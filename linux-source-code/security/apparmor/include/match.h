@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * AppArmor security module
  *
@@ -5,11 +6,6 @@
  *
  * Copyright (C) 1998-2008 Novell/SUSE
  * Copyright 2009-2012 Canonical Ltd.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation, version 2 of the
- * License.
  */
 
 #ifndef __AA_MATCH_H
@@ -138,7 +134,7 @@ unsigned int aa_dfa_matchn_until(struct aa_dfa *dfa, unsigned int start,
 
 void aa_dfa_free_kref(struct kref *kref);
 
-#define WB_HISTORY_SIZE 8
+#define WB_HISTORY_SIZE 24
 struct match_workbuf {
 	unsigned int count;
 	unsigned int pos;
@@ -151,7 +147,6 @@ struct match_workbuf N = {		\
 	.count = 0,			\
 	.pos = 0,			\
 	.len = 0,			\
-	.size = WB_HISTORY_SIZE,			\
 }
 
 unsigned int aa_dfa_leftmatch(struct aa_dfa *dfa, unsigned int start,
@@ -186,5 +181,9 @@ static inline void aa_put_dfa(struct aa_dfa *dfa)
 
 #define MATCH_FLAG_DIFF_ENCODE 0x80000000
 #define MARK_DIFF_ENCODE 0x40000000
+#define MATCH_FLAG_OOB_TRANSITION 0x20000000
+#define MATCH_FLAGS_MASK 0xff000000
+#define MATCH_FLAGS_VALID MATCH_FLAG_DIFF_ENCODE
+#define MATCH_FLAGS_INVALID (MATCH_FLAGS_MASK & ~MATCH_FLAGS_VALID)
 
 #endif /* __AA_MATCH_H */

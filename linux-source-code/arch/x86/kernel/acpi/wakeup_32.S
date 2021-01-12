@@ -1,9 +1,11 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 	.text
 #include <linux/linkage.h>
 #include <asm/segment.h>
 #include <asm/page_types.h>
+#include <asm/nospec-branch.h>
 
-# Copyright 2003, 2008 Pavel Machek <pavel@suse.cz>, distribute under GPLv2
+# Copyright 2003, 2008 Pavel Machek <pavel@suse.cz
 
 	.code32
 	ALIGN
@@ -37,6 +39,7 @@ wakeup_pmode_return:
 
 	# jump to place where we left off
 	movl	saved_eip, %eax
+	ANNOTATE_RETPOLINE_SAFE
 	jmp	*%eax
 
 bogus_magic:
@@ -90,7 +93,7 @@ ret_point:
 .data
 ALIGN
 ENTRY(saved_magic)	.long	0
-ENTRY(saved_eip)	.long	0
+saved_eip:		.long 0
 
 # saved registers
 saved_idt:	.long	0,0

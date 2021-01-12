@@ -1,21 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  Bluetooth supports for Qualcomm Atheros chips
  *
  *  Copyright (c) 2015 The Linux Foundation. All rights reserved.
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License version 2
- *  as published by the Free Software Foundation
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
- *
  */
 #include <linux/module.h>
 #include <linux/firmware.h>
@@ -31,7 +18,7 @@ int qca_read_soc_version(struct hci_dev *hdev, u32 *soc_version)
 {
 	struct sk_buff *skb;
 	struct edl_event_hdr *edl;
-	struct qca_btsoc_version *ver;
+	struct rome_version *ver;
 	char cmd;
 	int err = 0;
 
@@ -68,11 +55,11 @@ int qca_read_soc_version(struct hci_dev *hdev, u32 *soc_version)
 		goto out;
 	}
 
-	ver = (struct qca_btsoc_version *)(edl->data);
+	ver = (struct rome_version *)(edl->data);
 
 	BT_DBG("%s: Product:0x%08x", hdev->name, le32_to_cpu(ver->product_id));
 	BT_DBG("%s: Patch  :0x%08x", hdev->name, le16_to_cpu(ver->patch_ver));
-	BT_DBG("%s: ROM    :0x%08x", hdev->name, le16_to_cpu(ver->rom_ver));
+	BT_DBG("%s: ROM    :0x%08x", hdev->name, le16_to_cpu(ver->rome_ver));
 	BT_DBG("%s: SOC    :0x%08x", hdev->name, le32_to_cpu(ver->soc_id));
 
 	/* QCA chipset version can be decided by patch and SoC
@@ -80,7 +67,7 @@ int qca_read_soc_version(struct hci_dev *hdev, u32 *soc_version)
 	 * and lower 2 bytes from patch will be used.
 	 */
 	*soc_version = (le32_to_cpu(ver->soc_id) << 16) |
-			(le16_to_cpu(ver->rom_ver) & 0x0000ffff);
+			(le16_to_cpu(ver->rome_ver) & 0x0000ffff);
 	if (*soc_version == 0)
 		err = -EILSEQ;
 
@@ -134,8 +121,8 @@ int qca_send_pre_shutdown_cmd(struct hci_dev *hdev)
 }
 EXPORT_SYMBOL_GPL(qca_send_pre_shutdown_cmd);
 
-static void qca_tlv_check_data(struct qca_fw_config *config,
-		const struct firmware *fw, enum qca_btsoc_type soc_type)
+static void qca_tlv_check_data(struct rome_config *config,
+				const struct firmware *fw)
 {
 	const u8 *data;
 	u32 type_len;
@@ -144,7 +131,6 @@ static void qca_tlv_check_data(struct qca_fw_config *config,
 	struct tlv_type_hdr *tlv;
 	struct tlv_type_patch *tlv_patch;
 	struct tlv_type_nvm *tlv_nvm;
-	uint8_t nvm_baud_rate = config->user_baud_rate;
 
 	tlv = (struct tlv_type_hdr *)fw->data;
 
@@ -154,8 +140,8 @@ static void qca_tlv_check_data(struct qca_fw_config *config,
 	BT_DBG("TLV Type\t\t : 0x%x", type_len & 0x000000ff);
 	BT_DBG("Length\t\t : %d bytes", length);
 
-	config->dnld_mode = QCA_SKIP_EVT_NONE;
-	config->dnld_type = QCA_SKIP_EVT_NONE;
+	config->dnld_mode = ROME_SKIP_EVT_NONE;
+	config->dnld_type = ROME_SKIP_EVT_NONE;
 
 	switch (config->type) {
 	case TLV_TYPE_PATCH:
@@ -213,10 +199,7 @@ static void qca_tlv_check_data(struct qca_fw_config *config,
 				tlv_nvm->data[0] |= 0x80;
 
 				/* UART Baud Rate */
-				if (soc_type == QCA_WCN3991)
-					tlv_nvm->data[1] = nvm_baud_rate;
-				else
-					tlv_nvm->data[2] = nvm_baud_rate;
+				tlv_nvm->data[2] = config->user_baud_rate;
 
 				break;
 
@@ -240,7 +223,7 @@ static void qca_tlv_check_data(struct qca_fw_config *config,
 }
 
 static int qca_tlv_send_segment(struct hci_dev *hdev, int seg_size,
-				 const u8 *data, enum qca_tlv_dnld_mode mode)
+				 const u8 *data, enum rome_tlv_dnld_mode mode)
 {
 	struct sk_buff *skb;
 	struct edl_event_hdr *edl;
@@ -252,7 +235,7 @@ static int qca_tlv_send_segment(struct hci_dev *hdev, int seg_size,
 	cmd[1] = seg_size;
 	memcpy(cmd + 2, data, seg_size);
 
-	if (mode == QCA_SKIP_EVT_VSE_CC || mode == QCA_SKIP_EVT_VSE)
+	if (mode == ROME_SKIP_EVT_VSE_CC || mode == ROME_SKIP_EVT_VSE)
 		return __hci_cmd_send(hdev, EDL_PATCH_CMD_OPCODE, seg_size + 2,
 				      cmd);
 
@@ -318,7 +301,7 @@ static int qca_inject_cmd_complete_event(struct hci_dev *hdev)
 }
 
 static int qca_download_firmware(struct hci_dev *hdev,
-				  struct qca_fw_config *config)
+				  struct rome_config *config)
 {
 	const struct firmware *fw;
 	const u8 *segment;
@@ -333,7 +316,7 @@ static int qca_download_firmware(struct hci_dev *hdev,
 		return ret;
 	}
 
-	qca_tlv_check_data(config, fw, soc_type);
+	qca_tlv_check_data(config, fw);
 
 	segment = fw->data;
 	remain = fw->size;
@@ -345,7 +328,7 @@ static int qca_download_firmware(struct hci_dev *hdev,
 		remain -= segsize;
 		/* The last segment is always acked regardless download mode */
 		if (!remain || segsize < MAX_SIZE_PER_TLV_SEGMENT)
-			config->dnld_mode = QCA_SKIP_EVT_NONE;
+			config->dnld_mode = ROME_SKIP_EVT_NONE;
 
 		ret = qca_tlv_send_segment(hdev, segsize, segment,
 					    config->dnld_mode);
@@ -361,8 +344,8 @@ static int qca_download_firmware(struct hci_dev *hdev,
 	 * decrease the BT in initialization time. Here we will inject a command
 	 * complete event to avoid a command timeout error message.
 	 */
-	if (config->dnld_type == QCA_SKIP_EVT_VSE_CC ||
-	    config->dnld_type == QCA_SKIP_EVT_VSE)
+	if (config->dnld_type == ROME_SKIP_EVT_VSE_CC ||
+	    config->dnld_type == ROME_SKIP_EVT_VSE)
 		ret = qca_inject_cmd_complete_event(hdev);
 
 out:
@@ -399,7 +382,7 @@ int qca_uart_setup(struct hci_dev *hdev, uint8_t baudrate,
 		   enum qca_btsoc_type soc_type, u32 soc_ver,
 		   const char *firmware_name)
 {
-	struct qca_fw_config config;
+	struct rome_config config;
 	int err;
 	u8 rom_ver = 0;
 

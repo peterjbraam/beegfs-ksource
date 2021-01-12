@@ -1,21 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Based on arch/arm/kernel/sys_arm.c
  *
  * Copyright (C) People who wrote linux/arch/i386/kernel/sys_i386.c
  * Copyright (C) 1995, 1996 Russell King.
  * Copyright (C) 2012 ARM Ltd.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <linux/compat.h>
@@ -48,7 +37,7 @@ __do_compat_cache_op(unsigned long start, unsigned long end)
 			 * The workaround requires an inner-shareable tlbi.
 			 * We pick the reserved-ASID to minimise the impact.
 			 */
-			__tlbi(aside1is, 0);
+			__tlbi(aside1is, __TLBI_VADDR(0, 0));
 			dsb(ish);
 		}
 
@@ -77,12 +66,11 @@ do_compat_cache_op(unsigned long start, unsigned long end, int flags)
 /*
  * Handle all unrecognised system calls.
  */
-long compat_arm_syscall(struct pt_regs *regs)
+long compat_arm_syscall(struct pt_regs *regs, int scno)
 {
-	unsigned int no = regs->regs[7];
 	void __user *addr;
 
-	switch (no) {
+	switch (scno) {
 	/*
 	 * Flush a region from virtual address 'r0' to virtual address 'r1'
 	 * _exclusive_.  There is no alignment requirement on either address;
@@ -113,12 +101,12 @@ long compat_arm_syscall(struct pt_regs *regs)
 
 	default:
 		/*
-		 * Calls 9f00xx..9f07ff are defined to return -ENOSYS
+		 * Calls 0xf0xxx..0xf07ff are defined to return -ENOSYS
 		 * if not implemented, rather than raising SIGILL. This
 		 * way the calling program can gracefully determine whether
 		 * a feature is supported.
 		 */
-		if ((no & 0xffff) <= 0x7ff)
+		if (scno < __ARM_NR_COMPAT_END)
 			return -ENOSYS;
 		break;
 	}
@@ -127,6 +115,6 @@ long compat_arm_syscall(struct pt_regs *regs)
 		(compat_thumb_mode(regs) ? 2 : 4);
 
 	arm64_notify_die("Oops - bad compat syscall(2)", regs,
-			 SIGILL, ILL_ILLTRP, addr, no);
+			 SIGILL, ILL_ILLTRP, addr, scno);
 	return 0;
 }

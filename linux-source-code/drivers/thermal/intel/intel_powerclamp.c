@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * intel_powerclamp.c - package c-state idle injection
  *
@@ -6,20 +7,6 @@
  * Authors:
  *     Arjan van de Ven <arjan@linux.intel.com>
  *     Jacob Pan <jacob.jun.pan@linux.intel.com>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; if not, write to the Free Software Foundation, Inc.,
- * 51 Franklin St - Fifth Floor, Boston, MA 02110-1301 USA.
- *
  *
  *	TODO:
  *           1. better handle wakeup from external interrupts, currently a fixed
@@ -33,8 +20,6 @@
  *              get_cpu_iowait_time_us()
  *
  *	     2. synchronization with other hw blocks
- *
- *
  */
 
 #define pr_fmt(fmt)	KBUILD_MODNAME ": " fmt
@@ -101,7 +86,7 @@ struct powerclamp_worker_data {
 	bool clamping;
 };
 
-static struct powerclamp_worker_data * __percpu worker_data;
+static struct powerclamp_worker_data __percpu *worker_data;
 static struct thermal_cooling_device *cooling_dev;
 static unsigned long *cpu_clamping_mask;  /* bit map for tracking per cpu
 					   * clamping kthread worker
@@ -666,7 +651,7 @@ static struct thermal_cooling_device_ops powerclamp_cooling_ops = {
 };
 
 static const struct x86_cpu_id __initconst intel_powerclamp_ids[] = {
-	X86_MATCH_VENDOR_FEATURE(INTEL, X86_FEATURE_MWAIT, NULL),
+	{ X86_VENDOR_INTEL, X86_FAMILY_ANY, X86_MODEL_ANY, X86_FEATURE_MWAIT },
 	{}
 };
 MODULE_DEVICE_TABLE(x86cpu, intel_powerclamp_ids);
@@ -708,34 +693,14 @@ static int powerclamp_debug_show(struct seq_file *m, void *unused)
 	return 0;
 }
 
-static int powerclamp_debug_open(struct inode *inode,
-			struct file *file)
-{
-	return single_open(file, powerclamp_debug_show, inode->i_private);
-}
-
-static const struct file_operations powerclamp_debug_fops = {
-	.open		= powerclamp_debug_open,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-	.release	= single_release,
-	.owner		= THIS_MODULE,
-};
+DEFINE_SHOW_ATTRIBUTE(powerclamp_debug);
 
 static inline void powerclamp_create_debug_files(void)
 {
 	debug_dir = debugfs_create_dir("intel_powerclamp", NULL);
-	if (!debug_dir)
-		return;
 
-	if (!debugfs_create_file("powerclamp_calib", S_IRUGO, debug_dir,
-					cal_data, &powerclamp_debug_fops))
-		goto file_error;
-
-	return;
-
-file_error:
-	debugfs_remove_recursive(debug_dir);
+	debugfs_create_file("powerclamp_calib", S_IRUGO, debug_dir, cal_data,
+			    &powerclamp_debug_fops);
 }
 
 static enum cpuhp_state hp_state;

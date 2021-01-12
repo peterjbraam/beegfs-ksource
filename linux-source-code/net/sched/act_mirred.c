@@ -1,15 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * net/sched/act_mirred.c	packet mirroring and redirect actions
- *
- *		This program is free software; you can redistribute it and/or
- *		modify it under the terms of the GNU General Public License
- *		as published by the Free Software Foundation; either version
- *		2 of the License, or (at your option) any later version.
  *
  * Authors:	Jamal Hadi Salim (2002-4)
  *
  * TODO: Add ingress support (and socket redirect support)
- *
  */
 
 #include <linux/types.h>
@@ -98,7 +93,7 @@ static int tcf_mirred_init(struct net *net, struct nlattr *nla,
 			   struct nlattr *est, struct tc_action **a,
 			   int ovr, int bind, bool rtnl_held,
 			   struct tcf_proto *tp,
-			   u32 flags, struct netlink_ext_ack *extack)
+			   struct netlink_ext_ack *extack)
 {
 	struct tc_action_net *tn = net_generic(net, mirred_net_id);
 	struct nlattr *tb[TCA_MIRRED_MAX + 1];
@@ -153,8 +148,8 @@ static int tcf_mirred_init(struct net *net, struct nlattr *nla,
 			NL_SET_ERR_MSG_MOD(extack, "Specified device does not exist");
 			return -EINVAL;
 		}
-		ret = tcf_idr_create_from_flags(tn, index, est, a,
-						&act_mirred_ops, bind, flags);
+		ret = tcf_idr_create(tn, index, est, a,
+				     &act_mirred_ops, bind, true);
 		if (ret) {
 			tcf_idr_cleanup(tn, index);
 			return ret;
@@ -183,8 +178,8 @@ static int tcf_mirred_init(struct net *net, struct nlattr *nla,
 			goto put_chain;
 		}
 		mac_header_xmit = dev_is_mac_header_xmit(dev);
-		dev = rcu_replace_pointer(m->tcfm_dev, dev,
-					  lockdep_is_held(&m->tcf_lock));
+		rcu_swap_protected(m->tcfm_dev, dev,
+				   lockdep_is_held(&m->tcf_lock));
 		if (dev)
 			dev_put(dev);
 		m->tcfm_mac_header_xmit = mac_header_xmit;
@@ -199,8 +194,6 @@ static int tcf_mirred_init(struct net *net, struct nlattr *nla,
 		spin_lock(&mirred_list_lock);
 		list_add(&m->tcfm_list, &mirred_list);
 		spin_unlock(&mirred_list_lock);
-
-		tcf_idr_insert(tn, *a);
 	}
 
 	return ret;
@@ -238,7 +231,7 @@ static int tcf_mirred_act(struct sk_buff *skb, const struct tc_action *a,
 	}
 
 	tcf_lastuse_update(&m->tcf_tm);
-	tcf_action_update_bstats(&m->common, skb);
+	bstats_cpu_update(this_cpu_ptr(m->common.cpu_bstats), skb);
 
 	m_mac_header_xmit = READ_ONCE(m->tcfm_mac_header_xmit);
 	m_eaction = READ_ONCE(m->tcfm_eaction);
@@ -294,8 +287,8 @@ static int tcf_mirred_act(struct sk_buff *skb, const struct tc_action *a,
 		/* let's the caller reinsert the packet, if possible */
 		if (use_reinsert) {
 			res->ingress = want_ingress;
-			if (skb_tc_reinsert(skb, res))
-				tcf_action_inc_overlimit_qstats(&m->common);
+			res->qstats = this_cpu_ptr(m->common.cpu_qstats);
+			skb_tc_reinsert(skb, res);
 			__this_cpu_dec(mirred_rec_level);
 			return TC_ACT_CONSUMED;
 		}
@@ -308,7 +301,7 @@ static int tcf_mirred_act(struct sk_buff *skb, const struct tc_action *a,
 
 	if (err) {
 out:
-		tcf_action_inc_overlimit_qstats(&m->common);
+		qstats_overlimit_inc(this_cpu_ptr(m->common.cpu_qstats));
 		if (tcf_mirred_is_act_redirect(m_eaction))
 			retval = TC_ACT_SHOT;
 	}
@@ -323,7 +316,10 @@ static void tcf_stats_update(struct tc_action *a, u64 bytes, u32 packets,
 	struct tcf_mirred *m = to_mirred(a);
 	struct tcf_t *tm = &m->tcf_tm;
 
-	tcf_action_update_stats(a, bytes, packets, false, hw);
+	_bstats_cpu_update(this_cpu_ptr(a->cpu_bstats), bytes, packets);
+	if (hw)
+		_bstats_cpu_update(this_cpu_ptr(a->cpu_bstats_hw),
+				   bytes, packets);
 	tm->lastuse = max_t(u64, tm->lastuse, lastuse);
 }
 

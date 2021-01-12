@@ -1,19 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2013 Nicira, Inc.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of version 2 of the GNU General Public
- * License as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
- * 02110-1301, USA
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -308,7 +295,7 @@ static int ip_tunnel_bind_dev(struct net_device *dev)
 		ip_tunnel_init_flow(&fl4, iph->protocol, iph->daddr,
 				    iph->saddr, tunnel->parms.o_key,
 				    RT_TOS(iph->tos), tunnel->parms.link,
-				    tunnel->fwmark);
+				    tunnel->fwmark, 0);
 		rt = ip_route_output_key(tunnel->net, &fl4);
 
 		if (!IS_ERR(rt)) {
@@ -585,7 +572,7 @@ void ip_md_tunnel_xmit(struct sk_buff *skb, struct net_device *dev,
 	}
 	ip_tunnel_init_flow(&fl4, proto, key->u.ipv4.dst, key->u.ipv4.src,
 			    tunnel_id_to_key32(key->tun_id), RT_TOS(tos),
-			    0, skb->mark);
+			    0, skb->mark, skb_get_hash(skb));
 	if (tunnel->encap.type != TUNNEL_ENCAP_NONE)
 		goto tx_error;
 
@@ -627,9 +614,6 @@ void ip_md_tunnel_xmit(struct sk_buff *skb, struct net_device *dev,
 			ttl = ip4_dst_hoplimit(&rt->dst);
 	}
 
-	if (!df && skb->protocol == htons(ETH_P_IP))
-		df = inner_iph->frag_off & htons(IP_DF);
-
 	headroom += LL_RESERVED_SPACE(rt->dst.dev) + rt->dst.header_len;
 	if (headroom > dev->needed_headroom)
 		dev->needed_headroom = headroom;
@@ -655,14 +639,17 @@ void ip_tunnel_xmit(struct sk_buff *skb, struct net_device *dev,
 		    const struct iphdr *tnl_params, u8 protocol)
 {
 	struct ip_tunnel *tunnel = netdev_priv(dev);
+	struct ip_tunnel_info *tun_info = NULL;
 	const struct iphdr *inner_iph;
-	struct flowi4 fl4;
-	u8     tos, ttl;
-	__be16 df;
-	struct rtable *rt;		/* Route to the other host */
 	unsigned int max_headroom;	/* The extra header space needed */
-	__be32 dst;
+	struct rtable *rt = NULL;		/* Route to the other host */
+	bool use_cache = false;
+	struct flowi4 fl4;
+	bool md = false;
 	bool connected;
+	u8 tos, ttl;
+	__be32 dst;
+	__be16 df;
 
 	inner_iph = (const struct iphdr *)skb_inner_network_header(skb);
 	connected = (tunnel->parms.iph.daddr != 0);
@@ -678,7 +665,15 @@ void ip_tunnel_xmit(struct sk_buff *skb, struct net_device *dev,
 			goto tx_error;
 		}
 
-		if (skb->protocol == htons(ETH_P_IP)) {
+		tun_info = skb_tunnel_info(skb);
+		if (tun_info && (tun_info->mode & IP_TUNNEL_INFO_TX) &&
+		    ip_tunnel_info_af(tun_info) == AF_INET &&
+		    tun_info->key.u.ipv4.dst) {
+			dst = tun_info->key.u.ipv4.dst;
+			md = true;
+			connected = true;
+		}
+		else if (skb->protocol == htons(ETH_P_IP)) {
 			rt = skb_rtable(skb);
 			dst = rt_nexthop(rt, inner_iph->daddr);
 		}
@@ -716,7 +711,8 @@ void ip_tunnel_xmit(struct sk_buff *skb, struct net_device *dev,
 		else
 			goto tx_error;
 
-		connected = false;
+		if (!md)
+			connected = false;
 	}
 
 	tos = tnl_params->tos;
@@ -733,13 +729,20 @@ void ip_tunnel_xmit(struct sk_buff *skb, struct net_device *dev,
 
 	ip_tunnel_init_flow(&fl4, protocol, dst, tnl_params->saddr,
 			    tunnel->parms.o_key, RT_TOS(tos), tunnel->parms.link,
-			    tunnel->fwmark);
+			    tunnel->fwmark, skb_get_hash(skb));
 
 	if (ip_tunnel_encap(skb, tunnel, &protocol, &fl4) < 0)
 		goto tx_error;
 
-	rt = connected ? dst_cache_get_ip4(&tunnel->dst_cache, &fl4.saddr) :
-			 NULL;
+	if (connected && md) {
+		use_cache = ip_tunnel_dst_cache_usable(skb, tun_info);
+		if (use_cache)
+			rt = dst_cache_get_ip4(&tun_info->dst_cache,
+					       &fl4.saddr);
+	} else {
+		rt = connected ? dst_cache_get_ip4(&tunnel->dst_cache,
+						&fl4.saddr) : NULL;
+	}
 
 	if (!rt) {
 		rt = ip_route_output_key(tunnel->net, &fl4);
@@ -748,7 +751,10 @@ void ip_tunnel_xmit(struct sk_buff *skb, struct net_device *dev,
 			dev->stats.tx_carrier_errors++;
 			goto tx_error;
 		}
-		if (connected)
+		if (use_cache)
+			dst_cache_set_ip4(&tun_info->dst_cache, &rt->dst,
+					  fl4.saddr);
+		else if (!md && connected)
 			dst_cache_set_ip4(&tunnel->dst_cache, &rt->dst,
 					  fl4.saddr);
 	}
@@ -1165,7 +1171,7 @@ int ip_tunnel_changelink(struct net_device *dev, struct nlattr *tb[],
 	struct ip_tunnel_net *itn = net_generic(net, tunnel->ip_tnl_net_id);
 
 	if (dev == itn->fb_tunnel_dev)
-		return -EINVAL;
+		return fan_has_map(&tunnel->fan) ? 0 : -EINVAL;
 
 	t = ip_tunnel_find(itn, p, dev->type);
 

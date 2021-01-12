@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 #include <linux/etherdevice.h>
 #include <linux/if_tap.h>
 #include <linux/if_vlan.h>
@@ -519,8 +520,7 @@ static int tap_open(struct inode *inode, struct file *file)
 		goto err;
 	}
 
-	RCU_INIT_POINTER(q->sock.wq, &q->wq);
-	init_waitqueue_head(&q->wq.wait);
+	init_waitqueue_head(&q->sock.wq.wait);
 	q->sock.type = SOCK_RAW;
 	q->sock.state = SS_CONNECTED;
 	q->sock.file = file;
@@ -578,7 +578,7 @@ static __poll_t tap_poll(struct file *file, poll_table *wait)
 		goto out;
 
 	mask = 0;
-	poll_wait(file, &q->wq.wait, wait);
+	poll_wait(file, &q->sock.wq.wait, wait);
 
 	if (!ptr_ring_empty(&q->ring))
 		mask |= EPOLLIN | EPOLLRDNORM;
@@ -830,8 +830,7 @@ static ssize_t tap_do_read(struct tap_queue *q,
 	ssize_t ret = 0;
 
 	if (!iov_iter_count(to)) {
-		if (skb)
-			kfree_skb(skb);
+		kfree_skb(skb);
 		return 0;
 	}
 
@@ -1124,6 +1123,14 @@ static long tap_ioctl(struct file *file, unsigned int cmd,
 	}
 }
 
+#ifdef CONFIG_COMPAT
+static long tap_compat_ioctl(struct file *file, unsigned int cmd,
+			     unsigned long arg)
+{
+	return tap_ioctl(file, cmd, (unsigned long)compat_ptr(arg));
+}
+#endif
+
 static const struct file_operations tap_fops = {
 	.owner		= THIS_MODULE,
 	.open		= tap_open,
@@ -1133,7 +1140,9 @@ static const struct file_operations tap_fops = {
 	.poll		= tap_poll,
 	.llseek		= no_llseek,
 	.unlocked_ioctl	= tap_ioctl,
-	.compat_ioctl	= compat_ptr_ioctl,
+#ifdef CONFIG_COMPAT
+	.compat_ioctl	= tap_compat_ioctl,
+#endif
 };
 
 static int tap_get_user_xdp(struct tap_queue *q, struct xdp_buff *xdp)
@@ -1191,7 +1200,7 @@ err_kfree:
 	kfree_skb(skb);
 err:
 	rcu_read_lock();
-		tap = rcu_dereference(q->tap);
+	tap = rcu_dereference(q->tap);
 	if (tap && tap->count_tx_dropped)
 		tap->count_tx_dropped(tap);
 	rcu_read_unlock();
@@ -1225,8 +1234,7 @@ static int tap_recvmsg(struct socket *sock, struct msghdr *m,
 	struct sk_buff *skb = m->msg_control;
 	int ret;
 	if (flags & ~(MSG_DONTWAIT|MSG_TRUNC)) {
-		if (skb)
-			kfree_skb(skb);
+		kfree_skb(skb);
 		return -EINVAL;
 	}
 	ret = tap_do_read(q, &m->msg_iter, flags & MSG_DONTWAIT, skb);

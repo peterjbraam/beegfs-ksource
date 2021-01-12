@@ -14,7 +14,6 @@
 #include <linux/uprobes.h>
 #include <linux/page-flags-layout.h>
 #include <linux/workqueue.h>
-#include <linux/rh_kabi.h>
 
 #include <asm/mmu.h>
 
@@ -26,8 +25,6 @@
 
 struct address_space;
 struct mem_cgroup;
-struct hmm;
-struct dev_pagemap;
 
 /*
  * Each physical page in the system has a struct page associated with
@@ -81,7 +78,7 @@ struct page {
 		struct {	/* Page cache and anonymous pages */
 			/**
 			 * @lru: Pageout list, eg. active_list protected by
-			 * zone_lru_lock.  Sometimes used as a generic list
+			 * pgdat->lru_lock.  Sometimes used as a generic list
 			 * by the page owner.
 			 */
 			struct list_head lru;
@@ -96,13 +93,13 @@ struct page {
 			 */
 			unsigned long private;
 		};
-		RH_KABI_EXTEND(struct {	/* page_pool used by netstack */
+		struct {	/* page_pool used by netstack */
 			/**
 			 * @dma_addr: might require a 64-bit value even on
 			 * 32-bit architectures.
 			 */
 			dma_addr_t dma_addr;
-		})
+		};
 		struct {	/* slab, slob and slub */
 			union {
 				struct list_head slab_list;
@@ -141,13 +138,17 @@ struct page {
 		struct {	/* Second tail page of compound page */
 			unsigned long _compound_pad_1;	/* compound_head */
 			unsigned long _compound_pad_2;
+			/* For both global and memcg */
 			struct list_head deferred_list;
 		};
 		struct {	/* Page table pages */
 			unsigned long _pt_pad_1;	/* compound_head */
 			pgtable_t pmd_huge_pte; /* protected by page->ptl */
 			unsigned long _pt_pad_2;	/* mapping */
-			struct mm_struct *pt_mm;	/* x86 pgds only */
+			union {
+				struct mm_struct *pt_mm; /* x86 pgds only */
+				atomic_t pt_frag_refcount; /* powerpc */
+			};
 #if ALLOC_SPLIT_PTLOCKS
 			spinlock_t *ptl;
 #else
@@ -157,9 +158,17 @@ struct page {
 		struct {	/* ZONE_DEVICE pages */
 			/** @pgmap: Points to the hosting device page map. */
 			struct dev_pagemap *pgmap;
-			RH_KABI_REPLACE(unsigned long hmm_data,
-					void *zone_device_data)
-			unsigned long _zd_pad_1;	/* uses mapping */
+			void *zone_device_data;
+			/*
+			 * ZONE_DEVICE private pages are counted as being
+			 * mapped so the next 3 words hold the mapping, index,
+			 * and private fields from the source anonymous or
+			 * page cache page while the page is migrated to device
+			 * private memory.
+			 * ZONE_DEVICE MEMORY_DEVICE_FS_DAX pages also
+			 * use the mapping, index, and private fields when
+			 * pmem backed DAX files are mapped.
+			 */
 		};
 
 		/** @rcu_head: You can use this to free a page by RCU. */
@@ -217,6 +226,11 @@ static inline atomic_t *compound_mapcount_ptr(struct page *page)
 	return &page[1].compound_mapcount;
 }
 
+/*
+ * Used for sizing the vmemmap region on some architectures
+ */
+#define STRUCT_PAGE_MAX_SHIFT	(order_base_2(sizeof(struct page)))
+
 #define PAGE_FRAG_CACHE_MAX_SIZE	__ALIGN_MASK(32768, ~PAGE_MASK)
 #define PAGE_FRAG_CACHE_MAX_ORDER	get_order(PAGE_FRAG_CACHE_MAX_SIZE)
 
@@ -253,6 +267,7 @@ struct vm_region {
 	unsigned long	vm_top;		/* region allocated to here */
 	unsigned long	vm_pgoff;	/* the offset in vm_file corresponding to vm_start */
 	struct file	*vm_file;	/* the backing file or NULL */
+	struct file	*vm_prfile;	/* the virtual backing file or NULL */
 
 	int		vm_usage;	/* region usage count (access under nommu_region_sem) */
 	bool		vm_icache_flushed : 1; /* true if the icache has been flushed for
@@ -298,12 +313,7 @@ struct vm_area_struct {
 	/* Second cache line starts here. */
 
 	struct mm_struct *vm_mm;	/* The address space we belong to. */
-
-	/*
-	 * Access permissions of this VMA.
-	 * See vmf_insert_mixed_prot() for discussion.
-	 */
-	pgprot_t vm_page_prot;
+	pgprot_t vm_page_prot;		/* Access permissions of this VMA. */
 	unsigned long vm_flags;		/* Flags, see mm.h. */
 
 	/*
@@ -332,9 +342,12 @@ struct vm_area_struct {
 	unsigned long vm_pgoff;		/* Offset (within vm_file) in PAGE_SIZE
 					   units */
 	struct file * vm_file;		/* File we map to (can be NULL). */
+	struct file *vm_prfile;		/* shadow of vm_file */
 	void * vm_private_data;		/* was vm_pte (shared mem) */
 
+#ifdef CONFIG_SWAP
 	atomic_long_t swap_readahead_info;
+#endif
 #ifndef CONFIG_MMU
 	struct vm_region *vm_region;	/* NOMMU mapping region */
 #endif
@@ -342,11 +355,6 @@ struct vm_area_struct {
 	struct mempolicy *vm_policy;	/* NUMA policy for the VMA */
 #endif
 	struct vm_userfaultfd_ctx vm_userfaultfd_ctx;
-
-	RH_KABI_RESERVE(1)
-	RH_KABI_RESERVE(2)
-	RH_KABI_RESERVE(3)
-	RH_KABI_RESERVE(4)
 } __randomize_layout;
 
 struct core_thread {
@@ -381,6 +389,16 @@ struct mm_struct {
 		unsigned long task_size;	/* size of task vm space */
 		unsigned long highest_vm_end;	/* highest vma end address */
 		pgd_t * pgd;
+
+#ifdef CONFIG_MEMBARRIER
+		/**
+		 * @membarrier_state: Flags controlling membarrier behavior.
+		 *
+		 * This field is close to @pgd to hopefully fit in the same
+		 * cache-line, which needs to be touched by switch_mm().
+		 */
+		atomic_t membarrier_state;
+#endif
 
 		/**
 		 * @mm_users: The number of users including userspace.
@@ -424,23 +442,7 @@ struct mm_struct {
 
 		unsigned long total_vm;	   /* Total pages mapped */
 		unsigned long locked_vm;   /* Pages that have PG_mlocked set */
-		/*
-		 * RHEL KABI NOTE: due to changes for BZ#1620349 mm_types.h is
-		 * being exposed to the vdso32 object build, thus we need the
-		 * _BROKEN variant of RH_KABI_REPLACE in order to placate the
-		 * static assertion check embedded into the safe macro.
-		 * Although unsigned long and atomic64_t do not have a type size
-		 * match in the vdso32 object build case, it is, actually, safe
-		 * to keep the inline type replacement here as there are no
-		 * dependencies, direct or indirect, between the vdso32 code and
-		 * struct mm_struct fields. On every other compilation unit that
-		 * struct mm_struct is required, the type sizes and aligment are
-		 * a perfect match, as expected.
-		 */
-		RH_KABI_BROKEN_REPLACE(
-		unsigned long pinned_vm,
-		atomic64_t    pinned_vm
-		)			   /* Refcount permanently increased */
+		atomic64_t    pinned_vm;   /* Refcount permanently increased */
 		unsigned long data_vm;	   /* VM_WRITE & ~VM_SHARED & ~VM_STACK */
 		unsigned long exec_vm;	   /* VM_EXEC & ~VM_WRITE & ~VM_STACK */
 		unsigned long stack_vm;	   /* VM_STACK */
@@ -467,9 +469,7 @@ struct mm_struct {
 		unsigned long flags; /* Must use atomic bitops to access */
 
 		struct core_state *core_state; /* coredumping support */
-#ifdef CONFIG_MEMBARRIER
-		atomic_t membarrier_state;
-#endif
+
 #ifdef CONFIG_AIO
 		spinlock_t			ioctx_lock;
 		struct kioctx_table __rcu	*ioctx_table;
@@ -526,35 +526,7 @@ struct mm_struct {
 		atomic_long_t hugetlb_usage;
 #endif
 		struct work_struct async_put_work;
-
-#if IS_ENABLED(CONFIG_HMM)
-		/* HMM needs to track a few things per mm */
-		struct hmm *hmm;
-#endif
 	} __randomize_layout;
-
-	RH_KABI_RESERVE(1)
-	RH_KABI_RESERVE(2)
-	RH_KABI_RESERVE(3)
-	RH_KABI_RESERVE(4)
-	RH_KABI_RESERVE(5)
-	RH_KABI_RESERVE(6)
-	RH_KABI_RESERVE(7)
-
-#if defined(CONFIG_PPC64) && defined (CONFIG_PPC_VAS)
-	/*
-	 * In upstream vas_windows is defined in arch specific mm_context struct
-	 * (arch/powerpc/include/asm/mmu.h).
-	 * To fix kABI breakage, adding here but will be defined only for powerpc.
-	 * Though used only on powerNV and P9 (or later) right now, will be needed
-	 * in future when we add NX-GZIP support on powerVM.
-	 * Leaving first 7 reserves for arch independent elements if needed in future
-	 * so that will be placed in same location for all archs.
-	 */
-	RH_KABI_USE(8, atomic_t vas_windows)
-#else
-	RH_KABI_RESERVE(8)
-#endif
 
 	/*
 	 * The mm_cpumask needs to be at the end of mm_struct, because it
@@ -677,7 +649,7 @@ struct vm_fault;
  *
  * Page fault handlers return a bitmask of %VM_FAULT values.
  */
-typedef RH_KABI_ADD_MODIFIER(__bitwise unsigned) int vm_fault_t;
+typedef __bitwise unsigned int vm_fault_t;
 
 /**
  * enum vm_fault_reason - Page fault handlers return a bitmask of

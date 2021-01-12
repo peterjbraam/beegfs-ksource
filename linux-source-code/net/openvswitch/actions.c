@@ -1,19 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2007-2017 Nicira, Inc.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of version 2 of the GNU General Public
- * License as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
- * 02110-1301, USA
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -174,16 +161,15 @@ static int do_execute_actions(struct datapath *dp, struct sk_buff *skb,
 			      const struct nlattr *attr, int len);
 
 static int push_mpls(struct sk_buff *skb, struct sw_flow_key *key,
-		     __be32 mpls_lse, __be16 mpls_ethertype, __u16 mac_len)
+		     const struct ovs_action_push_mpls *mpls)
 {
 	int err;
 
-	err = skb_mpls_push(skb, mpls_lse, mpls_ethertype, mac_len, !!mac_len);
+	err = skb_mpls_push(skb, mpls->mpls_lse, mpls->mpls_ethertype,
+			    skb->mac_len,
+			    ovs_key_mac_proto(key) == MAC_PROTO_ETHERNET);
 	if (err)
 		return err;
-
-	if (!mac_len)
-		key->mac_proto = MAC_PROTO_NONE;
 
 	invalidate_flow_key(key);
 	return 0;
@@ -198,9 +184,6 @@ static int pop_mpls(struct sk_buff *skb, struct sw_flow_key *key,
 			   ovs_key_mac_proto(key) == MAC_PROTO_ETHERNET);
 	if (err)
 		return err;
-
-	if (ethertype == htons(ETH_P_TEB))
-		key->mac_proto = MAC_PROTO_ETHERNET;
 
 	invalidate_flow_key(key);
 	return 0;
@@ -219,7 +202,7 @@ static int set_mpls(struct sk_buff *skb, struct sw_flow_key *flow_key,
 	if (err)
 		return err;
 
-	flow_key->mpls.lse[0] = lse;
+	flow_key->mpls.top_lse = lse;
 	return 0;
 }
 
@@ -247,7 +230,7 @@ static int push_vlan(struct sk_buff *skb, struct sw_flow_key *key,
 		key->eth.vlan.tpid = vlan->vlan_tpid;
 	}
 	return skb_vlan_push(skb, vlan->vlan_tpid,
-			     ntohs(vlan->vlan_tci) & ~VLAN_TAG_PRESENT);
+			     ntohs(vlan->vlan_tci) & ~VLAN_CFI_MASK);
 }
 
 /* 'src' is already properly masked. */
@@ -768,8 +751,10 @@ static int ovs_vport_output(struct net *net, struct sock *sk, struct sk_buff *sk
 	__skb_dst_copy(skb, data->dst);
 	*OVS_CB(skb) = data->cb;
 	skb->inner_protocol = data->inner_protocol;
-	skb->vlan_tci = data->vlan_tci;
-	skb->vlan_proto = data->vlan_proto;
+	if (data->vlan_tci & VLAN_CFI_MASK)
+		__vlan_hwaccel_put_tag(skb, data->vlan_proto, data->vlan_tci & ~VLAN_CFI_MASK);
+	else
+		__vlan_hwaccel_clear_tag(skb);
 
 	/* Reconstruct the MAC header.  */
 	skb_push(skb, data->l2_len);
@@ -813,7 +798,10 @@ static void prepare_frag(struct vport *vport, struct sk_buff *skb,
 	data->cb = *OVS_CB(skb);
 	data->inner_protocol = skb->inner_protocol;
 	data->network_offset = orig_network_offset;
-	data->vlan_tci = skb->vlan_tci;
+	if (skb_vlan_tag_present(skb))
+		data->vlan_tci = skb_vlan_tag_get(skb) | VLAN_CFI_MASK;
+	else
+		data->vlan_tci = 0;
 	data->vlan_proto = skb->vlan_proto;
 	data->mac_proto = mac_proto;
 	data->l2_len = hlen;
@@ -1246,24 +1234,10 @@ static int do_execute_actions(struct datapath *dp, struct sk_buff *skb,
 			execute_hash(skb, key, a);
 			break;
 
-		case OVS_ACTION_ATTR_PUSH_MPLS: {
-			struct ovs_action_push_mpls *mpls = nla_data(a);
-
-			err = push_mpls(skb, key, mpls->mpls_lse,
-					mpls->mpls_ethertype, skb->mac_len);
+		case OVS_ACTION_ATTR_PUSH_MPLS:
+			err = push_mpls(skb, key, nla_data(a));
 			break;
-		}
-		case OVS_ACTION_ATTR_ADD_MPLS: {
-			struct ovs_action_add_mpls *mpls = nla_data(a);
-			__u16 mac_len = 0;
 
-			if (mpls->tun_flags & OVS_MPLS_L3_TUNNEL_FLAG_MASK)
-				mac_len = skb->mac_len;
-
-			err = push_mpls(skb, key, mpls->mpls_lse,
-					mpls->mpls_ethertype, mac_len);
-			break;
-		}
 		case OVS_ACTION_ATTR_POP_MPLS:
 			err = pop_mpls(skb, key, nla_get_be16(a));
 			break;

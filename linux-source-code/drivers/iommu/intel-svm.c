@@ -1,14 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright © 2015 Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
  *
  * Authors: David Woodhouse <dwmw2@infradead.org>
  */
@@ -30,6 +22,19 @@
 #include "intel-pasid.h"
 
 static irqreturn_t prq_event_thread(int irq, void *d);
+
+int intel_svm_init(struct intel_iommu *iommu)
+{
+	if (cpu_feature_enabled(X86_FEATURE_GBPAGES) &&
+			!cap_fl1gp_support(iommu->cap))
+		return -EINVAL;
+
+	if (cpu_feature_enabled(X86_FEATURE_LA57) &&
+			!cap_5lp_support(iommu->cap))
+		return -EINVAL;
+
+	return 0;
+}
 
 #define PRQ_ORDER 0
 
@@ -92,33 +97,6 @@ int intel_svm_finish_prq(struct intel_iommu *iommu)
 	iommu->prq = NULL;
 
 	return 0;
-}
-
-static inline bool intel_svm_capable(struct intel_iommu *iommu)
-{
-	return iommu->flags & VTD_FLAG_SVM_CAPABLE;
-}
-
-void intel_svm_check(struct intel_iommu *iommu)
-{
-	if (!pasid_supported(iommu))
-		return;
-
-	if (cpu_feature_enabled(X86_FEATURE_GBPAGES) &&
-	    !cap_fl1gp_support(iommu->cap)) {
-		pr_err("%s SVM disabled, incompatible 1GB page capability\n",
-		       iommu->name);
-		return;
-	}
-
-	if (cpu_feature_enabled(X86_FEATURE_LA57) &&
-	    !cap_5lp_support(iommu->cap)) {
-		pr_err("%s SVM disabled, incompatible paging mode\n",
-		       iommu->name);
-		return;
-	}
-
-	iommu->flags |= VTD_FLAG_SVM_CAPABLE;
 }
 
 static void intel_flush_svm_range_dev (struct intel_svm *svm, struct intel_svm_dev *sdev,
@@ -222,7 +200,6 @@ static void intel_mm_release(struct mmu_notifier *mn, struct mm_struct *mm)
 }
 
 static const struct mmu_notifier_ops intel_mmuops = {
-	.flags = MMU_INVALIDATE_DOES_NOT_BLOCK,
 	.release = intel_mm_release,
 	.invalidate_range = intel_invalidate_range,
 };
@@ -242,9 +219,6 @@ int intel_svm_bind_mm(struct device *dev, int *pasid, int flags, struct svm_dev_
 
 	if (!iommu || dmar_disabled)
 		return -EINVAL;
-
-	if (!intel_svm_capable(iommu))
-		return -ENOTSUPP;
 
 	if (dev_is_pci(dev)) {
 		pasid_max = pci_max_pasids(to_pci_dev(dev));
@@ -308,7 +282,7 @@ int intel_svm_bind_mm(struct device *dev, int *pasid, int flags, struct svm_dev_
 		goto out;
 	}
 
-	info = get_domain_info(dev);
+	info = dev->archdata.iommu;
 	if (!info || !info->pasid_supported) {
 		kfree(sdev);
 		goto out;
@@ -672,7 +646,7 @@ static irqreturn_t prq_event_thread(int irq, void *d)
 			resp.qw0 = QI_PGRP_PASID(req->pasid) |
 				QI_PGRP_DID(req->rid) |
 				QI_PGRP_PASID_P(req->pasid_present) |
-				QI_PGRP_PDP(req->pasid_present) |
+				QI_PGRP_PDP(req->priv_data_present) |
 				QI_PGRP_RESP_CODE(result) |
 				QI_PGRP_RESP_TYPE;
 			resp.qw1 = QI_PGRP_IDX(req->prg_index) |

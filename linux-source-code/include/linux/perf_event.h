@@ -92,26 +92,14 @@ struct perf_raw_record {
 /*
  * branch stack layout:
  *  nr: number of taken branches stored in entries[]
- *  hw_idx: The low level index of raw branch records
- *          for the most recent branch.
- *          -1ULL means invalid/unknown.
  *
  * Note that nr can vary from sample to sample
  * branches (to, from) are stored from most recent
  * to least recent, i.e., entries[0] contains the most
  * recent branch.
- * The entries[] is an abstraction of raw branch records,
- * which may not be stored in age order in HW, e.g. Intel LBR.
- * The hw_idx is to expose the low level index of raw
- * branch record for the most recent branch aka entries[0].
- * The hw_idx index is between -1 (unknown) and max depth,
- * which can be retrieved in /sys/devices/cpu/caps/branches.
- * For the architectures whose raw branch records are
- * already stored in age order, the hw_idx should be 0.
  */
 struct perf_branch_stack {
 	__u64				nr;
-	RH_KABI_BROKEN_INSERT(__u64				hw_idx)
 	struct perf_branch_entry	entries[0];
 };
 
@@ -260,8 +248,6 @@ struct perf_event;
 #define PERF_PMU_CAP_NO_EXCLUDE			0x80
 #define PERF_PMU_CAP_AUX_OUTPUT			0x100
 
-struct perf_output_handle;
-
 /**
  * struct pmu - generic performance monitoring unit
  */
@@ -271,7 +257,7 @@ struct pmu {
 	struct module			*module;
 	struct device			*dev;
 	const struct attribute_group	**attr_groups;
-	RH_KABI_BROKEN_INSERT(const struct attribute_group **attr_update)
+	const struct attribute_group	**attr_update;
 	const char			*name;
 	int				type;
 
@@ -423,36 +409,18 @@ struct pmu {
 	 */
 	size_t				task_ctx_size;
 
-	/*
-	 * PMU specific parts of task perf event context (i.e. ctx->task_ctx_data)
-	 * can be synchronized using this function. See Intel LBR callstack support
-	 * implementation and Perf core context switch handling callbacks for usage
-	 * examples.
-	 */
-	RH_KABI_BROKEN_INSERT(void (*swap_task_ctx)		(struct perf_event_context *prev, struct perf_event_context *next))
-					/* optional */
 
 	/*
 	 * Set up pmu-private data structures for an AUX area
 	 */
-	RH_KABI_REPLACE(void *(*setup_aux) (int cpu, void **pages, int nr_pages, bool overwrite), void *(*setup_aux) (struct perf_event *event, void **pages, int nr_pages, bool overwrite))
+	void *(*setup_aux)		(struct perf_event *event, void **pages,
+					 int nr_pages, bool overwrite);
 					/* optional */
 
 	/*
 	 * Free pmu-private AUX data structures
 	 */
 	void (*free_aux)		(void *aux); /* optional */
-
-	/*
-	 * Take a snapshot of the AUX buffer without touching the event
-	 * state, so that preempting ->start()/->stop() callbacks does
-	 * not interfere with their logic. Called in PMI context.
-	 *
-	 * Returns the size of AUX data copied to the output handle.
-	 *
-	 * Optional.
-	 */
-	RH_KABI_BROKEN_INSERT(long (*snapshot_aux)		(struct perf_event *event, struct perf_output_handle *handle, unsigned long size))
 
 	/*
 	 * Validate address range filters: make sure the HW supports the
@@ -486,7 +454,7 @@ struct pmu {
 	 * Runs from perf_event_open(). Should return 0 for "no match"
 	 * or non-zero for "match".
 	 */
-	RH_KABI_BROKEN_INSERT(int (*aux_output_match)		(struct perf_event *event))
+	int (*aux_output_match)		(struct perf_event *event);
 					/* optional */
 
 	/*
@@ -497,7 +465,7 @@ struct pmu {
 	/*
 	 * Check period value for PERF_EVENT_IOC_PERIOD ioctl.
 	 */
-	RH_KABI_BROKEN_INSERT(int (*check_period)		(struct perf_event *event, u64 value)) /* optional */
+	int (*check_period)		(struct perf_event *event, u64 value); /* optional */
 };
 
 enum perf_addr_filter_action_t {
@@ -540,12 +508,10 @@ struct perf_addr_filters_head {
 	unsigned int		nr_file_filters;
 };
 
-#ifndef __GENKSYMS__
 struct perf_addr_filter_range {
 	unsigned long		start;
 	unsigned long		size;
 };
-#endif /* __GENKSYMS__ */
 
 /**
  * enum perf_event_state - the states of an event:
@@ -723,11 +689,11 @@ struct perf_event {
 	/* address range filters */
 	struct perf_addr_filters_head	addr_filters;
 	/* vma address array for file-based filders */
-	RH_KABI_REPLACE(unsigned long *addr_filters_offs, struct perf_addr_filter_range	*addr_filter_ranges)
+	struct perf_addr_filter_range	*addr_filter_ranges;
 	unsigned long			addr_filters_gen;
 
 	/* for aux_output events */
-	RH_KABI_BROKEN_INSERT(struct perf_event        *aux_event)
+	struct perf_event		*aux_event;
 
 	void (*destroy)(struct perf_event *);
 	struct rcu_head			rcu_head;
@@ -802,8 +768,8 @@ struct perf_event_context {
 	 * Set when nr_events != nr_active, except tolerant to events not
 	 * necessary to be active due to scheduling constraints, such as cgroups.
 	 */
-	RH_KABI_BROKEN_INSERT(int rotate_necessary)
-	RH_KABI_REPLACE(atomic_t refcount, refcount_t refcount)
+	int				rotate_necessary;
+	refcount_t			refcount;
 	struct task_struct		*task;
 
 	/*
@@ -856,15 +822,6 @@ struct perf_cpu_context {
 	int				sched_cb_usage;
 
 	int				online;
-	/*
-	 * Per-CPU storage for iterators used in visit_groups_merge. The default
-	 * storage is of size 2 to hold the CPU and any CPU event iterators.
-	 */
-	RH_KABI_BROKEN_INSERT_BLOCK(
-	int				heap_size;
-	struct perf_event		**heap;
-	struct perf_event		*heap_default[2];
-	) /* RH_KABI_BROKEN_INSERT_BLOCK */
 };
 
 struct perf_output_handle {
@@ -1003,7 +960,6 @@ struct perf_sample_data {
 		u32	reserved;
 	}				cpu_entry;
 	struct perf_callchain_entry	*callchain;
-	RH_KABI_BROKEN_INSERT(u64				aux_size)
 
 	/*
 	 * regs_user may point to task_pt_regs or to regs_user_copy, depending
@@ -1016,7 +972,6 @@ struct perf_sample_data {
 	u64				stack_user_size;
 
 	u64				phys_addr;
-	RH_KABI_BROKEN_INSERT(u64				cgroup)
 } ____cacheline_aligned;
 
 /* default value for data source */
@@ -1286,6 +1241,11 @@ extern int perf_cpu_time_max_percent_handler(struct ctl_table *table, int write,
 int perf_event_max_stack_handler(struct ctl_table *table, int write,
 				 void __user *buffer, size_t *lenp, loff_t *ppos);
 
+static inline bool perf_paranoid_any(void)
+{
+	return sysctl_perf_event_paranoid > 2;
+}
+
 static inline bool perf_paranoid_tracepoint_raw(void)
 {
 	return sysctl_perf_event_paranoid > -1;
@@ -1372,9 +1332,6 @@ extern unsigned int perf_output_copy(struct perf_output_handle *handle,
 			     const void *buf, unsigned int len);
 extern unsigned int perf_output_skip(struct perf_output_handle *handle,
 				     unsigned int len);
-extern long perf_output_copy_aux(struct perf_output_handle *aux_handle,
-				 struct perf_output_handle *handle,
-				 unsigned long from, unsigned long to);
 extern int perf_swevent_get_recursion_context(void);
 extern void perf_swevent_put_recursion_context(int rctx);
 extern u64 perf_swevent_set_period(struct perf_event *event);
@@ -1384,8 +1341,6 @@ extern void perf_event_disable_local(struct perf_event *event);
 extern void perf_event_disable_inatomic(struct perf_event *event);
 extern void perf_event_task_tick(void);
 extern int perf_event_account_interrupt(struct perf_event *event);
-extern int perf_event_period(struct perf_event *event, u64 value);
-extern u64 perf_event_pause(struct perf_event *event, bool reset);
 #else /* !CONFIG_PERF_EVENTS: */
 static inline void *
 perf_aux_output_begin(struct perf_output_handle *handle,
@@ -1465,14 +1420,6 @@ static inline void perf_event_disable(struct perf_event *event)		{ }
 static inline int __perf_event_disable(void *info)			{ return -1; }
 static inline void perf_event_task_tick(void)				{ }
 static inline int perf_event_release_kernel(struct perf_event *event)	{ return 0; }
-static inline int perf_event_period(struct perf_event *event, u64 value)
-{
-	return -EINVAL;
-}
-static inline u64 perf_event_pause(struct perf_event *event, bool reset)
-{
-	return 0;
-}
 #endif
 
 #if defined(CONFIG_PERF_EVENTS) && defined(CONFIG_CPU_SUP_INTEL)
@@ -1537,9 +1484,5 @@ int perf_event_exit_cpu(unsigned int cpu);
 #define perf_event_init_cpu	NULL
 #define perf_event_exit_cpu	NULL
 #endif
-
-extern void __weak arch_perf_update_userpage(struct perf_event *event,
-					     struct perf_event_mmap_page *userpg,
-					     u64 now);
 
 #endif /* _LINUX_PERF_EVENT_H */

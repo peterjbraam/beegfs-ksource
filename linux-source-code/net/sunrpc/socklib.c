@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * linux/net/sunrpc/socklib.c
  *
@@ -175,7 +176,7 @@ int csum_partial_copy_to_xdr(struct xdr_buf *xdr, struct sk_buff *skb)
 		return -1;
 	if (unlikely(skb->ip_summed == CHECKSUM_COMPLETE) &&
 	    !skb->csum_complete_sw)
-		netdev_rx_csum_fault(skb->dev);
+		netdev_rx_csum_fault(skb->dev, skb);
 	return 0;
 no_checksum:
 	if (xdr_partial_copy_from_skb(xdr, 0, &desc, xdr_skb_read_bits) < 0)

@@ -112,7 +112,7 @@ verified:
  * Read the inode allocation bitmap for a given block_group, reading
  * into the specified slot in the superblock's bitmap cache.
  *
- * Return buffer_head of bitmap on success, or an ERR_PTR on error.
+ * Return buffer_head of bitmap on success or NULL.
  */
 static struct buffer_head *
 ext4_read_inode_bitmap(struct super_block *sb, ext4_group_t block_group)
@@ -194,9 +194,9 @@ ext4_read_inode_bitmap(struct super_block *sb, ext4_group_t block_group)
 	wait_on_buffer(bh);
 	if (!buffer_uptodate(bh)) {
 		put_bh(bh);
-		ext4_error_err(sb, EIO, "Cannot read inode bitmap - "
-			       "block_group = %u, inode_bitmap = %llu",
-			       block_group, bitmap_blk);
+		ext4_error(sb, "Cannot read inode bitmap - "
+			   "block_group = %u, inode_bitmap = %llu",
+			   block_group, bitmap_blk);
 		ext4_mark_group_bitmap_corrupted(sb, block_group,
 				EXT4_GROUP_INFO_IBITMAP_CORRUPT);
 		return ERR_PTR(-EIO);
@@ -265,13 +265,8 @@ void ext4_free_inode(handle_t *handle, struct inode *inode)
 	ext4_debug("freeing inode %lu\n", ino);
 	trace_ext4_free_inode(inode);
 
-	/*
-	 * Note: we must free any quota before locking the superblock,
-	 * as writing the quota to disk may need the lock as well.
-	 */
 	dquot_initialize(inode);
 	dquot_free_inode(inode);
-	dquot_drop(inode);
 
 	is_directory = S_ISDIR(inode->i_mode);
 
@@ -458,7 +453,7 @@ static int find_group_orlov(struct super_block *sb, struct inode *parent,
 		if (qstr) {
 			hinfo.hash_version = DX_HASH_HALF_MD4;
 			hinfo.seed = sbi->s_hash_seed;
-			ext4fs_dirhash(qstr->name, qstr->len, &hinfo);
+			ext4fs_dirhash(parent, qstr->name, qstr->len, &hinfo);
 			grp = hinfo.hash;
 		} else
 			grp = prandom_u32();
@@ -665,7 +660,7 @@ static int find_group_other(struct super_block *sb, struct inode *parent,
  * block has been written back to disk.  (Yes, these values are
  * somewhat arbitrary...)
  */
-#define RECENTCY_MIN	5
+#define RECENTCY_MIN	60
 #define RECENTCY_DIRTY	300
 
 static int recently_deleted(struct super_block *sb, ext4_group_t group, int ino)
@@ -714,34 +709,21 @@ out:
 static int find_inode_bit(struct super_block *sb, ext4_group_t group,
 			  struct buffer_head *bitmap, unsigned long *ino)
 {
-	bool check_recently_deleted = EXT4_SB(sb)->s_journal == NULL;
-	unsigned long recently_deleted_ino = EXT4_INODES_PER_GROUP(sb);
-
 next:
 	*ino = ext4_find_next_zero_bit((unsigned long *)
 				       bitmap->b_data,
 				       EXT4_INODES_PER_GROUP(sb), *ino);
 	if (*ino >= EXT4_INODES_PER_GROUP(sb))
-		goto not_found;
+		return 0;
 
-	if (check_recently_deleted && recently_deleted(sb, group, *ino)) {
-		recently_deleted_ino = *ino;
+	if ((EXT4_SB(sb)->s_journal == NULL) &&
+	    recently_deleted(sb, group, *ino)) {
 		*ino = *ino + 1;
 		if (*ino < EXT4_INODES_PER_GROUP(sb))
 			goto next;
-		goto not_found;
-	}
-	return 1;
-not_found:
-	if (recently_deleted_ino >= EXT4_INODES_PER_GROUP(sb))
 		return 0;
-	/*
-	 * Not reusing recently deleted inodes is mostly a preference. We don't
-	 * want to report ENOSPC or skew allocation patterns because of that.
-	 * So return even recently deleted inode if we could find better in the
-	 * given range.
-	 */
-	*ino = recently_deleted_ino;
+	}
+
 	return 1;
 }
 
@@ -942,8 +924,8 @@ repeat_in_this_group:
 		if (!handle) {
 			BUG_ON(nblocks <= 0);
 			handle = __ext4_journal_start_sb(dir->i_sb, line_no,
-				 handle_type, nblocks, 0,
-				 ext4_trans_default_revoke_credits(sb));
+							 handle_type, nblocks,
+							 0);
 			if (IS_ERR(handle)) {
 				err = PTR_ERR(handle);
 				ext4_std_error(sb, err);
@@ -1246,10 +1228,8 @@ struct inode *ext4_orphan_get(struct super_block *sb, unsigned long ino)
 	inode = ext4_iget(sb, ino, EXT4_IGET_NORMAL);
 	if (IS_ERR(inode)) {
 		err = PTR_ERR(inode);
-		ext4_error_err(sb, -err,
-			       "couldn't read orphan inode %lu (err %d)",
-			       ino, err);
-		brelse(bitmap_bh);
+		ext4_error(sb, "couldn't read orphan inode %lu (err %d)",
+			   ino, err);
 		return inode;
 	}
 

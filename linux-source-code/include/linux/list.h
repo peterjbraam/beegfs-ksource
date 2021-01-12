@@ -238,14 +238,14 @@ static inline void list_bulk_move_tail(struct list_head *head,
 }
 
 /**
- * list_is_first -- tests whether @ list is the first entry in list @head
+ * list_is_first -- tests whether @list is the first entry in list @head
  * @list: the entry to test
  * @head: the head of the list
  */
 static inline int list_is_first(const struct list_head *list,
-				const struct list_head *head)
+					const struct list_head *head)
 {
-       return list->prev == head;
+	return list->prev == head;
 }
 
 /**
@@ -803,7 +803,7 @@ static inline void hlist_add_behind(struct hlist_node *n,
 				    struct hlist_node *prev)
 {
 	n->next = prev->next;
-	WRITE_ONCE(prev->next, n);
+	prev->next = n;
 	n->pprev = &prev->next;
 
 	if (n->next)

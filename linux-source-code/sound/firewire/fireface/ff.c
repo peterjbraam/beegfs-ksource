@@ -224,7 +224,7 @@ MODULE_DEVICE_TABLE(ieee1394, snd_ff_id_table);
 static struct fw_driver ff_driver = {
 	.driver = {
 		.owner	= THIS_MODULE,
-		.name	= KBUILD_MODNAME,
+		.name	= "snd-fireface",
 		.bus	= &fw_bus_type,
 	},
 	.probe    = snd_ff_probe,

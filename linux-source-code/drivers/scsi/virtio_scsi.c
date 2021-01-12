@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Virtio SCSI HBA driver
  *
@@ -7,10 +8,6 @@
  * Authors:
  *  Stefan Hajnoczi   <stefanha@linux.vnet.ibm.com>
  *  Paolo Bonzini   <pbonzini@redhat.com>
- *
- * This work is licensed under the terms of the GNU GPL, version 2 or later.
- * See the COPYING file in the top-level directory.
- *
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -352,14 +349,6 @@ static void virtscsi_rescan_hotunplug(struct virtio_scsi *vscsi)
 
 		if (result == 0 && inq_result[0] >> 5) {
 			/* PQ indicates the LUN is not attached */
-			scsi_remove_device(sdev);
-		} else if (host_byte(result) == DID_BAD_TARGET) {
-			/*
-			 * If all LUNs of a virtio-scsi device are unplugged
-			 * it will respond with BAD TARGET on any INQUIRY
-			 * command.
-			 * Remove the device in this case as well.
-			 */
 			scsi_remove_device(sdev);
 		}
 	}
@@ -751,7 +740,6 @@ static struct scsi_host_template virtscsi_host_template = {
 	.slave_alloc = virtscsi_device_alloc,
 
 	.dma_boundary = UINT_MAX,
-	.use_clustering = ENABLE_CLUSTERING,
 	.map_queues = virtscsi_map_queues,
 	.track_queue_depth = 1,
 	.force_blk_mq = 1,

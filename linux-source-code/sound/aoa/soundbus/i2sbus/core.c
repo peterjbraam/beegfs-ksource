@@ -46,8 +46,8 @@ static int alloc_dbdma_descriptor_ring(struct i2sbus_dev *i2sdev,
 	/* We use the PCI APIs for now until the generic one gets fixed
 	 * enough or until we get some macio-specific versions
 	 */
-	r->space = dma_zalloc_coherent(&macio_get_pci_dev(i2sdev->macio)->dev,
-				       r->size, &r->bus_addr, GFP_KERNEL);
+	r->space = dma_alloc_coherent(&macio_get_pci_dev(i2sdev->macio)->dev,
+				      r->size, &r->bus_addr, GFP_KERNEL);
 	if (!r->space)
 		return -ENOMEM;
 
@@ -160,7 +160,7 @@ static int i2sbus_add_dev(struct macio_dev *macio,
 	static const char *rnames[] = { "i2sbus: %pOFn (control)",
 					"i2sbus: %pOFn (tx)",
 					"i2sbus: %pOFn (rx)" };
-	static const irq_handler_t ints[] = {
+	static irq_handler_t ints[] = {
 		i2sbus_bus_intr,
 		i2sbus_tx_intr,
 		i2sbus_rx_intr

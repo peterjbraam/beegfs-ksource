@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (C) 2016 CNEX Labs
  * Initial release: Javier Gonzalez <javier@cnexlabs.com>
@@ -17,7 +18,8 @@
 
 #include "pblk.h"
 
-int pblk_write_to_cache(struct pblk *pblk, struct bio *bio, unsigned long flags)
+void pblk_write_to_cache(struct pblk *pblk, struct bio *bio,
+				unsigned long flags)
 {
 	struct request_queue *q = pblk->dev->q;
 	struct pblk_w_ctx w_ctx;
@@ -42,6 +44,7 @@ retry:
 		goto retry;
 	case NVM_IO_ERR:
 		pblk_pipeline_stop(pblk);
+		bio_io_error(bio);
 		goto out;
 	}
 
@@ -68,7 +71,7 @@ retry:
 
 	atomic64_add(nr_entries, &pblk->user_wa);
 
-#ifdef CONFIG_NVM_DEBUG
+#ifdef CONFIG_NVM_PBLK_DEBUG
 	atomic_long_add(nr_entries, &pblk->inflight_writes);
 	atomic_long_add(nr_entries, &pblk->req_writes);
 #endif
@@ -78,7 +81,9 @@ retry:
 out:
 	generic_end_io_acct(q, REQ_OP_WRITE, &pblk->disk->part0, start_time);
 	pblk_write_should_kick(pblk);
-	return ret;
+
+	if (ret == NVM_IO_DONE)
+		bio_endio(bio);
 }
 
 /*
@@ -124,7 +129,7 @@ retry:
 
 	atomic64_add(valid_entries, &pblk->gc_wa);
 
-#ifdef CONFIG_NVM_DEBUG
+#ifdef CONFIG_NVM_PBLK_DEBUG
 	atomic_long_add(valid_entries, &pblk->inflight_writes);
 	atomic_long_add(valid_entries, &pblk->recov_gc_writes);
 #endif

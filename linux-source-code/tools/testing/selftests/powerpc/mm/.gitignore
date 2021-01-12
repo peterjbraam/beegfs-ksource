@@ -3,5 +3,6 @@ subpage_prot
 tempfile
 prot_sao
 segv_errors
-stack_expansion_ldst
-stack_expansion_signal
+wild_bctr
+large_vm_fork_separation
+tlbie_test

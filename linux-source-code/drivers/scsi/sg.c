@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0+
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  History:
  *  Started: Aug 9 by Lawrence Foard (entropy@world.std.com),
@@ -235,12 +235,11 @@ static int sg_check_file_access(struct file *filp, const char *caller)
 static int sg_allow_access(struct file *filp, unsigned char *cmd)
 {
 	struct sg_fd *sfp = filp->private_data;
-	struct scsi_device *device = sfp->parentdp->device;
 
 	if (sfp->parentdp->device->type == TYPE_SCANNER)
 		return 0;
 
-	return blk_verify_command(device->request_queue, cmd, filp->f_mode);
+	return blk_verify_command(cmd, filp->f_mode);
 }
 
 static int
@@ -430,10 +429,16 @@ sg_read(struct file *filp, char __user *buf, size_t count, loff_t * ppos)
 	SCSI_LOG_TIMEOUT(3, sg_printk(KERN_INFO, sdp,
 				      "sg_read: count=%d\n", (int) count));
 
+	if (!access_ok(buf, count))
+		return -EFAULT;
 	if (sfp->force_packid && (count >= SZ_SG_HEADER)) {
-		old_hdr = memdup_user(buf, SZ_SG_HEADER);
-		if (IS_ERR(old_hdr))
-			return PTR_ERR(old_hdr);
+		old_hdr = kmalloc(SZ_SG_HEADER, GFP_KERNEL);
+		if (!old_hdr)
+			return -ENOMEM;
+		if (__copy_from_user(old_hdr, buf, SZ_SG_HEADER)) {
+			retval = -EFAULT;
+			goto free_old_hdr;
+		}
 		if (old_hdr->reply_len < 0) {
 			if (count >= SZ_SG_IO_HDR) {
 				sg_io_hdr_t *new_hdr;
@@ -533,7 +538,7 @@ sg_read(struct file *filp, char __user *buf, size_t count, loff_t * ppos)
 
 	/* Now copy the result back to the user buffer.  */
 	if (count >= SZ_SG_HEADER) {
-		if (copy_to_user(buf, old_hdr, SZ_SG_HEADER)) {
+		if (__copy_to_user(buf, old_hdr, SZ_SG_HEADER)) {
 			retval = -EFAULT;
 			goto free_old_hdr;
 		}
@@ -622,9 +627,11 @@ sg_write(struct file *filp, const char __user *buf, size_t count, loff_t * ppos)
 	      scsi_block_when_processing_errors(sdp->device)))
 		return -ENXIO;
 
+	if (!access_ok(buf, count))
+		return -EFAULT;	/* protects following copy_from_user()s + get_user()s */
 	if (count < SZ_SG_HEADER)
 		return -EIO;
-	if (copy_from_user(&old_hdr, buf, SZ_SG_HEADER))
+	if (__copy_from_user(&old_hdr, buf, SZ_SG_HEADER))
 		return -EFAULT;
 	blocking = !(filp->f_flags & O_NONBLOCK);
 	if (old_hdr.reply_len < 0)
@@ -633,15 +640,13 @@ sg_write(struct file *filp, const char __user *buf, size_t count, loff_t * ppos)
 	if (count < (SZ_SG_HEADER + 6))
 		return -EIO;	/* The minimum scsi command length is 6 bytes. */
 
-	buf += SZ_SG_HEADER;
-	if (get_user(opcode, buf))
-		return -EFAULT;
-
 	if (!(srp = sg_add_request(sfp))) {
 		SCSI_LOG_TIMEOUT(1, sg_printk(KERN_INFO, sdp,
 					      "sg_write: queue full\n"));
 		return -EDOM;
 	}
+	buf += SZ_SG_HEADER;
+	__get_user(opcode, buf);
 	mutex_lock(&sfp->f_mutex);
 	if (sfp->next_cmd_len > 0) {
 		cmd_size = sfp->next_cmd_len;
@@ -684,7 +689,7 @@ sg_write(struct file *filp, const char __user *buf, size_t count, loff_t * ppos)
 	hp->flags = input_size;	/* structure abuse ... */
 	hp->pack_id = old_hdr.pack_id;
 	hp->usr_ptr = NULL;
-	if (copy_from_user(cmnd, buf, cmd_size)) {
+	if (__copy_from_user(cmnd, buf, cmd_size)) {
 		sg_remove_request(sfp, srp);
 		return -EFAULT;
 	}
@@ -721,6 +726,8 @@ sg_new_write(Sg_fd *sfp, struct file *file, const char __user *buf,
 
 	if (count < SZ_SG_IO_HDR)
 		return -EINVAL;
+	if (!access_ok(buf, count))
+		return -EFAULT; /* protects following copy_from_user()s + get_user()s */
 
 	sfp->cmd_q = 1;	/* when sg_io_hdr seen, set command queuing on */
 	if (!(srp = sg_add_request(sfp))) {
@@ -730,7 +737,7 @@ sg_new_write(Sg_fd *sfp, struct file *file, const char __user *buf,
 	}
 	srp->sg_io_owned = sg_io_owned;
 	hp = &srp->header;
-	if (copy_from_user(hp, buf, SZ_SG_IO_HDR)) {
+	if (__copy_from_user(hp, buf, SZ_SG_IO_HDR)) {
 		sg_remove_request(sfp, srp);
 		return -EFAULT;
 	}
@@ -758,7 +765,11 @@ sg_new_write(Sg_fd *sfp, struct file *file, const char __user *buf,
 		sg_remove_request(sfp, srp);
 		return -EMSGSIZE;
 	}
-	if (copy_from_user(cmnd, hp->cmdp, hp->cmd_len)) {
+	if (!access_ok(hp->cmdp, hp->cmd_len)) {
+		sg_remove_request(sfp, srp);
+		return -EFAULT;	/* protects following copy_from_user()s + get_user()s */
+	}
+	if (__copy_from_user(cmnd, hp->cmdp, hp->cmd_len)) {
 		sg_remove_request(sfp, srp);
 		return -EFAULT;
 	}
@@ -910,6 +921,8 @@ sg_ioctl(struct file *filp, unsigned int cmd_in, unsigned long arg)
 			return -ENODEV;
 		if (!scsi_block_when_processing_errors(sdp->device))
 			return -ENXIO;
+		if (!access_ok(p, SZ_SG_IO_HDR))
+			return -EFAULT;
 		result = sg_new_write(sfp, filp, p, SZ_SG_IO_HDR,
 				 1, read_only, 1, &srp);
 		if (result < 0)
@@ -954,21 +967,26 @@ sg_ioctl(struct file *filp, unsigned int cmd_in, unsigned long arg)
 	case SG_GET_LOW_DMA:
 		return put_user((int) sdp->device->host->unchecked_isa_dma, ip);
 	case SG_GET_SCSI_ID:
-		{
-			sg_scsi_id_t v;
+		if (!access_ok(p, sizeof (sg_scsi_id_t)))
+			return -EFAULT;
+		else {
+			sg_scsi_id_t __user *sg_idp = p;
 
 			if (atomic_read(&sdp->detaching))
 				return -ENODEV;
-			memset(&v, 0, sizeof(v));
-			v.host_no = sdp->device->host->host_no;
-			v.channel = sdp->device->channel;
-			v.scsi_id = sdp->device->id;
-			v.lun = sdp->device->lun;
-			v.scsi_type = sdp->device->type;
-			v.h_cmd_per_lun = sdp->device->host->cmd_per_lun;
-			v.d_queue_depth = sdp->device->queue_depth;
-			if (copy_to_user(p, &v, sizeof(sg_scsi_id_t)))
-				return -EFAULT;
+			__put_user((int) sdp->device->host->host_no,
+				   &sg_idp->host_no);
+			__put_user((int) sdp->device->channel,
+				   &sg_idp->channel);
+			__put_user((int) sdp->device->id, &sg_idp->scsi_id);
+			__put_user((int) sdp->device->lun, &sg_idp->lun);
+			__put_user((int) sdp->device->type, &sg_idp->scsi_type);
+			__put_user((short) sdp->device->host->cmd_per_lun,
+				   &sg_idp->h_cmd_per_lun);
+			__put_user((short) sdp->device->queue_depth,
+				   &sg_idp->d_queue_depth);
+			__put_user(0, &sg_idp->unused[0]);
+			__put_user(0, &sg_idp->unused[1]);
 			return 0;
 		}
 	case SG_SET_FORCE_PACK_ID:
@@ -978,16 +996,20 @@ sg_ioctl(struct file *filp, unsigned int cmd_in, unsigned long arg)
 		sfp->force_packid = val ? 1 : 0;
 		return 0;
 	case SG_GET_PACK_ID:
+		if (!access_ok(ip, sizeof (int)))
+			return -EFAULT;
 		read_lock_irqsave(&sfp->rq_list_lock, iflags);
 		list_for_each_entry(srp, &sfp->rq_list, entry) {
 			if ((1 == srp->done) && (!srp->sg_io_owned)) {
 				read_unlock_irqrestore(&sfp->rq_list_lock,
 						       iflags);
-				return put_user(srp->header.pack_id, ip);
+				__put_user(srp->header.pack_id, ip);
+				return 0;
 			}
 		}
 		read_unlock_irqrestore(&sfp->rq_list_lock, iflags);
-		return put_user(-1, ip);
+		__put_user(-1, ip);
+		return 0;
 	case SG_GET_NUM_WAITING:
 		read_lock_irqsave(&sfp->rq_list_lock, iflags);
 		val = 0;
@@ -1055,7 +1077,9 @@ sg_ioctl(struct file *filp, unsigned int cmd_in, unsigned long arg)
 		val = (sdp->device ? 1 : 0);
 		return put_user(val, ip);
 	case SG_GET_REQUEST_TABLE:
-		{
+		if (!access_ok(p, SZ_SG_REQ_INFO * SG_MAX_QUEUE))
+			return -EFAULT;
+		else {
 			sg_req_info_t *rinfo;
 
 			rinfo = kcalloc(SG_MAX_QUEUE, SZ_SG_REQ_INFO,
@@ -1065,7 +1089,7 @@ sg_ioctl(struct file *filp, unsigned int cmd_in, unsigned long arg)
 			read_lock_irqsave(&sfp->rq_list_lock, iflags);
 			sg_fill_request_table(sfp, rinfo);
 			read_unlock_irqrestore(&sfp->rq_list_lock, iflags);
-			result = copy_to_user(p, rinfo,
+			result = __copy_to_user(p, rinfo,
 						SZ_SG_REQ_INFO * SG_MAX_QUEUE);
 			result = result ? -EFAULT : 0;
 			kfree(rinfo);
@@ -1964,12 +1988,12 @@ sg_read_oxfer(Sg_request * srp, char __user *outp, int num_read_xfer)
 	num = 1 << (PAGE_SHIFT + schp->page_order);
 	for (k = 0; k < schp->k_use_sg && schp->pages[k]; k++) {
 		if (num > num_read_xfer) {
-			if (copy_to_user(outp, page_address(schp->pages[k]),
+			if (__copy_to_user(outp, page_address(schp->pages[k]),
 					   num_read_xfer))
 				return -EFAULT;
 			break;
 		} else {
-			if (copy_to_user(outp, page_address(schp->pages[k]),
+			if (__copy_to_user(outp, page_address(schp->pages[k]),
 					   num))
 				return -EFAULT;
 			num_read_xfer -= num;

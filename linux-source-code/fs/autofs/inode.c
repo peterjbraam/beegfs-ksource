@@ -1,16 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright 1997-1998 Transmeta Corporation -- All Rights Reserved
  * Copyright 2005-2006 Ian Kent <raven@themaw.net>
- *
- * This file is part of the Linux kernel and is made available under
- * the terms of the GNU General Public License, version 2, or at your
- * option, any later version, incorporated herein by reference.
  */
 
 #include <linux/seq_file.h>
 #include <linux/pagemap.h>
 #include <linux/parser.h>
-#include <linux/magic.h>
 
 #include "autofs_i.h"
 
@@ -37,7 +33,7 @@ void autofs_clean_ino(struct autofs_info *ino)
 
 void autofs_free_ino(struct autofs_info *ino)
 {
-	kfree(ino);
+	kfree_rcu(ino, rcu);
 }
 
 void autofs_kill_sb(struct super_block *sb)
@@ -83,20 +79,20 @@ static int autofs_show_options(struct seq_file *m, struct dentry *root)
 	seq_printf(m, ",maxproto=%d", sbi->max_proto);
 
 	if (autofs_type_offset(sbi->type))
-		seq_printf(m, ",offset");
+		seq_puts(m, ",offset");
 	else if (autofs_type_direct(sbi->type))
-		seq_printf(m, ",direct");
+		seq_puts(m, ",direct");
 	else
-		seq_printf(m, ",indirect");
+		seq_puts(m, ",indirect");
 	if (sbi->flags & AUTOFS_SBI_STRICTEXPIRE)
-		seq_printf(m, ",strictexpire");
+		seq_puts(m, ",strictexpire");
 	if (sbi->flags & AUTOFS_SBI_IGNORE)
-		seq_printf(m, ",ignore");
+		seq_puts(m, ",ignore");
 #ifdef CONFIG_CHECKPOINT_RESTORE
 	if (sbi->pipe)
 		seq_printf(m, ",pipe_ino=%ld", file_inode(sbi->pipe)->i_ino);
 	else
-		seq_printf(m, ",pipe_ino=-1");
+		seq_puts(m, ",pipe_ino=-1");
 #endif
 	return 0;
 }
@@ -274,8 +270,10 @@ int autofs_fill_super(struct super_block *s, void *data, int silent)
 	}
 	root_inode = autofs_get_inode(s, S_IFDIR | 0755);
 	root = d_make_root(root_inode);
-	if (!root)
+	if (!root) {
+		ret = -ENOMEM;
 		goto fail_ino;
+	}
 	pipe = NULL;
 
 	root->d_fsdata = ino;

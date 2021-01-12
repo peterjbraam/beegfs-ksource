@@ -1,25 +1,11 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (C) 2012 ARM Ltd.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 #ifndef __ASM_IRQFLAGS_H
 #define __ASM_IRQFLAGS_H
 
-#ifdef __KERNEL__
-
 #include <asm/alternative.h>
-#include <asm/barrier.h>
 #include <asm/ptrace.h>
 #include <asm/sysreg.h>
 
@@ -48,14 +34,14 @@ static inline void arch_local_irq_enable(void)
 	}
 
 	asm volatile(ALTERNATIVE(
-		"msr	daifclr, #2		// arch_local_irq_enable",
-		__msr_s(SYS_ICC_PMR_EL1, "%0"),
+		"msr	daifclr, #2		// arch_local_irq_enable\n"
+		"nop",
+		__msr_s(SYS_ICC_PMR_EL1, "%0")
+		"dsb	sy",
 		ARM64_HAS_IRQ_PRIO_MASKING)
 		:
 		: "r" ((unsigned long) GIC_PRIO_IRQON)
 		: "memory");
-
-	pmr_sync();
 }
 
 static inline void arch_local_irq_disable(void)
@@ -130,15 +116,14 @@ static inline unsigned long arch_local_irq_save(void)
 static inline void arch_local_irq_restore(unsigned long flags)
 {
 	asm volatile(ALTERNATIVE(
-		"msr	daif, %0",
-		__msr_s(SYS_ICC_PMR_EL1, "%0"),
-		ARM64_HAS_IRQ_PRIO_MASKING)
+			"msr	daif, %0\n"
+			"nop",
+			__msr_s(SYS_ICC_PMR_EL1, "%0")
+			"dsb	sy",
+			ARM64_HAS_IRQ_PRIO_MASKING)
 		:
 		: "r" (flags)
 		: "memory");
-
-	pmr_sync();
 }
 
-#endif
-#endif
+#endif /* __ASM_IRQFLAGS_H */

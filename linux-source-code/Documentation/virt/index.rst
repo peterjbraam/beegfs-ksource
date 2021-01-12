@@ -9,7 +9,6 @@ Linux Virtualization Support
 
    kvm/index
    paravirt_ops
-   guest-halt-polling
 
 .. only:: html and subproject
 

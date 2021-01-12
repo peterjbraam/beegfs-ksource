@@ -917,7 +917,7 @@ static void korina_restart_task(struct work_struct *work)
 	enable_irq(lp->rx_irq);
 }
 
-static void korina_tx_timeout(struct net_device *dev, unsigned int txqueue)
+static void korina_tx_timeout(struct net_device *dev)
 {
 	struct korina_private *lp = netdev_priv(dev);
 
@@ -1113,7 +1113,7 @@ out:
 	return rc;
 
 probe_err_register:
-	kfree(lp->td_ring);
+	kfree((struct dma_desc *)KSEG0ADDR(lp->td_ring));
 probe_err_td_ring:
 	iounmap(lp->tx_dma_regs);
 probe_err_dma_tx:
@@ -1133,6 +1133,7 @@ static int korina_remove(struct platform_device *pdev)
 	iounmap(lp->eth_regs);
 	iounmap(lp->rx_dma_regs);
 	iounmap(lp->tx_dma_regs);
+	kfree((struct dma_desc *)KSEG0ADDR(lp->td_ring));
 
 	unregister_netdev(bif->dev);
 	free_netdev(bif->dev);

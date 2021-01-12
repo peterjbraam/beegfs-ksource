@@ -15,6 +15,9 @@
 #include "ioasm.h"
 #include "vfio_ccw_private.h"
 
+#define CREATE_TRACE_POINTS
+#include "vfio_ccw_trace.h"
+
 static int fsm_io_helper(struct vfio_ccw_private *private)
 {
 	struct subchannel *sch;
@@ -257,7 +260,7 @@ static void fsm_io_request(struct vfio_ccw_private *private,
 			io_region->ret_code = -EOPNOTSUPP;
 			VFIO_CCW_MSG_EVENT(2,
 					   "%pUl (%x.%x.%04x): transport mode\n",
-					   mdev_uuid_p(mdev), schid.cssid,
+					   mdev_uuid(mdev), schid.cssid,
 					   schid.ssid, schid.sch_no);
 			errstr = "transport mode";
 			goto err_out;
@@ -267,7 +270,7 @@ static void fsm_io_request(struct vfio_ccw_private *private,
 		if (io_region->ret_code) {
 			VFIO_CCW_MSG_EVENT(2,
 					   "%pUl (%x.%x.%04x): cp_init=%d\n",
-					   mdev_uuid_p(mdev), schid.cssid,
+					   mdev_uuid(mdev), schid.cssid,
 					   schid.ssid, schid.sch_no,
 					   io_region->ret_code);
 			errstr = "cp init";
@@ -278,7 +281,7 @@ static void fsm_io_request(struct vfio_ccw_private *private,
 		if (io_region->ret_code) {
 			VFIO_CCW_MSG_EVENT(2,
 					   "%pUl (%x.%x.%04x): cp_prefetch=%d\n",
-					   mdev_uuid_p(mdev), schid.cssid,
+					   mdev_uuid(mdev), schid.cssid,
 					   schid.ssid, schid.sch_no,
 					   io_region->ret_code);
 			errstr = "cp prefetch";
@@ -291,7 +294,7 @@ static void fsm_io_request(struct vfio_ccw_private *private,
 		if (io_region->ret_code) {
 			VFIO_CCW_MSG_EVENT(2,
 					   "%pUl (%x.%x.%04x): fsm_io_helper=%d\n",
-					   mdev_uuid_p(mdev), schid.cssid,
+					   mdev_uuid(mdev), schid.cssid,
 					   schid.ssid, schid.sch_no,
 					   io_region->ret_code);
 			errstr = "cp fsm_io_helper";
@@ -302,7 +305,7 @@ static void fsm_io_request(struct vfio_ccw_private *private,
 	} else if (scsw->cmd.fctl & SCSW_FCTL_HALT_FUNC) {
 		VFIO_CCW_MSG_EVENT(2,
 				   "%pUl (%x.%x.%04x): halt on io_region\n",
-				   mdev_uuid_p(mdev), schid.cssid,
+				   mdev_uuid(mdev), schid.cssid,
 				   schid.ssid, schid.sch_no);
 		/* halt is handled via the async cmd region */
 		io_region->ret_code = -EOPNOTSUPP;
@@ -310,7 +313,7 @@ static void fsm_io_request(struct vfio_ccw_private *private,
 	} else if (scsw->cmd.fctl & SCSW_FCTL_CLEAR_FUNC) {
 		VFIO_CCW_MSG_EVENT(2,
 				   "%pUl (%x.%x.%04x): clear on io_region\n",
-				   mdev_uuid_p(mdev), schid.cssid,
+				   mdev_uuid(mdev), schid.cssid,
 				   schid.ssid, schid.sch_no);
 		/* clear is handled via the async cmd region */
 		io_region->ret_code = -EOPNOTSUPP;
@@ -318,8 +321,8 @@ static void fsm_io_request(struct vfio_ccw_private *private,
 	}
 
 err_out:
-	trace_vfio_ccw_fsm_io_request(scsw->cmd.fctl, schid,
-				      io_region->ret_code, errstr);
+	trace_vfio_ccw_io_fctl(scsw->cmd.fctl, schid,
+			       io_region->ret_code, errstr);
 }
 
 /*
@@ -341,10 +344,6 @@ static void fsm_async_request(struct vfio_ccw_private *private,
 		/* should not happen? */
 		cmd_region->ret_code = -EINVAL;
 	}
-
-	trace_vfio_ccw_fsm_async_request(get_schid(private),
-					 cmd_region->command,
-					 cmd_region->ret_code);
 }
 
 /*

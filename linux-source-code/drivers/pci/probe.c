@@ -7,7 +7,6 @@
 #include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/pci.h>
-#include <linux/msi.h>
 #include <linux/of_device.h>
 #include <linux/of_pci.h>
 #include <linux/pci_hotplug.h>
@@ -65,11 +64,6 @@ static struct resource *get_pci_domain_busn_res(int domain_nr)
 	return &r->res;
 }
 
-static int find_anything(struct device *dev, const void *data)
-{
-	return 1;
-}
-
 /*
  * Some device drivers need know if PCI is initiated.
  * Basically, we think PCI is not initiated when there
@@ -80,7 +74,7 @@ int no_pci_devices(void)
 	struct device *dev;
 	int no_devices;
 
-	dev = bus_find_device(&pci_bus_type, NULL, NULL, find_anything);
+	dev = bus_find_next_device(&pci_bus_type, NULL);
 	no_devices = (dev == NULL);
 	put_device(dev);
 	return no_devices;
@@ -603,7 +597,6 @@ static void pci_init_host_bridge(struct pci_host_bridge *bridge)
 	bridge->native_shpc_hotplug = 1;
 	bridge->native_pme = 1;
 	bridge->native_ltr = 1;
-	bridge->native_dpc = 1;
 }
 
 struct pci_host_bridge *pci_alloc_host_bridge(size_t priv)
@@ -874,9 +867,10 @@ static int pci_register_host_bridge(struct pci_host_bridge *bridge)
 		goto free;
 
 	err = device_register(&bridge->dev);
-	if (err)
+	if (err) {
 		put_device(&bridge->dev);
-
+		goto free;
+	}
 	bus->bridge = get_device(&bridge->dev);
 	device_enable_async_suspend(bus->bridge);
 	pci_set_bus_of_node(bus);
@@ -904,9 +898,6 @@ static int pci_register_host_bridge(struct pci_host_bridge *bridge)
 		dev_info(parent, "PCI host bridge to bus %s\n", name);
 	else
 		pr_info("PCI host bridge to bus %s\n", name);
-
-	if (nr_node_ids > 1 && pcibus_to_node(bus) == NUMA_NO_NODE)
-		dev_warn(&bus->dev, "Unknown NUMA node; performance will be reduced\n");
 
 	/* Add initial resources to the bus */
 	resource_list_for_each_entry_safe(window, n, &resources) {
@@ -1444,10 +1435,8 @@ void set_pcie_port_type(struct pci_dev *pdev)
 	pdev->pcie_mpss = reg16 & PCI_EXP_DEVCAP_PAYLOAD;
 
 	parent = pci_upstream_bridge(pdev);
-	if (!parent) {
-		pdev->has_secondary_link = 1;
+	if (!parent)
 		return;
-	}
 
 	/*
 	 * Some systems do not identify their upstream/downstream ports
@@ -1478,9 +1467,6 @@ void set_pcie_port_type(struct pci_dev *pdev)
 			pdev->pcie_flags_reg |= PCI_EXP_TYPE_DOWNSTREAM;
 		}
 	}
-
-	if (pcie_downstream_port(pdev))
-		pdev->has_secondary_link = 1;
 }
 
 void set_pcie_hotplug_bridge(struct pci_dev *pdev)
@@ -1792,7 +1778,7 @@ int pci_setup_device(struct pci_dev *dev)
 	/* Device class may be changed after fixup */
 	class = dev->class >> 8;
 
-	if (dev->non_compliant_bars) {
+	if (dev->non_compliant_bars && !dev->mmio_always_on) {
 		pci_read_config_word(dev, PCI_COMMAND, &cmd);
 		if (cmd & (PCI_COMMAND_IO | PCI_COMMAND_MEMORY)) {
 			pci_info(dev, "device has non-compliant BARs; disabling IO/MEM decoding\n");
@@ -1904,11 +1890,31 @@ static void pci_configure_mps(struct pci_dev *dev)
 	struct pci_dev *bridge = pci_upstream_bridge(dev);
 	int mps, mpss, p_mps, rc;
 
-	if (!pci_is_pcie(dev) || !bridge || !pci_is_pcie(bridge))
+	if (!pci_is_pcie(dev))
 		return;
 
 	/* MPS and MRRS fields are of type 'RsvdP' for VFs, short-circuit out */
 	if (dev->is_virtfn)
+		return;
+
+	/*
+	 * For Root Complex Integrated Endpoints, program the maximum
+	 * supported value unless limited by the PCIE_BUS_PEER2PEER case.
+	 */
+	if (pci_pcie_type(dev) == PCI_EXP_TYPE_RC_END) {
+		if (pcie_bus_config == PCIE_BUS_PEER2PEER)
+			mps = 128;
+		else
+			mps = 128 << dev->pcie_mpss;
+		rc = pcie_set_mps(dev, mps);
+		if (rc) {
+			pci_warn(dev, "can't set Max Payload Size to %d; if necessary, use \"pci=pcie_bus_safe\" and report a bug\n",
+				 mps);
+		}
+		return;
+	}
+
+	if (!bridge || !pci_is_pcie(bridge))
 		return;
 
 	mps = pcie_get_mps(dev);
@@ -2322,7 +2328,8 @@ void pcie_report_downtraining(struct pci_dev *dev)
 
 static void pci_init_capabilities(struct pci_dev *dev)
 {
-	pci_ea_init(dev);		/* Enhanced Allocation */
+	/* Enhanced Allocation */
+	pci_ea_init(dev);
 
 	/* Setup MSI caps & disable MSI/MSI-X interrupts */
 	pci_msi_setup_pci_dev(dev);
@@ -2330,17 +2337,29 @@ static void pci_init_capabilities(struct pci_dev *dev)
 	/* Buffers for saving PCIe and PCI-X capabilities */
 	pci_allocate_cap_save_buffers(dev);
 
-	pci_pm_init(dev);		/* Power Management */
-	pci_vpd_init(dev);		/* Vital Product Data */
-	pci_configure_ari(dev);		/* Alternative Routing-ID Forwarding */
-	pci_iov_init(dev);		/* Single Root I/O Virtualization */
-	pci_ats_init(dev);		/* Address Translation Services */
-	pci_pri_init(dev);		/* Page Request Interface */
-	pci_pasid_init(dev);		/* Process Address Space ID */
-	pci_enable_acs(dev);		/* Enable ACS PSP upstream forwarding */
-	pci_ptm_init(dev);		/* Precision Time Measurement */
-	pci_aer_init(dev);		/* Advanced Error Reporting */
-	pci_dpc_init(dev);		/* Downstream Port Containment */
+	/* Power Management */
+	pci_pm_init(dev);
+
+	/* Vital Product Data */
+	pci_vpd_init(dev);
+
+	/* Alternative Routing-ID Forwarding */
+	pci_configure_ari(dev);
+
+	/* Single Root I/O Virtualization */
+	pci_iov_init(dev);
+
+	/* Address Translation Services */
+	pci_ats_init(dev);
+
+	/* Enable ACS P2P upstream forwarding */
+	pci_enable_acs(dev);
+
+	/* Precision Time Measurement */
+	pci_ptm_init(dev);
+
+	/* Advanced Error Reporting */
+	pci_aer_init(dev);
 
 	pcie_report_downtraining(dev);
 
@@ -2412,10 +2431,13 @@ void pci_device_add(struct pci_dev *dev, struct pci_bus *bus)
 	/* Fix up broken headers */
 	pci_fixup_device(pci_fixup_header, dev);
 
+	/* Moved out from quirk header fixup code */
 	pci_reassigndev_resource_alignment(dev);
 
+	/* Clear the state_saved flag */
 	dev->state_saved = false;
 
+	/* Initialize various capabilities */
 	pci_init_capabilities(dev);
 
 	/*

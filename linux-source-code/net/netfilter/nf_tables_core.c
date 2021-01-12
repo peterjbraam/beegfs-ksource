@@ -1,9 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2008 Patrick McHardy <kaber@trash.net>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  * Development of this code funded by Astaro AG (http://www.astaro.com/)
  */
@@ -22,6 +19,7 @@
 #include <net/netfilter/nf_tables_core.h>
 #include <net/netfilter/nf_tables.h>
 #include <net/netfilter/nf_log.h>
+#include <net/netfilter/nft_meta.h>
 
 static noinline void __nft_trace_packet(struct nft_traceinfo *info,
 					const struct nft_chain *chain,
@@ -122,6 +120,31 @@ struct nft_jumpstack {
 	struct nft_rule	*const *rules;
 };
 
+static void expr_call_ops_eval(const struct nft_expr *expr,
+			       struct nft_regs *regs,
+			       struct nft_pktinfo *pkt)
+{
+#ifdef CONFIG_RETPOLINE
+	unsigned long e = (unsigned long)expr->ops->eval;
+#define X(e, fun) \
+	do { if ((e) == (unsigned long)(fun)) \
+		return fun(expr, regs, pkt); } while (0)
+
+	X(e, nft_payload_eval);
+	X(e, nft_cmp_eval);
+	X(e, nft_meta_get_eval);
+	X(e, nft_lookup_eval);
+	X(e, nft_range_eval);
+	X(e, nft_immediate_eval);
+	X(e, nft_byteorder_eval);
+	X(e, nft_dynset_eval);
+	X(e, nft_rt_get_eval);
+	X(e, nft_bitwise_eval);
+#undef  X
+#endif /* CONFIG_RETPOLINE */
+	expr->ops->eval(expr, regs, pkt);
+}
+
 unsigned int
 nft_do_chain(struct nft_pktinfo *pkt, void *priv)
 {
@@ -155,7 +178,7 @@ next_rule:
 				nft_cmp_fast_eval(expr, &regs);
 			else if (expr->ops != &nft_payload_fast_ops ||
 				 !nft_payload_fast_eval(expr, &regs, pkt))
-				expr->ops->eval(expr, &regs, pkt);
+				expr_call_ops_eval(expr, &regs, pkt);
 
 			if (regs.verdict.code != NFT_CONTINUE)
 				break;
@@ -198,7 +221,6 @@ next_rule:
 		chain = regs.verdict.chain;
 		goto do_chain;
 	case NFT_CONTINUE:
-		/* fall through */
 	case NFT_RETURN:
 		nft_trace_packet(&info, chain, rule,
 				 NFT_TRACETYPE_RETURN);

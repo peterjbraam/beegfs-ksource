@@ -1,10 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  *  QLogic FCoE Offload Driver
  *  Copyright (c) 2016-2018 Cavium Inc.
- *
- *  This software is available under the terms of the GNU General Public License
- *  (GPL) Version 2, available from the file COPYING in the main directory of
- *  this source tree.
  */
 #ifndef _QEDFC_H_
 #define _QEDFC_H_
@@ -391,9 +388,7 @@ struct qedf_ctx {
 #define QEDF_IO_WORK_MIN		64
 	mempool_t *io_mempool;
 	struct workqueue_struct *dpc_wq;
-	struct delayed_work recovery_work;
 	struct delayed_work grcdump_work;
-	struct delayed_work stag_work;
 
 	u32 slow_sge_ios;
 	u32 fast_sge_ios;
@@ -409,7 +404,6 @@ struct qedf_ctx {
 
 	u32 flogi_cnt;
 	u32 flogi_failed;
-	u32 flogi_pending;
 
 	/* Used for fc statistics */
 	struct mutex stats_mutex;
@@ -475,7 +469,7 @@ extern uint qedf_dump_frames;
 extern uint qedf_io_tracing;
 extern uint qedf_stop_io_on_error;
 extern uint qedf_link_down_tmo;
-#define QEDF_RETRY_DELAY_MAX		600 /* 60 seconds */
+#define QEDF_RETRY_DELAY_MAX		20 /* 2 seconds */
 extern bool qedf_retry_delay;
 extern uint qedf_debug;
 

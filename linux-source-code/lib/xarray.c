@@ -1288,17 +1288,6 @@ void *xas_find_conflict(struct xa_state *xas)
 EXPORT_SYMBOL_GPL(xas_find_conflict);
 
 /**
- * _xa_init_flags() - RHEL-only hook for kabi extension initialization.
- * @xa: XArray.
- * @flags: XA_FLAG values.
- *
- */
-void _xa_init_flags(struct xarray *xa, gfp_t flags)
-{
-}
-EXPORT_SYMBOL(_xa_init_flags);
-
-/**
  * xa_load() - Load an entry from an XArray.
  * @xa: XArray.
  * @index: index into array.
@@ -1849,7 +1838,7 @@ static bool xas_sibling(struct xa_state *xas)
 	struct xa_node *node = xas->xa_node;
 	unsigned long mask;
 
-	if (!IS_ENABLED(CONFIG_XARRAY_MULTI) || !node)
+	if (!node)
 		return false;
 	mask = (XA_CHUNK_SIZE << node->shift) - 1;
 	return (xas->xa_index & mask) >

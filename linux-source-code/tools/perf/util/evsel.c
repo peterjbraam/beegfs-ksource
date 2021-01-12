@@ -1,10 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2011, Red Hat Inc, Arnaldo Carvalho de Melo <acme@redhat.com>
  *
  * Parts came from builtin-{top,stat,record}.c, see those files for further
  * copyright notes.
- *
- * Released under the GPL v2. (and only v2, not any later version)
  */
 
 #include <byteswap.h>
@@ -713,8 +712,7 @@ static void __perf_evsel__config_callchain(struct evsel *evsel,
 				attr->branch_sample_type = PERF_SAMPLE_BRANCH_USER |
 							PERF_SAMPLE_BRANCH_CALL_STACK |
 							PERF_SAMPLE_BRANCH_NO_CYCLES |
-							PERF_SAMPLE_BRANCH_NO_FLAGS |
-							PERF_SAMPLE_BRANCH_HW_INDEX;
+							PERF_SAMPLE_BRANCH_NO_FLAGS;
 			}
 		} else
 			 pr_warning("Cannot use LBR callstack with branch stack. "
@@ -765,8 +763,7 @@ perf_evsel__reset_callgraph(struct evsel *evsel,
 	if (param->record_mode == CALLCHAIN_LBR) {
 		perf_evsel__reset_sample_bit(evsel, BRANCH_STACK);
 		attr->branch_sample_type &= ~(PERF_SAMPLE_BRANCH_USER |
-					      PERF_SAMPLE_BRANCH_CALL_STACK |
-					      PERF_SAMPLE_BRANCH_HW_INDEX);
+					      PERF_SAMPLE_BRANCH_CALL_STACK);
 	}
 	if (param->record_mode == CALLCHAIN_DWARF) {
 		perf_evsel__reset_sample_bit(evsel, REGS_USER);
@@ -811,12 +808,12 @@ static void apply_config_terms(struct evsel *evsel,
 				perf_evsel__reset_sample_bit(evsel, TIME);
 			break;
 		case PERF_EVSEL__CONFIG_TERM_CALLGRAPH:
-			callgraph_buf = term->val.str;
+			callgraph_buf = term->val.callgraph;
 			break;
 		case PERF_EVSEL__CONFIG_TERM_BRANCH:
-			if (term->val.str && strcmp(term->val.str, "no")) {
+			if (term->val.branch && strcmp(term->val.branch, "no")) {
 				perf_evsel__set_sample_bit(evsel, BRANCH_STACK);
-				parse_branch_str(term->val.str,
+				parse_branch_str(term->val.branch,
 						 &attr->branch_sample_type);
 			} else
 				perf_evsel__reset_sample_bit(evsel, BRANCH_STACK);
@@ -848,11 +845,6 @@ static void apply_config_terms(struct evsel *evsel,
 			break;
 		case PERF_EVSEL__CONFIG_TERM_AUX_OUTPUT:
 			attr->aux_output = term->val.aux_output ? 1 : 0;
-			break;
-		case PERF_EVSEL__CONFIG_TERM_AUX_SAMPLE_SIZE:
-			/* Already applied by auxtrace */
-			break;
-		case PERF_EVSEL__CONFIG_TERM_CFG_CHG:
 			break;
 		default:
 			break;
@@ -911,19 +903,6 @@ static bool is_dummy_event(struct evsel *evsel)
 {
 	return (evsel->core.attr.type == PERF_TYPE_SOFTWARE) &&
 	       (evsel->core.attr.config == PERF_COUNT_SW_DUMMY);
-}
-
-struct perf_evsel_config_term *__perf_evsel__get_config_term(struct evsel *evsel,
-							     enum evsel_term_type type)
-{
-	struct perf_evsel_config_term *term, *found_term = NULL;
-
-	list_for_each_entry(term, &evsel->config_terms, list) {
-		if (term->type == type)
-			found_term = term;
-	}
-
-	return found_term;
 }
 
 /*
@@ -1049,12 +1028,12 @@ void perf_evsel__config(struct evsel *evsel, struct record_opts *opts,
 	if (callchain && callchain->enabled && !evsel->no_aux_samples)
 		perf_evsel__config_callchain(evsel, opts, callchain);
 
-	if (opts->sample_intr_regs) {
+	if (opts->sample_intr_regs && !evsel->no_aux_samples) {
 		attr->sample_regs_intr = opts->sample_intr_regs;
 		perf_evsel__set_sample_bit(evsel, REGS_INTR);
 	}
 
-	if (opts->sample_user_regs) {
+	if (opts->sample_user_regs && !evsel->no_aux_samples) {
 		attr->sample_regs_user |= opts->sample_user_regs;
 		perf_evsel__set_sample_bit(evsel, REGS_USER);
 	}
@@ -1104,11 +1083,6 @@ void perf_evsel__config(struct evsel *evsel, struct record_opts *opts,
 
 	if (opts->record_namespaces)
 		attr->namespaces  = track;
-
-	if (opts->record_cgroup) {
-		attr->cgroup = track && !perf_missing_features.cgroup;
-		perf_evsel__set_sample_bit(evsel, CGROUP);
-	}
 
 	if (opts->record_switch_events)
 		attr->context_switch = track;
@@ -1231,25 +1205,14 @@ int perf_evsel__append_addr_filter(struct evsel *evsel, const char *filter)
 	return perf_evsel__append_filter(evsel, "%s,%s", filter);
 }
 
-/* Caller has to clear disabled after going through all CPUs. */
-int evsel__enable_cpu(struct evsel *evsel, int cpu)
-{
-	return perf_evsel__enable_cpu(&evsel->core, cpu);
-}
-
 int evsel__enable(struct evsel *evsel)
 {
 	int err = perf_evsel__enable(&evsel->core);
 
 	if (!err)
 		evsel->disabled = false;
-	return err;
-}
 
-/* Caller has to set disabled after going through all CPUs. */
-int evsel__disable_cpu(struct evsel *evsel, int cpu)
-{
-	return perf_evsel__disable_cpu(&evsel->core, cpu);
+	return err;
 }
 
 int evsel__disable(struct evsel *evsel)
@@ -1273,8 +1236,6 @@ static void perf_evsel__free_config_terms(struct evsel *evsel)
 
 	list_for_each_entry_safe(term, h, &evsel->config_terms, list) {
 		list_del_init(&term->list);
-		if (term->free_str)
-			zfree(&term->val.str);
 		free(term);
 	}
 }
@@ -1294,6 +1255,8 @@ void perf_evsel__exit(struct evsel *evsel)
 	zfree(&evsel->group_name);
 	zfree(&evsel->name);
 	zfree(&evsel->pmu_name);
+	zfree(&evsel->per_pkg_mask);
+	zfree(&evsel->metric_events);
 	perf_evsel__object.fini(evsel);
 }
 
@@ -1564,7 +1527,7 @@ static int __open_attr__fprintf(FILE *fp, const char *name, const char *val,
 
 static void display_attr(struct perf_event_attr *attr)
 {
-	if (verbose >= 2 || debug_peo_args) {
+	if (verbose >= 2) {
 		fprintf(stderr, "%.60s\n", graph_dotted_line);
 		fprintf(stderr, "perf_event_attr:\n");
 		perf_event_attr__fprintf(stderr, attr, __open_attr__fprintf, NULL);
@@ -1580,7 +1543,7 @@ static int perf_event_open(struct evsel *evsel,
 	int fd;
 
 	while (1) {
-		pr_debug2_peo("sys_perf_event_open: pid %d  cpu %d  group_fd %d  flags %#lx",
+		pr_debug2("sys_perf_event_open: pid %d  cpu %d  group_fd %d  flags %#lx",
 			  pid, cpu, group_fd, flags);
 
 		fd = sys_perf_event_open(&evsel->core.attr, pid, cpu, group_fd, flags);
@@ -1600,22 +1563,21 @@ static int perf_event_open(struct evsel *evsel,
 			break;
 		}
 
-		pr_debug2_peo("\nsys_perf_event_open failed, error %d\n", -ENOTSUP);
+		pr_debug2("\nsys_perf_event_open failed, error %d\n", -ENOTSUP);
 		evsel->core.attr.precise_ip--;
-		pr_debug2_peo("decreasing precise_ip by one (%d)\n", evsel->core.attr.precise_ip);
+		pr_debug2("decreasing precise_ip by one (%d)\n", evsel->core.attr.precise_ip);
 		display_attr(&evsel->core.attr);
 	}
 
 	return fd;
 }
 
-static int evsel__open_cpu(struct evsel *evsel, struct perf_cpu_map *cpus,
-		struct perf_thread_map *threads,
-		int start_cpu, int end_cpu)
+int evsel__open(struct evsel *evsel, struct perf_cpu_map *cpus,
+		struct perf_thread_map *threads)
 {
 	int cpu, thread, nthreads;
 	unsigned long flags = PERF_FLAG_FD_CLOEXEC;
-	int pid = -1, err, old_errno;
+	int pid = -1, err;
 	enum { NO_CHANGE, SET_TO_MAX, INCREASED_MAX } set_rlimit = NO_CHANGE;
 
 	if ((perf_missing_features.write_backward && evsel->core.attr.write_backward) ||
@@ -1682,15 +1644,13 @@ fallback_missing_features:
 		evsel->core.attr.ksymbol = 0;
 	if (perf_missing_features.bpf)
 		evsel->core.attr.bpf_event = 0;
-	if (perf_missing_features.branch_hw_idx)
-		evsel->core.attr.branch_sample_type &= ~PERF_SAMPLE_BRANCH_HW_INDEX;
 retry_sample_id:
 	if (perf_missing_features.sample_id_all)
 		evsel->core.attr.sample_id_all = 0;
 
 	display_attr(&evsel->core.attr);
 
-	for (cpu = start_cpu; cpu < end_cpu; cpu++) {
+	for (cpu = 0; cpu < cpus->nr; cpu++) {
 
 		for (thread = 0; thread < nthreads; thread++) {
 			int fd, group_fd;
@@ -1724,12 +1684,12 @@ retry_open:
 					continue;
 				}
 
-				pr_debug2_peo("\nsys_perf_event_open failed, error %d\n",
+				pr_debug2("\nsys_perf_event_open failed, error %d\n",
 					  err);
 				goto try_fallback;
 			}
 
-			pr_debug2_peo(" = %d\n", fd);
+			pr_debug2(" = %d\n", fd);
 
 			if (evsel->bpf_fd >= 0) {
 				int evt_fd = fd;
@@ -1770,8 +1730,8 @@ try_fallback:
 	 */
 	if (err == -EMFILE && set_rlimit < INCREASED_MAX) {
 		struct rlimit l;
+		int old_errno = errno;
 
-		old_errno = errno;
 		if (getrlimit(RLIMIT_NOFILE, &l) == 0) {
 			if (set_rlimit == NO_CHANGE)
 				l.rlim_cur = l.rlim_max;
@@ -1795,92 +1755,74 @@ try_fallback:
 	 * Must probe features in the order they were added to the
 	 * perf_event_attr interface.
 	 */
-        if (!perf_missing_features.cgroup && evsel->core.attr.cgroup) {
-		perf_missing_features.cgroup = true;
-		pr_debug2_peo("Kernel has no cgroup sampling support, bailing out\n");
-		goto out_close;
-        } else if (!perf_missing_features.branch_hw_idx &&
-	    (evsel->core.attr.branch_sample_type & PERF_SAMPLE_BRANCH_HW_INDEX)) {
-		perf_missing_features.branch_hw_idx = true;
-		pr_debug2("switching off branch HW index support\n");
-		goto fallback_missing_features;
-	} else if (!perf_missing_features.aux_output && evsel->core.attr.aux_output) {
+	if (!perf_missing_features.aux_output && evsel->core.attr.aux_output) {
 		perf_missing_features.aux_output = true;
-		pr_debug2_peo("Kernel has no attr.aux_output support, bailing out\n");
+		pr_debug2("Kernel has no attr.aux_output support, bailing out\n");
 		goto out_close;
 	} else if (!perf_missing_features.bpf && evsel->core.attr.bpf_event) {
 		perf_missing_features.bpf = true;
-		pr_debug2_peo("switching off bpf_event\n");
+		pr_debug2("switching off bpf_event\n");
 		goto fallback_missing_features;
 	} else if (!perf_missing_features.ksymbol && evsel->core.attr.ksymbol) {
 		perf_missing_features.ksymbol = true;
-		pr_debug2_peo("switching off ksymbol\n");
+		pr_debug2("switching off ksymbol\n");
 		goto fallback_missing_features;
 	} else if (!perf_missing_features.write_backward && evsel->core.attr.write_backward) {
 		perf_missing_features.write_backward = true;
-		pr_debug2_peo("switching off write_backward\n");
+		pr_debug2("switching off write_backward\n");
 		goto out_close;
 	} else if (!perf_missing_features.clockid_wrong && evsel->core.attr.use_clockid) {
 		perf_missing_features.clockid_wrong = true;
-		pr_debug2_peo("switching off clockid\n");
+		pr_debug2("switching off clockid\n");
 		goto fallback_missing_features;
 	} else if (!perf_missing_features.clockid && evsel->core.attr.use_clockid) {
 		perf_missing_features.clockid = true;
-		pr_debug2_peo("switching off use_clockid\n");
+		pr_debug2("switching off use_clockid\n");
 		goto fallback_missing_features;
 	} else if (!perf_missing_features.cloexec && (flags & PERF_FLAG_FD_CLOEXEC)) {
 		perf_missing_features.cloexec = true;
-		pr_debug2_peo("switching off cloexec flag\n");
+		pr_debug2("switching off cloexec flag\n");
 		goto fallback_missing_features;
 	} else if (!perf_missing_features.mmap2 && evsel->core.attr.mmap2) {
 		perf_missing_features.mmap2 = true;
-		pr_debug2_peo("switching off mmap2\n");
+		pr_debug2("switching off mmap2\n");
 		goto fallback_missing_features;
 	} else if (!perf_missing_features.exclude_guest &&
 		   (evsel->core.attr.exclude_guest || evsel->core.attr.exclude_host)) {
 		perf_missing_features.exclude_guest = true;
-		pr_debug2_peo("switching off exclude_guest, exclude_host\n");
+		pr_debug2("switching off exclude_guest, exclude_host\n");
 		goto fallback_missing_features;
 	} else if (!perf_missing_features.sample_id_all) {
 		perf_missing_features.sample_id_all = true;
-		pr_debug2_peo("switching off sample_id_all\n");
+		pr_debug2("switching off sample_id_all\n");
 		goto retry_sample_id;
 	} else if (!perf_missing_features.lbr_flags &&
 			(evsel->core.attr.branch_sample_type &
 			 (PERF_SAMPLE_BRANCH_NO_CYCLES |
 			  PERF_SAMPLE_BRANCH_NO_FLAGS))) {
 		perf_missing_features.lbr_flags = true;
-		pr_debug2_peo("switching off branch sample type no (cycles/flags)\n");
+		pr_debug2("switching off branch sample type no (cycles/flags)\n");
 		goto fallback_missing_features;
 	} else if (!perf_missing_features.group_read &&
 		    evsel->core.attr.inherit &&
 		   (evsel->core.attr.read_format & PERF_FORMAT_GROUP) &&
 		   perf_evsel__is_group_leader(evsel)) {
 		perf_missing_features.group_read = true;
-		pr_debug2_peo("switching off group read\n");
+		pr_debug2("switching off group read\n");
 		goto fallback_missing_features;
 	}
 out_close:
 	if (err)
 		threads->err_thread = thread;
 
-	old_errno = errno;
 	do {
 		while (--thread >= 0) {
-			if (FD(evsel, cpu, thread) >= 0)
-				close(FD(evsel, cpu, thread));
+			close(FD(evsel, cpu, thread));
 			FD(evsel, cpu, thread) = -1;
 		}
 		thread = nthreads;
 	} while (--cpu >= 0);
-	errno = old_errno;
 	return err;
-}
-
-int evsel__open(struct evsel *evsel, struct perf_cpu_map *cpus,
-		struct perf_thread_map *threads)
-{
-	return evsel__open_cpu(evsel, cpus, threads, 0, cpus ? cpus->nr : 1);
 }
 
 void evsel__close(struct evsel *evsel)
@@ -1890,14 +1832,9 @@ void evsel__close(struct evsel *evsel)
 }
 
 int perf_evsel__open_per_cpu(struct evsel *evsel,
-			     struct perf_cpu_map *cpus,
-			     int cpu)
+			     struct perf_cpu_map *cpus)
 {
-	if (cpu == -1)
-		return evsel__open_cpu(evsel, cpus, NULL, 0,
-					cpus ? cpus->nr : 1);
-
-	return evsel__open_cpu(evsel, cpus, NULL, cpu, cpu + 1);
+	return evsel__open(evsel, cpus, NULL);
 }
 
 int perf_evsel__open_per_thread(struct evsel *evsel,
@@ -2189,12 +2126,7 @@ int perf_evsel__parse_sample(struct evsel *evsel, union perf_event *event,
 
 		if (data->branch_stack->nr > max_branch_nr)
 			return -EFAULT;
-
 		sz = data->branch_stack->nr * sizeof(struct branch_entry);
-		if (perf_evsel__has_branch_hw_idx(evsel))
-			sz += sizeof(u64);
-		else
-			data->no_hw_idx = true;
 		OVERFLOW_CHECK(array, sz, max_size);
 		array = (void *)array + sz;
 	}
@@ -2275,25 +2207,6 @@ int perf_evsel__parse_sample(struct evsel *evsel, union perf_event *event,
 	if (type & PERF_SAMPLE_PHYS_ADDR) {
 		data->phys_addr = *array;
 		array++;
-	}
-
-	data->cgroup = 0;
-	if (type & PERF_SAMPLE_CGROUP) {
-		data->cgroup = *array;
-		array++;
-	}
-
-	if (type & PERF_SAMPLE_AUX) {
-		OVERFLOW_CHECK_u64(array);
-		sz = *array++;
-
-		OVERFLOW_CHECK(array, sz, max_size);
-		/* Undo swap of data */
-		if (swapped)
-			mem_bswap_64((char *)array, sz);
-		data->aux_sample.size = sz;
-		data->aux_sample.data = (char *)array;
-		array = (void *)array + sz;
 	}
 
 	return 0;
@@ -2446,6 +2359,10 @@ bool perf_evsel__fallback(struct evsel *evsel, int err,
 		const char *name = perf_evsel__name(evsel);
 		char *new_name;
 		const char *sep = ":";
+
+		/* If event has exclude user then don't exclude kernel. */
+		if (evsel->core.attr.exclude_user)
+			return false;
 
 		/* Is there already the separator in the name. */
 		if (strchr(name, '/') ||

@@ -233,15 +233,11 @@ void svc_rdma_send_ctxt_put(struct svcxprt_rdma *rdma,
 	/* The first SGE contains the transport header, which
 	 * remains mapped until @ctxt is destroyed.
 	 */
-	for (i = 1; i < ctxt->sc_send_wr.num_sge; i++) {
+	for (i = 1; i < ctxt->sc_send_wr.num_sge; i++)
 		ib_dma_unmap_page(device,
 				  ctxt->sc_sges[i].addr,
 				  ctxt->sc_sges[i].length,
 				  DMA_TO_DEVICE);
-		trace_svcrdma_dma_unmap_page(rdma,
-					     ctxt->sc_sges[i].addr,
-					     ctxt->sc_sges[i].length);
-	}
 
 	for (i = 0; i < ctxt->sc_page_count; ++i)
 		put_page(ctxt->sc_pages[i]);
@@ -496,7 +492,6 @@ static int svc_rdma_dma_map_page(struct svcxprt_rdma *rdma,
 	dma_addr_t dma_addr;
 
 	dma_addr = ib_dma_map_page(dev, page, offset, len, DMA_TO_DEVICE);
-	trace_svcrdma_dma_map_page(rdma, dma_addr, len);
 	if (ib_dma_mapping_error(dev, dma_addr))
 		goto out_maperr;
 
@@ -506,6 +501,7 @@ static int svc_rdma_dma_map_page(struct svcxprt_rdma *rdma,
 	return 0;
 
 out_maperr:
+	trace_svcrdma_dma_map_page(rdma, page);
 	return -EIO;
 }
 
@@ -613,10 +609,11 @@ static int svc_rdma_pull_up_reply_msg(struct svcxprt_rdma *rdma,
 		while (remaining) {
 			len = min_t(u32, PAGE_SIZE - pageoff, remaining);
 
-			memcpy(dst, page_address(*ppages), len);
+			memcpy(dst, page_address(*ppages) + pageoff, len);
 			remaining -= len;
 			dst += len;
 			pageoff = 0;
+			ppages++;
 		}
 	}
 
@@ -788,6 +785,7 @@ static int svc_rdma_send_error_msg(struct svcxprt_rdma *rdma,
 				   struct svc_rqst *rqstp)
 {
 	__be32 *p;
+	int ret;
 
 	p = ctxt->sc_xprt_buf;
 	trace_svcrdma_err_chunk(*p);
@@ -799,7 +797,13 @@ static int svc_rdma_send_error_msg(struct svcxprt_rdma *rdma,
 	svc_rdma_save_io_pages(rqstp, ctxt);
 
 	ctxt->sc_send_wr.opcode = IB_WR_SEND;
-	return svc_rdma_send(rdma, &ctxt->sc_send_wr);
+	ret = svc_rdma_send(rdma, &ctxt->sc_send_wr);
+	if (ret) {
+		svc_rdma_send_ctxt_put(rdma, ctxt);
+		return ret;
+	}
+
+	return 0;
 }
 
 /**
@@ -853,7 +857,18 @@ int svc_rdma_sendto(struct svc_rqst *rqstp)
 
 	if (wr_lst) {
 		/* XXX: Presume the client sent only one Write chunk */
-		ret = svc_rdma_send_write_chunk(rdma, wr_lst, xdr);
+		unsigned long offset;
+		unsigned int length;
+
+		if (rctxt->rc_read_payload_length) {
+			offset = rctxt->rc_read_payload_offset;
+			length = rctxt->rc_read_payload_length;
+		} else {
+			offset = xdr->head[0].iov_len;
+			length = xdr->page_len;
+		}
+		ret = svc_rdma_send_write_chunk(rdma, wr_lst, xdr, offset,
+						length);
 		if (ret < 0)
 			goto err2;
 		svc_rdma_xdr_encode_write_list(rdma_resp, wr_lst, ret);
@@ -870,12 +885,7 @@ int svc_rdma_sendto(struct svc_rqst *rqstp)
 				      wr_lst, rp_ch);
 	if (ret < 0)
 		goto err1;
-	ret = 0;
-
-out:
-	rqstp->rq_xprt_ctxt = NULL;
-	svc_rdma_recv_ctxt_put(rdma, rctxt);
-	return ret;
+	return 0;
 
  err2:
 	if (ret != -E2BIG && ret != -EINVAL)
@@ -884,14 +894,39 @@ out:
 	ret = svc_rdma_send_error_msg(rdma, sctxt, rqstp);
 	if (ret < 0)
 		goto err1;
-	ret = 0;
-	goto out;
+	return 0;
 
  err1:
 	svc_rdma_send_ctxt_put(rdma, sctxt);
  err0:
 	trace_svcrdma_send_failed(rqstp, ret);
 	set_bit(XPT_CLOSE, &xprt->xpt_flags);
-	ret = -ENOTCONN;
-	goto out;
+	return -ENOTCONN;
+}
+
+/**
+ * svc_rdma_read_payload - special processing for a READ payload
+ * @rqstp: svc_rqst to operate on
+ * @offset: payload's byte offset in @xdr
+ * @length: size of payload, in bytes
+ *
+ * Returns zero on success.
+ *
+ * For the moment, just record the xdr_buf location of the READ
+ * payload. svc_rdma_sendto will use that location later when
+ * we actually send the payload.
+ */
+int svc_rdma_read_payload(struct svc_rqst *rqstp, unsigned int offset,
+			  unsigned int length)
+{
+	struct svc_rdma_recv_ctxt *rctxt = rqstp->rq_xprt_ctxt;
+
+	/* XXX: Just one READ payload slot for now, since our
+	 * transport implementation currently supports only one
+	 * Write chunk.
+	 */
+	rctxt->rc_read_payload_offset = offset;
+	rctxt->rc_read_payload_length = length;
+
+	return 0;
 }

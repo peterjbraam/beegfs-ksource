@@ -368,7 +368,6 @@ enum qeth_header_ids {
 	QETH_HEADER_TYPE_L3_TSO	= 0x03,
 	QETH_HEADER_TYPE_OSN    = 0x04,
 	QETH_HEADER_TYPE_L2_TSO	= 0x06,
-	QETH_HEADER_MASK_INVAL	= 0x80,
 };
 /* flags for qeth_hdr.ext_flags */
 #define QETH_HDR_EXT_VLAN_FRAME       0x01
@@ -411,7 +410,7 @@ enum qeth_qdio_info_states {
 struct qeth_buffer_pool_entry {
 	struct list_head list;
 	struct list_head init_list;
-	struct page *elements[QDIO_MAX_ELEMENTS_PER_BUFFER];
+	void *elements[QDIO_MAX_ELEMENTS_PER_BUFFER];
 };
 
 struct qeth_qdio_buffer_pool {
@@ -478,17 +477,12 @@ struct qeth_card_stats {
 	u64 rx_sg_frags;
 	u64 rx_sg_alloc_page;
 
-	u64 rx_dropped_nomem;
-	u64 rx_dropped_notsupp;
-	u64 rx_dropped_runt;
-
 	/* rtnl_link_stats64 */
 	u64 rx_packets;
 	u64 rx_bytes;
+	u64 rx_errors;
+	u64 rx_dropped;
 	u64 rx_multicast;
-	u64 rx_length_errors;
-	u64 rx_frame_errors;
-	u64 rx_fifo_errors;
 };
 
 struct qeth_out_q_stats {
@@ -826,6 +820,7 @@ struct qeth_card {
 	struct workqueue_struct *event_wq;
 	struct workqueue_struct *cmd_wq;
 	wait_queue_head_t wait_q;
+	unsigned long active_vlans[BITS_TO_LONGS(VLAN_N_VID)];
 	DECLARE_HASHTABLE(mac_htable, 4);
 	DECLARE_HASHTABLE(ip_htable, 4);
 	struct mutex ip_lock;
@@ -1023,7 +1018,7 @@ extern const struct attribute_group qeth_device_blkt_group;
 extern const struct device_type qeth_generic_devtype;
 
 const char *qeth_get_cardname_short(struct qeth_card *);
-int qeth_resize_buffer_pool(struct qeth_card *card, unsigned int count);
+int qeth_realloc_buffer_pool(struct qeth_card *, int);
 int qeth_core_load_discipline(struct qeth_card *, enum qeth_discipline_id);
 void qeth_core_free_discipline(struct qeth_card *);
 
@@ -1042,6 +1037,7 @@ int qeth_core_hardsetup_card(struct qeth_card *card, bool *carrier_ok);
 int qeth_stop_channel(struct qeth_channel *channel);
 
 void qeth_print_status_message(struct qeth_card *);
+int qeth_init_qdio_queues(struct qeth_card *);
 int qeth_send_ipa_cmd(struct qeth_card *, struct qeth_cmd_buffer *,
 		  int (*reply_cb)
 		  (struct qeth_card *, struct qeth_reply *, unsigned long),
@@ -1075,7 +1071,7 @@ void qeth_clear_working_pool_list(struct qeth_card *);
 void qeth_drain_output_queues(struct qeth_card *card);
 void qeth_setadp_promisc_mode(struct qeth_card *card, bool enable);
 int qeth_setadpparms_change_macaddr(struct qeth_card *);
-void qeth_tx_timeout(struct net_device *, unsigned int txqueue);
+void qeth_tx_timeout(struct net_device *);
 void qeth_prepare_ipa_cmd(struct qeth_card *card, struct qeth_cmd_buffer *iob,
 			  u16 cmd_length);
 int qeth_query_switch_attributes(struct qeth_card *card,

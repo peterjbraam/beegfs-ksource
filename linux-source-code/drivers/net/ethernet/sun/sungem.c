@@ -970,7 +970,7 @@ static void gem_poll_controller(struct net_device *dev)
 }
 #endif
 
-static void gem_tx_timeout(struct net_device *dev, unsigned int txqueue)
+static void gem_tx_timeout(struct net_device *dev)
 {
 	struct gem *gp = netdev_priv(dev);
 
@@ -2760,7 +2760,7 @@ static void get_gem_mac_nonobp(struct pci_dev *pdev, unsigned char *dev_addr)
 	void __iomem *p = pci_map_rom(pdev, &size);
 
 	if (p) {
-			int found;
+		int found;
 
 		found = readb(p) == 0x55 &&
 			readb(p + 1) == 0xaa &&

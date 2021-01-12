@@ -69,7 +69,7 @@ static unsigned int
 nfsd_cache_size_limit(void)
 {
 	unsigned int limit;
-	unsigned long low_pages = totalram_pages - totalhigh_pages;
+	unsigned long low_pages = totalram_pages() - totalhigh_pages();
 
 	limit = (16 * int_sqrt(low_pages)) << (PAGE_SHIFT-10);
 	return min_t(unsigned int, limit, 256*1024);
@@ -469,8 +469,7 @@ found_entry:
 		rtn = RC_REPLY;
 		break;
 	default:
-		printk(KERN_WARNING "nfsd: bad repcache type %d\n", rp->c_type);
-		nfsd_reply_cache_free_locked(b, rp, nn);
+		WARN_ONCE(1, "nfsd: bad repcache type %d\n", rp->c_type);
 	}
 
 	goto out;

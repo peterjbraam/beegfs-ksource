@@ -78,7 +78,7 @@ static const struct brcmf_firmware_mapping brcmf_pcie_fwnames[] = {
 	BRCMF_FW_ENTRY(BRCM_CC_4371_CHIP_ID, 0xFFFFFFFF, 4371),
 };
 
-#define BRCMF_PCIE_FW_UP_TIMEOUT		5000 /* msec */
+#define BRCMF_PCIE_FW_UP_TIMEOUT		2000 /* msec */
 
 #define BRCMF_PCIE_REG_MAP_SIZE			(32 * 1024)
 
@@ -1023,6 +1023,8 @@ brcmf_pcie_init_dmabuffer_for_device(struct brcmf_pciedev_info *devinfo,
 	brcmf_pcie_write_tcm32(devinfo, tcm_dma_phys_addr,
 			       address & 0xffffffff);
 	brcmf_pcie_write_tcm32(devinfo, tcm_dma_phys_addr + 4, address >> 32);
+
+	memset(ring, 0, size);
 
 	return (ring);
 }

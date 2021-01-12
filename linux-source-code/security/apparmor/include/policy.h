@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * AppArmor security module
  *
@@ -5,11 +6,6 @@
  *
  * Copyright (C) 1998-2008 Novell/SUSE
  * Copyright 2009-2010 Canonical Ltd.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation, version 2 of the
- * License.
  */
 
 #ifndef __AA_POLICY_H
@@ -112,6 +108,7 @@ struct aa_data {
  * @policy: general match rules governing policy
  * @file: The set of rules governing basic file access and domain transitions
  * @caps: capabilities for the profile
+ * @net_compat: v2 compat network controls for the profile
  * @rlimits: rlimits for the profile
  *
  * @dents: dentries for the profiles file entries in apparmorfs
@@ -149,6 +146,7 @@ struct aa_profile {
 	struct aa_policydb policy;
 	struct aa_file_rules file;
 	struct aa_caps caps;
+	struct aa_net_compat *net_compat;
 
 	int xattr_count;
 	char **xattrs;
@@ -214,15 +212,28 @@ static inline struct aa_profile *aa_get_newest_profile(struct aa_profile *p)
 	return labels_profile(aa_get_newest_label(&p->label));
 }
 
-#define PROFILE_MEDIATES(P, T)  ((P)->policy.start[(unsigned char) (T)])
+static inline unsigned int PROFILE_MEDIATES(struct aa_profile *profile,
+					    unsigned char class)
+{
+	if (class <= AA_CLASS_LAST)
+		return profile->policy.start[class];
+	else
+		return aa_dfa_match_len(profile->policy.dfa,
+					profile->policy.start[0], &class, 1);
+}
+
 static inline unsigned int PROFILE_MEDIATES_AF(struct aa_profile *profile,
 					       u16 AF) {
 	unsigned int state = PROFILE_MEDIATES(profile, AA_CLASS_NET);
 	__be16 be_af = cpu_to_be16(AF);
 
-	if (!state)
-		return 0;
-	return aa_dfa_match_len(profile->policy.dfa, state, (char *) &be_af, 2);
+	if (!state) {
+		state = PROFILE_MEDIATES(profile, AA_CLASS_NET_COMPAT);
+		if (!state)
+			return 0;
+	}
+	state = aa_dfa_match_len(profile->policy.dfa, state, (char *) &be_af, 2);
+	return state;
 }
 
 /**

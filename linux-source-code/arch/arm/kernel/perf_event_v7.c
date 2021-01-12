@@ -697,9 +697,9 @@ static struct attribute_group armv7_pmuv2_events_attr_group = {
 /*
  * Event filters for PMUv2
  */
-#define	ARMV7_EXCLUDE_PL1	(1 << 31)
-#define	ARMV7_EXCLUDE_USER	(1 << 30)
-#define	ARMV7_INCLUDE_HYP	(1 << 27)
+#define	ARMV7_EXCLUDE_PL1	BIT(31)
+#define	ARMV7_EXCLUDE_USER	BIT(30)
+#define	ARMV7_INCLUDE_HYP	BIT(27)
 
 /*
  * Secure debug enable reg
@@ -2038,6 +2038,7 @@ static struct platform_driver armv7_pmu_driver = {
 	.driver		= {
 		.name	= "armv7-pmu",
 		.of_match_table = armv7_pmu_of_device_ids,
+		.suppress_bind_attrs = true,
 	},
 	.probe		= armv7_pmu_device_probe,
 };

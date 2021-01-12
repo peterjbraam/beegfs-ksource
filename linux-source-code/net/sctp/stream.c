@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* SCTP kernel implementation
  * (C) Copyright IBM Corp. 2001, 2004
  * Copyright (c) 1999-2000 Cisco, Inc.
@@ -7,22 +8,6 @@
  * This file is part of the SCTP kernel implementation
  *
  * This file contains sctp stream maniuplation primitives and helpers.
- *
- * This SCTP implementation is free software;
- * you can redistribute it and/or modify it under the terms of
- * the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This SCTP implementation is distributed in the hope that it
- * will be useful, but WITHOUT ANY WARRANTY; without even the implied
- *                 ************************
- * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
- * See the GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with GNU CC; see the file COPYING.  If not, see
- * <http://www.gnu.org/licenses/>.
  *
  * Please send any bug reports or fixes you make to the
  * email address(es):
@@ -85,67 +70,49 @@ static void sctp_stream_outq_migrate(struct sctp_stream *stream,
 		 * sctp_stream_update will swap ->out pointers.
 		 */
 		for (i = 0; i < outcnt; i++) {
-			kfree(new->out[i].ext);
-			new->out[i].ext = stream->out[i].ext;
-			stream->out[i].ext = NULL;
+			kfree(SCTP_SO(new, i)->ext);
+			SCTP_SO(new, i)->ext = SCTP_SO(stream, i)->ext;
+			SCTP_SO(stream, i)->ext = NULL;
 		}
 	}
 
 	for (i = outcnt; i < stream->outcnt; i++) {
-		kfree(stream->out[i].ext);
-		stream->out[i].ext = NULL;
+		kfree(SCTP_SO(stream, i)->ext);
+		SCTP_SO(stream, i)->ext = NULL;
 	}
 }
 
 static int sctp_stream_alloc_out(struct sctp_stream *stream, __u16 outcnt,
 				 gfp_t gfp)
 {
-	struct sctp_stream_out *out;
+	int ret;
 
-	out = kmalloc_array(outcnt, sizeof(*out), gfp);
-	if (!out)
-		return -ENOMEM;
+	if (outcnt <= stream->outcnt)
+		goto out;
 
-	if (stream->out) {
-		memcpy(out, stream->out, min(outcnt, stream->outcnt) *
-					 sizeof(*out));
-		if (stream->out_curr)
-			stream->out_curr = out +
-					   (stream->out_curr - stream->out);
-		kfree(stream->out);
-	}
+	ret = genradix_prealloc(&stream->out, outcnt, gfp);
+	if (ret)
+		return ret;
 
-	if (outcnt > stream->outcnt)
-		memset(out + stream->outcnt, 0,
-		       (outcnt - stream->outcnt) * sizeof(*out));
-
-	stream->out = out;
-
+out:
+	stream->outcnt = outcnt;
 	return 0;
 }
 
 static int sctp_stream_alloc_in(struct sctp_stream *stream, __u16 incnt,
 				gfp_t gfp)
 {
-	struct sctp_stream_in *in;
+	int ret;
 
-	in = kmalloc_array(incnt, sizeof(*stream->in), gfp);
+	if (incnt <= stream->incnt)
+		goto out;
 
-	if (!in)
-		return -ENOMEM;
+	ret = genradix_prealloc(&stream->in, incnt, gfp);
+	if (ret)
+		return ret;
 
-	if (stream->in) {
-		memcpy(in, stream->in, min(incnt, stream->incnt) *
-				       sizeof(*in));
-		kfree(stream->in);
-	}
-
-	if (incnt > stream->incnt)
-		memset(in + stream->incnt, 0,
-		       (incnt - stream->incnt) * sizeof(*in));
-
-	stream->in = in;
-
+out:
+	stream->incnt = incnt;
 	return 0;
 }
 
@@ -161,7 +128,7 @@ int sctp_stream_init(struct sctp_stream *stream, __u16 outcnt, __u16 incnt,
 	 * a new one with new outcnt to save memory if needed.
 	 */
 	if (outcnt == stream->outcnt)
-		goto in;
+		goto handle_in;
 
 	/* Filter out chunks queued on streams that won't exist anymore */
 	sched->unsched_all(stream);
@@ -170,28 +137,28 @@ int sctp_stream_init(struct sctp_stream *stream, __u16 outcnt, __u16 incnt,
 
 	ret = sctp_stream_alloc_out(stream, outcnt, gfp);
 	if (ret)
-		goto out;
+		goto out_err;
 
-	stream->outcnt = outcnt;
 	for (i = 0; i < stream->outcnt; i++)
 		SCTP_SO(stream, i)->state = SCTP_STREAM_OPEN;
 
-in:
+handle_in:
 	sctp_stream_interleave_init(stream);
 	if (!incnt)
 		goto out;
 
 	ret = sctp_stream_alloc_in(stream, incnt, gfp);
-	if (ret) {
-		sched->free(stream);
-		kfree(stream->out);
-		stream->out = NULL;
-		stream->outcnt = 0;
-		goto out;
-	}
+	if (ret)
+		goto in_err;
 
-	stream->incnt = incnt;
+	goto out;
 
+in_err:
+	sched->free(stream);
+	genradix_free(&stream->in);
+out_err:
+	genradix_free(&stream->out);
+	stream->outcnt = 0;
 out:
 	return ret;
 }
@@ -223,8 +190,8 @@ void sctp_stream_free(struct sctp_stream *stream)
 	sched->free(stream);
 	for (i = 0; i < stream->outcnt; i++)
 		kfree(SCTP_SO(stream, i)->ext);
-	kfree(stream->out);
-	kfree(stream->in);
+	genradix_free(&stream->out);
+	genradix_free(&stream->in);
 }
 
 void sctp_stream_clear(struct sctp_stream *stream)
@@ -255,8 +222,8 @@ void sctp_stream_update(struct sctp_stream *stream, struct sctp_stream *new)
 
 	sched->sched_all(stream);
 
-	new->out = NULL;
-	new->in  = NULL;
+	new->out.tree.root = NULL;
+	new->in.tree.root  = NULL;
 	new->outcnt = 0;
 	new->incnt  = 0;
 }
@@ -508,8 +475,6 @@ int sctp_send_add_streams(struct sctp_association *asoc,
 		asoc->strreset_chunk = NULL;
 		goto out;
 	}
-
-	stream->outcnt = outcnt;
 
 	asoc->strreset_outstanding = !!out + !!in;
 

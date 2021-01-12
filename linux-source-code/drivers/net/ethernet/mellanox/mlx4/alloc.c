@@ -583,8 +583,8 @@ static int mlx4_buf_direct_alloc(struct mlx4_dev *dev, int size,
 	buf->npages       = 1;
 	buf->page_shift   = get_order(size) + PAGE_SHIFT;
 	buf->direct.buf   =
-		dma_zalloc_coherent(&dev->persist->pdev->dev,
-				    size, &t, GFP_KERNEL);
+		dma_alloc_coherent(&dev->persist->pdev->dev, size, &t,
+				   GFP_KERNEL);
 	if (!buf->direct.buf)
 		return -ENOMEM;
 
@@ -613,7 +613,7 @@ int mlx4_buf_alloc(struct mlx4_dev *dev, int size, int max_direct,
 		int i;
 
 		buf->direct.buf = NULL;
-		buf->nbufs	= (size + PAGE_SIZE - 1) / PAGE_SIZE;
+		buf->nbufs      = DIV_ROUND_UP(size, PAGE_SIZE);
 		buf->npages	= buf->nbufs;
 		buf->page_shift  = PAGE_SHIFT;
 		buf->page_list   = kcalloc(buf->nbufs, sizeof(*buf->page_list),
@@ -623,8 +623,8 @@ int mlx4_buf_alloc(struct mlx4_dev *dev, int size, int max_direct,
 
 		for (i = 0; i < buf->nbufs; ++i) {
 			buf->page_list[i].buf =
-				dma_zalloc_coherent(&dev->persist->pdev->dev,
-						    PAGE_SIZE, &t, GFP_KERNEL);
+				dma_alloc_coherent(&dev->persist->pdev->dev,
+						   PAGE_SIZE, &t, GFP_KERNEL);
 			if (!buf->page_list[i].buf)
 				goto err_free;
 

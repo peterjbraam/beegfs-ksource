@@ -142,6 +142,7 @@ enum print_line_t {
 enum print_line_t trace_handle_return(struct trace_seq *s);
 
 void tracing_generic_entry_update(struct trace_entry *entry,
+				  unsigned short type,
 				  unsigned long flags,
 				  int pc);
 struct trace_event_file;
@@ -315,6 +316,14 @@ trace_event_name(struct trace_event_call *call)
 		return call->tp ? call->tp->name : NULL;
 	else
 		return call->name;
+}
+
+static inline struct list_head *
+trace_get_fields(struct trace_event_call *event_call)
+{
+	if (!event_call->class->get_fields)
+		return &event_call->class->fields;
+	return event_call->class->get_fields(event_call);
 }
 
 struct trace_array;
@@ -539,6 +548,7 @@ extern int trace_event_get_offsets(struct trace_event_call *call);
 
 #define is_signed_type(type)	(((type)(-1)) < (type)1)
 
+int ftrace_set_clr_event(struct trace_array *tr, char *buf, int set);
 int trace_set_clr_event(const char *system, const char *event, int set);
 
 /*
@@ -579,7 +589,8 @@ extern int bpf_get_kprobe_info(const struct perf_event *event,
 			       bool perf_type_tracepoint);
 #endif
 #ifdef CONFIG_UPROBE_EVENTS
-extern int  perf_uprobe_init(struct perf_event *event, bool is_retprobe);
+extern int  perf_uprobe_init(struct perf_event *event,
+			     unsigned long ref_ctr_offset, bool is_retprobe);
 extern void perf_uprobe_destroy(struct perf_event *event);
 extern int bpf_get_uprobe_info(const struct perf_event *event,
 			       u32 *fd_type, const char **filename,

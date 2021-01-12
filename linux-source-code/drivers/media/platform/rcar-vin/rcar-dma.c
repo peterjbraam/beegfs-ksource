@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * Driver for Renesas R-Car VIN
  *
@@ -7,11 +8,6 @@
  * Copyright (C) 2008 Magnus Damm
  *
  * Based on the soc-camera rcar_vin driver
- *
- * This program is free software; you can redistribute  it and/or modify it
- * under  the terms of  the GNU General  Public License as published by the
- * Free Software Foundation;  either version 2 of the  License, or (at your
- * option) any later version.
  */
 
 #include <linux/delay.h>
@@ -115,14 +111,18 @@
 #define VNIE_EFE		(1 << 1)
 
 /* Video n Data Mode Register bits */
+#define VNDMR_A8BIT(n)		(((n) & 0xff) << 24)
+#define VNDMR_A8BIT_MASK	(0xff << 24)
 #define VNDMR_EXRGB		(1 << 8)
 #define VNDMR_BPSM		(1 << 4)
+#define VNDMR_ABIT		(1 << 2)
 #define VNDMR_DTMD_YCSEP	(1 << 1)
-#define VNDMR_DTMD_ARGB1555	(1 << 0)
+#define VNDMR_DTMD_ARGB		(1 << 0)
 
 /* Video n Data Mode Register 2 bits */
 #define VNDMR2_VPS		(1 << 30)
 #define VNDMR2_HPS		(1 << 29)
+#define VNDMR2_CES		(1 << 28)
 #define VNDMR2_FTEV		(1 << 17)
 #define VNDMR2_VLV(n)		((n & 0xf) << 12)
 
@@ -489,7 +489,7 @@ static void rvin_set_coeff(struct rvin_dev *vin, unsigned short xs)
 	}
 
 	/* Use previous value if its XS value is closer */
-	if (p_prev_set && p_set &&
+	if (p_prev_set &&
 	    xs - p_prev_set->xs_value < p_set->xs_value - xs)
 		p_set = p_prev_set;
 
@@ -577,6 +577,9 @@ static void rvin_crop_scale_comp_gen2(struct rvin_dev *vin)
 
 void rvin_crop_scale_comp(struct rvin_dev *vin)
 {
+	const struct rvin_video_format *fmt;
+	u32 stride;
+
 	/* Set Start/End Pixel/Line Pre-Clip */
 	rvin_write(vin, vin->crop.left, VNSPPRC_REG);
 	rvin_write(vin, vin->crop.left + vin->crop.width - 1, VNEPPRC_REG);
@@ -600,10 +603,9 @@ void rvin_crop_scale_comp(struct rvin_dev *vin)
 	if (vin->info->model != RCAR_GEN3)
 		rvin_crop_scale_comp_gen2(vin);
 
-	if (vin->format.pixelformat == V4L2_PIX_FMT_NV16)
-		rvin_write(vin, ALIGN(vin->format.width, 0x20), VNIS_REG);
-	else
-		rvin_write(vin, ALIGN(vin->format.width, 0x10), VNIS_REG);
+	fmt = rvin_format_from_pixel(vin, vin->format.pixelformat);
+	stride = vin->format.bytesperline / fmt->bpp;
+	rvin_write(vin, stride, VNIS_REG);
 }
 
 /* -----------------------------------------------------------------------------
@@ -659,8 +661,12 @@ static int rvin_setup(struct rvin_dev *vin)
 		break;
 	case MEDIA_BUS_FMT_UYVY8_2X8:
 		/* BT.656 8bit YCbCr422 or BT.601 8bit YCbCr422 */
-		vnmc |= vin->mbus_cfg.type == V4L2_MBUS_BT656 ?
-			VNMC_INF_YUV8_BT656 : VNMC_INF_YUV8_BT601;
+		if (!vin->is_csi &&
+		    vin->parallel->mbus_type == V4L2_MBUS_BT656)
+			vnmc |= VNMC_INF_YUV8_BT656;
+		else
+			vnmc |= VNMC_INF_YUV8_BT601;
+
 		input_is_yuv = true;
 		break;
 	case MEDIA_BUS_FMT_RGB888_1X24:
@@ -668,27 +674,37 @@ static int rvin_setup(struct rvin_dev *vin)
 		break;
 	case MEDIA_BUS_FMT_UYVY10_2X10:
 		/* BT.656 10bit YCbCr422 or BT.601 10bit YCbCr422 */
-		vnmc |= vin->mbus_cfg.type == V4L2_MBUS_BT656 ?
-			VNMC_INF_YUV10_BT656 : VNMC_INF_YUV10_BT601;
+		if (!vin->is_csi &&
+		    vin->parallel->mbus_type == V4L2_MBUS_BT656)
+			vnmc |= VNMC_INF_YUV10_BT656;
+		else
+			vnmc |= VNMC_INF_YUV10_BT601;
+
 		input_is_yuv = true;
 		break;
 	default:
 		break;
 	}
 
-	/* Enable VSYNC Field Toogle mode after one VSYNC input */
+	/* Enable VSYNC Field Toggle mode after one VSYNC input */
 	if (vin->info->model == RCAR_GEN3)
 		dmr2 = VNDMR2_FTEV;
 	else
 		dmr2 = VNDMR2_FTEV | VNDMR2_VLV(1);
 
-	/* Hsync Signal Polarity Select */
-	if (!(vin->mbus_cfg.flags & V4L2_MBUS_HSYNC_ACTIVE_LOW))
-		dmr2 |= VNDMR2_HPS;
+	if (!vin->is_csi) {
+		/* Hsync Signal Polarity Select */
+		if (!(vin->parallel->mbus_flags & V4L2_MBUS_HSYNC_ACTIVE_LOW))
+			dmr2 |= VNDMR2_HPS;
 
-	/* Vsync Signal Polarity Select */
-	if (!(vin->mbus_cfg.flags & V4L2_MBUS_VSYNC_ACTIVE_LOW))
-		dmr2 |= VNDMR2_VPS;
+		/* Vsync Signal Polarity Select */
+		if (!(vin->parallel->mbus_flags & V4L2_MBUS_VSYNC_ACTIVE_LOW))
+			dmr2 |= VNDMR2_VPS;
+
+		/* Data Enable Polarity Select */
+		if (vin->parallel->mbus_flags & V4L2_MBUS_DATA_ENABLE_LOW)
+			dmr2 |= VNDMR2_CES;
+	}
 
 	/*
 	 * Output format
@@ -710,7 +726,7 @@ static int rvin_setup(struct rvin_dev *vin)
 		output_is_yuv = true;
 		break;
 	case V4L2_PIX_FMT_XRGB555:
-		dmr = VNDMR_DTMD_ARGB1555;
+		dmr = VNDMR_DTMD_ARGB;
 		break;
 	case V4L2_PIX_FMT_RGB565:
 		dmr = 0;
@@ -718,6 +734,12 @@ static int rvin_setup(struct rvin_dev *vin)
 	case V4L2_PIX_FMT_XBGR32:
 		/* Note: not supported on M1 */
 		dmr = VNDMR_EXRGB;
+		break;
+	case V4L2_PIX_FMT_ARGB555:
+		dmr = (vin->alpha ? VNDMR_ABIT : 0) | VNDMR_DTMD_ARGB;
+		break;
+	case V4L2_PIX_FMT_ABGR32:
+		dmr = VNDMR_A8BIT(vin->alpha) | VNDMR_EXRGB | VNDMR_DTMD_ARGB;
 		break;
 	default:
 		vin_err(vin, "Invalid pixelformat (0x%x)\n",
@@ -733,8 +755,8 @@ static int rvin_setup(struct rvin_dev *vin)
 		vnmc |= VNMC_BPS;
 
 	if (vin->info->model == RCAR_GEN3) {
-		/* Select between CSI-2 and Digital input */
-		if (vin->mbus_cfg.type == V4L2_MBUS_CSI2)
+		/* Select between CSI-2 and parallel input */
+		if (vin->is_csi)
 			vnmc &= ~VNMC_DPINE;
 		else
 			vnmc |= VNMC_DPINE;
@@ -783,7 +805,7 @@ static void rvin_set_slot_addr(struct rvin_dev *vin, int slot, dma_addr_t addr)
 	int offsetx, offsety;
 	dma_addr_t offset;
 
-	fmt = rvin_format_from_pixel(vin->format.pixelformat);
+	fmt = rvin_format_from_pixel(vin, vin->format.pixelformat);
 
 	/*
 	 * There is no HW support for composition do the beast we can
@@ -856,7 +878,7 @@ static int rvin_capture_start(struct rvin_dev *vin)
 	/* Continuous Frame Capture Mode */
 	rvin_write(vin, VNFC_C_FRAME, VNFC_REG);
 
-	vin->state = RUNNING;
+	vin->state = STARTING;
 
 	return 0;
 }
@@ -909,6 +931,20 @@ static irqreturn_t rvin_irq(int irq, void *data)
 	/* Prepare for capture and update state */
 	vnms = rvin_read(vin, VNMS_REG);
 	slot = (vnms & VNMS_FBS_MASK) >> VNMS_FBS_SHIFT;
+
+	/*
+	 * To hand buffers back in a known order to userspace start
+	 * to capture first from slot 0.
+	 */
+	if (vin->state == STARTING) {
+		if (slot != 0) {
+			vin_dbg(vin, "Starting sync slot: %d\n", slot);
+			goto done;
+		}
+
+		vin_dbg(vin, "Capture start synced!\n");
+		vin->state = RUNNING;
+	}
 
 	/* Capture frame */
 	if (vin->queue_buf[slot]) {
@@ -1074,7 +1110,7 @@ static int rvin_set_stream(struct rvin_dev *vin, int on)
 
 	/* No media controller used, simply pass operation to subdevice. */
 	if (!vin->info->use_mc) {
-		ret = v4l2_subdev_call(vin->digital->subdev, video, s_stream,
+		ret = v4l2_subdev_call(vin->parallel->subdev, video, s_stream,
 				       on);
 
 		return ret == -ENOIOCTLCMD ? 0 : ret;
@@ -1298,8 +1334,10 @@ int rvin_set_channel_routing(struct rvin_dev *vin, u8 chsel)
 	int ret;
 
 	ret = pm_runtime_get_sync(vin->dev);
-	if (ret < 0)
+	if (ret < 0) {
+		pm_runtime_put_noidle(vin->dev);
 		return ret;
+	}
 
 	/* Make register writes take effect immediately. */
 	vnmc = rvin_read(vin, VNMC_REG);
@@ -1316,5 +1354,36 @@ int rvin_set_channel_routing(struct rvin_dev *vin, u8 chsel)
 
 	pm_runtime_put(vin->dev);
 
-	return ret;
+	return 0;
+}
+
+void rvin_set_alpha(struct rvin_dev *vin, unsigned int alpha)
+{
+	unsigned long flags;
+	u32 dmr;
+
+	spin_lock_irqsave(&vin->qlock, flags);
+
+	vin->alpha = alpha;
+
+	if (vin->state == STOPPED)
+		goto out;
+
+	switch (vin->format.pixelformat) {
+	case V4L2_PIX_FMT_ARGB555:
+		dmr = rvin_read(vin, VNDMR_REG) & ~VNDMR_ABIT;
+		if (vin->alpha)
+			dmr |= VNDMR_ABIT;
+		break;
+	case V4L2_PIX_FMT_ABGR32:
+		dmr = rvin_read(vin, VNDMR_REG) & ~VNDMR_A8BIT_MASK;
+		dmr |= VNDMR_A8BIT(vin->alpha);
+		break;
+	default:
+		goto out;
+	}
+
+	rvin_write(vin, dmr,  VNDMR_REG);
+out:
+	spin_unlock_irqrestore(&vin->qlock, flags);
 }

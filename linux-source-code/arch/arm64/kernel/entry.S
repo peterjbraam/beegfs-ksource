@@ -1,21 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Low-level exception handling code
  *
  * Copyright (C) 2012 ARM Ltd.
  * Authors:	Catalin Marinas <catalin.marinas@arm.com>
  *		Will Deacon <will.deacon@arm.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <linux/arm-smccc.h>
@@ -41,19 +30,9 @@
  * Context tracking subsystem.  Used to instrument transitions
  * between user and kernel mode.
  */
-	.macro ct_user_exit, syscall = 0
+	.macro ct_user_exit_irqoff
 #ifdef CONFIG_CONTEXT_TRACKING
-	bl	context_tracking_user_exit
-	.if \syscall == 1
-	/*
-	 * Save/restore needed during syscalls.  Restore syscall arguments from
-	 * the values already saved on stack during kernel_entry.
-	 */
-	ldp	x0, x1, [sp]
-	ldp	x2, x3, [sp, #S_X2]
-	ldp	x4, x5, [sp, #S_X4]
-	ldp	x6, x7, [sp, #S_X6]
-	.endif
+	bl	enter_from_user_mode
 #endif
 	.endm
 
@@ -61,6 +40,12 @@
 #ifdef CONFIG_CONTEXT_TRACKING
 	bl	context_tracking_user_enter
 #endif
+	.endm
+
+	.macro	clear_gp_regs
+	.irp	n,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29
+	mov	x\n, xzr
+	.endr
 	.endm
 
 /*
@@ -140,20 +125,21 @@ alternative_else_nop_endif
 
 	// This macro corrupts x0-x3. It is the caller's duty
 	// to save/restore them if required.
-	.macro	apply_ssbd, state, targ, tmp1, tmp2
+	.macro	apply_ssbd, state, tmp1, tmp2
 #ifdef CONFIG_ARM64_SSBD
 alternative_cb	arm64_enable_wa2_handling
-	b	\targ
+	b	.L__asm_ssbd_skip\@
 alternative_cb_end
 	ldr_this_cpu	\tmp2, arm64_ssbd_callback_required, \tmp1
-	cbz	\tmp2, \targ
+	cbz	\tmp2,	.L__asm_ssbd_skip\@
 	ldr	\tmp2, [tsk, #TSK_TI_FLAGS]
-	tbnz	\tmp2, #TIF_SSBD, \targ
+	tbnz	\tmp2, #TIF_SSBD, .L__asm_ssbd_skip\@
 	mov	w0, #ARM_SMCCC_ARCH_WORKAROUND_2
 	mov	w1, #\state
 alternative_cb	arm64_update_smccc_conduit
 	nop					// Patched to SMC/HVC #0
 alternative_cb_end
+.L__asm_ssbd_skip\@:
 #endif
 	.endm
 
@@ -178,23 +164,17 @@ alternative_cb_end
 	stp	x28, x29, [sp, #16 * 14]
 
 	.if	\el == 0
+	clear_gp_regs
 	mrs	x21, sp_el0
 	ldr_this_cpu	tsk, __entry_task, x20	// Ensure MDSCR_EL1.SS is clear,
 	ldr	x19, [tsk, #TSK_TI_FLAGS]	// since we can unmask debug
 	disable_step_tsk x19, x20		// exceptions when scheduling.
 
-	apply_ssbd 1, 1f, x22, x23
+	apply_ssbd 1, x22, x23
 
-#ifdef CONFIG_ARM64_SSBD
-	ldp	x0, x1, [sp, #16 * 0]
-	ldp	x2, x3, [sp, #16 * 1]
-#endif
-1:
-
-	mov	x29, xzr			// fp pointed to user-space
 	.else
 	add	x21, sp, #S_FRAME_SIZE
-	get_thread_info tsk
+	get_current_task tsk
 	/* Save the task's original addr_limit and set USER_DS */
 	ldr	x20, [tsk, #TSK_TI_ADDR_LIMIT]
 	str	x20, [sp, #S_ORIG_ADDR_LIMIT]
@@ -289,10 +269,8 @@ alternative_else_nop_endif
 alternative_if ARM64_HAS_IRQ_PRIO_MASKING
 	ldr	x20, [sp, #S_PMR_SAVE]
 	msr_s	SYS_ICC_PMR_EL1, x20
-	mrs_s	x21, SYS_ICC_CTLR_EL1
-	tbz	x21, #6, .L__skip_pmr_sync\@	// Check for ICC_CTLR_EL1.PMHE
-	dsb	sy				// Ensure priority change is seen by redistributor
-.L__skip_pmr_sync\@:
+	/* Ensure priority change is seen by redistributor */
+	dsb	sy
 alternative_else_nop_endif
 
 	ldp	x21, x22, [sp, #S_PC]		// load ELR, SPSR
@@ -363,8 +341,7 @@ alternative_else_nop_endif
 	msr	cntkctl_el1, x1
 4:
 #endif
-	apply_ssbd 0, 5f, x0, x1
-5:
+	apply_ssbd 0, x0, x1
 	.endif
 
 	msr	elr_el1, x21			// set up the return data
@@ -609,10 +586,8 @@ el1_sync:
 	b.eq	el1_ia
 	cmp	x24, #ESR_ELx_EC_SYS64		// configurable trap
 	b.eq	el1_undef
-	cmp	x24, #ESR_ELx_EC_SP_ALIGN	// stack alignment exception
-	b.eq	el1_sp_pc
 	cmp	x24, #ESR_ELx_EC_PC_ALIGN	// pc alignment exception
-	b.eq	el1_sp_pc
+	b.eq	el1_pc
 	cmp	x24, #ESR_ELx_EC_UNKNOWN	// unknown exception in EL1
 	b.eq	el1_undef
 	cmp	x24, #ESR_ELx_EC_BREAKPT_CUR	// debug exception in EL1
@@ -629,14 +604,16 @@ el1_da:
 	 */
 	mrs	x3, far_el1
 	inherit_daif	pstate=x23, tmp=x2
-	clear_address_tag x0, x3
+	untagged_addr	x0, x3
 	mov	x2, sp				// struct pt_regs
 	bl	do_mem_abort
 
 	kernel_exit 1
-el1_sp_pc:
+el1_pc:
 	/*
-	 * Stack or PC alignment exception handling
+	 * PC alignment exception handling. We don't handle SP alignment faults,
+	 * since we will have hit a recursive exception when trying to push the
+	 * initial pt_regs.
 	 */
 	mrs	x0, far_el1
 	inherit_daif	pstate=x23, tmp=x2
@@ -703,7 +680,7 @@ alternative_if ARM64_HAS_IRQ_PRIO_MASKING
 	orr	x24, x24, x0
 alternative_else_nop_endif
 	cbnz	x24, 1f				// preempt count != 0 || NMI return path
-	bl	preempt_schedule_irq		// irq en/disable is done inside
+	bl	arm64_preempt_schedule_irq	// irq en/disable is done inside
 1:
 #endif
 
@@ -752,11 +729,12 @@ el0_sync:
 	cmp	x24, #ESR_ELx_EC_FP_EXC64	// FP/ASIMD exception
 	b.eq	el0_fpsimd_exc
 	cmp	x24, #ESR_ELx_EC_SYS64		// configurable trap
+	ccmp	x24, #ESR_ELx_EC_WFx, #4, ne
 	b.eq	el0_sys
 	cmp	x24, #ESR_ELx_EC_SP_ALIGN	// stack alignment exception
-	b.eq	el0_sp_pc
+	b.eq	el0_sp
 	cmp	x24, #ESR_ELx_EC_PC_ALIGN	// pc alignment exception
-	b.eq	el0_sp_pc
+	b.eq	el0_pc
 	cmp	x24, #ESR_ELx_EC_UNKNOWN	// unknown exception in EL0
 	b.eq	el0_undef
 	cmp	x24, #ESR_ELx_EC_BREAKPT_LOW	// debug exception in EL0
@@ -780,13 +758,13 @@ el0_sync_compat:
 	cmp	x24, #ESR_ELx_EC_FP_EXC32	// FP/ASIMD exception
 	b.eq	el0_fpsimd_exc
 	cmp	x24, #ESR_ELx_EC_PC_ALIGN	// pc alignment exception
-	b.eq	el0_sp_pc
+	b.eq	el0_pc
 	cmp	x24, #ESR_ELx_EC_UNKNOWN	// unknown exception in EL0
 	b.eq	el0_undef
 	cmp	x24, #ESR_ELx_EC_CP15_32	// CP15 MRC/MCR trap
-	b.eq	el0_undef
+	b.eq	el0_cp15
 	cmp	x24, #ESR_ELx_EC_CP15_64	// CP15 MRRC/MCRR trap
-	b.eq	el0_undef
+	b.eq	el0_cp15
 	cmp	x24, #ESR_ELx_EC_CP14_MR	// CP14 MRC/MCR trap
 	b.eq	el0_undef
 	cmp	x24, #ESR_ELx_EC_CP14_LS	// CP14 LDC/STC trap
@@ -810,6 +788,17 @@ el0_irq_compat:
 el0_error_compat:
 	kernel_entry 0, 32
 	b	el0_error_naked
+
+el0_cp15:
+	/*
+	 * Trapped CP15 (MRC, MCR, MRRC, MCRR) instructions
+	 */
+	ct_user_exit_irqoff
+	enable_daif
+	mov	x0, x25
+	mov	x1, sp
+	bl	do_cp15instr
+	b	ret_to_user
 #endif
 
 el0_da:
@@ -817,9 +806,9 @@ el0_da:
 	 * Data abort handling
 	 */
 	mrs	x26, far_el1
+	ct_user_exit_irqoff
 	enable_daif
-	ct_user_exit
-	clear_address_tag x0, x26
+	untagged_addr	x0, x26
 	mov	x1, x25
 	mov	x2, sp
 	bl	do_mem_abort
@@ -830,11 +819,11 @@ el0_ia:
 	 */
 	mrs	x26, far_el1
 	gic_prio_kentry_setup tmp=x0
+	ct_user_exit_irqoff
 	enable_da_f
 #ifdef CONFIG_TRACE_IRQFLAGS
 	bl	trace_hardirqs_off
 #endif
-	ct_user_exit
 	mov	x0, x26
 	mov	x1, x25
 	mov	x2, sp
@@ -844,8 +833,8 @@ el0_fpsimd_acc:
 	/*
 	 * Floating Point or Advanced SIMD access
 	 */
+	ct_user_exit_irqoff
 	enable_daif
-	ct_user_exit
 	mov	x0, x25
 	mov	x1, sp
 	bl	do_fpsimd_acc
@@ -854,8 +843,8 @@ el0_sve_acc:
 	/*
 	 * Scalable Vector Extension access
 	 */
+	ct_user_exit_irqoff
 	enable_daif
-	ct_user_exit
 	mov	x0, x25
 	mov	x1, sp
 	bl	do_sve_acc
@@ -864,23 +853,27 @@ el0_fpsimd_exc:
 	/*
 	 * Floating Point, Advanced SIMD or SVE exception
 	 */
+	ct_user_exit_irqoff
 	enable_daif
-	ct_user_exit
 	mov	x0, x25
 	mov	x1, sp
 	bl	do_fpsimd_exc
 	b	ret_to_user
+el0_sp:
+	ldr	x26, [sp, #S_SP]
+	b	el0_sp_pc
+el0_pc:
+	mrs	x26, far_el1
 el0_sp_pc:
 	/*
 	 * Stack or PC alignment exception handling
 	 */
-	mrs	x26, far_el1
 	gic_prio_kentry_setup tmp=x0
+	ct_user_exit_irqoff
 	enable_da_f
 #ifdef CONFIG_TRACE_IRQFLAGS
 	bl	trace_hardirqs_off
 #endif
-	ct_user_exit
 	mov	x0, x26
 	mov	x1, x25
 	mov	x2, sp
@@ -890,8 +883,8 @@ el0_undef:
 	/*
 	 * Undefined instruction
 	 */
+	ct_user_exit_irqoff
 	enable_daif
-	ct_user_exit
 	mov	x0, sp
 	bl	do_undefinstr
 	b	ret_to_user
@@ -899,8 +892,8 @@ el0_sys:
 	/*
 	 * System instructions, for trapped cache maintenance instructions
 	 */
+	ct_user_exit_irqoff
 	enable_daif
-	ct_user_exit
 	mov	x0, x25
 	mov	x1, sp
 	bl	do_sysinstr
@@ -910,17 +903,18 @@ el0_dbg:
 	 * Debug exception handling
 	 */
 	tbnz	x24, #0, el0_inv		// EL0 only
+	mrs	x24, far_el1
 	gic_prio_kentry_setup tmp=x3
-	mrs	x0, far_el1
+	ct_user_exit_irqoff
+	mov	x0, x24
 	mov	x1, x25
 	mov	x2, sp
 	bl	do_debug_exception
 	enable_da_f
-	ct_user_exit
 	b	ret_to_user
 el0_inv:
+	ct_user_exit_irqoff
 	enable_daif
-	ct_user_exit
 	mov	x0, sp
 	mov	x1, #BAD_SYNC
 	mov	x2, x25
@@ -933,13 +927,13 @@ el0_irq:
 	kernel_entry 0
 el0_irq_naked:
 	gic_prio_irq_setup pmr=x20, tmp=x0
+	ct_user_exit_irqoff
 	enable_da_f
 
 #ifdef CONFIG_TRACE_IRQFLAGS
 	bl	trace_hardirqs_off
 #endif
 
-	ct_user_exit
 #ifdef CONFIG_HARDEN_BRANCH_PREDICTOR
 	tbz	x22, #55, 1f
 	bl	do_el0_irq_bp_hardening
@@ -966,13 +960,14 @@ ENDPROC(el1_error)
 el0_error:
 	kernel_entry 0
 el0_error_naked:
-	mrs	x1, esr_el1
+	mrs	x25, esr_el1
 	gic_prio_kentry_setup tmp=x2
+	ct_user_exit_irqoff
 	enable_dbg
 	mov	x0, sp
+	mov	x1, x25
 	bl	do_serror
 	enable_da_f
-	ct_user_exit
 	b	ret_to_user
 ENDPROC(el0_error)
 
@@ -998,6 +993,9 @@ ret_to_user:
 	cbnz	x2, work_pending
 finish_ret_to_user:
 	enable_step_tsk x1, x2
+#ifdef CONFIG_GCC_PLUGIN_STACKLEAK
+	bl	stackleak_erase
+#endif
 	kernel_exit 0
 ENDPROC(ret_to_user)
 
@@ -1169,7 +1167,7 @@ ENTRY(ret_from_fork)
 	cbz	x19, 1f				// not a kernel thread
 	mov	x0, x20
 	blr	x19
-1:	get_thread_info tsk
+1:	get_current_task tsk
 	b	ret_to_user
 ENDPROC(ret_from_fork)
 NOKPROBE(ret_from_fork)

@@ -100,10 +100,6 @@ static int irq_affinity_hint_proc_show(struct seq_file *m, void *v)
 	return 0;
 }
 
-#ifndef is_affinity_mask_valid
-#define is_affinity_mask_valid(val) 1
-#endif
-
 int no_irq_affinity;
 static int irq_affinity_proc_show(struct seq_file *m, void *v)
 {
@@ -115,6 +111,28 @@ static int irq_affinity_list_proc_show(struct seq_file *m, void *v)
 	return show_irq_affinity(AFFINITY_LIST, m);
 }
 
+#ifndef CONFIG_AUTO_IRQ_AFFINITY
+static inline int irq_select_affinity_usr(unsigned int irq)
+{
+	/*
+	 * If the interrupt is started up already then this fails. The
+	 * interrupt is assigned to an online CPU already. There is no
+	 * point to move it around randomly. Tell user space that the
+	 * selected mask is bogus.
+	 *
+	 * If not then any change to the affinity is pointless because the
+	 * startup code invokes irq_setup_affinity() which will select
+	 * a online CPU anyway.
+	 */
+	return -EINVAL;
+}
+#else
+/* ALPHA magic affinity auto selector. Keep it for historical reasons. */
+static inline int irq_select_affinity_usr(unsigned int irq)
+{
+	return irq_select_affinity(irq);
+}
+#endif
 
 static ssize_t write_irq_affinity(int type, struct file *file,
 		const char __user *buffer, size_t count, loff_t *pos)
@@ -135,11 +153,6 @@ static ssize_t write_irq_affinity(int type, struct file *file,
 		err = cpumask_parse_user(buffer, count, new_value);
 	if (err)
 		goto free_cpumask;
-
-	if (!is_affinity_mask_valid(new_value)) {
-		err = -EINVAL;
-		goto free_cpumask;
-	}
 
 	/*
 	 * Do not allow disabling IRQs completely - it's a too easy
@@ -231,11 +244,6 @@ static ssize_t default_affinity_write(struct file *file,
 	err = cpumask_parse_user(buffer, count, new_value);
 	if (err)
 		goto out;
-
-	if (!is_affinity_mask_valid(new_value)) {
-		err = -EINVAL;
-		goto out;
-	}
 
 	/*
 	 * Do not allow disabling IRQs completely - it's a too easy
@@ -475,22 +483,24 @@ int show_interrupts(struct seq_file *p, void *v)
 		seq_putc(p, '\n');
 	}
 
-	irq_lock_sparse();
+	rcu_read_lock();
 	desc = irq_to_desc(i);
 	if (!desc)
 		goto outsparse;
 
-	raw_spin_lock_irqsave(&desc->lock, flags);
-	for_each_online_cpu(j)
-		any_count |= kstat_irqs_cpu(i, j);
-	action = desc->action;
-	if ((!action || irq_desc_is_chained(desc)) && !any_count)
-		goto out;
+	if (desc->kstat_irqs)
+		for_each_online_cpu(j)
+			any_count |= *per_cpu_ptr(desc->kstat_irqs, j);
+
+	if ((!desc->action || irq_desc_is_chained(desc)) && !any_count)
+		goto outsparse;
 
 	seq_printf(p, "%*d: ", prec, i);
 	for_each_online_cpu(j)
-		seq_printf(p, "%10u ", kstat_irqs_cpu(i, j));
+		seq_printf(p, "%10u ", desc->kstat_irqs ?
+					*per_cpu_ptr(desc->kstat_irqs, j) : 0);
 
+	raw_spin_lock_irqsave(&desc->lock, flags);
 	if (desc->irq_data.chip) {
 		if (desc->irq_data.chip->irq_print_chip)
 			desc->irq_data.chip->irq_print_chip(&desc->irq_data, p);
@@ -511,6 +521,7 @@ int show_interrupts(struct seq_file *p, void *v)
 	if (desc->name)
 		seq_printf(p, "-%-8s", desc->name);
 
+	action = desc->action;
 	if (action) {
 		seq_printf(p, "  %s", action->name);
 		while ((action = action->next) != NULL)
@@ -518,10 +529,9 @@ int show_interrupts(struct seq_file *p, void *v)
 	}
 
 	seq_putc(p, '\n');
-out:
 	raw_spin_unlock_irqrestore(&desc->lock, flags);
 outsparse:
-	irq_unlock_sparse();
+	rcu_read_unlock();
 	return 0;
 }
 #endif

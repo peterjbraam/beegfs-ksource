@@ -113,7 +113,6 @@ void qed_roce_stop(struct qed_hwfn *p_hwfn)
 			break;
 		}
 	}
-	qed_spq_unregister_async_cb(p_hwfn, PROTOCOLID_ROCE);
 }
 
 static void qed_rdma_copy_gids(struct qed_rdma_qp *qp, __le32 *src_gid,
@@ -900,7 +899,7 @@ int qed_roce_query_qp(struct qed_hwfn *p_hwfn,
 		goto err_resp;
 
 	out_params->rq_psn = le32_to_cpu(p_resp_ramrod_res->psn);
-	rq_err_state = GET_FIELD(le32_to_cpu(p_resp_ramrod_res->flags),
+	rq_err_state = GET_FIELD(le32_to_cpu(p_resp_ramrod_res->err_flag),
 				 ROCE_QUERY_QP_RESP_OUTPUT_PARAMS_ERROR_FLG);
 
 	dma_free_coherent(&p_hwfn->cdev->pdev->dev, sizeof(*p_resp_ramrod_res),

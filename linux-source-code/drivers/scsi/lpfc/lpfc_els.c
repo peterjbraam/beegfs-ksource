@@ -3128,7 +3128,7 @@ lpfc_cmpl_els_disc_cmd(struct lpfc_hba *phba, struct lpfc_iocbq *cmdiocb,
 		for (i = 0; i < ELS_RDF_REG_TAG_CNT &&
 			    i < be32_to_cpu(prdf->reg_d1.reg_desc.count); i++)
 			lpfc_printf_vlog(vport, KERN_INFO, LOG_ELS,
-				 "4677 Fabric RDF Notification Grant Data: "
+				 "4677 Fabric RDF Notication Grant Data: "
 				 "0x%08x\n",
 				 be32_to_cpu(
 					prdf->reg_d1.desc_tags[i]));
@@ -3845,6 +3845,15 @@ lpfc_els_retry(struct lpfc_hba *phba, struct lpfc_iocbq *cmdiocb,
 	case IOSTAT_LOCAL_REJECT:
 		switch ((irsp->un.ulpWord[4] & IOERR_PARAM_MASK)) {
 		case IOERR_LOOP_OPEN_FAILURE:
+			if (cmd == ELS_CMD_FLOGI) {
+				if (PCI_DEVICE_ID_HORNET ==
+					phba->pcidev->device) {
+					phba->fc_topology = LPFC_TOPOLOGY_LOOP;
+					phba->pport->fc_myDID = 0;
+					phba->alpa_map[0] = 0;
+					phba->alpa_map[1] = 0;
+				}
+			}
 			if (cmd == ELS_CMD_PLOGI && cmdiocb->retry == 0)
 				delay = 1000;
 			retry = 1;
@@ -4635,7 +4644,9 @@ lpfc_cmpl_els_rsp(struct lpfc_hba *phba, struct lpfc_iocbq *cmdiocb,
 out:
 	if (ndlp && NLP_CHK_NODE_ACT(ndlp) && shost) {
 		spin_lock_irq(shost->host_lock);
-		ndlp->nlp_flag &= ~(NLP_ACC_REGLOGIN | NLP_RM_DFLT_RPI);
+		if (mbox)
+			ndlp->nlp_flag &= ~NLP_ACC_REGLOGIN;
+		ndlp->nlp_flag &= ~NLP_RM_DFLT_RPI;
 		spin_unlock_irq(shost->host_lock);
 
 		/* If the node is not being used by another discovery thread,
@@ -7927,12 +7938,18 @@ lpfc_els_timeout_handler(struct lpfc_vport *vport)
 	if (unlikely(!pring))
 		return;
 
-	if (phba->pport->load_flag & FC_UNLOADING)
+	if ((phba->pport->load_flag & FC_UNLOADING))
 		return;
-
 	spin_lock_irq(&phba->hbalock);
 	if (phba->sli_rev == LPFC_SLI_REV4)
 		spin_lock(&pring->ring_lock);
+
+	if ((phba->pport->load_flag & FC_UNLOADING)) {
+		if (phba->sli_rev == LPFC_SLI_REV4)
+			spin_unlock(&pring->ring_lock);
+		spin_unlock_irq(&phba->hbalock);
+		return;
+	}
 
 	list_for_each_entry_safe(piocb, tmp_iocb, &pring->txcmplq, list) {
 		cmd = &piocb->iocb;
@@ -8426,10 +8443,8 @@ lpfc_els_unsol_buffer(struct lpfc_hba *phba, struct lpfc_sli_ring *pring,
 	struct ls_rjt stat;
 	uint32_t *payload, payload_len;
 	uint32_t cmd, did, newnode;
-	uint32_t vid, flag;
 	uint8_t rjt_exp, rjt_err = 0, init_link = 0;
 	IOCB_t *icmd = &elsiocb->iocb;
-	struct serv_parm *sp;
 	LPFC_MBOXQ_t *mbox;
 
 	if (!vport || !(elsiocb->context2))
@@ -8501,6 +8516,8 @@ lpfc_els_unsol_buffer(struct lpfc_hba *phba, struct lpfc_sli_ring *pring,
 	spin_lock_irq(shost->host_lock);
 	if (ndlp->nlp_flag & NLP_IN_DEV_LOSS) {
 		spin_unlock_irq(shost->host_lock);
+		if (newnode)
+			lpfc_nlp_put(ndlp);
 		goto dropit;
 	}
 	spin_unlock_irq(shost->host_lock);
@@ -8581,22 +8598,6 @@ lpfc_els_unsol_buffer(struct lpfc_hba *phba, struct lpfc_sli_ring *pring,
 			did, vport->port_state, ndlp->nlp_flag);
 
 		phba->fc_stat.elsRcvFLOGI++;
-		sp = (struct serv_parm *)
-			((uint8_t *)payload + sizeof(uint32_t));
-
-		/* Check to see if this is firmware generated */
-		if (sp->cmn.valid_vendor_ver_level) {
-			vid = be32_to_cpu(sp->un.vv.vid);
-			flag = be32_to_cpu(sp->un.vv.flags);
-			if (vid == LPFC_VV_BRCD_ID) {
-				/* Drop this FLOGI */
-				lpfc_printf_vlog(
-					vport, KERN_INFO, LOG_ELS,
-					"3316 Dropping rcv FLOGI: "
-					"flag x%x\n", flag);
-				goto lsrjt;
-			}
-		}
 
 		/* If the driver believes fabric discovery is done and is ready,
 		 * bounce the link.  There is some descrepancy.
@@ -8844,8 +8845,6 @@ lsrjt:
 	 * link and start over.
 	 */
 	if (init_link) {
-		lpfc_printf_vlog(vport, KERN_ERR, LOG_ELS,
-				 "3318 Resetting Link, multiple rcv FLOGIs\n");
 		mbox = mempool_alloc(phba->mbox_mem_pool, GFP_KERNEL);
 		if (!mbox)
 			return;

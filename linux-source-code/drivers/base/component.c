@@ -27,7 +27,7 @@
  * helper fills the niche of aggregate drivers for specific hardware, where
  * further standardization into a subsystem would not be practical. The common
  * example is when a logical device (e.g. a DRM display driver) is spread around
- * the SoC on various component (scanout engines, blending blocks, transcoders
+ * the SoC on various components (scanout engines, blending blocks, transcoders
  * for various outputs and so on).
  *
  * The component helper also doesn't solve runtime dependencies, e.g. for system
@@ -102,28 +102,18 @@ static int component_devices_show(struct seq_file *s, void *data)
 	seq_printf(s, "%-40s %20s\n", "device name", "status");
 	seq_puts(s, "-------------------------------------------------------------\n");
 	for (i = 0; i < match->num; i++) {
-		struct device *d = (struct device *)match->compare[i].data;
+		struct component *component = match->compare[i].component;
 
-		seq_printf(s, "%-40s %20s\n", dev_name(d),
-			   match->compare[i].component ?
-			   "registered" : "not registered");
+		seq_printf(s, "%-40s %20s\n",
+			   component ? dev_name(component->dev) : "(unknown)",
+			   component ? (component->bound ? "bound" : "not bound") : "not registered");
 	}
 	mutex_unlock(&component_mutex);
 
 	return 0;
 }
 
-static int component_devices_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, component_devices_show, inode->i_private);
-}
-
-static const struct file_operations component_devices_fops = {
-	.open = component_devices_open,
-	.read = seq_read,
-	.llseek = seq_lseek,
-	.release = single_release,
-};
+DEFINE_SHOW_ATTRIBUTE(component_devices);
 
 static int __init component_debug_init(void)
 {
@@ -267,7 +257,8 @@ static int try_to_bring_up_master(struct master *master,
 	ret = master->ops->bind(master->dev);
 	if (ret < 0) {
 		devres_release_group(master->dev, NULL);
-		dev_info(master->dev, "master bind failed: %d\n", ret);
+		if (ret != -EPROBE_DEFER)
+			dev_info(master->dev, "master bind failed: %d\n", ret);
 		return ret;
 	}
 
@@ -388,7 +379,7 @@ static void __component_match_add(struct device *master,
 }
 
 /**
- * component_match_add_release - add a component match with release callback
+ * component_match_add_release - add a component match entry with release callback
  * @master: device with the aggregate driver
  * @matchptr: pointer to the list of component matches
  * @release: release function for @compare_data
@@ -418,7 +409,7 @@ void component_match_add_release(struct device *master,
 EXPORT_SYMBOL(component_match_add_release);
 
 /**
- * component_match_add_typed - add a compent match for a typed component
+ * component_match_add_typed - add a component match entry for a typed component
  * @master: device with the aggregate driver
  * @matchptr: pointer to the list of component matches
  * @compare_typed: compare function to match against all typed components
@@ -547,11 +538,11 @@ static void component_unbind(struct component *component,
 }
 
 /**
- * component_unbind_all - unbind all component to an aggregate driver
+ * component_unbind_all - unbind all components of an aggregate driver
  * @master_dev: device with the aggregate driver
  * @data: opaque pointer, passed to all components
  *
- * Unbinds all components to the aggregate @dev by passing @data to their
+ * Unbinds all components of the aggregate @dev by passing @data to their
  * &component_ops.unbind functions. Should be called from
  * &component_master_ops.unbind.
  */
@@ -621,19 +612,20 @@ static int component_bind(struct component *component, struct master *master,
 		devres_release_group(component->dev, NULL);
 		devres_release_group(master->dev, NULL);
 
-		dev_err(master->dev, "failed to bind %s (ops %ps): %d\n",
-			dev_name(component->dev), component->ops, ret);
+		if (ret != -EPROBE_DEFER)
+			dev_err(master->dev, "failed to bind %s (ops %ps): %d\n",
+				dev_name(component->dev), component->ops, ret);
 	}
 
 	return ret;
 }
 
 /**
- * component_bind_all - bind all component to an aggregate driver
+ * component_bind_all - bind all components of an aggregate driver
  * @master_dev: device with the aggregate driver
  * @data: opaque pointer, passed to all components
  *
- * Binds all components to the aggregate @dev by passing @data to their
+ * Binds all components of the aggregate @dev by passing @data to their
  * &component_ops.bind functions. Should be called from
  * &component_master_ops.bind.
  */
@@ -660,9 +652,9 @@ int component_bind_all(struct device *master_dev, void *data)
 		}
 
 	if (ret != 0) {
-		for (; i--; )
-			if (!master->match->compare[i].duplicate) {
-				c = master->match->compare[i].component;
+		for (; i > 0; i--)
+			if (!master->match->compare[i - 1].duplicate) {
+				c = master->match->compare[i - 1].component;
 				component_unbind(c, master, data);
 			}
 	}

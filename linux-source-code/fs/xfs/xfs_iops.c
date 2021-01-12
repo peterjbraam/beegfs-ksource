@@ -885,6 +885,16 @@ xfs_setattr_size(
 		error = iomap_zero_range(inode, oldsize, newsize - oldsize,
 				&did_zeroing, &xfs_iomap_ops);
 	} else {
+		/*
+		 * iomap won't detect a dirty page over an unwritten block (or a
+		 * cow block over a hole) and subsequently skips zeroing the
+		 * newly post-EOF portion of the page. Flush the new EOF to
+		 * convert the block before the pagecache truncate.
+		 */
+		error = filemap_write_and_wait_range(inode->i_mapping, newsize,
+						     newsize);
+		if (error)
+			return error;
 		error = iomap_truncate_page(inode, newsize, &did_zeroing,
 				&xfs_iomap_ops);
 	}
@@ -1272,7 +1282,7 @@ xfs_setup_inode(
 
 	inode_sb_list_add(inode);
 	/* make the inode look hashed for the writeback code */
-	hlist_add_fake(&inode->i_hash);
+	inode_fake_hash(inode);
 
 	inode->i_uid    = xfs_uid_to_kuid(ip->i_d.di_uid);
 	inode->i_gid    = xfs_gid_to_kgid(ip->i_d.di_gid);

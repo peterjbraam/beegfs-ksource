@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * DECnet       An implementation of the DECnet protocol suite for the LINUX
  *              operating system.  DECnet is implemented using the  BSD Socket
@@ -44,15 +45,6 @@
 /******************************************************************************
     (c) 1995-1998 E.M. Serrat		emserrat@geocities.com
 
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation; either version 2 of the License, or
-    any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
 *******************************************************************************/
 
 #include <linux/errno.h>
@@ -406,7 +398,7 @@ void dn_rt_cache_flush(int delay)
 
 	if (delay <= 0) {
 		spin_unlock_bh(&dn_rt_flush_lock);
-		dn_run_flush(0);
+		dn_run_flush(NULL);
 		return;
 	}
 
@@ -1868,7 +1860,7 @@ void __init dn_route_init(void)
 	dn_route_timer.expires = jiffies + decnet_dst_gc_interval * HZ;
 	add_timer(&dn_route_timer);
 
-	goal = totalram_pages >> (26 - PAGE_SHIFT);
+	goal = totalram_pages() >> (26 - PAGE_SHIFT);
 
 	for(order = 0; (1UL << order) < goal; order++)
 		/* NOTHING */;
@@ -1922,9 +1914,8 @@ void __init dn_route_init(void)
 void __exit dn_route_cleanup(void)
 {
 	del_timer(&dn_route_timer);
-	dn_run_flush(0);
+	dn_run_flush(NULL);
 
 	remove_proc_entry("decnet_cache", init_net.proc_net);
 	dst_entries_destroy(&dn_dst_ops);
 }
-

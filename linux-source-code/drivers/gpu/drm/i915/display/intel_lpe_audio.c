@@ -114,7 +114,7 @@ lpe_audio_platdev_create(struct drm_i915_private *dev_priv)
 	pinfo.size_data = sizeof(*pdata);
 	pinfo.dma_mask = DMA_BIT_MASK(32);
 
-	pdata->num_pipes = INTEL_NUM_PIPES(dev_priv);
+	pdata->num_pipes = INTEL_INFO(dev_priv)->num_pipes;
 	pdata->num_ports = IS_CHERRYVIEW(dev_priv) ? 3 : 2; /* B,C,D or B,C */
 	pdata->port[0].pipe = -1;
 	pdata->port[1].pipe = -1;
@@ -172,6 +172,14 @@ static int lpe_audio_irq_init(struct drm_i915_private *dev_priv)
 				handle_simple_irq,
 				"hdmi_lpe_audio_irq_handler");
 
+	static const struct pci_device_id irq_quirk_ids[] = {
+		/* Dell Wyse 3040 */
+		{PCI_DEVICE_SUB(PCI_VENDOR_ID_INTEL, 0x22b0, 0x1028, 0x07c1)},
+		{}
+	};
+
+	if (pci_dev_present(irq_quirk_ids))
+		return 0;
 	return irq_set_chip_data(irq, dev_priv);
 }
 

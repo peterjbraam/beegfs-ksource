@@ -618,7 +618,7 @@ static const char * const sb_tx8_mux_text[] = {
 	"ZERO", "RX_MIX_TX8", "DEC8", "DEC8_192"
 };
 
-static const DECLARE_TLV_DB_SCALE(digital_gain, 0, 1, 0);
+static const DECLARE_TLV_DB_SCALE(digital_gain, -8400, 100, -8400);
 static const DECLARE_TLV_DB_SCALE(line_gain, 0, 7, 1);
 static const DECLARE_TLV_DB_SCALE(analog_gain, 0, 25, 1);
 static const DECLARE_TLV_DB_SCALE(ear_pa_gain, 0, 150, 0);
@@ -2837,11 +2837,11 @@ static int wcd9335_codec_enable_dec(struct snd_soc_dapm_widget *w,
 				   TX_HPF_CUT_OFF_FREQ_MASK) >> 5;
 		snd_soc_component_update_bits(comp, tx_vol_ctl_reg, 0x10, 0x10);
 		snd_soc_component_update_bits(comp, dec_cfg_reg, 0x08, 0x00);
-		if (hpf_coff_freq != CF_MIN_3DB_150HZ) {
-			snd_soc_component_update_bits(comp, dec_cfg_reg,
-						      TX_HPF_CUT_OFF_FREQ_MASK,
-						      hpf_coff_freq << 5);
-		}
+			if (hpf_coff_freq != CF_MIN_3DB_150HZ) {
+				snd_soc_component_update_bits(comp, dec_cfg_reg,
+						    TX_HPF_CUT_OFF_FREQ_MASK,
+						    hpf_coff_freq << 5);
+			}
 		break;
 	case SND_SOC_DAPM_POST_PMD:
 		snd_soc_component_update_bits(comp, tx_vol_ctl_reg, 0x10, 0x00);
@@ -4926,11 +4926,11 @@ static const struct regmap_range_cfg wcd9335_ranges[] = {
 		.name = "WCD9335",
 		.range_min =  0x0,
 		.range_max =  WCD9335_MAX_REGISTER,
-		.selector_reg = WCD9335_SEL_REGISTER,
+		.selector_reg = WCD9335_REG(0x0, 0),
 		.selector_mask = 0xff,
 		.selector_shift = 0,
-		.window_start = 0x800,
-		.window_len = 0x100,
+		.window_start = 0x0,
+		.window_len = 0x1000,
 	},
 };
 
@@ -4968,12 +4968,12 @@ static const struct regmap_range_cfg wcd9335_ifc_ranges[] = {
 	{
 		.name = "WCD9335-IFC-DEV",
 		.range_min =  0x0,
-		.range_max = WCD9335_MAX_REGISTER,
-		.selector_reg = WCD9335_SEL_REGISTER,
-		.selector_mask = 0xfff,
+		.range_max = WCD9335_REG(0, 0x7ff),
+		.selector_reg = WCD9335_REG(0, 0x0),
+		.selector_mask = 0xff,
 		.selector_shift = 0,
-		.window_start = 0x800,
-		.window_len = 0x400,
+		.window_start = 0x0,
+		.window_len = 0x1000,
 	},
 };
 
@@ -4981,7 +4981,7 @@ static struct regmap_config wcd9335_ifc_regmap_config = {
 	.reg_bits = 16,
 	.val_bits = 8,
 	.can_multi_write = true,
-	.max_register = WCD9335_MAX_REGISTER,
+	.max_register = WCD9335_REG(0, 0x7FF),
 	.ranges = wcd9335_ifc_ranges,
 	.num_ranges = ARRAY_SIZE(wcd9335_ifc_ranges),
 };

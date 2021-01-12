@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * L2TP core.
  *
@@ -12,10 +13,6 @@
  *		Michal Ostrowski <mostrows@speakeasy.net>
  *		Arnaldo Carvalho de Melo <acme@xconectiva.com.br>
  *		David S. Miller (davem@redhat.com)
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -202,44 +199,44 @@ struct l2tp_tunnel *l2tp_tunnel_get_nth(const struct net *net, int nth)
 }
 EXPORT_SYMBOL_GPL(l2tp_tunnel_get_nth);
 
-/* Lookup a session. A new reference is held on the returned session. */
-struct l2tp_session *l2tp_session_get(const struct net *net,
-				      struct l2tp_tunnel *tunnel,
-				      u32 session_id)
+struct l2tp_session *l2tp_tunnel_get_session(struct l2tp_tunnel *tunnel,
+					     u32 session_id)
 {
 	struct hlist_head *session_list;
 	struct l2tp_session *session;
 
-	if (!tunnel) {
-		struct l2tp_net *pn = l2tp_pernet(net);
-
-		session_list = l2tp_session_id_hash_2(pn, session_id);
-
-		rcu_read_lock_bh();
-		hlist_for_each_entry_rcu(session, session_list, global_hlist) {
-			if (session->session_id == session_id) {
-				l2tp_session_inc_refcount(session);
-				rcu_read_unlock_bh();
-
-				return session;
-			}
-		}
-		rcu_read_unlock_bh();
-
-		return NULL;
-	}
-
 	session_list = l2tp_session_id_hash(tunnel, session_id);
+
 	read_lock_bh(&tunnel->hlist_lock);
-	hlist_for_each_entry(session, session_list, hlist) {
+	hlist_for_each_entry(session, session_list, hlist)
 		if (session->session_id == session_id) {
 			l2tp_session_inc_refcount(session);
 			read_unlock_bh(&tunnel->hlist_lock);
 
 			return session;
 		}
-	}
 	read_unlock_bh(&tunnel->hlist_lock);
+
+	return NULL;
+}
+EXPORT_SYMBOL_GPL(l2tp_tunnel_get_session);
+
+struct l2tp_session *l2tp_session_get(const struct net *net, u32 session_id)
+{
+	struct hlist_head *session_list;
+	struct l2tp_session *session;
+
+	session_list = l2tp_session_id_hash_2(l2tp_pernet(net), session_id);
+
+	rcu_read_lock_bh();
+	hlist_for_each_entry_rcu(session, session_list, global_hlist)
+		if (session->session_id == session_id) {
+			l2tp_session_inc_refcount(session);
+			rcu_read_unlock_bh();
+
+			return session;
+		}
+	rcu_read_unlock_bh();
 
 	return NULL;
 }
@@ -321,8 +318,7 @@ int l2tp_session_register(struct l2tp_session *session,
 
 	if (tunnel->version == L2TP_HDR_VER_3) {
 		pn = l2tp_pernet(tunnel->l2tp_net);
-		g_head = l2tp_session_id_hash_2(l2tp_pernet(tunnel->l2tp_net),
-						session->session_id);
+		g_head = l2tp_session_id_hash_2(pn, session->session_id);
 
 		spin_lock_bh(&pn->l2tp_session_hlist_lock);
 
@@ -877,7 +873,7 @@ static int l2tp_udp_recv_core(struct l2tp_tunnel *tunnel, struct sk_buff *skb)
 	}
 
 	/* Find the session context */
-	session = l2tp_session_get(tunnel->l2tp_net, tunnel, session_id);
+	session = l2tp_tunnel_get_session(tunnel, session_id);
 	if (!session || !session->recv_skb) {
 		if (session)
 			l2tp_session_dec_refcount(session);
@@ -1008,8 +1004,8 @@ static int l2tp_build_l2tpv3_header(struct l2tp_session *session, void *buf)
 	return bufp - optr;
 }
 
-static int l2tp_xmit_core(struct l2tp_session *session, struct sk_buff *skb,
-			  struct flowi *fl, size_t data_len)
+static void l2tp_xmit_core(struct l2tp_session *session, struct sk_buff *skb,
+			   struct flowi *fl, size_t data_len)
 {
 	struct l2tp_tunnel *tunnel = session->tunnel;
 	unsigned int len = skb->len;
@@ -1052,8 +1048,6 @@ static int l2tp_xmit_core(struct l2tp_session *session, struct sk_buff *skb,
 		atomic_long_inc(&tunnel->stats.tx_errors);
 		atomic_long_inc(&session->stats.tx_errors);
 	}
-
-	return 0;
 }
 
 /* If caller requires the skb to have a ppp header, the header must be
@@ -1090,7 +1084,7 @@ int l2tp_xmit_skb(struct l2tp_session *session, struct sk_buff *skb, int hdr_len
 	memset(&(IPCB(skb)->opt), 0, sizeof(IPCB(skb)->opt));
 	IPCB(skb)->flags &= ~(IPSKB_XFRM_TUNNEL_SIZE | IPSKB_XFRM_TRANSFORMED |
 			      IPSKB_REROUTED);
-	nf_reset(skb);
+	nf_reset_ct(skb);
 
 	bh_lock_sock(sk);
 	if (sock_owned_by_user(sk)) {
@@ -1189,7 +1183,7 @@ end:
 
 /* When the tunnel is closed, all the attached sessions need to go too.
  */
-void l2tp_tunnel_closeall(struct l2tp_tunnel *tunnel)
+static void l2tp_tunnel_closeall(struct l2tp_tunnel *tunnel)
 {
 	int hash;
 	struct hlist_node *walk;
@@ -1238,7 +1232,6 @@ again:
 	}
 	write_unlock_bh(&tunnel->hlist_lock);
 }
-EXPORT_SYMBOL_GPL(l2tp_tunnel_closeall);
 
 /* Tunnel socket destroy hook for UDP encapsulation */
 static void l2tp_udp_encap_destroy(struct sock *sk)
@@ -1685,8 +1678,6 @@ struct l2tp_session *l2tp_session_create(int priv_size, struct l2tp_tunnel *tunn
 		if (cfg) {
 			session->pwtype = cfg->pw_type;
 			session->debug = cfg->debug;
-			session->mtu = cfg->mtu;
-			session->mru = cfg->mru;
 			session->send_seq = cfg->send_seq;
 			session->recv_seq = cfg->recv_seq;
 			session->lns_mode = cfg->lns_mode;
@@ -1799,4 +1790,3 @@ MODULE_AUTHOR("James Chapman <jchapman@katalix.com>");
 MODULE_DESCRIPTION("L2TP core");
 MODULE_LICENSE("GPL");
 MODULE_VERSION(L2TP_DRV_VERSION);
-

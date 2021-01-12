@@ -42,7 +42,6 @@
 #include "cifsproto.h"
 #include "cifs_unicode.h"
 #include "cifs_debug.h"
-#include "smb2proto.h"
 #include "fscache.h"
 #include "smbdirect.h"
 #ifdef CONFIG_CIFS_DFS_UPCALL
@@ -113,8 +112,6 @@ cifs_mark_open_files_invalid(struct cifs_tcon *tcon)
 
 	mutex_lock(&tcon->crfid.fid_mutex);
 	tcon->crfid.is_valid = false;
-	/* cached handle is not valid, so SMB2_CLOSE won't be sent below */
-	close_shroot_lease_locked(&tcon->crfid);
 	memset(tcon->crfid.fid, 0, sizeof(struct cifs_fid));
 	mutex_unlock(&tcon->crfid.fid_mutex);
 
@@ -162,18 +159,9 @@ static int __cifs_reconnect_tcon(const struct nls_table *nlsc,
 
 	for (it = dfs_cache_get_tgt_iterator(&tl); it;
 	     it = dfs_cache_get_next_tgt(&tl, it)) {
-		const char *share, *prefix;
-		size_t share_len, prefix_len;
+		const char *tgt = dfs_cache_get_tgt_name(it);
 
-		rc = dfs_cache_get_tgt_share(it, &share, &share_len, &prefix,
-					     &prefix_len);
-		if (rc) {
-			cifs_dbg(VFS, "%s: failed to parse target share %d\n",
-				 __func__, rc);
-			continue;
-		}
-
-		extract_unc_hostname(share, &dfs_host, &dfs_host_len);
+		extract_unc_hostname(tgt, &dfs_host, &dfs_host_len);
 
 		if (dfs_host_len != tcp_host_len
 		    || strncasecmp(dfs_host, tcp_host, dfs_host_len) != 0) {
@@ -184,13 +172,11 @@ static int __cifs_reconnect_tcon(const struct nls_table *nlsc,
 			continue;
 		}
 
-		scnprintf(tree, MAX_TREE_SIZE, "\\%.*s", (int)share_len, share);
+		scnprintf(tree, MAX_TREE_SIZE, "\\%s", tgt);
 
 		rc = CIFSTCon(0, tcon->ses, tree, tcon, nlsc);
-		if (!rc) {
-			rc = update_super_prepath(tcon, prefix, prefix_len);
+		if (!rc)
 			break;
-		}
 		if (rc == -EREMOTE)
 			break;
 	}
@@ -271,7 +257,7 @@ cifs_reconnect_tcon(struct cifs_tcon *tcon, int smb_command)
 		if (server->tcpStatus != CifsNeedReconnect)
 			break;
 
-		if (retries && --retries)
+		if (--retries)
 			continue;
 
 		/*
@@ -2149,8 +2135,8 @@ cifs_writev_requeue(struct cifs_writedata *wdata)
 			}
 		}
 
+		kref_put(&wdata2->refcount, cifs_writedata_release);
 		if (rc) {
-			kref_put(&wdata2->refcount, cifs_writedata_release);
 			if (is_retryable_error(rc))
 				continue;
 			i += nr_pages;
@@ -4631,7 +4617,7 @@ findFirstRetry:
 				psrch_inf->unicode = false;
 
 			psrch_inf->ntwrk_buf_start = (char *)pSMBr;
-			psrch_inf->smallBuf = false;
+			psrch_inf->smallBuf = 0;
 			psrch_inf->srch_entries_start =
 				(char *) &pSMBr->hdr.Protocol +
 					le16_to_cpu(pSMBr->t2.DataOffset);
@@ -4765,7 +4751,7 @@ int CIFSFindNext(const unsigned int xid, struct cifs_tcon *tcon,
 				cifs_buf_release(psrch_inf->ntwrk_buf_start);
 			psrch_inf->srch_entries_start = response_data;
 			psrch_inf->ntwrk_buf_start = (char *)pSMB;
-			psrch_inf->smallBuf = false;
+			psrch_inf->smallBuf = 0;
 			if (parms->EndofSearch)
 				psrch_inf->endOfSearch = true;
 			else

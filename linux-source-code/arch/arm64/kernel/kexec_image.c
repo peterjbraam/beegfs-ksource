@@ -12,7 +12,9 @@
 #include <linux/errno.h>
 #include <linux/kernel.h>
 #include <linux/kexec.h>
+#include <linux/pe.h>
 #include <linux/string.h>
+#include <linux/verification.h>
 #include <asm/byteorder.h>
 #include <asm/cpufeature.h>
 #include <asm/image.h>
@@ -20,13 +22,13 @@
 
 static int image_probe(const char *kernel_buf, unsigned long kernel_len)
 {
-	const struct arm64_image_header *h;
+	const struct arm64_image_header *h =
+		(const struct arm64_image_header *)(kernel_buf);
 
-	h = (const struct arm64_image_header *)(kernel_buf);
+	if (!h || (kernel_len < sizeof(*h)))
+		return -EINVAL;
 
-	if (!h || (kernel_len < sizeof(*h)) ||
-			memcmp(&h->magic, ARM64_IMAGE_MAGIC,
-				sizeof(h->magic)))
+	if (memcmp(&h->magic, ARM64_IMAGE_MAGIC, sizeof(h->magic)))
 		return -EINVAL;
 
 	return 0;
@@ -45,9 +47,13 @@ static void *image_load(struct kimage *image,
 	struct kexec_segment *kernel_segment;
 	int ret;
 
+	/* We don't support crash kernels yet. */
+	if (image->type == KEXEC_TYPE_CRASH)
+		return ERR_PTR(-EOPNOTSUPP);
+
 	/*
 	 * We require a kernel with an unambiguous Image header. Per
-	 * Documentation/booting.txt, this is the case when image_size
+	 * Documentation/arm64/booting.rst, this is the case when image_size
 	 * is non-zero (practically speaking, since v3.17).
 	 */
 	h = (struct arm64_image_header *)kernel;
@@ -78,7 +84,7 @@ static void *image_load(struct kimage *image,
 
 	kbuf.buffer = kernel;
 	kbuf.bufsz = kernel_len;
-	kbuf.mem = 0;
+	kbuf.mem = KEXEC_BUF_MEM_UNKNOWN;
 	kbuf.memsz = le64_to_cpu(h->image_size);
 	text_offset = le64_to_cpu(h->text_offset);
 	kbuf.buf_align = MIN_KIMG_ALIGN;
@@ -107,7 +113,18 @@ static void *image_load(struct kimage *image,
 	return ERR_PTR(ret);
 }
 
+#ifdef CONFIG_KEXEC_IMAGE_VERIFY_SIG
+static int image_verify_sig(const char *kernel, unsigned long kernel_len)
+{
+	return verify_pefile_signature(kernel, kernel_len, NULL,
+				       VERIFYING_KEXEC_PE_SIGNATURE);
+}
+#endif
+
 const struct kexec_file_ops kexec_image_ops = {
 	.probe = image_probe,
 	.load = image_load,
+#ifdef CONFIG_KEXEC_IMAGE_VERIFY_SIG
+	.verify_sig = image_verify_sig,
+#endif
 };

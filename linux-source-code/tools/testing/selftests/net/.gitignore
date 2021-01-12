@@ -3,6 +3,7 @@ socket
 psock_fanout
 psock_snd
 psock_tpacket
+reuseport_addr_any
 reuseport_bpf
 reuseport_bpf_cpu
 reuseport_bpf_numa
@@ -19,4 +20,5 @@ ip_defrag
 ipv6_flowlabel
 ipv6_flowlabel_mgr
 so_txtime
+tcp_fastopen_backup_key
 nettest

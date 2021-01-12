@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef _POWERPC_RTAS_H
 #define _POWERPC_RTAS_H
 #ifdef __KERNEL__
@@ -5,17 +6,13 @@
 #include <linux/spinlock.h>
 #include <asm/page.h>
 #include <linux/time.h>
+#include <linux/cpumask.h>
 
 /*
  * Definitions for talking to the RTAS on CHRP machines.
  *
  * Copyright (C) 2001 Peter Bergner
  * Copyright (C) 2001 PPC 64 Team, IBM Corp
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 
 #define RTAS_UNKNOWN_SERVICE (-1)
@@ -371,8 +368,6 @@ extern int rtas_set_indicator_fast(int indicator, int index, int new_value);
 extern void rtas_progress(char *s, unsigned short hex);
 extern int rtas_suspend_cpu(struct rtas_suspend_me_data *data);
 extern int rtas_suspend_last_cpu(struct rtas_suspend_me_data *data);
-extern int rtas_online_cpus_mask(cpumask_var_t cpus);
-extern int rtas_offline_cpus_mask(cpumask_var_t cpus);
 extern int rtas_ibm_suspend_me(u64 handle);
 
 struct rtc_time;

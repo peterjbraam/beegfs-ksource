@@ -944,6 +944,16 @@ static bool acpi_pci_bridge_d3(struct pci_dev *dev)
 	if (!dev->is_hotplug_bridge)
 		return false;
 
+	/* Assume D3 support if the bridge is power-manageable by ACPI. */
+	adev = ACPI_COMPANION(&dev->dev);
+	if (!adev && !pci_dev_is_added(dev)) {
+		adev = acpi_pci_find_companion(&dev->dev);
+		ACPI_COMPANION_SET(&dev->dev, adev);
+	}
+
+	if (adev && acpi_device_power_manageable(adev))
+		return true;
+
 	/*
 	 * Look for a special _DSD property for the root port and if it
 	 * is set we know the hierarchy behind it supports D3 just fine.
@@ -1078,13 +1088,11 @@ static bool acpi_pci_need_resume(struct pci_dev *dev)
 	/*
 	 * In some cases (eg. Samsung 305V4A) leaving a bridge in suspend over
 	 * system-wide suspend/resume confuses the platform firmware, so avoid
-	 * doing that, unless the bridge has a driver that should take care of
-	 * the PM handling.  According to Section 16.1.6 of ACPI 6.2, endpoint
+	 * doing that.  According to Section 16.1.6 of ACPI 6.2, endpoint
 	 * devices are expected to be in D3 before invoking the S3 entry path
 	 * from the firmware, so they should not be affected by this issue.
 	 */
-	if (pci_is_bridge(dev) && !dev->driver &&
-	    acpi_target_system_state() != ACPI_STATE_S0)
+	if (pci_is_bridge(dev) && acpi_target_system_state() != ACPI_STATE_S0)
 		return true;
 
 	if (!adev || !acpi_device_power_manageable(adev))
@@ -1243,7 +1251,6 @@ static void pci_acpi_setup(struct device *dev)
 
 	pci_acpi_optimize_delay(pci_dev, adev->handle);
 	pci_acpi_set_untrusted(pci_dev);
-	pci_acpi_add_edr_notifier(pci_dev);
 
 	pci_acpi_add_pm_notifier(adev, pci_dev);
 	if (!adev->wakeup.flags.valid)
@@ -1260,6 +1267,7 @@ static void pci_acpi_setup(struct device *dev)
 		device_wakeup_enable(dev);
 
 	acpi_pci_wakeup(pci_dev, false);
+	acpi_device_power_add_dependent(adev, dev);
 }
 
 static void pci_acpi_cleanup(struct device *dev)
@@ -1270,9 +1278,9 @@ static void pci_acpi_cleanup(struct device *dev)
 	if (!adev)
 		return;
 
-	pci_acpi_remove_edr_notifier(pci_dev);
 	pci_acpi_remove_pm_notifier(adev);
 	if (adev->wakeup.flags.valid) {
+		acpi_device_power_remove_dependent(adev, dev);
 		if (pci_dev->bridge_d3)
 			device_wakeup_disable(dev);
 

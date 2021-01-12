@@ -32,7 +32,6 @@ ALL_TESTS="
 	devlink_reload_test
 "
 NUM_NETIFS=2
-: ${TIMEOUT:=20000} # ms
 source $lib_dir/lib.sh
 source $lib_dir/devlink_lib.sh
 
@@ -361,24 +360,20 @@ vlan_rif_refcount_test()
 	ip link add link br0 name br0.10 up type vlan id 10
 	ip -6 address add 2001:db8:1::1/64 dev br0.10
 
-	busywait "$TIMEOUT" wait_for_offload \
-		ip -6 route get fibmatch 2001:db8:1::2 dev br0.10
+	ip -6 route get fibmatch 2001:db8:1::2 dev br0.10 | grep -q offload
 	check_err $? "vlan rif was not created before adding port to vlan"
 
 	bridge vlan add vid 10 dev $swp1
-	busywait "$TIMEOUT" wait_for_offload \
-		ip -6 route get fibmatch 2001:db8:1::2 dev br0.10
+	ip -6 route get fibmatch 2001:db8:1::2 dev br0.10 | grep -q offload
 	check_err $? "vlan rif was destroyed after adding port to vlan"
 
 	bridge vlan del vid 10 dev $swp1
-	busywait "$TIMEOUT" wait_for_offload \
-		ip -6 route get fibmatch 2001:db8:1::2 dev br0.10
+	ip -6 route get fibmatch 2001:db8:1::2 dev br0.10 | grep -q offload
 	check_err $? "vlan rif was destroyed after removing port from vlan"
 
 	ip link set dev $swp1 nomaster
-	busywait "$TIMEOUT" not wait_for_offload \
-		ip -6 route get fibmatch 2001:db8:1::2 dev br0.10
-	check_err $? "vlan rif was not destroyed after unlinking port from bridge"
+	ip -6 route get fibmatch 2001:db8:1::2 dev br0.10 | grep -q offload
+	check_fail $? "vlan rif was not destroyed after unlinking port from bridge"
 
 	log_test "vlan rif refcount"
 
@@ -406,28 +401,22 @@ subport_rif_refcount_test()
 	ip -6 address add 2001:db8:1::1/64 dev bond1
 	ip -6 address add 2001:db8:2::1/64 dev bond1.10
 
-	busywait "$TIMEOUT" wait_for_offload \
-		ip -6 route get fibmatch 2001:db8:1::2 dev bond1
+	ip -6 route get fibmatch 2001:db8:1::2 dev bond1 | grep -q offload
 	check_err $? "subport rif was not created on lag device"
-	busywait "$TIMEOUT" wait_for_offload \
-		ip -6 route get fibmatch 2001:db8:2::2 dev bond1.10
+	ip -6 route get fibmatch 2001:db8:2::2 dev bond1.10 | grep -q offload
 	check_err $? "subport rif was not created on vlan device"
 
 	ip link set dev $swp1 nomaster
-	busywait "$TIMEOUT" wait_for_offload \
-		ip -6 route get fibmatch 2001:db8:1::2 dev bond1
+	ip -6 route get fibmatch 2001:db8:1::2 dev bond1 | grep -q offload
 	check_err $? "subport rif of lag device was destroyed when should not"
-	busywait "$TIMEOUT" wait_for_offload \
-		ip -6 route get fibmatch 2001:db8:2::2 dev bond1.10
+	ip -6 route get fibmatch 2001:db8:2::2 dev bond1.10 | grep -q offload
 	check_err $? "subport rif of vlan device was destroyed when should not"
 
 	ip link set dev $swp2 nomaster
-	busywait "$TIMEOUT" not wait_for_offload \
-		ip -6 route get fibmatch 2001:db8:1::2 dev bond1
-	check_err $? "subport rif of lag device was not destroyed when should"
-	busywait "$TIMEOUT" not wait_for_offload \
-		ip -6 route get fibmatch 2001:db8:2::2 dev bond1.10
-	check_err $? "subport rif of vlan device was not destroyed when should"
+	ip -6 route get fibmatch 2001:db8:1::2 dev bond1 | grep -q offload
+	check_fail $? "subport rif of lag device was not destroyed when should"
+	ip -6 route get fibmatch 2001:db8:2::2 dev bond1.10 | grep -q offload
+	check_fail $? "subport rif of vlan device was not destroyed when should"
 
 	log_test "subport rif refcount"
 
@@ -586,8 +575,7 @@ bridge_extern_learn_test()
 
 	bridge fdb add de:ad:be:ef:13:37 dev $swp1 master extern_learn
 
-	busywait "$TIMEOUT" wait_for_offload \
-		bridge fdb show brport $swp1 de:ad:be:ef:13:37
+	bridge fdb show brport $swp1 | grep de:ad:be:ef:13:37 | grep -q offload
 	check_err $? "fdb entry not marked as offloaded when should"
 
 	log_test "externally learned fdb entry"
@@ -607,11 +595,9 @@ neigh_offload_test()
 	ip -6 neigh add 2001:db8:1::2 lladdr de:ad:be:ef:13:37 nud perm \
 		dev $swp1
 
-	busywait "$TIMEOUT" wait_for_offload \
-		ip -4 neigh show dev $swp1 192.0.2.2
+	ip -4 neigh show dev $swp1 | grep 192.0.2.2 | grep -q offload
 	check_err $? "ipv4 neigh entry not marked as offloaded when should"
-	busywait "$TIMEOUT" wait_for_offload \
-		ip -6 neigh show dev $swp1 2001:db8:1::2
+	ip -6 neigh show dev $swp1 | grep 2001:db8:1::2 | grep -q offload
 	check_err $? "ipv6 neigh entry not marked as offloaded when should"
 
 	log_test "neighbour offload indication"
@@ -637,31 +623,25 @@ nexthop_offload_test()
 	ip -6 route add 2001:db8:2::/64 vrf v$swp1 \
 		nexthop via 2001:db8:1::2 dev $swp1
 
-	busywait "$TIMEOUT" wait_for_offload \
-		ip -4 route show 198.51.100.0/24 vrf v$swp1
+	ip -4 route show 198.51.100.0/24 vrf v$swp1 | grep -q offload
 	check_err $? "ipv4 nexthop not marked as offloaded when should"
-	busywait "$TIMEOUT" wait_for_offload \
-		ip -6 route show 2001:db8:2::/64 vrf v$swp1
+	ip -6 route show 2001:db8:2::/64 vrf v$swp1 | grep -q offload
 	check_err $? "ipv6 nexthop not marked as offloaded when should"
 
 	ip link set dev $swp2 down
 	sleep 1
 
-	busywait "$TIMEOUT" not wait_for_offload \
-		ip -4 route show 198.51.100.0/24 vrf v$swp1
-	check_err $? "ipv4 nexthop marked as offloaded when should not"
-	busywait "$TIMEOUT" not wait_for_offload \
-		ip -6 route show 2001:db8:2::/64 vrf v$swp1
-	check_err $? "ipv6 nexthop marked as offloaded when should not"
+	ip -4 route show 198.51.100.0/24 vrf v$swp1 | grep -q offload
+	check_fail $? "ipv4 nexthop marked as offloaded when should not"
+	ip -6 route show 2001:db8:2::/64 vrf v$swp1 | grep -q offload
+	check_fail $? "ipv6 nexthop marked as offloaded when should not"
 
 	ip link set dev $swp2 up
 	setup_wait
 
-	busywait "$TIMEOUT" wait_for_offload \
-		ip -4 route show 198.51.100.0/24 vrf v$swp1
+	ip -4 route show 198.51.100.0/24 vrf v$swp1 | grep -q offload
 	check_err $? "ipv4 nexthop not marked as offloaded after neigh add"
-	busywait "$TIMEOUT" wait_for_offload \
-		ip -6 route show 2001:db8:2::/64 vrf v$swp1
+	ip -6 route show 2001:db8:2::/64 vrf v$swp1 | grep -q offload
 	check_err $? "ipv6 nexthop not marked as offloaded after neigh add"
 
 	log_test "nexthop offload indication"

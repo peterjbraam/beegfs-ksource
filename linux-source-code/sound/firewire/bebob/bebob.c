@@ -509,7 +509,7 @@ MODULE_DEVICE_TABLE(ieee1394, bebob_id_table);
 static struct fw_driver bebob_driver = {
 	.driver = {
 		.owner	= THIS_MODULE,
-		.name	= KBUILD_MODNAME,
+		.name	= "snd-bebob",
 		.bus	= &fw_bus_type,
 	},
 	.probe    = bebob_probe,

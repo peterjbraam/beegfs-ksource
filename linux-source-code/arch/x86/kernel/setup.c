@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  Copyright (C) 1995  Linus Torvalds
  *
@@ -50,6 +51,7 @@
 #include <linux/kvm_para.h>
 #include <linux/dma-contiguous.h>
 #include <xen/xen.h>
+#include <uapi/linux/mount.h>
 
 #include <linux/errno.h>
 #include <linux/kernel.h>
@@ -64,7 +66,6 @@
 #include <linux/dma-mapping.h>
 #include <linux/ctype.h>
 #include <linux/uaccess.h>
-#include <linux/security.h>
 
 #include <linux/percpu.h>
 #include <linux/crash_dump.h>
@@ -72,6 +73,7 @@
 #include <linux/jiffies.h>
 #include <linux/mem_encrypt.h>
 #include <linux/sizes.h>
+#include <linux/security.h>
 
 #include <linux/usb/xhci-dbgp.h>
 #include <video/edid.h>
@@ -118,7 +120,6 @@
 #include <asm/microcode.h>
 #include <asm/kaslr.h>
 #include <asm/unwind.h>
-#include <asm/intel-family.h>
 
 /*
  * max_low_pfn_mapped: highest direct mapped pfn under 4GB
@@ -486,7 +487,7 @@ static int __init reserve_crashkernel_low(void)
 	ret = parse_crashkernel_low(boot_command_line, total_low_mem, &low_size, &base);
 	if (ret) {
 		/*
-		 * two parts from lib/swiotlb.c:
+		 * two parts from kernel/dma/swiotlb.c:
 		 * -swiotlb size: user-specified with swiotlb= or default.
 		 *
 		 * -swiotlb overflow buffer: now hardcoded to 32k. We round it
@@ -528,7 +529,7 @@ static int __init reserve_crashkernel_low(void)
 
 static void __init reserve_crashkernel(void)
 {
-	unsigned long long crash_size, crash_base, total_mem, mem_enc_req;
+	unsigned long long crash_size, crash_base, total_mem;
 	bool high = false;
 	int ret;
 
@@ -550,15 +551,6 @@ static void __init reserve_crashkernel(void)
 		return;
 	}
 
-	/*
-	 * When SME/SEV is active, it will always required an extra SWIOTLB
-	 * region.
-	 */
-	if (mem_encrypt_active())
-		mem_enc_req = min(ALIGN(swiotlb_size_or_default(), SZ_1M), 64UL << 20);
-	else
-		mem_enc_req = 0;
-
 	/* 0 means: find the address automatically */
 	if (!crash_base) {
 		/*
@@ -572,19 +564,11 @@ static void __init reserve_crashkernel(void)
 		if (!high)
 			crash_base = memblock_find_in_range(CRASH_ALIGN,
 						CRASH_ADDR_LOW_MAX,
-						crash_size + mem_enc_req,
-						CRASH_ALIGN);
-		/*
-		 * For high reservation, an extra low memory for SWIOTLB will
-		 * always be reserved later, so no need to reserve extra
-		 * memory for memory encryption case here.
-		 */
-		if (!crash_base) {
-			mem_enc_req = 0;
+						crash_size, CRASH_ALIGN);
+		if (!crash_base)
 			crash_base = memblock_find_in_range(CRASH_ALIGN,
 						CRASH_ADDR_HIGH_MAX,
 						crash_size, CRASH_ALIGN);
-		}
 		if (!crash_base) {
 			pr_info("crashkernel reservation failed - No suitable area found.\n");
 			return;
@@ -592,7 +576,6 @@ static void __init reserve_crashkernel(void)
 	} else {
 		unsigned long long start;
 
-		mem_enc_req = 0;
 		start = memblock_find_in_range(crash_base,
 					       crash_base + crash_size,
 					       crash_size, 1 << 20);
@@ -601,13 +584,6 @@ static void __init reserve_crashkernel(void)
 			return;
 		}
 	}
-
-	if (mem_enc_req) {
-		pr_info("Memory encryption is active, crashkernel needs %ldMB extra memory\n",
-			(unsigned long)(mem_enc_req >> 20));
-		crash_size += mem_enc_req;
-	}
-
 	ret = memblock_reserve(crash_base, crash_size);
 	if (ret) {
 		pr_err("%s: Error reserving crashkernel memblock.\n", __func__);
@@ -826,46 +802,7 @@ static void __init trim_low_memory_range(void)
 {
 	memblock_reserve(0, ALIGN(reserve_low, PAGE_SIZE));
 }
-
-static void rh_check_supported(void)
-{
-	bool guest;
-
-	guest = (x86_hyper_type != X86_HYPER_NATIVE || boot_cpu_has(X86_FEATURE_HYPERVISOR));
-
-	/* RHEL supports single cpu on guests only */
-	if (((boot_cpu_data.x86_max_cores * smp_num_siblings) == 1) &&
-	    !guest && is_kdump_kernel()) {
-		pr_crit("Detected single cpu native boot.\n");
-		pr_crit("Important:  In Red Hat Enterprise Linux 8, single threaded, single CPU 64-bit physical systems are unsupported by Red Hat. Please contact your Red Hat support representative for a list of certified and supported systems.");
-	}
-
-	/*
-	 * If the RHEL kernel does not support this hardware, the kernel will
-	 * attempt to boot, but no support is provided for this hardware
-	 */
-	switch (boot_cpu_data.x86_vendor) {
-	case X86_VENDOR_AMD:
-	case X86_VENDOR_INTEL:
-		break;
-	default:
-		pr_crit("Detected processor %s %s\n",
-			boot_cpu_data.x86_vendor_id,
-			boot_cpu_data.x86_model_id);
-		mark_hardware_unsupported("Processor");
-		break;
-	}
-
-	/*
-	 * Due to the complexity of x86 lapic & ioapic enumeration, and PCI IRQ
-	 * routing, ACPI is required for x86.  acpi=off is a valid debug kernel
-	 * parameter, so just print out a loud warning in case something
-	 * goes wrong (which is most of the time).
-	 */
-	if (acpi_disabled && !guest)
-		pr_crit("ACPI has been disabled or is not available on this hardware.  This may result in a single cpu boot, incorrect PCI IRQ routing, or boot failure.\n");
-}
-
+	
 /*
  * Dump out kernel offset information on panic.
  */
@@ -1093,15 +1030,16 @@ void __init setup_arch(char **cmdline_p)
 
 	efi_set_secure_boot(boot_params.secure_boot);
 
-	init_lockdown();
+#ifdef CONFIG_LOCK_DOWN_IN_SECURE_BOOT
+	if (efi_enabled(EFI_SECURE_BOOT))
+		security_lock_kernel_down("EFI Secure Boot mode", LOCKDOWN_INTEGRITY_MAX);
+#endif
 
-	dmi_scan_machine();
-	dmi_memdev_walk();
-	dmi_set_dump_stack_arch_desc();
+	dmi_setup();
 
 	/*
 	 * VMware detection requires dmi to be available, so this
-	 * needs to be done after dmi_scan_machine(), for the boot CPU.
+	 * needs to be done after dmi_setup(), for the boot CPU.
 	 */
 	init_hypervisor_platform();
 
@@ -1196,7 +1134,6 @@ void __init setup_arch(char **cmdline_p)
 		efi_fake_memmap();
 		efi_find_mirror();
 		efi_esrt_init();
-		efi_mokvar_table_init();
 
 		/*
 		 * The EFI specification says that boot service code won't be
@@ -1249,6 +1186,8 @@ void __init setup_arch(char **cmdline_p)
 #endif
 	/* Allocate bigger log buffer */
 	setup_log_buf(1);
+
+	efi_set_secure_boot(boot_params.secure_boot);
 
 	reserve_initrd();
 
@@ -1328,7 +1267,7 @@ void __init setup_arch(char **cmdline_p)
 	x86_init.hyper.guest_late_init();
 
 	e820__reserve_resources();
-	e820__register_nosave_regions(max_low_pfn);
+	e820__register_nosave_regions(max_pfn);
 
 	x86_init.resources.reserve_resources();
 
@@ -1354,8 +1293,6 @@ void __init setup_arch(char **cmdline_p)
 	if (efi_enabled(EFI_BOOT))
 		efi_apply_memmap_quirks();
 #endif
-
-	rh_check_supported();
 
 	unwind_init();
 }

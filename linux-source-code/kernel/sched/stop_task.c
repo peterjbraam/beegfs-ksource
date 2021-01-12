@@ -34,8 +34,11 @@ static void set_next_task_stop(struct rq *rq, struct task_struct *stop, bool fir
 	stop->se.exec_start = rq_clock_task(rq);
 }
 
-static struct task_struct *pick_next_task_stop(struct rq *rq)
+static struct task_struct *
+pick_next_task_stop(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 {
+	WARN_ON_ONCE(prev || rf);
+
 	if (!sched_stop_runnable(rq))
 		return NULL;
 

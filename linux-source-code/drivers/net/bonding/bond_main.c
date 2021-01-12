@@ -41,8 +41,6 @@
 #include <linux/in.h>
 #include <net/ip.h>
 #include <linux/ip.h>
-#include <linux/icmp.h>
-#include <linux/icmpv6.h>
 #include <linux/tcp.h>
 #include <linux/udp.h>
 #include <linux/slab.h>
@@ -201,51 +199,6 @@ atomic_t netpoll_block_tx = ATOMIC_INIT(0);
 #endif
 
 unsigned int bond_net_id __read_mostly;
-
-static const struct flow_dissector_key flow_keys_bonding_keys[] = {
-	{
-		.key_id = FLOW_DISSECTOR_KEY_CONTROL,
-		.offset = offsetof(struct flow_keys, control),
-	},
-	{
-		.key_id = FLOW_DISSECTOR_KEY_BASIC,
-		.offset = offsetof(struct flow_keys, basic),
-	},
-	{
-		.key_id = FLOW_DISSECTOR_KEY_IPV4_ADDRS,
-		.offset = offsetof(struct flow_keys, addrs.v4addrs),
-	},
-	{
-		.key_id = FLOW_DISSECTOR_KEY_IPV6_ADDRS,
-		.offset = offsetof(struct flow_keys, addrs.v6addrs),
-	},
-	{
-		.key_id = FLOW_DISSECTOR_KEY_TIPC,
-		.offset = offsetof(struct flow_keys, addrs.tipckey),
-	},
-	{
-		.key_id = FLOW_DISSECTOR_KEY_PORTS,
-		.offset = offsetof(struct flow_keys, ports),
-	},
-	{
-		.key_id = FLOW_DISSECTOR_KEY_ICMP,
-		.offset = offsetof(struct flow_keys, icmp),
-	},
-	{
-		.key_id = FLOW_DISSECTOR_KEY_VLAN,
-		.offset = offsetof(struct flow_keys, vlan),
-	},
-	{
-		.key_id = FLOW_DISSECTOR_KEY_FLOW_LABEL,
-		.offset = offsetof(struct flow_keys, tags),
-	},
-	{
-		.key_id = FLOW_DISSECTOR_KEY_GRE_KEYID,
-		.offset = offsetof(struct flow_keys, keyid),
-	},
-};
-
-static struct flow_dissector flow_keys_bonding __read_mostly;
 
 /*-------------------------- Forward declarations ---------------------------*/
 
@@ -1195,6 +1148,7 @@ static void bond_setup_by_slave(struct net_device *bond_dev,
 
 	bond_dev->type		    = slave_dev->type;
 	bond_dev->hard_header_len   = slave_dev->hard_header_len;
+	bond_dev->needed_headroom   = slave_dev->needed_headroom;
 	bond_dev->addr_len	    = slave_dev->addr_len;
 
 	memcpy(bond_dev->broadcast, slave_dev->broadcast,
@@ -2084,7 +2038,8 @@ static int bond_release_and_destroy(struct net_device *bond_dev,
 	int ret;
 
 	ret = __bond_release_one(bond_dev, slave_dev, false, true);
-	if (ret == 0 && !bond_has_slaves(bond)) {
+	if (ret == 0 && !bond_has_slaves(bond) &&
+	    bond_dev->reg_state != NETREG_UNREGISTERING) {
 		bond_dev->priv_flags |= IFF_DISABLE_NETPOLL;
 		netdev_info(bond_dev, "Destroying bond\n");
 		bond_remove_proc_entry(bond);
@@ -2824,6 +2779,9 @@ static int bond_ab_arp_inspect(struct bonding *bond)
 			if (bond_time_in_interval(bond, last_rx, 1)) {
 				bond_propose_link_state(slave, BOND_LINK_UP);
 				commit++;
+			} else if (slave->link == BOND_LINK_BACK) {
+				bond_propose_link_state(slave, BOND_LINK_FAIL);
+				commit++;
 			}
 			continue;
 		}
@@ -2932,6 +2890,19 @@ static void bond_ab_arp_commit(struct bonding *bond)
 
 			continue;
 
+		case BOND_LINK_FAIL:
+			bond_set_slave_link_state(slave, BOND_LINK_FAIL,
+						  BOND_SLAVE_NOTIFY_NOW);
+			bond_set_slave_inactive_flags(slave,
+						      BOND_SLAVE_NOTIFY_NOW);
+
+			/* A slave has just been enslaved and has become
+			 * the current active slave.
+			 */
+			if (rtnl_dereference(bond->curr_active_slave))
+				RCU_INIT_POINTER(bond->current_arp_slave, NULL);
+			continue;
+
 		default:
 			slave_err(bond->dev, slave->dev,
 				  "impossible: link_new_state %d on slave\n",
@@ -2981,8 +2952,6 @@ static bool bond_ab_arp_probe(struct bonding *bond)
 		if (!curr_arp_slave)
 			return should_notify_rtnl;
 	}
-
-	bond_set_slave_inactive_flags(curr_arp_slave, BOND_SLAVE_NOTIFY_LATER);
 
 	bond_for_each_slave_rcu(bond, slave, iter) {
 		if (!found && !before && bond_slave_is_up(slave))
@@ -3296,78 +3265,39 @@ static inline u32 bond_eth_hash(struct sk_buff *skb)
 	return 0;
 }
 
-static bool bond_flow_ip(struct sk_buff *skb, struct flow_keys *fk,
-			 int *noff, int *proto, bool l34)
-{
-	const struct ipv6hdr *iph6;
-	const struct iphdr *iph;
-
-	if (skb->protocol == htons(ETH_P_IP)) {
-		if (unlikely(!pskb_may_pull(skb, *noff + sizeof(*iph))))
-			return false;
-		iph = (const struct iphdr *)(skb->data + *noff);
-		iph_to_flow_copy_v4addrs(fk, iph);
-		*noff += iph->ihl << 2;
-		if (!ip_is_fragment(iph))
-			*proto = iph->protocol;
-	} else if (skb->protocol == htons(ETH_P_IPV6)) {
-		if (unlikely(!pskb_may_pull(skb, *noff + sizeof(*iph6))))
-			return false;
-		iph6 = (const struct ipv6hdr *)(skb->data + *noff);
-		iph_to_flow_copy_v6addrs(fk, iph6);
-		*noff += sizeof(*iph6);
-		*proto = iph6->nexthdr;
-	} else {
-		return false;
-	}
-
-	if (l34 && *proto >= 0)
-		fk->ports.ports = skb_flow_get_ports(skb, *noff, *proto);
-
-	return true;
-}
-
 /* Extract the appropriate headers based on bond's xmit policy */
 static bool bond_flow_dissect(struct bonding *bond, struct sk_buff *skb,
 			      struct flow_keys *fk)
 {
-	bool l34 = bond->params.xmit_policy == BOND_XMIT_POLICY_LAYER34;
+	const struct ipv6hdr *iph6;
+	const struct iphdr *iph;
 	int noff, proto = -1;
 
-	if (bond->params.xmit_policy > BOND_XMIT_POLICY_LAYER23) {
-		memset(fk, 0, sizeof(*fk));
-		return __skb_flow_dissect(NULL, skb, &flow_keys_bonding,
-					  fk, NULL, 0, 0, 0, 0);
-	}
+	if (bond->params.xmit_policy > BOND_XMIT_POLICY_LAYER23)
+		return skb_flow_dissect_flow_keys(skb, fk, 0);
 
 	fk->ports.ports = 0;
-	memset(&fk->icmp, 0, sizeof(fk->icmp));
 	noff = skb_network_offset(skb);
-	if (!bond_flow_ip(skb, fk, &noff, &proto, l34))
+	if (skb->protocol == htons(ETH_P_IP)) {
+		if (unlikely(!pskb_may_pull(skb, noff + sizeof(*iph))))
+			return false;
+		iph = ip_hdr(skb);
+		iph_to_flow_copy_v4addrs(fk, iph);
+		noff += iph->ihl << 2;
+		if (!ip_is_fragment(iph))
+			proto = iph->protocol;
+	} else if (skb->protocol == htons(ETH_P_IPV6)) {
+		if (unlikely(!pskb_may_pull(skb, noff + sizeof(*iph6))))
+			return false;
+		iph6 = ipv6_hdr(skb);
+		iph_to_flow_copy_v6addrs(fk, iph6);
+		noff += sizeof(*iph6);
+		proto = iph6->nexthdr;
+	} else {
 		return false;
-
-	/* ICMP error packets contains at least 8 bytes of the header
-	 * of the packet which generated the error. Use this information
-	 * to correlate ICMP error packets within the same flow which
-	 * generated the error.
-	 */
-	if (proto == IPPROTO_ICMP || proto == IPPROTO_ICMPV6) {
-		skb_flow_get_icmp_tci(skb, &fk->icmp, skb->data,
-				      skb_transport_offset(skb),
-				      skb_headlen(skb));
-		if (proto == IPPROTO_ICMP) {
-			if (!icmp_is_err(fk->icmp.type))
-				return true;
-
-			noff += sizeof(struct icmphdr);
-		} else if (proto == IPPROTO_ICMPV6) {
-			if (!icmpv6_is_err(fk->icmp.type))
-				return true;
-
-			noff += sizeof(struct icmp6hdr);
-		}
-		return bond_flow_ip(skb, fk, &noff, &proto, l34);
 	}
+	if (bond->params.xmit_policy == BOND_XMIT_POLICY_LAYER34 && proto >= 0)
+		fk->ports.ports = skb_flow_get_ports(skb, noff, proto);
 
 	return true;
 }
@@ -3394,14 +3324,10 @@ u32 bond_xmit_hash(struct bonding *bond, struct sk_buff *skb)
 		return bond_eth_hash(skb);
 
 	if (bond->params.xmit_policy == BOND_XMIT_POLICY_LAYER23 ||
-	    bond->params.xmit_policy == BOND_XMIT_POLICY_ENCAP23) {
+	    bond->params.xmit_policy == BOND_XMIT_POLICY_ENCAP23)
 		hash = bond_eth_hash(skb);
-	} else {
-		if (flow.icmp.id)
-			memcpy(&hash, &flow.icmp, sizeof(hash));
-		else
-			memcpy(&hash, &flow.ports.ports, sizeof(hash));
-	}
+	else
+		hash = (__force u32)flow.ports.ports;
 	hash ^= (__force u32)flow_get_u32_dst(&flow) ^
 		(__force u32)flow_get_u32_src(&flow);
 	hash ^= (hash >> 16);
@@ -4264,8 +4190,7 @@ static inline int bond_slave_override(struct bonding *bond,
 
 
 static u16 bond_select_queue(struct net_device *dev, struct sk_buff *skb,
-			     struct net_device *sb_dev,
-			     select_queue_fallback_t fallback)
+			     struct net_device *sb_dev)
 {
 	/* This helper function exists to help dev_pick_tx get the correct
 	 * destination queue.  Using a helper function skips a call to
@@ -4337,13 +4262,23 @@ static netdev_tx_t bond_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	return ret;
 }
 
+static u32 bond_mode_bcast_speed(struct slave *slave, u32 speed)
+{
+	if (speed == 0 || speed == SPEED_UNKNOWN)
+		speed = slave->speed;
+	else
+		speed = min(speed, slave->speed);
+
+	return speed;
+}
+
 static int bond_ethtool_get_link_ksettings(struct net_device *bond_dev,
 					   struct ethtool_link_ksettings *cmd)
 {
 	struct bonding *bond = netdev_priv(bond_dev);
-	unsigned long speed = 0;
 	struct list_head *iter;
 	struct slave *slave;
+	u32 speed = 0;
 
 	cmd->base.duplex = DUPLEX_UNKNOWN;
 	cmd->base.port = PORT_OTHER;
@@ -4355,8 +4290,13 @@ static int bond_ethtool_get_link_ksettings(struct net_device *bond_dev,
 	 */
 	bond_for_each_slave(bond, slave, iter) {
 		if (bond_slave_can_tx(slave)) {
-			if (slave->speed != SPEED_UNKNOWN)
-				speed += slave->speed;
+			if (slave->speed != SPEED_UNKNOWN) {
+				if (BOND_MODE(bond) == BOND_MODE_BROADCAST)
+					speed = bond_mode_bcast_speed(slave,
+								      speed);
+				else
+					speed += slave->speed;
+			}
 			if (cmd->base.duplex == DUPLEX_UNKNOWN &&
 			    slave->duplex != DUPLEX_UNKNOWN)
 				cmd->base.duplex = slave->duplex;
@@ -4955,15 +4895,19 @@ int bond_create(struct net *net, const char *name)
 	bond_dev->rtnl_link_ops = &bond_link_ops;
 
 	res = register_netdevice(bond_dev);
+	if (res < 0) {
+		free_netdev(bond_dev);
+		rtnl_unlock();
+
+		return res;
+	}
 
 	netif_carrier_off(bond_dev);
 
 	bond_work_init_all(bond);
 
 	rtnl_unlock();
-	if (res < 0)
-		free_netdev(bond_dev);
-	return res;
+	return 0;
 }
 
 static int __net_init bond_net_init(struct net *net)
@@ -5030,10 +4974,6 @@ static int __init bonding_init(void)
 		if (res)
 			goto err;
 	}
-
-	skb_flow_dissector_init(&flow_keys_bonding,
-				flow_keys_bonding_keys,
-				ARRAY_SIZE(flow_keys_bonding_keys));
 
 	register_netdevice_notifier(&bond_netdev_notifier);
 out:

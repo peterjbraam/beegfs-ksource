@@ -1,22 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  *  Linux MegaRAID driver for SAS based RAID controllers
  *
  *  Copyright (c) 2003-2013  LSI Corporation
  *  Copyright (c) 2013-2016  Avago Technologies
  *  Copyright (c) 2016-2018  Broadcom Inc.
- *
- *  This program is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU General Public License
- *  as published by the Free Software Foundation; either version 2
- *  of the License, or (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
  *  FILE: megaraid_sas.h
  *
@@ -33,8 +21,8 @@
 /*
  * MegaRAID SAS Driver meta data
  */
-#define MEGASAS_VERSION				"07.714.04.00-rh1"
-#define MEGASAS_RELDATE				"Apr 14, 2020"
+#define MEGASAS_VERSION				"07.713.01.00-rc1"
+#define MEGASAS_RELDATE				"Dec 27, 2019"
 
 #define MEGASAS_MSIX_NAME_LEN			32
 
@@ -523,7 +511,7 @@ union MR_PROGRESS {
  */
 struct MR_PD_PROGRESS {
 	struct {
-#ifndef __BIG_ENDIAN_BITFIELD
+#ifndef MFI_BIG_ENDIAN
 		u32     rbld:1;
 		u32     patrol:1;
 		u32     clear:1;
@@ -549,7 +537,7 @@ struct MR_PD_PROGRESS {
 	};
 
 	struct {
-#ifndef __BIG_ENDIAN_BITFIELD
+#ifndef MFI_BIG_ENDIAN
 		u32     rbld:1;
 		u32     patrol:1;
 		u32     clear:1;

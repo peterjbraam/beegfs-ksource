@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Module signature checker
  *
  * Copyright (C) 2012 Red Hat, Inc. All Rights Reserved.
  * Written by David Howells (dhowells@redhat.com)
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public Licence
- * as published by the Free Software Foundation; either version
- * 2 of the Licence, or (at your option) any later version.
  */
 
 #include <linux/kernel.h>
@@ -25,7 +21,6 @@ int mod_verify_sig(const void *mod, struct load_info *info)
 {
 	struct module_signature ms;
 	size_t sig_len, modlen = info->len;
-	int err;
 	int ret;
 
 	pr_devel("==>%s(,%zu)\n", __func__, modlen);
@@ -43,25 +38,15 @@ int mod_verify_sig(const void *mod, struct load_info *info)
 	modlen -= sig_len + sizeof(ms);
 	info->len = modlen;
 
-	/*
-	 * Check signature using built-in trusted keys and, if configured,
-	 * secondary trusted keys.
-	 */
-	err =  verify_pkcs7_signature(mod, modlen, mod + modlen, sig_len,
+	ret = verify_pkcs7_signature(mod, modlen, mod + modlen, sig_len,
 				      VERIFY_USE_SECONDARY_KEYRING,
 				      VERIFYING_MODULE_SIGNATURE,
 				      NULL, NULL);
-	if (IS_ENABLED(CONFIG_INTEGRITY_PLATFORM_KEYRING) && err) {
-		/*
-		 * Check signature using platform trusted keys. This does
-		 * not consider the built-in keys, so must be done separately
-		 * from above, if possible and necessary.
-		 */
-		err =  verify_pkcs7_signature(mod, modlen, mod + modlen,
-					      sig_len,
-					      VERIFY_USE_PLATFORM_KEYRING,
-					      VERIFYING_MODULE_SIGNATURE,
-					      NULL, NULL);
+	if (ret == -ENOKEY && IS_ENABLED(CONFIG_INTEGRITY_PLATFORM_KEYRING)) {
+		ret = verify_pkcs7_signature(mod, modlen, mod + modlen, sig_len,
+				VERIFY_USE_PLATFORM_KEYRING,
+				VERIFYING_MODULE_SIGNATURE,
+				NULL, NULL);
 	}
-	return err;
+	return ret;
 }

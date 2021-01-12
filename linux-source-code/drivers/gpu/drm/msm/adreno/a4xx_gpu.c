@@ -1,14 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* Copyright (c) 2014 The Linux Foundation. All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 and
- * only version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
  */
 #include "a4xx_gpu.h"
 #ifdef CONFIG_MSM_OCMEM
@@ -274,6 +265,16 @@ static int a4xx_hw_init(struct msm_gpu *gpu)
 	if (ret)
 		return ret;
 
+	/*
+	 * Use the default ringbuffer size and block size but disable the RPTR
+	 * shadow
+	 */
+	gpu_write(gpu, REG_A4XX_CP_RB_CNTL,
+		MSM_GPU_RB_CNTL_DEFAULT | AXXX_CP_RB_CNTL_NO_UPDATE);
+
+	/* Set the ringbuffer address */
+	gpu_write(gpu, REG_A4XX_CP_RB_BASE, lower_32_bits(gpu->rb[0]->iova));
+
 	/* Load PM4: */
 	ptr = (uint32_t *)(adreno_gpu->fw[ADRENO_FW_PM4]->data);
 	len = adreno_gpu->fw[ADRENO_FW_PM4]->size / 4;
@@ -455,15 +456,19 @@ static const unsigned int a4xx_registers[] = {
 	~0 /* sentinel */
 };
 
-#ifdef CONFIG_DEBUG_FS
-static void a4xx_show(struct msm_gpu *gpu, struct seq_file *m)
+static struct msm_gpu_state *a4xx_gpu_state_get(struct msm_gpu *gpu)
 {
-	seq_printf(m, "status:   %08x\n",
-			gpu_read(gpu, REG_A4XX_RBBM_STATUS));
-	adreno_show(gpu, m);
+	struct msm_gpu_state *state = kzalloc(sizeof(*state), GFP_KERNEL);
 
+	if (!state)
+		return ERR_PTR(-ENOMEM);
+
+	adreno_gpu_state_get(gpu, state);
+
+	state->rbbm_status = gpu_read(gpu, REG_A4XX_RBBM_STATUS);
+
+	return state;
 }
-#endif
 
 /* Register offset defines for A4XX, in order of enum adreno_regs */
 static const unsigned int a4xx_register_offsets[REG_ADRENO_REGISTER_MAX] = {
@@ -538,9 +543,11 @@ static const struct adreno_gpu_funcs funcs = {
 		.active_ring = adreno_active_ring,
 		.irq = a4xx_irq,
 		.destroy = a4xx_destroy,
-#ifdef CONFIG_DEBUG_FS
-		.show = a4xx_show,
+#if defined(CONFIG_DEBUG_FS) || defined(CONFIG_DEV_COREDUMP)
+		.show = adreno_show,
 #endif
+		.gpu_state_get = a4xx_gpu_state_get,
+		.gpu_state_put = adreno_gpu_state_put,
 	},
 	.get_timestamp = a4xx_get_timestamp,
 };
@@ -555,7 +562,7 @@ struct msm_gpu *a4xx_gpu_init(struct drm_device *dev)
 	int ret;
 
 	if (!pdev) {
-		dev_err(dev->dev, "no a4xx device\n");
+		DRM_DEV_ERROR(dev->dev, "no a4xx device\n");
 		ret = -ENXIO;
 		goto fail;
 	}
@@ -602,7 +609,7 @@ struct msm_gpu *a4xx_gpu_init(struct drm_device *dev)
 		 * to not be possible to restrict access, then we must
 		 * implement a cmdstream validator.
 		 */
-		dev_err(dev->dev, "No memory protection without IOMMU\n");
+		DRM_DEV_ERROR(dev->dev, "No memory protection without IOMMU\n");
 		ret = -ENXIO;
 		goto fail;
 	}

@@ -45,7 +45,6 @@ int topology_cpu_init(struct cpu *);
 int topology_set_cpu_management(int fc);
 void topology_schedule_update(void);
 void store_topology(struct sysinfo_15_1_x *info);
-void update_cpu_masks(void);
 void topology_expect_change(void);
 const struct cpumask *cpu_coregroup_mask(int cpu);
 
@@ -55,7 +54,6 @@ static inline void topology_init_early(void) { }
 static inline void topology_schedule_update(void) { }
 static inline int topology_cpu_init(struct cpu *cpu) { return 0; }
 static inline int topology_cpu_dedicated(int cpu_nr) { return 0; }
-static inline void update_cpu_masks(void) { }
 static inline void topology_expect_change(void) { }
 
 #endif /* CONFIG_SCHED_TOPOLOGY */
@@ -70,11 +68,8 @@ static inline void topology_expect_change(void) { }
 
 #ifdef CONFIG_NUMA
 
-#define cpu_to_node cpu_to_node
-static inline int cpu_to_node(int cpu)
-{
-	return cpu_topology[cpu].node_id;
-}
+extern int __cpu_to_node(int cpu);
+#define cpu_to_node __cpu_to_node
 
 /* Returns a pointer to the cpumask of CPUs on node 'node'. */
 #define cpumask_of_node cpumask_of_node
@@ -84,8 +79,6 @@ static inline const struct cpumask *cpumask_of_node(int node)
 }
 
 #define pcibus_to_node(bus) __pcibus_to_node(bus)
-
-#define node_distance(a, b) __node_distance(a, b)
 
 #else /* !CONFIG_NUMA */
 

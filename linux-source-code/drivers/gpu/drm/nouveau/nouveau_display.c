@@ -355,7 +355,7 @@ nouveau_display_hpd_work(struct work_struct *work)
 	drm_helper_hpd_irq_event(drm->dev);
 
 	pm_runtime_mark_last_busy(drm->dev->dev);
-	pm_runtime_put_autosuspend(drm->dev->dev);
+	pm_runtime_put_sync(drm->dev->dev);
 }
 
 #ifdef CONFIG_ACPI
@@ -368,34 +368,34 @@ nouveau_display_acpi_ntfy(struct notifier_block *nb, unsigned long val,
 	struct acpi_bus_event *info = data;
 	int ret;
 
-	if (strcmp(info->device_class, ACPI_VIDEO_CLASS) ||
-	    info->type != ACPI_VIDEO_NOTIFY_PROBE)
-		return NOTIFY_DONE;
+	if (!strcmp(info->device_class, ACPI_VIDEO_CLASS)) {
+		if (info->type == ACPI_VIDEO_NOTIFY_PROBE) {
+			ret = pm_runtime_get(drm->dev->dev);
+			if (ret == 1 || ret == -EACCES) {
+				/* If the GPU is already awake, or in a state
+				 * where we can't wake it up, it can handle
+				 * it's own hotplug events.
+				 */
+				pm_runtime_put_autosuspend(drm->dev->dev);
+			} else if (ret == 0) {
+				/* This may be the only indication we receive
+				 * of a connector hotplug on a runtime
+				 * suspended GPU, schedule hpd_work to check.
+				 */
+				NV_DEBUG(drm, "ACPI requested connector reprobe\n");
+				schedule_work(&drm->hpd_work);
+				pm_runtime_put_noidle(drm->dev->dev);
+			} else {
+				NV_WARN(drm, "Dropped ACPI reprobe event due to RPM error: %d\n",
+					ret);
+			}
 
-	ret = pm_runtime_get(drm->dev->dev);
-	if (ret == 1 || ret == -EACCES || ret == -EINPROGRESS) {
-		/* If the GPU is already awake, is waking up, or is in a state
-		 * where we can't wake it up, it can handle its own hotplug
-		 * events.
-		 */
-		pm_runtime_put_autosuspend(drm->dev->dev);
-	} else if (ret == 0) {
-		/* This may be the only indication we receive
-		 * of a connector hotplug on a runtime
-		 * suspended GPU, schedule hpd_work to check.
-		 */
-		NV_DEBUG(drm, "ACPI requested connector reprobe\n");
-		schedule_work(&drm->hpd_work);
-		pm_runtime_put_noidle(drm->dev->dev);
-	} else {
-		NV_WARN(drm, "Dropped ACPI reprobe event due to RPM error: %d\n",
-			ret);
-		pm_runtime_mark_last_busy(drm->dev->dev);
-		pm_runtime_put_autosuspend(drm->dev->dev);
+			/* acpi-video should not generate keypresses for this */
+			return NOTIFY_BAD;
+		}
 	}
 
-	/* acpi-video should not generate keypresses for this */
-	return NOTIFY_BAD;
+	return NOTIFY_DONE;
 }
 #endif
 
@@ -407,17 +407,6 @@ nouveau_display_init(struct drm_device *dev, bool resume, bool runtime)
 	struct drm_connector_list_iter conn_iter;
 	int ret;
 
-	/*
-	 * Enable hotplug interrupts (done as early as possible, since we need
-	 * them for MST)
-	 */
-	drm_connector_list_iter_begin(dev, &conn_iter);
-	nouveau_for_each_non_mst_connector_iter(connector, &conn_iter) {
-		struct nouveau_connector *conn = nouveau_connector(connector);
-		nvif_notify_get(&conn->hpd);
-	}
-	drm_connector_list_iter_end(&conn_iter);
-
 	ret = disp->init(dev, resume, runtime);
 	if (ret)
 		return ret;
@@ -426,6 +415,14 @@ nouveau_display_init(struct drm_device *dev, bool resume, bool runtime)
 	 * support
 	 */
 	drm_kms_helper_poll_enable(dev);
+
+	/* enable hotplug interrupts */
+	drm_connector_list_iter_begin(dev, &conn_iter);
+	nouveau_for_each_non_mst_connector_iter(connector, &conn_iter) {
+		struct nouveau_connector *conn = nouveau_connector(connector);
+		nvif_notify_get(&conn->hpd);
+	}
+	drm_connector_list_iter_end(&conn_iter);
 
 	return ret;
 }

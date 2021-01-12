@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Block rq-qos base io controller
  *
@@ -117,9 +118,22 @@ struct child_latency_info {
 	atomic_t scale_cookie;
 };
 
+struct percentile_stats {
+	u64 total;
+	u64 missed;
+};
+
+struct latency_stat {
+	union {
+		struct percentile_stats ps;
+		struct blk_rq_stat rqs;
+	};
+};
+
 struct iolatency_grp {
 	struct blkg_policy_data pd;
-	struct blk_rq_stat __percpu *stats;
+	struct latency_stat __percpu *stats;
+	struct latency_stat cur_stat;
 	struct blk_iolatency *blkiolat;
 	struct rq_depth rq_depth;
 	struct rq_wait rq_wait;
@@ -134,6 +148,7 @@ struct iolatency_grp {
 	/* Our current number of IO's for the last summation. */
 	u64 nr_samples;
 
+	bool ssd;
 	struct child_latency_info child_lat;
 };
 
@@ -172,6 +187,82 @@ static inline struct iolatency_grp *blkg_to_lat(struct blkcg_gq *blkg)
 static inline struct blkcg_gq *lat_to_blkg(struct iolatency_grp *iolat)
 {
 	return pd_to_blkg(&iolat->pd);
+}
+
+static inline void latency_stat_init(struct iolatency_grp *iolat,
+				     struct latency_stat *stat)
+{
+	if (iolat->ssd) {
+		stat->ps.total = 0;
+		stat->ps.missed = 0;
+	} else
+		blk_rq_stat_init(&stat->rqs);
+}
+
+static inline void latency_stat_sum(struct iolatency_grp *iolat,
+				    struct latency_stat *sum,
+				    struct latency_stat *stat)
+{
+	if (iolat->ssd) {
+		sum->ps.total += stat->ps.total;
+		sum->ps.missed += stat->ps.missed;
+	} else
+		blk_rq_stat_sum(&sum->rqs, &stat->rqs);
+}
+
+static inline void latency_stat_record_time(struct iolatency_grp *iolat,
+					    u64 req_time)
+{
+	struct latency_stat *stat = get_cpu_ptr(iolat->stats);
+	if (iolat->ssd) {
+		if (req_time >= iolat->min_lat_nsec)
+			stat->ps.missed++;
+		stat->ps.total++;
+	} else
+		blk_rq_stat_add(&stat->rqs, req_time);
+	put_cpu_ptr(stat);
+}
+
+static inline bool latency_sum_ok(struct iolatency_grp *iolat,
+				  struct latency_stat *stat)
+{
+	if (iolat->ssd) {
+		u64 thresh = div64_u64(stat->ps.total, 10);
+		thresh = max(thresh, 1ULL);
+		return stat->ps.missed < thresh;
+	}
+	return stat->rqs.mean <= iolat->min_lat_nsec;
+}
+
+static inline u64 latency_stat_samples(struct iolatency_grp *iolat,
+				       struct latency_stat *stat)
+{
+	if (iolat->ssd)
+		return stat->ps.total;
+	return stat->rqs.nr_samples;
+}
+
+static inline void iolat_update_total_lat_avg(struct iolatency_grp *iolat,
+					      struct latency_stat *stat)
+{
+	int exp_idx;
+
+	if (iolat->ssd)
+		return;
+
+	/*
+	 * calc_load() takes in a number stored in fixed point representation.
+	 * Because we are using this for IO time in ns, the values stored
+	 * are significantly larger than the FIXED_1 denominator (2048).
+	 * Therefore, rounding errors in the calculation are negligible and
+	 * can be ignored.
+	 */
+	exp_idx = min_t(int, BLKIOLATENCY_NR_EXP_FACTORS - 1,
+			div64_u64(iolat->cur_win_nsec,
+				  BLKIOLATENCY_EXP_BUCKET_SIZE));
+	iolat->lat_avg = calc_load(iolat->lat_avg,
+				   iolatency_exp_factors[exp_idx],
+				   stat->rqs.mean);
 }
 
 static void iolat_cleanup_cb(struct rq_wait *rqw, void *private_data)
@@ -233,7 +324,7 @@ static void scale_cookie_change(struct blk_iolatency *blkiolat,
 				struct child_latency_info *lat_info,
 				bool up)
 {
-	unsigned long qd = blk_queue_depth(blkiolat->rqos.q);
+	unsigned long qd = blkiolat->rqos.q->nr_requests;
 	unsigned long scale = scale_amount(qd, up);
 	unsigned long old = atomic_read(&lat_info->scale_cookie);
 	unsigned long max_scale = qd << 1;
@@ -273,10 +364,9 @@ static void scale_cookie_change(struct blk_iolatency *blkiolat,
  */
 static void scale_change(struct iolatency_grp *iolat, bool up)
 {
-	unsigned long qd = blk_queue_depth(iolat->blkiolat->rqos.q);
+	unsigned long qd = iolat->blkiolat->rqos.q->nr_requests;
 	unsigned long scale = scale_amount(qd, up);
 	unsigned long old = iolat->rq_depth.max_depth;
-	bool changed = false;
 
 	if (old > qd)
 		old = qd;
@@ -286,15 +376,13 @@ static void scale_change(struct iolatency_grp *iolat, bool up)
 			return;
 
 		if (old < qd) {
-			changed = true;
 			old += scale;
 			old = min(old, qd);
 			iolat->rq_depth.max_depth = old;
 			wake_up_all(&iolat->rq_wait.wait);
 		}
-	} else if (old > 1) {
+	} else {
 		old >>= 1;
-		changed = true;
 		iolat->rq_depth.max_depth = max(old, 1UL);
 	}
 }
@@ -347,7 +435,7 @@ static void check_scale_change(struct iolatency_grp *iolat)
 		 * scale down event.
 		 */
 		samples_thresh = lat_info->nr_samples * 5;
-		samples_thresh = div64_u64(samples_thresh, 100);
+		samples_thresh = max(1ULL, div64_u64(samples_thresh, 100));
 		if (iolat->nr_samples <= samples_thresh)
 			return;
 	}
@@ -398,7 +486,6 @@ static void iolatency_record_time(struct iolatency_grp *iolat,
 				  struct bio_issue *issue, u64 now,
 				  bool issue_as_root)
 {
-	struct blk_rq_stat *rq_stat;
 	u64 start = bio_issue_time(issue);
 	u64 req_time;
 
@@ -424,9 +511,7 @@ static void iolatency_record_time(struct iolatency_grp *iolat,
 		return;
 	}
 
-	rq_stat = get_cpu_ptr(iolat->stats);
-	blk_rq_stat_add(rq_stat, req_time);
-	put_cpu_ptr(rq_stat);
+	latency_stat_record_time(iolat, req_time);
 }
 
 #define BLKIOLATENCY_MIN_ADJUST_TIME (500 * NSEC_PER_MSEC)
@@ -437,17 +522,17 @@ static void iolatency_check_latencies(struct iolatency_grp *iolat, u64 now)
 	struct blkcg_gq *blkg = lat_to_blkg(iolat);
 	struct iolatency_grp *parent;
 	struct child_latency_info *lat_info;
-	struct blk_rq_stat stat;
+	struct latency_stat stat;
 	unsigned long flags;
-	int cpu, exp_idx;
+	int cpu;
 
-	blk_rq_stat_init(&stat);
+	latency_stat_init(iolat, &stat);
 	preempt_disable();
 	for_each_online_cpu(cpu) {
-		struct blk_rq_stat *s;
+		struct latency_stat *s;
 		s = per_cpu_ptr(iolat->stats, cpu);
-		blk_rq_stat_sum(&stat, s);
-		blk_rq_stat_init(s);
+		latency_stat_sum(iolat, &stat, s);
+		latency_stat_init(iolat, s);
 	}
 	preempt_enable();
 
@@ -457,43 +542,36 @@ static void iolatency_check_latencies(struct iolatency_grp *iolat, u64 now)
 
 	lat_info = &parent->child_lat;
 
-	/*
-	 * calc_load() takes in a number stored in fixed point representation.
-	 * Because we are using this for IO time in ns, the values stored
-	 * are significantly larger than the FIXED_1 denominator (2048).
-	 * Therefore, rounding errors in the calculation are negligible and
-	 * can be ignored.
-	 */
-	exp_idx = min_t(int, BLKIOLATENCY_NR_EXP_FACTORS - 1,
-			div64_u64(iolat->cur_win_nsec,
-				  BLKIOLATENCY_EXP_BUCKET_SIZE));
-	iolat->lat_avg = calc_load(iolat->lat_avg,
-				   iolatency_exp_factors[exp_idx],
-				   stat.mean);
+	iolat_update_total_lat_avg(iolat, &stat);
 
 	/* Everything is ok and we don't need to adjust the scale. */
-	if (stat.mean <= iolat->min_lat_nsec &&
+	if (latency_sum_ok(iolat, &stat) &&
 	    atomic_read(&lat_info->scale_cookie) == DEFAULT_SCALE_COOKIE)
 		return;
 
 	/* Somebody beat us to the punch, just bail. */
 	spin_lock_irqsave(&lat_info->lock, flags);
+
+	latency_stat_sum(iolat, &iolat->cur_stat, &stat);
 	lat_info->nr_samples -= iolat->nr_samples;
-	lat_info->nr_samples += stat.nr_samples;
-	iolat->nr_samples = stat.nr_samples;
+	lat_info->nr_samples += latency_stat_samples(iolat, &iolat->cur_stat);
+	iolat->nr_samples = latency_stat_samples(iolat, &iolat->cur_stat);
 
 	if ((lat_info->last_scale_event >= now ||
-	    now - lat_info->last_scale_event < BLKIOLATENCY_MIN_ADJUST_TIME) &&
-	    lat_info->scale_lat <= iolat->min_lat_nsec)
+	    now - lat_info->last_scale_event < BLKIOLATENCY_MIN_ADJUST_TIME))
 		goto out;
 
-	if (stat.mean <= iolat->min_lat_nsec &&
-	    stat.nr_samples >= BLKIOLATENCY_MIN_GOOD_SAMPLES) {
+	if (latency_sum_ok(iolat, &iolat->cur_stat) &&
+	    latency_sum_ok(iolat, &stat)) {
+		if (latency_stat_samples(iolat, &iolat->cur_stat) <
+		    BLKIOLATENCY_MIN_GOOD_SAMPLES)
+			goto out;
 		if (lat_info->scale_grp == iolat) {
 			lat_info->last_scale_event = now;
 			scale_cookie_change(iolat->blkiolat, lat_info, true);
 		}
-	} else if (stat.mean > iolat->min_lat_nsec) {
+	} else if (lat_info->scale_lat == 0 ||
+		   lat_info->scale_lat >= iolat->min_lat_nsec) {
 		lat_info->last_scale_event = now;
 		if (!lat_info->scale_grp ||
 		    lat_info->scale_lat > iolat->min_lat_nsec) {
@@ -502,6 +580,7 @@ static void iolatency_check_latencies(struct iolatency_grp *iolat, u64 now)
 		}
 		scale_cookie_change(iolat->blkiolat, lat_info, false);
 	}
+	latency_stat_init(iolat, &iolat->cur_stat);
 out:
 	spin_unlock_irqrestore(&lat_info->lock, flags);
 }
@@ -710,7 +789,6 @@ static ssize_t iolatency_set_limit(struct kernfs_open_file *of, char *buf,
 {
 	struct blkcg *blkcg = css_to_blkcg(of_css(of));
 	struct blkcg_gq *blkg;
-	struct blk_iolatency *blkiolat;
 	struct blkg_conf_ctx ctx;
 	struct iolatency_grp *iolat;
 	char *p, *tok;
@@ -724,7 +802,6 @@ static ssize_t iolatency_set_limit(struct kernfs_open_file *of, char *buf,
 		return ret;
 
 	iolat = blkg_to_lat(ctx.blkg);
-	blkiolat = iolat->blkiolat;
 	p = ctx.body;
 
 	ret = -EINVAL;
@@ -808,13 +885,46 @@ static int iolatency_print_limit(struct seq_file *sf, void *v)
 	return 0;
 }
 
+static size_t iolatency_ssd_stat(struct iolatency_grp *iolat, char *buf,
+				 size_t size)
+{
+	struct latency_stat stat;
+	int cpu;
+
+	latency_stat_init(iolat, &stat);
+	preempt_disable();
+	for_each_online_cpu(cpu) {
+		struct latency_stat *s;
+		s = per_cpu_ptr(iolat->stats, cpu);
+		latency_stat_sum(iolat, &stat, s);
+	}
+	preempt_enable();
+
+	if (iolat->rq_depth.max_depth == UINT_MAX)
+		return scnprintf(buf, size, " missed=%llu total=%llu depth=max",
+				 (unsigned long long)stat.ps.missed,
+				 (unsigned long long)stat.ps.total);
+	return scnprintf(buf, size, " missed=%llu total=%llu depth=%u",
+			 (unsigned long long)stat.ps.missed,
+			 (unsigned long long)stat.ps.total,
+			 iolat->rq_depth.max_depth);
+}
+
 static size_t iolatency_pd_stat(struct blkg_policy_data *pd, char *buf,
 				size_t size)
 {
 	struct iolatency_grp *iolat = pd_to_lat(pd);
-	unsigned long long avg_lat = div64_u64(iolat->lat_avg, NSEC_PER_USEC);
-	unsigned long long cur_win = div64_u64(iolat->cur_win_nsec, NSEC_PER_MSEC);
+	unsigned long long avg_lat;
+	unsigned long long cur_win;
 
+	if (!blkcg_debug_stats)
+		return 0;
+
+	if (iolat->ssd)
+		return iolatency_ssd_stat(iolat, buf, size);
+
+	avg_lat = div64_u64(iolat->lat_avg, NSEC_PER_USEC);
+	cur_win = div64_u64(iolat->cur_win_nsec, NSEC_PER_MSEC);
 	if (iolat->rq_depth.max_depth == UINT_MAX)
 		return scnprintf(buf, size, " depth=max avg_lat=%llu win=%llu",
 				 avg_lat, cur_win);
@@ -833,8 +943,8 @@ static struct blkg_policy_data *iolatency_pd_alloc(gfp_t gfp,
 	iolat = kzalloc_node(sizeof(*iolat), gfp, q->node);
 	if (!iolat)
 		return NULL;
-	iolat->stats = __alloc_percpu_gfp(sizeof(struct blk_rq_stat),
-				       __alignof__(struct blk_rq_stat), gfp);
+	iolat->stats = __alloc_percpu_gfp(sizeof(struct latency_stat),
+				       __alignof__(struct latency_stat), gfp);
 	if (!iolat->stats) {
 		kfree(iolat);
 		return NULL;
@@ -851,15 +961,21 @@ static void iolatency_pd_init(struct blkg_policy_data *pd)
 	u64 now = ktime_to_ns(ktime_get());
 	int cpu;
 
+	if (blk_queue_nonrot(blkg->q))
+		iolat->ssd = true;
+	else
+		iolat->ssd = false;
+
 	for_each_possible_cpu(cpu) {
-		struct blk_rq_stat *stat;
+		struct latency_stat *stat;
 		stat = per_cpu_ptr(iolat->stats, cpu);
-		blk_rq_stat_init(stat);
+		latency_stat_init(iolat, stat);
 	}
 
+	latency_stat_init(iolat, &iolat->cur_stat);
 	rq_wait_init(&iolat->rq_wait);
 	spin_lock_init(&iolat->child_lat.lock);
-	iolat->rq_depth.queue_depth = blk_queue_depth(blkg->q);
+	iolat->rq_depth.queue_depth = blkg->q->nr_requests;
 	iolat->rq_depth.max_depth = UINT_MAX;
 	iolat->rq_depth.default_depth = iolat->rq_depth.queue_depth;
 	iolat->blkiolat = blkiolat;

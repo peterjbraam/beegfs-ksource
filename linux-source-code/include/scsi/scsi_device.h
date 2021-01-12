@@ -9,8 +9,6 @@
 #include <scsi/scsi.h>
 #include <linux/atomic.h>
 
-#include <linux/rh_kabi.h>
-
 struct device;
 struct request_queue;
 struct scsi_cmnd;
@@ -202,9 +200,6 @@ struct scsi_device {
 	unsigned lun_in_cdb:1;		/* Store LUN bits in CDB[1] */
 	unsigned unmap_limit_for_ws:1;	/* Use the UNMAP limit for WRITE SAME */
 
-	RH_KABI_FILL_HOLE(unsigned set_dbd_for_ms:1) /* Set "DBD" field in mode sense */
-	RH_KABI_FILL_HOLE(unsigned offline_already:1) /* Device offline message logged */
-
 	atomic_t disk_events_disable_depth; /* disable depth for disk events */
 
 	DECLARE_BITMAP(supported_events, SDEV_EVT_MAXBITS); /* supported events */
@@ -232,19 +227,6 @@ struct scsi_device {
 	struct mutex		state_mutex;
 	enum scsi_device_state sdev_state;
 	struct task_struct	*quiesced_by;
-
-	/* FOR RH USE ONLY
-	 *
-	 * The following padding has been inserted before ABI freeze to
-	 * allow extending the structure while preserving ABI.
-	 */
-	RH_KABI_USE(1, struct scsi_vpd __rcu *vpd_pg0)
-	RH_KABI_USE(2, struct scsi_vpd __rcu *vpd_pg89)
-	RH_KABI_RESERVE(3)
-	RH_KABI_RESERVE(4)
-	RH_KABI_RESERVE(5)
-	RH_KABI_RESERVE(6)
-
 	unsigned long		sdev_data[0];
 } __attribute__((aligned(sizeof(unsigned long))));
 
@@ -329,17 +311,6 @@ struct scsi_target {
 	char			scsi_level;
 	enum scsi_target_state	state;
 	void 			*hostdata; /* available to low-level driver */
-
-	/* FOR RH USE ONLY
-	 *
-	 * The following padding has been inserted before ABI freeze to
-	 * allow extending the structure while preserving ABI.
-	 */
-	RH_KABI_RESERVE(1)
-	RH_KABI_RESERVE(2)
-	RH_KABI_RESERVE(3)
-	RH_KABI_RESERVE(4)
-
 	unsigned long		starget_data[0]; /* for the transport */
 	/* starget_data must be the last element!!!! */
 } __attribute__((aligned(sizeof(unsigned long))));

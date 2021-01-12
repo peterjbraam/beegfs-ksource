@@ -1,23 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* audit.c -- Auditing support
  * Gateway between the kernel (e.g., selinux) and the user-space audit daemon.
  * System-call specific features have moved to auditsc.c
  *
  * Copyright 2003-2007 Red Hat Inc., Durham, North Carolina.
  * All Rights Reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  *
  * Written by Rickard E. (Rik) Faith <faith@redhat.com>
  *
@@ -115,13 +102,12 @@ struct audit_net {
  * This struct is RCU protected; you must either hold the RCU lock for reading
  * or the associated spinlock for writing.
  */
-struct auditd_connection {
+static struct auditd_connection {
 	struct pid *pid;
 	u32 portid;
 	struct net *net;
 	struct rcu_head rcu;
-};
-static struct auditd_connection __rcu *auditd_conn;
+} *auditd_conn = NULL;
 static DEFINE_SPINLOCK(auditd_conn_lock);
 
 /* If audit_rate_limit is non-zero, limit the rate of sending audit records
@@ -844,7 +830,7 @@ static int kauditd_thread(void *dummy)
 		rc = kauditd_send_queue(sk, portid,
 					&audit_hold_queue, UNICAST_RETRIES,
 					NULL, kauditd_rehold_skb);
-		if (rc < 0) {
+		if (ac && rc < 0) {
 			sk = NULL;
 			auditd_reset(ac);
 			goto main_queue;
@@ -854,7 +840,7 @@ static int kauditd_thread(void *dummy)
 		rc = kauditd_send_queue(sk, portid,
 					&audit_retry_queue, UNICAST_RETRIES,
 					NULL, kauditd_hold_skb);
-		if (rc < 0) {
+		if (ac && rc < 0) {
 			sk = NULL;
 			auditd_reset(ac);
 			goto main_queue;
@@ -1546,60 +1532,20 @@ static void audit_receive(struct sk_buff  *skb)
 	audit_ctl_unlock();
 }
 
-/* Log information about who is connecting to the audit multicast socket */
-static void audit_log_multicast(int group, const char *op, int err)
-{
-	const struct cred *cred;
-	struct tty_struct *tty;
-	char comm[sizeof(current->comm)];
-	struct audit_buffer *ab;
-
-	if (!audit_enabled)
-		return;
-
-	ab = audit_log_start(audit_context(), GFP_KERNEL, AUDIT_EVENT_LISTENER);
-	if (!ab)
-		return;
-
-	cred = current_cred();
-	tty = audit_get_tty();
-	audit_log_format(ab, "pid=%u uid=%u auid=%u tty=%s ses=%u",
-			 task_pid_nr(current),
-			 from_kuid(&init_user_ns, cred->uid),
-			 from_kuid(&init_user_ns, audit_get_loginuid(current)),
-			 tty ? tty_name(tty) : "(none)",
-			 audit_get_sessionid(current));
-	audit_put_tty(tty);
-	audit_log_task_context(ab); /* subj= */
-	audit_log_format(ab, " comm=");
-	audit_log_untrustedstring(ab, get_task_comm(comm, current));
-	audit_log_d_path_exe(ab, current->mm); /* exe= */
-	audit_log_format(ab, " nl-mcgrp=%d op=%s res=%d", group, op, !err);
-	audit_log_end(ab);
-}
-
 /* Run custom bind function on netlink socket group connect or bind requests. */
-static int audit_multicast_bind(struct net *net, int group)
+static int audit_bind(struct net *net, int group)
 {
-	int err = 0;
-
 	if (!capable(CAP_AUDIT_READ))
-		err = -EPERM;
-	audit_log_multicast(group, "connect", err);
-	return err;
-}
+		return -EPERM;
 
-static void audit_multicast_unbind(struct net *net, int group)
-{
-	audit_log_multicast(group, "disconnect", 0);
+	return 0;
 }
 
 static int __net_init audit_net_init(struct net *net)
 {
 	struct netlink_kernel_cfg cfg = {
 		.input	= audit_receive,
-		.bind	= audit_multicast_bind,
-		.unbind	= audit_multicast_unbind,
+		.bind	= audit_bind,
 		.flags	= NL_CFG_F_NONROOT_RECV,
 		.groups	= AUDIT_NLGRP_MAX,
 	};
@@ -1864,7 +1810,6 @@ struct audit_buffer *audit_log_start(struct audit_context *ctx, gfp_t gfp_mask,
 	}
 
 	audit_get_stamp(ab->ctx, &t, &serial);
-	audit_clear_dummy(ab->ctx);
 	audit_log_format(ab, "audit(%llu.%03lu:%u): ",
 			 (unsigned long long)t.tv_sec, t.tv_nsec/1000000, serial);
 
@@ -2223,19 +2168,18 @@ void audit_log_task_info(struct audit_buffer *ab)
 EXPORT_SYMBOL(audit_log_task_info);
 
 /**
- * audit_log_path_denied - report a path restriction denial
- * @type: audit message type (AUDIT_ANOM_LINK, AUDIT_ANOM_CREAT, etc)
- * @operation: specific operation name
+ * audit_log_link_denied - report a link restriction denial
+ * @operation: specific link operation
  */
-void audit_log_path_denied(int type, const char *operation)
+void audit_log_link_denied(const char *operation)
 {
 	struct audit_buffer *ab;
 
 	if (!audit_enabled || audit_dummy_context())
 		return;
 
-	/* Generate log with subject, operation, outcome. */
-	ab = audit_log_start(audit_context(), GFP_KERNEL, type);
+	/* Generate AUDIT_ANOM_LINK with subject, operation, outcome. */
+	ab = audit_log_start(audit_context(), GFP_KERNEL, AUDIT_ANOM_LINK);
 	if (!ab)
 		return;
 	audit_log_format(ab, "op=%s", operation);

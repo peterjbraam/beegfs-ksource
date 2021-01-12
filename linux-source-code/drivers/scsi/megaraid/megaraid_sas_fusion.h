@@ -1,22 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  *  Linux MegaRAID driver for SAS based RAID controllers
  *
  *  Copyright (c) 2009-2013  LSI Corporation
  *  Copyright (c) 2013-2016  Avago Technologies
  *  Copyright (c) 2016-2018  Broadcom Inc.
- *
- *  This program is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU General Public License
- *  as published by the Free Software Foundation; either version 2
- *  of the License, or (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
  *  FILE: megaraid_sas_fusion.h
  *
@@ -786,7 +774,7 @@ struct MR_SPAN_BLOCK_INFO {
 struct MR_CPU_AFFINITY_MASK {
 	union {
 		struct {
-#ifndef __BIG_ENDIAN_BITFIELD
+#ifndef MFI_BIG_ENDIAN
 		u8 hw_path:1;
 		u8 cpu0:1;
 		u8 cpu1:1;
@@ -878,7 +866,7 @@ struct MR_LD_RAID {
 	__le16     seqNum;
 
 struct {
-#ifndef __BIG_ENDIAN_BITFIELD
+#ifndef MFI_BIG_ENDIAN
 	u32 ldSyncRequired:1;
 	u32 regTypeReqOnReadIsValid:1;
 	u32 isEPD:1;
@@ -901,7 +889,7 @@ struct {
 	/* 0x30 - 0x33, Logical block size for the LD */
 	u32 logical_block_length;
 	struct {
-#ifndef __BIG_ENDIAN_BITFIELD
+#ifndef MFI_BIG_ENDIAN
 	/* 0x34, P_I_EXPONENT from READ CAPACITY 16 */
 	u32 ld_pi_exp:4;
 	/* 0x34, LOGICAL BLOCKS PER PHYSICAL

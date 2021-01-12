@@ -26,19 +26,13 @@ struct v4l2_fh;
  *	:ref:`VIDIOC_QUERYCAP <vidioc_querycap>` ioctl
  * @vidioc_enum_fmt_vid_cap: pointer to the function that implements
  *	:ref:`VIDIOC_ENUM_FMT <vidioc_enum_fmt>` ioctl logic
- *	for video capture in single plane mode
+ *	for video capture in single and multi plane mode
  * @vidioc_enum_fmt_vid_overlay: pointer to the function that implements
  *	:ref:`VIDIOC_ENUM_FMT <vidioc_enum_fmt>` ioctl logic
  *	for video overlay
  * @vidioc_enum_fmt_vid_out: pointer to the function that implements
  *	:ref:`VIDIOC_ENUM_FMT <vidioc_enum_fmt>` ioctl logic
- *	for video output in single plane mode
- * @vidioc_enum_fmt_vid_cap_mplane: pointer to the function that implements
- *	:ref:`VIDIOC_ENUM_FMT <vidioc_enum_fmt>` ioctl logic
- *	for video capture in multiplane mode
- * @vidioc_enum_fmt_vid_out_mplane: pointer to the function that implements
- *	:ref:`VIDIOC_ENUM_FMT <vidioc_enum_fmt>` ioctl logic
- *	for video output in multiplane mode
+ *	for video output in single and multi plane mode
  * @vidioc_enum_fmt_sdr_cap: pointer to the function that implements
  *	:ref:`VIDIOC_ENUM_FMT <vidioc_enum_fmt>` ioctl logic
  *	for Software Defined Radio capture
@@ -229,12 +223,8 @@ struct v4l2_fh;
  *	:ref:`VIDIOC_G_MODULATOR <vidioc_g_modulator>` ioctl
  * @vidioc_s_modulator: pointer to the function that implements
  *	:ref:`VIDIOC_S_MODULATOR <vidioc_g_modulator>` ioctl
- * @vidioc_cropcap: pointer to the function that implements
- *	:ref:`VIDIOC_CROPCAP <vidioc_cropcap>` ioctl
- * @vidioc_g_crop: pointer to the function that implements
- *	:ref:`VIDIOC_G_CROP <vidioc_g_crop>` ioctl
- * @vidioc_s_crop: pointer to the function that implements
- *	:ref:`VIDIOC_S_CROP <vidioc_g_crop>` ioctl
+ * @vidioc_g_pixelaspect: pointer to the function that implements
+ *	the pixelaspect part of the :ref:`VIDIOC_CROPCAP <vidioc_cropcap>` ioctl
  * @vidioc_g_selection: pointer to the function that implements
  *	:ref:`VIDIOC_G_SELECTION <vidioc_g_selection>` ioctl
  * @vidioc_s_selection: pointer to the function that implements
@@ -317,10 +307,6 @@ struct v4l2_ioctl_ops {
 					   struct v4l2_fmtdesc *f);
 	int (*vidioc_enum_fmt_vid_out)(struct file *file, void *fh,
 				       struct v4l2_fmtdesc *f);
-	int (*vidioc_enum_fmt_vid_cap_mplane)(struct file *file, void *fh,
-					      struct v4l2_fmtdesc *f);
-	int (*vidioc_enum_fmt_vid_out_mplane)(struct file *file, void *fh,
-					      struct v4l2_fmtdesc *f);
 	int (*vidioc_enum_fmt_sdr_cap)(struct file *file, void *fh,
 				       struct v4l2_fmtdesc *f);
 	int (*vidioc_enum_fmt_sdr_out)(struct file *file, void *fh,
@@ -508,12 +494,8 @@ struct v4l2_ioctl_ops {
 	int (*vidioc_s_modulator)(struct file *file, void *fh,
 				  const struct v4l2_modulator *a);
 	/* Crop ioctls */
-	int (*vidioc_cropcap)(struct file *file, void *fh,
-			      struct v4l2_cropcap *a);
-	int (*vidioc_g_crop)(struct file *file, void *fh,
-			     struct v4l2_crop *a);
-	int (*vidioc_s_crop)(struct file *file, void *fh,
-			     const struct v4l2_crop *a);
+	int (*vidioc_g_pixelaspect)(struct file *file, void *fh,
+				    int buf_type, struct v4l2_fract *aspect);
 	int (*vidioc_g_selection)(struct file *file, void *fh,
 				  struct v4l2_selection *s);
 	int (*vidioc_s_selection)(struct file *file, void *fh,
@@ -620,6 +602,8 @@ struct v4l2_ioctl_ops {
 #define V4L2_DEV_DEBUG_STREAMING	0x08
 /* Log poll() */
 #define V4L2_DEV_DEBUG_POLL		0x10
+/* Log controls */
+#define V4L2_DEV_DEBUG_CTRL		0x20
 
 /*  Video standard functions  */
 
@@ -638,7 +622,7 @@ const char *v4l2_norm_to_name(v4l2_std_id id);
  * v4l2_video_std_frame_period - Ancillary routine that fills a
  *	struct &v4l2_fract pointer with the default framerate fraction.
  *
- * @id: analog TV sdandard ID.
+ * @id: analog TV standard ID.
  * @frameperiod: struct &v4l2_fract pointer to be filled
  *
  */
@@ -649,7 +633,7 @@ void v4l2_video_std_frame_period(int id, struct v4l2_fract *frameperiod);
  *	a &v4l2_standard structure according to the @id parameter.
  *
  * @vs: struct &v4l2_standard pointer to be filled
- * @id: analog TV sdandard ID.
+ * @id: analog TV standard ID.
  * @name: name of the standard to be used
  *
  * .. note::
@@ -658,6 +642,17 @@ void v4l2_video_std_frame_period(int id, struct v4l2_fract *frameperiod);
  */
 int v4l2_video_std_construct(struct v4l2_standard *vs,
 				    int id, const char *name);
+
+/**
+ * v4l_video_std_enumstd - Ancillary routine that fills in the fields of
+ *	a &v4l2_standard structure according to the @id and @vs->index
+ *	parameters.
+ *
+ * @vs: struct &v4l2_standard pointer to be filled.
+ * @id: analog TV standard ID.
+ *
+ */
+int v4l_video_std_enumstd(struct v4l2_standard *vs, v4l2_std_id id);
 
 /**
  * v4l_printk_ioctl - Ancillary routine that prints the ioctl in a

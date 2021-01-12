@@ -58,7 +58,6 @@ int arch_stack_walk_reliable(stack_trace_consume_fn consume_entry,
 			 * or a page fault), which can make frame pointers
 			 * unreliable.
 			 */
-
 			if (IS_ENABLED(CONFIG_FRAME_POINTER))
 				return -EINVAL;
 		}
@@ -81,10 +80,6 @@ int arch_stack_walk_reliable(stack_trace_consume_fn consume_entry,
 	if (unwind_error(&state))
 		return -EINVAL;
 
-	/* Success path for non-user tasks, i.e. kthreads and idle tasks */
-	if (!(task->flags & (PF_KTHREAD | PF_IDLE)))
-		return -EINVAL;
-
 	return 0;
 }
 
@@ -96,8 +91,7 @@ struct stack_frame_user {
 };
 
 static int
-copy_stack_frame(const struct stack_frame_user __user *fp,
-		 struct stack_frame_user *frame)
+copy_stack_frame(const void __user *fp, struct stack_frame_user *frame)
 {
 	int ret;
 
@@ -106,8 +100,7 @@ copy_stack_frame(const struct stack_frame_user __user *fp,
 
 	ret = 1;
 	pagefault_disable();
-	if (__get_user(frame->next_fp, &fp->next_fp) ||
-	    __get_user(frame->ret_addr, &fp->ret_addr))
+	if (__copy_from_user_inatomic(frame, fp, sizeof(*frame)))
 		ret = 0;
 	pagefault_enable();
 
@@ -139,4 +132,3 @@ void arch_stack_walk_user(stack_trace_consume_fn consume_entry, void *cookie,
 	}
 }
 
-#include "rh_stacktrace.c"

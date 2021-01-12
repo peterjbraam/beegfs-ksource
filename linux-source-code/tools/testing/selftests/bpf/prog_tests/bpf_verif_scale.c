@@ -15,8 +15,6 @@ static int libbpf_debug_print(enum libbpf_print_level level,
 	return 0;
 }
 
-extern int extra_prog_load_log_flags;
-
 static int check_load(const char *file, enum bpf_prog_type type)
 {
 	struct bpf_prog_load_attr attr;
@@ -26,7 +24,7 @@ static int check_load(const char *file, enum bpf_prog_type type)
 	memset(&attr, 0, sizeof(struct bpf_prog_load_attr));
 	attr.file = file;
 	attr.prog_type = type;
-	attr.log_level = 4 | extra_prog_load_log_flags;
+	attr.log_level = 4;
 	attr.prog_flags = BPF_F_TEST_RND_HI32;
 	err = bpf_prog_load_xattr(&attr, &obj, &prog_fd);
 	bpf_object__close(obj);
@@ -47,8 +45,6 @@ void test_bpf_verif_scale(void)
 		{ "test_verif_scale1.o", BPF_PROG_TYPE_SCHED_CLS },
 		{ "test_verif_scale2.o", BPF_PROG_TYPE_SCHED_CLS },
 		{ "test_verif_scale3.o", BPF_PROG_TYPE_SCHED_CLS },
-
-		{ "pyperf_global.o", BPF_PROG_TYPE_RAW_TRACEPOINT },
 
 		/* full unroll by llvm */
 		{ "pyperf50.o", BPF_PROG_TYPE_RAW_TRACEPOINT },
@@ -90,10 +86,7 @@ void test_bpf_verif_scale(void)
 		{ "test_sysctl_loop2.o", BPF_PROG_TYPE_CGROUP_SYSCTL },
 
 		{ "test_xdp_loop.o", BPF_PROG_TYPE_XDP },
-#if 0
-		/* CONFIG_IPV6_SEG6_LWTUNNEL is disabled in RHEL 8 */
 		{ "test_seg6_loop.o", BPF_PROG_TYPE_LWT_SEG6LOCAL },
-#endif
 	};
 	libbpf_print_fn_t old_print_fn = NULL;
 	int err, i;

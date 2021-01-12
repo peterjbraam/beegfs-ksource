@@ -16,6 +16,9 @@
  *
  */
 
+struct media_device;
+struct media_intf_devnode;
+
 struct snd_usb_audio {
 	int index;
 	struct usb_device *dev;
@@ -23,7 +26,7 @@ struct snd_usb_audio {
 	struct usb_interface *pm_intf;
 	u32 usb_id;
 	struct mutex mutex;
-	unsigned int autosuspended:1;	
+	unsigned int system_suspend;
 	atomic_t active;
 	atomic_t shutdown;
 	atomic_t usage_count;
@@ -31,7 +34,6 @@ struct snd_usb_audio {
 	unsigned int txfr_quirk:1; /* Subframe boundaries on transfers */
 	unsigned int tx_length_quirk:1; /* Put length specifier in transfers */
 	unsigned int setup_fmt_after_resume_quirk:1; /* setup the format to interface after resume */
-	unsigned int need_delayed_register:1; /* warn for delayed registration */
 	int num_interfaces;
 	int num_suspended_intf;
 	int sample_rate_read_error;
@@ -53,6 +55,8 @@ struct snd_usb_audio {
 					 */
 
 	struct usb_host_interface *ctrl_intf;	/* the audio control interface */
+	struct media_device *media_dev;
+	struct media_intf_devnode *ctl_intf_media_devnode;
 };
 
 #define usb_audio_err(chip, fmt, args...) \
@@ -105,6 +109,7 @@ struct snd_usb_audio_quirk {
 	const char *profile_name;	/* override the card->longname */
 	int16_t ifnum;
 	uint16_t type;
+	bool shares_media_device;
 	const void *data;
 };
 
@@ -116,6 +121,5 @@ int snd_usb_lock_shutdown(struct snd_usb_audio *chip);
 void snd_usb_unlock_shutdown(struct snd_usb_audio *chip);
 
 extern bool snd_usb_use_vmalloc;
-extern bool snd_usb_skip_validation;
 
 #endif /* __USBAUDIO_H */

@@ -1,13 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  MMU context allocation for 64-bit kernels.
  *
  *  Copyright (C) 2004 Anton Blanchard, IBM Corp. <anton@samba.org>
- *
- *  This program is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU General Public License
- *  as published by the Free Software Foundation; either version
- *  2 of the License, or (at your option) any later version.
- *
  */
 
 #include <linux/sched.h>
@@ -53,6 +48,8 @@ int hash__alloc_context_id(void)
 }
 EXPORT_SYMBOL_GPL(hash__alloc_context_id);
 
+void slb_setup_new_exec(void);
+
 static int realloc_context_ids(mm_context_t *ctx)
 {
 	int i, id;
@@ -95,6 +92,11 @@ static int hash__init_new_context(struct mm_struct *mm)
 {
 	int index;
 
+	mm->context.hash_context = kmalloc(sizeof(struct hash_mm_context),
+					   GFP_KERNEL);
+	if (!mm->context.hash_context)
+		return -ENOMEM;
+
 	/*
 	 * The old code would re-promote on fork, we don't do that when using
 	 * slices as it could cause problem promoting slices that have been
@@ -109,17 +111,43 @@ static int hash__init_new_context(struct mm_struct *mm)
 	 * We should not be calling init_new_context() on init_mm. Hence a
 	 * check against 0 is OK.
 	 */
-	if (mm->context.id == 0)
+	if (mm->context.id == 0) {
+		memset(mm->context.hash_context, 0, sizeof(struct hash_mm_context));
 		slice_init_new_context_exec(mm);
+	} else {
+		/* This is fork. Copy hash_context details from current->mm */
+		memcpy(mm->context.hash_context, current->mm->context.hash_context, sizeof(struct hash_mm_context));
+#ifdef CONFIG_PPC_SUBPAGE_PROT
+		/* inherit subpage prot detalis if we have one. */
+		if (current->mm->context.hash_context->spt) {
+			mm->context.hash_context->spt = kmalloc(sizeof(struct subpage_prot_table),
+								GFP_KERNEL);
+			if (!mm->context.hash_context->spt) {
+				kfree(mm->context.hash_context);
+				return -ENOMEM;
+			}
+		}
+#endif
+	}
 
 	index = realloc_context_ids(&mm->context);
-	if (index < 0)
+	if (index < 0) {
+#ifdef CONFIG_PPC_SUBPAGE_PROT
+		kfree(mm->context.hash_context->spt);
+#endif
+		kfree(mm->context.hash_context);
 		return index;
-
-	subpage_prot_init_new_context(mm);
+	}
 
 	pkey_mm_init(mm);
 	return index;
+}
+
+void hash__setup_new_exec(void)
+{
+	slice_setup_new_exec();
+
+	slb_setup_new_exec();
 }
 
 static int radix__init_new_context(struct mm_struct *mm)
@@ -146,7 +174,7 @@ static int radix__init_new_context(struct mm_struct *mm)
 	 */
 	asm volatile("ptesync;isync" : : : "memory");
 
-	mm->context.npu_context = NULL;
+	mm->context.hash_context = NULL;
 
 	return index;
 }
@@ -191,21 +219,7 @@ static void destroy_contexts(mm_context_t *ctx)
 		if (context_id)
 			ida_free(&mmu_context_ida, context_id);
 	}
-}
-
-static void pte_frag_destroy(void *pte_frag)
-{
-	int count;
-	struct page *page;
-
-	page = virt_to_page(pte_frag);
-	/* drop all the pending references */
-	count = ((unsigned long)pte_frag & ~PAGE_MASK) >> PTE_FRAG_SIZE_SHIFT;
-	/* We allow PTE_FRAG_NR fragments from a PTE page */
-	if (page_ref_sub_and_test(page, PTE_FRAG_NR - count)) {
-		pgtable_page_dtor(page);
-		free_unref_page(page);
-	}
+	kfree(ctx->hash_context);
 }
 
 static void pmd_frag_destroy(void *pmd_frag)
@@ -217,13 +231,13 @@ static void pmd_frag_destroy(void *pmd_frag)
 	/* drop all the pending references */
 	count = ((unsigned long)pmd_frag & ~PAGE_MASK) >> PMD_FRAG_SIZE_SHIFT;
 	/* We allow PTE_FRAG_NR fragments from a PTE page */
-	if (page_ref_sub_and_test(page, PMD_FRAG_NR - count)) {
+	if (atomic_sub_and_test(PMD_FRAG_NR - count, &page->pt_frag_refcount)) {
 		pgtable_pmd_page_dtor(page);
-		free_unref_page(page);
+		__free_page(page);
 	}
 }
 
-static void destroy_pagetable_page(struct mm_struct *mm)
+static void destroy_pagetable_cache(struct mm_struct *mm)
 {
 	void *frag;
 
@@ -259,13 +273,14 @@ void destroy_context(struct mm_struct *mm)
 		process_tb[mm->context.id].prtb0 = 0;
 	else
 		subpage_prot_free(mm);
-	destroy_pagetable_page(mm);
 	destroy_contexts(&mm->context);
 	mm->context.id = MMU_NO_CONTEXT;
 }
 
 void arch_exit_mmap(struct mm_struct *mm)
 {
+	destroy_pagetable_cache(mm);
+
 	if (radix_enabled()) {
 		/*
 		 * Radix doesn't have a valid bit in the process table

@@ -70,7 +70,7 @@ static void copy_fd_bitmaps(struct fdtable *nfdt, struct fdtable *ofdt,
  */
 static void copy_fdtable(struct fdtable *nfdt, struct fdtable *ofdt)
 {
-	unsigned int cpy, set;
+	size_t cpy, set;
 
 	BUG_ON(nfdt->max_fds < ofdt->max_fds);
 
@@ -457,6 +457,7 @@ struct files_struct init_files = {
 		.full_fds_bits	= init_files.full_fds_bits_init,
 	},
 	.file_lock	= __SPIN_LOCK_UNLOCKED(init_files.file_lock),
+	.resize_wait	= __WAIT_QUEUE_HEAD_INITIALIZER(init_files.resize_wait),
 };
 
 static unsigned int find_next_fd(struct fdtable *fdt, unsigned int start)
@@ -539,14 +540,9 @@ static int alloc_fd(unsigned start, unsigned flags)
 	return __alloc_fd(current->files, start, rlimit(RLIMIT_NOFILE), flags);
 }
 
-int __get_unused_fd_flags(unsigned flags, unsigned long nofile)
-{
-	return __alloc_fd(current->files, 0, nofile, flags);
-}
-
 int get_unused_fd_flags(unsigned flags)
 {
-	return __get_unused_fd_flags(flags, rlimit(RLIMIT_NOFILE));
+	return __alloc_fd(current->files, 0, rlimit(RLIMIT_NOFILE), flags);
 }
 EXPORT_SYMBOL(get_unused_fd_flags);
 
@@ -673,6 +669,7 @@ out_unlock:
 	*res = NULL;
 	return -ENOENT;
 }
+EXPORT_SYMBOL(__close_fd_get_file);
 
 void do_close_on_exec(struct files_struct *files)
 {

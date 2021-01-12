@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  PowerPC version
  *    Copyright (C) 1995-1996 Gary Thomas (gdt@linuxppc.org)
@@ -9,12 +10,6 @@
  *
  *  Derived from "arch/i386/mm/init.c"
  *    Copyright (C) 1991, 1992, 1993, 1994  Linus Torvalds
- *
- *  This program is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU General Public License
- *  as published by the Free Software Foundation; either version
- *  2 of the License, or (at your option) any later version.
- *
  */
 
 #include <linux/export.h>
@@ -36,7 +31,6 @@
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/memremap.h>
-#include <linux/dma-direct.h>
 
 #include <asm/pgalloc.h>
 #include <asm/prom.h>
@@ -77,11 +71,6 @@ static inline pte_t *virt_to_kpte(unsigned long vaddr)
 			vaddr), vaddr), vaddr);
 }
 #endif
-
-int page_is_ram(unsigned long pfn)
-{
-	return memblock_is_memory(__pfn_to_phys(pfn));
-}
 
 pgprot_t phys_mem_access_prot(struct file *file, unsigned long pfn,
 			      unsigned long size, pgprot_t vma_prot)
@@ -184,34 +173,6 @@ void __ref arch_remove_memory(int nid, u64 start, u64 size,
 }
 #endif
 
-/*
- * walk_memory_resource() needs to make sure there is no holes in a given
- * memory range.  PPC64 does not maintain the memory layout in /proc/iomem.
- * Instead it maintains it in memblock.memory structures.  Walk through the
- * memory regions, find holes and callback for contiguous regions.
- */
-int
-walk_system_ram_range(unsigned long start_pfn, unsigned long nr_pages,
-		void *arg, int (*func)(unsigned long, unsigned long, void *))
-{
-	struct memblock_region *reg;
-	unsigned long end_pfn = start_pfn + nr_pages;
-	unsigned long tstart, tend;
-	int ret = -1;
-
-	for_each_memblock(memory, reg) {
-		tstart = max(start_pfn, memblock_region_memory_base_pfn(reg));
-		tend = min(end_pfn, memblock_region_memory_end_pfn(reg));
-		if (tstart >= tend)
-			continue;
-		ret = (*func)(tstart, tend - tstart, arg);
-		if (ret)
-			break;
-	}
-	return ret;
-}
-EXPORT_SYMBOL_GPL(walk_system_ram_range);
-
 #ifndef CONFIG_NEED_MULTIPLE_NODES
 void __init mem_topology_setup(void)
 {
@@ -262,10 +223,10 @@ static int __init mark_nonram_nosave(void)
  * everything else. GFP_DMA32 page allocations automatically fall back to
  * ZONE_DMA.
  *
- * By using 31-bit unconditionally, we can exploit zone_dma_bits to inform the
- * generic DMA mapping code.  32-bit only devices (if not handled by an IOMMU
- * anyway) will take a first dip into ZONE_NORMAL and get otherwise served by
- * ZONE_DMA.
+ * By using 31-bit unconditionally, we can exploit ARCH_ZONE_DMA_BITS to
+ * inform the generic DMA mapping code.  32-bit only devices (if not handled
+ * by an IOMMU anyway) will take a first dip into ZONE_NORMAL and get
+ * otherwise served by ZONE_DMA.
  */
 static unsigned long max_zone_pfns[MAX_NR_ZONES];
 
@@ -298,25 +259,9 @@ void __init paging_init(void)
 	printk(KERN_DEBUG "Memory hole size: %ldMB\n",
 	       (long int)((top_of_ram - total_ram) >> 20));
 
-	/*
-	 * Allow 30-bit DMA for very limited Broadcom wifi chips on many
-	 * powerbooks.
-	 */
-	if (IS_ENABLED(CONFIG_PPC32))
-		zone_dma_bits = 30;
-	else
-		zone_dma_bits = 31;
-
-#if defined(CONFIG_ZONE_DMA) && defined(CONFIG_PPC_BOOK3E_64)
+#ifdef CONFIG_ZONE_DMA
 	max_zone_pfns[ZONE_DMA]	= min(max_low_pfn,
-				      1UL << (zone_dma_bits - PAGE_SHIFT));
-#endif
-#if defined(CONFIG_ZONE_DMA) && !defined(CONFIG_PPC_BOOK3E_64)
-	/*
-	 * Reduce the window where gfp_allowed_mask isn't out of control of
-	 * powerpc in between kernel_init_freeable() and free_initmem().
-	 */
-	gfp_allowed_mask &= ~(__GFP_DMA|__GFP_DMA32);
+				      1UL << (ARCH_ZONE_DMA_BITS - PAGE_SHIFT));
 #endif
 	max_zone_pfns[ZONE_NORMAL] = max_low_pfn;
 #ifdef CONFIG_HIGHMEM
@@ -337,6 +282,14 @@ void __init mem_init(void)
 	BUILD_BUG_ON(MMU_PAGE_COUNT > 16);
 
 #ifdef CONFIG_SWIOTLB
+	/*
+	 * Some platforms (e.g. 85xx) limit DMA-able memory way below
+	 * 4G. We force memblock to bottom-up mode to ensure that the
+	 * memory allocated in swiotlb_init() is DMA-able.
+	 * As it's the last memblock allocation, no need to reset it
+	 * back to to-down.
+	 */
+	memblock_set_bottom_up(true);
 	swiotlb_init(0);
 #endif
 
@@ -370,17 +323,18 @@ void __init mem_init(void)
 	mem_init_print_info(NULL);
 #ifdef CONFIG_PPC32
 	pr_info("Kernel virtual memory layout:\n");
+#ifdef CONFIG_KASAN
+	pr_info("  * 0x%08lx..0x%08lx  : kasan shadow mem\n",
+		KASAN_SHADOW_START, KASAN_SHADOW_END);
+#endif
 	pr_info("  * 0x%08lx..0x%08lx  : fixmap\n", FIXADDR_START, FIXADDR_TOP);
 #ifdef CONFIG_HIGHMEM
 	pr_info("  * 0x%08lx..0x%08lx  : highmem PTEs\n",
 		PKMAP_BASE, PKMAP_ADDR(LAST_PKMAP));
 #endif /* CONFIG_HIGHMEM */
-#ifdef CONFIG_NOT_COHERENT_CACHE
-	pr_info("  * 0x%08lx..0x%08lx  : consistent mem\n",
-		IOREMAP_TOP, IOREMAP_TOP + CONFIG_CONSISTENT_SIZE);
-#endif /* CONFIG_NOT_COHERENT_CACHE */
-	pr_info("  * 0x%08lx..0x%08lx  : early ioremap\n",
-		ioremap_bot, IOREMAP_TOP);
+	if (ioremap_bot != IOREMAP_TOP)
+		pr_info("  * 0x%08lx..0x%08lx  : early ioremap\n",
+			ioremap_bot, IOREMAP_TOP);
 	pr_info("  * 0x%08lx..0x%08lx  : vmalloc & ioremap\n",
 		VMALLOC_START, VMALLOC_END);
 #endif /* CONFIG_PPC32 */
@@ -392,26 +346,123 @@ void free_initmem(void)
 	mark_initmem_nx();
 	init_mem_is_free = true;
 	free_initmem_default(POISON_FREE_INITMEM);
-#if defined(CONFIG_ZONE_DMA) && !defined(CONFIG_PPC_BOOK3E_64)
-	/*
-	 * At this point "gfp_allowed_mask" won't be overwritten by
-	 * the common code anymore so we can set it for our purpose.
-	 *
-	 * We leave the ZONE_DMA enabled to preserve the kABI, but
-	 * it's empty, so __GFP_DMA must be ignored when building the
-	 * zonelist in prepare_alloc_pages->node_zonelist or all
-	 * driver GFP_DMA allocations will fail for no good reason.
-	 */
-	gfp_allowed_mask &= ~(__GFP_DMA|__GFP_DMA32);
-#endif
 }
 
-#ifdef CONFIG_BLK_DEV_INITRD
-void __init free_initrd_mem(unsigned long start, unsigned long end)
+/**
+ * flush_coherent_icache() - if a CPU has a coherent icache, flush it
+ * @addr: The base address to use (can be any valid address, the whole cache will be flushed)
+ * Return true if the cache was flushed, false otherwise
+ */
+static inline bool flush_coherent_icache(unsigned long addr)
 {
-	free_reserved_area((void *)start, (void *)end, -1, "initrd");
+	/*
+	 * For a snooping icache, we still need a dummy icbi to purge all the
+	 * prefetched instructions from the ifetch buffers. We also need a sync
+	 * before the icbi to order the the actual stores to memory that might
+	 * have modified instructions with the icbi.
+	 */
+	if (cpu_has_feature(CPU_FTR_COHERENT_ICACHE)) {
+		mb(); /* sync */
+		allow_read_from_user((const void __user *)addr, L1_CACHE_BYTES);
+		icbi((void *)addr);
+		prevent_read_from_user((const void __user *)addr, L1_CACHE_BYTES);
+		mb(); /* sync */
+		isync();
+		return true;
+	}
+
+	return false;
 }
-#endif
+
+/**
+ * invalidate_icache_range() - Flush the icache by issuing icbi across an address range
+ * @start: the start address
+ * @stop: the stop address (exclusive)
+ */
+static void invalidate_icache_range(unsigned long start, unsigned long stop)
+{
+	unsigned long shift = l1_icache_shift();
+	unsigned long bytes = l1_icache_bytes();
+	char *addr = (char *)(start & ~(bytes - 1));
+	unsigned long size = stop - (unsigned long)addr + (bytes - 1);
+	unsigned long i;
+
+	for (i = 0; i < size >> shift; i++, addr += bytes)
+		icbi(addr);
+
+	mb(); /* sync */
+	isync();
+}
+
+/**
+ * flush_icache_range: Write any modified data cache blocks out to memory
+ * and invalidate the corresponding blocks in the instruction cache
+ *
+ * Generic code will call this after writing memory, before executing from it.
+ *
+ * @start: the start address
+ * @stop: the stop address (exclusive)
+ */
+void flush_icache_range(unsigned long start, unsigned long stop)
+{
+	if (flush_coherent_icache(start))
+		return;
+
+	clean_dcache_range(start, stop);
+
+	if (IS_ENABLED(CONFIG_44x)) {
+		/*
+		 * Flash invalidate on 44x because we are passed kmapped
+		 * addresses and this doesn't work for userspace pages due to
+		 * the virtually tagged icache.
+		 */
+		iccci((void *)start);
+		mb(); /* sync */
+		isync();
+	} else
+		invalidate_icache_range(start, stop);
+}
+EXPORT_SYMBOL(flush_icache_range);
+
+#if !defined(CONFIG_PPC_8xx) && !defined(CONFIG_PPC64)
+/**
+ * flush_dcache_icache_phys() - Flush a page by it's physical address
+ * @physaddr: the physical address of the page
+ */
+static void flush_dcache_icache_phys(unsigned long physaddr)
+{
+	unsigned long bytes = l1_dcache_bytes();
+	unsigned long nb = PAGE_SIZE / bytes;
+	unsigned long addr = physaddr & PAGE_MASK;
+	unsigned long msr, msr0;
+	unsigned long loop1 = addr, loop2 = addr;
+
+	msr0 = mfmsr();
+	msr = msr0 & ~MSR_DR;
+	/*
+	 * This must remain as ASM to prevent potential memory accesses
+	 * while the data MMU is disabled
+	 */
+	asm volatile(
+		"   mtctr %2;\n"
+		"   mtmsr %3;\n"
+		"   isync;\n"
+		"0: dcbst   0, %0;\n"
+		"   addi    %0, %0, %4;\n"
+		"   bdnz    0b;\n"
+		"   sync;\n"
+		"   mtctr %2;\n"
+		"1: icbi    0, %1;\n"
+		"   addi    %1, %1, %4;\n"
+		"   bdnz    1b;\n"
+		"   sync;\n"
+		"   mtmsr %5;\n"
+		"   isync;\n"
+		: "+&r" (loop1), "+&r" (loop2)
+		: "r" (nb), "r" (msr), "i" (bytes), "r" (msr0)
+		: "ctr", "memory");
+}
+#endif // !defined(CONFIG_PPC_8xx) && !defined(CONFIG_PPC64)
 
 /*
  * This is called when a page has been modified by the kernel.
@@ -445,11 +496,45 @@ void flush_dcache_icache_page(struct page *page)
 		__flush_dcache_icache(start);
 		kunmap_atomic(start);
 	} else {
-		__flush_dcache_icache_phys(page_to_pfn(page) << PAGE_SHIFT);
+		unsigned long addr = page_to_pfn(page) << PAGE_SHIFT;
+
+		if (flush_coherent_icache(addr))
+			return;
+		flush_dcache_icache_phys(addr);
 	}
 #endif
 }
 EXPORT_SYMBOL(flush_dcache_icache_page);
+
+/**
+ * __flush_dcache_icache(): Flush a particular page from the data cache to RAM.
+ * Note: this is necessary because the instruction cache does *not*
+ * snoop from the data cache.
+ *
+ * @page: the address of the page to flush
+ */
+void __flush_dcache_icache(void *p)
+{
+	unsigned long addr = (unsigned long)p;
+
+	if (flush_coherent_icache(addr))
+		return;
+
+	clean_dcache_range(addr, addr + PAGE_SIZE);
+
+	/*
+	 * We don't flush the icache on 44x. Those have a virtual icache and we
+	 * don't have access to the virtual address here (it's not the page
+	 * vaddr but where it's mapped in user space). The flushing of the
+	 * icache on these is handled elsewhere, when a change in the address
+	 * space occurs, before returning to user space.
+	 */
+
+	if (cpu_has_feature(MMU_FTR_TYPE_44x))
+		return;
+
+	invalidate_icache_range(addr, addr + PAGE_SIZE);
+}
 
 void clear_user_page(void *page, unsigned long vaddr, struct page *pg)
 {
@@ -546,3 +631,9 @@ int devmem_is_allowed(unsigned long pfn)
 	return 0;
 }
 #endif /* CONFIG_STRICT_DEVMEM */
+
+/*
+ * This is defined in kernel/resource.c but only powerpc needs to export it, for
+ * the EHEA driver. Drop this when drivers/net/ethernet/ibm/ehea is removed.
+ */
+EXPORT_SYMBOL_GPL(walk_system_ram_range);

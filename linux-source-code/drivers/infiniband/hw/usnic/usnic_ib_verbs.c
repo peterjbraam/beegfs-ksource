@@ -194,7 +194,7 @@ find_free_vf_and_create_qp_grp(struct usnic_ib_dev *us_ibdev,
 			return ERR_CAST(dev_list);
 		for (i = 0; dev_list[i]; i++) {
 			dev = dev_list[i];
-			vf = pci_get_drvdata(to_pci_dev(dev));
+			vf = dev_get_drvdata(dev);
 			spin_lock(&vf->lock);
 			vnic = vf->vnic;
 			if (!usnic_vnic_check_room(vnic, res_spec)) {
@@ -436,16 +436,6 @@ int usnic_ib_query_gid(struct ib_device *ibdev, u8 port, int index,
 	mutex_unlock(&us_ibdev->usdev_lock);
 
 	return 0;
-}
-
-struct net_device *usnic_get_netdev(struct ib_device *device, u8 port_num)
-{
-	struct usnic_ib_dev *us_ibdev = to_usdev(device);
-
-	if (us_ibdev->netdev)
-		dev_hold(us_ibdev->netdev);
-
-	return us_ibdev->netdev;
 }
 
 int usnic_ib_query_pkey(struct ib_device *ibdev, u8 port, u16 index,

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
+/* SPDX-License-Identifier: GPL-2.0 */
 
 /*
  * This file contains definitions from Hyper-V Hypervisor Top-Level Functional
@@ -86,8 +86,6 @@
 #define HV_X64_ACCESS_FREQUENCY_MSRS		BIT(11)
 /* AccessReenlightenmentControls privilege */
 #define HV_X64_ACCESS_REENLIGHTENMENT		BIT(13)
-/* AccessTscInvariantControls privilege */
-#define HV_X64_ACCESS_TSC_INVARIANT		BIT(15)
 
 /*
  * Feature identification: indicates which flags were specified at partition
@@ -280,9 +278,6 @@
 #define HV_X64_MSR_TSC_EMULATION_CONTROL	0x40000107
 #define HV_X64_MSR_TSC_EMULATION_STATUS		0x40000108
 
-/* TSC invariant control */
-#define HV_X64_MSR_TSC_INVARIANT_CONTROL	0x40000118
-
 /*
  * Declare the MSR used to setup pages used to communicate with the hypervisor.
  */
@@ -358,8 +353,8 @@ struct hv_tsc_emulation_status {
 /*
  * Crash notification (HV_X64_MSR_CRASH_CTL) flags.
  */
-#define HV_CRASH_CTL_CRASH_NOTIFY_MSG          BIT_ULL(62)
-#define HV_CRASH_CTL_CRASH_NOTIFY              BIT_ULL(63)
+#define HV_CRASH_CTL_CRASH_NOTIFY_MSG		BIT_ULL(62)
+#define HV_CRASH_CTL_CRASH_NOTIFY		BIT_ULL(63)
 #define HV_X64_MSR_CRASH_PARAMS		\
 		(1 + (HV_X64_MSR_CRASH_P4 - HV_X64_MSR_CRASH_P0))
 
@@ -376,7 +371,6 @@ struct hv_tsc_emulation_status {
 #define HVCALL_SEND_IPI_EX			0x0015
 #define HVCALL_POST_MESSAGE			0x005c
 #define HVCALL_SIGNAL_EVENT			0x005d
-#define HVCALL_RETARGET_INTERRUPT		0x007e
 #define HVCALL_FLUSH_GUEST_PHYSICAL_ADDRESS_SPACE 0x00af
 #define HVCALL_FLUSH_GUEST_PHYSICAL_ADDRESS_LIST 0x00b0
 
@@ -405,8 +399,6 @@ enum HV_GENERIC_SET_FORMAT {
 	HV_GENERIC_SET_SPARSE_4K,
 	HV_GENERIC_SET_ALL,
 };
-
-#define HV_PARTITION_ID_SELF                    ((u64)-1)
 
 #define HV_HYPERCALL_RESULT_MASK	GENMASK_ULL(15, 0)
 #define HV_HYPERCALL_FAST_BIT		BIT(16)
@@ -911,42 +903,4 @@ struct hv_tlb_flush_ex {
 struct hv_partition_assist_pg {
 	u32 tlb_lock_count;
 };
-
-union hv_msi_entry {
-	u64 as_uint64;
-	struct {
-		u32 address;
-		u32 data;
-	} __packed;
-};
-
-struct hv_interrupt_entry {
-	u32 source;			/* 1 for MSI(-X) */
-	u32 reserved1;
-	union hv_msi_entry msi_entry;
-} __packed;
-
-/*
- * flags for hv_device_interrupt_target.flags
- */
-#define HV_DEVICE_INTERRUPT_TARGET_MULTICAST		1
-#define HV_DEVICE_INTERRUPT_TARGET_PROCESSOR_SET	2
-
-struct hv_device_interrupt_target {
-	u32 vector;
-	u32 flags;
-	union {
-		u64 vp_mask;
-		struct hv_vpset vp_set;
-	};
-} __packed;
-
-/* HvRetargetDeviceInterrupt hypercall */
-struct hv_retarget_device_interrupt {
-	u64 partition_id;		/* use "self" */
-	u64 device_id;
-	struct hv_interrupt_entry int_entry;
-	u64 reserved2;
-	struct hv_device_interrupt_target int_target;
-} __packed __aligned(8);
 #endif

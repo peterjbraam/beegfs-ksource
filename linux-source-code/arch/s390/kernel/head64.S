@@ -26,8 +26,6 @@ ENTRY(startup_continue)
 0:	larl	%r1,tod_clock_base
 	mvc	0(16,%r1),__LC_BOOT_CLOCK
 	larl	%r13,.LPG1		# get base
-	lg	%r12,.Lparmaddr-.LPG1(%r13)	# pointer to parameter area
-					# move IPL device to lowcore
 	larl	%r0,boot_vdso_data
 	stg	%r0,__LC_VDSO_PER_CPU
 #
@@ -35,14 +33,10 @@ ENTRY(startup_continue)
 #
 	larl	%r14,init_task
 	stg	%r14,__LC_CURRENT
-	larl	%r15,init_thread_union+THREAD_SIZE
-	stg	%r15,__LC_KERNEL_STACK	# set end of kernel stack
-	aghi	%r15,-STACK_FRAME_OVERHEAD
-#
-# Early setup functions that may not rely on an initialized bss section,
-# like moving the initrd. Returns with an initialized bss section.
-#
-	brasl	%r14,startup_init_nobss
+	larl	%r15,init_thread_union+THREAD_SIZE-STACK_FRAME_OVERHEAD
+#ifdef CONFIG_KASAN
+	brasl	%r14,kasan_early_init
+#endif
 #
 # Early machine initialization and detection functions.
 #
@@ -64,12 +58,5 @@ ENTRY(startup_continue)
 
 	.align	16
 .LPG1:
-.Lpcmsk:.quad	0x0000000180000000
-.L4malign:.quad 0xffffffffffc00000
-.Lscan2g:.quad	0x80000000 + 0x20000 - 8	# 2GB + 128K - 8
-.Lnop:	.long	0x07000700
-.Lparmaddr:
-	.quad	PARMAREA
-	.align	64
 .Ldw:	.quad	0x0002000180000000,0x0000000000000000
 .Laregs:.long	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0

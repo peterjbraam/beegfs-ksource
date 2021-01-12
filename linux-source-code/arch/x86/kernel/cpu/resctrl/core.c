@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Resource Director Technology(RDT)
  * - Cache Allocation code.
@@ -8,15 +9,6 @@
  *    Fenghua Yu <fenghua.yu@intel.com>
  *    Tony Luck <tony.luck@intel.com>
  *    Vikas Shivappa <vikas.shivappa@intel.com>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
  *
  * More information about RDT be found in the Intel (R) x86 Architecture
  * Software Developer Manual June 2016, volume 3, section 17.17.
@@ -268,6 +260,7 @@ static bool __get_mem_config_intel(struct rdt_resource *r)
 	r->num_closid = edx.split.cos_max + 1;
 	r->membw.max_delay = eax.split.max_delay + 1;
 	r->default_ctrl = MAX_MBA_BW;
+	r->membw.mbm_width = MBM_CNTR_WIDTH;
 	if (ecx & MBA_IS_LINEAR) {
 		r->membw.delay_linear = true;
 		r->membw.min_bw = MAX_MBA_BW - r->membw.max_delay;
@@ -297,6 +290,7 @@ static bool __rdt_get_mem_config_amd(struct rdt_resource *r)
 	/* AMD does not use delay */
 	r->membw.delay_linear = false;
 
+	r->membw.mbm_width = MBM_CNTR_WIDTH_AMD;
 	r->membw.min_bw = 0;
 	r->membw.bw_gran = 1;
 	/* Max value is 2048, Data width should be 4 in decimal */
@@ -585,6 +579,8 @@ static void domain_add_cpu(int cpu, struct rdt_resource *r)
 
 	d->id = id;
 	cpumask_set_cpu(cpu, &d->cpu_mask);
+
+	rdt_domain_reconfigure_cdp(r);
 
 	if (r->alloc_capable && domain_setup_ctrlval(r, d)) {
 		kfree(d);

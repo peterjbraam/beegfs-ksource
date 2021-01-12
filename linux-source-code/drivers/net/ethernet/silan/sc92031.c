@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*  Silan SC92031 PCI Fast Ethernet Adapter driver
  *
  *  Based on vendor drivers:
@@ -1077,7 +1078,7 @@ static void sc92031_set_multicast_list(struct net_device *dev)
 	spin_unlock_bh(&priv->lock);
 }
 
-static void sc92031_tx_timeout(struct net_device *dev, unsigned int txqueue)
+static void sc92031_tx_timeout(struct net_device *dev)
 {
 	struct sc92031_priv *priv = netdev_priv(dev);
 

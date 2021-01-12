@@ -103,7 +103,7 @@ extern unsigned int ptrs_per_p4d;
 #define PGDIR_MASK	(~(PGDIR_SIZE - 1))
 
 /*
- * See Documentation/x86/x86_64/mm.txt for a description of the memory map.
+ * See Documentation/x86/x86_64/mm.rst for a description of the memory map.
  *
  * Be very careful vs. KASLR when changing anything here. The KASLR address
  * range must not overlap with anything except the KASAN shadow area, which
@@ -156,5 +156,7 @@ extern unsigned int ptrs_per_p4d;
 #define EFI_VA_END		(-68 * (_AC(1, UL) << 30))
 
 #define EARLY_DYNAMIC_PAGE_TABLES	64
+
+#define PGD_KERNEL_START	((PAGE_SIZE / 2) / sizeof(pgd_t))
 
 #endif /* _ASM_X86_PGTABLE_64_DEFS_H */

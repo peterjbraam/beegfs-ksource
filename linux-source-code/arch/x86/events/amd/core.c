@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 #include <linux/perf_event.h>
 #include <linux/export.h>
 #include <linux/types.h>
@@ -670,7 +671,15 @@ static void amd_pmu_disable_event(struct perf_event *event)
  */
 static int amd_pmu_handle_irq(struct pt_regs *regs)
 {
-	int handled;
+	struct cpu_hw_events *cpuc = this_cpu_ptr(&cpu_hw_events);
+	int active, handled;
+
+	/*
+	 * Obtain the active count before calling x86_pmu_handle_irq() since
+	 * it is possible that x86_pmu_handle_irq() may make a counter
+	 * inactive (through x86_pmu_stop).
+	 */
+	active = __bitmap_weight(cpuc->active_mask, X86_PMC_IDX_MAX);
 
 	/* Process any counter overflows */
 	handled = x86_pmu_handle_irq(regs);
@@ -680,7 +689,8 @@ static int amd_pmu_handle_irq(struct pt_regs *regs)
 	 * NMIs will be claimed if arriving within that window.
 	 */
 	if (handled) {
-		this_cpu_write(perf_nmi_tstamp, jiffies + perf_nmi_window);
+		this_cpu_write(perf_nmi_tstamp,
+			       jiffies + perf_nmi_window);
 
 		return handled;
 	}

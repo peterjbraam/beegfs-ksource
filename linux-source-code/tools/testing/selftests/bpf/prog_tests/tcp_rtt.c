@@ -188,7 +188,7 @@ static int start_server(void)
 	};
 	int fd;
 
-	fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+	fd = socket(AF_INET, SOCK_STREAM, 0);
 	if (fd < 0) {
 		log_err("Failed to create server socket");
 		return -1;
@@ -205,7 +205,6 @@ static int start_server(void)
 
 static pthread_mutex_t server_started_mtx = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t server_started = PTHREAD_COND_INITIALIZER;
-static volatile bool server_done = false;
 
 static void *server_thread(void *arg)
 {
@@ -223,24 +222,23 @@ static void *server_thread(void *arg)
 
 	if (CHECK_FAIL(err < 0)) {
 		perror("Failed to listed on socket");
-		return ERR_PTR(err);
+		return NULL;
 	}
 
-	while (true) {
-		client_fd = accept(fd, (struct sockaddr *)&addr, &len);
-		if (client_fd == -1 && errno == EAGAIN) {
-			usleep(50);
-			continue;
-		}
-		break;
-	}
+	client_fd = accept(fd, (struct sockaddr *)&addr, &len);
 	if (CHECK_FAIL(client_fd < 0)) {
 		perror("Failed to accept client");
-		return ERR_PTR(err);
+		return NULL;
 	}
 
-	while (!server_done)
-		usleep(50);
+	/* Wait for the next connection (that never arrives)
+	 * to keep this thread alive to prevent calling
+	 * close() on client_fd.
+	 */
+	if (CHECK_FAIL(accept(fd, (struct sockaddr *)&addr, &len) >= 0)) {
+		perror("Unexpected success in second accept");
+		return NULL;
+	}
 
 	close(client_fd);
 
@@ -251,7 +249,6 @@ void test_tcp_rtt(void)
 {
 	int server_fd, cgroup_fd;
 	pthread_t tid;
-	void *server_res;
 
 	cgroup_fd = test__join_cgroup("/tcp_rtt");
 	if (CHECK_FAIL(cgroup_fd < 0))
@@ -270,11 +267,6 @@ void test_tcp_rtt(void)
 	pthread_mutex_unlock(&server_started_mtx);
 
 	CHECK_FAIL(run_test(cgroup_fd, server_fd));
-
-	server_done = true;
-	CHECK_FAIL(pthread_join(tid, &server_res));
-	CHECK_FAIL(IS_ERR(server_res));
-
 close_server_fd:
 	close(server_fd);
 close_cgroup_fd:

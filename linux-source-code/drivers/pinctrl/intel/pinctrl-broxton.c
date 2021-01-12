@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Intel Broxton SoC pinctrl/GPIO driver
  *
  * Copyright (C) 2015, 2016 Intel Corporation
  * Author: Mika Westerberg <mika.westerberg@linux.intel.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/mod_devicetable.h>
@@ -1011,15 +1008,10 @@ static const struct platform_device_id bxt_pinctrl_platform_ids[] = {
 	{ }
 };
 
-static int bxt_pinctrl_probe(struct platform_device *pdev)
-{
-	return intel_pinctrl_probe_by_uid(pdev);
-}
-
 static INTEL_PINCTRL_PM_OPS(bxt_pinctrl_pm_ops);
 
 static struct platform_driver bxt_pinctrl_driver = {
-	.probe = bxt_pinctrl_probe,
+	.probe = intel_pinctrl_probe_by_uid,
 	.driver = {
 		.name = "broxton-pinctrl",
 		.acpi_match_table = bxt_pinctrl_acpi_match,

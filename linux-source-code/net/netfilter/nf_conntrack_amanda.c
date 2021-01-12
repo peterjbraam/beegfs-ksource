@@ -1,13 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Amanda extension for IP connection tracking
  *
  * (C) 2002 by Brian J. Murrell <netfilter@interlinx.bc.ca>
  * based on HW's ip_conntrack_irc.c as well as other modules
  * (C) 2006 Patrick McHardy <kaber@trash.net>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -56,6 +52,7 @@ enum amanda_strings {
 	SEARCH_DATA,
 	SEARCH_MESG,
 	SEARCH_INDEX,
+	SEARCH_STATE,
 };
 
 static struct {
@@ -81,6 +78,10 @@ static struct {
 	},
 	[SEARCH_INDEX] = {
 		.string = "INDEX ",
+		.len	= 6,
+	},
+	[SEARCH_STATE] = {
+		.string = "STATE ",
 		.len	= 6,
 	},
 };
@@ -126,7 +127,7 @@ static int amanda_help(struct sk_buff *skb,
 		goto out;
 	stop += start;
 
-	for (i = SEARCH_DATA; i <= SEARCH_INDEX; i++) {
+	for (i = SEARCH_DATA; i <= SEARCH_STATE; i++) {
 		off = skb_find_text(skb, start, stop, search[i].ts);
 		if (off == UINT_MAX)
 			continue;
@@ -158,7 +159,7 @@ static int amanda_help(struct sk_buff *skb,
 		if (nf_nat_amanda && ct->status & IPS_NAT_MASK)
 			ret = nf_nat_amanda(skb, ctinfo, protoff,
 					    off - dataoff, len, exp);
-		else if (nf_ct_expect_related(exp) != 0) {
+		else if (nf_ct_expect_related(exp, 0) != 0) {
 			nf_ct_helper_log(skb, ct, "cannot add expectation");
 			ret = NF_DROP;
 		}
@@ -170,7 +171,7 @@ out:
 }
 
 static const struct nf_conntrack_expect_policy amanda_exp_policy = {
-	.max_expected		= 3,
+	.max_expected		= 4,
 	.timeout		= 180,
 };
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  linux/lib/vsprintf.c
  *
@@ -20,7 +21,6 @@
 #include <linux/build_bug.h>
 #include <linux/clk.h>
 #include <linux/clk-provider.h>
-#include <linux/errname.h>
 #include <linux/module.h>	/* for KSYM_SYMBOL_LEN */
 #include <linux/types.h>
 #include <linux/string.h>
@@ -613,25 +613,6 @@ static char *string_nocheck(char *buf, char *end, const char *s,
 	return widen_string(buf, len, end, spec);
 }
 
-static char *err_ptr(char *buf, char *end, void *ptr,
-		     struct printf_spec spec)
-{
-	int err = PTR_ERR(ptr);
-	const char *sym = errname(err);
-
-	if (sym)
-		return string_nocheck(buf, end, sym, spec);
-
-	/*
-	 * Somebody passed ERR_PTR(-1234) or some other non-existing
-	 * Efoo - or perhaps CONFIG_SYMBOLIC_ERRNAME=n. Fall back to
-	 * printing it as its decimal representation.
-	 */
-	spec.flags |= SIGN;
-	spec.base = 10;
-	return number(buf, end, err, spec);
-}
-
 /* Be careful: error messages must fit into the given buffer. */
 static char *error_string(char *buf, char *end, const char *s,
 			  struct printf_spec spec)
@@ -765,6 +746,13 @@ static char *ptr_to_id(char *buf, char *end, const void *ptr,
 	const char *str = sizeof(ptr) == 8 ? "(____ptrval____)" : "(ptrval)";
 	unsigned long hashval;
 
+	/*
+	 * Print the real pointer value for NULL and error pointers,
+	 * as they are not actual addresses.
+	 */
+	if (IS_ERR_OR_NULL(ptr))
+		return pointer_string(buf, end, ptr, spec);
+
 	/* When debugging early boot use non-cryptographically secure hash. */
 	if (unlikely(debug_boot_weak_hash)) {
 		hashval = hash_long((unsigned long)ptr, 32);
@@ -888,6 +876,15 @@ char *dentry_name(char *buf, char *end, const struct dentry *d, struct printf_sp
 	return widen_string(buf, n, end, spec);
 }
 
+static noinline_for_stack
+char *file_dentry_name(char *buf, char *end, const struct file *f,
+			struct printf_spec spec, const char *fmt)
+{
+	if (check_pointer(&buf, end, f, spec))
+		return buf;
+
+	return dentry_name(buf, end, f->f_path.dentry, spec, fmt);
+}
 #ifdef CONFIG_BLOCK
 static noinline_for_stack
 char *bdev_name(char *buf, char *end, struct block_device *bdev,
@@ -2014,6 +2011,29 @@ static char *kobject_string(char *buf, char *end, void *ptr,
 	return error_string(buf, end, "(%pO?)", spec);
 }
 
+#ifdef CONFIG_KMSG_IDS
+
+unsigned long long __jhash_string(const char *str);
+
+static noinline_for_stack
+char *jhash_string(char *buf, char *end, const char *str, const char *fmt)
+{
+	struct printf_spec spec;
+	unsigned long long num;
+
+	num = __jhash_string(str);
+
+	spec.type = FORMAT_TYPE_PTR;
+	spec.field_width = 6;
+	spec.flags = SMALL | ZEROPAD;
+	spec.base = 16;
+	spec.precision = -1;
+
+	return number(buf, end, num, spec);
+}
+
+#endif
+
 /*
  * Show a '%p' thing.  A kernel extension is that the '%p' is followed
  * by an extra set of alphanumeric characters that are extended format
@@ -2118,11 +2138,8 @@ static char *kobject_string(char *buf, char *end, void *ptr,
  *                  F device node flags
  *                  c major compatible string
  *                  C full compatible string
+ * - 'j' Kernel message catalog jhash for System z
  * - 'x' For printing the address. Equivalent to "%lx".
- * - '[ku]s' For a BPF/tracing related format specifier, e.g. used out of
- *           bpf_trace_printk() where [ku] prefix specifies either kernel (k)
- *           or user (u) memory to probe, and:
- *              s a string, equivalent to "%s" on direct vsnprintf() use
  *
  * ** When making changes please also update:
  *	Documentation/core-api/printk-formats.rst
@@ -2189,9 +2206,7 @@ char *pointer(const char *fmt, char *buf, char *end, void *ptr,
 	case 'C':
 		return clock(buf, end, ptr, spec, fmt);
 	case 'D':
-		return dentry_name(buf, end,
-				   ((const struct file *)ptr)->f_path.dentry,
-				   spec, fmt);
+		return file_dentry_name(buf, end, ptr, spec, fmt);
 #ifdef CONFIG_BLOCK
 	case 'g':
 		return bdev_name(buf, end, ptr, spec, fmt);
@@ -2203,19 +2218,10 @@ char *pointer(const char *fmt, char *buf, char *end, void *ptr,
 		return kobject_string(buf, end, ptr, spec, fmt);
 	case 'x':
 		return pointer_string(buf, end, ptr, spec);
-	case 'e':
-		/* %pe with a non-ERR_PTR gets treated as plain %p */
-		if (!IS_ERR(ptr))
-			break;
-		return err_ptr(buf, end, ptr, spec);
-	case 'u':
-	case 'k':
-		switch (fmt[1]) {
-		case 's':
-			return string(buf, end, ptr, spec);
-		default:
-			return error_string(buf, end, "(einval)", spec);
-		}
+#ifdef CONFIG_KMSG_IDS
+	case 'j':
+		return jhash_string(buf, end, ptr, fmt);
+#endif
 	}
 
 	/* default is to _not_ leak addresses, hash before printing */
@@ -2852,7 +2858,6 @@ int vbin_printf(u32 *bin_buf, size_t size, const char *fmt, va_list args)
 			case 'f':
 			case 'x':
 			case 'K':
-			case 'e':
 				save_arg(void *);
 				break;
 			default:
@@ -3029,7 +3034,6 @@ int bstr_printf(char *buf, size_t size, const char *fmt, const u32 *bin_buf)
 			case 'f':
 			case 'x':
 			case 'K':
-			case 'e':
 				process = true;
 				break;
 			default:

@@ -1,12 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /* include/net/xdp.h
  *
  * Copyright (c) 2017 Jesper Dangaard Brouer, Red Hat Inc.
- * Released under terms in GPL version 2.  See COPYING.
  */
 #ifndef __LINUX_NET_XDP_H__
 #define __LINUX_NET_XDP_H__
-
-#include <linux/rh_kabi.h>
 
 /**
  * DOC: XDP RX-queue information
@@ -63,20 +61,6 @@ struct xdp_rxq_info {
 	u32 queue_index;
 	u32 reg_state;
 	struct xdp_mem_info mem;
-	/* RHEL: This structure is not considered part of the kABI
-	 * whitelist. However, it is embedded in struct netdev_rx_queue
-	 * which is referenced from struct net_device::_rx as an array.
-	 * Therefore, we need to protect the size of struct xdp_rxq_info. */
-	RH_KABI_RESERVE(1)
-	RH_KABI_RESERVE(2)
-	RH_KABI_RESERVE(3)
-	RH_KABI_RESERVE(4)
-	RH_KABI_RESERVE(5)
-	RH_KABI_RESERVE(6)
-	/* Note that there is more space available after the reserved fields
-	 * due to the cache alignment of this structure. Be sure to verify
-	 * the result with pahole on all supported archs before using the
-	 * padding, though. */
 } ____cacheline_aligned; /* perf critical, avoid false-sharing */
 
 struct xdp_buff {
@@ -160,10 +144,6 @@ static inline void xdp_release_frame(struct xdp_frame *xdpf)
 		__xdp_release_frame(xdpf->data, mem);
 }
 
-/* RHEL: increase the version of xdp_rxq_info_reg kABI whenever XDP is
- * changed in a kABI incompatible way. That includes changes to ndo_xdp* and
- * ndo_bpf ops, inline function changes and XDP struct changes. */
-RH_KABI_FORCE_CHANGE(2)
 int xdp_rxq_info_reg(struct xdp_rxq_info *xdp_rxq,
 		     struct net_device *dev, u32 queue_index);
 void xdp_rxq_info_unreg(struct xdp_rxq_info *xdp_rxq);

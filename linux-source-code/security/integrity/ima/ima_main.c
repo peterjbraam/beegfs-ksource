@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Integrity Measurement Architecture
  *
@@ -8,11 +9,6 @@
  * Serge Hallyn <serue@us.ibm.com>
  * Kylene Hall <kylene@us.ibm.com>
  * Mimi Zohar <zohar@us.ibm.com>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation, version 2 of the
- * License.
  *
  * File: ima_main.c
  *	implements the IMA hooks: ima_bprm_check, ima_file_mmap,
@@ -42,6 +38,10 @@ int ima_appraise;
 
 int ima_hash_algo = HASH_ALGO_SHA1;
 static int hash_setup_done;
+
+static struct notifier_block ima_lsm_policy_notifier = {
+	.notifier_call = ima_lsm_policy_change,
+};
 
 static int __init hash_setup(char *str)
 {
@@ -191,7 +191,7 @@ void ima_file_free(struct file *file)
 
 static int process_measurement(struct file *file, const struct cred *cred,
 			       u32 secid, char *buf, loff_t size, int mask,
-			       enum ima_hooks func, int opened)
+			       enum ima_hooks func)
 {
 	struct inode *inode = file_inode(file);
 	struct integrity_iint_cache *iint = NULL;
@@ -340,8 +340,7 @@ static int process_measurement(struct file *file, const struct cred *cred,
 			inode_lock(inode);
 			rc = ima_appraise_measurement(func, iint, file,
 						      pathname, xattr_value,
-						      xattr_len, opened,
-						      modsig);
+						      xattr_len, modsig);
 			inode_unlock(inode);
 		}
 		if (!rc)
@@ -390,7 +389,7 @@ int ima_file_mmap(struct file *file, unsigned long prot)
 	if (file && (prot & PROT_EXEC)) {
 		security_task_getsecid(current, &secid);
 		return process_measurement(file, current_cred(), secid, NULL,
-					   0, MAY_EXEC, MMAP_CHECK, 0);
+					   0, MAY_EXEC, MMAP_CHECK);
 	}
 
 	return 0;
@@ -416,13 +415,13 @@ int ima_bprm_check(struct linux_binprm *bprm)
 
 	security_task_getsecid(current, &secid);
 	ret = process_measurement(bprm->file, current_cred(), secid, NULL, 0,
-				  MAY_EXEC, BPRM_CHECK, 0);
+				  MAY_EXEC, BPRM_CHECK);
 	if (ret)
 		return ret;
 
 	security_cred_getsecid(bprm->cred, &secid);
 	return process_measurement(bprm->file, bprm->cred, secid, NULL, 0,
-				   MAY_EXEC, CREDS_CHECK, 0);
+				   MAY_EXEC, CREDS_CHECK);
 }
 
 /**
@@ -435,16 +434,43 @@ int ima_bprm_check(struct linux_binprm *bprm)
  * On success return 0.  On integrity appraisal error, assuming the file
  * is in policy and IMA-appraisal is in enforcing mode, return -EACCES.
  */
-int ima_file_check(struct file *file, int mask, int opened)
+int ima_file_check(struct file *file, int mask)
 {
 	u32 secid;
 
 	security_task_getsecid(current, &secid);
 	return process_measurement(file, current_cred(), secid, NULL, 0,
 				   mask & (MAY_READ | MAY_WRITE | MAY_EXEC |
-					   MAY_APPEND), FILE_CHECK, opened);
+					   MAY_APPEND), FILE_CHECK);
 }
 EXPORT_SYMBOL_GPL(ima_file_check);
+
+/**
+ * ima_post_create_tmpfile - mark newly created tmpfile as new
+ * @file : newly created tmpfile
+ *
+ * No measuring, appraising or auditing of newly created tmpfiles is needed.
+ * Skip calling process_measurement(), but indicate which newly, created
+ * tmpfiles are in policy.
+ */
+void ima_post_create_tmpfile(struct inode *inode)
+{
+	struct integrity_iint_cache *iint;
+	int must_appraise;
+
+	must_appraise = ima_must_appraise(inode, MAY_ACCESS, FILE_CHECK);
+	if (!must_appraise)
+		return;
+
+	/* Nothing to do if we can't allocate memory */
+	iint = integrity_inode_get(inode);
+	if (!iint)
+		return;
+
+	/* needed for writing the security xattrs */
+	set_bit(IMA_UPDATE_XATTR, &iint->atomic_flags);
+	iint->ima_file_status = INTEGRITY_PASS;
+}
 
 /**
  * ima_post_path_mknod - mark as a new inode
@@ -463,9 +489,13 @@ void ima_post_path_mknod(struct dentry *dentry)
 	if (!must_appraise)
 		return;
 
+	/* Nothing to do if we can't allocate memory */
 	iint = integrity_inode_get(inode);
-	if (iint)
-		iint->flags |= IMA_NEW_FILE;
+	if (!iint)
+		return;
+
+	/* needed for re-opening empty files */
+	iint->flags |= IMA_NEW_FILE;
 }
 
 /**
@@ -542,7 +572,7 @@ int ima_post_read_file(struct file *file, void *buf, loff_t size,
 	func = read_idmap[read_id] ?: FILE_CHECK;
 	security_task_getsecid(current, &secid);
 	return process_measurement(file, current_cred(), secid, buf, size,
-				   MAY_READ, func, 0);
+				   MAY_READ, func);
 }
 
 /**
@@ -707,6 +737,13 @@ static int __init init_ima(void)
 		hash_setup(CONFIG_IMA_DEFAULT_HASH);
 		error = ima_init();
 	}
+
+	if (error)
+		return error;
+
+	error = register_blocking_lsm_notifier(&ima_lsm_policy_notifier);
+	if (error)
+		pr_warn("Couldn't register LSM notifier, error %d\n", error);
 
 	if (!error)
 		ima_update_policy_flag();

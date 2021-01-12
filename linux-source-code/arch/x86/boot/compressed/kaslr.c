@@ -23,11 +23,8 @@
  * _ctype[] in lib/ctype.c is needed by isspace() of linux/ctype.h.
  * While both lib/ctype.c and lib/cmdline.c will bring EXPORT_SYMBOL
  * which is meaningless and will cause compiling error in some cases.
- * So do not include linux/export.h and define EXPORT_SYMBOL(sym)
- * as empty.
  */
-#define _LINUX_EXPORT_H
-#define EXPORT_SYMBOL(sym)
+#define __DISABLE_EXPORTS
 
 #include "misc.h"
 #include "error.h"
@@ -761,10 +758,6 @@ process_efi_entries(unsigned long minimum, unsigned long image_size)
 		 * Only EFI_CONVENTIONAL_MEMORY is guaranteed to be free.
 		 */
 		if (md->type != EFI_CONVENTIONAL_MEMORY)
-			continue;
-
-		if (efi_soft_reserve_enabled() &&
-		    (md->attribute & EFI_MEMORY_SP))
 			continue;
 
 		if (efi_mirror_found &&

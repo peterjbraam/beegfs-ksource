@@ -1,16 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License, version 2, as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  *
  * Copyright 2010 Paul Mackerras, IBM Corp. <paulus@au1.ibm.com>
  * Copyright 2011 David Gibson, IBM Corporation <dwg@au1.ibm.com>
@@ -26,8 +15,8 @@
 #include <linux/slab.h>
 #include <linux/hugetlb.h>
 #include <linux/list.h>
+#include <linux/stringify.h>
 
-#include <asm/tlbflush.h>
 #include <asm/kvm_ppc.h>
 #include <asm/kvm_book3s.h>
 #include <asm/book3s/64/mmu-hash.h>
@@ -35,6 +24,7 @@
 #include <asm/hvcall.h>
 #include <asm/synch.h>
 #include <asm/ppc-opcode.h>
+#include <asm/kvm_host.h>
 #include <asm/udbg.h>
 #include <asm/iommu.h>
 #include <asm/tce.h>
@@ -85,8 +75,8 @@ struct kvmppc_spapr_tce_table *kvmppc_find_table(struct kvm *kvm,
 EXPORT_SYMBOL_GPL(kvmppc_find_table);
 
 #ifdef CONFIG_KVM_BOOK3S_HV_POSSIBLE
-static long kvmppc_rm_tce_to_ua(struct kvm *kvm,
-				unsigned long tce, unsigned long *ua)
+static long kvmppc_rm_tce_to_ua(struct kvm *kvm, unsigned long tce,
+		unsigned long *ua, unsigned long **prmap)
 {
 	unsigned long gfn = tce >> PAGE_SHIFT;
 	struct kvm_memory_slot *memslot;
@@ -97,6 +87,9 @@ static long kvmppc_rm_tce_to_ua(struct kvm *kvm,
 
 	*ua = __gfn_to_hva_memslot(memslot, gfn) |
 		(tce & ~(PAGE_MASK | TCE_PCI_READ | TCE_PCI_WRITE));
+
+	if (prmap)
+		*prmap = &memslot->arch.rmap[gfn - memslot->base_gfn];
 
 	return 0;
 }
@@ -124,7 +117,7 @@ static long kvmppc_rm_tce_validate(struct kvmppc_spapr_tce_table *stt,
 	if (iommu_tce_check_gpa(stt->page_shift, gpa))
 		return H_PARAMETER;
 
-	if (kvmppc_rm_tce_to_ua(stt->kvm, tce, &ua))
+	if (kvmppc_rm_tce_to_ua(stt->kvm, tce, &ua, NULL))
 		return H_TOO_HARD;
 
 	list_for_each_entry_lockless(stit, &stt->iommu_tables, next) {
@@ -419,7 +412,7 @@ long kvmppc_rm_h_put_tce(struct kvm_vcpu *vcpu, unsigned long liobn,
 		return ret;
 
 	dir = iommu_tce_direction(tce);
-	if ((dir != DMA_NONE) && kvmppc_rm_tce_to_ua(vcpu->kvm, tce, &ua))
+	if ((dir != DMA_NONE) && kvmppc_rm_tce_to_ua(vcpu->kvm, tce, &ua, NULL))
 		return H_PARAMETER;
 
 	entry = ioba >> stt->page_shift;
@@ -445,8 +438,8 @@ long kvmppc_rm_h_put_tce(struct kvm_vcpu *vcpu, unsigned long liobn,
 	return H_SUCCESS;
 }
 
-static long kvmppc_rm_ua_to_hpa(struct kvm_vcpu *vcpu, unsigned long mmu_seq,
-				unsigned long ua, unsigned long *phpa)
+static long kvmppc_rm_ua_to_hpa(struct kvm_vcpu *vcpu,
+		unsigned long ua, unsigned long *phpa)
 {
 	pte_t *ptep, pte;
 	unsigned shift = 0;
@@ -460,17 +453,10 @@ static long kvmppc_rm_ua_to_hpa(struct kvm_vcpu *vcpu, unsigned long mmu_seq,
 	 * to exit which will agains result in the below page table walk
 	 * to finish.
 	 */
-	/* an rmap lock won't make it safe. because that just ensure hash
-	 * page table entries are removed with rmap lock held. After that
-	 * mmu notifier returns and we go ahead and removing ptes from Qemu page table.
-	 */
-	ptep = find_kvm_host_pte(vcpu->kvm, mmu_seq, ua, &shift);
-	if (!ptep)
+	ptep = __find_linux_pte(vcpu->arch.pgdir, ua, NULL, &shift);
+	if (!ptep || !pte_present(*ptep))
 		return -ENXIO;
-
-	pte = READ_ONCE(*ptep);
-	if (!pte_present(pte))
-		return -ENXIO;
+	pte = *ptep;
 
 	if (!shift)
 		shift = PAGE_SHIFT;
@@ -492,23 +478,16 @@ long kvmppc_rm_h_put_tce_indirect(struct kvm_vcpu *vcpu,
 		unsigned long liobn, unsigned long ioba,
 		unsigned long tce_list,	unsigned long npages)
 {
-	struct kvm *kvm = vcpu->kvm;
 	struct kvmppc_spapr_tce_table *stt;
 	long i, ret = H_SUCCESS;
 	unsigned long tces, entry, ua = 0;
-	unsigned long mmu_seq;
+	unsigned long *rmap = NULL;
 	bool prereg = false;
 	struct kvmppc_spapr_tce_iommu_table *stit;
 
 	/* For radix, we might be in virtual mode, so punt */
 	if (kvm_is_radix(vcpu->kvm))
 		return H_TOO_HARD;
-
-	/*
-	 * used to check for invalidations in progress
-	 */
-	mmu_seq = kvm->mmu_notifier_seq;
-	smp_rmb();
 
 	stt = kvmppc_find_table(vcpu->kvm, liobn);
 	if (!stt)
@@ -537,7 +516,7 @@ long kvmppc_rm_h_put_tce_indirect(struct kvm_vcpu *vcpu,
 		 */
 		struct mm_iommu_table_group_mem_t *mem;
 
-		if (kvmppc_rm_tce_to_ua(vcpu->kvm, tce_list, &ua))
+		if (kvmppc_rm_tce_to_ua(vcpu->kvm, tce_list, &ua, NULL))
 			return H_TOO_HARD;
 
 		mem = mm_iommu_lookup_rm(vcpu->kvm->mm, ua, IOMMU_PAGE_SIZE_4K);
@@ -553,11 +532,23 @@ long kvmppc_rm_h_put_tce_indirect(struct kvm_vcpu *vcpu,
 		 * We do not require memory to be preregistered in this case
 		 * so lock rmap and do __find_linux_pte_or_hugepte().
 		 */
-		if (kvmppc_rm_tce_to_ua(vcpu->kvm, tce_list, &ua))
+		if (kvmppc_rm_tce_to_ua(vcpu->kvm, tce_list, &ua, &rmap))
 			return H_TOO_HARD;
 
-		arch_spin_lock(&kvm->mmu_lock.rlock.raw_lock);
-		if (kvmppc_rm_ua_to_hpa(vcpu, mmu_seq, ua, &tces)) {
+		rmap = (void *) vmalloc_to_phys(rmap);
+		if (WARN_ON_ONCE_RM(!rmap))
+			return H_TOO_HARD;
+
+		/*
+		 * Synchronize with the MMU notifier callbacks in
+		 * book3s_64_mmu_hv.c (kvm_unmap_hva_range_hv etc.).
+		 * While we have the rmap lock, code running on other CPUs
+		 * cannot finish unmapping the host real page that backs
+		 * this guest real page, so we are OK to access the host
+		 * real page.
+		 */
+		lock_rmap(rmap);
+		if (kvmppc_rm_ua_to_hpa(vcpu, ua, &tces)) {
 			ret = H_TOO_HARD;
 			goto unlock_exit;
 		}
@@ -575,7 +566,7 @@ long kvmppc_rm_h_put_tce_indirect(struct kvm_vcpu *vcpu,
 		unsigned long tce = be64_to_cpu(((u64 *)tces)[i]);
 
 		ua = 0;
-		if (kvmppc_rm_tce_to_ua(vcpu->kvm, tce, &ua)) {
+		if (kvmppc_rm_tce_to_ua(vcpu->kvm, tce, &ua, NULL)) {
 			ret = H_PARAMETER;
 			goto invalidate_exit;
 		}
@@ -600,8 +591,9 @@ invalidate_exit:
 		iommu_tce_kill_rm(stit->tbl, entry, npages);
 
 unlock_exit:
-	if (!prereg)
-		arch_spin_unlock(&kvm->mmu_lock.rlock.raw_lock);
+	if (rmap)
+		unlock_rmap(rmap);
+
 	return ret;
 }
 

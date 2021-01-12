@@ -16,9 +16,6 @@
  * firmware fallback configuration table
  */
 
-/* Module or buit-in */
-#ifdef CONFIG_FW_LOADER_USER_HELPER
-
 struct firmware_fallback_config fw_fallback_config = {
 	.force_sysfs_fallback = IS_ENABLED(CONFIG_FW_LOADER_USER_HELPER_FALLBACK),
 	.loading_timeout = 60,
@@ -49,6 +46,4 @@ struct ctl_table firmware_config_table[] = {
 	{ }
 };
 EXPORT_SYMBOL_GPL(firmware_config_table);
-#endif
-
 #endif

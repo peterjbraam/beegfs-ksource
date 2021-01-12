@@ -14,16 +14,15 @@
 #include <asm/thread_info.h>
 #include <asm/unistd.h>
 
-long compat_arm_syscall(struct pt_regs *regs);
-
+long compat_arm_syscall(struct pt_regs *regs, int scno);
 long sys_ni_syscall(void);
 
-asmlinkage long do_ni_syscall(struct pt_regs *regs)
+static long do_ni_syscall(struct pt_regs *regs, int scno)
 {
 #ifdef CONFIG_COMPAT
 	long ret;
 	if (is_compat_task()) {
-		ret = compat_arm_syscall(regs);
+		ret = compat_arm_syscall(regs, scno);
 		if (ret != -ENOSYS)
 			return ret;
 	}
@@ -48,8 +47,11 @@ static void invoke_syscall(struct pt_regs *regs, unsigned int scno,
 		syscall_fn = syscall_table[array_index_nospec(scno, sc_nr)];
 		ret = __invoke_syscall(regs, syscall_fn);
 	} else {
-		ret = do_ni_syscall(regs);
+		ret = do_ni_syscall(regs, scno);
 	}
+
+	if (is_compat_task())
+		ret = lower_32_bits(ret);
 
 	regs->regs[0] = ret;
 }
@@ -122,7 +124,7 @@ static void el0_svc_common(struct pt_regs *regs, int scno, int sc_nr,
 	if (!has_syscall_work(flags) && !IS_ENABLED(CONFIG_DEBUG_RSEQ)) {
 		local_daif_mask();
 		flags = current_thread_info()->flags;
-		if (!has_syscall_work(flags)) {
+		if (!has_syscall_work(flags) && !(flags & _TIF_SINGLESTEP)) {
 			/*
 			 * We're off to userspace, where interrupts are
 			 * always enabled after we restore the flags from

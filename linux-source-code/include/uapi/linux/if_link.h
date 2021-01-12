@@ -38,20 +38,6 @@ struct rtnl_link_stats {
 	__u32	tx_compressed;
 
 	__u32	rx_nohandler;		/* dropped, no handler found	*/
-
-#ifdef __KERNEL__
-#ifndef __GENKSYMS__
-	/*
-	 * RHEL: when used, reserved fields must be moved before __KERNEL__
-	 * and must be under a #ifndef __GENKSYMS__ conditional
-	 */
-	char __rh_tail[0];
-	__u32	__rh_reserved_1;
-	__u32	__rh_reserved_2;
-	__u32	__rh_reserved_3;
-	__u32	__rh_reserved_4;
-#endif
-#endif
 };
 
 /* The main device statistics structure */
@@ -87,22 +73,7 @@ struct rtnl_link_stats64 {
 	__u64	tx_compressed;
 
 	__u64	rx_nohandler;		/* dropped, no handler found	*/
-
-#ifdef __KERNEL__
-#ifndef __GENKSYMS__
-	char __rh_tail[0];
-	__u64	__rh_reserved_1;
-	__u64	__rh_reserved_2;
-	__u64	__rh_reserved_3;
-	__u64	__rh_reserved_4;
-#endif
-#endif
 };
-
-#ifdef __KERNEL__
-#define sizeof_rtnl_link_stats offsetof(struct rtnl_link_stats, __rh_tail)
-#define sizeof_rtnl_link_stats64 offsetof(struct rtnl_link_stats64, __rh_tail)
-#endif
 
 /* The struct should be in sync with struct ifmap */
 struct rtnl_link_ifmap {
@@ -317,6 +288,7 @@ enum {
 	IFLA_BR_MCAST_IGMP_VERSION,
 	IFLA_BR_MCAST_MLD_VERSION,
 	IFLA_BR_VLAN_STATS_PER_PORT,
+	IFLA_BR_MULTI_BOOLOPT,
 	__IFLA_BR_MAX,
 };
 
@@ -367,6 +339,7 @@ enum {
 	IFLA_BRPORT_GROUP_FWD_MASK,
 	IFLA_BRPORT_NEIGH_SUPPRESS,
 	IFLA_BRPORT_ISOLATED,
+	IFLA_BRPORT_BACKUP_PORT,
 	__IFLA_BRPORT_MAX
 };
 #define IFLA_BRPORT_MAX (__IFLA_BRPORT_MAX - 1)
@@ -562,6 +535,7 @@ enum {
 	IFLA_VXLAN_GPE,
 	IFLA_VXLAN_TTL_INHERIT,
 	IFLA_VXLAN_DF,
+	IFLA_VXLAN_FAN_MAP = 33,
 	__IFLA_VXLAN_MAX
 };
 #define IFLA_VXLAN_MAX	(__IFLA_VXLAN_MAX - 1)
@@ -977,12 +951,11 @@ enum {
 #define XDP_FLAGS_SKB_MODE		(1U << 1)
 #define XDP_FLAGS_DRV_MODE		(1U << 2)
 #define XDP_FLAGS_HW_MODE		(1U << 3)
-#define XDP_FLAGS_REPLACE		(1U << 4)
 #define XDP_FLAGS_MODES			(XDP_FLAGS_SKB_MODE | \
 					 XDP_FLAGS_DRV_MODE | \
 					 XDP_FLAGS_HW_MODE)
 #define XDP_FLAGS_MASK			(XDP_FLAGS_UPDATE_IF_NOEXIST | \
-					 XDP_FLAGS_MODES | XDP_FLAGS_REPLACE)
+					 XDP_FLAGS_MODES)
 
 /* These are stored into IFLA_XDP_ATTACHED on dump. */
 enum {
@@ -1002,7 +975,6 @@ enum {
 	IFLA_XDP_DRV_PROG_ID,
 	IFLA_XDP_SKB_PROG_ID,
 	IFLA_XDP_HW_PROG_ID,
-	IFLA_XDP_EXPECTED_FD,
 	__IFLA_XDP_MAX,
 };
 

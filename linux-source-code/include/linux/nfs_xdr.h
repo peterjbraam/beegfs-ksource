@@ -62,20 +62,19 @@ struct nfs_fattr {
 	struct nfs_fsid		fsid;
 	__u64			fileid;
 	__u64			mounted_on_fileid;
-	struct timespec64	atime;
-	struct timespec64	mtime;
-	struct timespec64	ctime;
+	struct timespec		atime;
+	struct timespec		mtime;
+	struct timespec		ctime;
 	__u64			change_attr;	/* NFSv4 change attribute */
 	__u64			pre_change_attr;/* pre-op NFSv4 change attribute */
 	__u64			pre_size;	/* pre_op_attr.size	  */
-	struct timespec64	pre_mtime;	/* pre_op_attr.mtime	  */
-	struct timespec64	pre_ctime;	/* pre_op_attr.ctime	  */
+	struct timespec		pre_mtime;	/* pre_op_attr.mtime	  */
+	struct timespec		pre_ctime;	/* pre_op_attr.ctime	  */
 	unsigned long		time_start;
 	unsigned long		gencount;
 	struct nfs4_string	*owner_name;
 	struct nfs4_string	*group_name;
 	struct nfs4_threshold	*mdsthreshold;	/* pNFS threshold hints */
-	struct nfs4_label	*label;
 };
 
 #define NFS_ATTR_FATTR_TYPE		(1U << 0)
@@ -144,7 +143,7 @@ struct nfs_fsinfo {
 	__u32			wtmult;	/* writes should be multiple of this */
 	__u32			dtpref;	/* pref. readdir transfer size */
 	__u64			maxfilesize;
-	struct timespec64	time_delta; /* server time granularity */
+	struct timespec		time_delta; /* server time granularity */
 	__u32			lease_time; /* in seconds */
 	__u32			nlayouttypes; /* number of layouttypes */
 	__u32			layouttype[NFS_MAX_LAYOUT_TYPES]; /* supported pnfs layout driver */
@@ -644,9 +643,13 @@ struct nfs_pgio_args {
 	__u32			count;
 	unsigned int		pgbase;
 	struct page **		pages;
-	unsigned int		replen;		/* used by read */
-	const u32 *		bitmask;	/* used by write */
-	enum nfs3_stable_how	stable;		/* used by write */
+	union {
+		unsigned int		replen;			/* used by read */
+		struct {
+			const u32 *		bitmask;	/* used by write */
+			enum nfs3_stable_how	stable;		/* used by write */
+		};
+	};
 };
 
 struct nfs_pgio_res {
@@ -654,10 +657,16 @@ struct nfs_pgio_res {
 	struct nfs_fattr *	fattr;
 	__u32			count;
 	__u32			op_status;
-	int			eof;		/* used by read */
-	unsigned int		replen;		/* used by read */
-	struct nfs_writeverf *	verf;		/* used by write */
-	const struct nfs_server *server;	/* used by write */
+	union {
+		struct {
+			unsigned int		replen;		/* used by read */
+			int			eof;		/* used by read */
+		};
+		struct {
+			struct nfs_writeverf *	verf;		/* used by write */
+			const struct nfs_server *server;	/* used by write */
+		};
+	};
 };
 
 /*
@@ -860,7 +869,7 @@ struct nfs3_sattrargs {
 	struct nfs_fh *		fh;
 	struct iattr *		sattr;
 	unsigned int		guard;
-	struct timespec64	guardtime;
+	struct timespec		guardtime;
 };
 
 struct nfs3_diropargs {

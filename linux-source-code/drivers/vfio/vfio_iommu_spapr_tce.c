@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * VFIO: IOMMU DMA mapping support for TCE on POWER
  *
  * Copyright (C) 2013 IBM Corp.  All rights reserved.
  *     Author: Alexey Kardashevskiy <aik@ozlabs.ru>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  * Derived from original vfio_iommu_type1.c:
  * Copyright (C) 2012 Red Hat, Inc.  All rights reserved.
@@ -179,13 +176,13 @@ put_exit:
 }
 
 static bool tce_page_is_contained(struct mm_struct *mm, unsigned long hpa,
-		unsigned int page_shift)
+		unsigned int it_page_shift)
 {
 	struct page *page;
 	unsigned long size = 0;
 
-	if (mm_iommu_is_devmem(mm, hpa, page_shift, &size))
-		return size == (1UL << page_shift);
+	if (mm_iommu_is_devmem(mm, hpa, it_page_shift, &size))
+		return size == (1UL << it_page_shift);
 
 	page = pfn_to_page(hpa >> PAGE_SHIFT);
 	/*
@@ -193,7 +190,7 @@ static bool tce_page_is_contained(struct mm_struct *mm, unsigned long hpa,
 	 * a page we just found. Otherwise the hardware can get access to
 	 * a bigger memory chunk that it should.
 	 */
-	return (PAGE_SHIFT + compound_order(compound_head(page))) >= page_shift;
+	return page_shift(compound_head(page)) >= it_page_shift;
 }
 
 static inline bool tce_groups_attached(struct tce_container *container)
@@ -346,6 +343,7 @@ static void tce_iommu_release(void *iommu_data)
 {
 	struct tce_container *container = iommu_data;
 	struct tce_iommu_group *tcegrp;
+	struct tce_iommu_prereg *tcemem, *tmtmp;
 	long i;
 
 	while (tce_groups_attached(container)) {
@@ -368,13 +366,8 @@ static void tce_iommu_release(void *iommu_data)
 		tce_iommu_free_table(container, tbl);
 	}
 
-	while (!list_empty(&container->prereg_list)) {
-		struct tce_iommu_prereg *tcemem;
-
-		tcemem = list_first_entry(&container->prereg_list,
-				struct tce_iommu_prereg, next);
-		WARN_ON_ONCE(tce_iommu_prereg_free(container, tcemem));
-	}
+	list_for_each_entry_safe(tcemem, tmtmp, &container->prereg_list, next)
+		WARN_ON(tce_iommu_prereg_free(container, tcemem));
 
 	tce_iommu_disable(container);
 	if (container->mm)
@@ -424,8 +417,8 @@ static void tce_iommu_unuse_page_v2(struct tce_container *container,
 	if (!pua)
 		return;
 
-	ret = tce_iommu_prereg_ua_to_hpa(container, be64_to_cpu(*pua), tbl->it_page_shift,
-					 &hpa, &mem);
+	ret = tce_iommu_prereg_ua_to_hpa(container, be64_to_cpu(*pua),
+			tbl->it_page_shift, &hpa, &mem);
 	if (ret)
 		pr_debug("%s: tce %llx at #%lx was not cached, ret=%d\n",
 				__func__, be64_to_cpu(*pua), entry, ret);
@@ -442,7 +435,7 @@ static int tce_iommu_clear(struct tce_container *container,
 	unsigned long oldhpa;
 	long ret;
 	enum dma_data_direction direction;
-	unsigned long lastentry = entry + pages;
+	unsigned long lastentry = entry + pages, firstentry = entry;
 
 	for ( ; entry < lastentry; ++entry) {
 		if (tbl->it_indirect_levels && tbl->it_userspace) {
@@ -467,7 +460,7 @@ static int tce_iommu_clear(struct tce_container *container,
 
 		direction = DMA_NONE;
 		oldhpa = 0;
-		ret = iommu_tce_xchg(container->mm, tbl, entry, &oldhpa,
+		ret = iommu_tce_xchg_no_kill(container->mm, tbl, entry, &oldhpa,
 				&direction);
 		if (ret)
 			continue;
@@ -482,6 +475,8 @@ static int tce_iommu_clear(struct tce_container *container,
 
 		tce_iommu_unuse_page(container, oldhpa);
 	}
+
+	iommu_tce_kill(tbl, firstentry, pages);
 
 	return 0;
 }
@@ -525,8 +520,8 @@ static long tce_iommu_build(struct tce_container *container,
 
 		hpa |= offset;
 		dirtmp = direction;
-		ret = iommu_tce_xchg(container->mm, tbl, entry + i, &hpa,
-				&dirtmp);
+		ret = iommu_tce_xchg_no_kill(container->mm, tbl, entry + i,
+				&hpa, &dirtmp);
 		if (ret) {
 			tce_iommu_unuse_page(container, hpa);
 			pr_err("iommu_tce: %s failed ioba=%lx, tce=%lx, ret=%ld\n",
@@ -543,6 +538,8 @@ static long tce_iommu_build(struct tce_container *container,
 
 	if (ret)
 		tce_iommu_clear(container, tbl, entry, i);
+	else
+		iommu_tce_kill(tbl, entry, pages);
 
 	return ret;
 }
@@ -579,8 +576,8 @@ static long tce_iommu_build_v2(struct tce_container *container,
 		if (mm_iommu_mapped_inc(mem))
 			break;
 
-		ret = iommu_tce_xchg(container->mm, tbl, entry + i, &hpa,
-				&dirtmp);
+		ret = iommu_tce_xchg_no_kill(container->mm, tbl, entry + i,
+				&hpa, &dirtmp);
 		if (ret) {
 			/* dirtmp cannot be DMA_NONE here */
 			tce_iommu_unuse_page_v2(container, tbl, entry + i);
@@ -600,6 +597,8 @@ static long tce_iommu_build_v2(struct tce_container *container,
 
 	if (ret)
 		tce_iommu_clear(container, tbl, entry, i);
+	else
+		iommu_tce_kill(tbl, entry, pages);
 
 	return ret;
 }
@@ -1196,7 +1195,8 @@ static void tce_iommu_release_ownership_ddw(struct tce_container *container,
 	}
 
 	for (i = 0; i < IOMMU_TABLE_GROUP_MAX_TABLES; ++i)
-		table_group->ops->unset_window(table_group, i);
+		if (container->tables[i])
+			table_group->ops->unset_window(table_group, i);
 
 	table_group->ops->release_ownership(table_group);
 }
@@ -1359,7 +1359,7 @@ unlock_exit:
 	mutex_unlock(&container->lock);
 }
 
-const struct vfio_iommu_driver_ops tce_iommu_driver_ops = {
+static const struct vfio_iommu_driver_ops tce_iommu_driver_ops = {
 	.name		= "iommu-vfio-powerpc",
 	.owner		= THIS_MODULE,
 	.open		= tce_iommu_open,

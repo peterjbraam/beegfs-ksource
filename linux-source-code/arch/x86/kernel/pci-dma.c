@@ -56,7 +56,7 @@ void __init pci_iommu_alloc(void)
 }
 
 /*
- * See <Documentation/x86/x86_64/boot-options.txt> for the iommu kernel
+ * See <Documentation/x86/x86_64/boot-options.rst> for the iommu kernel
  * parameter documentation.
  */
 static __init int iommu_setup(char *p)
@@ -146,7 +146,7 @@ rootfs_initcall(pci_iommu_init);
 
 static int via_no_dac_cb(struct pci_dev *pdev, void *data)
 {
-	pdev->dev.bus_dma_limit = DMA_BIT_MASK(32);
+	pdev->dev.bus_dma_mask = DMA_BIT_MASK(32);
 	return 0;
 }
 

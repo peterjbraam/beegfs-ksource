@@ -473,7 +473,7 @@ static void cleanup_timers(struct posix_cputimers *pct)
  */
 void posix_cpu_timers_exit(struct task_struct *tsk)
 {
-	cleanup_timers(&tsk->task_struct_rh->posix_cputimers);
+	cleanup_timers(&tsk->posix_cputimers);
 }
 void posix_cpu_timers_exit_group(struct task_struct *tsk)
 {
@@ -493,7 +493,7 @@ static void arm_timer(struct k_itimer *timer)
 	struct posix_cputimer_base *base;
 
 	if (CPUCLOCK_PERTHREAD(timer->it_clock))
-		base = p->task_struct_rh->posix_cputimers.bases + clkidx;
+		base = p->posix_cputimers.bases + clkidx;
 	else
 		base = p->signal->posix_cputimers.bases + clkidx;
 
@@ -826,7 +826,7 @@ static bool check_rlimit(u64 time, u64 limit, int signo, bool rt, bool hard)
 static void check_thread_timers(struct task_struct *tsk,
 				struct list_head *firing)
 {
-	struct posix_cputimers *pct = &tsk->task_struct_rh->posix_cputimers;
+	struct posix_cputimers *pct = &tsk->posix_cputimers;
 	u64 samples[CPUCLOCK_MAX];
 	unsigned long soft;
 
@@ -907,9 +907,6 @@ static void check_process_timers(struct task_struct *tsk,
 	struct posix_cputimers *pct = &sig->posix_cputimers;
 	u64 samples[CPUCLOCK_MAX];
 	unsigned long soft;
-
-	if (dl_task(tsk))
-		check_dl_overrun(tsk);
 
 	/*
 	 * If there are no active process wide timers (POSIX 1.b, itimers,
@@ -1064,7 +1061,7 @@ task_cputimers_expired(const u64 *samples, struct posix_cputimers *pct)
  */
 static inline bool fastpath_timer_check(struct task_struct *tsk)
 {
-	struct posix_cputimers *pct = &tsk->task_struct_rh->posix_cputimers;
+	struct posix_cputimers *pct = &tsk->posix_cputimers;
 	struct signal_struct *sig;
 
 	if (!expiry_cache_is_inactive(pct)) {

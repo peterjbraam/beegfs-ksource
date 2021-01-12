@@ -142,6 +142,34 @@ static inline struct msdos_sb_info *MSDOS_SB(struct super_block *sb)
 	return sb->s_fs_info;
 }
 
+/*
+ * Functions that determine the variant of the FAT file system (i.e.,
+ * whether this is FAT12, FAT16 or FAT32.
+ */
+static inline bool is_fat12(const struct msdos_sb_info *sbi)
+{
+	return sbi->fat_bits == 12;
+}
+
+static inline bool is_fat16(const struct msdos_sb_info *sbi)
+{
+	return sbi->fat_bits == 16;
+}
+
+static inline bool is_fat32(const struct msdos_sb_info *sbi)
+{
+	return sbi->fat_bits == 32;
+}
+
+/* Maximum number of clusters */
+static inline u32 max_fat(struct super_block *sb)
+{
+	struct msdos_sb_info *sbi = MSDOS_SB(sb);
+
+	return is_fat32(sbi) ? MAX_FAT32 :
+		is_fat16(sbi) ? MAX_FAT16 : MAX_FAT12;
+}
+
 static inline struct msdos_inode_info *MSDOS_I(struct inode *inode)
 {
 	return container_of(inode, struct msdos_inode_info, vfs_inode);
@@ -257,7 +285,7 @@ static inline int fat_get_start(const struct msdos_sb_info *sbi,
 				const struct msdos_dir_entry *de)
 {
 	int cluster = le16_to_cpu(de->start);
-	if (sbi->fat_bits == 32)
+	if (is_fat32(sbi))
 		cluster |= (le16_to_cpu(de->starthi) << 16);
 	return cluster;
 }
@@ -348,6 +376,11 @@ static inline void fatent_brelse(struct fat_entry *fatent)
 	fatent->fat_inode = NULL;
 }
 
+static inline bool fat_valid_entry(struct msdos_sb_info *sbi, int entry)
+{
+	return FAT_START_ENT <= entry && entry < sbi->max_cluster;
+}
+
 extern void fat_ent_access_init(struct super_block *sb);
 extern int fat_ent_read(struct inode *inode, struct fat_entry *fatent,
 			int entry);
@@ -357,6 +390,7 @@ extern int fat_alloc_clusters(struct inode *inode, int *cluster,
 			      int nr_cluster);
 extern int fat_free_clusters(struct inode *inode, int cluster);
 extern int fat_count_free_clusters(struct super_block *sb);
+extern int fat_trim_fs(struct inode *inode, struct fstrim_range *range);
 
 /* fat/file.c */
 extern long fat_generic_ioctl(struct file *filp, unsigned int cmd,
@@ -410,6 +444,10 @@ extern void fat_time_fat2unix(struct msdos_sb_info *sbi, struct timespec64 *ts,
 			      __le16 __time, __le16 __date, u8 time_cs);
 extern void fat_time_unix2fat(struct msdos_sb_info *sbi, struct timespec64 *ts,
 			      __le16 *time, __le16 *date, u8 *time_cs);
+extern int fat_truncate_time(struct inode *inode, struct timespec64 *now,
+			     int flags);
+extern int fat_update_time(struct inode *inode, struct timespec64 *now,
+			   int flags);
 extern int fat_sync_bhs(struct buffer_head **bhs, int nr_bhs);
 
 int fat_cache_init(void);

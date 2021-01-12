@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Hauppauge HD PVR USB driver - video 4 linux 2 interface
  *
  * Copyright (C) 2008      Janne Grunau (j@jannau.net)
- *
- *	This program is free software; you can redistribute it and/or
- *	modify it under the terms of the GNU General Public License as
- *	published by the Free Software Foundation, version 2.
- *
  */
 
 #include <linux/kernel.h>
@@ -991,9 +987,6 @@ static int vidioc_enum_fmt_vid_cap(struct file *file, void *private_data,
 	if (f->index != 0)
 		return -EINVAL;
 
-	f->flags = V4L2_FMT_FLAG_COMPRESSED;
-	strscpy(f->description, "MPEG2-TS with AVC/AAC streams",
-		sizeof(f->description));
 	f->pixelformat = V4L2_PIX_FMT_MPEG;
 
 	return 0;

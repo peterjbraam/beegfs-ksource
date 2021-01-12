@@ -168,9 +168,6 @@ static void tls_decrypt_done(struct crypto_async_request *req, int err)
 
 	/* Propagate if there was an err */
 	if (err) {
-		if (err == -EBADMSG)
-			TLS_INC_STATS(sock_net(skb->sk),
-				      LINUX_MIB_TLSDECRYPTERROR);
 		ctx->async_wait.err = err;
 		tls_err_abort(skb->sk, err);
 	} else {
@@ -1539,7 +1536,7 @@ static int decrypt_skb_update(struct sock *sk, struct sk_buff *skb,
 
 	if (!ctx->decrypted) {
 		if (tls_ctx->rx_conf == TLS_HW) {
-			err = tls_device_decrypted(sk, tls_ctx, skb, rxm);
+			err = tls_device_decrypted(sk, skb);
 			if (err < 0)
 				return err;
 		}
@@ -1552,9 +1549,7 @@ static int decrypt_skb_update(struct sock *sk, struct sk_buff *skb,
 				if (err == -EINPROGRESS)
 					tls_advance_record_sn(sk, prot,
 							      &tls_ctx->rx);
-				else if (err == -EBADMSG)
-					TLS_INC_STATS(sock_net(sk),
-						      LINUX_MIB_TLSDECRYPTERROR);
+
 				return err;
 			}
 		} else {
@@ -1569,7 +1564,7 @@ static int decrypt_skb_update(struct sock *sk, struct sk_buff *skb,
 		rxm->offset += prot->prepend_size;
 		rxm->full_len -= prot->overhead_size;
 		tls_advance_record_sn(sk, prot, &tls_ctx->rx);
-		ctx->decrypted = 1;
+		ctx->decrypted = true;
 		ctx->saved_data_ready(sk);
 	} else {
 		*zc = false;
@@ -1742,6 +1737,7 @@ int tls_sw_recvmsg(struct sock *sk,
 	long timeo;
 	bool is_kvec = iov_iter_is_kvec(&msg->msg_iter);
 	bool is_peek = flags & MSG_PEEK;
+	bool bpf_strp_enabled;
 	int num_async = 0;
 	int pending;
 
@@ -1752,6 +1748,7 @@ int tls_sw_recvmsg(struct sock *sk,
 
 	psock = sk_psock_get(sk);
 	lock_sock(sk);
+	bpf_strp_enabled = sk_psock_strp_enabled(psock);
 
 	/* Process pending decrypted records. It must be non-zero-copy */
 	err = process_rx_list(ctx, msg, &control, &cmsg, 0, len, false,
@@ -1805,11 +1802,12 @@ int tls_sw_recvmsg(struct sock *sk,
 
 		if (to_decrypt <= len && !is_kvec && !is_peek &&
 		    ctx->control == TLS_RECORD_TYPE_DATA &&
-		    prot->version != TLS_1_3_VERSION)
+		    prot->version != TLS_1_3_VERSION &&
+		    !bpf_strp_enabled)
 			zc = true;
 
 		/* Do not use async mode if record is non-data */
-		if (ctx->control == TLS_RECORD_TYPE_DATA)
+		if (ctx->control == TLS_RECORD_TYPE_DATA && !bpf_strp_enabled)
 			async_capable = ctx->async_capable;
 		else
 			async_capable = false;
@@ -1859,6 +1857,19 @@ int tls_sw_recvmsg(struct sock *sk,
 			goto pick_next_record;
 
 		if (!zc) {
+			if (bpf_strp_enabled) {
+				err = sk_psock_tls_strp_read(psock, skb);
+				if (err != __SK_PASS) {
+					rxm->offset = rxm->offset + rxm->full_len;
+					rxm->full_len = 0;
+					if (err == __SK_DROP)
+						consume_skb(skb);
+					ctx->recv_pkt = NULL;
+					__strp_unpause(&ctx->strp);
+					continue;
+				}
+			}
+
 			if (rxm->full_len > len) {
 				retain_skb = true;
 				chunk = len;
@@ -1987,7 +1998,7 @@ ssize_t tls_sw_splice_read(struct socket *sock,  loff_t *ppos,
 			tls_err_abort(sk, EBADMSG);
 			goto splice_read_end;
 		}
-		ctx->decrypted = 1;
+		ctx->decrypted = true;
 	}
 	rxm = strp_msg(skb);
 
@@ -2088,7 +2099,7 @@ static void tls_queue(struct strparser *strp, struct sk_buff *skb)
 	struct tls_context *tls_ctx = tls_get_ctx(strp->sk);
 	struct tls_sw_context_rx *ctx = tls_sw_ctx_rx(tls_ctx);
 
-	ctx->decrypted = 0;
+	ctx->decrypted = false;
 
 	ctx->recv_pkt = skb;
 	strp_pause(strp);
@@ -2126,10 +2137,15 @@ void tls_sw_release_resources_tx(struct sock *sk)
 	struct tls_context *tls_ctx = tls_get_ctx(sk);
 	struct tls_sw_context_tx *ctx = tls_sw_ctx_tx(tls_ctx);
 	struct tls_rec *rec, *tmp;
+	int pending;
 
 	/* Wait for any pending async encryptions to complete */
-	smp_store_mb(ctx->async_notify, true);
-	if (atomic_read(&ctx->encrypt_pending))
+	spin_lock_bh(&ctx->encrypt_compl_lock);
+	ctx->async_notify = true;
+	pending = atomic_read(&ctx->encrypt_pending);
+	spin_unlock_bh(&ctx->encrypt_compl_lock);
+
+	if (pending)
 		crypto_wait_req(-EINPROGRESS, &ctx->async_wait);
 
 	tls_tx_records(sk, -1);
@@ -2448,11 +2464,10 @@ int tls_set_sw_offload(struct sock *sk, struct tls_context *ctx, int tx)
 		tfm = crypto_aead_tfm(sw_ctx_rx->aead_recv);
 
 		if (crypto_info->version == TLS_1_3_VERSION)
-			sw_ctx_rx->async_capable = 0;
+			sw_ctx_rx->async_capable = false;
 		else
 			sw_ctx_rx->async_capable =
-				!!(tfm->__crt_alg->cra_flags &
-				   CRYPTO_ALG_ASYNC);
+				tfm->__crt_alg->cra_flags & CRYPTO_ALG_ASYNC;
 
 		/* Set up strparser */
 		memset(&cb, 0, sizeof(cb));

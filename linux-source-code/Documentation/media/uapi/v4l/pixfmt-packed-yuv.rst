@@ -1,4 +1,11 @@
-.. -*- coding: utf-8; mode: rst -*-
+.. Permission is granted to copy, distribute and/or modify this
+.. document under the terms of the GNU Free Documentation License,
+.. Version 1.1 or any later version published by the Free Software
+.. Foundation, with no Invariant Sections, no Front-Cover Texts
+.. and no Back-Cover Texts. A copy of the license is included at
+.. Documentation/media/uapi/fdl-appendix.rst.
+..
+.. TODO: replace it to GFDL-1.1-or-later WITH no-invariant-sections
 
 .. _packed-yuv:
 
@@ -21,7 +28,7 @@ component of each pixel in one 16 or 32 bit word.
 
 .. _packed-yuv-formats:
 
-.. tabularcolumns:: |p{2.0cm}|p{0.67cm}|p{0.29cm}|p{0.29cm}|p{0.29cm}|p{0.29cm}|p{0.29cm}|p{0.29cm}|p{0.29cm}|p{0.29cm}|p{0.29cm}|p{0.29cm}|p{0.29cm}|p{0.29cm}|p{0.29cm}|p{0.29cm}|p{0.29cm}|p{0.29cm}|p{0.29cm}|p{0.29cm}|p{0.29cm}|p{0.29cm}|p{0.29cm}|p{0.29cm}|p{0.29cm}|p{0.29cm}|p{0.29cm}|p{0.29cm}|p{0.29cm}|p{0.29cm}|p{0.29cm}|p{0.29cm}|p{0.29cm}|p{0.29cm}|
+.. tabularcolumns:: |p{2.5cm}|p{0.69cm}|p{0.31cm}|p{0.31cm}|p{0.31cm}|p{0.31cm}|p{0.31cm}|p{0.31cm}|p{0.31cm}|p{0.31cm}|p{0.31cm}|p{0.31cm}|p{0.31cm}|p{0.31cm}|p{0.31cm}|p{0.31cm}|p{0.31cm}|p{0.31cm}|p{0.31cm}|p{0.31cm}|p{0.31cm}|p{0.31cm}|p{0.31cm}|p{0.31cm}|p{0.31cm}|p{0.31cm}|p{0.31cm}|p{0.31cm}|p{0.31cm}|p{0.31cm}|p{0.31cm}|p{0.31cm}|p{0.31cm}|p{0.31cm}|
 
 .. flat-table:: Packed YUV Image Formats
     :header-rows:  2
@@ -37,6 +44,7 @@ component of each pixel in one 16 or 32 bit word.
       - :cspan:`7` Byte 2
 
       - :cspan:`7` Byte 3
+
     * -
       -
       - 7
@@ -74,6 +82,7 @@ component of each pixel in one 16 or 32 bit word.
       - 2
       - 1
       - 0
+
     * .. _V4L2-PIX-FMT-YUV444:
 
       - ``V4L2_PIX_FMT_YUV444``
@@ -96,7 +105,9 @@ component of each pixel in one 16 or 32 bit word.
       - Y'\ :sub:`2`
       - Y'\ :sub:`1`
       - Y'\ :sub:`0`
-      -
+
+      -  :cspan:`15`
+
     * .. _V4L2-PIX-FMT-YUV555:
 
       - ``V4L2_PIX_FMT_YUV555``
@@ -119,7 +130,8 @@ component of each pixel in one 16 or 32 bit word.
       - Y'\ :sub:`0`
       - Cb\ :sub:`4`
       - Cb\ :sub:`3`
-      -
+
+      -  :cspan:`15`
     * .. _V4L2-PIX-FMT-YUV565:
 
       - ``V4L2_PIX_FMT_YUV565``
@@ -142,7 +154,9 @@ component of each pixel in one 16 or 32 bit word.
       - Cb\ :sub:`5`
       - Cb\ :sub:`4`
       - Cb\ :sub:`3`
-      -
+
+      -  :cspan:`15`
+
     * .. _V4L2-PIX-FMT-YUV32:
 
       - ``V4L2_PIX_FMT_YUV32``
@@ -183,7 +197,7 @@ component of each pixel in one 16 or 32 bit word.
       - Cr\ :sub:`2`
       - Cr\ :sub:`1`
       - Cr\ :sub:`0`
-      -
+
     * .. _V4L2-PIX-FMT-AYUV32:
 
       - ``V4L2_PIX_FMT_AYUV32``
@@ -224,7 +238,7 @@ component of each pixel in one 16 or 32 bit word.
       - Cr\ :sub:`2`
       - Cr\ :sub:`1`
       - Cr\ :sub:`0`
-      -
+
     * .. _V4L2-PIX-FMT-XYUV32:
 
       - ``V4L2_PIX_FMT_XYUV32``
@@ -265,7 +279,7 @@ component of each pixel in one 16 or 32 bit word.
       - Cr\ :sub:`2`
       - Cr\ :sub:`1`
       - Cr\ :sub:`0`
-      -
+
     * .. _V4L2-PIX-FMT-VUYA32:
 
       - ``V4L2_PIX_FMT_VUYA32``
@@ -306,7 +320,7 @@ component of each pixel in one 16 or 32 bit word.
       - a\ :sub:`2`
       - a\ :sub:`1`
       - a\ :sub:`0`
-      -
+
     * .. _V4L2-PIX-FMT-VUYX32:
 
       - ``V4L2_PIX_FMT_VUYX32``

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * TPM handling.
  *
@@ -5,13 +6,10 @@
  * Copyright (C) 2017 Google, Inc.
  *     Matthew Garrett <mjg59@google.com>
  *     Thiebaud Weksteen <tweek@google.com>
- *
- * This file is part of the Linux kernel, and is made available under the
- * terms of the GNU General Public License version 2.
  */
 #include <linux/efi.h>
-#include <asm/efi.h>
 #include <linux/tpm_eventlog.h>
+#include <asm/efi.h>
 
 #include "efistub.h"
 
@@ -143,7 +141,8 @@ void efi_retrieve_tpm2_eventlog(efi_system_table_t *sys_table_arg)
 	 * final events structure, and if so how much space they take up
 	 */
 	if (version == EFI_TCG2_EVENT_LOG_FORMAT_TCG_2)
-		final_events_table = get_efi_config_table(sys_table_arg, LINUX_EFI_TPM_FINAL_LOG_GUID);
+		final_events_table = get_efi_config_table(sys_table_arg,
+						LINUX_EFI_TPM_FINAL_LOG_GUID);
 	if (final_events_table && final_events_table->nr_events) {
 		struct tcg_pcr_event2_head *header;
 		int offset;

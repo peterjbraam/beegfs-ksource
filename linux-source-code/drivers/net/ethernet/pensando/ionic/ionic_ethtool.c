@@ -3,7 +3,6 @@
 
 #include <linux/module.h>
 #include <linux/netdevice.h>
-#include <linux/sfp.h>
 
 #include "ionic.h"
 #include "ionic_bus.h"
@@ -12,11 +11,10 @@
 #include "ionic_stats.h"
 
 static const char ionic_priv_flags_strings[][ETH_GSTRING_LEN] = {
-#define IONIC_PRIV_F_SW_DBG_STATS	BIT(0)
+#define PRIV_F_SW_DBG_STATS		BIT(0)
 	"sw-dbg-stats",
 };
-
-#define IONIC_PRIV_FLAGS_COUNT ARRAY_SIZE(ionic_priv_flags_strings)
+#define PRIV_FLAGS_COUNT ARRAY_SIZE(ionic_priv_flags_strings)
 
 static void ionic_get_stats_strings(struct ionic_lif *lif, u8 *buf)
 {
@@ -59,7 +57,7 @@ static int ionic_get_sset_count(struct net_device *netdev, int sset)
 		count = ionic_get_stats_count(lif);
 		break;
 	case ETH_SS_PRIV_FLAGS:
-		count = IONIC_PRIV_FLAGS_COUNT;
+		count = PRIV_FLAGS_COUNT;
 		break;
 	}
 	return count;
@@ -76,7 +74,7 @@ static void ionic_get_strings(struct net_device *netdev,
 		break;
 	case ETH_SS_PRIV_FLAGS:
 		memcpy(buf, ionic_priv_flags_strings,
-		       IONIC_PRIV_FLAGS_COUNT * ETH_GSTRING_LEN);
+		       PRIV_FLAGS_COUNT * ETH_GSTRING_LEN);
 		break;
 	}
 }
@@ -88,6 +86,7 @@ static void ionic_get_drvinfo(struct net_device *netdev,
 	struct ionic *ionic = lif->ionic;
 
 	strlcpy(drvinfo->driver, IONIC_DRV_NAME, sizeof(drvinfo->driver));
+	strlcpy(drvinfo->version, IONIC_DRV_VERSION, sizeof(drvinfo->version));
 	strlcpy(drvinfo->fw_version, ionic->idev.dev_info.fw_version,
 		sizeof(drvinfo->fw_version));
 	strlcpy(drvinfo->bus_info, ionic_bus_info(ionic),
@@ -103,15 +102,18 @@ static void ionic_get_regs(struct net_device *netdev, struct ethtool_regs *regs,
 			   void *p)
 {
 	struct ionic_lif *lif = netdev_priv(netdev);
+	unsigned int offset;
 	unsigned int size;
 
 	regs->version = IONIC_DEV_CMD_REG_VERSION;
 
+	offset = 0;
 	size = IONIC_DEV_INFO_REG_COUNT * sizeof(u32);
-	memcpy_fromio(p, lif->ionic->idev.dev_info_regs->words, size);
+	memcpy_fromio(p + offset, lif->ionic->idev.dev_info_regs->words, size);
 
+	offset += size;
 	size = IONIC_DEV_CMD_REG_COUNT * sizeof(u32);
-	memcpy_fromio(p, lif->ionic->idev.dev_cmd_regs->words, size);
+	memcpy_fromio(p + offset, lif->ionic->idev.dev_cmd_regs->words, size);
 }
 
 static int ionic_get_link_ksettings(struct net_device *netdev,
@@ -122,6 +124,11 @@ static int ionic_get_link_ksettings(struct net_device *netdev,
 	int copper_seen = 0;
 
 	ethtool_link_ksettings_zero_link_mode(ks, supported);
+
+	if (!idev->port_info) {
+		netdev_err(netdev, "port_info not initialized\n");
+		return -EOPNOTSUPP;
+	}
 
 	/* The port_info data is found in a DMA space that the NIC keeps
 	 * up-to-date, so there's no need to request the data from the
@@ -160,8 +167,6 @@ static int ionic_get_link_ksettings(struct net_device *netdev,
 		ethtool_link_ksettings_add_link_mode(ks, supported,
 						     100000baseSR4_Full);
 		break;
-	case IONIC_XCVR_PID_QSFP_100G_CWDM4:
-	case IONIC_XCVR_PID_QSFP_100G_PSM4:
 	case IONIC_XCVR_PID_QSFP_100G_LR4:
 		ethtool_link_ksettings_add_link_mode(ks, supported,
 						     100000baseLR4_ER4_Full);
@@ -181,7 +186,6 @@ static int ionic_get_link_ksettings(struct net_device *netdev,
 		break;
 	case IONIC_XCVR_PID_SFP_25GBASE_SR:
 	case IONIC_XCVR_PID_SFP_25GBASE_AOC:
-	case IONIC_XCVR_PID_SFP_25GBASE_ACC:
 		ethtool_link_ksettings_add_link_mode(ks, supported,
 						     25000baseSR_Full);
 		break;
@@ -258,9 +262,12 @@ static int ionic_set_link_ksettings(struct net_device *netdev,
 	struct ionic_lif *lif = netdev_priv(netdev);
 	struct ionic *ionic = lif->ionic;
 	struct ionic_dev *idev;
+	u32 req_rs, req_fc;
+	u8 fec_type;
 	int err = 0;
 
 	idev = &lif->ionic->idev;
+	fec_type = IONIC_PORT_FEC_TYPE_NONE;
 
 	/* set autoneg */
 	if (ks->base.autoneg != idev->port_info->config.an_enable) {
@@ -276,6 +283,29 @@ static int ionic_set_link_ksettings(struct net_device *netdev,
 	if (ks->base.speed != le32_to_cpu(idev->port_info->config.speed)) {
 		mutex_lock(&ionic->dev_cmd_lock);
 		ionic_dev_cmd_port_speed(idev, ks->base.speed);
+		err = ionic_dev_cmd_wait(ionic, DEVCMD_TIMEOUT);
+		mutex_unlock(&ionic->dev_cmd_lock);
+		if (err)
+			return err;
+	}
+
+	/* set FEC */
+	req_rs = ethtool_link_ksettings_test_link_mode(ks, advertising, FEC_RS);
+	req_fc = ethtool_link_ksettings_test_link_mode(ks, advertising, FEC_BASER);
+	if (req_rs && req_fc) {
+		netdev_info(netdev, "Only select one FEC mode at a time\n");
+		return -EINVAL;
+	} else if (req_fc) {
+		fec_type = IONIC_PORT_FEC_TYPE_FC;
+	} else if (req_rs) {
+		fec_type = IONIC_PORT_FEC_TYPE_RS;
+	} else if (!(req_rs | req_fc)) {
+		fec_type = IONIC_PORT_FEC_TYPE_NONE;
+	}
+
+	if (fec_type != idev->port_info->config.fec_type) {
+		mutex_lock(&ionic->dev_cmd_lock);
+		ionic_dev_cmd_port_fec(idev, fec_type);
 		err = ionic_dev_cmd_wait(ionic, DEVCMD_TIMEOUT);
 		mutex_unlock(&ionic->dev_cmd_lock);
 		if (err)
@@ -331,70 +361,6 @@ static int ionic_set_pauseparam(struct net_device *netdev,
 	return 0;
 }
 
-static int ionic_get_fecparam(struct net_device *netdev,
-			      struct ethtool_fecparam *fec)
-{
-	struct ionic_lif *lif = netdev_priv(netdev);
-
-	switch (lif->ionic->idev.port_info->config.fec_type) {
-	case IONIC_PORT_FEC_TYPE_NONE:
-		fec->active_fec = ETHTOOL_FEC_OFF;
-		break;
-	case IONIC_PORT_FEC_TYPE_RS:
-		fec->active_fec = ETHTOOL_FEC_RS;
-		break;
-	case IONIC_PORT_FEC_TYPE_FC:
-		fec->active_fec = ETHTOOL_FEC_BASER;
-		break;
-	}
-
-	fec->fec = ETHTOOL_FEC_OFF | ETHTOOL_FEC_RS | ETHTOOL_FEC_BASER;
-
-	return 0;
-}
-
-static int ionic_set_fecparam(struct net_device *netdev,
-			      struct ethtool_fecparam *fec)
-{
-	struct ionic_lif *lif = netdev_priv(netdev);
-	u8 fec_type;
-	int ret = 0;
-
-	if (lif->ionic->idev.port_info->config.an_enable) {
-		netdev_err(netdev, "FEC request not allowed while autoneg is enabled\n");
-		return -EINVAL;
-	}
-
-	switch (fec->fec) {
-	case ETHTOOL_FEC_NONE:
-		fec_type = IONIC_PORT_FEC_TYPE_NONE;
-		break;
-	case ETHTOOL_FEC_OFF:
-		fec_type = IONIC_PORT_FEC_TYPE_NONE;
-		break;
-	case ETHTOOL_FEC_RS:
-		fec_type = IONIC_PORT_FEC_TYPE_RS;
-		break;
-	case ETHTOOL_FEC_BASER:
-		fec_type = IONIC_PORT_FEC_TYPE_FC;
-		break;
-	case ETHTOOL_FEC_AUTO:
-	default:
-		netdev_err(netdev, "FEC request 0x%04x not supported\n",
-			   fec->fec);
-		return -EINVAL;
-	}
-
-	if (fec_type != lif->ionic->idev.port_info->config.fec_type) {
-		mutex_lock(&lif->ionic->dev_cmd_lock);
-		ionic_dev_cmd_port_fec(&lif->ionic->idev, fec_type);
-		ret = ionic_dev_cmd_wait(lif->ionic, DEVCMD_TIMEOUT);
-		mutex_unlock(&lif->ionic->dev_cmd_lock);
-	}
-
-	return ret;
-}
-
 static int ionic_get_coalesce(struct net_device *netdev,
 			      struct ethtool_coalesce *coalesce)
 {
@@ -414,7 +380,30 @@ static int ionic_set_coalesce(struct net_device *netdev,
 	struct ionic_identity *ident;
 	struct ionic_qcq *qcq;
 	unsigned int i;
+	u32 usecs;
 	u32 coal;
+
+	if (coalesce->rx_max_coalesced_frames ||
+	    coalesce->rx_coalesce_usecs_irq ||
+	    coalesce->rx_max_coalesced_frames_irq ||
+	    coalesce->tx_max_coalesced_frames ||
+	    coalesce->tx_coalesce_usecs_irq ||
+	    coalesce->tx_max_coalesced_frames_irq ||
+	    coalesce->stats_block_coalesce_usecs ||
+	    coalesce->use_adaptive_rx_coalesce ||
+	    coalesce->use_adaptive_tx_coalesce ||
+	    coalesce->pkt_rate_low ||
+	    coalesce->rx_coalesce_usecs_low ||
+	    coalesce->rx_max_coalesced_frames_low ||
+	    coalesce->tx_coalesce_usecs_low ||
+	    coalesce->tx_max_coalesced_frames_low ||
+	    coalesce->pkt_rate_high ||
+	    coalesce->rx_coalesce_usecs_high ||
+	    coalesce->rx_max_coalesced_frames_high ||
+	    coalesce->tx_coalesce_usecs_high ||
+	    coalesce->tx_max_coalesced_frames_high ||
+	    coalesce->rate_sample_interval)
+		return -EINVAL;
 
 	ident = &lif->ionic->ident;
 	if (ident->dev.intr_coal_div == 0) {
@@ -429,27 +418,26 @@ static int ionic_set_coalesce(struct net_device *netdev,
 		return -EINVAL;
 	}
 
-	/* Convert the usec request to a HW useable value.  If they asked
-	 * for non-zero and it resolved to zero, bump it up
-	 */
 	coal = ionic_coal_usec_to_hw(lif->ionic, coalesce->rx_coalesce_usecs);
-	if (!coal && coalesce->rx_coalesce_usecs)
-		coal = 1;
 
 	if (coal > IONIC_INTR_CTRL_COAL_MAX)
 		return -ERANGE;
 
-	/* Save the new value */
-	lif->rx_coalesce_usecs = coalesce->rx_coalesce_usecs;
-	if (coal != lif->rx_coalesce_hw) {
-		lif->rx_coalesce_hw = coal;
+	/* If they asked for non-zero and it resolved to zero, bump it up */
+	if (!coal && coalesce->rx_coalesce_usecs)
+		coal = 1;
 
-		if (test_bit(IONIC_LIF_F_UP, lif->state)) {
+	/* Convert it back to get device resolution */
+	usecs = ionic_coal_hw_to_usec(lif->ionic, coal);
+
+	if (usecs != lif->rx_coalesce_usecs) {
+		lif->rx_coalesce_usecs = usecs;
+
+		if (test_bit(IONIC_LIF_UP, lif->state)) {
 			for (i = 0; i < lif->nxqs; i++) {
 				qcq = lif->rxqcqs[i].qcq;
 				ionic_intr_coal_init(lif->ionic->idev.intr_ctrl,
-						     qcq->intr.index,
-						     lif->rx_coalesce_hw);
+						     qcq->intr.index, coal);
 			}
 		}
 	}
@@ -462,24 +450,17 @@ static void ionic_get_ringparam(struct net_device *netdev,
 {
 	struct ionic_lif *lif = netdev_priv(netdev);
 
-	ring->tx_max_pending = IONIC_MAX_TX_DESC;
+	ring->tx_max_pending = IONIC_MAX_TXRX_DESC;
 	ring->tx_pending = lif->ntxq_descs;
-	ring->rx_max_pending = IONIC_MAX_RX_DESC;
+	ring->rx_max_pending = IONIC_MAX_TXRX_DESC;
 	ring->rx_pending = lif->nrxq_descs;
-}
-
-static void ionic_set_ringsize(struct ionic_lif *lif, void *arg)
-{
-	struct ethtool_ringparam *ring = arg;
-
-	lif->ntxq_descs = ring->tx_pending;
-	lif->nrxq_descs = ring->rx_pending;
 }
 
 static int ionic_set_ringparam(struct net_device *netdev,
 			       struct ethtool_ringparam *ring)
 {
 	struct ionic_lif *lif = netdev_priv(netdev);
+	bool running;
 
 	if (ring->rx_mini_pending || ring->rx_jumbo_pending) {
 		netdev_info(netdev, "Changing jumbo or mini descriptors not supported\n");
@@ -497,7 +478,21 @@ static int ionic_set_ringparam(struct net_device *netdev,
 	    ring->rx_pending == lif->nrxq_descs)
 		return 0;
 
-	return ionic_reset_queues(lif, ionic_set_ringsize, ring);
+	if (!ionic_wait_for_bit(lif, IONIC_LIF_QUEUE_RESET))
+		return -EBUSY;
+
+	running = test_bit(IONIC_LIF_UP, lif->state);
+	if (running)
+		ionic_stop(netdev);
+
+	lif->ntxq_descs = ring->tx_pending;
+	lif->nrxq_descs = ring->rx_pending;
+
+	if (running)
+		ionic_open(netdev);
+	clear_bit(IONIC_LIF_QUEUE_RESET, lif->state);
+
+	return 0;
 }
 
 static void ionic_get_channels(struct net_device *netdev,
@@ -512,17 +507,11 @@ static void ionic_get_channels(struct net_device *netdev,
 	ch->combined_count = lif->nxqs;
 }
 
-static void ionic_set_queuecount(struct ionic_lif *lif, void *arg)
-{
-	struct ethtool_channels *ch = arg;
-
-	lif->nxqs = ch->combined_count;
-}
-
 static int ionic_set_channels(struct net_device *netdev,
 			      struct ethtool_channels *ch)
 {
 	struct ionic_lif *lif = netdev_priv(netdev);
+	bool running;
 
 	if (!ch->combined_count || ch->other_count ||
 	    ch->rx_count || ch->tx_count)
@@ -531,7 +520,20 @@ static int ionic_set_channels(struct net_device *netdev,
 	if (ch->combined_count == lif->nxqs)
 		return 0;
 
-	return ionic_reset_queues(lif, ionic_set_queuecount, ch);
+	if (!ionic_wait_for_bit(lif, IONIC_LIF_QUEUE_RESET))
+		return -EBUSY;
+
+	running = test_bit(IONIC_LIF_UP, lif->state);
+	if (running)
+		ionic_stop(netdev);
+
+	lif->nxqs = ch->combined_count;
+
+	if (running)
+		ionic_open(netdev);
+	clear_bit(IONIC_LIF_QUEUE_RESET, lif->state);
+
+	return 0;
 }
 
 static u32 ionic_get_priv_flags(struct net_device *netdev)
@@ -539,8 +541,8 @@ static u32 ionic_get_priv_flags(struct net_device *netdev)
 	struct ionic_lif *lif = netdev_priv(netdev);
 	u32 priv_flags = 0;
 
-	if (test_bit(IONIC_LIF_F_SW_DEBUG_STATS, lif->state))
-		priv_flags |= IONIC_PRIV_F_SW_DBG_STATS;
+	if (test_bit(IONIC_LIF_SW_DEBUG_STATS, lif->state))
+		priv_flags |= PRIV_F_SW_DBG_STATS;
 
 	return priv_flags;
 }
@@ -548,10 +550,14 @@ static u32 ionic_get_priv_flags(struct net_device *netdev)
 static int ionic_set_priv_flags(struct net_device *netdev, u32 priv_flags)
 {
 	struct ionic_lif *lif = netdev_priv(netdev);
+	u32 flags = lif->flags;
 
-	clear_bit(IONIC_LIF_F_SW_DEBUG_STATS, lif->state);
-	if (priv_flags & IONIC_PRIV_F_SW_DBG_STATS)
-		set_bit(IONIC_LIF_F_SW_DEBUG_STATS, lif->state);
+	clear_bit(IONIC_LIF_SW_DEBUG_STATS, lif->state);
+	if (priv_flags & PRIV_F_SW_DBG_STATS)
+		set_bit(IONIC_LIF_SW_DEBUG_STATS, lif->state);
+
+	if (flags != lif->flags)
+		lif->flags = flags;
 
 	return 0;
 }
@@ -664,27 +670,23 @@ static int ionic_get_module_info(struct net_device *netdev,
 	struct ionic_lif *lif = netdev_priv(netdev);
 	struct ionic_dev *idev = &lif->ionic->idev;
 	struct ionic_xcvr_status *xcvr;
-	struct sfp_eeprom_base *sfp;
 
 	xcvr = &idev->port_info->status.xcvr;
-	sfp = (struct sfp_eeprom_base *) xcvr->sprom;
 
 	/* report the module data type and length */
-	switch (sfp->phys_id) {
-	case SFF8024_ID_SFP:
+	switch (xcvr->sprom[0]) {
+	case 0x03: /* SFP */
 		modinfo->type = ETH_MODULE_SFF_8079;
 		modinfo->eeprom_len = ETH_MODULE_SFF_8079_LEN;
 		break;
-	case SFF8024_ID_QSFP_8436_8636:
-	case SFF8024_ID_QSFP28_8636:
+	case 0x0D: /* QSFP */
+	case 0x11: /* QSFP28 */
 		modinfo->type = ETH_MODULE_SFF_8436;
 		modinfo->eeprom_len = ETH_MODULE_SFF_8436_LEN;
 		break;
 	default:
 		netdev_info(netdev, "unknown xcvr type 0x%02x\n",
 			    xcvr->sprom[0]);
-		modinfo->type = 0;
-		modinfo->eeprom_len = ETH_MODULE_SFF_8079_LEN;
 		break;
 	}
 
@@ -748,13 +750,11 @@ static int ionic_nway_reset(struct net_device *netdev)
 }
 
 static const struct ethtool_ops ionic_ethtool_ops = {
-	.supported_coalesce_params = ETHTOOL_COALESCE_USECS,
 	.get_drvinfo		= ionic_get_drvinfo,
 	.get_regs_len		= ionic_get_regs_len,
 	.get_regs		= ionic_get_regs,
 	.get_link		= ethtool_op_get_link,
 	.get_link_ksettings	= ionic_get_link_ksettings,
-	.set_link_ksettings	= ionic_set_link_ksettings,
 	.get_coalesce		= ionic_get_coalesce,
 	.set_coalesce		= ionic_set_coalesce,
 	.get_ringparam		= ionic_get_ringparam,
@@ -777,8 +777,7 @@ static const struct ethtool_ops ionic_ethtool_ops = {
 	.get_module_eeprom	= ionic_get_module_eeprom,
 	.get_pauseparam		= ionic_get_pauseparam,
 	.set_pauseparam		= ionic_set_pauseparam,
-	.get_fecparam		= ionic_get_fecparam,
-	.set_fecparam		= ionic_set_fecparam,
+	.set_link_ksettings	= ionic_set_link_ksettings,
 	.nway_reset		= ionic_nway_reset,
 };
 

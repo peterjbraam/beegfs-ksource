@@ -1,10 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) Sistina Software, Inc.  1997-2003 All rights reserved.
  * Copyright (C) 2004-2006 Red Hat, Inc.  All rights reserved.
- *
- * This copyrighted material is made available to anyone wishing to use,
- * modify, copy, or redistribute it subject to the terms and conditions
- * of the GNU General Public License version 2.
  */
 
 /*
@@ -883,7 +880,7 @@ static struct gfs2_leaf *new_leaf(struct inode *inode, struct buffer_head **pbh,
 	if (!bh)
 		return NULL;
 
-	gfs2_trans_add_unrevoke(GFS2_SB(inode), bn, 1);
+	gfs2_trans_remove_revoke(GFS2_SB(inode), bn, 1);
 	gfs2_trans_add_meta(ip->i_gl, bh);
 	gfs2_metatype_set(bh, GFS2_METATYPE_LF, GFS2_FORMAT_LF);
 	leaf = (struct gfs2_leaf *)bh->b_data;
@@ -1466,8 +1463,7 @@ static int gfs2_dir_read_leaf(struct inode *inode, struct dir_context *ctx,
 				sort_offset : entries, copied);
 out_free:
 	for(i = 0; i < leaf; i++)
-		if (larr[i])
-			brelse(larr[i]);
+		brelse(larr[i]);
 	kvfree(larr);
 out:
 	return error;
@@ -2021,7 +2017,7 @@ static int leaf_dealloc(struct gfs2_inode *dip, u32 index, u32 len,
 		l_blocks++;
 	}
 
-	gfs2_rlist_alloc(&rlist, LM_ST_EXCLUSIVE);
+	gfs2_rlist_alloc(&rlist);
 
 	for (x = 0; x < rlist.rl_rgrps; x++) {
 		struct gfs2_rgrpd *rgd = gfs2_glock2rgrp(rlist.rl_ghs[x].gh_gl);
@@ -2042,6 +2038,8 @@ static int leaf_dealloc(struct gfs2_inode *dip, u32 index, u32 len,
 	bh = leaf_bh;
 
 	for (blk = leaf_no; blk; blk = nblk) {
+		struct gfs2_rgrpd *rgd;
+
 		if (blk != leaf_no) {
 			error = get_leaf(dip, blk, &bh);
 			if (error)
@@ -2052,7 +2050,8 @@ static int leaf_dealloc(struct gfs2_inode *dip, u32 index, u32 len,
 		if (blk != leaf_no)
 			brelse(bh);
 
-		gfs2_free_meta(dip, blk, 1);
+		rgd = gfs2_blk2rgrpd(sdp, blk, true);
+		gfs2_free_meta(dip, rgd, blk, 1);
 		gfs2_add_inode_blocks(&dip->i_inode, -1);
 	}
 

@@ -1,20 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Copyright (C) 2001  Dave Engebretsen & Todd Inglett IBM Corporation.
  * Copyright 2001-2012 IBM Corporation.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
 #ifndef _POWERPC_EEH_H
@@ -99,8 +86,8 @@ struct eeh_pe {
 	struct eeh_pe *parent;		/* Parent PE			*/
 	void *data;			/* PE auxillary data		*/
 	struct list_head child_list;	/* List of PEs below this PE	*/
-	struct list_head edevs;		/* List of eeh_dev in this PE	*/
 	struct list_head child;		/* Memb. child_list/eeh_phb_pe	*/
+	struct list_head edevs;		/* List of eeh_dev in this PE	*/
 
 #ifdef CONFIG_STACKTRACE
 	/*
@@ -111,8 +98,8 @@ struct eeh_pe {
 	 *
 	 * A max of 64 entries might be overkill, but it also might not be.
 	 */
-	RH_KABI_EXTEND(unsigned long stack_trace[64])
-	RH_KABI_EXTEND(int trace_entries)
+	unsigned long stack_trace[64];
+	int trace_entries;
 #endif /* CONFIG_STACKTRACE */
 };
 
@@ -147,6 +134,8 @@ static inline bool eeh_pe_passed(struct eeh_pe *pe)
 struct eeh_dev {
 	int mode;			/* EEH mode			*/
 	int class_code;			/* Class code of the device	*/
+	int bdfn;			/* bdfn of device (for cfg ops) */
+	struct pci_controller *controller;
 	int pe_config_addr;		/* PE config address		*/
 	u32 config_space[16];		/* Saved PCI config space	*/
 	int pcix_cap;			/* Saved PCIx capability	*/
@@ -154,14 +143,12 @@ struct eeh_dev {
 	int aer_cap;			/* Saved AER capability		*/
 	int af_cap;			/* Saved AF capability		*/
 	struct eeh_pe *pe;		/* Associated PE		*/
-	struct list_head RH_KABI_RENAME(list, entry);		/* Membership in eeh_pe.edevs	*/
-	struct list_head RH_KABI_RENAME(rmv_list, rmv_entry);	/* Membership in rmv_list	*/
+	struct list_head entry;		/* Membership in eeh_pe.edevs	*/
+	struct list_head rmv_entry;	/* Membership in rmv_list	*/
 	struct pci_dn *pdn;		/* Associated PCI device node	*/
 	struct pci_dev *pdev;		/* Associated PCI device	*/
 	bool in_error;			/* Error flag for edev		*/
 	struct pci_dev *physfn;		/* Associated SRIOV PF		*/
-	RH_KABI_REPLACE(struct pci_bus * bus, struct pci_controller *controller)
-	RH_KABI_EXTEND(int bdfn)	/* bdfn of device (for cfg ops) */
 };
 
 /* "fmt" must be a simple literal string */
@@ -233,7 +220,6 @@ struct eeh_ops {
 	int (*get_pe_addr)(struct eeh_pe *pe);
 	int (*get_state)(struct eeh_pe *pe, int *delay);
 	int (*reset)(struct eeh_pe *pe, int option);
-	RH_KABI_DEPRECATE_FN(int, wait_state, struct eeh_pe *pe, int max_wait);
 	int (*get_log)(struct eeh_pe *pe, int severity, char *drv_log, unsigned long len);
 	int (*configure_bridge)(struct eeh_pe *pe);
 	int (*err_inject)(struct eeh_pe *pe, int type, int func,
@@ -246,7 +232,8 @@ struct eeh_ops {
 };
 
 extern int eeh_subsystem_flags;
-extern int eeh_max_freezes;
+extern u32 eeh_max_freezes;
+extern bool eeh_debugfs_no_recover;
 extern struct eeh_ops *eeh_ops;
 extern raw_spinlock_t confirm_error_lock;
 
@@ -317,6 +304,8 @@ void eeh_addr_cache_init(void);
 void eeh_add_device_early(struct pci_dn *);
 void eeh_add_device_tree_early(struct pci_dn *);
 void eeh_add_device_late(struct pci_dev *);
+void eeh_add_device_tree_late(struct pci_bus *);
+void eeh_add_sysfs_files(struct pci_bus *);
 void eeh_remove_device(struct pci_dev *);
 int eeh_unfreeze_pe(struct eeh_pe *pe);
 int eeh_pe_reset_and_recover(struct eeh_pe *pe);
@@ -376,6 +365,10 @@ static inline void eeh_add_device_early(struct pci_dn *pdn) { }
 static inline void eeh_add_device_tree_early(struct pci_dn *pdn) { }
 
 static inline void eeh_add_device_late(struct pci_dev *dev) { }
+
+static inline void eeh_add_device_tree_late(struct pci_bus *bus) { }
+
+static inline void eeh_add_sysfs_files(struct pci_bus *bus) { }
 
 static inline void eeh_remove_device(struct pci_dev *dev) { }
 
@@ -480,6 +473,9 @@ static inline void eeh_readsl(const volatile void __iomem *addr, void * buf,
 	if (EEH_POSSIBLE_ERROR((*(((u32*)buf)+nl-1)), u32))
 		eeh_check_failure(addr);
 }
+
+
+void eeh_cache_debugfs_init(void);
 
 #endif /* CONFIG_PPC64 */
 #endif /* __KERNEL__ */

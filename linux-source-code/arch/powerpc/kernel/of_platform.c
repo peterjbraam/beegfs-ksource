@@ -1,13 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *    Copyright (C) 2006 Benjamin Herrenschmidt, IBM Corp.
  *			 <benh@kernel.crashing.org>
  *    and		 Arnd Bergmann, IBM Corp.
- *
- *  This program is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU General Public License
- *  as published by the Free Software Foundation; either version
- *  2 of the License, or (at your option) any later version.
- *
  */
 
 #undef DEBUG
@@ -85,8 +80,14 @@ static int of_pci_phb_probe(struct platform_device *dev)
 	 */
 	pcibios_claim_one_bus(phb->bus);
 
+	/* Finish EEH setup */
+	eeh_add_device_tree_late(phb->bus);
+
 	/* Add probed PCI devices to the device model */
 	pci_bus_add_devices(phb->bus);
+
+	/* sysfs files should only be added after devices are added */
+	eeh_add_sysfs_files(phb->bus);
 
 	return 0;
 }

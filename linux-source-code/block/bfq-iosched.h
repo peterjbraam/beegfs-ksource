@@ -1,16 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Header file for the BFQ I/O scheduler: data structures and
  * prototypes of interface functions among BFQ components.
- *
- *  This program is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU General Public License as
- *  published by the Free Software Foundation; either version 2 of the
- *  License, or (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  General Public License for more details.
  */
 #ifndef _BFQ_H
 #define _BFQ_H
@@ -91,7 +82,7 @@ struct bfq_service_tree {
  * expiration. This peculiar definition allows for the following
  * optimization, not yet exploited: while a given entity is still in
  * service, we already know which is the best candidate for next
- * service among the other active entitities in the same parent
+ * service among the other active entities in the same parent
  * entity. We can then quickly compare the timestamps of the
  * in-service entity with those of such best candidate.
  *
@@ -142,7 +133,7 @@ struct bfq_weight_counter {
  *
  * Unless cgroups are used, the weight value is calculated from the
  * ioprio to export the same interface as CFQ.  When dealing with
- * ``well-behaved'' queues (i.e., queues that do not spend too much
+ * "well-behaved" queues (i.e., queues that do not spend too much
  * time to consume their budget and have true sequential behavior, and
  * when there are no external factors breaking anticipation) the
  * relative weights at each level of the cgroups hierarchy should be
@@ -157,7 +148,7 @@ struct bfq_entity {
 	 * Flag, true if the entity is on a tree (either the active or
 	 * the idle one of its service_tree) or is in service.
 	 */
-	bool on_st_or_in_serv;
+	bool on_st;
 
 	/* B-WF2Q+ start and finish timestamps [sectors/weight] */
 	u64 start, finish;
@@ -959,6 +950,7 @@ void bfq_bfqq_expire(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 		     bool compensate, enum bfqq_expiration reason);
 void bfq_put_queue(struct bfq_queue *bfqq);
 void bfq_end_wr_async_queues(struct bfq_data *bfqd, struct bfq_group *bfqg);
+void bfq_release_process_ref(struct bfq_data *bfqd, struct bfq_queue *bfqq);
 void bfq_schedule_dispatch(struct bfq_data *bfqd);
 void bfq_put_async_queues(struct bfq_data *bfqd, struct bfq_group *bfqg);
 
@@ -988,7 +980,6 @@ struct bfq_group *bfq_find_set_group(struct bfq_data *bfqd,
 struct blkcg_gq *bfqg_to_blkg(struct bfq_group *bfqg);
 struct bfq_group *bfqq_group(struct bfq_queue *bfqq);
 struct bfq_group *bfq_create_group_hierarchy(struct bfq_data *bfqd, int node);
-void bfqg_and_blkg_get(struct bfq_group *bfqg);
 void bfqg_and_blkg_put(struct bfq_group *bfqg);
 
 #ifdef CONFIG_BFQ_GROUP_IOSCHED
@@ -1073,8 +1064,6 @@ struct bfq_group *bfqq_group(struct bfq_queue *bfqq);
 
 #define bfq_log_bfqq(bfqd, bfqq, fmt, args...)	do {			\
 	char pid_str[MAX_PID_STR_LENGTH];	\
-	if (likely(!blk_trace_note_message_enabled((bfqd)->queue)))	\
-		break;							\
 	bfq_pid_to_str((bfqq)->pid, pid_str, MAX_PID_STR_LENGTH);	\
 	blk_add_cgroup_trace_msg((bfqd)->queue,				\
 			bfqg_to_blkg(bfqq_group(bfqq))->blkcg,		\
@@ -1091,8 +1080,6 @@ struct bfq_group *bfqq_group(struct bfq_queue *bfqq);
 
 #define bfq_log_bfqq(bfqd, bfqq, fmt, args...) do {	\
 	char pid_str[MAX_PID_STR_LENGTH];	\
-	if (likely(!blk_trace_note_message_enabled((bfqd)->queue)))	\
-		break;							\
 	bfq_pid_to_str((bfqq)->pid, pid_str, MAX_PID_STR_LENGTH);	\
 	blk_add_trace_msg((bfqd)->queue, "bfq%s%c " fmt, pid_str,	\
 			bfq_bfqq_sync((bfqq)) ? 'S' : 'A',		\

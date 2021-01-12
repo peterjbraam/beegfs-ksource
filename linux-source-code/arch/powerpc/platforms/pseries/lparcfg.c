@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * PowerPC64 LPAR Configuration Information Driver
  *
@@ -8,11 +9,6 @@
  *    seq_file updates, Copyright (c) 2004 Will Schmidt IBM Corporation.
  * Nathan Lynch nathanl@austin.ibm.com
  *    Added lparcfg_write, Copyright (C) 2004 Nathan Lynch IBM Corporation.
- *
- *      This program is free software; you can redistribute it and/or
- *      modify it under the terms of the GNU General Public License
- *      as published by the Free Software Foundation; either version
- *      2 of the License, or (at your option) any later version.
  *
  * This driver creates a proc file at /proc/ppc64/lparcfg which contains
  * keyword - value pairs that specify the configuration of the partition.
@@ -475,6 +471,7 @@ static int pseries_lparcfg_data(struct seq_file *m, void *v)
 		splpar_dispatch_data(m);
 
 		seq_printf(m, "purr=%ld\n", get_purr());
+		seq_printf(m, "tbr=%ld\n", mftb());
 	} else {		/* non SPLPAR case */
 
 		seq_printf(m, "system_active_processors=%d\n",
@@ -598,8 +595,7 @@ static ssize_t update_mpp(u64 *entitlement, u8 *weight)
 static ssize_t lparcfg_write(struct file *file, const char __user * buf,
 			     size_t count, loff_t * off)
 {
-	int kbuf_sz = 64;
-	char kbuf[kbuf_sz];
+	char kbuf[64];
 	char *tmp;
 	u64 new_entitled, *new_entitled_ptr = &new_entitled;
 	u8 new_weight, *new_weight_ptr = &new_weight;
@@ -608,7 +604,7 @@ static ssize_t lparcfg_write(struct file *file, const char __user * buf,
 	if (!firmware_has_feature(FW_FEATURE_SPLPAR))
 		return -EINVAL;
 
-	if (count > kbuf_sz)
+	if (count > sizeof(kbuf))
 		return -EINVAL;
 
 	if (copy_from_user(kbuf, buf, count))

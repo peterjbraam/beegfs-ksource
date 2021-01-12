@@ -500,8 +500,7 @@ int bnx2x_set_vf_spoofchk(struct net_device *dev, int idx, bool val);
 
 /* select_queue callback */
 u16 bnx2x_select_queue(struct net_device *dev, struct sk_buff *skb,
-		       struct net_device *sb_dev,
-		       select_queue_fallback_t fallback);
+		       struct net_device *sb_dev);
 
 static inline void bnx2x_update_rx_prod(struct bnx2x *bp,
 					struct bnx2x_fastpath *fp,
@@ -618,7 +617,7 @@ int bnx2x_set_features(struct net_device *dev, netdev_features_t features);
  *
  * @dev:	net device
  */
-void bnx2x_tx_timeout(struct net_device *dev, unsigned int txqueue);
+void bnx2x_tx_timeout(struct net_device *dev);
 
 /** bnx2x_get_c2s_mapping - read inner-to-outer vlan configuration
  * c2s_map should have BNX2X_MAX_PRIORITY entries.

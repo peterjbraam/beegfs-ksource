@@ -20,7 +20,7 @@
 
 int snd_info_check_reserved_words(const char *str)
 {
-	static const char * const reserved[] =
+	static char *reserved[] =
 	{
 		"version",
 		"meminfo",
@@ -35,7 +35,7 @@ int snd_info_check_reserved_words(const char *str)
 		"seq",
 		NULL
 	};
-	const char * const *xstr = reserved;
+	char **xstr = reserved;
 
 	while (*xstr) {
 		if (!strcmp(*xstr, str))
@@ -606,9 +606,11 @@ int snd_info_card_free(struct snd_card *card)
  */
 int snd_info_get_line(struct snd_info_buffer *buffer, char *line, int len)
 {
-	int c;
+	int c = -1;
 
-	if (snd_BUG_ON(!buffer || !buffer->buffer))
+	if (snd_BUG_ON(!buffer))
+		return 1;
+	if (!buffer->buffer)
 		return 1;
 	if (len <= 0 || buffer->stop || buffer->error)
 		return 1;

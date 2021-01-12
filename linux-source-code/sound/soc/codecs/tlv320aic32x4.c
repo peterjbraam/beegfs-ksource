@@ -573,9 +573,6 @@ static int aic32x4_set_dai_sysclk(struct snd_soc_dai *codec_dai,
 	struct clk *pll;
 
 	pll = devm_clk_get(component->dev, "pll");
-	if (IS_ERR(pll))
-		return PTR_ERR(pll);
-
 	mclk = clk_get_parent(pll);
 
 	return clk_set_rate(mclk, freq);
@@ -665,7 +662,7 @@ static int aic32x4_set_processing_blocks(struct snd_soc_component *component,
 }
 
 static int aic32x4_setup_clocks(struct snd_soc_component *component,
-				unsigned int sample_rate)
+				unsigned int sample_rate, unsigned int channels)
 {
 	u8 aosr;
 	u16 dosr;
@@ -753,7 +750,9 @@ static int aic32x4_setup_clocks(struct snd_soc_component *component,
 							dosr);
 
 						clk_set_rate(clocks[5].clk,
-							sample_rate * 32);
+							sample_rate * 32 *
+							channels);
+
 						return 0;
 					}
 				}
@@ -775,7 +774,8 @@ static int aic32x4_hw_params(struct snd_pcm_substream *substream,
 	u8 iface1_reg = 0;
 	u8 dacsetup_reg = 0;
 
-	aic32x4_setup_clocks(component, params_rate(params));
+	aic32x4_setup_clocks(component, params_rate(params),
+			     params_channels(params));
 
 	switch (params_width(params)) {
 	case 16:
@@ -1098,9 +1098,11 @@ static int aic32x4_setup_regulators(struct device *dev,
 			return PTR_ERR(aic32x4->supply_av);
 		}
 	} else {
-		if (PTR_ERR(aic32x4->supply_dv) == -EPROBE_DEFER)
+		if (IS_ERR(aic32x4->supply_dv) &&
+				PTR_ERR(aic32x4->supply_dv) == -EPROBE_DEFER)
 			return -EPROBE_DEFER;
-		if (PTR_ERR(aic32x4->supply_av) == -EPROBE_DEFER)
+		if (IS_ERR(aic32x4->supply_av) &&
+				PTR_ERR(aic32x4->supply_av) == -EPROBE_DEFER)
 			return -EPROBE_DEFER;
 	}
 

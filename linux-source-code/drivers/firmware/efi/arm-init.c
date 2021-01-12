@@ -1,14 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Extensible Firmware Interface
  *
  * Based on Extensible Firmware Interface Specification version 2.4
  *
  * Copyright (C) 2013 - 2015 Linaro Ltd.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
  */
 
 #define pr_fmt(fmt)	"efi: " fmt
@@ -21,6 +17,7 @@
 #include <linux/of_fdt.h>
 #include <linux/platform_device.h>
 #include <linux/screen_info.h>
+#include <linux/security.h>
 
 #include <asm/efi.h>
 
@@ -257,9 +254,15 @@ void __init efi_init(void)
 		return;
 	}
 
+	efi_set_secure_boot(params.secure_boot);
+
+#ifdef CONFIG_LOCK_DOWN_IN_SECURE_BOOT
+	if (efi_enabled(EFI_SECURE_BOOT))
+		security_lock_kernel_down("EFI Secure Boot mode", LOCKDOWN_INTEGRITY_MAX);
+#endif
+
 	reserve_regions();
 	efi_esrt_init();
-	efi_mokvar_table_init();
 
 	memblock_reserve(params.mmap & PAGE_MASK,
 			 PAGE_ALIGN(params.mmap_size +

@@ -242,8 +242,10 @@ struct vxlan_dev {
 	struct net	  *net;		/* netns for packet i/o */
 	struct vxlan_rdst default_dst;	/* default destination */
 
+	struct ip_tunnel_fan fan;
+
 	struct timer_list age_timer;
-	spinlock_t	  hash_lock;
+	spinlock_t	  hash_lock[FDB_HASH_SIZE];
 	unsigned int	  addrcnt;
 	struct gro_cells  gro_cells;
 
@@ -392,7 +394,7 @@ static inline bool vxlan_addr_multicast(const union vxlan_addr *ipa)
 	if (ipa->sa.sa_family == AF_INET6)
 		return ipv6_addr_is_multicast(&ipa->sin6.sin6_addr);
 	else
-		return IN_MULTICAST(ntohl(ipa->sin.sin_addr.s_addr));
+		return ipv4_is_multicast(ipa->sin.sin_addr.s_addr);
 }
 
 #else /* !IS_ENABLED(CONFIG_IPV6) */
@@ -404,7 +406,7 @@ static inline bool vxlan_addr_any(const union vxlan_addr *ipa)
 
 static inline bool vxlan_addr_multicast(const union vxlan_addr *ipa)
 {
-	return IN_MULTICAST(ntohl(ipa->sin.sin_addr.s_addr));
+	return ipv4_is_multicast(ipa->sin.sin_addr.s_addr);
 }
 
 #endif /* IS_ENABLED(CONFIG_IPV6) */
@@ -455,5 +457,36 @@ vxlan_fdb_clear_offload(const struct net_device *dev, __be32 vni)
 {
 }
 #endif
+
+static inline void vxlan_flag_attr_error(int attrtype,
+					 struct netlink_ext_ack *extack)
+{
+#define VXLAN_FLAG(flg) \
+	case IFLA_VXLAN_##flg: \
+		NL_SET_ERR_MSG_MOD(extack, \
+				   "cannot change " #flg " flag"); \
+		break
+	switch (attrtype) {
+	VXLAN_FLAG(TTL_INHERIT);
+	VXLAN_FLAG(LEARNING);
+	VXLAN_FLAG(PROXY);
+	VXLAN_FLAG(RSC);
+	VXLAN_FLAG(L2MISS);
+	VXLAN_FLAG(L3MISS);
+	VXLAN_FLAG(COLLECT_METADATA);
+	VXLAN_FLAG(UDP_ZERO_CSUM6_TX);
+	VXLAN_FLAG(UDP_ZERO_CSUM6_RX);
+	VXLAN_FLAG(REMCSUM_TX);
+	VXLAN_FLAG(REMCSUM_RX);
+	VXLAN_FLAG(GBP);
+	VXLAN_FLAG(GPE);
+	VXLAN_FLAG(REMCSUM_NOPARTIAL);
+	default:
+		NL_SET_ERR_MSG_MOD(extack, \
+				   "cannot change flag");
+		break;
+	}
+#undef VXLAN_FLAG
+}
 
 #endif

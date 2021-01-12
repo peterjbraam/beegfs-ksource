@@ -1,15 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Common code for the NVMe target.
  * Copyright (c) 2015-2016 HGST, a Western Digital Company.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
  */
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 #include <linux/module.h>
@@ -137,30 +129,39 @@ static u32 nvmet_async_event_result(struct nvmet_async_event *aen)
 	return aen->event_type | (aen->event_info << 8) | (aen->log_page << 16);
 }
 
-static void nvmet_async_events_failall(struct nvmet_ctrl *ctrl)
+static void nvmet_async_events_free(struct nvmet_ctrl *ctrl)
 {
-	u16 status = NVME_SC_INTERNAL | NVME_SC_DNR;
 	struct nvmet_req *req;
 
-	mutex_lock(&ctrl->lock);
-	while (ctrl->nr_async_event_cmds) {
+	while (1) {
+		mutex_lock(&ctrl->lock);
+		if (!ctrl->nr_async_event_cmds) {
+			mutex_unlock(&ctrl->lock);
+			return;
+		}
+
 		req = ctrl->async_event_cmds[--ctrl->nr_async_event_cmds];
 		mutex_unlock(&ctrl->lock);
-		nvmet_req_complete(req, status);
-		mutex_lock(&ctrl->lock);
+		nvmet_req_complete(req, NVME_SC_INTERNAL | NVME_SC_DNR);
 	}
-	mutex_unlock(&ctrl->lock);
 }
 
-static void nvmet_async_events_process(struct nvmet_ctrl *ctrl)
+static void nvmet_async_event_work(struct work_struct *work)
 {
+	struct nvmet_ctrl *ctrl =
+		container_of(work, struct nvmet_ctrl, async_event_work);
 	struct nvmet_async_event *aen;
 	struct nvmet_req *req;
 
-	mutex_lock(&ctrl->lock);
-	while (ctrl->nr_async_event_cmds && !list_empty(&ctrl->async_events)) {
-		aen = list_first_entry(&ctrl->async_events,
-				       struct nvmet_async_event, entry);
+	while (1) {
+		mutex_lock(&ctrl->lock);
+		aen = list_first_entry_or_null(&ctrl->async_events,
+				struct nvmet_async_event, entry);
+		if (!aen || !ctrl->nr_async_event_cmds) {
+			mutex_unlock(&ctrl->lock);
+			return;
+		}
+
 		req = ctrl->async_event_cmds[--ctrl->nr_async_event_cmds];
 		nvmet_set_result(req, nvmet_async_event_result(aen));
 
@@ -168,31 +169,8 @@ static void nvmet_async_events_process(struct nvmet_ctrl *ctrl)
 		kfree(aen);
 
 		mutex_unlock(&ctrl->lock);
-		trace_nvmet_async_event(ctrl, req->cqe->result.u32);
 		nvmet_req_complete(req, 0);
-		mutex_lock(&ctrl->lock);
 	}
-	mutex_unlock(&ctrl->lock);
-}
-
-static void nvmet_async_events_free(struct nvmet_ctrl *ctrl)
-{
-	struct nvmet_async_event *aen, *tmp;
-
-	mutex_lock(&ctrl->lock);
-	list_for_each_entry_safe(aen, tmp, &ctrl->async_events, entry) {
-		list_del(&aen->entry);
-		kfree(aen);
-	}
-	mutex_unlock(&ctrl->lock);
-}
-
-static void nvmet_async_event_work(struct work_struct *work)
-{
-	struct nvmet_ctrl *ctrl =
-		container_of(work, struct nvmet_ctrl, async_event_work);
-
-	nvmet_async_events_process(ctrl);
 }
 
 void nvmet_add_async_event(struct nvmet_ctrl *ctrl, u8 event_type,
@@ -391,6 +369,9 @@ static void nvmet_keep_alive_timer(struct work_struct *work)
 
 static void nvmet_start_keep_alive_timer(struct nvmet_ctrl *ctrl)
 {
+	if (unlikely(ctrl->kato == 0))
+		return;
+
 	pr_debug("ctrl %d start keep-alive timer for %d secs\n",
 		ctrl->cntlid, ctrl->kato);
 
@@ -400,6 +381,9 @@ static void nvmet_start_keep_alive_timer(struct nvmet_ctrl *ctrl)
 
 static void nvmet_stop_keep_alive_timer(struct nvmet_ctrl *ctrl)
 {
+	if (unlikely(ctrl->kato == 0))
+		return;
+
 	pr_debug("ctrl %d stop keep-alive\n", ctrl->cntlid);
 
 	cancel_delayed_work_sync(&ctrl->ka_work);
@@ -577,7 +561,8 @@ int nvmet_ns_enable(struct nvmet_ns *ns)
 	} else {
 		struct nvmet_ns *old;
 
-		list_for_each_entry_rcu(old, &subsys->namespaces, dev_link) {
+		list_for_each_entry_rcu(old, &subsys->namespaces, dev_link,
+					lockdep_is_held(&subsys->lock)) {
 			BUG_ON(ns->nsid == old->nsid);
 			if (ns->nsid < old->nsid)
 				break;
@@ -634,6 +619,7 @@ void nvmet_ns_disable(struct nvmet_ns *ns)
 	percpu_ref_exit(&ns->ref);
 
 	mutex_lock(&subsys->lock);
+
 	subsys->nr_namespaces--;
 	nvmet_ns_changed(subsys, ns->nsid);
 	nvmet_ns_dev_disable(ns);
@@ -773,21 +759,19 @@ static void nvmet_confirm_sq(struct percpu_ref *ref)
 
 void nvmet_sq_destroy(struct nvmet_sq *sq)
 {
-	struct nvmet_ctrl *ctrl = sq->ctrl;
-
 	/*
 	 * If this is the admin queue, complete all AERs so that our
 	 * queue doesn't have outstanding requests on it.
 	 */
-	if (ctrl && ctrl->sqs && ctrl->sqs[0] == sq)
-		nvmet_async_events_failall(ctrl);
+	if (sq->ctrl && sq->ctrl->sqs && sq->ctrl->sqs[0] == sq)
+		nvmet_async_events_free(sq->ctrl);
 	percpu_ref_kill_and_confirm(&sq->ref, nvmet_confirm_sq);
 	wait_for_completion(&sq->confirm_done);
 	wait_for_completion(&sq->free_done);
 	percpu_ref_exit(&sq->ref);
 
-	if (ctrl) {
-		nvmet_ctrl_put(ctrl);
+	if (sq->ctrl) {
+		nvmet_ctrl_put(sq->ctrl);
 		sq->ctrl = NULL; /* allows reusing the queue later */
 	}
 }
@@ -894,8 +878,6 @@ bool nvmet_req_init(struct nvmet_req *req, struct nvmet_cq *cq,
 	req->error_loc = NVMET_NO_ERROR_LOC;
 	req->error_slba = 0;
 
-	trace_nvmet_req_init(req, req->cmd);
-
 	/* no support for fused commands yet */
 	if (unlikely(flags & (NVME_CMD_FUSE_FIRST | NVME_CMD_FUSE_SECOND))) {
 		req->error_loc = offsetof(struct nvme_common_command, flags);
@@ -915,15 +897,21 @@ bool nvmet_req_init(struct nvmet_req *req, struct nvmet_cq *cq,
 	}
 
 	if (unlikely(!req->sq->ctrl))
-		/* will return an error for any non-connect command: */
+		/* will return an error for any Non-connect command: */
 		status = nvmet_parse_connect_cmd(req);
 	else if (likely(req->sq->qid != 0))
 		status = nvmet_parse_io_cmd(req);
+	else if (nvme_is_fabrics(req->cmd))
+		status = nvmet_parse_fabrics_cmd(req);
+	else if (req->sq->ctrl->subsys->type == NVME_NQN_DISC)
+		status = nvmet_parse_discovery_cmd(req);
 	else
 		status = nvmet_parse_admin_cmd(req);
 
 	if (status)
 		goto fail;
+
+	trace_nvmet_req_init(req, req->cmd);
 
 	if (unlikely(!percpu_ref_tryget_live(&sq->ref))) {
 		status = NVME_SC_INVALID_FIELD | NVME_SC_DNR;
@@ -949,28 +937,15 @@ void nvmet_req_uninit(struct nvmet_req *req)
 }
 EXPORT_SYMBOL_GPL(nvmet_req_uninit);
 
-bool nvmet_check_data_len(struct nvmet_req *req, size_t data_len)
+void nvmet_req_execute(struct nvmet_req *req)
 {
-	if (unlikely(data_len != req->transfer_len)) {
+	if (unlikely(req->data_len != req->transfer_len)) {
 		req->error_loc = offsetof(struct nvme_common_command, dptr);
 		nvmet_req_complete(req, NVME_SC_SGL_INVALID_DATA | NVME_SC_DNR);
-		return false;
-	}
-
-	return true;
+	} else
+		req->execute(req);
 }
-EXPORT_SYMBOL_GPL(nvmet_check_data_len);
-
-bool nvmet_check_data_len_lte(struct nvmet_req *req, size_t data_len)
-{
-	if (unlikely(data_len > req->transfer_len)) {
-		req->error_loc = offsetof(struct nvme_common_command, dptr);
-		nvmet_req_complete(req, NVME_SC_SGL_INVALID_DATA | NVME_SC_DNR);
-		return false;
-	}
-
-	return true;
-}
+EXPORT_SYMBOL_GPL(nvmet_req_execute);
 
 int nvmet_req_alloc_sgl(struct nvmet_req *req)
 {
@@ -998,7 +973,7 @@ int nvmet_req_alloc_sgl(struct nvmet_req *req)
 	}
 
 	req->sg = sgl_alloc(req->transfer_len, GFP_KERNEL, &req->sg_cnt);
-	if (unlikely(!req->sg))
+	if (!req->sg)
 		return -ENOMEM;
 
 	return 0;
@@ -1073,7 +1048,8 @@ static void nvmet_start_ctrl(struct nvmet_ctrl *ctrl)
 	 * in case a host died before it enabled the controller.  Hence, simply
 	 * reset the keep alive timer when the controller is enabled.
 	 */
-	mod_delayed_work(system_wq, &ctrl->ka_work, ctrl->kato * HZ);
+	if (ctrl->kato)
+		mod_delayed_work(system_wq, &ctrl->ka_work, ctrl->kato * HZ);
 }
 
 static void nvmet_clear_ctrl(struct nvmet_ctrl *ctrl)
@@ -1206,7 +1182,8 @@ static void nvmet_setup_p2p_ns_map(struct nvmet_ctrl *ctrl,
 
 	ctrl->p2p_client = get_device(req->p2p_client);
 
-	list_for_each_entry_rcu(ns, &ctrl->subsys->namespaces, dev_link)
+	list_for_each_entry_rcu(ns, &ctrl->subsys->namespaces, dev_link,
+				lockdep_is_held(&ctrl->subsys->lock))
 		nvmet_p2pmem_ns_add_p2p(ctrl, ns);
 }
 
@@ -1366,7 +1343,6 @@ static void nvmet_ctrl_free(struct kref *ref)
 
 	ida_simple_remove(&cntlid_ida, ctrl->cntlid);
 
-	nvmet_async_events_free(ctrl);
 	kfree(ctrl->sqs);
 	kfree(ctrl->cqs);
 	kfree(ctrl->changed_ns_list);

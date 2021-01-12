@@ -275,11 +275,12 @@ static struct attribute *irq_attrs[] = {
 	&actions_attr.attr,
 	NULL
 };
+ATTRIBUTE_GROUPS(irq);
 
 static struct kobj_type irq_kobj_type = {
 	.release	= irq_kobj_release,
 	.sysfs_ops	= &kobj_sysfs_ops,
-	.default_attrs	= irq_attrs,
+	.default_groups = irq_groups,
 };
 
 static void irq_sysfs_add(int irq, struct irq_desc *desc)
@@ -292,6 +293,18 @@ static void irq_sysfs_add(int irq, struct irq_desc *desc)
 		if (kobject_add(&desc->kobj, irq_kobj_base, "%d", irq))
 			pr_warn("Failed to add kobject for irq %d\n", irq);
 	}
+}
+
+static void irq_sysfs_del(struct irq_desc *desc)
+{
+	/*
+	 * If irq_sysfs_init() has not yet been invoked (early boot), then
+	 * irq_kobj_base is NULL and the descriptor was never added.
+	 * kobject_del() complains about a object with no parent, so make
+	 * it conditional.
+	 */
+	if (irq_kobj_base)
+		kobject_del(&desc->kobj);
 }
 
 static int __init irq_sysfs_init(void)
@@ -324,6 +337,7 @@ static struct kobj_type irq_kobj_type = {
 };
 
 static void irq_sysfs_add(int irq, struct irq_desc *desc) {}
+static void irq_sysfs_del(struct irq_desc *desc) {}
 
 #endif /* CONFIG_SYSFS */
 
@@ -437,13 +451,14 @@ static void free_desc(unsigned int irq)
 	 * The sysfs entry must be serialized against a concurrent
 	 * irq_sysfs_init() as well.
 	 */
-	kobject_del(&desc->kobj);
+	irq_sysfs_del(desc);
 	delete_irq_desc(irq);
 
 	/*
 	 * We free the descriptor, masks and stat fields via RCU. That
 	 * allows demultiplex interrupts to do rcu based management of
 	 * the child interrupts.
+	 * This also allows us to use rcu in kstat_irqs_usr().
 	 */
 	call_rcu(&desc->rcu, delayed_free_desc);
 }
@@ -557,6 +572,7 @@ int __init early_irq_init(void)
 		alloc_masks(&desc[i], node);
 		raw_spin_lock_init(&desc[i].lock);
 		lockdep_set_class(&desc[i].lock, &irq_desc_lock_class);
+		mutex_init(&desc[i].request_mutex);
 		desc_set_defaults(i, &desc[i], node, NULL, NULL);
 	}
 	return arch_early_irq_init();
@@ -622,15 +638,9 @@ void irq_init_desc(unsigned int irq)
 int generic_handle_irq(unsigned int irq)
 {
 	struct irq_desc *desc = irq_to_desc(irq);
-	struct irq_data *data;
 
 	if (!desc)
 		return -EINVAL;
-
-	data = irq_desc_get_irq_data(desc);
-	if (WARN_ON_ONCE(!in_irq() && handle_enforce_irqctx(data)))
-		return -EPERM;
-
 	generic_handle_irq_desc(desc);
 	return 0;
 }
@@ -988,17 +998,17 @@ unsigned int kstat_irqs(unsigned int irq)
  * kstat_irqs_usr - Get the statistics for an interrupt
  * @irq:	The interrupt number
  *
- * Returns the sum of interrupt counts on all cpus since boot for
- * @irq. Contrary to kstat_irqs() this can be called from any
- * preemptible context. It's protected against concurrent removal of
- * an interrupt descriptor when sparse irqs are enabled.
+ * Returns the sum of interrupt counts on all cpus since boot for @irq.
+ * Contrary to kstat_irqs() this can be called from any context.
+ * It uses rcu since a concurrent removal of an interrupt descriptor is
+ * observing an rcu grace period before delayed_free_desc()/irq_kobj_release().
  */
 unsigned int kstat_irqs_usr(unsigned int irq)
 {
 	unsigned int sum;
 
-	irq_lock_sparse();
+	rcu_read_lock();
 	sum = kstat_irqs(irq);
-	irq_unlock_sparse();
+	rcu_read_unlock();
 	return sum;
 }

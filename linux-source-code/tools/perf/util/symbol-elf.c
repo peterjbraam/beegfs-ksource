@@ -9,7 +9,7 @@
 
 #include "dso.h"
 #include "map.h"
-#include "maps.h"
+#include "map_groups.h"
 #include "symbol.h"
 #include "symsrc.h"
 #include "demangle-java.h"
@@ -704,15 +704,9 @@ void symsrc__destroy(struct symsrc *ss)
 	close(ss->fd);
 }
 
-bool elf__needs_adjust_symbols(GElf_Ehdr ehdr)
+bool __weak elf__needs_adjust_symbols(GElf_Ehdr ehdr)
 {
-	/*
-	 * Usually vmlinux is an ELF file with type ET_EXEC for most
-	 * architectures; except Arm64 kernel is linked with option
-	 * '-share', so need to check type ET_DYN.
-	 */
-	return ehdr.e_type == ET_EXEC || ehdr.e_type == ET_REL ||
-	       ehdr.e_type == ET_DYN;
+	return ehdr.e_type == ET_EXEC || ehdr.e_type == ET_REL;
 }
 
 int symsrc__init(struct symsrc *ss, struct dso *dso, const char *name,
@@ -850,7 +844,7 @@ void __weak arch__sym_update(struct symbol *s __maybe_unused,
 
 static int dso__process_kernel_symbol(struct dso *dso, struct map *map,
 				      GElf_Sym *sym, GElf_Shdr *shdr,
-				      struct maps *kmaps, struct kmap *kmap,
+				      struct map_groups *kmaps, struct kmap *kmap,
 				      struct dso **curr_dsop, struct map **curr_mapp,
 				      const char *section_name,
 				      bool adjust_kernel_syms, bool kmodule, bool *remap_kernel)
@@ -882,8 +876,8 @@ static int dso__process_kernel_symbol(struct dso *dso, struct map *map,
 			/* Ensure maps are correctly ordered */
 			if (kmaps) {
 				map__get(map);
-				maps__remove(kmaps, map);
-				maps__insert(kmaps, map);
+				map_groups__remove(kmaps, map);
+				map_groups__insert(kmaps, map);
 				map__put(map);
 			}
 		}
@@ -908,7 +902,7 @@ static int dso__process_kernel_symbol(struct dso *dso, struct map *map,
 
 	snprintf(dso_name, sizeof(dso_name), "%s%s", dso->short_name, section_name);
 
-	curr_map = maps__find_by_name(kmaps, dso_name);
+	curr_map = map_groups__find_by_name(kmaps, dso_name);
 	if (curr_map == NULL) {
 		u64 start = sym->st_value;
 
@@ -926,9 +920,6 @@ static int dso__process_kernel_symbol(struct dso *dso, struct map *map,
 		if (curr_map == NULL)
 			return -1;
 
-		if (curr_dso->kernel)
-			map__kmap(curr_map)->kmaps = kmaps;
-
 		if (adjust_kernel_syms) {
 			curr_map->start  = shdr->sh_addr + ref_reloc(kmap);
 			curr_map->end	 = curr_map->start + shdr->sh_size;
@@ -937,13 +928,13 @@ static int dso__process_kernel_symbol(struct dso *dso, struct map *map,
 			curr_map->map_ip = curr_map->unmap_ip = identity__map_ip;
 		}
 		curr_dso->symtab_type = dso->symtab_type;
-		maps__insert(kmaps, curr_map);
+		map_groups__insert(kmaps, curr_map);
 		/*
 		 * Add it before we drop the referece to curr_map, i.e. while
 		 * we still are sure to have a reference to this DSO via
 		 * *curr_map->dso.
 		 */
-		dsos__add(&kmaps->machine->dsos, curr_dso);
+		dsos__add(&map->groups->machine->dsos, curr_dso);
 		/* kmaps already got it */
 		map__put(curr_map);
 		dso__set_loaded(curr_dso);
@@ -959,7 +950,7 @@ int dso__load_sym(struct dso *dso, struct map *map, struct symsrc *syms_ss,
 		  struct symsrc *runtime_ss, int kmodule)
 {
 	struct kmap *kmap = dso->kernel ? map__kmap(map) : NULL;
-	struct maps *kmaps = kmap ? map__kmaps(map) : NULL;
+	struct map_groups *kmaps = kmap ? map__kmaps(map) : NULL;
 	struct map *curr_map = map;
 	struct dso *curr_dso = dso;
 	Elf_Data *symstrs, *secstrs;
@@ -1171,7 +1162,7 @@ int dso__load_sym(struct dso *dso, struct map *map, struct symsrc *syms_ss,
 			 * We need to fixup this here too because we create new
 			 * maps here, for things like vsyscall sections.
 			 */
-			maps__fixup_end(kmaps);
+			map_groups__fixup_end(kmaps);
 		}
 	}
 	err = nr;
@@ -1458,6 +1449,7 @@ struct kcore_copy_info {
 	u64 first_symbol;
 	u64 last_symbol;
 	u64 first_module;
+	u64 first_module_symbol;
 	u64 last_module_symbol;
 	size_t phnum;
 	struct list_head phdrs;
@@ -1534,6 +1526,8 @@ static int kcore_copy__process_kallsyms(void *arg, const char *name, char type,
 		return 0;
 
 	if (strchr(name, '[')) {
+		if (!kci->first_module_symbol || start < kci->first_module_symbol)
+			kci->first_module_symbol = start;
 		if (start > kci->last_module_symbol)
 			kci->last_module_symbol = start;
 		return 0;
@@ -1730,6 +1724,10 @@ static int kcore_copy__calc_maps(struct kcore_copy_info *kci, const char *dir,
 		kci->etext = round_up(kci->last_symbol, page_size);
 		kci->etext += page_size;
 	}
+
+	if (kci->first_module_symbol &&
+	    (!kci->first_module || kci->first_module_symbol < kci->first_module))
+		kci->first_module = kci->first_module_symbol;
 
 	kci->first_module = round_down(kci->first_module, page_size);
 

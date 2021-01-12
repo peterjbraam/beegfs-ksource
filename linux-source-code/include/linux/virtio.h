@@ -9,6 +9,7 @@
 #include <linux/device.h>
 #include <linux/mod_devicetable.h>
 #include <linux/gfp.h>
+#include <linux/vringh.h>
 
 /**
  * virtqueue - a queue to register buffers for sending or receiving.

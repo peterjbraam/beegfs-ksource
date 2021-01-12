@@ -1,24 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Ceph cache definitions.
  *
  *  Copyright (C) 2013 by Adfin Solutions, Inc. All Rights Reserved.
  *  Written by Milosz Tanski (milosz@adfin.com)
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License version 2
- *  as published by the Free Software Foundation.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to:
- *  Free Software Foundation
- *  51 Franklin Street, Fifth Floor
- *  Boston, MA  02111-1301  USA
- *
  */
 
 #include <linux/ceph/ceph_debug.h>
@@ -46,7 +31,7 @@ struct ceph_fscache_entry {
 	size_t uniq_len;
 	/* The following members must be last */
 	struct ceph_fsid fsid;
-	char uniquifier[];
+	char uniquifier[0];
 };
 
 static const struct fscache_cookie_def ceph_fscache_fsid_object_def = {

@@ -404,10 +404,7 @@ static void dwc2_get_device_properties(struct dwc2_hsotg *hsotg)
 		device_property_read_u32(hsotg->dev, "g-np-tx-fifo-size",
 					 &p->g_np_tx_fifo_size);
 
-		num = device_property_read_u32_array(hsotg->dev,
-						     "g-tx-fifo-size",
-						     NULL, 0);
-
+		num = device_property_count_u32(hsotg->dev, "g-tx-fifo-size");
 		if (num > 0) {
 			num = min(num, 15);
 			memset(p->g_tx_fifo_size, 0,
@@ -849,7 +846,7 @@ int dwc2_get_hwparams(struct dwc2_hsotg *hsotg)
 int dwc2_init_params(struct dwc2_hsotg *hsotg)
 {
 	const struct of_device_id *match;
-	void (*set_params)(void *data);
+	void (*set_params)(struct dwc2_hsotg *data);
 
 	dwc2_set_default_params(hsotg);
 	dwc2_get_device_properties(hsotg);

@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *	VLAN netlink control interface
  *
  * 	Copyright (c) 2007 Patrick McHardy <kaber@trash.net>
- *
- *	This program is free software; you can redistribute it and/or
- *	modify it under the terms of the GNU General Public License
- *	version 2 as published by the Free Software Foundation.
  */
 
 #include <linux/kernel.h>
@@ -84,7 +81,8 @@ static int vlan_validate(struct nlattr *tb[], struct nlattr *data[],
 		flags = nla_data(data[IFLA_VLAN_FLAGS]);
 		if ((flags->flags & flags->mask) &
 		    ~(VLAN_FLAG_REORDER_HDR | VLAN_FLAG_GVRP |
-		      VLAN_FLAG_LOOSE_BINDING | VLAN_FLAG_MVRP)) {
+		      VLAN_FLAG_LOOSE_BINDING | VLAN_FLAG_MVRP |
+		      VLAN_FLAG_BRIDGE_BINDING)) {
 			NL_SET_ERR_MSG_MOD(extack, "Invalid VLAN flags");
 			return -EINVAL;
 		}
@@ -185,10 +183,11 @@ static int vlan_newlink(struct net *src_net, struct net_device *dev,
 		return -EINVAL;
 
 	err = vlan_changelink(dev, tb, data, extack);
-	if (err < 0)
-		return err;
-
-	return register_vlan_dev(dev, extack);
+	if (!err)
+		err = register_vlan_dev(dev, extack);
+	if (err)
+		vlan_dev_uninit(dev);
+	return err;
 }
 
 static inline size_t vlan_qos_map_size(unsigned int n)

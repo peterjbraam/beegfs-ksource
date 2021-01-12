@@ -1,13 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* Helper handling for netfilter. */
 
 /* (C) 1999-2001 Paul `Rusty' Russell
  * (C) 2002-2006 Netfilter Core Team <coreteam@netfilter.org>
  * (C) 2003,2004 USAGI/WIDE Project <http://www.linux-ipv6.org>
  * (C) 2006-2012 Patrick McHardy <kaber@trash.net>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/types.h>
@@ -42,67 +39,6 @@ static bool nf_ct_auto_assign_helper __read_mostly = false;
 module_param_named(nf_conntrack_helper, nf_ct_auto_assign_helper, bool, 0644);
 MODULE_PARM_DESC(nf_conntrack_helper,
 		 "Enable automatic conntrack helper assignment (default 0)");
-
-#ifdef CONFIG_SYSCTL
-static struct ctl_table helper_sysctl_table[] = {
-	{
-		.procname	= "nf_conntrack_helper",
-		.data		= &init_net.ct.sysctl_auto_assign_helper,
-		.maxlen		= sizeof(unsigned int),
-		.mode		= 0644,
-		.proc_handler	= proc_dointvec,
-	},
-	{}
-};
-
-static int nf_conntrack_helper_init_sysctl(struct net *net)
-{
-	struct ctl_table *table;
-
-	table = kmemdup(helper_sysctl_table, sizeof(helper_sysctl_table),
-			GFP_KERNEL);
-	if (!table)
-		goto out;
-
-	table[0].data = &net->ct.sysctl_auto_assign_helper;
-
-	/* Don't export sysctls to unprivileged users */
-	if (net->user_ns != &init_user_ns)
-		table[0].procname = NULL;
-
-	net->ct.helper_sysctl_header =
-		register_net_sysctl(net, "net/netfilter", table);
-
-	if (!net->ct.helper_sysctl_header) {
-		pr_err("nf_conntrack_helper: can't register to sysctl.\n");
-		goto out_register;
-	}
-	return 0;
-
-out_register:
-	kfree(table);
-out:
-	return -ENOMEM;
-}
-
-static void nf_conntrack_helper_fini_sysctl(struct net *net)
-{
-	struct ctl_table *table;
-
-	table = net->ct.helper_sysctl_header->ctl_table_arg;
-	unregister_net_sysctl_table(net->ct.helper_sysctl_header);
-	kfree(table);
-}
-#else
-static int nf_conntrack_helper_init_sysctl(struct net *net)
-{
-	return 0;
-}
-
-static void nf_conntrack_helper_fini_sysctl(struct net *net)
-{
-}
-#endif /* CONFIG_SYSCTL */
 
 static DEFINE_MUTEX(nf_ct_nat_helpers_mutex);
 static struct list_head nf_ct_nat_helpers __read_mostly;
@@ -260,8 +196,7 @@ void nf_nat_helper_put(struct nf_conntrack_helper *helper)
 EXPORT_SYMBOL_GPL(nf_nat_helper_put);
 
 struct nf_conn_help *
-nf_ct_helper_ext_add(struct nf_conn *ct,
-		     struct nf_conntrack_helper *helper, gfp_t gfp)
+nf_ct_helper_ext_add(struct nf_conn *ct, gfp_t gfp)
 {
 	struct nf_conn_help *help;
 
@@ -330,7 +265,7 @@ int __nf_ct_try_assign_helper(struct nf_conn *ct, struct nf_conn *tmpl,
 	}
 
 	if (help == NULL) {
-		help = nf_ct_helper_ext_add(ct, helper, flags);
+		help = nf_ct_helper_ext_add(ct, flags);
 		if (help == NULL)
 			return -ENOMEM;
 	} else {
@@ -620,16 +555,10 @@ static const struct nf_ct_ext_type helper_extend = {
 	.id	= NF_CT_EXT_HELPER,
 };
 
-int nf_conntrack_helper_pernet_init(struct net *net)
+void nf_conntrack_helper_pernet_init(struct net *net)
 {
 	net->ct.auto_assign_helper_warned = false;
 	net->ct.sysctl_auto_assign_helper = nf_ct_auto_assign_helper;
-	return nf_conntrack_helper_init_sysctl(net);
-}
-
-void nf_conntrack_helper_pernet_fini(struct net *net)
-{
-	nf_conntrack_helper_fini_sysctl(net);
 }
 
 int nf_conntrack_helper_init(void)
@@ -650,12 +579,12 @@ int nf_conntrack_helper_init(void)
 	INIT_LIST_HEAD(&nf_ct_nat_helpers);
 	return 0;
 out_extend:
-	nf_ct_free_hashtable(nf_ct_helper_hash, nf_ct_helper_hsize);
+	kvfree(nf_ct_helper_hash);
 	return ret;
 }
 
 void nf_conntrack_helper_fini(void)
 {
 	nf_ct_extend_unregister(&helper_extend);
-	nf_ct_free_hashtable(nf_ct_helper_hash, nf_ct_helper_hsize);
+	kvfree(nf_ct_helper_hash);
 }

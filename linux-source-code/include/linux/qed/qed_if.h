@@ -159,7 +159,6 @@ struct qed_dcbx_get {
 enum qed_nvm_images {
 	QED_NVM_IMAGE_ISCSI_CFG,
 	QED_NVM_IMAGE_FCOE_CFG,
-	QED_NVM_IMAGE_MDUMP,
 	QED_NVM_IMAGE_NVM_CFG1,
 	QED_NVM_IMAGE_DEFAULT_CFG,
 	QED_NVM_IMAGE_NVM_META,
@@ -464,7 +463,7 @@ enum qed_db_rec_space {
 
 #define DIRECT_REG_RD(reg_addr) readl((void __iomem *)(reg_addr))
 
-#define DIRECT_REG_WR64(reg_addr, val) writeq((u64)val,	\
+#define DIRECT_REG_WR64(reg_addr, val) writeq((u32)val,	\
 					      (void __iomem *)(reg_addr))
 
 #define QED_COALESCE_MAX 0x1FF
@@ -638,6 +637,7 @@ struct qed_dev_info {
 #define QED_MFW_VERSION_3_OFFSET	24
 
 	u32		flash_size;
+	bool		b_arfs_capable;
 	bool		b_inter_pf_switch;
 	bool		tx_switching;
 	bool		rdma_supported;
@@ -817,7 +817,6 @@ struct qed_common_cb_ops {
 	void	(*dcbx_aen)(void *dev, struct qed_dcbx_get *get, u32 mib_type);
 	void (*get_generic_tlv_data)(void *dev, struct qed_generic_tlvs *data);
 	void (*get_protocol_tlv_data)(void *dev, void *data);
-	void (*bw_update)(void *dev);
 };
 
 struct qed_selftest_ops {
@@ -1178,17 +1177,6 @@ struct qed_common_ops {
 
 #define GET_FIELD(value, name) \
 	(((value) >> (name ## _SHIFT)) & name ## _MASK)
-
-#define GET_MFW_FIELD(name, field) \
-	(((name) & (field ## _MASK)) >> (field ## _OFFSET))
-
-#define SET_MFW_FIELD(name, field, value)				 \
-	do {								 \
-		(name) &= ~(field ## _MASK);				 \
-		(name) |= (((value) << (field ## _OFFSET)) & (field ## _MASK));\
-	} while (0)
-
-#define DB_ADDR_SHIFT(addr) ((addr) << DB_PWM_ADDR_OFFSET_SHIFT)
 
 /* Debug print definitions */
 #define DP_ERR(cdev, fmt, ...)					\

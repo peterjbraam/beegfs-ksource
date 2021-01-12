@@ -29,7 +29,7 @@ enum migrate_reason {
 };
 
 /* In mm/debug.c; also keep sync with include/trace/events/migrate.h */
-extern char *migrate_reason_names[MR_TYPES];
+extern const char *migrate_reason_names[MR_TYPES];
 
 static inline struct page *new_page_nodemask(struct page *page,
 				int preferred_nid, nodemask_t *nodemask)
@@ -77,9 +77,7 @@ extern void migrate_page_copy(struct page *newpage, struct page *page);
 extern int migrate_huge_page_move_mapping(struct address_space *mapping,
 				  struct page *newpage, struct page *page);
 extern int migrate_page_move_mapping(struct address_space *mapping,
-		struct page *newpage, struct page *page,
-		struct buffer_head *head, enum migrate_mode mode,
-		int extra_count);
+		struct page *newpage, struct page *page, int extra_count);
 #else
 
 static inline void putback_movable_pages(struct list_head *l) {}
@@ -168,7 +166,6 @@ static inline int migrate_misplaced_transhuge_page(struct mm_struct *mm,
 #define MIGRATE_PFN_MIGRATE	(1UL << 1)
 #define MIGRATE_PFN_LOCKED	(1UL << 2)
 #define MIGRATE_PFN_WRITE	(1UL << 3)
-#define MIGRATE_PFN_ERROR	(1UL << 5)
 #define MIGRATE_PFN_SHIFT	6
 
 static inline struct page *migrate_pfn_to_page(unsigned long mpfn)
@@ -199,14 +196,6 @@ struct migrate_vma {
 	unsigned long		npages;
 	unsigned long		start;
 	unsigned long		end;
-
-	/*
-	 * Set to the owner value also stored in page->pgmap->owner for
-	 * migrating out of device private memory.  If set only device
-	 * private pages with this owner are migrated.  If not set
-	 * device private pages are not migrated at all.
-	 */
-	void			*src_owner;
 };
 
 int migrate_vma_setup(struct migrate_vma *args);

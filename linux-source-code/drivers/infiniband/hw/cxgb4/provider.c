@@ -271,7 +271,6 @@ static int c4iw_query_device(struct ib_device *ibdev, struct ib_device_attr *pro
 		return -EINVAL;
 
 	dev = to_c4iw_dev(ibdev);
-	memset(props, 0, sizeof *props);
 	memcpy(&props->sys_image_guid, dev->rdev.lldi.ports[0]->dev_addr, 6);
 	props->hw_ver = CHELSIO_CHIP_RELEASE(dev->rdev.lldi.adapter_type);
 	props->fw_ver = dev->rdev.lldi.fw_vers;
@@ -306,10 +305,7 @@ static int c4iw_query_device(struct ib_device *ibdev, struct ib_device_attr *pro
 static int c4iw_query_port(struct ib_device *ibdev, u8 port,
 			   struct ib_port_attr *props)
 {
-	int ret = 0;
 	pr_debug("ibdev %p\n", ibdev);
-	ret = ib_get_eth_speed(ibdev, port, &props->active_speed,
-			       &props->active_width);
 
 	props->port_cap_flags =
 	    IB_PORT_CM_SUP |
@@ -319,9 +315,11 @@ static int c4iw_query_port(struct ib_device *ibdev, u8 port,
 	    IB_PORT_VENDOR_CLASS_SUP | IB_PORT_BOOT_MGMT_SUP;
 	props->gid_tbl_len = 1;
 	props->pkey_tbl_len = 1;
+	props->active_width = 2;
+	props->active_speed = IB_SPEED_DDR;
 	props->max_msg_sz = -1;
 
-	return ret;
+	return 0;
 }
 
 static ssize_t hw_rev_show(struct device *dev,
@@ -479,6 +477,7 @@ static const struct ib_device_ops c4iw_dev_ops = {
 	.create_cq = c4iw_create_cq,
 	.create_qp = c4iw_create_qp,
 	.create_srq = c4iw_create_srq,
+	.dealloc_mw = c4iw_dealloc_mw,
 	.dealloc_pd = c4iw_deallocate_pd,
 	.dealloc_ucontext = c4iw_dealloc_ucontext,
 	.dereg_mr = c4iw_dereg_mr,

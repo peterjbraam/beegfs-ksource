@@ -1,18 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Bluetooth support for Realtek devices
  *
  *  Copyright (C) 2015 Endless Mobile, Inc.
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
  */
 
 #include <linux/module.h>
@@ -65,6 +55,7 @@ struct btrtl_device_info {
 	int fw_len;
 	u8 *cfg_data;
 	int cfg_len;
+	bool drop_fw;
 };
 
 static const struct id_table ic_id_table[] = {
@@ -145,18 +136,6 @@ static const struct id_table ic_id_table[] = {
 	  .has_rom_version = true,
 	  .fw_name  = "rtl_bt/rtl8761a_fw.bin",
 	  .cfg_name = "rtl_bt/rtl8761a_config" },
-
-	/* 8822C with UART interface */
-	{ .match_flags = IC_MATCH_FL_LMPSUBV | IC_MATCH_FL_HCIREV |
-			 IC_MATCH_FL_HCIBUS,
-	  .lmp_subver = RTL_ROM_LMP_8822B,
-	  .hci_rev = 0x000c,
-	  .hci_ver = 0x0a,
-	  .hci_bus = HCI_UART,
-	  .config_needed = true,
-	  .has_rom_version = true,
-	  .fw_name  = "rtl_bt/rtl8822cs_fw.bin",
-	  .cfg_name = "rtl_bt/rtl8822cs_config" },
 
 	/* 8822C with USB interface */
 	{ IC_INFO(RTL_ROM_LMP_8822B, 0xc),
@@ -440,7 +419,7 @@ static int rtl_download_firmware(struct hci_dev *hdev,
 		if (IS_ERR(skb)) {
 			rtl_dev_err(hdev, "download fw command failed (%ld)",
 				    PTR_ERR(skb));
-			ret = PTR_ERR(skb);
+			ret = -PTR_ERR(skb);
 			goto out;
 		}
 
@@ -565,6 +544,8 @@ struct btrtl_device_info *btrtl_initialize(struct hci_dev *hdev,
 	u16 hci_rev, lmp_subver;
 	u8 hci_ver;
 	int ret;
+	u16 opcode;
+	u8 cmd[2];
 
 	btrtl_dev = kzalloc(sizeof(*btrtl_dev), GFP_KERNEL);
 	if (!btrtl_dev) {
@@ -586,6 +567,49 @@ struct btrtl_device_info *btrtl_initialize(struct hci_dev *hdev,
 	hci_ver = resp->hci_ver;
 	hci_rev = le16_to_cpu(resp->hci_rev);
 	lmp_subver = le16_to_cpu(resp->lmp_subver);
+
+	if (resp->hci_ver == 0x8 && le16_to_cpu(resp->hci_rev) == 0x826c &&
+	    resp->lmp_ver == 0x8 && le16_to_cpu(resp->lmp_subver) == 0xa99e)
+		btrtl_dev->drop_fw = true;
+
+	if (btrtl_dev->drop_fw) {
+		opcode = hci_opcode_pack(0x3f, 0x66);
+		cmd[0] = opcode & 0xff;
+		cmd[1] = opcode >> 8;
+
+		skb = bt_skb_alloc(sizeof(cmd), GFP_KERNEL);
+		if (!skb)
+			goto out_free;
+
+		skb_put_data(skb, cmd, sizeof(cmd));
+		hci_skb_pkt_type(skb) = HCI_COMMAND_PKT;
+
+		hdev->send(hdev, skb);
+
+		/* Ensure the above vendor command is sent to controller and
+		 * process has done.
+		 */
+		msleep(200);
+
+		/* Read the local version again. Expect to have the vanilla
+		 * version as cold boot.
+		 */
+		skb = btrtl_read_local_version(hdev);
+		if (IS_ERR(skb)) {
+			ret = PTR_ERR(skb);
+			goto err_free;
+		}
+
+		resp = (struct hci_rp_read_local_version *)skb->data;
+		rtl_dev_info(hdev, "examining hci_ver=%02x hci_rev=%04x lmp_ver=%02x lmp_subver=%04x",
+			     resp->hci_ver, resp->hci_rev,
+			     resp->lmp_ver, resp->lmp_subver);
+
+		hci_ver = resp->hci_ver;
+		hci_rev = le16_to_cpu(resp->hci_rev);
+		lmp_subver = le16_to_cpu(resp->lmp_subver);
+	}
+out_free:
 	kfree_skb(skb);
 
 	btrtl_dev->ic_info = btrtl_match_ic(lmp_subver, hci_rev, hci_ver,
@@ -802,7 +826,7 @@ int btrtl_get_uart_settings(struct hci_dev *hdev,
 			rtl_dev_dbg(hdev, "skipping config entry 0x%x (len %u)",
 				   le16_to_cpu(entry->offset), entry->len);
 			break;
-		}
+		};
 
 		i += sizeof(*entry) + entry->len;
 	}

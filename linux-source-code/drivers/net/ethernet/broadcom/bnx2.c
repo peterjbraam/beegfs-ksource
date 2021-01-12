@@ -844,8 +844,8 @@ bnx2_alloc_stats_blk(struct net_device *dev)
 						 BNX2_SBLK_MSIX_ALIGN_SIZE);
 	bp->status_stats_size = status_blk_size +
 				sizeof(struct statistics_block);
-	status_blk = dma_zalloc_coherent(&bp->pdev->dev, bp->status_stats_size,
-					 &bp->status_blk_mapping, GFP_KERNEL);
+	status_blk = dma_alloc_coherent(&bp->pdev->dev, bp->status_stats_size,
+					&bp->status_blk_mapping, GFP_KERNEL);
 	if (!status_blk)
 		return -ENOMEM;
 
@@ -6575,7 +6575,7 @@ bnx2_dump_state(struct bnx2 *bp)
 }
 
 static void
-bnx2_tx_timeout(struct net_device *dev, unsigned int txqueue)
+bnx2_tx_timeout(struct net_device *dev)
 {
 	struct bnx2 *bp = netdev_priv(dev);
 

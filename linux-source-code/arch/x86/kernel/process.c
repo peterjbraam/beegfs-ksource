@@ -41,7 +41,6 @@
 #include <asm/desc.h>
 #include <asm/prctl.h>
 #include <asm/spec-ctrl.h>
-#include <asm/spec_ctrl.h>
 #include <asm/proto.h>
 
 #include "process.h"
@@ -63,14 +62,12 @@ __visible DEFINE_PER_CPU_PAGE_ALIGNED(struct tss_struct, cpu_tss_rw) = {
 		 */
 		.sp0 = (1UL << (BITS_PER_LONG-1)) + 1,
 
-#ifdef CONFIG_X86_64
 		/*
 		 * .sp1 is cpu_current_top_of_stack.  The init task never
 		 * runs user code, but cpu_current_top_of_stack should still
 		 * be well defined before the first context switch.
 		 */
 		.sp1 = TOP_OF_INIT_STACK,
-#endif
 
 #ifdef CONFIG_X86_32
 		.ss0 = __KERNEL_DS,
@@ -239,7 +236,7 @@ static int get_cpuid_mode(void)
 
 static int set_cpuid_mode(struct task_struct *task, unsigned long cpuid_enabled)
 {
-	if (!static_cpu_has(X86_FEATURE_CPUID_FAULT))
+	if (!boot_cpu_has(X86_FEATURE_CPUID_FAULT))
 		return -ENODEV;
 
 	if (cpuid_enabled)
@@ -451,11 +448,8 @@ static __always_inline void __speculation_ctrl_update(unsigned long tifp,
 		msr |= stibp_tif_to_spec_ctrl(tifn);
 	}
 
-	if (updmsr) {
-		if (static_cpu_has(X86_FEATURE_SPEC_CTRL_ENTRY))
-			spec_ctrl_update(msr);
+	if (updmsr)
 		wrmsrl(MSR_IA32_SPEC_CTRL, msr);
-	}
 }
 
 static unsigned long speculation_ctrl_update_tif(struct task_struct *tsk)
@@ -533,9 +527,6 @@ void __switch_to_xtra(struct task_struct *prev_p, struct task_struct *next_p)
 		/* Enforce MSR update to ensure consistent state */
 		__speculation_ctrl_update(~tifn, tifn);
 	}
-
-	if ((tifp ^ tifn) & _TIF_SLD)
-		switch_to_sld(tifn);
 }
 
 /*
@@ -671,7 +662,7 @@ static int prefer_mwait_c1_over_halt(const struct cpuinfo_x86 *c)
 	if (c->x86_vendor != X86_VENDOR_INTEL)
 		return 0;
 
-	if (!cpu_has(c, X86_FEATURE_MWAIT) || static_cpu_has_bug(X86_BUG_MONITOR))
+	if (!cpu_has(c, X86_FEATURE_MWAIT) || boot_cpu_has_bug(X86_BUG_MONITOR))
 		return 0;
 
 	return 1;
@@ -813,7 +804,7 @@ unsigned long get_wchan(struct task_struct *p)
 	unsigned long start, bottom, top, sp, fp, ip, ret = 0;
 	int count = 0;
 
-	if (!p || p == current || p->state == TASK_RUNNING)
+	if (p == current || p->state == TASK_RUNNING)
 		return 0;
 
 	if (!try_get_task_stack(p))

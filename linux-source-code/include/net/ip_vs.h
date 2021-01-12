@@ -335,6 +335,11 @@ enum ip_vs_sctp_states {
 	IP_VS_SCTP_S_LAST
 };
 
+/* Connection templates use bits from state */
+#define IP_VS_CTPL_S_NONE		0x0000
+#define IP_VS_CTPL_S_ASSURED		0x0001
+#define IP_VS_CTPL_S_LAST		0x0002
+
 /* Delta sequence info structure
  * Each ip_vs_conn has 2 (output AND input seq. changes).
  * Only used in the VS/NAT.
@@ -447,9 +452,6 @@ struct ip_vs_protocol {
 
 	int (*dnat_handler)(struct sk_buff *skb, struct ip_vs_protocol *pp,
 			    struct ip_vs_conn *cp, struct ip_vs_iphdr *iph);
-
-	int (*csum_check)(int af, struct sk_buff *skb,
-			  struct ip_vs_protocol *pp);
 
 	const char *(*state_name)(int state);
 
@@ -598,6 +600,10 @@ struct ip_vs_dest_user_kern {
 
 	/* Address family of addr */
 	u16			af;
+
+	u16			tun_type;	/* tunnel type */
+	__be16			tun_port;	/* tunnel port */
+	u16			tun_flags;	/* tunnel flags */
 };
 
 
@@ -658,6 +664,9 @@ struct ip_vs_dest {
 	atomic_t		conn_flags;	/* flags to copy to conn */
 	atomic_t		weight;		/* server weight */
 	atomic_t		last_weight;	/* server latest weight */
+	__u16			tun_type;	/* tunnel type */
+	__be16			tun_port;	/* tunnel port */
+	__u16			tun_flags;	/* tunnel flags */
 
 	refcount_t		refcnt;		/* reference counter */
 	struct ip_vs_stats      stats;          /* statistics */
@@ -880,6 +889,7 @@ struct netns_ipvs {
 	struct delayed_work	defense_work;   /* Work handler */
 	int			drop_rate;
 	int			drop_counter;
+	int			old_secure_tcp;
 	atomic_t		dropentry;
 	/* locks in ctl.c */
 	spinlock_t		dropentry_lock;  /* drop entry handling */
@@ -1223,7 +1233,7 @@ struct ip_vs_conn *ip_vs_conn_new(const struct ip_vs_conn_param *p, int dest_af,
 				  struct ip_vs_dest *dest, __u32 fwmark);
 void ip_vs_conn_expire_now(struct ip_vs_conn *cp);
 
-const char *ip_vs_state_name(__u16 proto, int state);
+const char *ip_vs_state_name(const struct ip_vs_conn *cp);
 
 void ip_vs_tcp_conn_listen(struct ip_vs_conn *cp);
 int ip_vs_check_template(struct ip_vs_conn *ct, struct ip_vs_dest *cdest);
@@ -1289,6 +1299,17 @@ ip_vs_control_add(struct ip_vs_conn *cp, struct ip_vs_conn *ctl_cp)
 
 	cp->control = ctl_cp;
 	atomic_inc(&ctl_cp->n_control);
+}
+
+/* Mark our template as assured */
+static inline void
+ip_vs_control_assure_ct(struct ip_vs_conn *cp)
+{
+	struct ip_vs_conn *ct = cp->control;
+
+	if (ct && !(ct->state & IP_VS_CTPL_S_ASSURED) &&
+	    (ct->flags & IP_VS_CONN_F_TEMPLATE))
+		ct->state |= IP_VS_CTPL_S_ASSURED;
 }
 
 /* IPVS netns init & cleanup functions */
@@ -1388,6 +1409,9 @@ bool ip_vs_has_real_service(struct netns_ipvs *ipvs, int af, __u16 protocol,
 struct ip_vs_dest *
 ip_vs_find_real_service(struct netns_ipvs *ipvs, int af, __u16 protocol,
 			const union nf_inet_addr *daddr, __be16 dport);
+struct ip_vs_dest *ip_vs_find_tunnel(struct netns_ipvs *ipvs, int af,
+				     const union nf_inet_addr *daddr,
+				     __be16 tun_port);
 
 int ip_vs_use_count_inc(void);
 void ip_vs_use_count_dec(void);
@@ -1480,6 +1504,9 @@ static inline int ip_vs_todrop(struct netns_ipvs *ipvs)
 #else
 static inline int ip_vs_todrop(struct netns_ipvs *ipvs) { return 0; }
 #endif
+
+#define IP_VS_DFWD_METHOD(dest) (atomic_read(&(dest)->conn_flags) & \
+				 IP_VS_CONN_F_FWD_MASK)
 
 /* ip_vs_fwd_tag returns the forwarding tag of the connection */
 #define IP_VS_FWD_METHOD(cp)  (cp->flags & IP_VS_CONN_F_FWD_MASK)
@@ -1597,18 +1624,16 @@ static inline void ip_vs_conn_drop_conntrack(struct ip_vs_conn *cp)
 }
 #endif /* CONFIG_IP_VS_NFCT */
 
-/* Really using conntrack? */
-static inline bool ip_vs_conn_uses_conntrack(struct ip_vs_conn *cp,
-					     struct sk_buff *skb)
+/* Using old conntrack that can not be redirected to another real server? */
+static inline bool ip_vs_conn_uses_old_conntrack(struct ip_vs_conn *cp,
+						 struct sk_buff *skb)
 {
 #ifdef CONFIG_IP_VS_NFCT
 	enum ip_conntrack_info ctinfo;
 	struct nf_conn *ct;
 
-	if (!(cp->flags & IP_VS_CONN_F_NFCT))
-		return false;
 	ct = nf_ct_get(skb, &ctinfo);
-	if (ct)
+	if (ct && nf_ct_is_confirmed(ct))
 		return true;
 #endif
 	return false;

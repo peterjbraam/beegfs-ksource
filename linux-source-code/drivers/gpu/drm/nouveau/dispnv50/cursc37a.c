@@ -25,17 +25,14 @@
 static void
 cursc37a_update(struct nv50_wndw *wndw, u32 *interlock)
 {
-	if (curs507a_space(wndw))
-		nvif_wr32(&wndw->wimm.base.user, 0x0200, 0x00000001);
+	nvif_wr32(&wndw->wimm.base.user, 0x0200, 0x00000001);
 }
 
 static void
 cursc37a_point(struct nv50_wndw *wndw, struct nv50_wndw_atom *asyw)
 {
-	if (curs507a_space(wndw)) {
-		nvif_wr32(&wndw->wimm.base.user, 0x0208, asyw->point.y << 16 |
-							 asyw->point.x);
-	}
+	nvif_wr32(&wndw->wimm.base.user, 0x0208, asyw->point.y << 16 |
+						 asyw->point.x);
 }
 
 static const struct nv50_wimm_func

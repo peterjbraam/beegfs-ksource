@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * AppArmor security module
  *
@@ -6,11 +7,6 @@
  *
  * Copyright (C) 1998-2008 Novell/SUSE
  * Copyright 2009-2010 Canonical Ltd.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation, version 2 of the
- * License.
  *
  * AppArmor uses a serialized binary format for loading policy. To find
  * policy format documentation see Documentation/admin-guide/LSM/apparmor.rst
@@ -37,7 +33,7 @@
 
 #define v5	5	/* base version */
 #define v6	6	/* per entry policydb mediation check */
-#define v7	7
+#define v7	7	/* v2 compat networking */
 #define v8	8	/* full network masking */
 
 /*
@@ -223,16 +219,21 @@ static void *kvmemdup(const void *src, size_t len)
 static size_t unpack_u16_chunk(struct aa_ext *e, char **chunk)
 {
 	size_t size = 0;
+	void *pos = e->pos;
 
 	if (!inbounds(e, sizeof(u16)))
-		return 0;
+		goto fail;
 	size = le16_to_cpu(get_unaligned((__le16 *) e->pos));
 	e->pos += sizeof(__le16);
 	if (!inbounds(e, size))
-		return 0;
+		goto fail;
 	*chunk = e->pos;
 	e->pos += size;
 	return size;
+
+fail:
+	e->pos = pos;
+	return 0;
 }
 
 /* unpack control byte */
@@ -276,7 +277,7 @@ static bool unpack_nameX(struct aa_ext *e, enum aa_code code, const char *name)
 		char *tag = NULL;
 		size_t size = unpack_u16_chunk(e, &tag);
 		/* if a name is specified it must match. otherwise skip tag */
-		if (name && (!size || strcmp(name, tag)))
+		if (name && (!size || tag[size-1] != '\0' || strcmp(name, tag)))
 			goto fail;
 	} else if (name) {
 		/* if a name is specified and there is no name tag fail */
@@ -292,51 +293,81 @@ fail:
 	return 0;
 }
 
+static bool unpack_u16(struct aa_ext *e, u16 *data, const char *name)
+{
+	if (unpack_nameX(e, AA_U16, name)) {
+		if (!inbounds(e, sizeof(u16)))
+			return 0;
+		if (data)
+			*data = le16_to_cpu(get_unaligned((__le16 *) e->pos));
+		e->pos += sizeof(u16);
+		return 1;
+	}
+	return 0;
+}
+
 static bool unpack_u32(struct aa_ext *e, u32 *data, const char *name)
 {
+	void *pos = e->pos;
+
 	if (unpack_nameX(e, AA_U32, name)) {
 		if (!inbounds(e, sizeof(u32)))
-			return 0;
+			goto fail;
 		if (data)
 			*data = le32_to_cpu(get_unaligned((__le32 *) e->pos));
 		e->pos += sizeof(u32);
 		return 1;
 	}
+
+fail:
+	e->pos = pos;
 	return 0;
 }
 
 static bool unpack_u64(struct aa_ext *e, u64 *data, const char *name)
 {
+	void *pos = e->pos;
+
 	if (unpack_nameX(e, AA_U64, name)) {
 		if (!inbounds(e, sizeof(u64)))
-			return 0;
+			goto fail;
 		if (data)
 			*data = le64_to_cpu(get_unaligned((__le64 *) e->pos));
 		e->pos += sizeof(u64);
 		return 1;
 	}
+
+fail:
+	e->pos = pos;
 	return 0;
 }
 
 static size_t unpack_array(struct aa_ext *e, const char *name)
 {
+	void *pos = e->pos;
+
 	if (unpack_nameX(e, AA_ARRAY, name)) {
 		int size;
 		if (!inbounds(e, sizeof(u16)))
-			return 0;
+			goto fail;
 		size = (int)le16_to_cpu(get_unaligned((__le16 *) e->pos));
 		e->pos += sizeof(u16);
 		return size;
 	}
+
+fail:
+	e->pos = pos;
 	return 0;
 }
 
 static size_t unpack_blob(struct aa_ext *e, char **blob, const char *name)
 {
+	void *pos = e->pos;
+
 	if (unpack_nameX(e, AA_BLOB, name)) {
 		u32 size;
 		if (!inbounds(e, sizeof(u32)))
-			return 0;
+			goto fail;
 		size = le32_to_cpu(get_unaligned((__le32 *) e->pos));
 		e->pos += sizeof(u32);
 		if (inbounds(e, (size_t) size)) {
@@ -345,6 +376,9 @@ static size_t unpack_blob(struct aa_ext *e, char **blob, const char *name)
 			return size;
 		}
 	}
+
+fail:
+	e->pos = pos;
 	return 0;
 }
 
@@ -361,9 +395,10 @@ static int unpack_str(struct aa_ext *e, const char **string, const char *name)
 			if (src_str[size - 1] != 0)
 				goto fail;
 			*string = src_str;
+
+			return size;
 		}
 	}
-	return size;
 
 fail:
 	e->pos = pos;
@@ -389,32 +424,6 @@ static int unpack_strdup(struct aa_ext *e, char **string, const char *name)
 	return res;
 }
 
-#define DFA_VALID_PERM_MASK		0xffffffff
-#define DFA_VALID_PERM2_MASK		0xffffffff
-
-/**
- * verify_accept - verify the accept tables of a dfa
- * @dfa: dfa to verify accept tables of (NOT NULL)
- * @flags: flags governing dfa
- *
- * Returns: 1 if valid accept tables else 0 if error
- */
-static bool verify_accept(struct aa_dfa *dfa, int flags)
-{
-	int i;
-
-	/* verify accept permissions */
-	for (i = 0; i < dfa->tables[YYTD_ID_ACCEPT]->td_lolen; i++) {
-		int mode = ACCEPT_TABLE(dfa)[i];
-
-		if (mode & ~DFA_VALID_PERM_MASK)
-			return 0;
-
-		if (ACCEPT_TABLE2(dfa)[i] & ~DFA_VALID_PERM2_MASK)
-			return 0;
-	}
-	return 1;
-}
 
 /**
  * unpack_dfa - unpack a file rule dfa
@@ -445,15 +454,9 @@ static struct aa_dfa *unpack_dfa(struct aa_ext *e)
 		if (IS_ERR(dfa))
 			return dfa;
 
-		if (!verify_accept(dfa, flags))
-			goto fail;
 	}
 
 	return dfa;
-
-fail:
-	aa_put_dfa(dfa);
-	return ERR_PTR(-EPROTO);
 }
 
 /**
@@ -621,7 +624,7 @@ static struct aa_profile *unpack_profile(struct aa_ext *e, char **ns_name)
 	struct aa_profile *profile = NULL;
 	const char *tmpname, *tmpns = NULL, *name = NULL;
 	const char *info = "failed to unpack profile";
-	size_t ns_len;
+	size_t size = 0, ns_len;
 	struct rhashtable_params params = { 0 };
 	char *key = NULL;
 	struct aa_data *data;
@@ -693,10 +696,14 @@ static struct aa_profile *unpack_profile(struct aa_ext *e, char **ns_name)
 		goto fail;
 	if (tmp == PACKED_MODE_COMPLAIN || (e->version & FORCE_COMPLAIN_FLAG))
 		profile->mode = APPARMOR_COMPLAIN;
+	else if (tmp == PACKED_MODE_ENFORCE)
+		profile->mode = APPARMOR_ENFORCE;
 	else if (tmp == PACKED_MODE_KILL)
 		profile->mode = APPARMOR_KILL;
 	else if (tmp == PACKED_MODE_UNCONFINED)
 		profile->mode = APPARMOR_UNCONFINED;
+	else
+		goto fail;
 	if (!unpack_u32(e, &tmp, NULL))
 		goto fail;
 	if (tmp)
@@ -758,6 +765,43 @@ static struct aa_profile *unpack_profile(struct aa_ext *e, char **ns_name)
 		info = "failed to unpack profile rlimits";
 		goto fail;
 	}
+
+	size = unpack_array(e, "net_allowed_af");
+	if (size || VERSION_LT(e->version, v8)) {
+		profile->net_compat = kzalloc(sizeof(struct aa_net_compat), GFP_KERNEL);
+		if (!profile->net_compat) {
+			info = "out of memory";
+			goto fail;
+		}
+		for (i = 0; i < size; i++) {
+			/* discard extraneous rules that this kernel will
+			 * never request
+			 */
+			if (i >= AF_MAX) {
+				u16 tmp;
+
+				if (!unpack_u16(e, &tmp, NULL) ||
+				    !unpack_u16(e, &tmp, NULL) ||
+				    !unpack_u16(e, &tmp, NULL))
+					goto fail;
+				continue;
+			}
+			if (!unpack_u16(e, &profile->net_compat->allow[i], NULL))
+				goto fail;
+			if (!unpack_u16(e, &profile->net_compat->audit[i], NULL))
+				goto fail;
+			if (!unpack_u16(e, &profile->net_compat->quiet[i], NULL))
+				goto fail;
+		}
+		if (size && !unpack_nameX(e, AA_ARRAYEND, NULL))
+			goto fail;
+		if (VERSION_LT(e->version, v7)) {
+			/* pre v7 policy always allowed these */
+			profile->net_compat->allow[AF_UNIX] = 0xffff;
+			profile->net_compat->allow[AF_NETLINK] = 0xffff;
+		}
+	}
+
 
 	if (unpack_nameX(e, AA_STRUCT, "policydb")) {
 		/* generic policy dfa - optional and may be NULL */

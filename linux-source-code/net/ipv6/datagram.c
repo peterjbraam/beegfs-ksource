@@ -1,14 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *	common UDP/RAW code
  *	Linux INET6 implementation
  *
  *	Authors:
  *	Pedro Roque		<roque@di.fc.ul.pt>
- *
- *	This program is free software; you can redistribute it and/or
- *      modify it under the terms of the GNU General Public License
- *      as published by the Free Software Foundation; either version
- *      2 of the License, or (at your option) any later version.
  */
 
 #include <linux/capability.h>
@@ -79,7 +75,7 @@ int ip6_datagram_dst_update(struct sock *sk, bool fix_sk_saddr)
 
 	if (np->sndflow && (np->flow_label & IPV6_FLOWLABEL_MASK)) {
 		flowlabel = fl6_sock_lookup(sk, np->flow_label);
-		if (!flowlabel)
+		if (IS_ERR(flowlabel))
 			return -EINVAL;
 	}
 	ip6_datagram_flow_key_init(&fl6, sk);
@@ -740,7 +736,7 @@ EXPORT_SYMBOL_GPL(ip6_datagram_recv_ctl);
 
 int ip6_datagram_send_ctl(struct net *net, struct sock *sk,
 			  struct msghdr *msg, struct flowi6 *fl6,
-			  struct ipcm6_cookie *ipc6, struct sockcm_cookie *sockc)
+			  struct ipcm6_cookie *ipc6)
 {
 	struct in6_pktinfo *src_info;
 	struct cmsghdr *cmsg;
@@ -759,7 +755,7 @@ int ip6_datagram_send_ctl(struct net *net, struct sock *sk,
 		}
 
 		if (cmsg->cmsg_level == SOL_SOCKET) {
-			err = __sock_cmsg_send(sk, msg, cmsg, sockc);
+			err = __sock_cmsg_send(sk, msg, cmsg, &ipc6->sockc);
 			if (err)
 				return err;
 			continue;
@@ -773,6 +769,7 @@ int ip6_datagram_send_ctl(struct net *net, struct sock *sk,
 		case IPV6_2292PKTINFO:
 		    {
 			struct net_device *dev = NULL;
+			int src_idx;
 
 			if (cmsg->cmsg_len < CMSG_LEN(sizeof(struct in6_pktinfo))) {
 				err = -EINVAL;
@@ -780,12 +777,15 @@ int ip6_datagram_send_ctl(struct net *net, struct sock *sk,
 			}
 
 			src_info = (struct in6_pktinfo *)CMSG_DATA(cmsg);
+			src_idx = src_info->ipi6_ifindex;
 
-			if (src_info->ipi6_ifindex) {
+			if (src_idx) {
 				if (fl6->flowi6_oif &&
-				    src_info->ipi6_ifindex != fl6->flowi6_oif)
+				    src_idx != fl6->flowi6_oif &&
+				    (sk->sk_bound_dev_if != fl6->flowi6_oif ||
+				     !sk_dev_equal_l3scope(sk, src_idx)))
 					return -EINVAL;
-				fl6->flowi6_oif = src_info->ipi6_ifindex;
+				fl6->flowi6_oif = src_idx;
 			}
 
 			addr_type = __ipv6_addr_type(&src_info->ipi6_addr);
@@ -804,8 +804,7 @@ int ip6_datagram_send_ctl(struct net *net, struct sock *sk,
 
 			if (addr_type != IPV6_ADDR_ANY) {
 				int strict = __ipv6_addr_src_scope(addr_type) <= IPV6_ADDR_SCOPE_LINKLOCAL;
-				if (!(net->ipv6.sysctl.ip_nonlocal_bind ||
-				      inet_sk(sk)->freebind || inet_sk(sk)->transparent) &&
+				if (!ipv6_can_nonlocal_bind(net, inet_sk(sk)) &&
 				    !ipv6_chk_addr_and_flags(net, &src_info->ipi6_addr,
 							     dev, !strict, 0,
 							     IFA_F_TENTATIVE) &&

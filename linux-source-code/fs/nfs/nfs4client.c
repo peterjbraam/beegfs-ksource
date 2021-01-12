@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2006 Red Hat, Inc. All Rights Reserved.
  * Written by David Howells (dhowells@redhat.com)
@@ -877,17 +878,14 @@ static int nfs4_set_client(struct nfs_server *server,
 	};
 	struct nfs_client *clp;
 
-	if (minorversion == 0)
-		__set_bit(NFS_CS_REUSEPORT, &cl_init.init_flags);
-	if (proto == XPRT_TRANSPORT_TCP)
+	if (minorversion > 0 && proto == XPRT_TRANSPORT_TCP)
 		cl_init.nconnect = nconnect;
-
 	if (server->flags & NFS_MOUNT_NORESVPORT)
-		__set_bit(NFS_CS_NORESVPORT, &cl_init.init_flags);
+		set_bit(NFS_CS_NORESVPORT, &cl_init.init_flags);
 	if (server->options & NFS_OPTION_MIGRATION)
-		__set_bit(NFS_CS_MIGRATION, &cl_init.init_flags);
+		set_bit(NFS_CS_MIGRATION, &cl_init.init_flags);
 	if (test_bit(NFS_MIG_TSM_POSSIBLE, &server->mig_status))
-		__set_bit(NFS_CS_TSM_POSSIBLE, &cl_init.init_flags);
+		set_bit(NFS_CS_TSM_POSSIBLE, &cl_init.init_flags);
 	server->port = rpc_get_port(addr);
 
 	/* Allocate or find a client reference we can use */

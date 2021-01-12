@@ -1,13 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Packet matching code.
  *
  * Copyright (C) 1999 Paul `Rusty' Russell & Michael J. Neuling
  * Copyright (C) 2000-2005 Netfilter Core Team <coreteam@netfilter.org>
  * Copyright (C) 2006-2010 Patrick McHardy <kaber@trash.net>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 #include <linux/cache.h>
@@ -365,6 +362,17 @@ ipt_do_table(struct sk_buff *skb,
 	else return verdict;
 }
 
+static bool next_offset_ok(const struct xt_table_info *t, unsigned int newpos)
+{
+	if (newpos > t->size - sizeof(struct ipt_entry))
+		return false;
+
+	if (newpos % __alignof__(struct ipt_entry) != 0)
+		return false;
+
+	return true;
+}
+
 /* Figures out from what hook each rule can be called: returns 0 if
    there are loops.  Puts hook bitmask in comefrom. */
 static int
@@ -420,6 +428,8 @@ mark_source_chains(const struct xt_table_info *newinfo,
 
 				/* Move along one */
 				size = e->next_offset;
+				if (!next_offset_ok(newinfo, pos + size))
+					return 0;
 				e = entry0 + pos + size;
 				if (pos + size >= newinfo->size)
 					return 0;
@@ -441,6 +451,10 @@ mark_source_chains(const struct xt_table_info *newinfo,
 					if (newpos >= newinfo->size)
 						return 0;
 				}
+
+				if (!next_offset_ok(newinfo, newpos))
+					return 0;
+
 				e = entry0 + newpos;
 				e->counters.pcnt = pos;
 				pos = newpos;
@@ -1800,22 +1814,11 @@ out_free:
 	return ret;
 }
 
-void ipt_unregister_table_pre_exit(struct net *net, struct xt_table *table,
-				   const struct nf_hook_ops *ops)
-{
-	nf_unregister_net_hooks(net, ops, hweight32(table->valid_hooks));
-}
-
-void ipt_unregister_table_exit(struct net *net, struct xt_table *table)
-{
-	__ipt_unregister_table(net, table);
-}
-
 void ipt_unregister_table(struct net *net, struct xt_table *table,
 			  const struct nf_hook_ops *ops)
 {
 	if (ops)
-		ipt_unregister_table_pre_exit(net, table, ops);
+		nf_unregister_net_hooks(net, ops, hweight32(table->valid_hooks));
 	__ipt_unregister_table(net, table);
 }
 
@@ -1972,8 +1975,6 @@ static void __exit ip_tables_fini(void)
 
 EXPORT_SYMBOL(ipt_register_table);
 EXPORT_SYMBOL(ipt_unregister_table);
-EXPORT_SYMBOL(ipt_unregister_table_pre_exit);
-EXPORT_SYMBOL(ipt_unregister_table_exit);
 EXPORT_SYMBOL(ipt_do_table);
 module_init(ip_tables_init);
 module_exit(ip_tables_fini);

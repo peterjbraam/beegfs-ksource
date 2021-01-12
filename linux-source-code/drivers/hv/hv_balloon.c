@@ -1,19 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2012, Microsoft Corporation.
  *
  * Author:
  *   K. Y. Srinivasan <kys@microsoft.com>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published
- * by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE, GOOD TITLE or
- * NON INFRINGEMENT.  See the GNU General Public License for more
- * details.
- *
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -33,9 +23,6 @@
 #include <linux/percpu_counter.h>
 
 #include <linux/hyperv.h>
-#include <asm/hyperv-tlfs.h>
-
-#include <asm/mshyperv.h>
 
 #define CREATE_TRACE_POINTS
 #include "hv_trace_balloon.h"
@@ -354,6 +341,8 @@ struct dm_unballoon_response {
  *
  * mem_range: Memory range to hot add.
  *
+ * On Linux we currently don't support this since we cannot hot add
+ * arbitrary granularity of memory.
  */
 
 struct dm_hot_add {
@@ -468,7 +457,6 @@ struct hot_add_wrk {
 	struct work_struct wrk;
 };
 
-static bool allow_hibernation;
 static bool hot_add = true;
 static bool do_hot_add;
 /*
@@ -489,7 +477,7 @@ module_param(pressure_report_delay, uint, (S_IRUGO | S_IWUSR));
 MODULE_PARM_DESC(pressure_report_delay, "Delay in secs in reporting pressure");
 static atomic_t trans_id = ATOMIC_INIT(0);
 
-static int dm_ring_size = 20 * 1024;
+static int dm_ring_size = (5 * PAGE_SIZE);
 
 /*
  * Driver specific state.
@@ -505,10 +493,10 @@ enum hv_dm_state {
 };
 
 
-static __u8 recv_buffer[HV_HYP_PAGE_SIZE];
-static __u8 balloon_up_send_buffer[HV_HYP_PAGE_SIZE];
-#define PAGES_IN_2M (2 * 1024 * 1024 / PAGE_SIZE)
-#define HA_CHUNK (128 * 1024 * 1024 / PAGE_SIZE)
+static __u8 recv_buffer[PAGE_SIZE];
+static __u8 balloon_up_send_buffer[PAGE_SIZE];
+#define PAGES_IN_2M	512
+#define HA_CHUNK (32 * 1024)
 
 struct hv_dynmem_device {
 	struct hv_device *dev;
@@ -543,6 +531,7 @@ struct hv_dynmem_device {
 	 * State to synchronize hot-add.
 	 */
 	struct completion  ol_waitevent;
+	bool ha_waiting;
 	/*
 	 * This thread handles hot-add
 	 * requests from the host as well as notifying
@@ -643,7 +632,10 @@ static int hv_memory_notifier(struct notifier_block *nb, unsigned long val,
 	switch (val) {
 	case MEM_ONLINE:
 	case MEM_CANCEL_ONLINE:
-		complete(&dm_device.ol_waitevent);
+		if (dm_device.ha_waiting) {
+			dm_device.ha_waiting = false;
+			complete(&dm_device.ol_waitevent);
+		}
 		break;
 
 	case MEM_OFFLINE:
@@ -689,7 +681,8 @@ static void hv_page_online_one(struct hv_hotadd_state *has, struct page *pg)
 
 	/* This frame is currently backed; online the page. */
 	__online_page_set_limits(pg);
-	generic_online_page(pg, 0);
+	__online_page_increment_counters(pg);
+	__online_page_free(pg);
 
 	lockdep_assert_held(&dm_device.ha_lock);
 	dm_device.num_pages_onlined++;
@@ -733,7 +726,8 @@ static void hv_mem_hot_add(unsigned long start, unsigned long size,
 		has->covered_end_pfn +=  processed_pfn;
 		spin_unlock_irqrestore(&dm_device.ha_lock, flags);
 
-		reinit_completion(&dm_device.ol_waitevent);
+		init_completion(&dm_device.ol_waitevent);
+		dm_device.ha_waiting = !memhp_auto_online;
 
 		nid = memory_add_physaddr_to_nid(PFN_PHYS(start_pfn));
 		ret = add_memory(nid, PFN_PHYS((start_pfn)),
@@ -759,14 +753,15 @@ static void hv_mem_hot_add(unsigned long start, unsigned long size,
 		}
 
 		/*
-		 * Wait for memory to get onlined. If the kernel onlined the
-		 * memory when adding it, this will return directly. Otherwise,
-		 * it will wait for user space to online the memory. This helps
-		 * to avoid adding memory faster than it is getting onlined. As
-		 * adding succeeded, it is ok to proceed even if the memory was
-		 * not onlined in time.
+		 * Wait for the memory block to be onlined when memory onlining
+		 * is done outside of kernel (memhp_auto_online). Since the hot
+		 * add has succeeded, it is ok to proceed even if the pages in
+		 * the hot added region have not been "onlined" within the
+		 * allowed time.
 		 */
-		wait_for_completion_timeout(&dm_device.ol_waitevent, 5 * HZ);
+		if (dm_device.ha_waiting)
+			wait_for_completion_timeout(&dm_device.ol_waitevent,
+						    5*HZ);
 		post_status(&dm_device);
 	}
 }
@@ -1058,12 +1053,8 @@ static void hot_add_req(struct work_struct *dummy)
 	else
 		resp.result = 0;
 
-	if (!do_hot_add || resp.page_count == 0) {
-		if (!allow_hibernation)
-			pr_err("Memory hot add failed\n");
-		else
-			pr_info("Ignore hot-add request!\n");
-	}
+	if (!do_hot_add || (resp.page_count == 0))
+		pr_err("Memory hot add failed\n");
 
 	dm->state = DM_INITIALIZED;
 	resp.hdr.trans_id = atomic_inc_return(&trans_id);
@@ -1085,7 +1076,7 @@ static void process_info(struct hv_dynmem_device *dm, struct dm_info_msg *msg)
 			__u64 *max_page_count = (__u64 *)&info_hdr[1];
 
 			pr_info("Max. dynamic memory size: %llu MB\n",
-				(*max_page_count) >> (20 - HV_HYP_PAGE_SHIFT));
+				(*max_page_count) >> (20 - PAGE_SHIFT));
 		}
 
 		break;
@@ -1097,6 +1088,7 @@ static void process_info(struct hv_dynmem_device *dm, struct dm_info_msg *msg)
 static unsigned long compute_balloon_floor(void)
 {
 	unsigned long min_pages;
+	unsigned long nr_pages = totalram_pages();
 #define MB2PAGES(mb) ((mb) << (20 - PAGE_SHIFT))
 	/* Simple continuous piecewiese linear function:
 	 *  max MiB -> min MiB  gradient
@@ -1109,16 +1101,16 @@ static unsigned long compute_balloon_floor(void)
 	 *    8192       744    (1/16)
 	 *   32768      1512	(1/32)
 	 */
-	if (totalram_pages < MB2PAGES(128))
-		min_pages = MB2PAGES(8) + (totalram_pages >> 1);
-	else if (totalram_pages < MB2PAGES(512))
-		min_pages = MB2PAGES(40) + (totalram_pages >> 2);
-	else if (totalram_pages < MB2PAGES(2048))
-		min_pages = MB2PAGES(104) + (totalram_pages >> 3);
-	else if (totalram_pages < MB2PAGES(8192))
-		min_pages = MB2PAGES(232) + (totalram_pages >> 4);
+	if (nr_pages < MB2PAGES(128))
+		min_pages = MB2PAGES(8) + (nr_pages >> 1);
+	else if (nr_pages < MB2PAGES(512))
+		min_pages = MB2PAGES(40) + (nr_pages >> 2);
+	else if (nr_pages < MB2PAGES(2048))
+		min_pages = MB2PAGES(104) + (nr_pages >> 3);
+	else if (nr_pages < MB2PAGES(8192))
+		min_pages = MB2PAGES(232) + (nr_pages >> 4);
 	else
-		min_pages = MB2PAGES(488) + (totalram_pages >> 5);
+		min_pages = MB2PAGES(488) + (nr_pages >> 5);
 #undef MB2PAGES
 	return min_pages;
 }
@@ -1223,7 +1215,7 @@ static unsigned int alloc_balloon_pages(struct hv_dynmem_device *dm,
 
 	for (i = 0; i < num_pages / alloc_unit; i++) {
 		if (bl_resp->hdr.size + sizeof(union dm_mem_page_range) >
-			HV_HYP_PAGE_SIZE)
+			PAGE_SIZE)
 			return i * alloc_unit;
 
 		/*
@@ -1276,16 +1268,16 @@ static void balloon_up(struct work_struct *dummy)
 
 	/*
 	 * We will attempt 2M allocations. However, if we fail to
-	 * allocate 2M chunks, we will go back to PAGE_SIZE allocations.
+	 * allocate 2M chunks, we will go back to 4k allocations.
 	 */
-	alloc_unit = PAGES_IN_2M;
+	alloc_unit = 512;
 
 	avail_pages = si_mem_available();
 	floor = compute_balloon_floor();
 
 	/* Refuse to balloon below the floor. */
 	if (avail_pages < num_pages || avail_pages - num_pages < floor) {
-		pr_warn("Balloon request will be partially fulfilled. %s\n",
+		pr_info("Balloon request will be partially fulfilled. %s\n",
 			avail_pages < num_pages ? "Not enough memory." :
 			"Balloon floor reached.");
 
@@ -1293,7 +1285,7 @@ static void balloon_up(struct work_struct *dummy)
 	}
 
 	while (!done) {
-		memset(balloon_up_send_buffer, 0, HV_HYP_PAGE_SIZE);
+		memset(balloon_up_send_buffer, 0, PAGE_SIZE);
 		bl_resp = (struct dm_balloon_response *)balloon_up_send_buffer;
 		bl_resp->hdr.type = DM_BALLOON_RESPONSE;
 		bl_resp->hdr.size = sizeof(struct dm_balloon_response);
@@ -1492,7 +1484,7 @@ static void balloon_onchannelcallback(void *context)
 
 	memset(recv_buffer, 0, sizeof(recv_buffer));
 	vmbus_recvpacket(dev->channel, recv_buffer,
-			 HV_HYP_PAGE_SIZE, &recvlen, &requestid);
+			 PAGE_SIZE, &recvlen, &requestid);
 
 	if (recvlen > 0) {
 		dm_msg = (struct dm_message *)recv_buffer;
@@ -1510,11 +1502,6 @@ static void balloon_onchannelcallback(void *context)
 			break;
 
 		case DM_BALLOON_REQUEST:
-			if (allow_hibernation) {
-				pr_info("Ignore balloon-up request!\n");
-				break;
-			}
-
 			if (dm->state == DM_BALLOON_UP)
 				pr_warn("Currently ballooning\n");
 			bal_msg = (struct dm_balloon *)recv_buffer;
@@ -1524,11 +1511,6 @@ static void balloon_onchannelcallback(void *context)
 			break;
 
 		case DM_UNBALLOON_REQUEST:
-			if (allow_hibernation) {
-				pr_info("Ignore balloon-down request!\n");
-				break;
-			}
-
 			dm->state = DM_BALLOON_DOWN;
 			balloon_down(dm,
 				 (struct dm_unballoon_request *)recv_buffer);
@@ -1634,11 +1616,6 @@ static int balloon_connect_vsp(struct hv_device *dev)
 	cap_msg.hdr.size = sizeof(struct dm_capabilities);
 	cap_msg.hdr.trans_id = atomic_inc_return(&trans_id);
 
-	/*
-	 * When hibernation (i.e. virtual ACPI S4 state) is enabled, the host
-	 * currently still requires the bits to be set, so we have to add code
-	 * to fail the host's hot-add and balloon up/down requests, if any.
-	 */
 	cap_msg.caps.cap_bits.balloon = 1;
 	cap_msg.caps.cap_bits.hot_add = 1;
 
@@ -1688,10 +1665,6 @@ static int balloon_probe(struct hv_device *dev,
 {
 	int ret;
 
-	allow_hibernation = hv_is_hibernation_supported();
-	if (allow_hibernation)
-		hot_add = false;
-
 #ifdef CONFIG_MEMORY_HOTPLUG
 	do_hot_add = hot_add;
 #else
@@ -1710,7 +1683,6 @@ static int balloon_probe(struct hv_device *dev,
 
 #ifdef CONFIG_MEMORY_HOTPLUG
 	set_online_page_callback(&hv_online_page);
-	init_completion(&dm_device.ol_waitevent);
 	register_memory_notifier(&hv_memory_nb);
 #endif
 
@@ -1732,8 +1704,6 @@ static int balloon_probe(struct hv_device *dev,
 	return 0;
 
 probe_error:
-	dm_device.state = DM_INIT_ERROR;
-	dm_device.thread  = NULL;
 	vmbus_close(dev->channel);
 #ifdef CONFIG_MEMORY_HOTPLUG
 	unregister_memory_notifier(&hv_memory_nb);
@@ -1775,59 +1745,6 @@ static int balloon_remove(struct hv_device *dev)
 	return 0;
 }
 
-static int balloon_suspend(struct hv_device *hv_dev)
-{
-	struct hv_dynmem_device *dm = hv_get_drvdata(hv_dev);
-
-	tasklet_disable(&hv_dev->channel->callback_event);
-
-	cancel_work_sync(&dm->balloon_wrk.wrk);
-	cancel_work_sync(&dm->ha_wrk.wrk);
-
-	if (dm->thread) {
-		kthread_stop(dm->thread);
-		dm->thread = NULL;
-		vmbus_close(hv_dev->channel);
-	}
-
-	tasklet_enable(&hv_dev->channel->callback_event);
-
-	return 0;
-
-}
-
-static int balloon_resume(struct hv_device *dev)
-{
-	int ret;
-
-	dm_device.state = DM_INITIALIZING;
-
-	ret = balloon_connect_vsp(dev);
-
-	if (ret != 0)
-		goto out;
-
-	dm_device.thread =
-		 kthread_run(dm_thread_func, &dm_device, "hv_balloon");
-	if (IS_ERR(dm_device.thread)) {
-		ret = PTR_ERR(dm_device.thread);
-		dm_device.thread = NULL;
-		goto close_channel;
-	}
-
-	dm_device.state = DM_INITIALIZED;
-	return 0;
-close_channel:
-	vmbus_close(dev->channel);
-out:
-	dm_device.state = DM_INIT_ERROR;
-#ifdef CONFIG_MEMORY_HOTPLUG
-	unregister_memory_notifier(&hv_memory_nb);
-	restore_online_page_callback(&hv_online_page);
-#endif
-	return ret;
-}
-
 static const struct hv_vmbus_device_id id_table[] = {
 	/* Dynamic Memory Class ID */
 	/* 525074DC-8985-46e2-8057-A307DC18A502 */
@@ -1842,8 +1759,6 @@ static  struct hv_driver balloon_drv = {
 	.id_table = id_table,
 	.probe =  balloon_probe,
 	.remove =  balloon_remove,
-	.suspend = balloon_suspend,
-	.resume = balloon_resume,
 	.driver = {
 		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 	},

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-only
 #
 # IPv6 configuration
 #
@@ -15,7 +16,7 @@ menuconfig IPV6
 	  Documentation/networking/ipv6.txt and read the HOWTO at
 	  <http://www.tldp.org/HOWTO/Linux+IPv6-HOWTO/>
 
-	  To compile this protocol support as a module, choose M here: the 
+	  To compile this protocol support as a module, choose M here: the
 	  module will be called ipv6.
 
 if IPV6
@@ -84,18 +85,6 @@ config INET6_ESP_OFFLOAD
 	  only if this system really does IPsec and want to do it
 	  with high throughput. A typical desktop system does not
 	  need it, even if it does IPsec.
-
-	  If unsure, say N.
-
-config INET6_ESPINTCP
-	bool "IPv6: ESP in TCP encapsulation (RFC 8229)"
-	depends on XFRM && INET6_ESP
-	select STREAM_PARSER
-	select NET_SOCK_MSG
-	select XFRM_ESPINTCP
-	help
-	  Support for RFC 8229 encapsulation of ESP and IKE over
-	  TCP/IPv6 sockets.
 
 	  If unsure, say N.
 
@@ -300,6 +289,7 @@ config IPV6_SEG6_LWTUNNEL
 config IPV6_SEG6_HMAC
 	bool "IPv6: Segment Routing HMAC support"
 	depends on IPV6
+	select CRYPTO
 	select CRYPTO_HMAC
 	select CRYPTO_SHA1
 	select CRYPTO_SHA256

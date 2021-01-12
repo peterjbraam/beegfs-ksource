@@ -1,12 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * linux/kernel/power/user.c
  *
  * This file provides the user space interface for software suspend/resume.
  *
  * Copyright (C) 2006 Rafael J. Wysocki <rjw@sisk.pl>
- *
- * This file is released under the GPLv2.
- *
  */
 
 #include <linux/suspend.h>
@@ -49,9 +47,6 @@ static int snapshot_open(struct inode *inode, struct file *filp)
 	int error, nr_calls = 0;
 
 	if (!hibernation_available())
-		return -EPERM;
-
-	if (kernel_is_locked_down("/dev/snapshot"))
 		return -EPERM;
 
 	lock_system_sleep();

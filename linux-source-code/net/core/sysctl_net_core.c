@@ -34,6 +34,15 @@ static int net_msg_warn;	/* Unused, but still a sysctl */
 int sysctl_fb_tunnels_only_for_init_net __read_mostly = 0;
 EXPORT_SYMBOL(sysctl_fb_tunnels_only_for_init_net);
 
+/* 0 - Keep current behavior:
+ *     IPv4: inherit all current settings from init_net
+ *     IPv6: reset all settings to default
+ * 1 - Both inherit all current settings from init_net
+ * 2 - Both reset all settings to default
+ */
+int sysctl_devconf_inherit_init_net __read_mostly;
+EXPORT_SYMBOL(sysctl_devconf_inherit_init_net);
+
 #ifdef CONFIG_RPS
 static int rps_sock_flow_sysctl(struct ctl_table *table, int write,
 				void __user *buffer, size_t *lenp, loff_t *ppos)
@@ -268,7 +277,7 @@ static int proc_dointvec_minmax_bpf_enable(struct ctl_table *table, int write,
 	ret = proc_dointvec_minmax(&tmp, write, buffer, lenp, ppos);
 	if (write && !ret) {
 		if (jit_enable < 2 ||
-		    (jit_enable == 2 && bpf_dump_raw_ok())) {
+		    (jit_enable == 2 && bpf_dump_raw_ok(current_cred()))) {
 			*(int *)table->data = jit_enable;
 			if (jit_enable == 2)
 				pr_warn("bpf_jit_enable = 2 was set! NEVER use this in production, only for JIT debugging!\n");
@@ -543,6 +552,30 @@ static struct ctl_table net_core_table[] = {
 		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= SYSCTL_ZERO,
 		.extra2		= SYSCTL_ONE,
+	},
+	{
+		.procname	= "devconf_inherit_init_net",
+		.data		= &sysctl_devconf_inherit_init_net,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= &two,
+	},
+	{
+		.procname	= "high_order_alloc_disable",
+		.data		= &net_high_order_alloc_disable_key.key,
+		.maxlen         = sizeof(net_high_order_alloc_disable_key),
+		.mode		= 0644,
+		.proc_handler	= proc_do_static_key,
+	},
+	{
+		.procname	= "gro_normal_batch",
+		.data		= &gro_normal_batch,
+		.maxlen		= sizeof(unsigned int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ONE,
 	},
 	{ }
 };

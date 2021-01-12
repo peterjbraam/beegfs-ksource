@@ -280,6 +280,8 @@ int qed_fill_dev_info(struct qed_dev *cdev,
 		dev_info->fw_eng = FW_ENGINEERING_VERSION;
 		dev_info->b_inter_pf_switch = test_bit(QED_MF_INTER_PF_SWITCH,
 						       &cdev->mf_bits);
+		if (!test_bit(QED_MF_DISABLE_ARFS, &cdev->mf_bits))
+			dev_info->b_arfs_capable = true;
 		dev_info->tx_switching = true;
 
 		if (hw_info->b_wol_support == QED_WOL_SUPPORT_PME)
@@ -1940,15 +1942,6 @@ void qed_link_update(struct qed_hwfn *hwfn, struct qed_ptt *ptt)
 		op->link_update(cookie, &if_link);
 }
 
-void qed_bw_update(struct qed_hwfn *hwfn, struct qed_ptt *ptt)
-{
-	void *cookie = hwfn->cdev->ops_cookie;
-	struct qed_common_cb_ops *op = hwfn->cdev->protocol_ops.common;
-
-	if (IS_LEAD_HWFN(hwfn) && cookie && op && op->bw_update)
-		op->bw_update(cookie);
-}
-
 static int qed_drain(struct qed_dev *cdev)
 {
 	struct qed_hwfn *hwfn;
@@ -2637,7 +2630,7 @@ static int qed_set_grc_config(struct qed_dev *cdev, u32 cfg_id, u32 val)
 	if (!ptt)
 		return -EAGAIN;
 
-	rc = qed_dbg_grc_config(hwfn, cfg_id, val);
+	rc = qed_dbg_grc_config(hwfn, ptt, cfg_id, val);
 
 	qed_ptt_release(hwfn, ptt);
 

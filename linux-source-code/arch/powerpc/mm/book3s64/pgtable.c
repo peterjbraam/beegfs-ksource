@@ -1,10 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright 2015-2016, Aneesh Kumar K.V, IBM Corporation.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 
 #include <linux/sched.h>
@@ -12,6 +8,7 @@
 #include <linux/memblock.h>
 #include <misc/cxl-base.h>
 
+#include <asm/debugfs.h>
 #include <asm/pgalloc.h>
 #include <asm/tlb.h>
 #include <asm/trace.h>
@@ -26,9 +23,6 @@ unsigned long __pmd_frag_nr;
 EXPORT_SYMBOL(__pmd_frag_nr);
 unsigned long __pmd_frag_size_shift;
 EXPORT_SYMBOL(__pmd_frag_size_shift);
-
-int (*register_process_table)(unsigned long base, unsigned long page_size,
-			      unsigned long tbl_size);
 
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 /*
@@ -71,9 +65,14 @@ void set_pmd_at(struct mm_struct *mm, unsigned long addr,
 		pmd_t *pmdp, pmd_t pmd)
 {
 #ifdef CONFIG_DEBUG_VM
-	WARN_ON(pte_present(pmd_pte(*pmdp)) && !pte_protnone(pmd_pte(*pmdp)));
+	/*
+	 * Make sure hardware valid bit is not set. We don't do
+	 * tlb flush for this update.
+	 */
+
+	WARN_ON(pte_hw_valid(pmd_pte(*pmdp)) && !pte_protnone(pmd_pte(*pmdp)));
 	assert_spin_locked(pmd_lockptr(mm, pmdp));
-	WARN_ON(!(pmd_trans_huge(pmd) || pmd_devmap(pmd)));
+	WARN_ON(!(pmd_large(pmd)));
 #endif
 	trace_hugepage_set_pmd(addr, pmd_val(pmd));
 	return set_pte_at(mm, addr, pmdp_ptep(pmdp), pmd_pte(pmd));
@@ -108,27 +107,17 @@ pmd_t pmdp_invalidate(struct vm_area_struct *vma, unsigned long address,
 {
 	unsigned long old_pmd;
 
-	old_pmd = pmd_hugepage_update(vma->vm_mm, address, pmdp, _PAGE_PRESENT, 0);
+	old_pmd = pmd_hugepage_update(vma->vm_mm, address, pmdp, _PAGE_PRESENT, _PAGE_INVALID);
 	flush_pmd_tlb_range(vma, address, address + HPAGE_PMD_SIZE);
-	return __pmd(old_pmd);
-}
-
-pmd_t pmdp_huge_get_and_clear_full(struct vm_area_struct *vma,
-				   unsigned long addr, pmd_t *pmdp, int full)
-{
-	pmd_t pmd;
-	VM_BUG_ON(addr & ~HPAGE_PMD_MASK);
-	VM_BUG_ON((pmd_present(*pmdp) && !pmd_trans_huge(*pmdp) &&
-		   !pmd_devmap(*pmdp)) || !pmd_present(*pmdp));
-	pmd = pmdp_huge_get_and_clear(vma->vm_mm, addr, pmdp);
 	/*
-	 * if it not a fullmm flush, then we can possibly end up converting
-	 * this PMD pte entry to a regular level 0 PTE by a parallel page fault.
-	 * Make sure we flush the tlb in this case.
+	 * This ensures that generic code that rely on IRQ disabling
+	 * to prevent a parallel THP split work as expected.
+	 *
+	 * Marking the entry with _PAGE_INVALID && ~_PAGE_PRESENT requires
+	 * a special case check in pmd_access_permitted.
 	 */
-	if (!full)
-		flush_pmd_tlb_range(vma, addr, addr + HPAGE_PMD_SIZE);
-	return pmd;
+	serialize_against_pte_lookup(vma->vm_mm);
+	return __pmd(old_pmd);
 }
 
 static pmd_t pmd_set_protbits(pmd_t pmd, pgprot_t pgprot)
@@ -205,11 +194,11 @@ void __init mmu_partition_table_init(void)
 	unsigned long ptcr;
 
 	BUILD_BUG_ON_MSG((PATB_SIZE_SHIFT > 36), "Partition table size too large.");
-	partition_tb = __va(memblock_alloc_base(patb_size, patb_size,
-						MEMBLOCK_ALLOC_ANYWHERE));
-
 	/* Initialize the Partition Table with no entries */
-	memset((void *)partition_tb, 0, patb_size);
+	partition_tb = memblock_alloc(patb_size, patb_size);
+	if (!partition_tb)
+		panic("%s: Failed to allocate %lu bytes align=0x%lx\n",
+		      __func__, patb_size, patb_size);
 
 	/*
 	 * update partition table control register,
@@ -222,24 +211,21 @@ void __init mmu_partition_table_init(void)
 
 static void flush_partition(unsigned int lpid, bool radix)
 {
-	asm volatile("ptesync" : : : "memory");
 	if (radix) {
-		asm volatile(PPC_TLBIE_5(%0,%1,2,0,1) : :
-			     "r" (TLBIEL_INVAL_SET_LPID), "r" (lpid));
-		asm volatile(PPC_TLBIE_5(%0,%1,2,1,1) : :
-			     "r" (TLBIEL_INVAL_SET_LPID), "r" (lpid));
-		trace_tlbie(lpid, 0, TLBIEL_INVAL_SET_LPID, lpid, 2, 0, 1);
+		radix__flush_all_lpid(lpid);
+		radix__flush_all_lpid_guest(lpid);
 	} else {
+		asm volatile("ptesync" : : : "memory");
 		asm volatile(PPC_TLBIE_5(%0,%1,2,0,0) : :
 			     "r" (TLBIEL_INVAL_SET_LPID), "r" (lpid));
+		/* do we need fixup here ?*/
+		asm volatile("eieio; tlbsync; ptesync" : : : "memory");
 		trace_tlbie(lpid, 0, TLBIEL_INVAL_SET_LPID, lpid, 2, 0, 0);
 	}
-	/* do we need fixup here ?*/
-	asm volatile("eieio; tlbsync; ptesync" : : : "memory");
 }
 
 void mmu_partition_table_set_entry(unsigned int lpid, unsigned long dw0,
-				  unsigned long dw1)
+				  unsigned long dw1, bool flush)
 {
 	unsigned long old = be64_to_cpu(partition_tb[lpid].patb0);
 
@@ -266,7 +252,12 @@ void mmu_partition_table_set_entry(unsigned int lpid, unsigned long dw0,
 		uv_register_pate(lpid, dw0, dw1);
 		pr_info("PATE registered by ultravisor: dw0 = 0x%lx, dw1 = 0x%lx\n",
 			dw0, dw1);
-	} else {
+	} else if (flush) {
+		/*
+		 * Boot does not need to flush, because MMU is off and each
+		 * CPU does a tlbiel_all() before switching them on, which
+		 * flushes everything.
+		 */
 		flush_partition(lpid, (old & PATB_HR));
 	}
 }
@@ -275,6 +266,9 @@ EXPORT_SYMBOL_GPL(mmu_partition_table_set_entry);
 static pmd_t *get_pmd_from_cache(struct mm_struct *mm)
 {
 	void *pmd_frag, *ret;
+
+	if (PMD_FRAG_NR == 1)
+		return NULL;
 
 	spin_lock(&mm->page_table_lock);
 	ret = mm->context.pmd_frag;
@@ -307,6 +301,8 @@ static pmd_t *__alloc_for_pmdcache(struct mm_struct *mm)
 		return NULL;
 	}
 
+	atomic_set(&page->pt_frag_refcount, 1);
+
 	ret = page_address(page);
 	/*
 	 * if we support only one fragment just return the
@@ -322,7 +318,7 @@ static pmd_t *__alloc_for_pmdcache(struct mm_struct *mm)
 	 * count.
 	 */
 	if (likely(!mm->context.pmd_frag)) {
-		set_page_count(page, PMD_FRAG_NR);
+		atomic_set(&page->pt_frag_refcount, PMD_FRAG_NR);
 		mm->context.pmd_frag = ret + PMD_FRAG_SIZE;
 	}
 	spin_unlock(&mm->page_table_lock);
@@ -345,92 +341,10 @@ void pmd_fragment_free(unsigned long *pmd)
 {
 	struct page *page = virt_to_page(pmd);
 
-	if (put_page_testzero(page)) {
+	BUG_ON(atomic_read(&page->pt_frag_refcount) <= 0);
+	if (atomic_dec_and_test(&page->pt_frag_refcount)) {
 		pgtable_pmd_page_dtor(page);
-		free_unref_page(page);
-	}
-}
-
-static pte_t *get_pte_from_cache(struct mm_struct *mm)
-{
-	void *pte_frag, *ret;
-
-	spin_lock(&mm->page_table_lock);
-	ret = mm->context.pte_frag;
-	if (ret) {
-		pte_frag = ret + PTE_FRAG_SIZE;
-		/*
-		 * If we have taken up all the fragments mark PTE page NULL
-		 */
-		if (((unsigned long)pte_frag & ~PAGE_MASK) == 0)
-			pte_frag = NULL;
-		mm->context.pte_frag = pte_frag;
-	}
-	spin_unlock(&mm->page_table_lock);
-	return (pte_t *)ret;
-}
-
-static pte_t *__alloc_for_ptecache(struct mm_struct *mm, int kernel)
-{
-	void *ret = NULL;
-	struct page *page;
-
-	if (!kernel) {
-		page = alloc_page(PGALLOC_GFP | __GFP_ACCOUNT);
-		if (!page)
-			return NULL;
-		if (!pgtable_page_ctor(page)) {
-			__free_page(page);
-			return NULL;
-		}
-	} else {
-		page = alloc_page(PGALLOC_GFP);
-		if (!page)
-			return NULL;
-	}
-
-
-	ret = page_address(page);
-	/*
-	 * if we support only one fragment just return the
-	 * allocated page.
-	 */
-	if (PTE_FRAG_NR == 1)
-		return ret;
-	spin_lock(&mm->page_table_lock);
-	/*
-	 * If we find pgtable_page set, we return
-	 * the allocated page with single fragement
-	 * count.
-	 */
-	if (likely(!mm->context.pte_frag)) {
-		set_page_count(page, PTE_FRAG_NR);
-		mm->context.pte_frag = ret + PTE_FRAG_SIZE;
-	}
-	spin_unlock(&mm->page_table_lock);
-
-	return (pte_t *)ret;
-}
-
-pte_t *pte_fragment_alloc(struct mm_struct *mm, unsigned long vmaddr, int kernel)
-{
-	pte_t *pte;
-
-	pte = get_pte_from_cache(mm);
-	if (pte)
-		return pte;
-
-	return __alloc_for_ptecache(mm, kernel);
-}
-
-void pte_fragment_free(unsigned long *table, int kernel)
-{
-	struct page *page = virt_to_page(table);
-
-	if (put_page_testzero(page)) {
-		if (!kernel)
-			pgtable_page_dtor(page);
-		free_unref_page(page);
+		__free_page(page);
 	}
 }
 
@@ -464,7 +378,6 @@ static inline void pgtable_free(void *table, int index)
 	}
 }
 
-#ifdef CONFIG_SMP
 void pgtable_free_tlb(struct mmu_gather *tlb, void *table, int index)
 {
 	unsigned long pgf = (unsigned long)table;
@@ -481,12 +394,53 @@ void __tlb_remove_table(void *_table)
 
 	return pgtable_free(table, index);
 }
-#else
-void pgtable_free_tlb(struct mmu_gather *tlb, void *table, int index)
+
+#ifdef CONFIG_PROC_FS
+atomic_long_t direct_pages_count[MMU_PAGE_COUNT];
+
+void arch_report_meminfo(struct seq_file *m)
 {
-	return pgtable_free(table, index);
+	/*
+	 * Hash maps the memory with one size mmu_linear_psize.
+	 * So don't bother to print these on hash
+	 */
+	if (!radix_enabled())
+		return;
+	seq_printf(m, "DirectMap4k:    %8lu kB\n",
+		   atomic_long_read(&direct_pages_count[MMU_PAGE_4K]) << 2);
+	seq_printf(m, "DirectMap64k:    %8lu kB\n",
+		   atomic_long_read(&direct_pages_count[MMU_PAGE_64K]) << 6);
+	seq_printf(m, "DirectMap2M:    %8lu kB\n",
+		   atomic_long_read(&direct_pages_count[MMU_PAGE_2M]) << 11);
+	seq_printf(m, "DirectMap1G:    %8lu kB\n",
+		   atomic_long_read(&direct_pages_count[MMU_PAGE_1G]) << 20);
 }
-#endif
+#endif /* CONFIG_PROC_FS */
+
+pte_t ptep_modify_prot_start(struct vm_area_struct *vma, unsigned long addr,
+			     pte_t *ptep)
+{
+	unsigned long pte_val;
+
+	/*
+	 * Clear the _PAGE_PRESENT so that no hardware parallel update is
+	 * possible. Also keep the pte_present true so that we don't take
+	 * wrong fault.
+	 */
+	pte_val = pte_update(vma->vm_mm, addr, ptep, _PAGE_PRESENT, _PAGE_INVALID, 0);
+
+	return __pte(pte_val);
+
+}
+
+void ptep_modify_prot_commit(struct vm_area_struct *vma, unsigned long addr,
+			     pte_t *ptep, pte_t old_pte, pte_t pte)
+{
+	if (radix_enabled())
+		return radix__ptep_modify_prot_commit(vma, addr,
+						      ptep, old_pte, pte);
+	set_pte_at(vma->vm_mm, addr, ptep, pte);
+}
 
 /*
  * For hash translation mode, we use the deposited table to store hash slot
@@ -509,3 +463,49 @@ int pmd_move_must_withdraw(struct spinlock *new_pmd_ptl,
 
 	return true;
 }
+
+/*
+ * Does the CPU support tlbie?
+ */
+bool tlbie_capable __read_mostly = true;
+EXPORT_SYMBOL(tlbie_capable);
+
+/*
+ * Should tlbie be used for management of CPU TLBs, for kernel and process
+ * address spaces? tlbie may still be used for nMMU accelerators, and for KVM
+ * guest address spaces.
+ */
+bool tlbie_enabled __read_mostly = true;
+
+static int __init setup_disable_tlbie(char *str)
+{
+	if (!radix_enabled()) {
+		pr_err("disable_tlbie: Unable to disable TLBIE with Hash MMU.\n");
+		return 1;
+	}
+
+	tlbie_capable = false;
+	tlbie_enabled = false;
+
+        return 1;
+}
+__setup("disable_tlbie", setup_disable_tlbie);
+
+static int __init pgtable_debugfs_setup(void)
+{
+	if (!tlbie_capable)
+		return 0;
+
+	/*
+	 * There is no locking vs tlb flushing when changing this value.
+	 * The tlb flushers will see one value or another, and use either
+	 * tlbie or tlbiel with IPIs. In both cases the TLBs will be
+	 * invalidated as expected.
+	 */
+	debugfs_create_bool("tlbie_enabled", 0600,
+			powerpc_debugfs_root,
+			&tlbie_enabled);
+
+	return 0;
+}
+arch_initcall(pgtable_debugfs_setup);

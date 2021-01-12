@@ -1,17 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * SMI PCIe driver for DVBSky cards.
  *
  * Copyright (C) 2014 Max nibble <nibble.max@gmail.com>
- *
- *    This program is free software; you can redistribute it and/or modify
- *    it under the terms of the GNU General Public License as published by
- *    the Free Software Foundation; either version 2 of the License, or
- *    (at your option) any later version.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU General Public License for more details.
  */
 
 #include "smipcie.h"
@@ -191,7 +182,7 @@ static int smi_i2c_init(struct smi_dev *dev)
 	/* i2c bus 0 */
 	smi_i2c_cfg(dev, I2C_A_SW_CTL);
 	i2c_set_adapdata(&dev->i2c_bus[0], dev);
-	strcpy(dev->i2c_bus[0].name, "SMI-I2C0");
+	strscpy(dev->i2c_bus[0].name, "SMI-I2C0", sizeof(dev->i2c_bus[0].name));
 	dev->i2c_bus[0].owner = THIS_MODULE;
 	dev->i2c_bus[0].dev.parent = &dev->pci_dev->dev;
 	dev->i2c_bus[0].algo_data = &dev->i2c_bit[0];
@@ -213,7 +204,7 @@ static int smi_i2c_init(struct smi_dev *dev)
 	/* i2c bus 1 */
 	smi_i2c_cfg(dev, I2C_B_SW_CTL);
 	i2c_set_adapdata(&dev->i2c_bus[1], dev);
-	strcpy(dev->i2c_bus[1].name, "SMI-I2C1");
+	strscpy(dev->i2c_bus[1].name, "SMI-I2C1", sizeof(dev->i2c_bus[1].name));
 	dev->i2c_bus[1].owner = THIS_MODULE;
 	dev->i2c_bus[1].dev.parent = &dev->pci_dev->dev;
 	dev->i2c_bus[1].algo_data = &dev->i2c_bit[1];

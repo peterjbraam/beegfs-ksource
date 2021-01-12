@@ -1,7 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * poll_state.c - Polling idle state
- *
- * This file is released under the GPLv2.
  */
 
 #include <linux/cpuidle.h>
@@ -50,10 +49,9 @@ void cpuidle_poll_state_init(struct cpuidle_driver *drv)
 	snprintf(state->desc, CPUIDLE_DESC_LEN, "CPUIDLE CORE POLL IDLE");
 	state->exit_latency = 0;
 	state->target_residency = 0;
-	state->exit_latency_ns = 0;
-	state->target_residency_ns = 0;
 	state->power_usage = -1;
 	state->enter = poll_idle;
+	state->disabled = false;
 	state->flags = CPUIDLE_FLAG_POLLING;
 }
 EXPORT_SYMBOL_GPL(cpuidle_poll_state_init);

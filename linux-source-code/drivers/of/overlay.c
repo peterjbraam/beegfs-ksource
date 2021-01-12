@@ -261,6 +261,8 @@ static struct property *dup_and_fixup_symbol_prop(
 
 	of_property_set_flag(new_prop, OF_DYNAMIC);
 
+	kfree(target_path);
+
 	return new_prop;
 
 err_free_new_prop:
@@ -426,12 +428,9 @@ static int add_changeset_node(struct overlay_changeset *ovcs,
 
 		tchild->parent = target->np;
 		tchild->name = __of_get_property(node, "name", NULL);
-		tchild->type = __of_get_property(node, "device_type", NULL);
 
 		if (!tchild->name)
 			tchild->name = "<NULL>";
-		if (!tchild->type)
-			tchild->type = "<NULL>";
 
 		/* ignore obsolete "linux,phandle" */
 		phandle = __of_get_property(node, "phandle", &size);

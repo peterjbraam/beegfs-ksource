@@ -1,17 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (C) 2012 ARM Ltd.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #ifndef __ASM_PERF_EVENT_H
@@ -206,9 +195,9 @@
 /*
  * Event filters for PMUv3
  */
-#define	ARMV8_PMU_EXCLUDE_EL1	(1 << 31)
-#define	ARMV8_PMU_EXCLUDE_EL0	(1 << 30)
-#define	ARMV8_PMU_INCLUDE_EL2	(1 << 27)
+#define	ARMV8_PMU_EXCLUDE_EL1	(1U << 31)
+#define	ARMV8_PMU_EXCLUDE_EL0	(1U << 30)
+#define	ARMV8_PMU_INCLUDE_EL2	(1U << 27)
 
 /*
  * PMUSERENR: user enable reg

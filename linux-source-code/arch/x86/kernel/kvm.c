@@ -1,19 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * KVM paravirt_ops implementation
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  *
  * Copyright (C) 2007, Red Hat, Inc., Ingo Molnar <mingo@redhat.com>
  * Copyright IBM Corporation, 2007
@@ -46,7 +33,6 @@
 #include <asm/apicdef.h>
 #include <asm/hypervisor.h>
 #include <asm/tlb.h>
-#include <asm/cpuidle_haltpoll.h>
 
 static int kvmapf = 1;
 
@@ -256,23 +242,23 @@ EXPORT_SYMBOL_GPL(kvm_read_and_reset_pf_reason);
 NOKPROBE_SYMBOL(kvm_read_and_reset_pf_reason);
 
 dotraplinkage void
-do_async_page_fault(struct pt_regs *regs, unsigned long error_code)
+do_async_page_fault(struct pt_regs *regs, unsigned long error_code, unsigned long address)
 {
 	enum ctx_state prev_state;
 
 	switch (kvm_read_and_reset_pf_reason()) {
 	default:
-		do_page_fault(regs, error_code);
+		do_page_fault(regs, error_code, address);
 		break;
 	case KVM_PV_REASON_PAGE_NOT_PRESENT:
 		/* page is swapped out by the host. */
 		prev_state = exception_enter();
-		kvm_async_pf_task_wait((u32)read_cr2(), !user_mode(regs));
+		kvm_async_pf_task_wait((u32)address, !user_mode(regs));
 		exception_exit(prev_state);
 		break;
 	case KVM_PV_REASON_PAGE_READY:
 		rcu_irq_enter();
-		kvm_async_pf_task_wake((u32)read_cr2());
+		kvm_async_pf_task_wake((u32)address);
 		rcu_irq_exit();
 		break;
 	}
@@ -284,7 +270,7 @@ static void __init paravirt_ops_setup(void)
 	pv_info.name = "KVM";
 
 	if (kvm_para_has_feature(KVM_FEATURE_NOP_IO_DELAY))
-		pv_cpu_ops.io_delay = kvm_io_delay;
+		pv_ops.cpu.io_delay = kvm_io_delay;
 
 #ifdef CONFIG_X86_IO_APIC
 	no_timer_check = 1;
@@ -442,29 +428,7 @@ static void __init sev_map_percpu_data(void)
 	}
 }
 
-static bool pv_tlb_flush_supported(void)
-{
-	return (kvm_para_has_feature(KVM_FEATURE_PV_TLB_FLUSH) &&
-		!kvm_para_has_hint(KVM_HINTS_REALTIME) &&
-		kvm_para_has_feature(KVM_FEATURE_STEAL_TIME));
-}
-
-static DEFINE_PER_CPU(cpumask_var_t, __pv_cpu_mask);
-
 #ifdef CONFIG_SMP
-
-static bool pv_ipi_supported(void)
-{
-	return kvm_para_has_feature(KVM_FEATURE_PV_SEND_IPI);
-}
-
-static bool pv_sched_yield_supported(void)
-{
-	return (kvm_para_has_feature(KVM_FEATURE_PV_SCHED_YIELD) &&
-		!kvm_para_has_hint(KVM_HINTS_REALTIME) &&
-	    kvm_para_has_feature(KVM_FEATURE_STEAL_TIME));
-}
-
 #define KVM_IPI_CLUSTER_SIZE	(2 * BITS_PER_LONG)
 
 static void __send_ipi_mask(const struct cpumask *mask, int vector)
@@ -529,12 +493,12 @@ static void kvm_send_ipi_mask(const struct cpumask *mask, int vector)
 static void kvm_send_ipi_mask_allbutself(const struct cpumask *mask, int vector)
 {
 	unsigned int this_cpu = smp_processor_id();
-	struct cpumask *new_mask = this_cpu_cpumask_var_ptr(__pv_cpu_mask);
+	struct cpumask new_mask;
 	const struct cpumask *local_mask;
 
-	cpumask_copy(new_mask, mask);
-	cpumask_clear_cpu(this_cpu, new_mask);
-	local_mask = new_mask;
+	cpumask_copy(&new_mask, mask);
+	cpumask_clear_cpu(this_cpu, &new_mask);
+	local_mask = &new_mask;
 	__send_ipi_mask(local_mask, vector);
 }
 
@@ -614,6 +578,7 @@ static void __init kvm_apf_trap_init(void)
 	update_intr_gate(X86_TRAP_PF, async_page_fault);
 }
 
+static DEFINE_PER_CPU(cpumask_var_t, __pv_tlb_mask);
 
 static void kvm_flush_tlb_others(const struct cpumask *cpumask,
 			const struct flush_tlb_info *info)
@@ -621,7 +586,7 @@ static void kvm_flush_tlb_others(const struct cpumask *cpumask,
 	u8 state;
 	int cpu;
 	struct kvm_steal_time *src;
-	struct cpumask *flushmask = this_cpu_cpumask_var_ptr(__pv_cpu_mask);
+	struct cpumask *flushmask = this_cpu_cpumask_var_ptr(__pv_tlb_mask);
 
 	cpumask_copy(flushmask, cpumask);
 	/*
@@ -654,13 +619,14 @@ static void __init kvm_guest_init(void)
 
 	if (kvm_para_has_feature(KVM_FEATURE_STEAL_TIME)) {
 		has_steal_clock = 1;
-		pv_time_ops.steal_clock = kvm_steal_clock;
+		pv_ops.time.steal_clock = kvm_steal_clock;
 	}
 
-	if (pv_tlb_flush_supported()) {
-		pv_mmu_ops.flush_tlb_others = kvm_flush_tlb_others;
-		pv_mmu_ops.tlb_remove_table = tlb_remove_table;
-		pr_info("KVM setup pv remote TLB flush\n");
+	if (kvm_para_has_feature(KVM_FEATURE_PV_TLB_FLUSH) &&
+	    !kvm_para_has_hint(KVM_HINTS_REALTIME) &&
+	    kvm_para_has_feature(KVM_FEATURE_STEAL_TIME)) {
+		pv_ops.mmu.flush_tlb_others = kvm_flush_tlb_others;
+		pv_ops.mmu.tlb_remove_table = tlb_remove_table;
 	}
 
 	if (kvm_para_has_feature(KVM_FEATURE_PV_EOI))
@@ -669,7 +635,9 @@ static void __init kvm_guest_init(void)
 #ifdef CONFIG_SMP
 	smp_ops.smp_prepare_cpus = kvm_smp_prepare_cpus;
 	smp_ops.smp_prepare_boot_cpu = kvm_smp_prepare_boot_cpu;
-	if (pv_sched_yield_supported()) {
+	if (kvm_para_has_feature(KVM_FEATURE_PV_SCHED_YIELD) &&
+	    !kvm_para_has_hint(KVM_HINTS_REALTIME) &&
+	    kvm_para_has_feature(KVM_FEATURE_STEAL_TIME)) {
 		smp_ops.send_call_func_ipi = kvm_smp_send_call_func_ipi;
 		pr_info("KVM setup pv sched yield\n");
 	}
@@ -735,7 +703,7 @@ static uint32_t __init kvm_detect(void)
 static void __init kvm_apic_init(void)
 {
 #if defined(CONFIG_SMP)
-	if (pv_ipi_supported())
+	if (kvm_para_has_feature(KVM_FEATURE_PV_SEND_IPI))
 		kvm_setup_pv_ipi();
 #endif
 }
@@ -767,31 +735,23 @@ static __init int activate_jump_labels(void)
 }
 arch_initcall(activate_jump_labels);
 
-static __init int kvm_alloc_cpumask(void)
+static __init int kvm_setup_pv_tlb_flush(void)
 {
 	int cpu;
-	bool alloc = false;
 
-	if (!kvm_para_available() || nopv)
-		return 0;
-
-	if (pv_tlb_flush_supported())
-		alloc = true;
-
-#if defined(CONFIG_SMP)
-	if (pv_ipi_supported())
-		alloc = true;
-#endif
-
-	if (alloc)
+	if (kvm_para_has_feature(KVM_FEATURE_PV_TLB_FLUSH) &&
+	    !kvm_para_has_hint(KVM_HINTS_REALTIME) &&
+	    kvm_para_has_feature(KVM_FEATURE_STEAL_TIME)) {
 		for_each_possible_cpu(cpu) {
-			zalloc_cpumask_var_node(per_cpu_ptr(&__pv_cpu_mask, cpu),
+			zalloc_cpumask_var_node(per_cpu_ptr(&__pv_tlb_mask, cpu),
 				GFP_KERNEL, cpu_to_node(cpu));
 		}
+		pr_info("KVM setup pv remote TLB flush\n");
+	}
 
 	return 0;
 }
-arch_initcall(kvm_alloc_cpumask);
+arch_initcall(kvm_setup_pv_tlb_flush);
 
 #ifdef CONFIG_PARAVIRT_SPINLOCKS
 
@@ -883,13 +843,14 @@ void __init kvm_spinlock_init(void)
 		return;
 
 	__pv_init_lock_hash();
-	pv_lock_ops.queued_spin_lock_slowpath = __pv_queued_spin_lock_slowpath;
-	pv_lock_ops.queued_spin_unlock = PV_CALLEE_SAVE(__pv_queued_spin_unlock);
-	pv_lock_ops.wait = kvm_wait;
-	pv_lock_ops.kick = kvm_kick_cpu;
+	pv_ops.lock.queued_spin_lock_slowpath = __pv_queued_spin_lock_slowpath;
+	pv_ops.lock.queued_spin_unlock =
+		PV_CALLEE_SAVE(__pv_queued_spin_unlock);
+	pv_ops.lock.wait = kvm_wait;
+	pv_ops.lock.kick = kvm_kick_cpu;
 
 	if (kvm_para_has_feature(KVM_FEATURE_STEAL_TIME)) {
-		pv_lock_ops.vcpu_is_preempted =
+		pv_ops.lock.vcpu_is_preempted =
 			PV_CALLEE_SAVE(__kvm_vcpu_is_preempted);
 	}
 }

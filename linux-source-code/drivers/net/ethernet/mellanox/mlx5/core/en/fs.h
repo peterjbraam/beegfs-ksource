@@ -4,8 +4,6 @@
 #ifndef __MLX5E_FLOW_STEER_H__
 #define __MLX5E_FLOW_STEER_H__
 
-#include "mod_hdr.h"
-
 enum {
 	MLX5E_TC_FT_LEVEL = 0,
 	MLX5E_TC_TTC_FT_LEVEL,
@@ -23,7 +21,6 @@ struct mlx5e_tc_table {
 	DECLARE_HASHTABLE(hairpin_tbl, 8);
 
 	struct notifier_block     netdevice_nb;
-	struct netdev_net_notifier	netdevice_nn;
 };
 
 struct mlx5e_flow_table {

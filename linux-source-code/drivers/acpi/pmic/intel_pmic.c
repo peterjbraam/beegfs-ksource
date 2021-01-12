@@ -1,16 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * intel_pmic.c - Intel PMIC operation region driver
  *
  * Copyright (C) 2014 Intel Corporation. All rights reserved.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License version
- * 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <linux/export.h>
@@ -260,7 +252,7 @@ int intel_pmic_install_opregion_handler(struct device *dev, acpi_handle handle,
 					struct regmap *regmap,
 					struct intel_pmic_opregion_data *d)
 {
-	acpi_status status = AE_OK;
+	acpi_status status;
 	struct intel_pmic_opregion *opregion;
 	int ret;
 
@@ -278,8 +270,7 @@ int intel_pmic_install_opregion_handler(struct device *dev, acpi_handle handle,
 	opregion->regmap = regmap;
 	opregion->lpat_table = acpi_lpat_get_conversion_table(handle);
 
-	if (d->power_table_count)
-		status = acpi_install_address_space_handler(handle,
+	status = acpi_install_address_space_handler(handle,
 						    PMIC_POWER_OPREGION_ID,
 						    intel_pmic_power_handler,
 						    NULL, opregion);
@@ -288,8 +279,7 @@ int intel_pmic_install_opregion_handler(struct device *dev, acpi_handle handle,
 		goto out_error;
 	}
 
-	if (d->thermal_table_count)
-		status = acpi_install_address_space_handler(handle,
+	status = acpi_install_address_space_handler(handle,
 						    PMIC_THERMAL_OPREGION_ID,
 						    intel_pmic_thermal_handler,
 						    NULL, opregion);
@@ -311,16 +301,12 @@ int intel_pmic_install_opregion_handler(struct device *dev, acpi_handle handle,
 	return 0;
 
 out_remove_thermal_handler:
-	if (d->thermal_table_count)
-		acpi_remove_address_space_handler(handle,
-						  PMIC_THERMAL_OPREGION_ID,
-						  intel_pmic_thermal_handler);
+	acpi_remove_address_space_handler(handle, PMIC_THERMAL_OPREGION_ID,
+					  intel_pmic_thermal_handler);
 
 out_remove_power_handler:
-	if (d->power_table_count)
-		acpi_remove_address_space_handler(handle,
-						  PMIC_POWER_OPREGION_ID,
-						  intel_pmic_power_handler);
+	acpi_remove_address_space_handler(handle, PMIC_POWER_OPREGION_ID,
+					  intel_pmic_power_handler);
 
 out_error:
 	acpi_lpat_free_conversion_table(opregion->lpat_table);

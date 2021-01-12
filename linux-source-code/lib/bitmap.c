@@ -1,9 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * lib/bitmap.c
  * Helper functions for bitmap.h.
- *
- * This source code is licensed under the GNU General Public License,
- * Version 2.  See the file COPYING for more details.
  */
 #include <linux/export.h>
 #include <linux/thread_info.h>
@@ -13,6 +11,7 @@
 #include <linux/bitops.h>
 #include <linux/bug.h>
 #include <linux/kernel.h>
+#include <linux/mm.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/uaccess.h>
@@ -38,11 +37,6 @@
  * carefully filter out these unused bits from impacting their
  * results.
  *
- * These operations actually hold to a slightly stronger rule:
- * if you don't input any bitmaps to these ops that have some
- * unused bits set, then they won't output any set unused bits
- * in output bitmaps.
- *
  * The byte ordering of bitmaps is more natural on little
  * endian architectures.  See the big-endian headers
  * include/asm-ppc64/bitops.h and include/asm-s390/bitops.h
@@ -64,6 +58,26 @@ int __bitmap_equal(const unsigned long *bitmap1,
 	return 1;
 }
 EXPORT_SYMBOL(__bitmap_equal);
+
+bool __bitmap_or_equal(const unsigned long *bitmap1,
+		       const unsigned long *bitmap2,
+		       const unsigned long *bitmap3,
+		       unsigned int bits)
+{
+	unsigned int k, lim = bits / BITS_PER_LONG;
+	unsigned long tmp;
+
+	for (k = 0; k < lim; ++k) {
+		if ((bitmap1[k] | bitmap2[k]) != bitmap3[k])
+			return false;
+	}
+
+	if (!(bits % BITS_PER_LONG))
+		return true;
+
+	tmp = (bitmap1[k] | bitmap2[k]) ^ bitmap3[k];
+	return (tmp & BITMAP_LAST_WORD_MASK(bits)) == 0;
+}
 
 void __bitmap_complement(unsigned long *dst, const unsigned long *src, unsigned int bits)
 {
@@ -153,72 +167,6 @@ void __bitmap_shift_left(unsigned long *dst, const unsigned long *src,
 		memset(dst, 0, off*sizeof(unsigned long));
 }
 EXPORT_SYMBOL(__bitmap_shift_left);
-
-/**
- * bitmap_cut() - remove bit region from bitmap and right shift remaining bits
- * @dst: destination bitmap, might overlap with src
- * @src: source bitmap
- * @first: start bit of region to be removed
- * @cut: number of bits to remove
- * @nbits: bitmap size, in bits
- *
- * Set the n-th bit of @dst iff the n-th bit of @src is set and
- * n is less than @first, or the m-th bit of @src is set for any
- * m such that @first <= n < nbits, and m = n + @cut.
- *
- * In pictures, example for a big-endian 32-bit architecture:
- *
- * @src:
- * 31                                   63
- * |                                    |
- * 10000000 11000001 11110010 00010101  10000000 11000001 01110010 00010101
- *                 |  |              |                                    |
- *                16  14             0                                   32
- *
- * if @cut is 3, and @first is 14, bits 14-16 in @src are cut and @dst is:
- *
- * 31                                   63
- * |                                    |
- * 10110000 00011000 00110010 00010101  00010000 00011000 00101110 01000010
- *                    |              |                                    |
- *                    14 (bit 17     0                                   32
- *                        from @src)
- *
- * Note that @dst and @src might overlap partially or entirely.
- *
- * This is implemented in the obvious way, with a shift and carry
- * step for each moved bit. Optimisation is left as an exercise
- * for the compiler.
- */
-void bitmap_cut(unsigned long *dst, const unsigned long *src,
-		unsigned int first, unsigned int cut, unsigned int nbits)
-{
-	unsigned int len = BITS_TO_LONGS(nbits);
-	unsigned long keep = 0, carry;
-	int i;
-
-	memmove(dst, src, len * sizeof(*dst));
-
-	if (first % BITS_PER_LONG) {
-		keep = src[first / BITS_PER_LONG] &
-		       (~0UL >> (BITS_PER_LONG - first % BITS_PER_LONG));
-	}
-
-	while (cut--) {
-		for (i = first / BITS_PER_LONG; i < len; i++) {
-			if (i < len - 1)
-				carry = dst[i + 1] & 1UL;
-			else
-				carry = 0;
-
-			dst[i] = (dst[i] >> 1) | (carry << (BITS_PER_LONG - 1));
-		}
-	}
-
-	dst[first / BITS_PER_LONG] &= ~0UL << (first % BITS_PER_LONG);
-	dst[first / BITS_PER_LONG] |= keep;
-}
-EXPORT_SYMBOL(bitmap_cut);
 
 int __bitmap_and(unsigned long *dst, const unsigned long *bitmap1,
 				const unsigned long *bitmap2, unsigned int bits)
@@ -534,20 +482,18 @@ EXPORT_SYMBOL(bitmap_parse_user);
  * ranges if list is specified or hex digits grouped into comma-separated
  * sets of 8 digits/set. Returns the number of characters written to buf.
  *
- * It is assumed that @buf is a pointer into a PAGE_SIZE area and that
- * sufficient storage remains at @buf to accommodate the
- * bitmap_print_to_pagebuf() output.
+ * It is assumed that @buf is a pointer into a PAGE_SIZE, page-aligned
+ * area and that sufficient storage remains at @buf to accommodate the
+ * bitmap_print_to_pagebuf() output. Returns the number of characters
+ * actually printed to @buf, excluding terminating '\0'.
  */
 int bitmap_print_to_pagebuf(bool list, char *buf, const unsigned long *maskp,
 			    int nmaskbits)
 {
-	ptrdiff_t len = PTR_ALIGN(buf + PAGE_SIZE - 1, PAGE_SIZE) - buf;
-	int n = 0;
+	ptrdiff_t len = PAGE_SIZE - offset_in_page(buf);
 
-	if (len > 1)
-		n = list ? scnprintf(buf, len, "%*pbl\n", nmaskbits, maskp) :
-			   scnprintf(buf, len, "%*pb\n", nmaskbits, maskp);
-	return n;
+	return list ? scnprintf(buf, len, "%*pbl\n", nmaskbits, maskp) :
+		      scnprintf(buf, len, "%*pb\n", nmaskbits, maskp);
 }
 EXPORT_SYMBOL(bitmap_print_to_pagebuf);
 
@@ -753,6 +699,7 @@ int bitmap_parselist_user(const char __user *ubuf,
 EXPORT_SYMBOL(bitmap_parselist_user);
 
 
+#ifdef CONFIG_NUMA
 /**
  * bitmap_pos_to_ord - find ordinal of set bit at given position in bitmap
  *	@buf: pointer to a bitmap
@@ -861,7 +808,6 @@ void bitmap_remap(unsigned long *dst, const unsigned long *src,
 			set_bit(bitmap_ord_to_pos(new, n % w, nbits), dst);
 	}
 }
-EXPORT_SYMBOL(bitmap_remap);
 
 /**
  * bitmap_bitremap - Apply map defined by a pair of bitmaps to a single bit
@@ -899,7 +845,6 @@ int bitmap_bitremap(int oldbit, const unsigned long *old,
 	else
 		return bitmap_ord_to_pos(new, n % w, bits);
 }
-EXPORT_SYMBOL(bitmap_bitremap);
 
 /**
  * bitmap_onto - translate one bitmap relative to another
@@ -1034,7 +979,6 @@ void bitmap_onto(unsigned long *dst, const unsigned long *orig,
 		m++;
 	}
 }
-EXPORT_SYMBOL(bitmap_onto);
 
 /**
  * bitmap_fold - fold larger bitmap into smaller, modulo specified size
@@ -1059,7 +1003,7 @@ void bitmap_fold(unsigned long *dst, const unsigned long *orig,
 	for_each_set_bit(oldbit, orig, nbits)
 		set_bit(oldbit % sz, dst);
 }
-EXPORT_SYMBOL(bitmap_fold);
+#endif /* CONFIG_NUMA */
 
 /*
  * Common code for bitmap_*_region() routines.
@@ -1250,13 +1194,9 @@ EXPORT_SYMBOL(bitmap_free);
  *	@buf: array of u32 (in host byte order), the source bitmap
  *	@nbits: number of bits in @bitmap
  */
-void bitmap_from_arr32(unsigned long *bitmap, const u32 *buf,
-						unsigned int nbits)
+void bitmap_from_arr32(unsigned long *bitmap, const u32 *buf, unsigned int nbits)
 {
 	unsigned int i, halfwords;
-
-	if (!nbits)
-		return;
 
 	halfwords = DIV_ROUND_UP(nbits, 32);
 	for (i = 0; i < halfwords; i++) {
@@ -1280,9 +1220,6 @@ EXPORT_SYMBOL(bitmap_from_arr32);
 void bitmap_to_arr32(u32 *buf, const unsigned long *bitmap, unsigned int nbits)
 {
 	unsigned int i, halfwords;
-
-	if (!nbits)
-		return;
 
 	halfwords = DIV_ROUND_UP(nbits, 32);
 	for (i = 0; i < halfwords; i++) {

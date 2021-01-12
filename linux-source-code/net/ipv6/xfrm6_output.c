@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * xfrm6_output.c - Common IPsec encapsulation code for IPv6.
  * Copyright (C) 2002 USAGI/WIDE Project
  * Copyright (c) 2004 Herbert Xu <herbert@gondor.apana.org.au>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 
 #include <linux/if_ether.h>
@@ -127,7 +123,7 @@ static int __xfrm6_output_state_finish(struct xfrm_state *x, struct sock *sk,
 	int ret = -EAFNOSUPPORT;
 
 	rcu_read_lock();
-	afinfo = xfrm_state_afinfo_get_rcu(x->outer_mode->family);
+	afinfo = xfrm_state_afinfo_get_rcu(x->outer_mode.family);
 	if (likely(afinfo))
 		ret = afinfo->output_finish(sk, skb);
 	else
@@ -189,7 +185,7 @@ skip_frag:
 int xfrm6_output(struct net *net, struct sock *sk, struct sk_buff *skb)
 {
 	return NF_HOOK_COND(NFPROTO_IPV6, NF_INET_POST_ROUTING,
-			    net, sk, skb,  skb->dev, skb_dst(skb)->dev,
+			    net, sk, skb,  NULL, skb_dst(skb)->dev,
 			    __xfrm6_output,
 			    !(IP6CB(skb)->flags & IP6SKB_REROUTED));
 }

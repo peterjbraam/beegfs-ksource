@@ -66,7 +66,7 @@ static void test_hv_cpuid(struct kvm_cpuid2 *hv_cpuid_entries,
 
 		TEST_ASSERT((entry->function >= 0x40000000) &&
 			    (entry->function <= 0x4000000A),
-			    "function %x is our of supported range",
+			    "function %lx is our of supported range",
 			    entry->function);
 
 		TEST_ASSERT(entry->index == 0,
@@ -141,7 +141,8 @@ int main(int argc, char *argv[])
 
 	rv = kvm_check_cap(KVM_CAP_HYPERV_CPUID);
 	if (!rv) {
-		print_skip("KVM_CAP_HYPERV_CPUID not supported");
+		fprintf(stderr,
+			"KVM_CAP_HYPERV_CPUID not supported, skip test\n");
 		exit(KSFT_SKIP);
 	}
 
@@ -158,9 +159,9 @@ int main(int argc, char *argv[])
 
 	free(hv_cpuid_entries);
 
-	if (!nested_vmx_supported() ||
-	    !kvm_check_cap(KVM_CAP_HYPERV_ENLIGHTENED_VMCS)) {
-		print_skip("Enlightened VMCS is unsupported");
+	if (!kvm_check_cap(KVM_CAP_HYPERV_ENLIGHTENED_VMCS)) {
+		fprintf(stderr,
+			"Enlightened VMCS is unsupported, skip related test\n");
 		goto vm_free;
 	}
 

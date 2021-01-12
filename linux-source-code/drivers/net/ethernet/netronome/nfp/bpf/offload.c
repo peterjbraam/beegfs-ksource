@@ -46,7 +46,9 @@ nfp_map_ptr_record(struct nfp_app_bpf *bpf, struct nfp_prog *nfp_prog,
 	/* Grab a single ref to the map for our record.  The prog destroy ndo
 	 * happens after free_used_maps().
 	 */
-	bpf_map_inc(map);
+	map = bpf_map_inc(map, false);
+	if (IS_ERR(map))
+		return PTR_ERR(map);
 
 	record = kmalloc(sizeof(*record), GFP_KERNEL);
 	if (!record) {
@@ -383,6 +385,7 @@ nfp_bpf_map_alloc(struct nfp_app_bpf *bpf, struct bpf_offloaded_map *offmap)
 	offmap->dev_priv = nfp_map;
 	nfp_map->offmap = offmap;
 	nfp_map->bpf = bpf;
+	spin_lock_init(&nfp_map->cache_lock);
 
 	res = nfp_bpf_ctrl_alloc_map(bpf, &offmap->map);
 	if (res < 0) {
@@ -405,6 +408,8 @@ nfp_bpf_map_free(struct nfp_app_bpf *bpf, struct bpf_offloaded_map *offmap)
 	struct nfp_bpf_map *nfp_map = offmap->dev_priv;
 
 	nfp_bpf_ctrl_free_map(bpf, nfp_map);
+	dev_consume_skb_any(nfp_map->cache);
+	WARN_ON_ONCE(nfp_map->cache_blockers);
 	list_del_init(&nfp_map->l);
 	bpf->map_elems_in_use -= offmap->map.max_entries;
 	bpf->maps_in_use--;

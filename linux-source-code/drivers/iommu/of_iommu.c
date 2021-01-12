@@ -1,37 +1,20 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * OF helpers for IOMMU
  *
  * Copyright (c) 2012, NVIDIA CORPORATION.  All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; if not, write to the Free Software Foundation, Inc.,
- * 51 Franklin St - Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
 #include <linux/export.h>
 #include <linux/iommu.h>
 #include <linux/limits.h>
-#include <linux/module.h>
-#include <linux/msi.h>
 #include <linux/of.h>
 #include <linux/of_iommu.h>
 #include <linux/of_pci.h>
-#include <linux/pci.h>
 #include <linux/slab.h>
+#include <linux/fsl/mc.h>
 
 #define NO_IOMMU	1
-
-static const struct of_device_id __iommu_of_table_sentinel
-	__used __section(__iommu_of_table_end);
 
 /**
  * of_get_dma_window - Parse *dma-window property and returns 0 if found.
@@ -101,49 +84,30 @@ int of_get_dma_window(struct device_node *dn, const char *prefix, int index,
 }
 EXPORT_SYMBOL_GPL(of_get_dma_window);
 
-static bool of_iommu_driver_present(struct device_node *np)
-{
-	/*
-	 * If the IOMMU still isn't ready by the time we reach init, assume
-	 * it never will be. We don't want to defer indefinitely, nor attempt
-	 * to dereference __iommu_of_table after it's been freed.
-	 */
-	if (system_state >= SYSTEM_RUNNING)
-		return false;
-
-	return of_match_node(&__iommu_of_table, np);
-}
-
 static int of_iommu_xlate(struct device *dev,
 			  struct of_phandle_args *iommu_spec)
 {
 	const struct iommu_ops *ops;
 	struct fwnode_handle *fwnode = &iommu_spec->np->fwnode;
-	int ret;
+	int err;
 
 	ops = iommu_ops_from_fwnode(fwnode);
 	if ((ops && !ops->of_xlate) ||
-	    !of_device_is_available(iommu_spec->np) ||
-	    (!ops && !of_iommu_driver_present(iommu_spec->np)))
+	    !of_device_is_available(iommu_spec->np))
 		return NO_IOMMU;
 
-	ret = iommu_fwspec_init(dev, &iommu_spec->np->fwnode, ops);
-	if (ret)
-		return ret;
+	err = iommu_fwspec_init(dev, &iommu_spec->np->fwnode, ops);
+	if (err)
+		return err;
 	/*
 	 * The otherwise-empty fwspec handily serves to indicate the specific
 	 * IOMMU device we're waiting for, which will be useful if we ever get
 	 * a proper probe-ordering dependency mechanism in future.
 	 */
 	if (!ops)
-		return -EPROBE_DEFER;
+		return driver_deferred_probe_check_state(dev);
 
-	if (!try_module_get(ops->owner))
-		return -ENODEV;
-
-	ret = ops->of_xlate(dev, iommu_spec);
-	module_put(ops->owner);
-	return ret;
+	return ops->of_xlate(dev, iommu_spec);
 }
 
 struct of_pci_iommu_alias_info {
@@ -163,6 +127,23 @@ static int of_pci_iommu_init(struct pci_dev *pdev, u16 alias, void *data)
 		return err == -ENODEV ? NO_IOMMU : err;
 
 	err = of_iommu_xlate(info->dev, &iommu_spec);
+	of_node_put(iommu_spec.np);
+	return err;
+}
+
+static int of_fsl_mc_iommu_init(struct fsl_mc_device *mc_dev,
+				struct device_node *master_np)
+{
+	struct of_phandle_args iommu_spec = { .args_count = 1 };
+	int err;
+
+	err = of_map_rid(master_np, mc_dev->icid, "iommu-map",
+			 "iommu-map-mask", &iommu_spec.np,
+			 iommu_spec.args);
+	if (err)
+		return err == -ENODEV ? NO_IOMMU : err;
+
+	err = of_iommu_xlate(&mc_dev->dev, &iommu_spec);
 	of_node_put(iommu_spec.np);
 	return err;
 }
@@ -196,9 +177,10 @@ const struct iommu_ops *of_iommu_configure(struct device *dev,
 			.np = master_np,
 		};
 
-		pci_request_acs();
 		err = pci_for_each_dma_alias(to_pci_dev(dev),
 					     of_pci_iommu_init, &info);
+	} else if (dev_is_fsl_mc(dev)) {
+		err = of_fsl_mc_iommu_init(to_fsl_mc_device(dev), master_np);
 	} else {
 		struct of_phandle_args iommu_spec;
 		int idx = 0;
@@ -212,12 +194,8 @@ const struct iommu_ops *of_iommu_configure(struct device *dev,
 			if (err)
 				break;
 		}
-
-		fwspec = dev_iommu_fwspec_get(dev);
-		if (!err && fwspec)
-			of_property_read_u32(master_np, "pasid-num-bits",
-					     &fwspec->num_pasid_bits);
 	}
+
 
 	/*
 	 * Two success conditions can be represented by non-negative err here:

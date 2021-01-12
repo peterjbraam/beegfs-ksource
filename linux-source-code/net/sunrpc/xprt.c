@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  linux/net/sunrpc/xprt.c
  *
@@ -204,20 +205,20 @@ int xprt_reserve_xprt(struct rpc_xprt *xprt, struct rpc_task *task)
 
 	if (test_and_set_bit(XPRT_LOCKED, &xprt->state)) {
 		if (task == xprt->snd_task)
-			goto out_locked;
+			return 1;
 		goto out_sleep;
 	}
 	if (test_bit(XPRT_WRITE_SPACE, &xprt->state))
 		goto out_unlock;
 	xprt->snd_task = task;
 
-out_locked:
-	trace_xprt_reserve_xprt(xprt, task);
 	return 1;
 
 out_unlock:
 	xprt_clear_locked(xprt);
 out_sleep:
+	dprintk("RPC: %5u failed to lock transport %p\n",
+			task->tk_pid, xprt);
 	task->tk_status = -EAGAIN;
 	if  (RPC_IS_SOFT(task))
 		rpc_sleep_on_timeout(&xprt->sending, task, NULL,
@@ -268,22 +269,23 @@ int xprt_reserve_xprt_cong(struct rpc_xprt *xprt, struct rpc_task *task)
 
 	if (test_and_set_bit(XPRT_LOCKED, &xprt->state)) {
 		if (task == xprt->snd_task)
-			goto out_locked;
+			return 1;
 		goto out_sleep;
 	}
 	if (req == NULL) {
 		xprt->snd_task = task;
-		goto out_locked;
+		return 1;
 	}
 	if (test_bit(XPRT_WRITE_SPACE, &xprt->state))
 		goto out_unlock;
 	if (!xprt_need_congestion_window_wait(xprt)) {
 		xprt->snd_task = task;
-		goto out_locked;
+		return 1;
 	}
 out_unlock:
 	xprt_clear_locked(xprt);
 out_sleep:
+	dprintk("RPC: %5u failed to lock transport %p\n", task->tk_pid, xprt);
 	task->tk_status = -EAGAIN;
 	if (RPC_IS_SOFT(task))
 		rpc_sleep_on_timeout(&xprt->sending, task, NULL,
@@ -291,9 +293,6 @@ out_sleep:
 	else
 		rpc_sleep_on(&xprt->sending, task, NULL);
 	return 0;
-out_locked:
-	trace_xprt_reserve_cong(xprt, task);
-	return 1;
 }
 EXPORT_SYMBOL_GPL(xprt_reserve_xprt_cong);
 
@@ -358,7 +357,6 @@ void xprt_release_xprt(struct rpc_xprt *xprt, struct rpc_task *task)
 		xprt_clear_locked(xprt);
 		__xprt_lock_write_next(xprt);
 	}
-	trace_xprt_release_xprt(xprt, task);
 }
 EXPORT_SYMBOL_GPL(xprt_release_xprt);
 
@@ -376,7 +374,6 @@ void xprt_release_xprt_cong(struct rpc_xprt *xprt, struct rpc_task *task)
 		xprt_clear_locked(xprt);
 		__xprt_lock_write_next_cong(xprt);
 	}
-	trace_xprt_release_cong(xprt, task);
 }
 EXPORT_SYMBOL_GPL(xprt_release_xprt_cong);
 
@@ -398,7 +395,8 @@ __xprt_get_cong(struct rpc_xprt *xprt, struct rpc_rqst *req)
 {
 	if (req->rq_cong)
 		return 1;
-	trace_xprt_get_cong(xprt, req->rq_task);
+	dprintk("RPC: %5u xprt_cwnd_limited cong = %lu cwnd = %lu\n",
+			req->rq_task->tk_pid, xprt->cong, xprt->cwnd);
 	if (RPCXPRT_CONGESTED(xprt)) {
 		xprt_set_congestion_window_wait(xprt);
 		return 0;
@@ -420,7 +418,6 @@ __xprt_put_cong(struct rpc_xprt *xprt, struct rpc_rqst *req)
 	req->rq_cong = 0;
 	xprt->cong -= RPC_CWNDSCALE;
 	xprt_test_and_clear_congestion_window_wait(xprt);
-	trace_xprt_put_cong(xprt, req->rq_task);
 	__xprt_lock_write_next_cong(xprt);
 }
 
@@ -1116,6 +1113,8 @@ void xprt_complete_rqst(struct rpc_task *task, int copied)
 	struct rpc_rqst *req = task->tk_rqstp;
 	struct rpc_xprt *xprt = req->rq_xprt;
 
+	dprintk("RPC: %5u xid %08x complete (%d bytes received)\n",
+			task->tk_pid, ntohl(req->rq_xid), copied);
 	trace_xprt_complete_rqst(xprt, req->rq_xid, copied);
 
 	xprt->stat.recvs++;
@@ -1459,7 +1458,6 @@ xprt_request_transmit(struct rpc_rqst *req, struct rpc_task *snd_task)
 	 */
 	req->rq_ntrans++;
 
-	trace_xprt_sendto(&req->rq_snd_buf);
 	connect_cookie = xprt->connect_cookie;
 	status = xprt->ops->send_request(req);
 	if (status != 0) {
@@ -1505,10 +1503,13 @@ xprt_transmit(struct rpc_task *task)
 {
 	struct rpc_rqst *next, *req = task->tk_rqstp;
 	struct rpc_xprt	*xprt = req->rq_xprt;
-	int status;
+	int counter, status;
 
 	spin_lock(&xprt->queue_lock);
+	counter = 0;
 	while (!list_empty(&xprt->xmit_queue)) {
+		if (++counter == 20)
+			break;
 		next = list_first_entry(&xprt->xmit_queue,
 				struct rpc_rqst, rq_xmit);
 		xprt_pin_rqst(next);
@@ -1516,7 +1517,6 @@ xprt_transmit(struct rpc_task *task)
 		status = xprt_request_transmit(next, task);
 		if (status == -EBADMSG && next != req)
 			status = 0;
-		cond_resched();
 		spin_lock(&xprt->queue_lock);
 		xprt_unpin_rqst(next);
 		if (status == 0) {

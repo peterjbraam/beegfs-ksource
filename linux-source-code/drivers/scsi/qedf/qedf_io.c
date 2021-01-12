@@ -1,10 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  QLogic FCoE Offload Driver
  *  Copyright (c) 2016-2018 Cavium Inc.
- *
- *  This software is available under the terms of the GNU General Public License
- *  (GPL) Version 2, available from the file COPYING in the main directory of
- *  this source tree.
  */
 #include <linux/spinlock.h>
 #include <linux/vmalloc.h>
@@ -1024,18 +1021,14 @@ qedf_queuecommand(struct Scsi_Host *host, struct scsi_cmnd *sc_cmd)
 	atomic_inc(&fcport->ios_to_queue);
 
 	if (fcport->retry_delay_timestamp) {
-		/* Take fcport->rport_lock for resetting the delay_timestamp */
-		spin_lock_irqsave(&fcport->rport_lock, flags);
 		if (time_after(jiffies, fcport->retry_delay_timestamp)) {
 			fcport->retry_delay_timestamp = 0;
 		} else {
-			spin_unlock_irqrestore(&fcport->rport_lock, flags);
 			/* If retry_delay timer is active, flow off the ML */
 			rc = SCSI_MLQUEUE_TARGET_BUSY;
 			atomic_dec(&fcport->ios_to_queue);
 			goto exit_qcmd;
 		}
-		spin_unlock_irqrestore(&fcport->rport_lock, flags);
 	}
 
 	io_req = qedf_alloc_cmd(fcport, QEDF_SCSI_CMD);
@@ -1141,8 +1134,6 @@ void qedf_scsi_completion(struct qedf_ctx *qedf, struct fcoe_cqe *cqe,
 	int refcount;
 	u16 scope, qualifier = 0;
 	u8 fw_residual_flag = 0;
-	unsigned long flags = 0;
-	u16 chk_scope = 0;
 
 	if (!io_req)
 		return;
@@ -1276,8 +1267,16 @@ void qedf_scsi_completion(struct qedf_ctx *qedf, struct fcoe_cqe *cqe,
 				/* Lower 14 bits */
 				qualifier = fcp_rsp->retry_delay_timer & 0x3FFF;
 
-				if (qedf_retry_delay)
-					chk_scope = 1;
+				if (qedf_retry_delay &&
+				    scope > 0 && qualifier > 0 &&
+				    qualifier <= 0x3FEF) {
+					/* Check we don't go over the max */
+					if (qualifier > QEDF_RETRY_DELAY_MAX)
+						qualifier =
+						    QEDF_RETRY_DELAY_MAX;
+					fcport->retry_delay_timestamp =
+					    jiffies + (qualifier * HZ / 10);
+				}
 				/* Record stats */
 				if (io_req->cdb_status ==
 				    SAM_STAT_TASK_SET_FULL)
@@ -1288,36 +1287,6 @@ void qedf_scsi_completion(struct qedf_ctx *qedf, struct fcoe_cqe *cqe,
 		}
 		if (io_req->fcp_resid)
 			scsi_set_resid(sc_cmd, io_req->fcp_resid);
-
-		if (chk_scope == 1) {
-			if ((scope == 1 || scope == 2) &&
-			    (qualifier > 0 && qualifier <= 0x3FEF)) {
-				/* Check we don't go over the max */
-				if (qualifier > QEDF_RETRY_DELAY_MAX) {
-					qualifier = QEDF_RETRY_DELAY_MAX;
-					QEDF_INFO(&qedf->dbg_ctx, QEDF_LOG_IO,
-						  "qualifier = %d\n",
-						  (fcp_rsp->retry_delay_timer &
-						  0x3FFF));
-				}
-				QEDF_INFO(&qedf->dbg_ctx, QEDF_LOG_IO,
-					  "Scope = %d and qualifier = %d",
-					  scope, qualifier);
-				/*  Take fcport->rport_lock to
-				 *  update the retry_delay_timestamp
-				 */
-				spin_lock_irqsave(&fcport->rport_lock, flags);
-				fcport->retry_delay_timestamp =
-					jiffies + (qualifier * HZ / 10);
-				spin_unlock_irqrestore(&fcport->rport_lock,
-						       flags);
-
-			} else {
-				QEDF_INFO(&qedf->dbg_ctx, QEDF_LOG_IO,
-					  "combination of scope = %d and qualifier = %d is not handled in qedf.\n",
-					  scope, qualifier);
-			}
-		}
 		break;
 	default:
 		QEDF_INFO(&(qedf->dbg_ctx), QEDF_LOG_IO, "fcp_status=%d.\n",

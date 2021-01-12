@@ -1,12 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* PE Binary parser bits
  *
  * Copyright (C) 2014 Red Hat, Inc. All Rights Reserved.
  * Written by David Howells (dhowells@redhat.com)
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public Licence
- * as published by the Free Software Foundation; either version
- * 2 of the Licence, or (at your option) any later version.
  */
 
 #include <crypto/pkcs7.h>
@@ -18,7 +14,6 @@ struct pefile_context {
 	unsigned	cert_dirent_offset;
 	unsigned	n_data_dirents;
 	unsigned	n_sections;
-	unsigned	certs_offset;
 	unsigned	certs_size;
 	unsigned	sig_offset;
 	unsigned	sig_len;

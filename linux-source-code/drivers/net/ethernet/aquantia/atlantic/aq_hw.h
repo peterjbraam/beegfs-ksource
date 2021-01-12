@@ -1,10 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * aQuantia Corporation Network Driver
  * Copyright (C) 2014-2017 aQuantia Corporation. All rights reserved
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
  */
 
 /* File aq_hw.h: Declaration of abstract interface for NIC hardware specific
@@ -113,10 +110,10 @@ struct aq_stats_s {
 #define AQ_HW_MEDIA_TYPE_TP    1U
 #define AQ_HW_MEDIA_TYPE_FIBRE 2U
 
-#define AQ_HW_MULTICAST_ADDRESS_MAX     32U
-
 #define AQ_HW_TXD_MULTIPLE 8U
 #define AQ_HW_RXD_MULTIPLE 8U
+
+#define AQ_HW_MULTICAST_ADDRESS_MAX     32U
 
 struct aq_hw_s {
 	atomic_t flags;
@@ -233,7 +230,7 @@ struct aq_hw_ops {
 
 	struct aq_stats_s *(*hw_get_hw_stats)(struct aq_hw_s *self);
 
-	int (*hw_get_fw_version)(struct aq_hw_s *self, u32 *fw_version);
+	u32 (*hw_get_fw_version)(struct aq_hw_s *self);
 
 	int (*hw_set_offload)(struct aq_hw_s *self,
 			      struct aq_nic_cfg_s *aq_nic_cfg);

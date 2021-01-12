@@ -9,7 +9,7 @@ This is the authoritative documentation on the design, interface and
 conventions of cgroup v2.  It describes all userland-visible aspects
 of cgroup including core and specific controller behaviors.  All
 future changes must be reflected in this document.  Documentation for
-v1 is available under Documentation/cgroup-v1/.
+v1 is available under Documentation/admin-guide/cgroup-v1/.
 
 .. CONTENTS
 
@@ -61,8 +61,6 @@ v1 is available under Documentation/cgroup-v1/.
      5-6. Device
      5-7. RDMA
        5-7-1. RDMA Interface Files
-     5-8. HugeTLB
-       5.8-1. HugeTLB Interface Files
      5-8. Misc
        5-8-1. perf_event
      5-N. Non-normative information
@@ -178,6 +176,15 @@ cgroup v2 currently supports the following mount options.
 	through remount from the init namespace.  The mount option is
 	ignored on non-init namespace mounts.  Please refer to the
 	Delegation section for details.
+
+  memory_localevents
+
+        Only populate memory.events with data for the current cgroup,
+        and not any subtrees. This is legacy behaviour, the default
+        behaviour without this option is to include subtree counts.
+        This option is system wide and can only be set on mount or
+        modified through remount from the init namespace. The mount
+        option is ignored on non-init namespace mounts.
 
 
 Organizing Processes and Threads
@@ -944,6 +951,13 @@ controller implements weight and absolute bandwidth limit models for
 normal scheduling policy and absolute bandwidth allocation model for
 realtime scheduling policy.
 
+In all the above models, cycles distribution is defined only on a temporal
+base and it does not account for the frequency at which tasks are executed.
+The (optional) utilization clamping support allows to hint the schedutil
+cpufreq governor about the minimum desired frequency which should always be
+provided by a CPU, as well as the maximum desired frequency, which should not
+be exceeded by a CPU.
+
 WARNING: cgroup2 doesn't yet support control of realtime processes and
 the cpu controller can only be enabled when all RT processes are in
 the root cgroup.  Be aware that system management software may already
@@ -1007,7 +1021,34 @@ All time durations are in microseconds.
 	A read-only nested-key file which exists on non-root cgroups.
 
 	Shows pressure stall information for CPU. See
-	Documentation/accounting/psi.txt for details.
+	Documentation/accounting/psi.rst for details.
+
+  cpu.uclamp.min
+        A read-write single value file which exists on non-root cgroups.
+        The default is "0", i.e. no utilization boosting.
+
+        The requested minimum utilization (protection) as a percentage
+        rational number, e.g. 12.34 for 12.34%.
+
+        This interface allows reading and setting minimum utilization clamp
+        values similar to the sched_setattr(2). This minimum utilization
+        value is used to clamp the task specific minimum utilization clamp.
+
+        The requested minimum utilization (protection) is always capped by
+        the current value for the maximum utilization (limit), i.e.
+        `cpu.uclamp.max`.
+
+  cpu.uclamp.max
+        A read-write single value file which exists on non-root cgroups.
+        The default is "max". i.e. no utilization capping
+
+        The requested maximum utilization (limit) as a percentage rational
+        number, e.g. 98.76 for 98.76%.
+
+        This interface allows reading and setting maximum utilization clamp
+        values similar to the sched_setattr(2). This maximum utilization
+        value is used to clamp the task specific maximum utilization clamp.
+
 
 
 Memory
@@ -1145,6 +1186,11 @@ PAGE_SIZE multiple when read back.
 	otherwise, a value change in this file generates a file
 	modified event.
 
+	Note that all fields in this file are hierarchical and the
+	file modified event can be generated due to an event down the
+	hierarchy. For for the local events at the cgroup level see
+	memory.events.local.
+
 	  low
 		The number of times the cgroup is reclaimed due to
 		high memory pressure even though its usage is under
@@ -1183,6 +1229,11 @@ PAGE_SIZE multiple when read back.
 	  oom_kill
 		The number of processes belonging to this cgroup
 		killed by any kind of OOM killer.
+
+  memory.events.local
+	Similar to memory.events but the fields in the file are local
+	to the cgroup i.e. not hierarchical. The file modified event
+	generated on this file reflects only the local events.
 
   memory.stat
 	A read-only flat-keyed file which exists on non-root cgroups.
@@ -1344,7 +1395,7 @@ PAGE_SIZE multiple when read back.
 	A read-only nested-key file which exists on non-root cgroups.
 
 	Shows pressure stall information for memory. See
-	Documentation/accounting/psi.txt for details.
+	Documentation/accounting/psi.rst for details.
 
 
 Usage Guidelines
@@ -1584,7 +1635,7 @@ IO Interface Files
 	A read-only nested-key file which exists on non-root cgroups.
 
 	Shows pressure stall information for IO. See
-	Documentation/accounting/psi.txt for details.
+	Documentation/accounting/psi.rst for details.
 
 
 Writeback
@@ -1657,7 +1708,7 @@ protected workload.
 
 The limits are only applied at the peer level in the hierarchy.  This means that
 in the diagram below, only groups A, B, and C will influence each other, and
-groups D and F will influence each other.  Group G will influence nobody.
+groups D and F will influence each other.  Group G will influence nobody::
 
 			[root]
 		/	   |		\
@@ -1999,33 +2050,6 @@ RDMA Interface Files
 	  mlx4_0 hca_handle=1 hca_object=20
 	  ocrdma1 hca_handle=1 hca_object=23
 
-HugeTLB
--------
-
-The HugeTLB controller allows to limit the HugeTLB usage per control group and
-enforces the controller limit during page fault.
-
-HugeTLB Interface Files
-~~~~~~~~~~~~~~~~~~~~~~~
-
-  hugetlb.<hugepagesize>.current
-	Show current usage for "hugepagesize" hugetlb.  It exists for all
-	the cgroup except root.
-
-  hugetlb.<hugepagesize>.max
-	Set/show the hard limit of "hugepagesize" hugetlb usage.
-	The default value is "max".  It exists for all the cgroup except root.
-
-  hugetlb.<hugepagesize>.events
-	A read-only flat-keyed file which exists on non-root cgroups.
-
-	  max
-		The number of allocation failure due to HugeTLB limit
-
-  hugetlb.<hugepagesize>.events.local
-	Similar to hugetlb.<hugepagesize>.events but the fields in the file
-	are local to the cgroup i.e. not hierarchical. The file modified event
-	generated on this file reflects only the local events.
 
 Misc
 ----

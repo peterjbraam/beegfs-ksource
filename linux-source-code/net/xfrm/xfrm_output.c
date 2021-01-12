@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * xfrm_output.c - Common IPsec encapsulation code.
  *
  * Copyright (c) 2007 Herbert Xu <herbert@gondor.apana.org.au>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 
 #include <linux/errno.h>
@@ -334,7 +330,7 @@ static int xfrm4_prepare_output(struct xfrm_state *x, struct sk_buff *skb)
 	IPCB(skb)->flags |= IPSKB_XFRM_TUNNEL_SIZE;
 	skb->protocol = htons(ETH_P_IP);
 
-	switch (x->outer_mode->encap) {
+	switch (x->outer_mode.encap) {
 	case XFRM_MODE_BEET:
 		return xfrm4_beet_encap_add(x, skb);
 	case XFRM_MODE_TUNNEL:
@@ -357,7 +353,7 @@ static int xfrm6_prepare_output(struct xfrm_state *x, struct sk_buff *skb)
 	skb->ignore_df = 1;
 	skb->protocol = htons(ETH_P_IPV6);
 
-	switch (x->outer_mode->encap) {
+	switch (x->outer_mode.encap) {
 	case XFRM_MODE_BEET:
 		return xfrm6_beet_encap_add(x, skb);
 	case XFRM_MODE_TUNNEL:
@@ -373,22 +369,22 @@ static int xfrm6_prepare_output(struct xfrm_state *x, struct sk_buff *skb)
 
 static int xfrm_outer_mode_output(struct xfrm_state *x, struct sk_buff *skb)
 {
-	switch (x->outer_mode->encap) {
+	switch (x->outer_mode.encap) {
 	case XFRM_MODE_BEET:
 	case XFRM_MODE_TUNNEL:
-		if (x->outer_mode->family == AF_INET)
+		if (x->outer_mode.family == AF_INET)
 			return xfrm4_prepare_output(x, skb);
-		if (x->outer_mode->family == AF_INET6)
+		if (x->outer_mode.family == AF_INET6)
 			return xfrm6_prepare_output(x, skb);
 		break;
 	case XFRM_MODE_TRANSPORT:
-		if (x->outer_mode->family == AF_INET)
+		if (x->outer_mode.family == AF_INET)
 			return xfrm4_transport_output(x, skb);
-		if (x->outer_mode->family == AF_INET6)
+		if (x->outer_mode.family == AF_INET6)
 			return xfrm6_transport_output(x, skb);
 		break;
 	case XFRM_MODE_ROUTEOPTIMIZATION:
-		if (x->outer_mode->family == AF_INET6)
+		if (x->outer_mode.family == AF_INET6)
 			return xfrm6_ro_output(x, skb);
 		WARN_ON_ONCE(1);
 		break;
@@ -489,7 +485,7 @@ resume:
 		}
 		skb_dst_set(skb, dst);
 		x = dst->xfrm;
-	} while (x && !(x->outer_mode->flags & XFRM_MODE_FLAG_TUNNEL));
+	} while (x && !(x->outer_mode.flags & XFRM_MODE_FLAG_TUNNEL));
 
 	return 0;
 
@@ -506,7 +502,7 @@ int xfrm_output_resume(struct sk_buff *skb, int err)
 	struct net *net = xs_net(skb_dst(skb)->xfrm);
 
 	while (likely((err = xfrm_output_one(skb, err)) == 0)) {
-		nf_reset(skb);
+		nf_reset_ct(skb);
 
 		err = skb_dst(skb)->ops->local_out(net, skb->sk, skb);
 		if (unlikely(err != 1))
@@ -539,8 +535,8 @@ static int xfrm_output_gso(struct net *net, struct sock *sk, struct sk_buff *skb
 {
 	struct sk_buff *segs;
 
-	BUILD_BUG_ON(sizeof(*IPCB(skb)) > SKB_GSO_CB_OFFSET);
-	BUILD_BUG_ON(sizeof(*IP6CB(skb)) > SKB_GSO_CB_OFFSET);
+	BUILD_BUG_ON(sizeof(*IPCB(skb)) > SKB_SGO_CB_OFFSET);
+	BUILD_BUG_ON(sizeof(*IP6CB(skb)) > SKB_SGO_CB_OFFSET);
 	segs = skb_gso_segment(skb, 0);
 	kfree_skb(skb);
 	if (IS_ERR(segs))
@@ -577,19 +573,16 @@ int xfrm_output(struct sock *sk, struct sk_buff *skb)
 	if (xfrm_dev_offload_ok(skb, x)) {
 		struct sec_path *sp;
 
-		sp = secpath_dup(skb->sp);
+		sp = secpath_set(skb);
 		if (!sp) {
 			XFRM_INC_STATS(net, LINUX_MIB_XFRMOUTERROR);
 			kfree_skb(skb);
 			return -ENOMEM;
 		}
-		if (skb->sp)
-			secpath_put(skb->sp);
-		skb->sp = sp;
 		skb->encapsulation = 1;
 
 		sp->olen++;
-		sp->xvec[skb->sp->len++] = x;
+		sp->xvec[sp->len++] = x;
 		xfrm_state_hold(x);
 
 		if (skb_is_gso(skb)) {
@@ -631,7 +624,7 @@ static int xfrm_inner_extract_output(struct xfrm_state *x, struct sk_buff *skb)
 		inner_mode = xfrm_ip2inner_mode(x,
 				xfrm_af2proto(skb_dst(skb)->ops->family));
 	else
-		inner_mode = x->inner_mode;
+		inner_mode = &x->inner_mode;
 
 	if (inner_mode == NULL)
 		return -EAFNOSUPPORT;

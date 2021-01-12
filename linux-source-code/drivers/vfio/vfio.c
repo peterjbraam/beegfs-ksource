@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * VFIO core
  *
  * Copyright (C) 2012 Red Hat, Inc.  All rights reserved.
  *     Author: Alex Williamson <alex.williamson@redhat.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  * Derived from original vfio:
  * Copyright 2010 Cisco Systems, Inc.  All rights reserved.
@@ -705,8 +702,8 @@ static int vfio_group_nb_add_dev(struct vfio_group *group, struct device *dev)
 		return 0;
 
 	/* TODO Prevent device auto probing */
-	WARN(1, "Device %s added to live group %d!\n", dev_name(dev),
-	     iommu_group_id(group->iommu_group));
+	dev_WARN(dev, "Device added to live group %d!\n",
+		 iommu_group_id(group->iommu_group));
 
 	return 0;
 }
@@ -749,25 +746,22 @@ static int vfio_iommu_group_notifier(struct notifier_block *nb,
 		 */
 		break;
 	case IOMMU_GROUP_NOTIFY_BIND_DRIVER:
-		pr_debug("%s: Device %s, group %d binding to driver\n",
-			 __func__, dev_name(dev),
-			 iommu_group_id(group->iommu_group));
+		dev_dbg(dev, "%s: group %d binding to driver\n", __func__,
+			iommu_group_id(group->iommu_group));
 		break;
 	case IOMMU_GROUP_NOTIFY_BOUND_DRIVER:
-		pr_debug("%s: Device %s, group %d bound to driver %s\n",
-			 __func__, dev_name(dev),
-			 iommu_group_id(group->iommu_group), dev->driver->name);
+		dev_dbg(dev, "%s: group %d bound to driver %s\n", __func__,
+			iommu_group_id(group->iommu_group), dev->driver->name);
 		BUG_ON(vfio_group_nb_verify(group, dev));
 		break;
 	case IOMMU_GROUP_NOTIFY_UNBIND_DRIVER:
-		pr_debug("%s: Device %s, group %d unbinding from driver %s\n",
-			 __func__, dev_name(dev),
-			 iommu_group_id(group->iommu_group), dev->driver->name);
+		dev_dbg(dev, "%s: group %d unbinding from driver %s\n",
+			__func__, iommu_group_id(group->iommu_group),
+			dev->driver->name);
 		break;
 	case IOMMU_GROUP_NOTIFY_UNBOUND_DRIVER:
-		pr_debug("%s: Device %s, group %d unbound from driver\n",
-			 __func__, dev_name(dev),
-			 iommu_group_id(group->iommu_group));
+		dev_dbg(dev, "%s: group %d unbound from driver\n", __func__,
+			iommu_group_id(group->iommu_group));
 		/*
 		 * XXX An unbound device in a live group is ok, but we'd
 		 * really like to avoid the above BUG_ON by preventing other
@@ -831,8 +825,8 @@ int vfio_add_group_dev(struct device *dev,
 
 	device = vfio_group_get_device(group, dev);
 	if (device) {
-		WARN(1, "Device %s already exists on group %d\n",
-		     dev_name(dev), iommu_group_id(iommu_group));
+		dev_WARN(dev, "Device already exists on group %d\n",
+			 iommu_group_id(iommu_group));
 		vfio_device_put(device);
 		vfio_group_put(group);
 		return -EBUSY;
@@ -917,6 +911,10 @@ void *vfio_del_group_dev(struct device *dev)
 	struct vfio_unbound_dev *unbound;
 	unsigned int i = 0;
 	bool interrupted = false;
+	bool locked = true;
+	struct device_driver *drv;
+
+	drv = dev->driver;
 
 	/*
 	 * The group exists so long as we have a device reference.  Get
@@ -959,8 +957,11 @@ void *vfio_del_group_dev(struct device *dev)
 		if (!device)
 			break;
 
-		if (device->ops->request)
+		if (device->ops->request) {
+			device_unlock(dev);
+			locked = false;
 			device->ops->request(device_data, i++);
+		}
 
 		vfio_device_put(device);
 
@@ -975,6 +976,20 @@ void *vfio_del_group_dev(struct device *dev)
 					 " \"%s\" (%d) "
 					 "blocked until device is released",
 					 current->comm, task_pid_nr(current));
+			}
+		}
+
+		if (!locked) {
+			device_lock(dev);
+			locked = true;
+			/*
+			 * A concurrent operation may have released the driver
+			 * successfully while we had dropped the lock,
+			 * check for that.
+			 */
+			if (dev->driver != drv) {
+				vfio_group_put(group);
+				return NULL;
 			}
 		}
 
@@ -1190,6 +1205,15 @@ static long vfio_fops_unl_ioctl(struct file *filep,
 	return ret;
 }
 
+#ifdef CONFIG_COMPAT
+static long vfio_fops_compat_ioctl(struct file *filep,
+				   unsigned int cmd, unsigned long arg)
+{
+	arg = (unsigned long)compat_ptr(arg);
+	return vfio_fops_unl_ioctl(filep, cmd, arg);
+}
+#endif	/* CONFIG_COMPAT */
+
 static int vfio_fops_open(struct inode *inode, struct file *filep)
 {
 	struct vfio_container *container;
@@ -1272,7 +1296,9 @@ static const struct file_operations vfio_fops = {
 	.read		= vfio_fops_read,
 	.write		= vfio_fops_write,
 	.unlocked_ioctl	= vfio_fops_unl_ioctl,
-	.compat_ioctl	= compat_ptr_ioctl,
+#ifdef CONFIG_COMPAT
+	.compat_ioctl	= vfio_fops_compat_ioctl,
+#endif
 	.mmap		= vfio_fops_mmap,
 };
 
@@ -1551,6 +1577,15 @@ static long vfio_group_fops_unl_ioctl(struct file *filep,
 	return ret;
 }
 
+#ifdef CONFIG_COMPAT
+static long vfio_group_fops_compat_ioctl(struct file *filep,
+					 unsigned int cmd, unsigned long arg)
+{
+	arg = (unsigned long)compat_ptr(arg);
+	return vfio_group_fops_unl_ioctl(filep, cmd, arg);
+}
+#endif	/* CONFIG_COMPAT */
+
 static int vfio_group_fops_open(struct inode *inode, struct file *filep)
 {
 	struct vfio_group *group;
@@ -1606,7 +1641,9 @@ static int vfio_group_fops_release(struct inode *inode, struct file *filep)
 static const struct file_operations vfio_group_fops = {
 	.owner		= THIS_MODULE,
 	.unlocked_ioctl	= vfio_group_fops_unl_ioctl,
-	.compat_ioctl	= compat_ptr_ioctl,
+#ifdef CONFIG_COMPAT
+	.compat_ioctl	= vfio_group_fops_compat_ioctl,
+#endif
 	.open		= vfio_group_fops_open,
 	.release	= vfio_group_fops_release,
 };
@@ -1671,13 +1708,24 @@ static int vfio_device_fops_mmap(struct file *filep, struct vm_area_struct *vma)
 	return device->ops->mmap(device->device_data, vma);
 }
 
+#ifdef CONFIG_COMPAT
+static long vfio_device_fops_compat_ioctl(struct file *filep,
+					  unsigned int cmd, unsigned long arg)
+{
+	arg = (unsigned long)compat_ptr(arg);
+	return vfio_device_fops_unl_ioctl(filep, cmd, arg);
+}
+#endif	/* CONFIG_COMPAT */
+
 static const struct file_operations vfio_device_fops = {
 	.owner		= THIS_MODULE,
 	.release	= vfio_device_fops_release,
 	.read		= vfio_device_fops_read,
 	.write		= vfio_device_fops_write,
 	.unlocked_ioctl	= vfio_device_fops_unl_ioctl,
-	.compat_ioctl	= compat_ptr_ioctl,
+#ifdef CONFIG_COMPAT
+	.compat_ioctl	= vfio_device_fops_compat_ioctl,
+#endif
 	.mmap		= vfio_device_fops_mmap,
 };
 

@@ -67,12 +67,17 @@ void save_stack_trace_tsk(struct task_struct *tsk, struct stack_trace *trace)
 {
 	unsigned long sp;
 
+	if (!try_get_task_stack(tsk))
+		return;
+
 	if (tsk == current)
 		sp = current_stack_pointer();
 	else
 		sp = tsk->thread.ksp;
 
 	save_context_stack(trace, sp, tsk, 0);
+
+	put_task_stack(tsk);
 }
 EXPORT_SYMBOL_GPL(save_stack_trace_tsk);
 
@@ -90,9 +95,8 @@ EXPORT_SYMBOL_GPL(save_stack_trace_regs);
  *
  * If the task is not 'current', the caller *must* ensure the task is inactive.
  */
-int
-save_stack_trace_tsk_reliable(struct task_struct *tsk,
-				struct stack_trace *trace)
+static int __save_stack_trace_tsk_reliable(struct task_struct *tsk,
+					   struct stack_trace *trace)
 {
 	unsigned long sp;
 	unsigned long newsp;
@@ -178,7 +182,7 @@ save_stack_trace_tsk_reliable(struct task_struct *tsk,
 		 * FIXME: IMHO these tests do not belong in
 		 * arch-dependent code, they are generic.
 		 */
-		ip = ftrace_graph_ret_addr(tsk, &graph_idx, ip, NULL);
+		ip = ftrace_graph_ret_addr(tsk, &graph_idx, ip, stack);
 #ifdef CONFIG_KPROBES
 		/*
 		 * Mark stacktraces with kretprobed functions on them
@@ -197,7 +201,25 @@ save_stack_trace_tsk_reliable(struct task_struct *tsk,
 	}
 	return 0;
 }
-EXPORT_SYMBOL_GPL(save_stack_trace_tsk_reliable);
+
+int save_stack_trace_tsk_reliable(struct task_struct *tsk,
+				  struct stack_trace *trace)
+{
+	int ret;
+
+	/*
+	 * If the task doesn't have a stack (e.g., a zombie), the stack is
+	 * "reliably" empty.
+	 */
+	if (!try_get_task_stack(tsk))
+		return 0;
+
+	ret = __save_stack_trace_tsk_reliable(tsk, trace);
+
+	put_task_stack(tsk);
+
+	return ret;
+}
 #endif /* CONFIG_HAVE_RELIABLE_STACKTRACE */
 
 #if defined(CONFIG_PPC_BOOK3S_64) && defined(CONFIG_NMI_IPI)

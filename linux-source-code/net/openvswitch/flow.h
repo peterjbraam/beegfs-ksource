@@ -1,19 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (c) 2007-2017 Nicira, Inc.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of version 2 of the GNU General Public
- * License as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
- * 02110-1301, USA
  */
 
 #ifndef FLOW_H
@@ -30,7 +17,6 @@
 #include <linux/in6.h>
 #include <linux/jiffies.h>
 #include <linux/time.h>
-#include <linux/flex_array.h>
 #include <linux/cpumask.h>
 #include <net/inet_ecn.h>
 #include <net/ip_tunnels.h>
@@ -44,7 +30,6 @@ enum sw_flow_mac_proto {
 	MAC_PROTO_ETHERNET,
 };
 #define SW_FLOW_KEY_INVALID	0x80
-#define MPLS_LABEL_DEPTH       3
 
 /* Store options at the end of the array if they are less than the
  * maximum size. This allows us to get the benefits of variable length
@@ -61,7 +46,7 @@ struct ovs_tunnel_info {
 
 struct vlan_head {
 	__be16 tpid; /* Vlan type. Generally 802.1q or 802.1ad.*/
-	__be16 tci;  /* 0 if no VLAN, VLAN_TAG_PRESENT set otherwise. */
+	__be16 tci;  /* 0 if no VLAN, VLAN_CFI_MASK set otherwise. */
 };
 
 #define OVS_SW_FLOW_KEY_METADATA_SIZE			\
@@ -99,6 +84,9 @@ struct sw_flow_key {
 					 * protocol.
 					 */
 	union {
+		struct {
+			__be32 top_lse;	/* top label stack entry */
+		} mpls;
 		struct {
 			u8     proto;	/* IP protocol or lower 8 bits of ARP opcode. */
 			u8     tos;	    /* IP ToS. */
@@ -147,11 +135,6 @@ struct sw_flow_key {
 				} nd;
 			};
 		} ipv6;
-		struct {
-			u32 num_labels_mask;    /* labels present bitmap of effective length MPLS_LABEL_DEPTH */
-			__be32 lse[MPLS_LABEL_DEPTH];     /* label stack entry  */
-		} mpls;
-
 		struct ovs_key_nsh nsh;         /* network service header */
 	};
 	struct {
@@ -183,6 +166,7 @@ struct sw_flow_key_range {
 struct sw_flow_mask {
 	int ref_count;
 	struct rcu_head rcu;
+	struct list_head list;
 	struct sw_flow_key_range range;
 	struct sw_flow_key key;
 };

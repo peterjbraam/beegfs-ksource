@@ -85,11 +85,31 @@ _LPP_OFFSET	= __LC_LPP
 #endif
 	.endm
 
-	.macro	CHECK_STACK stacksize,savearea
+	.macro	CHECK_STACK savearea
 #ifdef CONFIG_CHECK_STACK
-	tml	%r15,\stacksize - CONFIG_STACK_GUARD
+	tml	%r15,STACK_SIZE - CONFIG_STACK_GUARD
 	lghi	%r14,\savearea
 	jz	stack_overflow
+#endif
+	.endm
+
+	.macro	CHECK_VMAP_STACK savearea,oklabel
+#ifdef CONFIG_VMAP_STACK
+	lgr	%r14,%r15
+	nill	%r14,0x10000 - STACK_SIZE
+	oill	%r14,STACK_INIT
+	clg	%r14,__LC_KERNEL_STACK
+	je	\oklabel
+	clg	%r14,__LC_ASYNC_STACK
+	je	\oklabel
+	clg	%r14,__LC_NODAT_STACK
+	je	\oklabel
+	clg	%r14,__LC_RESTART_STACK
+	je	\oklabel
+	lghi	%r14,\savearea
+	j	stack_overflow
+#else
+	j	\oklabel
 #endif
 	.endm
 
@@ -107,11 +127,11 @@ _LPP_OFFSET	= __LC_LPP
 	brasl	%r14,cleanup_critical
 	tmhh	%r8,0x0001		# retest problem state after cleanup
 	jnz	2f
-1:	lg	%r14,__LC_ASYNC_STACK	# are we already on the async stack?
+1:	lg	%r14,__LC_ASYNC_STACK	# are we already on the target stack?
 	slgr	%r14,%r15
 	srag	%r14,%r14,STACK_SHIFT
 	jnz	3f
-	CHECK_STACK 1<<STACK_SHIFT,\savearea
+	CHECK_STACK \savearea
 	aghi	%r15,-(STACK_FRAME_OVERHEAD + __PT_SIZE)
 	j	4f
 2:	UPDATE_VTIME %r14,%r15,\timer
@@ -207,6 +227,7 @@ ENTRY(__bpon)
 	.globl __bpon
 	BPON
 	BR_EX	%r14
+ENDPROC(__bpon)
 
 /*
  * Scheduler resume function, called by switch_to
@@ -231,6 +252,7 @@ ENTRY(__switch_to)
 	lmg	%r6,%r15,__SF_GPRS(%r15)	# load gprs of next task
 	ALTERNATIVE "", ".insn s,0xb2800000,_LPP_OFFSET", 40
 	BR_EX	%r14
+ENDPROC(__switch_to)
 
 .L__critical_start:
 
@@ -307,6 +329,7 @@ sie_exit:
 	EX_TABLE(.Lrewind_pad4,.Lsie_fault)
 	EX_TABLE(.Lrewind_pad2,.Lsie_fault)
 	EX_TABLE(sie_exit,.Lsie_fault)
+ENDPROC(sie64a)
 EXPORT_SYMBOL(sie64a)
 EXPORT_SYMBOL(sie_exit)
 #endif
@@ -345,9 +368,9 @@ ENTRY(system_call)
 	jnz	.Lsysc_nr_ok
 	# svc 0: system call number in %r1
 	llgfr	%r1,%r1				# clear high word in r1
+	sth	%r1,__PT_INT_CODE+2(%r11)
 	cghi	%r1,NR_syscalls
 	jnl	.Lsysc_nr_ok
-	sth	%r1,__PT_INT_CODE+2(%r11)
 	slag	%r8,%r1,3
 .Lsysc_nr_ok:
 	xc	__SF_BACKCHAIN(8,%r15),__SF_BACKCHAIN(%r15)
@@ -553,6 +576,7 @@ ENTRY(system_call)
 	lgr	%r2,%r11		# pass pointer to pt_regs
 	larl	%r14,.Lsysc_return
 	jg	do_syscall_trace_exit
+ENDPROC(system_call)
 
 #
 # a new process exits the kernel with ret_from_fork
@@ -567,10 +591,16 @@ ENTRY(ret_from_fork)
 	jne	.Lsysc_tracenogo
 	# it's a kernel thread
 	lmg	%r9,%r10,__PT_R9(%r11)	# load gprs
+	la	%r2,0(%r10)
+	BASR_EX	%r14,%r9
+	j	.Lsysc_tracenogo
+ENDPROC(ret_from_fork)
+
 ENTRY(kernel_thread_starter)
 	la	%r2,0(%r10)
 	BASR_EX	%r14,%r9
 	j	.Lsysc_tracenogo
+ENDPROC(kernel_thread_starter)
 
 /*
  * Program check handler routine
@@ -610,9 +640,10 @@ ENTRY(pgm_check_handler)
 	jnz	2f			# -> enabled, can't be a double fault
 	tm	__LC_PGM_ILC+3,0x80	# check for per exception
 	jnz	.Lpgm_svcper		# -> single stepped svc
-2:	CHECK_STACK STACK_SIZE,__LC_SAVE_AREA_SYNC
+2:	CHECK_STACK __LC_SAVE_AREA_SYNC
 	aghi	%r15,-(STACK_FRAME_OVERHEAD + __PT_SIZE)
-	j	5f
+	# CHECK_VMAP_STACK branches to stack_overflow or 5f
+	CHECK_VMAP_STACK __LC_SAVE_AREA_SYNC,5f
 3:	UPDATE_VTIME %r14,%r15,__LC_SYNC_ENTER_TIMER
 	BPENTER __TI_flags(%r12),_TIF_ISOLATE_BP
 	lg	%r15,__LC_KERNEL_STACK
@@ -687,6 +718,7 @@ ENTRY(pgm_check_handler)
 	stg	%r14,__LC_RETURN_PSW+8
 	lghi	%r14,_PIF_SYSCALL | _PIF_PER_TRAP
 	lpswe	__LC_RETURN_PSW		# branch to .Lsysc_per and enable irqs
+ENDPROC(pgm_check_handler)
 
 /*
  * IO interrupt handler routine
@@ -915,6 +947,7 @@ ENTRY(io_int_handler)
 	ssm	__LC_PGM_NEW_PSW	# disable I/O and ext. interrupts
 	TRACE_IRQS_OFF
 	j	.Lio_return
+ENDPROC(io_int_handler)
 
 /*
  * External interrupt handler routine
@@ -954,6 +987,7 @@ ENTRY(ext_int_handler)
 	lghi	%r3,EXT_INTERRUPT
 	brasl	%r14,do_IRQ
 	j	.Lio_return
+ENDPROC(ext_int_handler)
 
 /*
  * Load idle PSW. The second "half" of this function is in .Lcleanup_idle.
@@ -962,14 +996,12 @@ ENTRY(psw_idle)
 	stg	%r3,__SF_EMPTY(%r15)
 	larl	%r1,.Lpsw_idle_lpsw+4
 	stg	%r1,__SF_EMPTY+8(%r15)
-#ifdef CONFIG_SMP
 	larl	%r1,smp_cpu_mtid
 	llgf	%r1,0(%r1)
 	ltgr	%r1,%r1
 	jz	.Lpsw_idle_stcctm
 	.insn	rsy,0xeb0000000017,%r1,5,__SF_EMPTY+16(%r15)
 .Lpsw_idle_stcctm:
-#endif
 	oi	__LC_CPU_FLAGS+7,_CIF_ENABLED_WAIT
 	BPON
 	STCK	__CLOCK_IDLE_ENTER(%r2)
@@ -978,6 +1010,7 @@ ENTRY(psw_idle)
 	lpswe	__SF_EMPTY(%r15)
 	BR_EX	%r14
 .Lpsw_idle_end:
+ENDPROC(psw_idle)
 
 /*
  * Store floating-point controls and floating-point or vector register
@@ -1020,6 +1053,7 @@ ENTRY(save_fpu_regs)
 .Lsave_fpu_regs_exit:
 	BR_EX	%r14
 .Lsave_fpu_regs_end:
+ENDPROC(save_fpu_regs)
 EXPORT_SYMBOL(save_fpu_regs)
 
 /*
@@ -1066,6 +1100,7 @@ load_fpu_regs:
 .Lload_fpu_regs_exit:
 	BR_EX	%r14
 .Lload_fpu_regs_end:
+ENDPROC(load_fpu_regs)
 
 .L__critical_end:
 
@@ -1192,9 +1227,10 @@ ENTRY(mcck_int_handler)
 	b	__LC_RETURN_MCCK_LPSWE
 
 .Lmcck_panic:
-	lg	%r15,__LC_PANIC_STACK
+	lg	%r15,__LC_NODAT_STACK
 	la	%r11,STACK_FRAME_OVERHEAD(%r15)
 	j	.Lmcck_skip
+ENDPROC(mcck_int_handler)
 
 #
 # PSW restart interrupt handler
@@ -1203,12 +1239,10 @@ ENTRY(restart_int_handler)
 	ALTERNATIVE "", ".insn s,0xb2800000,_LPP_OFFSET", 40
 	stg	%r15,__LC_SAVE_AREA_RESTART
 	lg	%r15,__LC_RESTART_STACK
-	aghi	%r15,-__PT_SIZE			# create pt_regs on stack
-	xc	0(__PT_SIZE,%r15),0(%r15)
-	stmg	%r0,%r14,__PT_R0(%r15)
-	mvc	__PT_R15(8,%r15),__LC_SAVE_AREA_RESTART
-	mvc	__PT_PSW(16,%r15),__LC_RST_OLD_PSW # store restart old psw
-	aghi	%r15,-STACK_FRAME_OVERHEAD	# create stack frame on stack
+	xc	STACK_FRAME_OVERHEAD(__PT_SIZE,%r15),STACK_FRAME_OVERHEAD(%r15)
+	stmg	%r0,%r14,STACK_FRAME_OVERHEAD+__PT_R0(%r15)
+	mvc	STACK_FRAME_OVERHEAD+__PT_R15(8,%r15),__LC_SAVE_AREA_RESTART
+	mvc	STACK_FRAME_OVERHEAD+__PT_PSW(16,%r15),__LC_RST_OLD_PSW
 	xc	0(STACK_FRAME_OVERHEAD,%r15),0(%r15)
 	lg	%r1,__LC_RESTART_FN		# load fn, parm & source cpu
 	lg	%r2,__LC_RESTART_DATA
@@ -1223,17 +1257,18 @@ ENTRY(restart_int_handler)
 2:	sigp	%r4,%r3,SIGP_STOP		# sigp stop to current cpu
 	brc	2,2b
 3:	j	3b
+ENDPROC(restart_int_handler)
 
 	.section .kprobes.text, "ax"
 
-#ifdef CONFIG_CHECK_STACK
+#if defined(CONFIG_CHECK_STACK) || defined(CONFIG_VMAP_STACK)
 /*
  * The synchronous or the asynchronous stack overflowed. We are dead.
  * No need to properly save the registers, we are going to panic anyway.
  * Setup a pt_regs so that show_trace can provide a good call trace.
  */
-stack_overflow:
-	lg	%r15,__LC_PANIC_STACK	# change to panic stack
+ENTRY(stack_overflow)
+	lg	%r15,__LC_NODAT_STACK	# change to panic stack
 	la	%r11,STACK_FRAME_OVERHEAD(%r15)
 	stmg	%r0,%r7,__PT_R0(%r11)
 	stmg	%r8,%r9,__PT_PSW(%r11)
@@ -1242,9 +1277,10 @@ stack_overflow:
 	xc	__SF_BACKCHAIN(8,%r15),__SF_BACKCHAIN(%r15)
 	lgr	%r2,%r11		# pass pointer to pt_regs
 	jg	kernel_stack_overflow
+ENDPROC(stack_overflow)
 #endif
 
-cleanup_critical:
+ENTRY(cleanup_critical)
 	cghi	%r9,__LC_RETURN_LPSWE
 	je	.Lcleanup_lpswe
 #if IS_ENABLED(CONFIG_KVM)
@@ -1282,6 +1318,7 @@ cleanup_critical:
 	clg	%r9,BASED(.Lcleanup_table+104)	# .Lload_fpu_regs_end
 	jl	.Lcleanup_load_fpu_regs
 0:	BR_EX	%r14,%r11
+ENDPROC(cleanup_critical)
 
 	.align	8
 .Lcleanup_table:
@@ -1442,7 +1479,6 @@ cleanup_critical:
 	mvc	__CLOCK_IDLE_ENTER(8,%r2),__CLOCK_IDLE_EXIT(%r2)
 	mvc	__TIMER_IDLE_ENTER(8,%r2),__TIMER_IDLE_EXIT(%r2)
 1:	# calculate idle cycles
-#ifdef CONFIG_SMP
 	clg	%r9,BASED(.Lcleanup_idle_insn)
 	jl	3f
 	larl	%r1,smp_cpu_mtid
@@ -1460,7 +1496,6 @@ cleanup_critical:
 	la	%r3,8(%r3)
 	la	%r4,8(%r4)
 	brct	%r1,2b
-#endif
 3:	# account system time going idle
 	lg	%r9,__LC_STEAL_TIMER
 	alg	%r9,__CLOCK_IDLE_ENTER(%r2)
@@ -1506,7 +1541,7 @@ cleanup_critical:
 	.quad   .Lsie_skip - .Lsie_entry
 #endif
 	.section .rodata, "a"
-#define SYSCALL(esame,emu)	.quad esame
+#define SYSCALL(esame,emu)	.quad __s390x_ ## esame
 	.globl	sys_call_table
 sys_call_table:
 #include "asm/syscall_table.h"
@@ -1514,7 +1549,7 @@ sys_call_table:
 
 #ifdef CONFIG_COMPAT
 
-#define SYSCALL(esame,emu)	.quad emu
+#define SYSCALL(esame,emu)	.quad __s390_ ## emu
 	.globl	sys_call_table_emu
 sys_call_table_emu:
 #include "asm/syscall_table.h"

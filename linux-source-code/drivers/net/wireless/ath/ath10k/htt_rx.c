@@ -142,6 +142,14 @@ static int __ath10k_htt_rx_ring_fill_n(struct ath10k_htt *htt, int num)
 	BUILD_BUG_ON(HTT_RX_RING_FILL_LEVEL >= HTT_RX_RING_SIZE / 2);
 
 	idx = __le32_to_cpu(*htt->rx_ring.alloc_idx.vaddr);
+
+	if (idx < 0 || idx >= htt->rx_ring.size) {
+		ath10k_err(htt->ar, "rx ring index is not valid, firmware malfunctioning?\n");
+		idx &= htt->rx_ring.size_mask;
+		ret = -ENOMEM;
+		goto fail;
+	}
+
 	while (num > 0) {
 		skb = dev_alloc_skb(HTT_RX_BUF_SIZE + HTT_RX_DESC_ALIGN);
 		if (!skb) {
@@ -941,6 +949,7 @@ static void ath10k_htt_rx_h_rates(struct ath10k *ar,
 	u8 preamble = 0;
 	u8 group_id;
 	u32 info1, info2, info3;
+	u32 stbc, nsts_su;
 
 	info1 = __le32_to_cpu(rxd->ppdu_start.info1);
 	info2 = __le32_to_cpu(rxd->ppdu_start.info2);
@@ -985,11 +994,16 @@ static void ath10k_htt_rx_h_rates(struct ath10k *ar,
 		 */
 		bw = info2 & 3;
 		sgi = info3 & 1;
+		stbc = (info2 >> 3) & 1;
 		group_id = (info2 >> 4) & 0x3F;
 
 		if (GROUP_ID_IS_SU_MIMO(group_id)) {
 			mcs = (info3 >> 4) & 0x0F;
-			nss = ((info2 >> 10) & 0x07) + 1;
+			nsts_su = ((info2 >> 10) & 0x07);
+			if (stbc)
+				nss = (nsts_su >> 2) + 1;
+			else
+				nss = (nsts_su + 1);
 		} else {
 			/* Hardware doesn't decode VHT-SIG-B into Rx descriptor
 			 * so it's impossible to decode MCS. Also since
@@ -1284,13 +1298,6 @@ static void ath10k_process_rx(struct ath10k *ar, struct sk_buff *skb)
 	char tid[32];
 
 	status = IEEE80211_SKB_RXCB(skb);
-
-	if (!(ar->filter_flags & FIF_FCSFAIL) &&
-	    status->flag & RX_FLAG_FAILED_FCS_CRC) {
-		ar->stats.rx_crc_err_drop++;
-		dev_kfree_skb_any(skb);
-		return;
-	}
 
 	ath10k_dbg(ar, ATH10K_DBG_DATA,
 		   "rx skb %pK len %u peer %pM %s %s sn %u %s%s%s%s%s%s %srate_idx %u vht_nss %u freq %u band %u flag 0x%x fcs-err %i mic-err %i amsdu-more %i\n",
@@ -2080,7 +2087,7 @@ static void ath10k_htt_rx_mpdu_desc_pn_hl(struct htt_hl_rx_desc *rx_desc,
 	case 24:
 		pn->pn24 = __le32_to_cpu(rx_desc->pn_31_0);
 		break;
-	}
+	};
 }
 
 static bool ath10k_htt_rx_pn_cmp48(union htt_rx_pn_t *new_pn,
@@ -2140,7 +2147,7 @@ static bool ath10k_htt_rx_pn_check_replay_hl(struct ath10k *ar,
 	if (last_pn_valid)
 		pn_invalid = ath10k_htt_rx_pn_cmp48(&new_pn, last_pn);
 	else
-		peer->tids_last_pn_valid[tid] = true;
+		peer->tids_last_pn_valid[tid] = 1;
 
 	if (!pn_invalid)
 		last_pn->pn48 = new_pn.pn48;
@@ -2203,8 +2210,8 @@ static bool ath10k_htt_rx_proc_rx_ind_hl(struct ath10k_htt *htt,
 	    HTT_RX_IND_MPDU_STATUS_OK &&
 	    mpdu_ranges->mpdu_range_status !=
 	    HTT_RX_IND_MPDU_STATUS_TKIP_MIC_ERR) {
-		ath10k_dbg(ar, ATH10K_DBG_HTT, "htt mpdu_range_status %d\n",
-			   mpdu_ranges->mpdu_range_status);
+		ath10k_warn(ar, "MPDU range status: %d\n",
+			    mpdu_ranges->mpdu_range_status);
 		goto err;
 	}
 
@@ -2242,10 +2249,8 @@ static bool ath10k_htt_rx_proc_rx_ind_hl(struct ath10k_htt *htt,
 
 	hdr = (struct ieee80211_hdr *)skb->data;
 	qos = ieee80211_is_data_qos(hdr->frame_control);
-
 	rx_status = IEEE80211_SKB_RXCB(skb);
-	memset(rx_status, 0, sizeof(*rx_status));
-
+	rx_status->chains |= BIT(0);
 	if (rx->ppdu.combined_rssi == 0) {
 		/* SDIO firmware does not provide signal */
 		rx_status->signal = 0;
@@ -2359,10 +2364,7 @@ static bool ath10k_htt_rx_proc_rx_ind_hl(struct ath10k_htt *htt,
 		memcpy(skb->data + offset, &qos_ctrl, IEEE80211_QOS_CTL_LEN);
 	}
 
-	if (ar->napi.dev)
-		ieee80211_rx_napi(ar->hw, NULL, skb, &ar->napi);
-	else
-		ieee80211_rx_ni(ar->hw, skb);
+	ieee80211_rx_ni(ar->hw, skb);
 
 	/* We have delivered the skb to the upper layers (mac80211) so we
 	 * must not free it.
@@ -3763,12 +3765,14 @@ bool ath10k_htt_t2h_msg_handler(struct ath10k *ar, struct sk_buff *skb)
 		break;
 	}
 	case HTT_T2H_MSG_TYPE_RX_IND:
-		if (ar->bus_param.dev_type != ATH10K_DEV_TYPE_HL) {
+		if (ar->bus_param.dev_type == ATH10K_DEV_TYPE_HL)
+			return ath10k_htt_rx_proc_rx_ind_hl(htt,
+							    &resp->rx_ind_hl,
+							    skb,
+							    HTT_RX_PN_CHECK,
+							    HTT_RX_NON_TKIP_MIC);
+		else
 			ath10k_htt_rx_proc_rx_ind_ll(htt, &resp->rx_ind);
-		} else {
-			skb_queue_tail(&htt->rx_indication_head, skb);
-			return false;
-		}
 		break;
 	case HTT_T2H_MSG_TYPE_PEER_MAP: {
 		struct htt_peer_map_event ev = {
@@ -3957,37 +3961,6 @@ static int ath10k_htt_rx_deliver_msdu(struct ath10k *ar, int quota, int budget)
 
 	return quota;
 }
-
-int ath10k_htt_rx_hl_indication(struct ath10k *ar, int budget)
-{
-	struct htt_resp *resp;
-	struct ath10k_htt *htt = &ar->htt;
-	struct sk_buff *skb;
-	bool release;
-	int quota;
-
-	for (quota = 0; quota < budget; quota++) {
-		skb = skb_dequeue(&htt->rx_indication_head);
-		if (!skb)
-			break;
-
-		resp = (struct htt_resp *)skb->data;
-
-		release = ath10k_htt_rx_proc_rx_ind_hl(htt,
-						       &resp->rx_ind_hl,
-						       skb,
-						       HTT_RX_PN_CHECK,
-						       HTT_RX_NON_TKIP_MIC);
-
-		if (release)
-			dev_kfree_skb_any(skb);
-
-		ath10k_dbg(ar, ATH10K_DBG_HTT, "rx indication poll pending count:%d\n",
-			   skb_queue_len(&htt->rx_indication_head));
-	}
-	return quota;
-}
-EXPORT_SYMBOL(ath10k_htt_rx_hl_indication);
 
 int ath10k_htt_txrx_compl_task(struct ath10k *ar, int budget)
 {

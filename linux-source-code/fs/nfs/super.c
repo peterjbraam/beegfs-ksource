@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  linux/fs/nfs/super.c
  *
@@ -315,7 +316,7 @@ struct file_system_type nfs_xdev_fs_type = {
 
 const struct super_operations nfs_sops = {
 	.alloc_inode	= nfs_alloc_inode,
-	.destroy_inode	= nfs_destroy_inode,
+	.free_inode	= nfs_free_inode,
 	.write_inode	= nfs_write_inode,
 	.drop_inode	= nfs_drop_inode,
 	.statfs		= nfs_statfs,
@@ -949,7 +950,7 @@ static struct nfs_parsed_mount_data *nfs_alloc_parsed_mount_data(void)
 		data->minorversion	= 0;
 		data->need_mount	= true;
 		data->net		= current->nsproxy->net_ns;
-		security_init_mnt_opts(&data->lsm_opts);
+		data->lsm_opts		= NULL;
 	}
 	return data;
 }
@@ -1226,7 +1227,7 @@ static int nfs_get_option_ul_bound(substring_t args[], unsigned long *option,
 static int nfs_parse_mount_options(char *raw,
 				   struct nfs_parsed_mount_data *mnt)
 {
-	char *p, *string, *secdata;
+	char *p, *string;
 	int rc, sloppy = 0, invalid_option = 0;
 	unsigned short protofamily = AF_UNSPEC;
 	unsigned short mountfamily = AF_UNSPEC;
@@ -1237,19 +1238,9 @@ static int nfs_parse_mount_options(char *raw,
 	}
 	dfprintk(MOUNT, "NFS: nfs mount opts='%s'\n", raw);
 
-	secdata = alloc_secdata();
-	if (!secdata)
-		goto out_nomem;
-
-	rc = security_sb_copy_data(raw, secdata);
+	rc = security_sb_eat_lsm_opts(raw, &mnt->lsm_opts);
 	if (rc)
 		goto out_security_failure;
-
-	rc = security_sb_parse_opts_str(secdata, &mnt->lsm_opts);
-	if (rc)
-		goto out_security_failure;
-
-	free_secdata(secdata);
 
 	while ((p = strsep(&raw, ",")) != NULL) {
 		substring_t args[MAX_OPT_ARGS];
@@ -1601,7 +1592,7 @@ static int nfs_parse_mount_options(char *raw,
 					dfprintk(MOUNT, "NFS:   invalid "
 							"lookupcache argument\n");
 					return 0;
-			}
+			};
 			break;
 		case Opt_fscache_uniq:
 			if (nfs_get_option_str(args, &mnt->fscache_uniq))
@@ -1634,7 +1625,7 @@ static int nfs_parse_mount_options(char *raw,
 				dfprintk(MOUNT, "NFS:	invalid	"
 						"local_lock argument\n");
 				return 0;
-			}
+			};
 			break;
 
 		/*
@@ -1712,7 +1703,6 @@ out_nomem:
 	printk(KERN_INFO "NFS: not enough memory to parse option\n");
 	return 0;
 out_security_failure:
-	free_secdata(secdata);
 	printk(KERN_INFO "NFS: security options invalid: %d\n", rc);
 	return 0;
 }
@@ -2117,14 +2107,9 @@ static int nfs23_validate_mount_data(void *options,
 		if (data->context[0]){
 #ifdef CONFIG_SECURITY_SELINUX
 			int rc;
-			char *opts_str = kmalloc(sizeof(data->context) + 8, GFP_KERNEL);
-			if (!opts_str)
-				return -ENOMEM;
-			strcpy(opts_str, "context=");
 			data->context[NFS_MAX_CONTEXT_LEN] = '\0';
-			strcat(opts_str, &data->context[0]);
-			rc = security_sb_parse_opts_str(opts_str, &args->lsm_opts);
-			kfree(opts_str);
+			rc = security_add_mnt_opt("context", data->context,
+					strlen(data->context), &args->lsm_opts);
 			if (rc)
 				return rc;
 #else
@@ -2204,7 +2189,10 @@ static int nfs_validate_text_mount_data(void *options,
 
 	if (args->version == 4) {
 #if IS_ENABLED(CONFIG_NFS_V4)
-		port = NFS_PORT;
+		if (args->nfs_server.protocol == XPRT_TRANSPORT_RDMA)
+			port = NFS_RDMA_PORT;
+		else
+			port = NFS_PORT;
 		max_namelen = NFS4_MAXNAMLEN;
 		max_pathlen = NFS4_MAXPATHLEN;
 		nfs_validate_transport_protocol(args);
@@ -2214,8 +2202,11 @@ static int nfs_validate_text_mount_data(void *options,
 #else
 		goto out_v4_not_compiled;
 #endif /* CONFIG_NFS_V4 */
-	} else
+	} else {
 		nfs_set_mount_transport_protocol(args);
+		if (args->nfs_server.protocol == XPRT_TRANSPORT_RDMA)
+			port = NFS_RDMA_PORT;
+	}
 
 	nfs_set_port(sap, &args->nfs_server.port, port);
 
@@ -2302,7 +2293,7 @@ nfs_remount(struct super_block *sb, int *flags, char *raw_data)
 					   options->version <= 6))))
 		return 0;
 
-	data = kzalloc(sizeof(*data), GFP_KERNEL);
+	data = nfs_alloc_parsed_mount_data();
 	if (data == NULL)
 		return -ENOMEM;
 
@@ -2341,8 +2332,10 @@ nfs_remount(struct super_block *sb, int *flags, char *raw_data)
 
 	/* compare new mount options with old ones */
 	error = nfs_compare_remount_data(nfss, data);
+	if (!error)
+		error = security_sb_remount(sb, data->lsm_opts);
 out:
-	kfree(data);
+	nfs_free_parsed_mount_data(data);
 	return error;
 }
 EXPORT_SYMBOL_GPL(nfs_remount);
@@ -2592,7 +2585,7 @@ static void nfs_get_cache_cookie(struct super_block *sb,
 		if (mnt_s->fscache_key) {
 			uniq = mnt_s->fscache_key->key.uniquifier;
 			ulen = mnt_s->fscache_key->key.uniq_len;
-		}
+		};
 	} else
 		return;
 
@@ -2614,7 +2607,7 @@ int nfs_set_sb_security(struct super_block *s, struct dentry *mntroot,
 	if (NFS_SB(s)->caps & NFS_CAP_SECURITY_LABEL)
 		kflags |= SECURITY_LSM_NATIVE_LABELS;
 
-	error = security_sb_set_mnt_opts(s, &mount_info->parsed->lsm_opts,
+	error = security_sb_set_mnt_opts(s, mount_info->parsed->lsm_opts,
 						kflags, &kflags_out);
 	if (error)
 		goto err;
@@ -2713,9 +2706,13 @@ struct dentry *nfs_fs_mount_common(struct nfs_server *server,
 			s->s_iflags |= SB_I_MULTIROOT;
 	}
 
-	mntroot = nfs_get_root(s, mount_info, dev_name);
+	mntroot = nfs_get_root(s, mount_info->mntfh, dev_name);
 	if (IS_ERR(mntroot))
 		goto error_splat_super;
+
+	error = mount_info->set_security(s, mntroot, mount_info);
+	if (error)
+		goto error_splat_root;
 
 	s->s_flags |= SB_ACTIVE;
 
@@ -2726,6 +2723,9 @@ out_err_nosb:
 	nfs_free_server(server);
 	goto out;
 
+error_splat_root:
+	dput(mntroot);
+	mntroot = ERR_PTR(error);
 error_splat_super:
 	deactivate_locked_super(s);
 	goto out;

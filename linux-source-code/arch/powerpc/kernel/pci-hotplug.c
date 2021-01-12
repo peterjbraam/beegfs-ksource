@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Derived from "arch/powerpc/platforms/pseries/pci_dlpar.c"
  *
@@ -7,11 +8,6 @@
  * Updates, 2005, John Rose <johnrose@austin.ibm.com>
  * Updates, 2005, Linas Vepstas <linas@austin.ibm.com>
  * Updates, 2013, Gavin Shan <shangw@linux.vnet.ibm.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  */
 
 #include <linux/pci.h>
@@ -62,8 +58,6 @@ void pcibios_release_device(struct pci_dev *dev)
 	struct pci_dn *pdn = pci_get_pdn(dev);
 
 	eeh_remove_device(dev);
-
-	irq_dispose_mapping(dev->irq);
 
 	if (phb->controller_ops.release_device)
 		phb->controller_ops.release_device(dev);
@@ -140,6 +134,7 @@ void pci_hp_add_devices(struct pci_bus *bus)
 		 */
 		slotno = PCI_SLOT(PCI_DN(dn->child)->devfn);
 		pci_scan_slot(bus, PCI_DEVFN(slotno, 0));
+		pcibios_setup_bus_devices(bus);
 		max = bus->busn_res.start;
 		/*
 		 * Scan bridges that are already configured. We don't touch

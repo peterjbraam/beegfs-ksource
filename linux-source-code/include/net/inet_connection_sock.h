@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * NET		Generic infrastructure for INET connection oriented protocols.
  *
@@ -6,11 +7,6 @@
  * Authors:	Many people, see the TCP sources
  *
  * 		From code originally in TCP
- *
- *		This program is free software; you can redistribute it and/or
- *		modify it under the terms of the GNU General Public License
- *		as published by the Free Software Foundation; either version
- *		2 of the License, or (at your option) any later version.
  */
 #ifndef _INET_CONNECTION_SOCK_H
 #define _INET_CONNECTION_SOCK_H
@@ -19,6 +15,7 @@
 #include <linux/string.h>
 #include <linux/timer.h>
 #include <linux/poll.h>
+#include <linux/kernel.h>
 
 #include <net/inet_sock.h>
 #include <net/request_sock.h>
@@ -138,8 +135,8 @@ struct inet_connection_sock {
 	} icsk_mtup;
 	u32			  icsk_user_timeout;
 
-	u64			  icsk_ca_priv[88 / sizeof(u64)];
-#define ICSK_CA_PRIV_SIZE      (11 * sizeof(u64))
+	u64			  icsk_ca_priv[104 / sizeof(u64)];
+#define ICSK_CA_PRIV_SIZE      (13 * sizeof(u64))
 };
 
 #define ICSK_TIME_RETRANS	1	/* Retransmit timer */
@@ -225,7 +222,7 @@ static inline void inet_csk_reset_xmit_timer(struct sock *sk, const int what,
 
 	if (when > max_when) {
 		pr_debug("reset_xmit_timer: sk=%p %d when=0x%lx, caller=%p\n",
-			 sk, what, when, current_text_addr());
+			 sk, what, when, (void *)_THIS_IP_);
 		when = max_when;
 	}
 
@@ -290,13 +287,6 @@ static inline int inet_csk_reqsk_queue_is_full(const struct sock *sk)
 void inet_csk_reqsk_queue_drop(struct sock *sk, struct request_sock *req);
 void inet_csk_reqsk_queue_drop_and_put(struct sock *sk, struct request_sock *req);
 
-static inline void inet_csk_prepare_for_destroy_sock(struct sock *sk)
-{
-	/* The below has to be done to allow calling inet_csk_destroy_sock */
-	sock_set_flag(sk, SOCK_DEAD);
-	percpu_counter_inc(sk->sk_prot->orphan_count);
-}
-
 void inet_csk_destroy_sock(struct sock *sk);
 void inet_csk_prepare_forced_close(struct sock *sk);
 
@@ -319,11 +309,34 @@ int inet_csk_compat_getsockopt(struct sock *sk, int level, int optname,
 int inet_csk_compat_setsockopt(struct sock *sk, int level, int optname,
 			       char __user *optval, unsigned int optlen);
 
+/* update the fast reuse flag when adding a socket */
+void inet_csk_update_fastreuse(struct inet_bind_bucket *tb,
+			       struct sock *sk);
+
 struct dst_entry *inet_csk_update_pmtu(struct sock *sk, u32 mtu);
 
-static inline bool inet_csk_has_ulp(struct sock *sk)
+#define TCP_PINGPONG_THRESH	3
+
+static inline void inet_csk_enter_pingpong_mode(struct sock *sk)
 {
-	return inet_sk(sk)->is_icsk && !!inet_csk(sk)->icsk_ulp_ops;
+	inet_csk(sk)->icsk_ack.pingpong = TCP_PINGPONG_THRESH;
 }
 
+static inline void inet_csk_exit_pingpong_mode(struct sock *sk)
+{
+	inet_csk(sk)->icsk_ack.pingpong = 0;
+}
+
+static inline bool inet_csk_in_pingpong_mode(struct sock *sk)
+{
+	return inet_csk(sk)->icsk_ack.pingpong >= TCP_PINGPONG_THRESH;
+}
+
+static inline void inet_csk_inc_pingpong_cnt(struct sock *sk)
+{
+	struct inet_connection_sock *icsk = inet_csk(sk);
+
+	if (icsk->icsk_ack.pingpong < U8_MAX)
+		icsk->icsk_ack.pingpong++;
+}
 #endif /* _INET_CONNECTION_SOCK_H */

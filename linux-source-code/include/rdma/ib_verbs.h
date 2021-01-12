@@ -72,15 +72,10 @@
 #define IB_FW_VERSION_NAME_MAX	ETHTOOL_FWVERS_LEN
 
 struct ib_umem_odp;
-struct ib_uqp_object;
-struct ib_usrq_object;
-struct ib_uwq_object;
 
 extern struct workqueue_struct *ib_wq;
 extern struct workqueue_struct *ib_comp_wq;
 extern struct workqueue_struct *ib_comp_unbound_wq;
-
-struct ib_ucq_object;
 
 __printf(3, 4) __cold
 void ibdev_printk(const char *level, const struct ib_device *ibdev,
@@ -450,8 +445,6 @@ struct ib_device_attr {
 	struct ib_tm_caps	tm_caps;
 	struct ib_cq_caps       cq_caps;
 	u64			max_dm_size;
-	/* Max entries for sgl for optimized performance per READ */
-	u32			max_sgl_rd;
 };
 
 enum ib_mtu {
@@ -1418,11 +1411,8 @@ enum ib_access_flags {
 	IB_ZERO_BASED = IB_UVERBS_ACCESS_ZERO_BASED,
 	IB_ACCESS_ON_DEMAND = IB_UVERBS_ACCESS_ON_DEMAND,
 	IB_ACCESS_HUGETLB = IB_UVERBS_ACCESS_HUGETLB,
-	IB_ACCESS_RELAXED_ORDERING = IB_UVERBS_ACCESS_RELAXED_ORDERING,
 
-	IB_ACCESS_OPTIONAL = IB_UVERBS_ACCESS_OPTIONAL_RANGE,
-	IB_ACCESS_SUPPORTED =
-		((IB_ACCESS_HUGETLB << 1) - 1) | IB_ACCESS_OPTIONAL,
+	IB_ACCESS_SUPPORTED = ((IB_ACCESS_HUGETLB << 1) - 1)
 };
 
 /*
@@ -1475,9 +1465,6 @@ struct ib_ucontext {
 	bool closing;
 
 	bool cleanup_retryable;
-
-	struct mutex per_mm_list_lock;
-	struct list_head per_mm_list;
 
 	struct ib_rdmacg_object	cg_obj;
 	/*
@@ -1555,7 +1542,7 @@ enum ib_poll_context {
 
 struct ib_cq {
 	struct ib_device       *device;
-	struct ib_ucq_object   *uobject;
+	struct ib_uobject      *uobject;
 	ib_comp_handler   	comp_handler;
 	void                  (*event_handler)(struct ib_event *, void *);
 	void                   *cq_context;
@@ -1569,11 +1556,6 @@ struct ib_cq {
 	};
 	struct workqueue_struct *comp_wq;
 	struct dim *dim;
-
-	/* updated only by trace points */
-	ktime_t timestamp;
-	bool interrupt;
-
 	/*
 	 * Implementation details of the RDMA core, don't use in drivers:
 	 */
@@ -1583,7 +1565,7 @@ struct ib_cq {
 struct ib_srq {
 	struct ib_device       *device;
 	struct ib_pd	       *pd;
-	struct ib_usrq_object  *uobject;
+	struct ib_uobject      *uobject;
 	void		      (*event_handler)(struct ib_event *, void *);
 	void		       *srq_context;
 	enum ib_srq_type	srq_type;
@@ -1628,7 +1610,7 @@ enum ib_wq_state {
 
 struct ib_wq {
 	struct ib_device       *device;
-	struct ib_uwq_object   *uobject;
+	struct ib_uobject      *uobject;
 	void		    *wq_context;
 	void		    (*event_handler)(struct ib_event *, void *);
 	struct ib_pd	       *pd;
@@ -1744,7 +1726,7 @@ struct ib_qp {
 	atomic_t		usecnt;
 	struct list_head	open_list;
 	struct ib_qp           *real_qp;
-	struct ib_uqp_object   *uobject;
+	struct ib_uobject      *uobject;
 	void                  (*event_handler)(struct ib_event *, void *);
 	void		       *qp_context;
 	/* sgid_attrs associated with the AV's */
@@ -2139,7 +2121,7 @@ struct ib_flow_action {
 	atomic_t			usecnt;
 };
 
-struct ib_mad;
+struct ib_mad_hdr;
 struct ib_grh;
 
 enum ib_process_mad_flags {
@@ -2161,6 +2143,10 @@ struct ib_port_cache {
 	struct ib_gid_table   *gid;
 	u8                     lmc;
 	enum ib_port_state     port_state;
+};
+
+struct ib_cache {
+	rwlock_t                lock;
 };
 
 struct ib_port_immutable {
@@ -2230,11 +2216,6 @@ struct rdma_netdev_alloc_params {
 
 	int (*initialize_rdma_netdev)(struct ib_device *device, u8 port_num,
 				      struct net_device *netdev, void *param);
-};
-
-struct ib_odp_counters {
-	atomic64_t faults;
-	atomic64_t invalidations;
 };
 
 struct ib_counters {
@@ -2312,8 +2293,9 @@ struct ib_device_ops {
 	int (*process_mad)(struct ib_device *device, int process_mad_flags,
 			   u8 port_num, const struct ib_wc *in_wc,
 			   const struct ib_grh *in_grh,
-			   const struct ib_mad *in_mad, struct ib_mad *out_mad,
-			   size_t *out_mad_size, u16 *out_mad_pkey_index);
+			   const struct ib_mad_hdr *in_mad, size_t in_mad_size,
+			   struct ib_mad_hdr *out_mad, size_t *out_mad_size,
+			   u16 *out_mad_pkey_index);
 	int (*query_device)(struct ib_device *device,
 			    struct ib_device_attr *device_attr,
 			    struct ib_udata *udata);
@@ -2488,9 +2470,6 @@ struct ib_device_ops {
 			     struct ifla_vf_info *ivf);
 	int (*get_vf_stats)(struct ib_device *device, int vf, u8 port,
 			    struct ifla_vf_stats *stats);
-	int (*get_vf_guid)(struct ib_device *device, int vf, u8 port,
-			    struct ifla_vf_guid *node_guid,
-			    struct ifla_vf_guid *port_guid);
 	int (*set_vf_guid)(struct ib_device *device, int vf, u8 port, u64 guid,
 			   int type);
 	struct ib_wq *(*create_wq)(struct ib_pd *pd,
@@ -2606,13 +2585,6 @@ struct ib_device_ops {
 	 */
 	int (*counter_update_stats)(struct rdma_counter *counter);
 
-	/**
-	 * Allows rdma drivers to add their own restrack attributes
-	 * dumped via 'rdma stat' iproute2 command.
-	 */
-	int (*fill_stat_entry)(struct sk_buff *msg,
-			       struct rdma_restrack_entry *entry);
-
 	DECLARE_RDMA_OBJ_SIZE(ib_ah);
 	DECLARE_RDMA_OBJ_SIZE(ib_cq);
 	DECLARE_RDMA_OBJ_SIZE(ib_pd);
@@ -2644,14 +2616,13 @@ struct ib_device {
 	struct rw_semaphore event_handler_rwsem;
 
 	/* Protects QP's event_handler calls and open_qp list */
-	spinlock_t qp_open_list_lock;
+	spinlock_t event_handler_lock;
 
 	struct rw_semaphore	      client_data_rwsem;
 	struct xarray                 client_data;
 	struct mutex                  unregistration_lock;
 
-	/* Synchronize GID, Pkey cache entries, subnet prefix, LMC */
-	rwlock_t cache_lock;
+	struct ib_cache               cache;
 	/**
 	 * port_data is indexed by port number
 	 */
@@ -2850,11 +2821,6 @@ int rdma_user_mmap_io(struct ib_ucontext *ucontext, struct vm_area_struct *vma,
 int rdma_user_mmap_entry_insert(struct ib_ucontext *ucontext,
 				struct rdma_user_mmap_entry *entry,
 				size_t length);
-int rdma_user_mmap_entry_insert_range(struct ib_ucontext *ucontext,
-				      struct rdma_user_mmap_entry *entry,
-				      size_t length, u32 min_pgoff,
-				      u32 max_pgoff);
-
 struct rdma_user_mmap_entry *
 rdma_user_mmap_entry_get_pgoff(struct ib_ucontext *ucontext,
 			       unsigned long pgoff);
@@ -3366,9 +3332,6 @@ int ib_get_vf_config(struct ib_device *device, int vf, u8 port,
 		     struct ifla_vf_info *info);
 int ib_get_vf_stats(struct ib_device *device, int vf, u8 port,
 		    struct ifla_vf_stats *stats);
-int ib_get_vf_guid(struct ib_device *device, int vf, u8 port,
-		    struct ifla_vf_guid *node_guid,
-		    struct ifla_vf_guid *port_guid);
 int ib_set_vf_guid(struct ib_device *device, int vf, u8 port, u64 guid,
 		   int type);
 
@@ -4099,6 +4062,17 @@ static inline void ib_dma_unmap_sg_attrs(struct ib_device *dev,
 					 unsigned long dma_attrs)
 {
 	dma_unmap_sg_attrs(dev->dma_device, sg, nents, direction, dma_attrs);
+}
+
+/**
+ * ib_dma_max_seg_size - Return the size limit of a single DMA transfer
+ * @dev: The device to query
+ *
+ * The returned value represents a size in bytes.
+ */
+static inline unsigned int ib_dma_max_seg_size(struct ib_device *dev)
+{
+	return dma_get_max_seg_size(dev->dma_device);
 }
 
 /**

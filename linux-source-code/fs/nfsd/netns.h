@@ -1,21 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * per net namespace data structures for nfsd
  *
  * Copyright (C) 2012, Jeff Layton <jlayton@redhat.com>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; if not, write to the Free Software Foundation, Inc., 51
- * Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  */
 
 #ifndef __NFSD_NETNS_H__
@@ -53,7 +40,7 @@ struct nfsd_net {
 
 	struct lock_manager nfsd4_manager;
 	bool grace_ended;
-	time64_t boot_time;
+	time_t boot_time;
 
 	/* internal mount of the "nfsd" pseudofilesystem: */
 	struct vfsmount *nfsd_mnt;
@@ -105,8 +92,8 @@ struct nfsd_net {
 	bool in_grace;
 	const struct nfsd4_client_tracking_ops *client_tracking_ops;
 
-	time64_t nfsd4_lease;
-	time64_t nfsd4_grace;
+	time_t nfsd4_lease;
+	time_t nfsd4_grace;
 	bool somebody_reclaimed;
 
 	bool track_reclaim_completes;
@@ -184,8 +171,6 @@ struct nfsd_net {
 	unsigned int             longest_chain_cachesize;
 
 	struct shrinker		nfsd_reply_cache_shrinker;
-	/* utsname taken from the the process that starts the server */
-	char			nfsd_name[UNX_MAXNODENAME+1];
 };
 
 /* Simple check to find out if a given net was properly initialized */

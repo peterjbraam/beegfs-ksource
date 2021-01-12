@@ -57,7 +57,7 @@ void error(char *x)
 	sclp_early_printk(x);
 	sclp_early_printk("\n\n -- System halted");
 
-	disabled_wait(0xdeadbeef);
+	disabled_wait();
 }
 
 #ifdef CONFIG_KERNEL_UNCOMPRESSED
@@ -120,6 +120,11 @@ static void handle_relocs(unsigned long offset)
 	}
 }
 
+static void clear_bss_section(void)
+{
+	memset((void *)vmlinux.default_lma + vmlinux.image_size, 0, vmlinux.bss_size);
+}
+
 void startup_kernel(void)
 {
 	unsigned long random_lma;
@@ -133,6 +138,7 @@ void startup_kernel(void)
 	rescue_initrd(safe_addr);
 	sclp_early_read_info();
 	setup_boot_command_line();
+	parse_boot_command_line();
 	setup_memory_end();
 	detect_memory();
 
@@ -158,6 +164,7 @@ void startup_kernel(void)
 	} else if (__kaslr_offset)
 		memcpy((void *)vmlinux.default_lma, img, vmlinux.image_size);
 
+	clear_bss_section();
 	copy_bootdata();
 	if (IS_ENABLED(CONFIG_RELOCATABLE))
 		handle_relocs(__kaslr_offset);

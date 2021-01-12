@@ -11,14 +11,6 @@
 #include <linux/delay.h>
 #include <linux/bsg-lib.h>
 
-static void qla2xxx_free_fcport_work(struct work_struct *work)
-{
-	struct fc_port *fcport = container_of(work, typeof(*fcport),
-	    free_work);
-
-	qla2x00_free_fcport(fcport);
-}
-
 /* BSG support for ELS/CT pass through */
 void qla2x00_bsg_job_done(srb_t *sp, int res)
 {
@@ -61,11 +53,8 @@ void qla2x00_bsg_sp_free(srb_t *sp)
 
 	if (sp->type == SRB_CT_CMD ||
 	    sp->type == SRB_FXIOCB_BCMD ||
-	    sp->type == SRB_ELS_CMD_HST) {
-		INIT_WORK(&sp->fcport->free_work, qla2xxx_free_fcport_work);
-		queue_work(ha->wq, &sp->fcport->free_work);
-	}
-
+	    sp->type == SRB_ELS_CMD_HST)
+		kfree(sp->fcport);
 	qla2x00_rel_sp(sp);
 }
 
@@ -416,7 +405,7 @@ done_unmap_sg:
 
 done_free_fcport:
 	if (bsg_request->msgcode == FC_BSG_RPT_ELS)
-		qla2x00_free_fcport(fcport);
+		kfree(fcport);
 done:
 	return rval;
 }
@@ -556,7 +545,7 @@ qla2x00_process_ct(struct bsg_job *bsg_job)
 	return rval;
 
 done_free_fcport:
-	qla2x00_free_fcport(fcport);
+	kfree(fcport);
 done_unmap_sg:
 	dma_unmap_sg(&ha->pdev->dev, bsg_job->request_payload.sg_list,
 		bsg_job->request_payload.sg_cnt, DMA_TO_DEVICE);
@@ -807,7 +796,7 @@ qla2x00_process_loopback(struct bsg_job *bsg_job)
 
 	if (atomic_read(&vha->loop_state) == LOOP_READY &&
 	    (ha->current_topology == ISP_CFG_F ||
-	    (get_unaligned_le32(req_data) == ELS_OPCODE_BYTE &&
+	    (le32_to_cpu(*(uint32_t *)req_data) == ELS_OPCODE_BYTE &&
 	     req_data_len == MAX_ELS_FRAME_PAYLOAD)) &&
 	    elreq.options == EXTERNAL_LOOPBACK) {
 		type = "FC_BSG_HST_VENDOR_ECHO_DIAG";
@@ -1516,15 +1505,10 @@ qla2x00_update_optrom(struct bsg_job *bsg_job)
 	    bsg_job->request_payload.sg_cnt, ha->optrom_buffer,
 	    ha->optrom_region_size);
 
-	rval = ha->isp_ops->write_optrom(vha, ha->optrom_buffer,
+	ha->isp_ops->write_optrom(vha, ha->optrom_buffer,
 	    ha->optrom_region_start, ha->optrom_region_size);
 
-	if (rval) {
-		bsg_reply->result = -EINVAL;
-		rval = -EINVAL;
-	} else {
-		bsg_reply->result = DID_OK;
-	}
+	bsg_reply->result = DID_OK;
 	vfree(ha->optrom_buffer);
 	ha->optrom_buffer = NULL;
 	ha->optrom_state = QLA_SWAITING;
@@ -2065,7 +2049,7 @@ qlafx00_mgmt_cmd(struct bsg_job *bsg_job)
 	return rval;
 
 done_free_fcport:
-	qla2x00_free_fcport(fcport);
+	kfree(fcport);
 
 done_unmap_rsp_sg:
 	if (piocb_rqst->flags & SRB_FXDISC_RESP_DMA_VALID)
@@ -2330,8 +2314,8 @@ qla2x00_get_priv_stats(struct bsg_job *bsg_job)
 	if (!IS_FWI2_CAPABLE(ha))
 		return -EPERM;
 
-	stats = dma_zalloc_coherent(&ha->pdev->dev, sizeof(*stats),
-				    &stats_dma, GFP_KERNEL);
+	stats = dma_alloc_coherent(&ha->pdev->dev, sizeof(*stats), &stats_dma,
+				   GFP_KERNEL);
 	if (!stats) {
 		ql_log(ql_log_warn, vha, 0x70e2,
 		    "Failed to allocate memory for stats.\n");
@@ -2419,7 +2403,7 @@ qla2x00_get_flash_image_status(struct bsg_job *bsg_job)
 	regions.global_image = active_regions.global;
 
 	if (IS_QLA28XX(ha)) {
-		qla28xx_get_aux_images(vha, &active_regions);
+		qla27xx_get_active_image(vha, &active_regions);
 		regions.board_config = active_regions.aux.board_config;
 		regions.vpd_nvram = active_regions.aux.vpd_nvram;
 		regions.npiv_config_0_1 = active_regions.aux.npiv_config_0_1;

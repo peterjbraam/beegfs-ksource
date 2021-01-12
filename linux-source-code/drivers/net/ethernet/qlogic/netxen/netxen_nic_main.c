@@ -1,24 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright (C) 2003 - 2009 NetXen, Inc.
  * Copyright (C) 2009 - QLogic Corporation.
  * All rights reserved.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see <http://www.gnu.org/licenses/>.
- *
- * The full GNU General Public License is included in this distribution
- * in the file called "COPYING".
- *
  */
 
 #include <linux/slab.h>
@@ -65,16 +49,13 @@ static int netxen_nic_open(struct net_device *netdev);
 static int netxen_nic_close(struct net_device *netdev);
 static netdev_tx_t netxen_nic_xmit_frame(struct sk_buff *,
 					       struct net_device *);
-static void netxen_tx_timeout(struct net_device *netdev, unsigned int txqueue);
+static void netxen_tx_timeout(struct net_device *netdev);
 static void netxen_tx_timeout_task(struct work_struct *work);
 static void netxen_fw_poll_work(struct work_struct *work);
 static void netxen_schedule_work(struct netxen_adapter *adapter,
 		work_func_t func, int delay);
 static void netxen_cancel_fw_work(struct netxen_adapter *adapter);
 static int netxen_nic_poll(struct napi_struct *napi, int budget);
-#ifdef CONFIG_NET_POLL_CONTROLLER
-static void netxen_nic_poll_controller(struct net_device *netdev);
-#endif
 
 static void netxen_create_sysfs_entries(struct netxen_adapter *adapter);
 static void netxen_remove_sysfs_entries(struct netxen_adapter *adapter);
@@ -581,9 +562,6 @@ static const struct net_device_ops netxen_netdev_ops = {
 	.ndo_tx_timeout	   = netxen_tx_timeout,
 	.ndo_fix_features = netxen_fix_features,
 	.ndo_set_features = netxen_set_features,
-#ifdef CONFIG_NET_POLL_CONTROLLER
-	.ndo_poll_controller = netxen_nic_poll_controller,
-#endif
 };
 
 static inline bool netxen_function_zero(struct pci_dev *pdev)
@@ -2002,7 +1980,7 @@ netxen_map_tx_skb(struct pci_dev *pdev,
 		struct sk_buff *skb, struct netxen_cmd_buffer *pbuf)
 {
 	struct netxen_skb_frag *nf;
-	struct skb_frag_struct *frag;
+	skb_frag_t *frag;
 	int i, nr_frags;
 	dma_addr_t map;
 
@@ -2065,10 +2043,10 @@ netxen_nic_xmit_frame(struct sk_buff *skb, struct net_device *netdev)
 	struct pci_dev *pdev;
 	int i, k;
 	int delta = 0;
-	struct skb_frag_struct *frag;
+	skb_frag_t *frag;
 
 	u32 producer;
-	int frag_count, no_of_desc;
+	int frag_count;
 	u32 num_txd = tx_ring->num_desc;
 
 	frag_count = skb_shinfo(skb)->nr_frags + 1;
@@ -2088,8 +2066,6 @@ netxen_nic_xmit_frame(struct sk_buff *skb, struct net_device *netdev)
 
 		frag_count = 1 + skb_shinfo(skb)->nr_frags;
 	}
-	/* 4 fragments per cmd des */
-	no_of_desc = (frag_count + 3) >> 2;
 
 	if (unlikely(netxen_tx_avail(tx_ring) <= TX_STOP_THRESH)) {
 		netif_stop_queue(netdev);
@@ -2246,7 +2222,7 @@ static void netxen_nic_handle_phy_intr(struct netxen_adapter *adapter)
 	netxen_advert_link_change(adapter, linkup);
 }
 
-static void netxen_tx_timeout(struct net_device *netdev, unsigned int txqueue)
+static void netxen_tx_timeout(struct net_device *netdev)
 {
 	struct netxen_adapter *adapter = netdev_priv(netdev);
 
@@ -2398,23 +2374,6 @@ static int netxen_nic_poll(struct napi_struct *napi, int budget)
 
 	return work_done;
 }
-
-#ifdef CONFIG_NET_POLL_CONTROLLER
-static void netxen_nic_poll_controller(struct net_device *netdev)
-{
-	int ring;
-	struct nx_host_sds_ring *sds_ring;
-	struct netxen_adapter *adapter = netdev_priv(netdev);
-	struct netxen_recv_context *recv_ctx = &adapter->recv_ctx;
-
-	disable_irq(adapter->irq);
-	for (ring = 0; ring < adapter->max_sds_rings; ring++) {
-		sds_ring = &recv_ctx->sds_rings[ring];
-		netxen_intr(adapter->irq, sds_ring);
-	}
-	enable_irq(adapter->irq);
-}
-#endif
 
 static int
 nx_incr_dev_ref_cnt(struct netxen_adapter *adapter)
@@ -3505,7 +3464,6 @@ static struct pci_driver netxen_driver = {
 static int __init netxen_init_module(void)
 {
 	printk(KERN_INFO "%s\n", netxen_nic_driver_string);
-	mark_hardware_unsupported(netxen_nic_driver_name);
 
 #ifdef CONFIG_INET
 	register_netdevice_notifier(&netxen_netdev_cb);

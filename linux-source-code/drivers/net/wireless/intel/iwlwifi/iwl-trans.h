@@ -112,8 +112,6 @@
  *	6) Eventually, the free function will be called.
  */
 
-#define IWL_TRANS_FW_DBG_DOMAIN(trans)	IWL_FW_INI_DOMAIN_ALWAYS_ON
-
 #define FH_RSCSR_FRAME_SIZE_MSK		0x00003FFF	/* bits 0-13 */
 #define FH_RSCSR_FRAME_INVALID		0x55550000
 #define FH_RSCSR_FRAME_ALIGN		0x40
@@ -316,6 +314,7 @@ static inline void iwl_free_rxb(struct iwl_rx_cmd_buffer *r)
 #define IWL_MGMT_TID		15
 #define IWL_FRAME_LIMIT	64
 #define IWL_MAX_RX_HW_QUEUES	16
+#define IWL_9000_MAX_RX_HW_QUEUES	6
 
 /**
  * enum iwl_wowlan_status - WoWLAN image/device status
@@ -369,24 +368,6 @@ iwl_trans_get_rb_size_order(enum iwl_amsdu_size rb_size)
 	default:
 		WARN_ON(1);
 		return -1;
-	}
-}
-
-static inline int
-iwl_trans_get_rb_size(enum iwl_amsdu_size rb_size)
-{
-	switch (rb_size) {
-	case IWL_AMSDU_2K:
-		return 2 * 1024;
-	case IWL_AMSDU_4K:
-		return 4 * 1024;
-	case IWL_AMSDU_8K:
-		return 8 * 1024;
-	case IWL_AMSDU_12K:
-		return 12 * 1024;
-	default:
-		WARN_ON(1);
-		return 0;
 	}
 }
 
@@ -711,16 +692,6 @@ struct iwl_dram_data {
 };
 
 /**
- * struct iwl_fw_mon - fw monitor per allocation id
- * @num_frags: number of fragments
- * @frags: an array of DRAM buffer fragments
- */
-struct iwl_fw_mon {
-	u32 num_frags;
-	struct iwl_dram_data *frags;
-};
-
-/**
  * struct iwl_self_init_dram - dram data used by self init process
  * @fw: lmac and umac dram data
  * @fw_cnt: total number of items in array
@@ -748,17 +719,10 @@ struct iwl_self_init_dram {
  *	pointers was recevied via TLV. uses enum &iwl_error_event_table_status
  * @internal_ini_cfg: internal debug cfg state. Uses &enum iwl_ini_cfg_state
  * @external_ini_cfg: external debug cfg state. Uses &enum iwl_ini_cfg_state
- * @fw_mon_cfg: debug buffer allocation configuration
- * @fw_mon_ini: DRAM buffer fragments per allocation id
- * @fw_mon: DRAM buffer for firmware monitor
+ * @num_blocks: number of blocks in fw_mon
+ * @fw_mon: address of the buffers for firmware monitor
  * @hw_error: equals true if hw error interrupt was received from the FW
  * @ini_dest: debug monitor destination uses &enum iwl_fw_ini_buffer_location
- * @active_regions: active regions
- * @debug_info_tlv_list: list of debug info TLVs
- * @time_point: array of debug time points
- * @periodic_trig_list: periodic triggers list
- * @domains_bitmap: bitmap of active domains other than
- *	&IWL_FW_INI_DOMAIN_ALWAYS_ON
  */
 struct iwl_trans_debug {
 	u8 n_dest_reg;
@@ -775,21 +739,11 @@ struct iwl_trans_debug {
 	enum iwl_ini_cfg_state internal_ini_cfg;
 	enum iwl_ini_cfg_state external_ini_cfg;
 
-	struct iwl_fw_ini_allocation_tlv fw_mon_cfg[IWL_FW_INI_ALLOCATION_NUM];
-	struct iwl_fw_mon fw_mon_ini[IWL_FW_INI_ALLOCATION_NUM];
-
-	struct iwl_dram_data fw_mon;
+	int num_blocks;
+	struct iwl_dram_data fw_mon[IWL_FW_INI_ALLOCATION_NUM];
 
 	bool hw_error;
 	enum iwl_fw_ini_buffer_location ini_dest;
-
-	struct iwl_ucode_tlv *active_regions[IWL_FW_INI_MAX_REGION_ID];
-	struct list_head debug_info_tlv_list;
-	struct iwl_dbg_tlv_time_point_data
-		time_point[IWL_FW_INI_TIME_POINT_NUM];
-	struct list_head periodic_trig_list;
-
-	u32 domains_bitmap;
 };
 
 /**
@@ -870,8 +824,6 @@ struct iwl_trans {
 	struct iwl_self_init_dram init_dram;
 
 	enum iwl_plat_pm_mode system_pm_mode;
-
-	const char *name;
 
 	/* pointer to trans specific struct */
 	/*Ensure that this pointer will always be aligned to sizeof pointer */
@@ -1281,11 +1233,6 @@ static inline void iwl_trans_fw_error(struct iwl_trans *trans)
 	/* prevent double restarts due to the same erroneous FW */
 	if (!test_and_set_bit(STATUS_FW_ERROR, &trans->status))
 		iwl_op_mode_nic_error(trans->op_mode);
-}
-
-static inline bool iwl_trans_fw_running(struct iwl_trans *trans)
-{
-	return trans->state == IWL_TRANS_FW_ALIVE;
 }
 
 static inline void iwl_trans_sync_nmi(struct iwl_trans *trans)

@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * pSeries NUMA support
  *
  * Copyright (C) 2002 Anton Blanchard <anton@au.ibm.com>, IBM
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 #define pr_fmt(fmt) "numa: " fmt
 
@@ -32,7 +28,6 @@
 #include <asm/sparsemem.h>
 #include <asm/prom.h>
 #include <asm/smp.h>
-#include <asm/cputhreads.h>
 #include <asm/topology.h>
 #include <asm/firmware.h>
 #include <asm/paca.h>
@@ -84,7 +79,7 @@ static void __init setup_node_to_cpumask_map(void)
 		alloc_bootmem_cpumask_var(&node_to_cpumask_map[node]);
 
 	/* cpumask_of_node() will now work */
-	dbg("Node to cpumask map for %d nodes\n", nr_node_ids);
+	dbg("Node to cpumask map for %u nodes\n", nr_node_ids);
 }
 
 static int __init fake_numa_create_new_node(unsigned long end_pfn,
@@ -231,7 +226,7 @@ static void initialize_distance_lookup_table(int nid,
  */
 static int associativity_to_nid(const __be32 *associativity)
 {
-	int nid = -1;
+	int nid = NUMA_NO_NODE;
 
 	if (!numa_enabled)
 		goto out;
@@ -241,7 +236,7 @@ static int associativity_to_nid(const __be32 *associativity)
 
 	/* POWER4 LPAR uses 0xffff as invalid node */
 	if (nid == 0xffff || nid >= MAX_NUMNODES)
-		nid = -1;
+		nid = NUMA_NO_NODE;
 
 	if (nid > 0 &&
 		of_read_number(associativity, 1) >= distance_ref_points_depth) {
@@ -260,7 +255,7 @@ out:
  */
 static int of_node_to_nid_single(struct device_node *device)
 {
-	int nid = -1;
+	int nid = NUMA_NO_NODE;
 	const __be32 *tmp;
 
 	tmp = of_get_associativity(device);
@@ -272,7 +267,7 @@ static int of_node_to_nid_single(struct device_node *device)
 /* Walk the device tree upwards, looking for an associativity id */
 int of_node_to_nid(struct device_node *device)
 {
-	int nid = -1;
+	int nid = NUMA_NO_NODE;
 
 	of_node_get(device);
 	while (device) {
@@ -472,7 +467,7 @@ static int of_drconf_to_nid_single(struct drmem_lmb *lmb)
  */
 static int numa_setup_cpu(unsigned long lcpu)
 {
-	int nid = -1;
+	int nid = NUMA_NO_NODE;
 	struct device_node *cpu;
 
 	/*
@@ -592,9 +587,8 @@ static inline int __init read_usm_ranges(const __be32 **usm)
  * Extract NUMA information from the ibm,dynamic-reconfiguration-memory
  * node.  This assumes n_mem_{addr,size}_cells have been set.
  */
-static int __init numa_setup_drmem_lmb(struct drmem_lmb *lmb,
-					const __be32 **usm,
-					void *data)
+static void __init numa_setup_drmem_lmb(struct drmem_lmb *lmb,
+					const __be32 **usm)
 {
 	unsigned int ranges, is_kexec_kdump = 0;
 	unsigned long base, size, sz;
@@ -606,7 +600,7 @@ static int __init numa_setup_drmem_lmb(struct drmem_lmb *lmb,
 	 */
 	if ((lmb->flags & DRCONF_MEM_RESERVED)
 	    || !(lmb->flags & DRCONF_MEM_ASSIGNED))
-		return 0;
+		return;
 
 	if (*usm)
 		is_kexec_kdump = 1;
@@ -618,7 +612,7 @@ static int __init numa_setup_drmem_lmb(struct drmem_lmb *lmb,
 	if (is_kexec_kdump) {
 		ranges = read_usm_ranges(usm);
 		if (!ranges) /* there are no (base, size) duple */
-			return 0;
+			return;
 	}
 
 	do {
@@ -635,8 +629,6 @@ static int __init numa_setup_drmem_lmb(struct drmem_lmb *lmb,
 		if (sz)
 			memblock_set_node(base, sz, &memblock.memory, nid);
 	} while (--ranges);
-
-	return 0;
 }
 
 static int __init parse_numa_properties(void)
@@ -738,7 +730,7 @@ new_range:
 	 */
 	memory = of_find_node_by_path("/ibm,dynamic-reconfiguration-memory");
 	if (memory) {
-		walk_drmem_lmbs(memory, NULL, numa_setup_drmem_lmb);
+		walk_drmem_lmbs(memory, numa_setup_drmem_lmb);
 		of_node_put(memory);
 	}
 
@@ -815,6 +807,10 @@ static void __init setup_node_data(int nid, u64 start_pfn, u64 end_pfn)
 	int tnid;
 
 	nd_pa = memblock_phys_alloc_try_nid(nd_size, SMP_CACHE_BYTES, nid);
+	if (!nd_pa)
+		panic("Cannot allocate %zu bytes for node %d data\n",
+		      nd_size, nid);
+
 	nd = __va(nd_pa);
 
 	/* report and initialize */
@@ -963,7 +959,7 @@ static int hot_add_drconf_scn_to_nid(unsigned long scn_addr)
 {
 	struct drmem_lmb *lmb;
 	unsigned long lmb_size;
-	int nid = -1;
+	int nid = NUMA_NO_NODE;
 
 	lmb_size = drmem_lmb_size();
 
@@ -993,7 +989,7 @@ static int hot_add_drconf_scn_to_nid(unsigned long scn_addr)
 static int hot_add_node_scn_to_nid(unsigned long scn_addr)
 {
 	struct device_node *memory;
-	int nid = -1;
+	int nid = NUMA_NO_NODE;
 
 	for_each_node_by_type(memory, "memory") {
 		unsigned long start, size;
@@ -1196,7 +1192,7 @@ static long vphn_get_associativity(unsigned long cpu,
 
 	switch (rc) {
 	case H_FUNCTION:
-		printk(KERN_INFO
+		printk_once(KERN_INFO
 			"VPHN is not supported. Disabling polling...\n");
 		stop_topology_update();
 		break;
@@ -1486,7 +1482,7 @@ static int dt_update_callback(struct notifier_block *nb,
 
 	switch (action) {
 	case OF_RECONFIG_UPDATE_PROPERTY:
-		if (!of_prop_cmp(update->dn->type, "cpu") &&
+		if (of_node_is_type(update->dn, "cpu") &&
 		    !of_prop_cmp(update->prop->name, "ibm,associativity")) {
 			u32 core_id;
 			of_property_read_u32(update->dn, "reg", &core_id);

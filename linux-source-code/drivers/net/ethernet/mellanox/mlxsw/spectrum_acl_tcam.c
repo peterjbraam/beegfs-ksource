@@ -224,7 +224,7 @@ struct mlxsw_sp_acl_tcam_vchunk;
 struct mlxsw_sp_acl_tcam_chunk {
 	struct mlxsw_sp_acl_tcam_vchunk *vchunk;
 	struct mlxsw_sp_acl_tcam_region *region;
-	unsigned long priv[];
+	unsigned long priv[0];
 	/* priv has to be always the last item */
 };
 
@@ -243,7 +243,7 @@ struct mlxsw_sp_acl_tcam_vchunk {
 struct mlxsw_sp_acl_tcam_entry {
 	struct mlxsw_sp_acl_tcam_ventry *ventry;
 	struct mlxsw_sp_acl_tcam_chunk *chunk;
-	unsigned long priv[];
+	unsigned long priv[0];
 	/* priv has to be always the last item */
 };
 
@@ -290,12 +290,13 @@ mlxsw_sp_acl_tcam_group_add(struct mlxsw_sp_acl_tcam *tcam,
 	int err;
 
 	group->tcam = tcam;
-	mutex_init(&group->lock);
 	INIT_LIST_HEAD(&group->region_list);
 
 	err = mlxsw_sp_acl_tcam_group_id_get(tcam, &group->id);
 	if (err)
 		return err;
+
+	mutex_init(&group->lock);
 
 	return 0;
 }

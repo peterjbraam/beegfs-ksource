@@ -1,11 +1,5 @@
-/*
- * Copyright (c) 2016~2017 Hisilicon Limited.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- */
+// SPDX-License-Identifier: GPL-2.0+
+// Copyright (c) 2016-2017 Hisilicon Limited.
 
 #include <linux/etherdevice.h>
 #include <linux/kernel.h>
@@ -14,12 +8,6 @@
 #include "hclge_cmd.h"
 #include "hclge_main.h"
 #include "hclge_mdio.h"
-
-#define HCLGE_PHY_SUPPORTED_FEATURES	(SUPPORTED_Autoneg | \
-					 SUPPORTED_TP | \
-					 PHY_10BT_FEATURES | \
-					 PHY_100BT_FEATURES | \
-					 PHY_1000BT_FEATURES)
 
 enum hclge_mdio_c22_op_seq {
 	HCLGE_MDIO_C22_WRITE = 1,
@@ -59,7 +47,7 @@ static int hclge_mdio_write(struct mii_bus *bus, int phyid, int regnum,
 	struct hclge_desc desc;
 	int ret;
 
-	if (test_bit(HCLGE_STATE_RST_HANDLING, &hdev->state))
+	if (test_bit(HCLGE_STATE_CMD_DISABLE, &hdev->state))
 		return 0;
 
 	hclge_cmd_setup_basic_desc(&desc, HCLGE_OPC_MDIO_CONFIG, false);
@@ -67,9 +55,9 @@ static int hclge_mdio_write(struct mii_bus *bus, int phyid, int regnum,
 	mdio_cmd = (struct hclge_mdio_cfg_cmd *)desc.data;
 
 	hnae3_set_field(mdio_cmd->phyid, HCLGE_MDIO_PHYID_M,
-			HCLGE_MDIO_PHYID_S, phyid);
+			HCLGE_MDIO_PHYID_S, (u32)phyid);
 	hnae3_set_field(mdio_cmd->phyad, HCLGE_MDIO_PHYREG_M,
-			HCLGE_MDIO_PHYREG_S, regnum);
+			HCLGE_MDIO_PHYREG_S, (u32)regnum);
 
 	hnae3_set_bit(mdio_cmd->ctrl_bit, HCLGE_MDIO_CTRL_START_B, 1);
 	hnae3_set_field(mdio_cmd->ctrl_bit, HCLGE_MDIO_CTRL_ST_M,
@@ -97,7 +85,7 @@ static int hclge_mdio_read(struct mii_bus *bus, int phyid, int regnum)
 	struct hclge_desc desc;
 	int ret;
 
-	if (test_bit(HCLGE_STATE_RST_HANDLING, &hdev->state))
+	if (test_bit(HCLGE_STATE_CMD_DISABLE, &hdev->state))
 		return 0;
 
 	hclge_cmd_setup_basic_desc(&desc, HCLGE_OPC_MDIO_CONFIG, true);
@@ -105,9 +93,9 @@ static int hclge_mdio_read(struct mii_bus *bus, int phyid, int regnum)
 	mdio_cmd = (struct hclge_mdio_cfg_cmd *)desc.data;
 
 	hnae3_set_field(mdio_cmd->phyid, HCLGE_MDIO_PHYID_M,
-			HCLGE_MDIO_PHYID_S, phyid);
+			HCLGE_MDIO_PHYID_S, (u32)phyid);
 	hnae3_set_field(mdio_cmd->phyad, HCLGE_MDIO_PHYREG_M,
-			HCLGE_MDIO_PHYREG_S, regnum);
+			HCLGE_MDIO_PHYREG_S, (u32)regnum);
 
 	hnae3_set_bit(mdio_cmd->ctrl_bit, HCLGE_MDIO_CTRL_START_B, 1);
 	hnae3_set_field(mdio_cmd->ctrl_bit, HCLGE_MDIO_CTRL_ST_M,
@@ -134,13 +122,19 @@ static int hclge_mdio_read(struct mii_bus *bus, int phyid, int regnum)
 
 int hclge_mac_mdio_config(struct hclge_dev *hdev)
 {
+#define PHY_INEXISTENT	255
+
 	struct hclge_mac *mac = &hdev->hw.mac;
 	struct phy_device *phydev;
 	struct mii_bus *mdio_bus;
 	int ret;
 
-	if (hdev->hw.mac.phy_addr >= PHY_MAX_ADDR) {
-		dev_err(&hdev->pdev->dev, "phy_addr(%d) is too large.\n",
+	if (hdev->hw.mac.phy_addr == PHY_INEXISTENT) {
+		dev_info(&hdev->pdev->dev,
+			 "no phy device is connected to mdio bus\n");
+		return 0;
+	} else if (hdev->hw.mac.phy_addr >= PHY_MAX_ADDR) {
+		dev_err(&hdev->pdev->dev, "phy_addr(%u) is too large.\n",
 			hdev->hw.mac.phy_addr);
 		return -EINVAL;
 	}
@@ -186,6 +180,10 @@ static void hclge_mac_adjust_link(struct net_device *netdev)
 	int duplex, speed;
 	int ret;
 
+	/* When phy link down, do nothing */
+	if (netdev->phydev->link == 0)
+		return;
+
 	speed = netdev->phydev->speed;
 	duplex = netdev->phydev->duplex;
 
@@ -222,16 +220,18 @@ int hclge_mac_connect_phy(struct hnae3_handle *handle)
 		return ret;
 	}
 
-	linkmode_set_bit(ETHTOOL_LINK_MODE_Autoneg_BIT, mask);
-	linkmode_set_bit(ETHTOOL_LINK_MODE_TP_BIT, mask);
-	linkmode_set_bit_array(phy_10_100_features_array,
-			       ARRAY_SIZE(phy_10_100_features_array),
-			       mask);
-	linkmode_set_bit_array(phy_gbit_features_array,
-			       ARRAY_SIZE(phy_gbit_features_array),
-			       mask);
+	linkmode_copy(mask, hdev->hw.mac.supported);
 	linkmode_and(phydev->supported, phydev->supported, mask);
-	phy_support_asym_pause(phydev);
+	linkmode_copy(phydev->advertising, phydev->supported);
+
+	/* supported flag is Pause and Asym Pause, but default advertising
+	 * should be rx on, tx on, so need clear Asym Pause in advertising
+	 * flag
+	 */
+	linkmode_clear_bit(ETHTOOL_LINK_MODE_Asym_Pause_BIT,
+			   phydev->advertising);
+
+	phy_attached_info(phydev);
 
 	return 0;
 }

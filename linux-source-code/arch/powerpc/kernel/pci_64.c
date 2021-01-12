@@ -1,14 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Port for PPC64 David Engebretsen, IBM Corp.
  * Contains common pci routines for ppc64 platform, pSeries and iSeries brands.
  * 
  * Copyright (C) 2003 Anton Blanchard <anton@au.ibm.com>, IBM
  *   Rework, based on alpha PCI code.
- *
- *      This program is free software; you can redistribute it and/or
- *      modify it under the terms of the GNU General Public License
- *      as published by the Free Software Foundation; either version
- *      2 of the License, or (at your option) any later version.
  */
 
 #undef DEBUG
@@ -104,7 +100,7 @@ int pcibios_unmap_io_space(struct pci_bus *bus)
 			 pci_name(bus->self));
 
 #ifdef CONFIG_PPC_BOOK3S_64
-		__flush_hash_table_range(res->start + _IO_BASE,
+		__flush_hash_table_range(&init_mm, res->start + _IO_BASE,
 					 res->end + _IO_BASE + 1);
 #endif
 		return 0;

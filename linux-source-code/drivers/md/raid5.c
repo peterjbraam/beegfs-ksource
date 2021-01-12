@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * raid5.c : Multiple Devices driver for Linux
  *	   Copyright (C) 1996, 1997 Ingo Molnar, Miguel de Icaza, Gadi Oxman
@@ -7,15 +8,6 @@
  * RAID-4/5/6 management functions.
  * Thanks to Penguin Computing for making the RAID-6 development possible
  * by donating a test server!
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * You should have received a copy of the GNU General Public License
- * (for example /usr/src/linux/COPYING); if not, write to the Free
- * Software Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 /*
@@ -2236,14 +2228,19 @@ static int grow_stripes(struct r5conf *conf, int num)
  * of the P and Q blocks.
  */
 static int scribble_alloc(struct raid5_percpu *percpu,
-			  int num, int cnt, gfp_t flags)
+			  int num, int cnt)
 {
 	size_t obj_size =
 		sizeof(struct page *) * (num+2) +
 		sizeof(addr_conv_t) * (num+2);
 	void *scribble;
 
-	scribble = kvmalloc_array(cnt, obj_size, flags);
+	/*
+	 * If here is in raid array suspend context, it is in memalloc noio
+	 * context as well, there is no potential recursive memory reclaim
+	 * I/Os with the GFP_KERNEL flag.
+	 */
+	scribble = kvmalloc_array(cnt, obj_size, GFP_KERNEL);
 	if (!scribble)
 		return -ENOMEM;
 
@@ -2275,8 +2272,7 @@ static int resize_chunks(struct r5conf *conf, int new_disks, int new_sectors)
 
 		percpu = per_cpu_ptr(conf->percpu, cpu);
 		err = scribble_alloc(percpu, new_disks,
-				     new_sectors / STRIPE_SECTORS,
-				     GFP_NOIO);
+				     new_sectors / STRIPE_SECTORS);
 		if (err)
 			break;
 	}
@@ -2411,8 +2407,6 @@ static int resize_stripes(struct r5conf *conf, int newsize)
 	} else
 		err = -ENOMEM;
 
-	mutex_unlock(&conf->cache_size_mutex);
-
 	conf->slab_cache = sc;
 	conf->active_name = 1-conf->active_name;
 
@@ -2435,6 +2429,8 @@ static int resize_stripes(struct r5conf *conf, int newsize)
 
 	if (!err)
 		conf->pool_size = newsize;
+	mutex_unlock(&conf->cache_size_mutex);
+
 	return err;
 }
 
@@ -3608,6 +3604,7 @@ static int need_this_block(struct stripe_head *sh, struct stripe_head_state *s,
 	 * is missing/faulty, then we need to read everything we can.
 	 */
 	if (sh->raid_conf->level != 6 &&
+	    sh->raid_conf->rmw_level != PARITY_DISABLE_RMW &&
 	    sh->sector < sh->raid_conf->mddev->recovery_cp)
 		/* reconstruct-write isn't being forced */
 		return 0;
@@ -4843,7 +4840,7 @@ static void handle_stripe(struct stripe_head *sh)
 	 * or to load a block that is being partially written.
 	 */
 	if (s.to_read || s.non_overwrite
-	    || (conf->level == 6 && s.to_write && s.failed)
+	    || (s.to_write && s.failed)
 	    || (s.syncing && (s.uptodate + s.compute < disks))
 	    || s.replacing
 	    || s.expanding)
@@ -5267,7 +5264,6 @@ static int raid5_read_one_chunk(struct mddev *mddev, struct bio *raid_bio)
 		rcu_read_unlock();
 		raid_bio->bi_next = (void*)rdev;
 		bio_set_dev(align_bi, rdev->bdev);
-		bio_clear_flag(align_bi, BIO_SEG_VALID);
 
 		if (is_badblock(rdev, align_bi->bi_iter.bi_sector,
 				bio_sectors(align_bi),
@@ -6607,6 +6603,7 @@ raid5_show_group_thread_cnt(struct mddev *mddev, char *page)
 
 static int alloc_thread_groups(struct r5conf *conf, int cnt,
 			       int *group_cnt,
+			       int *worker_cnt_per_group,
 			       struct r5worker_group **worker_groups);
 static ssize_t
 raid5_store_group_thread_cnt(struct mddev *mddev, const char *page, size_t len)
@@ -6615,7 +6612,7 @@ raid5_store_group_thread_cnt(struct mddev *mddev, const char *page, size_t len)
 	unsigned int new;
 	int err;
 	struct r5worker_group *new_groups, *old_groups;
-	int group_cnt;
+	int group_cnt, worker_cnt_per_group;
 
 	if (len >= PAGE_SIZE)
 		return -EINVAL;
@@ -6638,11 +6635,13 @@ raid5_store_group_thread_cnt(struct mddev *mddev, const char *page, size_t len)
 		if (old_groups)
 			flush_workqueue(raid5_wq);
 
-		err = alloc_thread_groups(conf, new, &group_cnt, &new_groups);
+		err = alloc_thread_groups(conf, new,
+					  &group_cnt, &worker_cnt_per_group,
+					  &new_groups);
 		if (!err) {
 			spin_lock_irq(&conf->device_lock);
 			conf->group_cnt = group_cnt;
-			conf->worker_cnt_per_group = new;
+			conf->worker_cnt_per_group = worker_cnt_per_group;
 			conf->worker_groups = new_groups;
 			spin_unlock_irq(&conf->device_lock);
 
@@ -6678,13 +6677,16 @@ static struct attribute_group raid5_attrs_group = {
 	.attrs = raid5_attrs,
 };
 
-static int alloc_thread_groups(struct r5conf *conf, int cnt, int *group_cnt,
+static int alloc_thread_groups(struct r5conf *conf, int cnt,
+			       int *group_cnt,
+			       int *worker_cnt_per_group,
 			       struct r5worker_group **worker_groups)
 {
 	int i, j, k;
 	ssize_t size;
 	struct r5worker *workers;
 
+	*worker_cnt_per_group = cnt;
 	if (cnt == 0) {
 		*group_cnt = 0;
 		*worker_groups = NULL;
@@ -6768,8 +6770,7 @@ static int alloc_scratch_buffer(struct r5conf *conf, struct raid5_percpu *percpu
 			       conf->previous_raid_disks),
 			   max(conf->chunk_sectors,
 			       conf->prev_chunk_sectors)
-			   / STRIPE_SECTORS,
-			   GFP_KERNEL)) {
+			   / STRIPE_SECTORS)) {
 		free_scratch_buffer(conf, percpu);
 		return -ENOMEM;
 	}
@@ -6885,7 +6886,7 @@ static struct r5conf *setup_conf(struct mddev *mddev)
 	struct disk_info *disk;
 	char pers_name[6];
 	int i;
-	int group_cnt;
+	int group_cnt, worker_cnt_per_group;
 	struct r5worker_group *new_group;
 	int ret;
 
@@ -6931,9 +6932,10 @@ static struct r5conf *setup_conf(struct mddev *mddev)
 	for (i = 0; i < PENDING_IO_MAX; i++)
 		list_add(&conf->pending_data[i].sibling, &conf->free_list);
 	/* Don't enable multi-threading by default*/
-	if (!alloc_thread_groups(conf, 0, &group_cnt, &new_group)) {
+	if (!alloc_thread_groups(conf, 0, &group_cnt, &worker_cnt_per_group,
+				 &new_group)) {
 		conf->group_cnt = group_cnt;
-		conf->worker_cnt_per_group = 0;
+		conf->worker_cnt_per_group = worker_cnt_per_group;
 		conf->worker_groups = new_group;
 	} else
 		goto abort;

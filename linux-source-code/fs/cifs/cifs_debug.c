@@ -1,23 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *   fs/cifs_debug.c
  *
  *   Copyright (C) International Business Machines  Corp., 2000,2005
  *
  *   Modified by Steve French (sfrench@us.ibm.com)
- *
- *   This program is free software;  you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY;  without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See
- *   the GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program;  if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  */
 #include <linux/fs.h>
 #include <linux/string.h>
@@ -135,27 +122,6 @@ static void cifs_debug_tcon(struct seq_file *m, struct cifs_tcon *tcon)
 }
 
 static void
-cifs_dump_channel(struct seq_file *m, int i, struct cifs_chan *chan)
-{
-	struct TCP_Server_Info *server = chan->server;
-
-	seq_printf(m, "\t\tChannel %d Number of credits: %d Dialect 0x%x "
-		   "TCP status: %d Instance: %d Local Users To Server: %d "
-		   "SecMode: 0x%x Req On Wire: %d In Send: %d "
-		   "In MaxReq Wait: %d\n",
-		   i+1,
-		   server->credits,
-		   server->dialect,
-		   server->tcpStatus,
-		   server->reconnect_instance,
-		   server->srv_count,
-		   server->sec_mode,
-		   in_flight(server),
-		   atomic_read(&server->in_send),
-		   atomic_read(&server->num_waiters));
-}
-
-static void
 cifs_dump_iface(struct seq_file *m, struct cifs_server_iface *iface)
 {
 	struct sockaddr_in *ipv4 = (struct sockaddr_in *)&iface->sockaddr;
@@ -234,8 +200,6 @@ static int cifs_debug_data_proc_show(struct seq_file *m, void *v)
 	struct cifs_ses *ses;
 	struct cifs_tcon *tcon;
 	int i, j;
-	const char *security_types[] = {"Unspecified", "LANMAN", "NTLM",
-                                       "NTLMv2", "RawNTLMSSP", "Kerberos"};
 
 	seq_puts(m,
 		    "Display Internal CIFS Data Structures for Debugging\n"
@@ -392,10 +356,6 @@ skip_rdma:
 				ses->ses_count, ses->serverOS, ses->serverNOS,
 				ses->capabilities, ses->status);
 			}
-
-			seq_printf(m,"Security type: %s\n",
-                                      security_types[server->ops->select_sectype(server, ses->sectype)]);
-
 			if (server->rdma)
 				seq_printf(m, "RDMA\n\t");
 			seq_printf(m, "TCP status: %d Instance: %d\n\tLocal Users To "
@@ -405,23 +365,17 @@ skip_rdma:
 				   server->srv_count,
 				   server->sec_mode, in_flight(server));
 
+#ifdef CONFIG_CIFS_STATS2
 			seq_printf(m, " In Send: %d In MaxReq Wait: %d",
 				atomic_read(&server->in_send),
 				atomic_read(&server->num_waiters));
-
+#endif
 			/* dump session id helpful for use with network trace */
 			seq_printf(m, " SessionId: 0x%llx", ses->Suid);
 			if (ses->session_flags & SMB2_SESSION_FLAG_ENCRYPT_DATA)
 				seq_puts(m, " encrypted");
 			if (ses->sign)
 				seq_puts(m, " signed");
-
-			if (ses->chan_count > 1) {
-				seq_printf(m, "\n\n\tExtra Channels: %zu\n",
-					   ses->chan_count-1);
-				for (j = 1; j < ses->chan_count; j++)
-					cifs_dump_channel(m, j, &ses->chans[j]);
-			}
 
 			seq_puts(m, "\n\tShares:");
 			j = 0;
@@ -461,13 +415,8 @@ skip_rdma:
 				seq_printf(m, "\n\tServer interfaces: %zu\n",
 					   ses->iface_count);
 			for (j = 0; j < ses->iface_count; j++) {
-				struct cifs_server_iface *iface;
-
-				iface = &ses->iface_list[j];
 				seq_printf(m, "\t%d)", j);
-				cifs_dump_iface(m, iface);
-				if (is_ses_using_iface(ses, iface))
-					seq_puts(m, "\t\t[CONNECTED]\n");
+				cifs_dump_iface(m, &ses->iface_list[j]);
 			}
 			spin_unlock(&ses->iface_lock);
 		}

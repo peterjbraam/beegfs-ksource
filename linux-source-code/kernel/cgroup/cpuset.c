@@ -39,6 +39,7 @@
 #include <linux/memory.h>
 #include <linux/export.h>
 #include <linux/mount.h>
+#include <linux/fs_context.h>
 #include <linux/namei.h>
 #include <linux/pagemap.h>
 #include <linux/proc_fs.h>
@@ -357,44 +358,14 @@ static DECLARE_WORK(cpuset_hotplug_work, cpuset_hotplug_workfn);
 static DECLARE_WAIT_QUEUE_HEAD(cpuset_attach_wq);
 
 /*
- * Cgroup v2 behavior is used on the "cpus" and "mems" control files when
- * on default hierarchy or when the cpuset_v2_mode flag is set by mounting
- * the v1 cpuset cgroup filesystem with the "cpuset_v2_mode" mount option.
- * With v2 behavior, "cpus" and "mems" are always what the users have
- * requested and won't be changed by hotplug events. Only the effective
- * cpus or mems will be affected.
+ * Cgroup v2 behavior is used when on default hierarchy or the
+ * cgroup_v2_mode flag is set.
  */
 static inline bool is_in_v2_mode(void)
 {
 	return cgroup_subsys_on_dfl(cpuset_cgrp_subsys) ||
 	      (cpuset_cgrp_subsys.root->flags & CGRP_ROOT_CPUSET_V2_MODE);
 }
-
-/*
- * This is ugly, but preserves the userspace API for existing cpuset
- * users. If someone tries to mount the "cpuset" filesystem, we
- * silently switch it to mount "cgroup" instead
- */
-static struct dentry *cpuset_mount(struct file_system_type *fs_type,
-			 int flags, const char *unused_dev_name, void *data)
-{
-	struct file_system_type *cgroup_fs = get_fs_type("cgroup");
-	struct dentry *ret = ERR_PTR(-ENODEV);
-	if (cgroup_fs) {
-		char mountopts[] =
-			"cpuset,noprefix,"
-			"release_agent=/sbin/cpuset_release_agent";
-		ret = cgroup_fs->mount(cgroup_fs, flags,
-					   unused_dev_name, mountopts);
-		put_filesystem(cgroup_fs);
-	}
-	return ret;
-}
-
-static struct file_system_type cpuset_fs_type = {
-	.name = "cpuset",
-	.mount = cpuset_mount,
-};
 
 /*
  * Return in pmask the portion of a cpusets's cpus_allowed that
@@ -717,7 +688,7 @@ static inline int nr_cpusets(void)
  * load balancing domains (sched domains) as specified by that partial
  * partition.
  *
- * See "What is sched_load_balance" in Documentation/cgroup-v1/cpusets.txt
+ * See "What is sched_load_balance" in Documentation/admin-guide/cgroup-v1/cpusets.rst
  * for a background explanation of this.
  *
  * Does not return errors, on the theory that the callers of this
@@ -957,6 +928,8 @@ static void rebuild_root_domains(void)
 	percpu_rwsem_assert_held(&cpuset_rwsem);
 	lockdep_assert_cpus_held();
 	lockdep_assert_held(&sched_domains_mutex);
+
+	cgroup_enable_task_cg_lists();
 
 	rcu_read_lock();
 
@@ -2913,13 +2886,11 @@ struct cgroup_subsys cpuset_cgrp_subsys = {
 /**
  * cpuset_init - initialize cpusets at system boot
  *
- * Description: Initialize top_cpuset and the cpuset internal file system,
+ * Description: Initialize top_cpuset
  **/
 
 int __init cpuset_init(void)
 {
-	int err = 0;
-
 	BUG_ON(percpu_init_rwsem(&cpuset_rwsem));
 
 	BUG_ON(!alloc_cpumask_var(&top_cpuset.cpus_allowed, GFP_KERNEL));
@@ -2934,10 +2905,6 @@ int __init cpuset_init(void)
 	fmeter_init(&top_cpuset.fmeter);
 	set_bit(CS_SCHED_LOAD_BALANCE, &top_cpuset.flags);
 	top_cpuset.relax_domain_level = -1;
-
-	err = register_filesystem(&cpuset_fs_type);
-	if (err < 0)
-		return err;
 
 	BUG_ON(!alloc_cpumask_var(&cpus_attach, GFP_KERNEL));
 

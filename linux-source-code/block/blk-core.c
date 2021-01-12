@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (C) 1991, 1992 Linus Torvalds
  * Copyright (C) 1994,      Karl Keyte: Added support for disk statistics
@@ -36,6 +37,7 @@
 #include <linux/t10-pi.h>
 #include <linux/debugfs.h>
 #include <linux/bpf.h>
+#include <linux/psi.h>
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/block.h>
@@ -130,9 +132,6 @@ static const char *const blk_op_name[] = {
 	REQ_OP_NAME(SECURE_ERASE),
 	REQ_OP_NAME(ZONE_RESET),
 	REQ_OP_NAME(ZONE_RESET_ALL),
-	REQ_OP_NAME(ZONE_OPEN),
-	REQ_OP_NAME(ZONE_CLOSE),
-	REQ_OP_NAME(ZONE_FINISH),
 	REQ_OP_NAME(WRITE_SAME),
 	REQ_OP_NAME(WRITE_ZEROES),
 	REQ_OP_NAME(SCSI_IN),
@@ -303,16 +302,6 @@ void blk_clear_pm_only(struct request_queue *q)
 }
 EXPORT_SYMBOL_GPL(blk_clear_pm_only);
 
-/**
- * blk_put_queue - decrement the request_queue refcount
- * @q: the request_queue structure to decrement the refcount for
- *
- * Decrements the refcount of the request_queue kobject. When this reaches 0
- * we'll have blk_release_queue() called.
- *
- * Context: Any context, but the last reference must not be dropped from
- *          atomic context.
- */
 void blk_put_queue(struct request_queue *q)
 {
 	kobject_put(&q->kobj);
@@ -344,22 +333,17 @@ EXPORT_SYMBOL_GPL(blk_set_queue_dying);
  *
  * Mark @q DYING, drain all pending requests, mark @q DEAD, destroy and
  * put it.  All future requests will be failed immediately with -ENODEV.
- *
- * Context: can sleep
  */
 void blk_cleanup_queue(struct request_queue *q)
 {
-	/* cannot be called from atomic context */
-	might_sleep();
-
-	WARN_ON_ONCE(blk_queue_registered(q));
-
 	/* mark @q DYING, no new request or merges will be allowed afterwards */
+	mutex_lock(&q->sysfs_lock);
 	blk_set_queue_dying(q);
 
 	blk_queue_flag_set(QUEUE_FLAG_NOMERGES, q);
 	blk_queue_flag_set(QUEUE_FLAG_NOXMERGES, q);
 	blk_queue_flag_set(QUEUE_FLAG_DYING, q);
+	mutex_unlock(&q->sysfs_lock);
 
 	/*
 	 * Drain all requests queued before DYING marking. Set DEAD flag to
@@ -480,6 +464,10 @@ static void blk_rq_timed_out_timer(struct timer_list *t)
 	kblockd_schedule_work(&q->timeout_work);
 }
 
+static void blk_timeout_work(struct work_struct *work)
+{
+}
+
 /**
  * blk_alloc_queue_node - allocate a request queue
  * @gfp_mask: memory allocation flags
@@ -514,6 +502,7 @@ struct request_queue *blk_alloc_queue_node(gfp_t gfp_mask, int node_id)
 		goto fail_stats;
 
 	q->backing_dev_info->ra_pages = VM_READAHEAD_PAGES;
+	q->backing_dev_info->io_pages = VM_READAHEAD_PAGES;
 	q->backing_dev_info->capabilities = BDI_CAP_CGROUP_WRITEBACK;
 	q->backing_dev_info->name = "block";
 	q->node = node_id;
@@ -521,7 +510,7 @@ struct request_queue *blk_alloc_queue_node(gfp_t gfp_mask, int node_id)
 	timer_setup(&q->backing_dev_info->laptop_mode_wb_timer,
 		    laptop_mode_timer_fn, 0);
 	timer_setup(&q->timeout, blk_rq_timed_out_timer, 0);
-	INIT_WORK(&q->timeout_work, NULL);
+	INIT_WORK(&q->timeout_work, blk_timeout_work);
 	INIT_LIST_HEAD(&q->icq_list);
 #ifdef CONFIG_BLK_CGROUP
 	INIT_LIST_HEAD(&q->blkg_list);
@@ -569,14 +558,6 @@ fail_q:
 }
 EXPORT_SYMBOL(blk_alloc_queue_node);
 
-/**
- * blk_get_queue - increment the request_queue refcount
- * @q: the request_queue structure to increment the refcount for
- *
- * Increment the refcount of the request_queue kobject.
- *
- * Context: Any context.
- */
 bool blk_get_queue(struct request_queue *q)
 {
 	if (likely(!blk_queue_dying(q))) {
@@ -616,15 +597,15 @@ void blk_put_request(struct request *req)
 }
 EXPORT_SYMBOL(blk_put_request);
 
-bool bio_attempt_back_merge(struct request_queue *q, struct request *req,
-			    struct bio *bio)
+bool bio_attempt_back_merge(struct request *req, struct bio *bio,
+		unsigned int nr_segs)
 {
 	const int ff = bio->bi_opf & REQ_FAILFAST_MASK;
 
-	if (!ll_back_merge_fn(q, req, bio))
+	if (!ll_back_merge_fn(req, bio, nr_segs))
 		return false;
 
-	trace_block_bio_backmerge(q, req, bio);
+	trace_block_bio_backmerge(req->q, req, bio);
 	rq_qos_merge(req->q, req, bio);
 
 	if ((req->cmd_flags & REQ_FAILFAST_MASK) != ff)
@@ -638,15 +619,15 @@ bool bio_attempt_back_merge(struct request_queue *q, struct request *req,
 	return true;
 }
 
-bool bio_attempt_front_merge(struct request_queue *q, struct request *req,
-			     struct bio *bio)
+bool bio_attempt_front_merge(struct request *req, struct bio *bio,
+		unsigned int nr_segs)
 {
 	const int ff = bio->bi_opf & REQ_FAILFAST_MASK;
 
-	if (!ll_front_merge_fn(q, req, bio))
+	if (!ll_front_merge_fn(req, bio, nr_segs))
 		return false;
 
-	trace_block_bio_frontmerge(q, req, bio);
+	trace_block_bio_frontmerge(req->q, req, bio);
 	rq_qos_merge(req->q, req, bio);
 
 	if ((req->cmd_flags & REQ_FAILFAST_MASK) != ff)
@@ -691,7 +672,7 @@ no_merge:
  * blk_attempt_plug_merge - try to merge with %current's plugged list
  * @q: request_queue new bio is being queued at
  * @bio: new bio being queued
- * @request_count: out parameter for number of traversed plugged requests
+ * @nr_segs: number of segments in @bio
  * @same_queue_rq: pointer to &struct request that gets filled in when
  * another request associated with @q is found on the plug list
  * (optional, may be %NULL)
@@ -710,7 +691,7 @@ no_merge:
  * Caller must ensure !blk_queue_nomerges(q) beforehand.
  */
 bool blk_attempt_plug_merge(struct request_queue *q, struct bio *bio,
-			    struct request **same_queue_rq)
+		unsigned int nr_segs, struct request **same_queue_rq)
 {
 	struct blk_plug *plug;
 	struct request *rq;
@@ -739,10 +720,10 @@ bool blk_attempt_plug_merge(struct request_queue *q, struct bio *bio,
 
 		switch (blk_try_merge(rq, bio)) {
 		case ELEVATOR_BACK_MERGE:
-			merged = bio_attempt_back_merge(q, rq, bio);
+			merged = bio_attempt_back_merge(rq, bio, nr_segs);
 			break;
 		case ELEVATOR_FRONT_MERGE:
-			merged = bio_attempt_front_merge(q, rq, bio);
+			merged = bio_attempt_front_merge(rq, bio, nr_segs);
 			break;
 		case ELEVATOR_DISCARD_MERGE:
 			merged = bio_attempt_discard_merge(q, rq, bio);
@@ -762,11 +743,10 @@ static void handle_bad_sector(struct bio *bio, sector_t maxsector)
 {
 	char b[BDEVNAME_SIZE];
 
-	printk(KERN_INFO "attempt to access beyond end of device\n");
-	printk(KERN_INFO "%s: rw=%d, want=%Lu, limit=%Lu\n",
-			bio_devname(bio, b), bio->bi_opf,
-			(unsigned long long)bio_end_sector(bio),
-			(long long)maxsector);
+	pr_info_ratelimited("attempt to access beyond end of device\n"
+			    "%s: rw=%d, want=%llu, limit=%llu\n",
+			    bio_devname(bio, b), bio->bi_opf,
+			    bio_end_sector(bio), maxsector);
 }
 
 #ifdef CONFIG_FAIL_MAKE_REQUEST
@@ -868,7 +848,11 @@ static inline int blk_partition_remap(struct bio *bio)
 	if (unlikely(bio_check_ro(bio, p)))
 		goto out;
 
-	if (bio_sectors(bio)) {
+	/*
+	 * Zone reset does not include bi_size so bio_sectors() is always 0.
+	 * Include a test for the reset op code and perform the remap if needed.
+	 */
+	if (bio_sectors(bio) || bio_op(bio) == REQ_OP_ZONE_RESET) {
 		if (bio_check_eod(bio, part_nr_sects_read(p)))
 			goto out;
 		bio->bi_iter.bi_sector += p->start_sect;
@@ -952,9 +936,6 @@ generic_make_request_checks(struct bio *bio)
 			goto not_supported;
 		break;
 	case REQ_OP_ZONE_RESET:
-	case REQ_OP_ZONE_OPEN:
-	case REQ_OP_ZONE_CLOSE:
-	case REQ_OP_ZONE_FINISH:
 		if (!blk_queue_is_zoned(q))
 			goto not_supported;
 		break;
@@ -1159,6 +1140,10 @@ EXPORT_SYMBOL_GPL(direct_make_request);
  */
 blk_qc_t submit_bio(struct bio *bio)
 {
+	bool workingset_read = false;
+	unsigned long pflags;
+	blk_qc_t ret;
+
 	if (blkcg_punt_bio_submit(bio))
 		return BLK_QC_T_NONE;
 
@@ -1177,6 +1162,8 @@ blk_qc_t submit_bio(struct bio *bio)
 		if (op_is_write(bio_op(bio))) {
 			count_vm_events(PGPGOUT, count);
 		} else {
+			if (bio_flagged(bio, BIO_WORKINGSET))
+				workingset_read = true;
 			task_io_account_read(bio->bi_iter.bi_size);
 			count_vm_events(PGPGIN, count);
 		}
@@ -1191,7 +1178,21 @@ blk_qc_t submit_bio(struct bio *bio)
 		}
 	}
 
-	return generic_make_request(bio);
+	/*
+	 * If we're reading data that is part of the userspace
+	 * workingset, count submission time as memory stall. When the
+	 * device is congested, or the submitting cgroup IO-throttled,
+	 * submission can be a significant part of overall IO time.
+	 */
+	if (workingset_read)
+		psi_memstall_enter(&pflags);
+
+	ret = generic_make_request(bio);
+
+	if (workingset_read)
+		psi_memstall_leave(&pflags);
+
+	return ret;
 }
 EXPORT_SYMBOL(submit_bio);
 
@@ -1228,7 +1229,7 @@ static int blk_cloned_rq_check_limits(struct request_queue *q,
 	 * Recalculate it to check the request correctly on this queue's
 	 * limitation.
 	 */
-	blk_recalc_rq_segments(rq);
+	rq->nr_phys_segments = blk_recalc_rq_segments(rq);
 	if (rq->nr_phys_segments > queue_max_segments(q)) {
 		printk(KERN_ERR "%s: over max segments limit. (%hu > %hu)\n",
 			__func__, rq->nr_phys_segments, queue_max_segments(q));
@@ -1307,7 +1308,7 @@ EXPORT_SYMBOL_GPL(blk_rq_err_bytes);
 
 void blk_account_io_completion(struct request *req, unsigned int bytes)
 {
-	if (req->part && blk_do_io_stat(req)) {
+	if (blk_do_io_stat(req)) {
 		const int sgrp = op_stat_group(req_op(req));
 		struct hd_struct *part;
 
@@ -1325,8 +1326,7 @@ void blk_account_io_done(struct request *req, u64 now)
 	 * normal IO on queueing nor completion.  Accounting the
 	 * containing request is enough.
 	 */
-	if (req->part && blk_do_io_stat(req) &&
-	    !(req->rq_flags & RQF_FLUSH_SEQ)) {
+	if (blk_do_io_stat(req) && !(req->rq_flags & RQF_FLUSH_SEQ)) {
 		const int sgrp = op_stat_group(req_op(req));
 		struct hd_struct *part;
 
@@ -1359,6 +1359,18 @@ void blk_account_io_start(struct request *rq, bool new_io)
 		part_stat_inc(part, merges[rw]);
 	} else {
 		part = disk_map_sector_rcu(rq->rq_disk, blk_rq_pos(rq));
+		if (!hd_struct_try_get(part)) {
+			/*
+			 * The partition is already being removed,
+			 * the request will be accounted on the disk only
+			 *
+			 * We take a reference on disk->part0 although that
+			 * partition will never be deleted, so we can treat
+			 * it as any other partition.
+			 */
+			part = &rq->rq_disk->part0;
+			hd_struct_get(part);
+		}
 		part_inc_in_flight(rq->q, part, rw);
 		rq->part = part;
 	}
@@ -1428,7 +1440,7 @@ bool blk_update_request(struct request *req, blk_status_t error,
 #ifdef CONFIG_BLK_DEV_INTEGRITY
 	if (blk_integrity_rq(req) && req_op(req) == REQ_OP_READ &&
 	    error == BLK_STS_OK)
-		req->q->integrity.profile->ext_ops->complete_fn(req, nr_bytes);
+		req->q->integrity.profile->complete_fn(req, nr_bytes);
 #endif
 
 	if (unlikely(error && !blk_rq_is_passthrough(req) &&
@@ -1492,28 +1504,12 @@ bool blk_update_request(struct request *req, blk_status_t error,
 		}
 
 		/* recalculate the number of segments */
-		blk_recalc_rq_segments(req);
+		req->nr_phys_segments = blk_recalc_rq_segments(req);
 	}
 
 	return true;
 }
 EXPORT_SYMBOL_GPL(blk_update_request);
-
-void blk_rq_bio_prep(struct request_queue *q, struct request *rq,
-		     struct bio *bio)
-{
-	if (bio_has_data(bio))
-		rq->nr_phys_segments = bio_phys_segments(q, bio);
-	else if (bio_op(bio) == REQ_OP_DISCARD)
-		rq->nr_phys_segments = 1;
-
-	rq->__data_len = bio->bi_iter.bi_size;
-	rq->bio = rq->biotail = bio;
-	rq->ioprio = bio_prio(bio);
-
-	if (bio->bi_disk)
-		rq->rq_disk = bio->bi_disk;
-}
 
 #if ARCH_IMPLEMENTS_FLUSH_DCACHE_PAGE
 /**
@@ -1679,6 +1675,15 @@ EXPORT_SYMBOL(kblockd_mod_delayed_work_on);
  * @plug:	The &struct blk_plug that needs to be initialized
  *
  * Description:
+ *   blk_start_plug() indicates to the block layer an intent by the caller
+ *   to submit multiple I/O requests in a batch.  The block layer may use
+ *   this hint to defer submitting I/Os from the caller until blk_finish_plug()
+ *   is called.  However, the block layer may choose to submit requests
+ *   before a call to blk_finish_plug() if the number of queued I/Os
+ *   exceeds %BLK_MAX_REQUEST_COUNT, or if the size of the I/O is larger than
+ *   %BLK_PLUG_FLUSH_SIZE.  The queued I/Os may also be submitted early if
+ *   the task schedules (see below).
+ *
  *   Tracking blk_plug inside the task_struct will help with auto-flushing the
  *   pending I/O should the task end up blocking between blk_start_plug() and
  *   blk_finish_plug(). This is important from a performance perspective, but
@@ -1761,6 +1766,16 @@ void blk_flush_plug_list(struct blk_plug *plug, bool from_schedule)
 		blk_mq_flush_plug_list(plug, from_schedule);
 }
 
+/**
+ * blk_finish_plug - mark the end of a batch of submitted I/O
+ * @plug:	The &struct blk_plug passed to blk_start_plug()
+ *
+ * Description:
+ * Indicate that a batch of I/O submissions is complete.  This function
+ * must be paired with an initial call to blk_start_plug().  The intent
+ * is to allow the block layer to optimize I/O submission.  See the
+ * documentation for blk_start_plug() for more information.
+ */
 void blk_finish_plug(struct blk_plug *plug)
 {
 	if (plug != current->plug)
@@ -1770,15 +1785,6 @@ void blk_finish_plug(struct blk_plug *plug)
 	current->plug = NULL;
 }
 EXPORT_SYMBOL(blk_finish_plug);
-
-/*
- * For 3rd party modules to access the extended fields of 'struct request'
- */
-struct request_aux *blk_rq_aux(const struct request *rq)
-{
-	return (struct request_aux *)((void *)rq - sizeof(struct request_aux));
-}
-EXPORT_SYMBOL(blk_rq_aux);
 
 int __init blk_dev_init(void)
 {

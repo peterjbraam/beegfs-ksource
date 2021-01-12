@@ -48,8 +48,6 @@
 #include "qed_reg_addr.h"
 #include "qed_sriov.h"
 
-#define GRCBASE_MCP     0xe00000
-
 #define QED_MCP_RESP_ITER_US	10
 
 #define QED_DRV_MB_MAX_RETRIES	(500 * 1000)	/* Account for 5 sec */
@@ -3151,6 +3149,13 @@ err0:
 	return rc;
 }
 
+void qed_mcp_nvm_info_free(struct qed_hwfn *p_hwfn)
+{
+	kfree(p_hwfn->nvm_info.image_att);
+	p_hwfn->nvm_info.image_att = NULL;
+	p_hwfn->nvm_info.valid = false;
+}
+
 int
 qed_mcp_get_nvm_image_att(struct qed_hwfn *p_hwfn,
 			  enum qed_nvm_images image_id,
@@ -3166,9 +3171,6 @@ qed_mcp_get_nvm_image_att(struct qed_hwfn *p_hwfn,
 		break;
 	case QED_NVM_IMAGE_FCOE_CFG:
 		type = NVM_TYPE_FCOE_CFG;
-		break;
-	case QED_NVM_IMAGE_MDUMP:
-		type = NVM_TYPE_MDUMP;
 		break;
 	case QED_NVM_IMAGE_NVM_CFG1:
 		type = NVM_TYPE_NVM_CFG1;
@@ -3266,11 +3268,8 @@ static enum resource_id_enum qed_mcp_get_mfw_res_id(enum qed_resources res_id)
 	case QED_ILT:
 		mfw_res_id = RESOURCE_ILT_E;
 		break;
-	case QED_LL2_RAM_QUEUE:
+	case QED_LL2_QUEUE:
 		mfw_res_id = RESOURCE_LL2_QUEUE_E;
-		break;
-	case QED_LL2_CTX_QUEUE:
-		mfw_res_id = RESOURCE_LL2_CQS_E;
 		break;
 	case QED_RDMA_CNQ_RAM:
 	case QED_CMDQS_CQS:

@@ -1,20 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Based on arch/arm/include/asm/processor.h
  *
  * Copyright (C) 1995-1999 Russell King
  * Copyright (C) 2012 ARM Ltd.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 #ifndef __ASM_PROCESSOR_H
 #define __ASM_PROCESSOR_H
@@ -22,15 +11,15 @@
 #define KERNEL_DS		UL(-1)
 #define USER_DS			((UL(1) << MAX_USER_VA_BITS) - 1)
 
-#ifndef __ASSEMBLY__
-
 /*
- * Default implementation of macro that returns current
- * instruction pointer ("program counter").
+ * On arm64 systems, unaligned accesses by the CPU are cheap, and so there is
+ * no point in shifting all network buffers by 2 bytes just to make some IP
+ * header fields appear aligned in memory, potentially sacrificing some DMA
+ * performance on some platforms.
  */
-#define current_text_addr() ({ __label__ _l; _l: &&_l;})
+#define NET_IP_ALIGN	0
 
-#ifdef __KERNEL__
+#ifndef __ASSEMBLY__
 
 #include <linux/build_bug.h>
 #include <linux/cache.h>
@@ -52,11 +41,19 @@
  * TASK_UNMAPPED_BASE - the lower boundary of the mmap VM area.
  */
 
-#define DEFAULT_MAP_WINDOW_64	(UL(1) << VA_BITS)
-#define TASK_SIZE_64		(UL(1) << vabits_user)
+#define DEFAULT_MAP_WINDOW_64	(UL(1) << VA_BITS_MIN)
+#define TASK_SIZE_64		(UL(1) << vabits_actual)
 
 #ifdef CONFIG_COMPAT
+#if defined(CONFIG_ARM64_64K_PAGES) && defined(CONFIG_KUSER_HELPERS)
+/*
+ * With CONFIG_ARM64_64K_PAGES enabled, the last page is occupied
+ * by the compat vectors page.
+ */
 #define TASK_SIZE_32		UL(0x100000000)
+#else
+#define TASK_SIZE_32		(UL(0x100000000) - PAGE_SIZE)
+#endif /* CONFIG_ARM64_64K_PAGES */
 #define TASK_SIZE		(test_thread_flag(TIF_32BIT) ? \
 				TASK_SIZE_32 : TASK_SIZE_64)
 #define TASK_SIZE_OF(tsk)	(test_tsk_thread_flag(tsk, TIF_32BIT) ? \
@@ -93,8 +90,8 @@
 					base)
 #endif /* CONFIG_ARM64_FORCE_52BIT */
 
-extern phys_addr_t arm64_dma32_phys_limit;
-#define ARCH_LOW_ADDRESS_LIMIT	(arm64_dma32_phys_limit - 1)
+extern phys_addr_t arm64_dma_phys_limit;
+#define ARCH_LOW_ADDRESS_LIMIT	(arm64_dma_phys_limit - 1)
 
 struct debug_info {
 #ifdef CONFIG_HAVE_HW_BREAKPOINT
@@ -222,12 +219,12 @@ static inline void compat_start_thread(struct pt_regs *regs, unsigned long pc,
 				       unsigned long sp)
 {
 	start_thread_common(regs, pc);
-	regs->pstate = COMPAT_PSR_MODE_USR;
+	regs->pstate = PSR_AA32_MODE_USR;
 	if (pc & 1)
-		regs->pstate |= COMPAT_PSR_T_BIT;
+		regs->pstate |= PSR_AA32_T_BIT;
 
 #ifdef __AARCH64EB__
-	regs->pstate |= COMPAT_PSR_E_BIT;
+	regs->pstate |= PSR_AA32_E_BIT;
 #endif
 
 	if (arm64_get_ssbd_state() != ARM64_SSBD_FORCE_ENABLE)
@@ -283,10 +280,6 @@ static inline void spin_lock_prefetch(const void *ptr)
 		     "nop") : : "p" (ptr));
 }
 
-#define HAVE_ARCH_PICK_MMAP_LAYOUT
-
-#endif
-
 extern unsigned long __ro_after_init signal_minsigstksz; /* sigframe size */
 extern void __init minsigstksz_setup(void);
 
@@ -307,6 +300,29 @@ extern void __init minsigstksz_setup(void);
 
 /* PR_PAC_RESET_KEYS prctl */
 #define PAC_RESET_KEYS(tsk, arg)	ptrauth_prctl_reset_keys(tsk, arg)
+
+#ifdef CONFIG_ARM64_TAGGED_ADDR_ABI
+/* PR_{SET,GET}_TAGGED_ADDR_CTRL prctl */
+long set_tagged_addr_ctrl(unsigned long arg);
+long get_tagged_addr_ctrl(void);
+#define SET_TAGGED_ADDR_CTRL(arg)	set_tagged_addr_ctrl(arg)
+#define GET_TAGGED_ADDR_CTRL()		get_tagged_addr_ctrl()
+#endif
+
+/*
+ * For CONFIG_GCC_PLUGIN_STACKLEAK
+ *
+ * These need to be macros because otherwise we get stuck in a nightmare
+ * of header definitions for the use of task_stack_page.
+ */
+
+#define current_top_of_stack()							\
+({										\
+	struct stack_info _info;						\
+	BUG_ON(!on_accessible_stack(current, current_stack_pointer, &_info));	\
+	_info.high;								\
+})
+#define on_thread_stack()	(on_task_stack(current, current_stack_pointer, NULL))
 
 #endif /* __ASSEMBLY__ */
 #endif /* __ASM_PROCESSOR_H */

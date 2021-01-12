@@ -5,8 +5,6 @@
 #ifndef _ASM_X86_FPU_H
 #define _ASM_X86_FPU_H
 
-#include <linux/rh_kabi.h>
-
 /*
  * The legacy x87 FPU state format, as saved by FSAVE and
  * restored by the FRSTOR instructions:
@@ -295,7 +293,12 @@ struct fpu {
 	 */
 	unsigned int			last_cpu;
 
-	RH_KABI_DEPRECATE(unsigned char, initialized)
+	/*
+	 * @avx512_timestamp:
+	 *
+	 * Records the timestamp of AVX512 use during last context switch.
+	 */
+	unsigned long			avx512_timestamp;
 
 	/*
 	 * @state:

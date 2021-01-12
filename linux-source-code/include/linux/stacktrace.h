@@ -4,7 +4,6 @@
 
 #include <linux/types.h>
 #include <asm/errno.h>
-#include <linux/rh_kabi.h>
 
 struct task_struct;
 struct pt_regs;
@@ -22,22 +21,6 @@ unsigned int stack_trace_save_tsk(struct task_struct *task,
 unsigned int stack_trace_save_regs(struct pt_regs *regs, unsigned long *store,
 				   unsigned int size, unsigned int skipnr);
 unsigned int stack_trace_save_user(unsigned long *store, unsigned int size);
-
-/*
- * RHEL KABI whilelisted structure and functions.
- */
-struct stack_trace {
-	unsigned int nr_entries, max_entries;
-	unsigned long *entries;
-	int skip;	/* input argument: How many entries to skip */
-	RH_KABI_RESERVE(1);
-	RH_KABI_RESERVE(2);
-};
-
-extern void save_stack_trace(struct stack_trace *trace);
-extern void save_stack_trace_tsk(struct task_struct *tsk,
-				struct stack_trace *trace);
-extern void print_stack_trace(struct stack_trace *trace, int spaces);
 
 /* Internal interfaces. Do not use in generic code */
 #ifdef CONFIG_ARCH_STACKWALK
@@ -78,25 +61,21 @@ void arch_stack_walk_user(stack_trace_consume_fn consume_entry, void *cookie,
 			  const struct pt_regs *regs);
 
 #else /* CONFIG_ARCH_STACKWALK */
+struct stack_trace {
+	unsigned int nr_entries, max_entries;
+	unsigned long *entries;
+	int skip;	/* input argument: How many entries to skip */
+};
+
+extern void save_stack_trace(struct stack_trace *trace);
 extern void save_stack_trace_regs(struct pt_regs *regs,
 				  struct stack_trace *trace);
+extern void save_stack_trace_tsk(struct task_struct *tsk,
+				struct stack_trace *trace);
 extern int save_stack_trace_tsk_reliable(struct task_struct *tsk,
 					 struct stack_trace *trace);
-
-#ifdef CONFIG_USER_STACKTRACE_SUPPORT
 extern void save_stack_trace_user(struct stack_trace *trace);
-#else
-# define save_stack_trace_user(trace)              do { } while (0)
-#endif
 #endif /* !CONFIG_ARCH_STACKWALK */
-
-#else /* !CONFIG_STACKTRACE */
-# define save_stack_trace(trace)			do { } while (0)
-# define save_stack_trace_tsk(tsk, trace)		do { } while (0)
-# define save_stack_trace_user(trace)			do { } while (0)
-# define print_stack_trace(trace, spaces)		do { } while (0)
-# define snprint_stack_trace(buf, size, trace, spaces)	do { } while (0)
-# define save_stack_trace_tsk_reliable(tsk, trace)	({ -ENOSYS; })
 #endif /* CONFIG_STACKTRACE */
 
 #if defined(CONFIG_STACKTRACE) && defined(CONFIG_HAVE_RELIABLE_STACKTRACE)

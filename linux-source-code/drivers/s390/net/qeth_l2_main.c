@@ -288,12 +288,11 @@ static void qeth_l2_stop_card(struct qeth_card *card)
 	}
 	if (card->state == CARD_STATE_HARDSETUP) {
 		qeth_drain_output_queues(card);
-		cancel_delayed_work_sync(&card->buffer_reclaim_work);
+		qeth_clear_working_pool_list(card);
 		card->state = CARD_STATE_DOWN;
 	}
 
 	qeth_qdio_clear_card(card, 0);
-	qeth_clear_working_pool_list(card);
 	flush_workqueue(card->event_wq);
 	card->info.mac_bits &= ~QETH_LAYER2_MAC_REGISTERED;
 	card->info.promisc_mode = 0;
@@ -317,19 +316,29 @@ static int qeth_l2_process_inbound_buffer(struct qeth_card *card,
 			*done = 1;
 			break;
 		}
-
-		if (hdr->hdr.l2.id == QETH_HEADER_TYPE_LAYER2) {
+		switch (hdr->hdr.l2.id) {
+		case QETH_HEADER_TYPE_LAYER2:
 			skb->protocol = eth_type_trans(skb, skb->dev);
 			qeth_rx_csum(card, skb, hdr->hdr.l2.flags[1]);
 			len = skb->len;
 			napi_gro_receive(&card->napi, skb);
-		} else {
-			skb_push(skb, sizeof(*hdr));
-			skb_copy_to_linear_data(skb, hdr, sizeof(*hdr));
-			len = skb->len;
-			card->osn_info.data_cb(skb);
+			break;
+		case QETH_HEADER_TYPE_OSN:
+			if (IS_OSN(card)) {
+				skb_push(skb, sizeof(struct qeth_hdr));
+				skb_copy_to_linear_data(skb, hdr,
+						sizeof(struct qeth_hdr));
+				len = skb->len;
+				card->osn_info.data_cb(skb);
+				break;
+			}
+			/* Else, fall through */
+		default:
+			dev_kfree_skb_any(skb);
+			QETH_CARD_TEXT(card, 3, "inbunkno");
+			QETH_DBF_HEX(CTRL, 3, hdr, sizeof(*hdr));
+			continue;
 		}
-
 		work_done++;
 		budget--;
 		QETH_CARD_STAT_INC(card, rx_packets);
@@ -605,8 +614,7 @@ static netdev_tx_t qeth_l2_hard_start_xmit(struct sk_buff *skb,
 }
 
 static u16 qeth_l2_select_queue(struct net_device *dev, struct sk_buff *skb,
-				struct net_device *sb_dev,
-				select_queue_fallback_t fallback)
+				struct net_device *sb_dev)
 {
 	struct qeth_card *card = dev->ml_priv;
 
@@ -757,6 +765,14 @@ add_napi:
 	return rc;
 }
 
+static int qeth_l2_start_ipassists(struct qeth_card *card)
+{
+	/* configure isolation level */
+	if (qeth_set_access_ctrl_online(card, 0))
+		return -ENODEV;
+	return 0;
+}
+
 static void qeth_l2_trace_features(struct qeth_card *card)
 {
 	/* Set BridgePort features */
@@ -787,6 +803,13 @@ static int qeth_l2_set_online(struct ccwgroup_device *gdev)
 		goto out_remove;
 	}
 
+	if (qeth_is_diagass_supported(card, QETH_DIAGS_CMD_TRAP)) {
+		if (card->info.hwtrap &&
+		    qeth_hw_trap(card, QETH_DIAGS_TRAP_ARM))
+			card->info.hwtrap = 0;
+	} else
+		card->info.hwtrap = 0;
+
 	mutex_lock(&card->sbp_lock);
 	qeth_bridgeport_query_support(card);
 	if (card->options.sbp.supported_funcs)
@@ -810,6 +833,18 @@ static int qeth_l2_set_online(struct ccwgroup_device *gdev)
 	/* softsetup */
 	QETH_CARD_TEXT(card, 2, "softsetp");
 
+	if (IS_OSD(card) || IS_OSX(card)) {
+		rc = qeth_l2_start_ipassists(card);
+		if (rc)
+			goto out_remove;
+	}
+
+	rc = qeth_init_qdio_queues(card);
+	if (rc) {
+		QETH_CARD_TEXT_(card, 2, "6err%d", rc);
+		rc = -ENODEV;
+		goto out_remove;
+	}
 	card->state = CARD_STATE_SOFTSETUP;
 
 	qeth_set_allowed_threads(card, 0xffffffff, 0);
@@ -1133,12 +1168,6 @@ static void qeth_bridge_state_change_worker(struct work_struct *work)
 		NULL
 	};
 
-	/* Role should not change by itself, but if it did, */
-	/* information from the hardware is authoritative.  */
-	mutex_lock(&data->card->sbp_lock);
-	data->card->options.sbp.role = entry->role;
-	mutex_unlock(&data->card->sbp_lock);
-
 	snprintf(env_locrem, sizeof(env_locrem), "BRIDGEPORT=statechange");
 	snprintf(env_role, sizeof(env_role), "ROLE=%s",
 		(entry->role == QETH_SBP_ROLE_NONE) ? "none" :
@@ -1164,6 +1193,10 @@ static void qeth_bridge_state_change(struct qeth_card *card,
 	int extrasize;
 
 	QETH_CARD_TEXT(card, 2, "brstchng");
+	if (qports->num_entries == 0) {
+		QETH_CARD_TEXT(card, 2, "BPempty");
+		return;
+	}
 	if (qports->entry_length != sizeof(struct qeth_sbp_port_entry)) {
 		QETH_CARD_TEXT_(card, 2, "BPsz%04x", qports->entry_length);
 		return;

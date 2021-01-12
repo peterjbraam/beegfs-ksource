@@ -92,6 +92,7 @@ userptr_mn_invalidate_range_start(struct mmu_notifier *_mn,
 	struct i915_mmu_notifier *mn =
 		container_of(_mn, struct i915_mmu_notifier, mn);
 	struct interval_tree_node *it;
+	struct mutex *unlock = NULL;
 	unsigned long end;
 	int ret = 0;
 
@@ -128,14 +129,33 @@ userptr_mn_invalidate_range_start(struct mmu_notifier *_mn,
 		}
 		spin_unlock(&mn->lock);
 
+		if (!unlock) {
+			unlock = &mn->mm->i915->drm.struct_mutex;
+
+			switch (mutex_trylock_recursive(unlock)) {
+			default:
+			case MUTEX_TRYLOCK_FAILED:
+				if (mutex_lock_killable_nested(unlock, I915_MM_SHRINKER)) {
+					i915_gem_object_put(obj);
+					return -EINTR;
+				}
+				/* fall through */
+			case MUTEX_TRYLOCK_SUCCESS:
+				break;
+
+			case MUTEX_TRYLOCK_RECURSIVE:
+				unlock = ERR_PTR(-EEXIST);
+				break;
+			}
+		}
+
 		ret = i915_gem_object_unbind(obj,
-					     I915_GEM_OBJECT_UNBIND_ACTIVE |
-					     I915_GEM_OBJECT_UNBIND_BARRIER);
+					     I915_GEM_OBJECT_UNBIND_ACTIVE);
 		if (ret == 0)
-			ret = __i915_gem_object_put_pages(obj);
+			ret = __i915_gem_object_put_pages(obj, I915_MM_SHRINKER);
 		i915_gem_object_put(obj);
 		if (ret)
-			return ret;
+			goto unlock;
 
 		spin_lock(&mn->lock);
 
@@ -147,6 +167,10 @@ userptr_mn_invalidate_range_start(struct mmu_notifier *_mn,
 		it = interval_tree_iter_first(&mn->objects, range->start, end);
 	}
 	spin_unlock(&mn->lock);
+
+unlock:
+	if (!IS_ERR_OR_NULL(unlock))
+		mutex_unlock(unlock);
 
 	return ret;
 
@@ -461,36 +485,31 @@ __i915_gem_userptr_get_pages_worker(struct work_struct *_work)
 	if (pvec != NULL) {
 		struct mm_struct *mm = obj->userptr.mm->mm;
 		unsigned int flags = 0;
-		int locked = 0;
 
 		if (!i915_gem_object_is_readonly(obj))
 			flags |= FOLL_WRITE;
 
 		ret = -EFAULT;
 		if (mmget_not_zero(mm)) {
+			down_read(&mm->mmap_sem);
 			while (pinned < npages) {
-				if (!locked) {
-					down_read(&mm->mmap_sem);
-					locked = 1;
-				}
 				ret = get_user_pages_remote
 					(work->task, mm,
 					 obj->userptr.ptr + pinned * PAGE_SIZE,
 					 npages - pinned,
 					 flags,
-					 pvec + pinned, NULL, &locked);
+					 pvec + pinned, NULL, NULL);
 				if (ret < 0)
 					break;
 
 				pinned += ret;
 			}
-			if (locked)
-				up_read(&mm->mmap_sem);
+			up_read(&mm->mmap_sem);
 			mmput(mm);
 		}
 	}
 
-	mutex_lock_nested(&obj->mm.lock, I915_MM_GET_PAGES);
+	mutex_lock(&obj->mm.lock);
 	if (obj->userptr.work == &work->work) {
 		struct sg_table *pages = ERR_PTR(ret);
 
@@ -600,6 +619,14 @@ static int i915_gem_userptr_get_pages(struct drm_i915_gem_object *obj)
 				      GFP_KERNEL |
 				      __GFP_NORETRY |
 				      __GFP_NOWARN);
+		/*
+		 * Using __get_user_pages_fast() with a read-only
+		 * access is questionable. A read-only page may be
+		 * COW-broken, and then this might end up giving
+		 * the wrong side of the COW..
+		 *
+		 * We may or may not care.
+		 */
 		if (pvec) /* defer to worker if malloc fails */
 			pinned = __get_user_pages_fast(obj->userptr.ptr,
 						       num_pages,
@@ -752,7 +779,6 @@ i915_gem_userptr_ioctl(struct drm_device *dev,
 		       void *data,
 		       struct drm_file *file)
 {
-	static struct lock_class_key lock_class;
 	struct drm_i915_private *dev_priv = to_i915(dev);
 	struct drm_i915_gem_userptr *args = data;
 	struct drm_i915_gem_object *obj;
@@ -780,11 +806,14 @@ i915_gem_userptr_ioctl(struct drm_device *dev,
 		return -EFAULT;
 
 	if (args->flags & I915_USERPTR_READ_ONLY) {
+		struct i915_address_space *vm;
+
 		/*
 		 * On almost all of the older hw, we cannot tell the GPU that
 		 * a page is readonly.
 		 */
-		if (!dev_priv->gt.vm->has_read_only)
+		vm = dev_priv->kernel_context->vm;
+		if (!vm || !vm->has_read_only)
 			return -ENODEV;
 	}
 
@@ -793,7 +822,7 @@ i915_gem_userptr_ioctl(struct drm_device *dev,
 		return -ENOMEM;
 
 	drm_gem_private_object_init(dev, &obj->base, args->user_size);
-	i915_gem_object_init(obj, &i915_gem_userptr_ops, &lock_class);
+	i915_gem_object_init(obj, &i915_gem_userptr_ops);
 	obj->read_domains = I915_GEM_DOMAIN_CPU;
 	obj->write_domain = I915_GEM_DOMAIN_CPU;
 	i915_gem_object_set_cache_coherency(obj, I915_CACHE_LLC);

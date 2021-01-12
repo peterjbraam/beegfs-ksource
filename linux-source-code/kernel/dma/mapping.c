@@ -16,17 +16,6 @@
 #include <linux/vmalloc.h>
 
 /*
- * Avoid KABI breakage due to struct device opacity change when relocating
- * dma_set_mask/dma_set_coherent_mask/dma_get_required_mask definitions
- * from arch/powerpc/kernel/dma.c to here
- */
-#ifdef CONFIG_PPC64
-#include RH_KABI_FAKE_INCLUDE(<linux/cred.h>)
-#include RH_KABI_FAKE_INCLUDE(<linux/seq_file.h>)
-#include RH_KABI_FAKE_INCLUDE(<asm/iommu.h>)
-#endif
-
-/*
  * Managed DMA API
  */
 struct dma_devres {
@@ -123,8 +112,23 @@ int dma_common_get_sgtable(struct device *dev, struct sg_table *sgt,
 		 void *cpu_addr, dma_addr_t dma_addr, size_t size,
 		 unsigned long attrs)
 {
-	struct page *page = virt_to_page(cpu_addr);
+	struct page *page;
 	int ret;
+
+	if (!dev_is_dma_coherent(dev)) {
+		unsigned long pfn;
+
+		if (!IS_ENABLED(CONFIG_ARCH_HAS_DMA_COHERENT_TO_PFN))
+			return -ENXIO;
+
+		/* If the PFN is not valid, we do not have a struct page */
+		pfn = arch_dma_coherent_to_pfn(dev, cpu_addr, dma_addr);
+		if (!pfn_valid(pfn))
+			return -ENXIO;
+		page = pfn_to_page(pfn);
+	} else {
+		page = virt_to_page(cpu_addr);
+	}
 
 	ret = sg_alloc_table(sgt, 1, GFP_KERNEL);
 	if (!ret)
@@ -150,7 +154,7 @@ int dma_get_sgtable_attrs(struct device *dev, struct sg_table *sgt,
 	const struct dma_map_ops *ops = get_dma_ops(dev);
 
 	if (dma_is_direct(ops))
-		return dma_direct_get_sgtable(dev, sgt, cpu_addr, dma_addr,
+		return dma_common_get_sgtable(dev, sgt, cpu_addr, dma_addr,
 				size, attrs);
 	if (!ops->get_sgtable)
 		return -ENXIO;
@@ -165,6 +169,8 @@ EXPORT_SYMBOL(dma_get_sgtable_attrs);
  */
 pgprot_t dma_pgprot(struct device *dev, pgprot_t prot, unsigned long attrs)
 {
+	if (force_dma_unencrypted(dev))
+		prot = pgprot_decrypted(prot);
 	if (dev_is_dma_coherent(dev) ||
 	    (IS_ENABLED(CONFIG_DMA_NONCOHERENT_CACHE_SYNC) &&
              (attrs & DMA_ATTR_NON_CONSISTENT)))
@@ -188,6 +194,7 @@ int dma_common_mmap(struct device *dev, struct vm_area_struct *vma,
 	unsigned long user_count = vma_pages(vma);
 	unsigned long count = PAGE_ALIGN(size) >> PAGE_SHIFT;
 	unsigned long off = vma->vm_pgoff;
+	unsigned long pfn;
 	int ret = -ENXIO;
 
 	vma->vm_page_prot = dma_pgprot(dev, vma->vm_page_prot, attrs);
@@ -198,8 +205,19 @@ int dma_common_mmap(struct device *dev, struct vm_area_struct *vma,
 	if (off >= count || user_count > count - off)
 		return -ENXIO;
 
-	return remap_pfn_range(vma, vma->vm_start,
-			page_to_pfn(virt_to_page(cpu_addr)) + vma->vm_pgoff,
+	if (!dev_is_dma_coherent(dev)) {
+		if (!IS_ENABLED(CONFIG_ARCH_HAS_DMA_COHERENT_TO_PFN))
+			return -ENXIO;
+
+		/* If the PFN is not valid, we do not have a struct page */
+		pfn = arch_dma_coherent_to_pfn(dev, cpu_addr, dma_addr);
+		if (!pfn_valid(pfn))
+			return -ENXIO;
+	} else {
+		pfn = page_to_pfn(virt_to_page(cpu_addr));
+	}
+
+	return remap_pfn_range(vma, vma->vm_start, pfn + vma->vm_pgoff,
 			user_count << PAGE_SHIFT, vma->vm_page_prot);
 #else
 	return -ENXIO;
@@ -217,8 +235,12 @@ bool dma_can_mmap(struct device *dev)
 {
 	const struct dma_map_ops *ops = get_dma_ops(dev);
 
-	if (dma_is_direct(ops))
-		return dma_direct_can_mmap(dev);
+	if (dma_is_direct(ops)) {
+		return IS_ENABLED(CONFIG_MMU) &&
+		       (dev_is_dma_coherent(dev) ||
+			IS_ENABLED(CONFIG_ARCH_HAS_DMA_COHERENT_TO_PFN));
+	}
+
 	return ops->mmap != NULL;
 }
 EXPORT_SYMBOL_GPL(dma_can_mmap);
@@ -243,7 +265,7 @@ int dma_mmap_attrs(struct device *dev, struct vm_area_struct *vma,
 	const struct dma_map_ops *ops = get_dma_ops(dev);
 
 	if (dma_is_direct(ops))
-		return dma_direct_mmap(dev, vma, cpu_addr, dma_addr, size,
+		return dma_common_mmap(dev, vma, cpu_addr, dma_addr, size,
 				attrs);
 	if (!ops->mmap)
 		return -ENXIO;

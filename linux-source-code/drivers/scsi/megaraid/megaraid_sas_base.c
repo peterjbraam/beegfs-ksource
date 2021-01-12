@@ -1,22 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Linux MegaRAID driver for SAS based RAID controllers
  *
  *  Copyright (c) 2003-2013  LSI Corporation
  *  Copyright (c) 2013-2016  Avago Technologies
  *  Copyright (c) 2016-2018  Broadcom Inc.
- *
- *  This program is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU General Public License
- *  as published by the Free Software Foundation; either version 2
- *  of the License, or (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
  *  Authors: Broadcom Inc.
  *           Sreenivas Bagalkote
@@ -93,7 +81,7 @@ int smp_affinity_enable = 1;
 module_param(smp_affinity_enable, int, 0444);
 MODULE_PARM_DESC(smp_affinity_enable, "SMP affinity feature enable/disable Default: enable(1)");
 
-static int rdpq_enable = 1;
+int rdpq_enable = 1;
 module_param(rdpq_enable, int, 0444);
 MODULE_PARM_DESC(rdpq_enable, "Allocate reply queue in chunks for large queue depth enable/disable Default: enable(1)");
 
@@ -101,7 +89,7 @@ unsigned int dual_qdepth_disable;
 module_param(dual_qdepth_disable, int, 0444);
 MODULE_PARM_DESC(dual_qdepth_disable, "Disable dual queue depth feature. Default: 0");
 
-static unsigned int scmd_timeout = MEGASAS_DEFAULT_CMD_TIMEOUT;
+unsigned int scmd_timeout = MEGASAS_DEFAULT_CMD_TIMEOUT;
 module_param(scmd_timeout, int, 0444);
 MODULE_PARM_DESC(scmd_timeout, "scsi command timeout (10-90s), default 90s. See megasas_reset_timer.");
 
@@ -145,6 +133,24 @@ static void megasas_get_pd_info(struct megasas_instance *instance,
  */
 static struct pci_device_id megasas_pci_table[] = {
 
+	{PCI_DEVICE(PCI_VENDOR_ID_LSI_LOGIC, PCI_DEVICE_ID_LSI_SAS1064R)},
+	/* xscale IOP */
+	{PCI_DEVICE(PCI_VENDOR_ID_LSI_LOGIC, PCI_DEVICE_ID_LSI_SAS1078R)},
+	/* ppc IOP */
+	{PCI_DEVICE(PCI_VENDOR_ID_LSI_LOGIC, PCI_DEVICE_ID_LSI_SAS1078DE)},
+	/* ppc IOP */
+	{PCI_DEVICE(PCI_VENDOR_ID_LSI_LOGIC, PCI_DEVICE_ID_LSI_SAS1078GEN2)},
+	/* gen2*/
+	{PCI_DEVICE(PCI_VENDOR_ID_LSI_LOGIC, PCI_DEVICE_ID_LSI_SAS0079GEN2)},
+	/* gen2*/
+	{PCI_DEVICE(PCI_VENDOR_ID_LSI_LOGIC, PCI_DEVICE_ID_LSI_SAS0073SKINNY)},
+	/* skinny*/
+	{PCI_DEVICE(PCI_VENDOR_ID_LSI_LOGIC, PCI_DEVICE_ID_LSI_SAS0071SKINNY)},
+	/* skinny*/
+	{PCI_DEVICE(PCI_VENDOR_ID_LSI_LOGIC, PCI_DEVICE_ID_LSI_VERDE_ZCR)},
+	/* xscale IOP, vega */
+	{PCI_DEVICE(PCI_VENDOR_ID_DELL, PCI_DEVICE_ID_DELL_PERC5)},
+	/* xscale IOP */
 	{PCI_DEVICE(PCI_VENDOR_ID_LSI_LOGIC, PCI_DEVICE_ID_LSI_FUSION)},
 	/* Fusion */
 	{PCI_DEVICE(PCI_VENDOR_ID_LSI_LOGIC, PCI_DEVICE_ID_LSI_PLASMA)},
@@ -1976,9 +1982,9 @@ static void megasas_set_fw_assisted_qd(struct scsi_device *sdev,
 
 	if (is_target_prop) {
 		tgt_device_qd = le32_to_cpu(instance->tgt_prop->device_qdepth);
-		if (tgt_device_qd)
-			device_qd = min(instance->host->can_queue,
-					(int)tgt_device_qd);
+		if (tgt_device_qd &&
+		    (tgt_device_qd <= instance->host->can_queue))
+			device_qd = tgt_device_qd;
 	}
 
 	if (instance->enable_sdev_max_qd && interface_type != UNKNOWN_DRIVE)
@@ -2981,10 +2987,9 @@ megasas_dump_sys_regs(void __iomem *reg_set, char *buf)
 	u32 __iomem *reg = (u32 __iomem *)reg_set;
 
 	for (i = 0; i < sz / sizeof(u32); i++) {
-		bytes_wrote += scnprintf(loc + bytes_wrote,
-					 PAGE_SIZE - bytes_wrote,
-					 "%08x: %08x\n", (i * 4),
-					 readl(&reg[i]));
+		bytes_wrote += snprintf(loc + bytes_wrote, PAGE_SIZE,
+					"%08x: %08x\n", (i * 4),
+					readl(&reg[i]));
 	}
 	return bytes_wrote;
 }
@@ -3417,8 +3422,8 @@ static struct scsi_host_template megasas_template = {
 	.eh_timed_out = megasas_reset_timer,
 	.shost_attrs = megaraid_host_attrs,
 	.bios_param = megasas_bios_param,
-	.use_clustering = ENABLE_CLUSTERING,
 	.change_queue_depth = scsi_change_queue_depth,
+	.max_segment_size = 0xffffffff,
 };
 
 /**
@@ -8226,8 +8231,8 @@ megasas_mgmt_fw_ioctl(struct megasas_instance *instance,
 			"return -EBUSY from %s %d cmd 0x%x opcode 0x%x cmd->cmd_status_drv 0x%x\n",
 			 __func__, __LINE__, cmd->frame->hdr.cmd, opcode,
 			 cmd->cmd_status_drv);
-		error = -EBUSY;
-		goto out;
+			error = -EBUSY;
+			goto out;
 	}
 
 	cmd->sync_cmd = 0;

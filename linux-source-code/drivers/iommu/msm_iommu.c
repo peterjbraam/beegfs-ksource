@@ -1,23 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* Copyright (c) 2010-2011, Code Aurora Forum. All rights reserved.
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 and
- * only version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
- * 02110-1301, USA.
+ * Author: Stepan Moskovchenko <stepanm@codeaurora.org>
  */
 
 #define pr_fmt(fmt)	KBUILD_MODNAME ": " fmt
 #include <linux/kernel.h>
-#include <linux/module.h>
+#include <linux/init.h>
 #include <linux/platform_device.h>
 #include <linux/errno.h>
 #include <linux/io.h>
@@ -32,7 +21,7 @@
 #include <linux/of_iommu.h>
 
 #include <asm/cacheflush.h>
-#include <asm/sizes.h>
+#include <linux/sizes.h>
 
 #include "msm_iommu_hw-8xxx.h"
 #include "msm_iommu.h"
@@ -404,20 +393,15 @@ static int msm_iommu_add_device(struct device *dev)
 	struct msm_iommu_dev *iommu;
 	struct iommu_group *group;
 	unsigned long flags;
-	int ret = 0;
 
 	spin_lock_irqsave(&msm_iommu_lock, flags);
-
 	iommu = find_iommu_for_dev(dev);
+	spin_unlock_irqrestore(&msm_iommu_lock, flags);
+
 	if (iommu)
 		iommu_device_link(&iommu->iommu, dev);
 	else
-		ret = -ENODEV;
-
-	spin_unlock_irqrestore(&msm_iommu_lock, flags);
-
-	if (ret)
-		return ret;
+		return -ENODEV;
 
 	group = iommu_group_get_for_dev(dev);
 	if (IS_ERR(group))
@@ -434,12 +418,11 @@ static void msm_iommu_remove_device(struct device *dev)
 	unsigned long flags;
 
 	spin_lock_irqsave(&msm_iommu_lock, flags);
-
 	iommu = find_iommu_for_dev(dev);
+	spin_unlock_irqrestore(&msm_iommu_lock, flags);
+
 	if (iommu)
 		iommu_device_unlink(&iommu->iommu, dev);
-
-	spin_unlock_irqrestore(&msm_iommu_lock, flags);
 
 	iommu_group_remove_device(dev);
 }
@@ -474,10 +457,10 @@ static int msm_iommu_attach_dev(struct iommu_domain *domain, struct device *dev)
 				master->num =
 					msm_iommu_alloc_ctx(iommu->context_map,
 							    0, iommu->ncb);
-					if (IS_ERR_VALUE(master->num)) {
-						ret = -ENODEV;
-						goto fail;
-					}
+				if (IS_ERR_VALUE(master->num)) {
+					ret = -ENODEV;
+					goto fail;
+				}
 				config_mids(iommu, master);
 				__program_context(iommu->base, master->num,
 						  priv);
@@ -521,7 +504,7 @@ fail:
 }
 
 static int msm_iommu_map(struct iommu_domain *domain, unsigned long iova,
-			 phys_addr_t pa, size_t len, int prot, gfp_t gfp)
+			 phys_addr_t pa, size_t len, int prot)
 {
 	struct msm_priv *priv = to_msm_priv(domain);
 	unsigned long flags;
@@ -783,7 +766,6 @@ static int msm_iommu_probe(struct platform_device *pdev)
 
 	iommu->irq = platform_get_irq(pdev, 0);
 	if (iommu->irq < 0) {
-		dev_err(iommu->dev, "could not get iommu irq\n");
 		ret = -ENODEV;
 		goto fail;
 	}
@@ -883,16 +865,5 @@ static int __init msm_iommu_driver_init(void)
 
 	return ret;
 }
-
-static void __exit msm_iommu_driver_exit(void)
-{
-	platform_driver_unregister(&msm_iommu_driver);
-}
-
 subsys_initcall(msm_iommu_driver_init);
-module_exit(msm_iommu_driver_exit);
 
-IOMMU_OF_DECLARE(msm_iommu_of, "qcom,apq8064-iommu");
-
-MODULE_LICENSE("GPL v2");
-MODULE_AUTHOR("Stepan Moskovchenko <stepanm@codeaurora.org>");

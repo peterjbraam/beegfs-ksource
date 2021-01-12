@@ -28,8 +28,6 @@
 #include "dm_services.h"
 #include "dc.h"
 
-#include "dcn10_init.h"
-
 #include "resource.h"
 #include "include/irq_service_interface.h"
 #include "dcn10_resource.h"
@@ -181,14 +179,6 @@ enum dcn10_clk_src_array_id {
 	.reg_name[id] = BASE(mm ## block ## id ## _ ## reg_name ## _BASE_IDX) + \
 					mm ## block ## id ## _ ## reg_name
 
-#define VUPDATE_SRII(reg_name, block, id)\
-	.reg_name[id] = BASE(mm ## reg_name ## 0 ## _ ## block ## id ## _BASE_IDX) + \
-					mm ## reg_name ## 0 ## _ ## block ## id
-
-/* set field/register/bitfield name */
-#define SFRB(field_name, reg_name, bitfield, post_fix)\
-	.field_name = reg_name ## __ ## bitfield ## post_fix
-
 /* NBIO */
 #define NBIO_BASE_INNER(seg) \
 	NBIF_BASE__INST0_SEG ## seg
@@ -329,14 +319,6 @@ static const struct dcn10_link_enc_mask le_mask = {
 		LINK_ENCODER_MASK_SH_LIST_DCN10(_MASK)
 };
 
-static const struct dce110_aux_registers_shift aux_shift = {
-	DCN10_AUX_MASK_SH_LIST(__SHIFT)
-};
-
-static const struct dce110_aux_registers_mask aux_mask = {
-	DCN10_AUX_MASK_SH_LIST(_MASK)
-};
-
 #define ipp_regs(id)\
 [id] = {\
 	IPP_REG_LIST_DCN10(id),\
@@ -427,13 +409,11 @@ static const struct dcn_mpc_registers mpc_regs = {
 };
 
 static const struct dcn_mpc_shift mpc_shift = {
-	MPC_COMMON_MASK_SH_LIST_DCN1_0(__SHIFT),\
-	SFRB(CUR_VUPDATE_LOCK_SET, CUR0_VUPDATE_LOCK_SET0, CUR0_VUPDATE_LOCK_SET, __SHIFT)
+	MPC_COMMON_MASK_SH_LIST_DCN1_0(__SHIFT)
 };
 
 static const struct dcn_mpc_mask mpc_mask = {
-	MPC_COMMON_MASK_SH_LIST_DCN1_0(_MASK),\
-	SFRB(CUR_VUPDATE_LOCK_SET, CUR0_VUPDATE_LOCK_SET0, CUR0_VUPDATE_LOCK_SET, _MASK)
+	MPC_COMMON_MASK_SH_LIST_DCN1_0(_MASK),
 };
 
 #define tg_regs(id)\
@@ -490,28 +470,6 @@ static const struct dcn_hubbub_shift hubbub_shift = {
 static const struct dcn_hubbub_mask hubbub_mask = {
 		HUBBUB_MASK_SH_LIST_DCN10(_MASK)
 };
-
-static int map_transmitter_id_to_phy_instance(
-	enum transmitter transmitter)
-{
-	switch (transmitter) {
-	case TRANSMITTER_UNIPHY_A:
-		return 0;
-	break;
-	case TRANSMITTER_UNIPHY_B:
-		return 1;
-	break;
-	case TRANSMITTER_UNIPHY_C:
-		return 2;
-	break;
-	case TRANSMITTER_UNIPHY_D:
-		return 3;
-	break;
-	default:
-		ASSERT(0);
-		return 0;
-	}
-}
 
 #define clk_src_regs(index, pllid)\
 [index] = {\
@@ -684,10 +642,7 @@ struct dce_aux *dcn10_aux_engine_create(
 
 	dce110_aux_engine_construct(aux_engine, ctx, inst,
 				    SW_AUX_TIMEOUT_PERIOD_MULTIPLIER * AUX_TIMEOUT_PERIOD,
-				    &aux_engine_regs[inst],
-					&aux_mask,
-					&aux_shift,
-					ctx->dc->caps.extended_aux_timeout_support);
+				    &aux_engine_regs[inst]);
 
 	return &aux_engine->base;
 }
@@ -796,18 +751,14 @@ struct link_encoder *dcn10_link_encoder_create(
 {
 	struct dcn10_link_encoder *enc10 =
 		kzalloc(sizeof(struct dcn10_link_encoder), GFP_KERNEL);
-	int link_regs_id;
 
 	if (!enc10)
 		return NULL;
 
-	link_regs_id =
-		map_transmitter_id_to_phy_instance(enc_init_data->transmitter);
-
 	dcn10_link_encoder_construct(enc10,
 				      enc_init_data,
 				      &link_enc_feature,
-				      &link_enc_regs[link_regs_id],
+				      &link_enc_regs[enc_init_data->transmitter],
 				      &link_enc_aux_regs[enc_init_data->channel - 1],
 				      &link_enc_hpd_regs[enc_init_data->hpd_source],
 				      &le_shift,
@@ -931,7 +882,7 @@ static struct pp_smu_funcs *dcn10_pp_smu_create(struct dc_context *ctx)
 	return pp_smu;
 }
 
-static void dcn10_resource_destruct(struct dcn10_resource_pool *pool)
+static void destruct(struct dcn10_resource_pool *pool)
 {
 	unsigned int i;
 
@@ -1178,7 +1129,7 @@ static void dcn10_destroy_resource_pool(struct resource_pool **pool)
 {
 	struct dcn10_resource_pool *dcn10_pool = TO_DCN10_RES_POOL(*pool);
 
-	dcn10_resource_destruct(dcn10_pool);
+	destruct(dcn10_pool);
 	kfree(dcn10_pool);
 	*pool = NULL;
 }
@@ -1200,6 +1151,7 @@ static enum dc_status dcn10_validate_global(struct dc *dc, struct dc_state *cont
 	bool video_large = false;
 	bool desktop_large = false;
 	bool dcc_disabled = false;
+	bool mpo_enabled = false;
 
 	for (i = 0; i < context->stream_count; i++) {
 		if (context->stream_status[i].plane_count == 0)
@@ -1207,6 +1159,9 @@ static enum dc_status dcn10_validate_global(struct dc *dc, struct dc_state *cont
 
 		if (context->stream_status[i].plane_count > 2)
 			return DC_FAIL_UNSUPPORTED_1;
+
+		if (context->stream_status[i].plane_count > 1)
+			mpo_enabled = true;
 
 		for (j = 0; j < context->stream_status[i].plane_count; j++) {
 			struct dc_plane_state *plane =
@@ -1230,6 +1185,10 @@ static enum dc_status dcn10_validate_global(struct dc *dc, struct dc_state *cont
 			}
 		}
 	}
+
+	/* Disable MPO in multi-display configurations. */
+	if (context->stream_count > 1 && mpo_enabled)
+		return DC_FAIL_UNSUPPORTED_1;
 
 	/*
 	 * Workaround: On DCN10 there is UMC issue that causes underflow when
@@ -1317,7 +1276,7 @@ static uint32_t read_pipe_fuses(struct dc_context *ctx)
 	return value;
 }
 
-static bool dcn10_resource_construct(
+static bool construct(
 	uint8_t num_virtual_links,
 	struct dc *dc,
 	struct dcn10_resource_pool *pool)
@@ -1357,8 +1316,6 @@ static bool dcn10_resource_construct(
 	dc->caps.max_slave_planes = 1;
 	dc->caps.is_apu = true;
 	dc->caps.post_blend_color_processing = false;
-	dc->caps.extended_aux_timeout_support = false;
-
 	/* Raven DP PHY HBR2 eye diagram pattern is not stable. Use TP4 */
 	dc->caps.force_dp_tps4_for_cp2520 = true;
 
@@ -1604,7 +1561,7 @@ static bool dcn10_resource_construct(
 
 fail:
 
-	dcn10_resource_destruct(pool);
+	destruct(pool);
 
 	return false;
 }
@@ -1619,7 +1576,7 @@ struct resource_pool *dcn10_create_resource_pool(
 	if (!pool)
 		return NULL;
 
-	if (dcn10_resource_construct(init_data->num_virtual_links, dc, pool))
+	if (construct(init_data->num_virtual_links, dc, pool))
 		return &pool->base;
 
 	kfree(pool);

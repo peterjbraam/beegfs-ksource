@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Berkeley Packet Filter based traffic classifier
  *
@@ -6,10 +7,6 @@
  * ematches.
  *
  * (C) 2013 Daniel Borkmann <dborkman@redhat.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/module.h>
@@ -22,8 +19,6 @@
 #include <net/rtnetlink.h>
 #include <net/pkt_cls.h>
 #include <net/sock.h>
-
-#include <linux/rh_features.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Daniel Borkmann <dborkman@redhat.com>");
@@ -399,8 +394,6 @@ static int cls_bpf_prog_from_efd(struct nlattr **tb, struct cls_bpf_prog *prog,
 			return -ENOMEM;
 		}
 	}
-
-	rh_mark_used_feature("eBPF/cls");
 
 	prog->bpf_ops = NULL;
 	prog->bpf_name = name;

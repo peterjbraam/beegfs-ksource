@@ -1,11 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * fs/kernfs/kernfs-internal.h - kernfs internal header file
  *
  * Copyright (c) 2001-3 Patrick Mochel
  * Copyright (c) 2007 SUSE Linux Products GmbH
  * Copyright (c) 2007, 2013 Tejun Heo <teheo@suse.de>
- *
- * This file is released under the GPLv2.
  */
 
 #ifndef __KERNFS_INTERNAL_H
@@ -17,6 +16,7 @@
 #include <linux/xattr.h>
 
 #include <linux/kernfs.h>
+#include <linux/fs_context.h>
 
 struct kernfs_iattrs {
 	kuid_t			ia_uid;
@@ -80,7 +80,7 @@ static inline struct kernfs_node *kernfs_dentry_node(struct dentry *dentry)
 }
 
 extern const struct super_operations kernfs_sops;
-extern struct kmem_cache *kernfs_node_cache;
+extern struct kmem_cache *kernfs_node_cache, *kernfs_iattrs_cache;
 
 /*
  * inode.c

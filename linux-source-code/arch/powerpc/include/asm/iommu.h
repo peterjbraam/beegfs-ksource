@@ -1,21 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Copyright (C) 2001 Mike Corrigan & Dave Engebretsen, IBM Corporation
  * Rewrite, cleanup:
  * Copyright (C) 2004 Olof Johansson <olof@lixom.net>, IBM Corporation
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
 #ifndef _ASM_IOMMU_H
@@ -30,6 +17,7 @@
 #include <asm/machdep.h>
 #include <asm/types.h>
 #include <asm/pci-bridge.h>
+#include <asm/asm-const.h>
 
 #define IOMMU_PAGE_SHIFT_4K      12
 #define IOMMU_PAGE_SIZE_4K       (ASM_CONST(1) << IOMMU_PAGE_SHIFT_4K)
@@ -60,15 +48,16 @@ struct iommu_table_ops {
 	 * returns old TCE and DMA direction mask.
 	 * @tce is a physical address.
 	 */
-	int (*exchange)(struct iommu_table *tbl,
+	int (*xchg_no_kill)(struct iommu_table *tbl,
 			long index,
 			unsigned long *hpa,
-			enum dma_data_direction *direction);
-	/* Real mode */
-	int (*exchange_rm)(struct iommu_table *tbl,
-			long index,
-			unsigned long *hpa,
-			enum dma_data_direction *direction);
+			enum dma_data_direction *direction,
+			bool realmode);
+
+	void (*tce_kill)(struct iommu_table *tbl,
+			unsigned long index,
+			unsigned long pages,
+			bool realmode);
 
 	__be64 *(*useraddrptr)(struct iommu_table *tbl, long index, bool alloc);
 #endif
@@ -78,19 +67,6 @@ struct iommu_table_ops {
 	unsigned long (*get)(struct iommu_table *tbl, long index);
 	void (*flush)(struct iommu_table *tbl);
 	void (*free)(struct iommu_table *tbl);
-
-#ifdef CONFIG_IOMMU_API
-	RH_KABI_EXTEND(int (*xchg_no_kill)(struct iommu_table *tbl,
-					   long index,
-					   unsigned long *hpa,
-					   enum dma_data_direction *direction,
-					   bool realmode);)
-
-	RH_KABI_EXTEND(void (*tce_kill)(struct iommu_table *tbl,
-					unsigned long index,
-					unsigned long pages,
-					bool realmode);)
-#endif
 };
 
 /* These are used by VIO */
@@ -136,6 +112,8 @@ struct iommu_table {
 	struct iommu_table_ops *it_ops;
 	struct kref    it_kref;
 	int it_nid;
+	unsigned long it_reserved_start; /* Start of not-DMA-able (MMIO) area */
+	unsigned long it_reserved_end;
 };
 
 #define IOMMU_TABLE_USERSPACE_ENTRY_RO(tbl, entry) \
@@ -174,8 +152,9 @@ extern int iommu_tce_table_put(struct iommu_table *tbl);
 /* Initializes an iommu_table based in values set in the passed-in
  * structure
  */
-extern struct iommu_table *iommu_init_table(struct iommu_table * tbl,
-					    int nid);
+extern struct iommu_table *iommu_init_table(struct iommu_table *tbl,
+		int nid, unsigned long res_start, unsigned long res_end);
+
 #define IOMMU_TABLE_GROUP_MAX_TABLES	2
 
 struct iommu_table_group;
@@ -344,14 +323,6 @@ extern bool iommu_fixed_is_weak;
 #endif
 
 extern const struct dma_map_ops dma_iommu_ops;
-
-static inline unsigned long device_to_mask(struct device *dev)
-{
-	if (dev->dma_mask && *dev->dma_mask)
-		return *dev->dma_mask;
-	/* Assume devices without mask can take 32 bit addresses */
-	return 0xfffffffful;
-}
 
 #endif /* __KERNEL__ */
 #endif /* _ASM_IOMMU_H */

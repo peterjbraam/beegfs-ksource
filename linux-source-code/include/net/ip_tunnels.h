@@ -100,6 +100,28 @@ struct ip_tunnel_prl_entry {
 };
 
 struct metadata_dst;
+/* A fan overlay /8 (250.0.0.0/8, for example) maps to exactly one /16
+ * underlay (10.88.0.0/16, for example).  Multiple local addresses within
+ * the /16 may be used, but a particular overlay may not span
+ * multiple underlay subnets.
+ *
+ * We store one underlay, indexed by the overlay's high order octet.
+ */
+#define FAN_OVERLAY_CNT		256
+
+struct ip_fan_map {
+	__be32			underlay;
+	__be32			overlay;
+	u16			underlay_prefix;
+	u16			overlay_prefix;
+	u32			overlay_mask;
+	struct list_head	list;
+	struct rcu_head		rcu;
+};
+
+struct ip_tunnel_fan {
+	struct list_head	fan_maps;
+};
 
 struct ip_tunnel {
 	struct ip_tunnel __rcu	*next;
@@ -137,12 +159,18 @@ struct ip_tunnel {
 #endif
 	struct ip_tunnel_prl_entry __rcu *prl;	/* potential router list */
 	unsigned int		prl_count;	/* # of entries in PRL */
+	struct ip_tunnel_fan	fan;
 	unsigned int		ip_tnl_net_id;
 	struct gro_cells	gro_cells;
 	__u32			fwmark;
 	bool			collect_md;
 	bool			ignore_df;
 };
+
+static inline int fan_has_map(const struct ip_tunnel_fan *fan)
+{
+	return !list_empty(&fan->fan_maps);
+}
 
 struct tnl_ptk_info {
 	__be16 flags;
@@ -241,7 +269,7 @@ static inline void ip_tunnel_init_flow(struct flowi4 *fl4,
 				       int proto,
 				       __be32 daddr, __be32 saddr,
 				       __be32 key, __u8 tos, int oif,
-				       __u32 mark)
+				       __u32 mark, __u32 tun_inner_hash)
 {
 	memset(fl4, 0, sizeof(*fl4));
 	fl4->flowi4_oif = oif;
@@ -251,6 +279,7 @@ static inline void ip_tunnel_init_flow(struct flowi4 *fl4,
 	fl4->flowi4_proto = proto;
 	fl4->fl4_gre_key = key;
 	fl4->flowi4_mark = mark;
+	fl4->flowi4_multipath_hash = tun_inner_hash;
 }
 
 int ip_tunnel_init(struct net_device *dev);
@@ -292,6 +321,7 @@ struct ip_tunnel_encap_ops {
 	size_t (*encap_hlen)(struct ip_tunnel_encap *e);
 	int (*build_header)(struct sk_buff *skb, struct ip_tunnel_encap *e,
 			    u8 *protocol, struct flowi4 *fl4);
+	int (*err_handler)(struct sk_buff *skb, u32 info);
 };
 
 #define MAX_IPTUN_ENCAP_OPS 8

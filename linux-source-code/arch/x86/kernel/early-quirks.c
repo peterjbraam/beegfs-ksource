@@ -28,6 +28,37 @@
 #include <asm/irq_remapping.h>
 #include <asm/early_ioremap.h>
 
+static void __init early_pci_clear_msi(int bus, int slot, int func)
+{
+	int pos;
+	u16 ctrl;
+
+	if (likely(!pci_early_clear_msi))
+		return;
+
+	pr_info_once("Clearing MSI/MSI-X enable bits early in boot (quirk)\n");
+
+	pos = pci_early_find_cap(bus, slot, func, PCI_CAP_ID_MSI);
+	if (pos) {
+		ctrl = read_pci_config_16(bus, slot, func, pos + PCI_MSI_FLAGS);
+		ctrl &= ~PCI_MSI_FLAGS_ENABLE;
+		write_pci_config_16(bus, slot, func, pos + PCI_MSI_FLAGS, ctrl);
+
+		/* Read again to flush previous write */
+		ctrl = read_pci_config_16(bus, slot, func, pos + PCI_MSI_FLAGS);
+	}
+
+	pos = pci_early_find_cap(bus, slot, func, PCI_CAP_ID_MSIX);
+	if (pos) {
+		ctrl = read_pci_config_16(bus, slot, func, pos + PCI_MSIX_FLAGS);
+		ctrl &= ~PCI_MSIX_FLAGS_ENABLE;
+		write_pci_config_16(bus, slot, func, pos + PCI_MSIX_FLAGS, ctrl);
+
+		/* Read again to flush previous write */
+		ctrl = read_pci_config_16(bus, slot, func, pos + PCI_MSIX_FLAGS);
+	}
+}
+
 static void __init fix_hypertransport_config(int num, int slot, int func)
 {
 	u32 htcfg;
@@ -338,6 +369,18 @@ static resource_size_t __init gen3_stolen_base(int num, int slot, int func,
 	return bsm & INTEL_BSM_MASK;
 }
 
+static resource_size_t __init gen11_stolen_base(int num, int slot, int func,
+						resource_size_t stolen_size)
+{
+	u64 bsm;
+
+	bsm = read_pci_config(num, slot, func, INTEL_GEN11_BSM_DW0);
+	bsm &= INTEL_BSM_MASK;
+	bsm |= (u64)read_pci_config(num, slot, func, INTEL_GEN11_BSM_DW1) << 32;
+
+	return bsm;
+}
+
 static resource_size_t __init i830_stolen_size(int num, int slot, int func)
 {
 	u16 gmch_ctrl;
@@ -498,6 +541,11 @@ static const struct intel_early_ops chv_early_ops __initconst = {
 	.stolen_size = chv_stolen_size,
 };
 
+static const struct intel_early_ops gen11_early_ops __initconst = {
+	.stolen_base = gen11_stolen_base,
+	.stolen_size = gen9_stolen_size,
+};
+
 static const struct pci_device_id intel_early_ids[] __initconst = {
 	INTEL_I830_IDS(&i830_early_ops),
 	INTEL_I845G_IDS(&i845_early_ops),
@@ -530,6 +578,9 @@ static const struct pci_device_id intel_early_ids[] __initconst = {
 	INTEL_CFL_IDS(&gen9_early_ops),
 	INTEL_GLK_IDS(&gen9_early_ops),
 	INTEL_CNL_IDS(&gen9_early_ops),
+	INTEL_ICL_11_IDS(&gen11_early_ops),
+	INTEL_EHL_IDS(&gen11_early_ops),
+	INTEL_TGL_12_IDS(&gen11_early_ops),
 };
 
 struct resource intel_graphics_stolen_res __ro_after_init = DEFINE_RES_MEM(0, 0);
@@ -690,10 +741,15 @@ static struct chipset early_qrk[] __initdata = {
 	 */
 	{ PCI_VENDOR_ID_INTEL, 0x0f00,
 		PCI_CLASS_BRIDGE_HOST, PCI_ANY_ID, 0, force_disable_hpet},
+	{ PCI_VENDOR_ID_INTEL, 0x3e20,
+		PCI_CLASS_BRIDGE_HOST, PCI_ANY_ID, 0, force_disable_hpet},
 	{ PCI_VENDOR_ID_INTEL, 0x3ec4,
+		PCI_CLASS_BRIDGE_HOST, PCI_ANY_ID, 0, force_disable_hpet},
+	{ PCI_VENDOR_ID_INTEL, 0x8a12,
 		PCI_CLASS_BRIDGE_HOST, PCI_ANY_ID, 0, force_disable_hpet},
 	{ PCI_VENDOR_ID_BROADCOM, 0x4331,
 	  PCI_CLASS_NETWORK_OTHER, PCI_ANY_ID, 0, apple_airport_reset},
+	{ PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0, early_pci_clear_msi},
 	{}
 };
 
@@ -746,6 +802,10 @@ static int __init check_dev_quirk(int num, int slot, int func)
 				    PCI_HEADER_TYPE);
 
 	if ((type & 0x7f) == PCI_HEADER_TYPE_BRIDGE) {
+		/* pci_early_clear_msi scans the buses differently. */
+		if (pci_early_clear_msi)
+			return -1;
+
 		sec = read_pci_config_byte(num, slot, func, PCI_SECONDARY_BUS);
 		if (sec > num)
 			early_pci_scan_bus(sec);
@@ -772,8 +832,13 @@ static void __init early_pci_scan_bus(int bus)
 
 void __init early_quirks(void)
 {
+	int bus;
+
 	if (!early_pci_allowed())
 		return;
 
 	early_pci_scan_bus(0);
+	/* pci_early_clear_msi scans more buses. */
+	for (bus = 1; pci_early_clear_msi && bus < 256; bus++)
+		early_pci_scan_bus(bus);
 }

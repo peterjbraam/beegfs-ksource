@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-only
 config FUSE_FS
 	tristate "FUSE (Filesystem in Userspace) support"
 	select FS_POSIX_ACL
@@ -33,7 +34,7 @@ config VIRTIO_FS
 	select VIRTIO
 	help
 	  The Virtio Filesystem allows guests to mount file systems from the
-	  host.
+          host.
 
 	  If you want to share files between guests or with the host, answer Y
-	  or M.
+          or M.

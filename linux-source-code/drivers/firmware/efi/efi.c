@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * efi.c - EFI subsystem
  *
@@ -9,8 +10,6 @@
  * allowing the efivarfs to be mounted or the efivars module to be loaded.
  * The existance of /sys/firmware/efi may also be used by userspace to
  * determine that the system supports EFI.
- *
- * This file is released under the GPLv2.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -31,7 +30,8 @@
 #include <linux/acpi.h>
 #include <linux/ucs2_string.h>
 #include <linux/memblock.h>
-#include <linux/kernel.h>
+#include <linux/security.h>
+#include <linux/bsearch.h>
 
 #include <asm/early_ioremap.h>
 
@@ -41,11 +41,9 @@ struct efi __read_mostly efi = {
 	.acpi20			= EFI_INVALID_TABLE_ADDR,
 	.smbios			= EFI_INVALID_TABLE_ADDR,
 	.smbios3		= EFI_INVALID_TABLE_ADDR,
-	.sal_systab		= EFI_INVALID_TABLE_ADDR,
 	.boot_info		= EFI_INVALID_TABLE_ADDR,
 	.hcdp			= EFI_INVALID_TABLE_ADDR,
 	.uga			= EFI_INVALID_TABLE_ADDR,
-	.uv_systab		= EFI_INVALID_TABLE_ADDR,
 	.fw_vendor		= EFI_INVALID_TABLE_ADDR,
 	.runtime		= EFI_INVALID_TABLE_ADDR,
 	.config_table		= EFI_INVALID_TABLE_ADDR,
@@ -56,38 +54,8 @@ struct efi __read_mostly efi = {
 	.tpm_log		= EFI_INVALID_TABLE_ADDR,
 	.tpm_final_log		= EFI_INVALID_TABLE_ADDR,
 	.mem_reserve		= EFI_INVALID_TABLE_ADDR,
-#ifdef CONFIG_LOAD_UEFI_KEYS
-	.mokvar_table		= EFI_INVALID_TABLE_ADDR,
-#endif
 };
 EXPORT_SYMBOL(efi);
-
-static unsigned long *efi_tables[] = {
-	&efi.mps,
-	&efi.acpi,
-	&efi.acpi20,
-	&efi.smbios,
-	&efi.smbios3,
-	&efi.sal_systab,
-	&efi.boot_info,
-	&efi.hcdp,
-	&efi.uga,
-	&efi.uv_systab,
-	&efi.fw_vendor,
-	&efi.runtime,
-	&efi.config_table,
-	&efi.esrt,
-	&efi.properties_table,
-	&efi.mem_attr_table,
-#ifdef CONFIG_EFI_RCI2_TABLE
-	&rci2_table_phys,
-#endif
-	&efi.tpm_log,
-	&efi.tpm_final_log,
-#ifdef CONFIG_LOAD_UEFI_KEYS
-	&efi.mokvar_table,
-#endif
-};
 
 struct mm_struct efi_mm = {
 	.mm_rb			= RB_ROOT,
@@ -114,11 +82,6 @@ bool efi_runtime_disabled(void)
 	return disable_runtime;
 }
 
-bool __pure __efi_soft_reserve_enabled(void)
-{
-	return !efi_enabled(EFI_MEM_NO_SOFT_RESERVE);
-}
-
 static int __init parse_efi_cmdline(char *str)
 {
 	if (!str) {
@@ -131,9 +94,6 @@ static int __init parse_efi_cmdline(char *str)
 
 	if (parse_option_str(str, "noruntime"))
 		disable_runtime = true;
-
-	if (parse_option_str(str, "nosoftreserve"))
-		set_bit(EFI_MEM_NO_SOFT_RESERVE, &efi.flags);
 
 	return 0;
 }
@@ -258,12 +218,12 @@ static void generic_ops_unregister(void)
 	efivars_unregister(&generic_efivars);
 }
 
-#if IS_ENABLED(CONFIG_ACPI)
+#ifdef CONFIG_EFI_CUSTOM_SSDT_OVERLAYS
 #define EFIVAR_SSDT_NAME_MAX	16
 static char efivar_ssdt[EFIVAR_SSDT_NAME_MAX] __initdata;
 static int __init efivar_ssdt_setup(char *str)
 {
-	int ret = kernel_is_locked_down("Modifying ACPI tables");
+	int ret = security_locked_down(LOCKDOWN_ACPI_TABLES);
 
 	if (ret)
 		return ret;
@@ -308,6 +268,9 @@ static __init int efivar_ssdt_load(void)
 	void *data;
 	int ret;
 
+	if (!efivar_ssdt[0])
+		return 0;
+
 	ret = efivar_init(efivar_ssdt_iter, &entries, true, &entries);
 
 	list_for_each_entry_safe(entry, aux, &entries, list) {
@@ -334,7 +297,7 @@ static __init int efivar_ssdt_load(void)
 			goto free_data;
 		}
 
-		ret = acpi_load_table(data, NULL);
+		ret = acpi_load_table(data);
 		if (ret) {
 			pr_err("failed to load table: %d\n", ret);
 			goto free_data;
@@ -383,6 +346,7 @@ static int __init efisubsys_init(void)
 	efi_kobj = kobject_create_and_add("efi", firmware_kobj);
 	if (!efi_kobj) {
 		pr_err("efi: Firmware registration failed.\n");
+		destroy_workqueue(efi_rts_wq);
 		return -ENOMEM;
 	}
 
@@ -419,6 +383,7 @@ err_unregister:
 	generic_ops_unregister();
 err_put:
 	kobject_put(efi_kobj);
+	destroy_workqueue(efi_rts_wq);
 	return error;
 }
 
@@ -430,7 +395,7 @@ subsys_initcall(efisubsys_init);
  * and if so, populate the supplied memory descriptor with the appropriate
  * data.
  */
-int __init efi_mem_desc_lookup(u64 phys_addr, efi_memory_desc_t *out_md)
+int efi_mem_desc_lookup(u64 phys_addr, efi_memory_desc_t *out_md)
 {
 	efi_memory_desc_t *md;
 
@@ -447,12 +412,6 @@ int __init efi_mem_desc_lookup(u64 phys_addr, efi_memory_desc_t *out_md)
 	for_each_efi_memory_desc(md) {
 		u64 size;
 		u64 end;
-
-		if (!(md->attribute & EFI_MEMORY_RUNTIME) &&
-		    md->type != EFI_BOOT_SERVICES_DATA &&
-		    md->type != EFI_RUNTIME_SERVICES_DATA) {
-			continue;
-		}
 
 		size = md->num_pages << EFI_PAGE_SHIFT;
 		end = md->phys_addr + size;
@@ -508,7 +467,6 @@ static __initdata efi_config_table_type_t common_tables[] = {
 	{ACPI_TABLE_GUID, "ACPI", &efi.acpi},
 	{HCDP_TABLE_GUID, "HCDP", &efi.hcdp},
 	{MPS_TABLE_GUID, "MPS", &efi.mps},
-	{SAL_SYSTEM_TABLE_GUID, "SALsystab", &efi.sal_systab},
 	{SMBIOS_TABLE_GUID, "SMBIOS", &efi.smbios},
 	{SMBIOS3_TABLE_GUID, "SMBIOS 3.0", &efi.smbios3},
 	{UGA_IO_PROTOCOL_GUID, "UGA", &efi.uga},
@@ -521,9 +479,6 @@ static __initdata efi_config_table_type_t common_tables[] = {
 	{LINUX_EFI_MEMRESERVE_TABLE_GUID, "MEMRESERVE", &efi.mem_reserve},
 #ifdef CONFIG_EFI_RCI2_TABLE
 	{DELLEMC_EFI_RCI2_TABLE_GUID, NULL, &rci2_table_phys},
-#endif
-#ifdef CONFIG_LOAD_UEFI_KEYS
-	{LINUX_EFI_MOK_VARIABLE_TABLE_GUID, "MOKvar", &efi.mokvar_table},
 #endif
 	{NULL_GUID, NULL, NULL},
 };
@@ -592,7 +547,7 @@ int __init efi_config_parse_tables(void *config_tables, int count, int sz,
 
 		seed = early_memremap(efi.rng_seed, sizeof(*seed));
 		if (seed != NULL) {
-			size = seed->size;
+			size = READ_ONCE(seed->size);
 			early_memunmap(seed, sizeof(*seed));
 		} else {
 			pr_err("Could not map UEFI random seed!\n");
@@ -602,7 +557,7 @@ int __init efi_config_parse_tables(void *config_tables, int count, int sz,
 					      sizeof(*seed) + size);
 			if (seed != NULL) {
 				pr_notice("seeding entropy pool\n");
-				add_device_randomness(seed->bits, seed->size);
+				add_bootloader_randomness(seed->bits, size);
 				early_memunmap(seed, sizeof(*seed) + size);
 			} else {
 				pr_err("Could not map UEFI random seed!\n");
@@ -610,7 +565,7 @@ int __init efi_config_parse_tables(void *config_tables, int count, int sz,
 		}
 	}
 
-	if (efi_enabled(EFI_MEMMAP))
+	if (!IS_ENABLED(CONFIG_X86_32) && efi_enabled(EFI_MEMMAP))
 		efi_memattr_init();
 
 	efi_tpm_eventlog_init();
@@ -675,6 +630,9 @@ int __init efi_config_init(efi_config_table_type_t *arch_tables)
 	void *config_tables;
 	int sz, ret;
 
+	if (efi.systab->nr_tables == 0)
+		return 0;
+
 	if (efi_enabled(EFI_64BIT))
 		sz = sizeof(efi_config_table_64_t);
 	else
@@ -733,7 +691,8 @@ static __initdata struct params fdt_params[] = {
 	UEFI_PARAM("MemMap Address", "linux,uefi-mmap-start", mmap),
 	UEFI_PARAM("MemMap Size", "linux,uefi-mmap-size", mmap_size),
 	UEFI_PARAM("MemMap Desc. Size", "linux,uefi-mmap-desc-size", desc_size),
-	UEFI_PARAM("MemMap Desc. Version", "linux,uefi-mmap-desc-ver", desc_ver)
+	UEFI_PARAM("MemMap Desc. Version", "linux,uefi-mmap-desc-ver", desc_ver),
+	UEFI_PARAM("Secure Boot Enabled", "linux,uefi-secure-boot", secure_boot)
 };
 
 static __initdata struct params xen_fdt_params[] = {
@@ -887,16 +846,15 @@ char * __init efi_md_typeattr_format(char *buf, size_t size,
 	if (attr & ~(EFI_MEMORY_UC | EFI_MEMORY_WC | EFI_MEMORY_WT |
 		     EFI_MEMORY_WB | EFI_MEMORY_UCE | EFI_MEMORY_RO |
 		     EFI_MEMORY_WP | EFI_MEMORY_RP | EFI_MEMORY_XP |
-		     EFI_MEMORY_NV | EFI_MEMORY_SP |
+		     EFI_MEMORY_NV |
 		     EFI_MEMORY_RUNTIME | EFI_MEMORY_MORE_RELIABLE))
 		snprintf(pos, size, "|attr=0x%016llx]",
 			 (unsigned long long)attr);
 	else
 		snprintf(pos, size,
-			 "|%3s|%2s|%2s|%2s|%2s|%2s|%2s|%2s|%3s|%2s|%2s|%2s|%2s]",
+			 "|%3s|%2s|%2s|%2s|%2s|%2s|%2s|%3s|%2s|%2s|%2s|%2s]",
 			 attr & EFI_MEMORY_RUNTIME ? "RUN" : "",
 			 attr & EFI_MEMORY_MORE_RELIABLE ? "MR" : "",
-			 attr & EFI_MEMORY_SP      ? "SP"  : "",
 			 attr & EFI_MEMORY_NV      ? "NV"  : "",
 			 attr & EFI_MEMORY_XP      ? "XP"  : "",
 			 attr & EFI_MEMORY_RP      ? "RP"  : "",
@@ -964,54 +922,101 @@ int efi_mem_type(unsigned long phys_addr)
 }
 #endif
 
-int efi_status_to_err(efi_status_t status)
+struct efi_error_code {
+	efi_status_t status;
+	int errno;
+	const char *description;
+};
+
+static const struct efi_error_code efi_error_codes[] = {
+	{ EFI_SUCCESS, 0, "Success"},
+#if 0
+	{ EFI_LOAD_ERROR, -EPICK_AN_ERRNO, "Load Error"},
+#endif
+	{ EFI_INVALID_PARAMETER, -EINVAL, "Invalid Parameter"},
+	{ EFI_UNSUPPORTED, -ENOSYS, "Unsupported"},
+	{ EFI_BAD_BUFFER_SIZE, -ENOSPC, "Bad Buffer Size"},
+	{ EFI_BUFFER_TOO_SMALL, -ENOSPC, "Buffer Too Small"},
+	{ EFI_NOT_READY, -EAGAIN, "Not Ready"},
+	{ EFI_DEVICE_ERROR, -EIO, "Device Error"},
+	{ EFI_WRITE_PROTECTED, -EROFS, "Write Protected"},
+	{ EFI_OUT_OF_RESOURCES, -ENOMEM, "Out of Resources"},
+#if 0
+	{ EFI_VOLUME_CORRUPTED, -EPICK_AN_ERRNO, "Volume Corrupt"},
+	{ EFI_VOLUME_FULL, -EPICK_AN_ERRNO, "Volume Full"},
+	{ EFI_NO_MEDIA, -EPICK_AN_ERRNO, "No Media"},
+	{ EFI_MEDIA_CHANGED, -EPICK_AN_ERRNO, "Media changed"},
+#endif
+	{ EFI_NOT_FOUND, -ENOENT, "Not Found"},
+#if 0
+	{ EFI_ACCESS_DENIED, -EPICK_AN_ERRNO, "Access Denied"},
+	{ EFI_NO_RESPONSE, -EPICK_AN_ERRNO, "No Response"},
+	{ EFI_NO_MAPPING, -EPICK_AN_ERRNO, "No mapping"},
+	{ EFI_TIMEOUT, -EPICK_AN_ERRNO, "Time out"},
+	{ EFI_NOT_STARTED, -EPICK_AN_ERRNO, "Not started"},
+	{ EFI_ALREADY_STARTED, -EPICK_AN_ERRNO, "Already started"},
+#endif
+	{ EFI_ABORTED, -EINTR, "Aborted"},
+#if 0
+	{ EFI_ICMP_ERROR, -EPICK_AN_ERRNO, "ICMP Error"},
+	{ EFI_TFTP_ERROR, -EPICK_AN_ERRNO, "TFTP Error"},
+	{ EFI_PROTOCOL_ERROR, -EPICK_AN_ERRNO, "Protocol Error"},
+	{ EFI_INCOMPATIBLE_VERSION, -EPICK_AN_ERRNO, "Incompatible Version"},
+#endif
+	{ EFI_SECURITY_VIOLATION, -EACCES, "Security Policy Violation"},
+#if 0
+	{ EFI_CRC_ERROR, -EPICK_AN_ERRNO, "CRC Error"},
+	{ EFI_END_OF_MEDIA, -EPICK_AN_ERRNO, "End of Media"},
+	{ EFI_END_OF_FILE, -EPICK_AN_ERRNO, "End of File"},
+	{ EFI_INVALID_LANGUAGE, -EPICK_AN_ERRNO, "Invalid Languages"},
+	{ EFI_COMPROMISED_DATA, -EPICK_AN_ERRNO, "Compromised Data"},
+
+	// warnings
+	{ EFI_WARN_UNKOWN_GLYPH, -EPICK_AN_ERRNO, "Warning Unknown Glyph"},
+	{ EFI_WARN_DELETE_FAILURE, -EPICK_AN_ERRNO, "Warning Delete Failure"},
+	{ EFI_WARN_WRITE_FAILURE, -EPICK_AN_ERRNO, "Warning Write Failure"},
+	{ EFI_WARN_BUFFER_TOO_SMALL, -EPICK_AN_ERRNO, "Warning Buffer Too Small"},
+#endif
+};
+
+static int
+efi_status_cmp_bsearch(const void *key, const void *item)
 {
-	int err;
+	u64 status = (u64)(uintptr_t)key;
+	struct efi_error_code *code = (struct efi_error_code *)item;
 
-	switch (status) {
-	case EFI_SUCCESS:
-		err = 0;
-		break;
-	case EFI_INVALID_PARAMETER:
-		err = -EINVAL;
-		break;
-	case EFI_OUT_OF_RESOURCES:
-		err = -ENOSPC;
-		break;
-	case EFI_DEVICE_ERROR:
-		err = -EIO;
-		break;
-	case EFI_WRITE_PROTECTED:
-		err = -EROFS;
-		break;
-	case EFI_SECURITY_VIOLATION:
-		err = -EACCES;
-		break;
-	case EFI_NOT_FOUND:
-		err = -ENOENT;
-		break;
-	case EFI_ABORTED:
-		err = -EINTR;
-		break;
-	default:
-		err = -EINVAL;
-	}
-
-	return err;
+	if (status < code->status)
+		return -1;
+	if (status > code->status)
+		return 1;
+	return 0;
 }
 
-bool efi_is_table_address(unsigned long phys_addr)
+int efi_status_to_err(efi_status_t status)
 {
-	unsigned int i;
+	struct efi_error_code *found;
+	size_t num = sizeof(efi_error_codes) / sizeof(struct efi_error_code);
 
-	if (phys_addr == EFI_INVALID_TABLE_ADDR)
-		return false;
+	found = bsearch((void *)(uintptr_t)status, efi_error_codes,
+			sizeof(struct efi_error_code), num,
+			efi_status_cmp_bsearch);
+	if (!found)
+		return -EINVAL;
+	return found->errno;
+}
 
-	for (i = 0; i < ARRAY_SIZE(efi_tables); i++)
-		if (*(efi_tables[i]) == phys_addr)
-			return true;
+const char *
+efi_status_to_str(efi_status_t status)
+{
+	struct efi_error_code *found;
+	size_t num = sizeof(efi_error_codes) / sizeof(struct efi_error_code);
 
-	return false;
+	found = bsearch((void *)(uintptr_t)status, efi_error_codes,
+			sizeof(struct efi_error_code), num,
+			efi_status_cmp_bsearch);
+	if (!found)
+		return "Unknown error code";
+	return found->description;
 }
 
 static DEFINE_SPINLOCK(efi_mem_reserve_persistent_lock);

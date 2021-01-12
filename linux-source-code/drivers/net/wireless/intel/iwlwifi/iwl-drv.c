@@ -493,16 +493,6 @@ static void iwl_set_ucode_capabilities(struct iwl_drv *drv, const u8 *data,
 	}
 }
 
-static const char *iwl_reduced_fw_name(struct iwl_drv *drv)
-{
-	const char *name = drv->firmware_name;
-
-	if (strncmp(name, "iwlwifi-", 8) == 0)
-		name += 8;
-
-	return name;
-}
-
 static int iwl_parse_v1_v2_firmware(struct iwl_drv *drv,
 				    const struct firmware *ucode_raw,
 				    struct iwl_firmware_pieces *pieces)
@@ -561,12 +551,12 @@ static int iwl_parse_v1_v2_firmware(struct iwl_drv *drv,
 
 	snprintf(drv->fw.fw_version,
 		 sizeof(drv->fw.fw_version),
-		 "%u.%u.%u.%u%s %s",
+		 "%u.%u.%u.%u%s",
 		 IWL_UCODE_MAJOR(drv->fw.ucode_ver),
 		 IWL_UCODE_MINOR(drv->fw.ucode_ver),
 		 IWL_UCODE_API(drv->fw.ucode_ver),
 		 IWL_UCODE_SERIAL(drv->fw.ucode_ver),
-		 buildstr, iwl_reduced_fw_name(drv));
+		 buildstr);
 
 	/* Verify size of file vs. image size info in file's header */
 
@@ -646,12 +636,12 @@ static int iwl_parse_tlv_firmware(struct iwl_drv *drv,
 
 	snprintf(drv->fw.fw_version,
 		 sizeof(drv->fw.fw_version),
-		 "%u.%u.%u.%u%s %s",
+		 "%u.%u.%u.%u%s",
 		 IWL_UCODE_MAJOR(drv->fw.ucode_ver),
 		 IWL_UCODE_MINOR(drv->fw.ucode_ver),
 		 IWL_UCODE_API(drv->fw.ucode_ver),
 		 IWL_UCODE_SERIAL(drv->fw.ucode_ver),
-		 buildstr, iwl_reduced_fw_name(drv));
+		 buildstr);
 
 	data = ucode->data;
 
@@ -905,13 +895,11 @@ static int iwl_parse_tlv_firmware(struct iwl_drv *drv,
 			if (major >= 35)
 				snprintf(drv->fw.fw_version,
 					 sizeof(drv->fw.fw_version),
-					"%u.%08x.%u %s", major, minor,
-					local_comp, iwl_reduced_fw_name(drv));
+					"%u.%08x.%u", major, minor, local_comp);
 			else
 				snprintf(drv->fw.fw_version,
 					 sizeof(drv->fw.fw_version),
-					"%u.%u.%u %s", major, minor,
-					local_comp, iwl_reduced_fw_name(drv));
+					"%u.%u.%u", major, minor, local_comp);
 			break;
 			}
 		case IWL_UCODE_TLV_FW_DBG_DEST: {
@@ -1467,7 +1455,7 @@ static void iwl_req_fw_callback(const struct firmware *ucode_raw, void *context)
 				kmemdup(pieces->dbg_conf_tlv[i],
 					pieces->dbg_conf_tlv_len[i],
 					GFP_KERNEL);
-			if (!drv->fw.dbg.conf_tlv[i])
+			if (!pieces->dbg_conf_tlv_len[i])
 				goto out_free_fw;
 		}
 	}
@@ -1572,8 +1560,6 @@ static void iwl_req_fw_callback(const struct firmware *ucode_raw, void *context)
 	IWL_INFO(drv, "loaded firmware version %s op_mode %s\n",
 		 drv->fw.fw_version, op->name);
 
-	iwl_dbg_tlv_load_bin(drv->trans->dev, drv->trans);
-
 	/* add this device to the list of devices using this op_mode */
 	list_add_tail(&drv->list, &op->drv);
 
@@ -1650,6 +1636,8 @@ struct iwl_drv *iwl_drv_start(struct iwl_trans *trans)
 	init_completion(&drv->request_firmware_complete);
 	INIT_LIST_HEAD(&drv->list);
 
+	iwl_dbg_tlv_load_bin(drv->trans->dev, drv->trans);
+
 #ifdef CONFIG_IWLWIFI_DEBUGFS
 	/* Create the device debugfs entries. */
 	drv->dbgfs_drv = debugfs_create_dir(dev_name(trans->dev),
@@ -1658,8 +1646,6 @@ struct iwl_drv *iwl_drv_start(struct iwl_trans *trans)
 	/* Create transport layer debugfs dir */
 	drv->trans->dbgfs_dir = debugfs_create_dir("trans", drv->dbgfs_drv);
 #endif
-
-	drv->trans->dbg.domains_bitmap = IWL_TRANS_FW_DBG_DOMAIN(drv->trans);
 
 	ret = iwl_request_firmware(drv, true);
 	if (ret) {
@@ -1830,6 +1816,9 @@ MODULE_PARM_DESC(antenna_coupling,
 
 module_param_named(nvm_file, iwlwifi_mod_params.nvm_file, charp, 0444);
 MODULE_PARM_DESC(nvm_file, "NVM file name");
+
+module_param_named(lar_disable, iwlwifi_mod_params.lar_disable, bool, 0444);
+MODULE_PARM_DESC(lar_disable, "disable LAR functionality (default: N)");
 
 module_param_named(uapsd_disable, iwlwifi_mod_params.uapsd_disable, uint, 0644);
 MODULE_PARM_DESC(uapsd_disable,

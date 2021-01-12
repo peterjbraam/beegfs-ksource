@@ -10,13 +10,12 @@
 #define SMCD_ISM_H
 
 #include <linux/uio.h>
-#include <linux/mutex.h>
 
 #include "smc.h"
 
 struct smcd_dev_list {	/* List of SMCD devices */
 	struct list_head list;
-	struct mutex mutex;	/* Protects list of devices */
+	spinlock_t lock;	/* Protects list of devices */
 };
 
 extern struct smcd_dev_list	smcd_dev_list; /* list of smcd devices */

@@ -23,6 +23,7 @@ struct snd_compr_ops;
  * struct snd_compr_runtime: runtime stream description
  * @state: stream state
  * @ops: pointer to DSP callbacks
+ * @dma_buffer_p: runtime dma buffer pointer
  * @buffer: pointer to kernel buffer, valid only when not in mmap mode or
  *	DSP doesn't implement copy
  * @buffer_size: size of the above buffer
@@ -33,14 +34,11 @@ struct snd_compr_ops;
  * @total_bytes_transferred: cumulative bytes transferred by offload DSP
  * @sleep: poll sleep
  * @private_data: driver private data pointer
- * @dma_area: virtual buffer address
- * @dma_addr: physical buffer address (not accessible from main CPU)
- * @dma_bytes: size of DMA area
- * @dma_buffer_p: runtime dma buffer pointer
  */
 struct snd_compr_runtime {
 	snd_pcm_state_t state;
 	struct snd_compr_ops *ops;
+	struct snd_dma_buffer *dma_buffer_p;
 	void *buffer;
 	u64 buffer_size;
 	u32 fragment_size;
@@ -49,11 +47,6 @@ struct snd_compr_runtime {
 	u64 total_bytes_transferred;
 	wait_queue_head_t sleep;
 	void *private_data;
-
-	unsigned char *dma_area;
-	dma_addr_t dma_addr;
-	size_t dma_bytes;
-	struct snd_dma_buffer *dma_buffer_p;
 };
 
 /**
@@ -66,8 +59,8 @@ struct snd_compr_runtime {
  * @direction: stream direction, playback/recording
  * @metadata_set: metadata set flag, true when set
  * @next_track: has userspace signal next track transition, true when set
+ * @partial_drain: undergoing partial_drain for stream, true when set
  * @private_data: pointer to DSP private data
- * @dma_buffer: allocated buffer if any
  */
 struct snd_compr_stream {
 	const char *name;
@@ -78,8 +71,8 @@ struct snd_compr_stream {
 	enum snd_compr_direction direction;
 	bool metadata_set;
 	bool next_track;
+	bool partial_drain;
 	void *private_data;
-	struct snd_dma_buffer dma_buffer;
 };
 
 /**
@@ -182,40 +175,33 @@ static inline void snd_compr_drain_notify(struct snd_compr_stream *stream)
 	if (snd_BUG_ON(!stream))
 		return;
 
-	stream->runtime->state = SNDRV_PCM_STATE_SETUP;
+	/* for partial_drain case we are back to running state on success */
+	if (stream->partial_drain) {
+		stream->runtime->state = SNDRV_PCM_STATE_RUNNING;
+		stream->partial_drain = false; /* clear this flag as well */
+	} else {
+		stream->runtime->state = SNDRV_PCM_STATE_SETUP;
+	}
 
 	wake_up(&stream->runtime->sleep);
 }
 
 /**
  * snd_compr_set_runtime_buffer - Set the Compress runtime buffer
- * @stream: compress stream to set
+ * @substream: compress substream to set
  * @bufp: the buffer information, NULL to clear
  *
  * Copy the buffer information to runtime buffer when @bufp is non-NULL.
  * Otherwise it clears the current buffer information.
  */
-static inline void
-snd_compr_set_runtime_buffer(struct snd_compr_stream *stream,
-			     struct snd_dma_buffer *bufp)
+static inline void snd_compr_set_runtime_buffer(
+					struct snd_compr_stream *substream,
+					struct snd_dma_buffer *bufp)
 {
-	struct snd_compr_runtime *runtime = stream->runtime;
+	struct snd_compr_runtime *runtime = substream->runtime;
 
-	if (bufp) {
-		runtime->dma_buffer_p = bufp;
-		runtime->dma_area = bufp->area;
-		runtime->dma_addr = bufp->addr;
-		runtime->dma_bytes = bufp->bytes;
-	} else {
-		runtime->dma_buffer_p = NULL;
-		runtime->dma_area = NULL;
-		runtime->dma_addr = 0;
-		runtime->dma_bytes = 0;
-	}
+	runtime->dma_buffer_p = bufp;
 }
-
-int snd_compr_malloc_pages(struct snd_compr_stream *stream, size_t size);
-int snd_compr_free_pages(struct snd_compr_stream *stream);
 
 int snd_compr_stop_error(struct snd_compr_stream *stream,
 			 snd_pcm_state_t state);

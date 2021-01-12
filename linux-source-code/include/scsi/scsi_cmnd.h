@@ -12,8 +12,6 @@
 #include <scsi/scsi_device.h>
 #include <scsi/scsi_request.h>
 
-#include <linux/rh_kabi.h>
-
 struct Scsi_Host;
 struct scsi_driver;
 
@@ -37,7 +35,6 @@ struct scsi_driver;
 struct scsi_data_buffer {
 	struct sg_table table;
 	unsigned length;
-	int resid;
 };
 
 /* embedded in scsi_cmnd */
@@ -66,7 +63,6 @@ struct scsi_pointer {
 
 /* for scmd->state */
 #define SCMD_STATE_COMPLETE	0
-#define SCMD_STATE_INFLIGHT	1
 
 struct scsi_cmnd {
 	struct scsi_request req;
@@ -78,16 +74,6 @@ struct scsi_cmnd {
 	struct rcu_head rcu;
 
 	int eh_eflags;		/* Used by error handlr */
-
-	/*
-	 * A SCSI Command is assigned a nonzero serial_number before passed
-	 * to the driver's queue command function.  The serial_number is
-	 * cleared when scsi_done is entered indicating that the command
-	 * has been completed.  It is a bug for LLDDs to use this number
-	 * for purposes other than printk (and even that is only useful
-	 * for debugging).
-	 */
-	unsigned long serial_number;
 
 	/*
 	 * This is set to jiffies as it was when the command was first
@@ -155,16 +141,6 @@ struct scsi_cmnd {
 	unsigned long state;	/* Command completion state */
 
 	unsigned char tag;	/* SCSI-II queued command tag */
-
-	/* FOR RH USE ONLY
-	 *
-	 * The following padding has been inserted before ABI freeze to
-	 * allow extending the structure while preserving ABI.
-	 */
-	RH_KABI_RESERVE(1)
-	RH_KABI_RESERVE(2)
-	RH_KABI_RESERVE(3)
-	RH_KABI_RESERVE(4)
 };
 
 /*
@@ -216,12 +192,12 @@ static inline unsigned scsi_bufflen(struct scsi_cmnd *cmd)
 
 static inline void scsi_set_resid(struct scsi_cmnd *cmd, int resid)
 {
-	cmd->sdb.resid = resid;
+	cmd->req.resid_len = resid;
 }
 
 static inline int scsi_get_resid(struct scsi_cmnd *cmd)
 {
-	return cmd->sdb.resid;
+	return cmd->req.resid_len;
 }
 
 #define scsi_for_each_sg(cmd, sg, nseg, __i)			\

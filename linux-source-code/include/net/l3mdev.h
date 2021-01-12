@@ -1,23 +1,14 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * include/net/l3mdev.h - L3 master device API
  * Copyright (c) 2015 Cumulus Networks
  * Copyright (c) 2015 David Ahern <dsa@cumulusnetworks.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  */
 #ifndef _NET_L3MDEV_H_
 #define _NET_L3MDEV_H_
 
 #include <net/dst.h>
 #include <net/fib_rules.h>
-
-#include <linux/rh_kabi.h>
-
-struct l3mdev_ops_extended_rh {
-};
 
 /**
  * struct l3mdev_ops - l3mdev operations
@@ -42,15 +33,6 @@ struct l3mdev_ops {
 	/* IPv6 ops */
 	struct dst_entry * (*l3mdev_link_scope_lookup)(const struct net_device *dev,
 						 struct flowi6 *fl6);
-
-	RH_KABI_RESERVE(1)
-	RH_KABI_RESERVE(2)
-	RH_KABI_RESERVE(3)
-	RH_KABI_RESERVE(4)
-	RH_KABI_RESERVE(5)
-	RH_KABI_RESERVE(6)
-	RH_KABI_RESERVE(7)
-	RH_KABI_AUX_EMBED(l3mdev_ops_extended)
 };
 
 #ifdef CONFIG_NET_L3_MASTER_DEV
@@ -113,6 +95,17 @@ struct net_device *l3mdev_master_dev_rcu(const struct net_device *_dev)
 		master = NULL;
 
 	return master;
+}
+
+int l3mdev_master_upper_ifindex_by_index_rcu(struct net *net, int ifindex);
+static inline
+int l3mdev_master_upper_ifindex_by_index(struct net *net, int ifindex)
+{
+	rcu_read_lock();
+	ifindex = l3mdev_master_upper_ifindex_by_index_rcu(net, ifindex);
+	rcu_read_unlock();
+
+	return ifindex;
 }
 
 u32 l3mdev_fib_table_rcu(const struct net_device *dev);
@@ -218,6 +211,17 @@ static inline int l3mdev_master_ifindex(struct net_device *dev)
 }
 
 static inline int l3mdev_master_ifindex_by_index(struct net *net, int ifindex)
+{
+	return 0;
+}
+
+static inline
+int l3mdev_master_upper_ifindex_by_index_rcu(struct net *net, int ifindex)
+{
+	return 0;
+}
+static inline
+int l3mdev_master_upper_ifindex_by_index(struct net *net, int ifindex)
 {
 	return 0;
 }

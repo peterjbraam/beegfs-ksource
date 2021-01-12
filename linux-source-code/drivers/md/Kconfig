@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-only
 #
 # Block device driver configuration
 #
@@ -346,6 +347,20 @@ config DM_ERA
          over time.  Useful for maintaining cache coherency when using
          vendor snapshots.
 
+config DM_CLONE
+       tristate "Clone target (EXPERIMENTAL)"
+       depends on BLK_DEV_DM
+       default n
+       select DM_PERSISTENT_DATA
+       ---help---
+         dm-clone produces a one-to-one copy of an existing, read-only source
+         device into a writable destination device. The cloned device is
+         visible/mountable immediately and the copy of the source device to the
+         destination device happens in the background, in parallel with user
+         I/O.
+
+         If unsure, say N.
+
 config DM_MIRROR
        tristate "Mirror target"
        depends on BLK_DEV_DM
@@ -434,6 +449,27 @@ config DM_DELAY
 	---help---
 	A target that delays reads and/or writes and can send
 	them to different devices.  Useful for testing.
+
+	If unsure, say N.
+
+config DM_DUST
+	tristate "Bad sector simulation target"
+	depends on BLK_DEV_DM
+	---help---
+	A target that simulates bad sector behavior.
+	Useful for testing.
+
+	If unsure, say N.
+
+config DM_INIT
+	bool "DM \"dm-mod.create=\" parameter support"
+	depends on BLK_DEV_DM=y
+	---help---
+	Enable "dm-mod.create=" parameter to create mapped devices at init time.
+	This option is useful to allow mounting rootfs without requiring an
+	initramfs.
+	See Documentation/admin-guide/device-mapper/dm-init.rst for dm-mod.create="..."
+	format.
 
 	If unsure, say N.
 

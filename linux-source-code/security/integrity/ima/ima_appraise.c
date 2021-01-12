@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2011 IBM Corporation
  *
  * Author:
  * Mimi Zohar <zohar@us.ibm.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, version 2 of the License.
  */
 #include <linux/init.h>
 #include <linux/file.h>
@@ -121,6 +118,7 @@ static void ima_set_cache_status(struct integrity_iint_cache *iint,
 		break;
 	case CREDS_CHECK:
 		iint->ima_creds_status = status;
+		break;
 	case FILE_CHECK:
 	case POST_SETATTR:
 		iint->ima_file_status = status;
@@ -356,8 +354,7 @@ int ima_appraise_measurement(enum ima_hooks func,
 			     struct integrity_iint_cache *iint,
 			     struct file *file, const unsigned char *filename,
 			     struct evm_ima_xattr_data *xattr_value,
-			     int xattr_len, int opened,
-			     const struct modsig *modsig)
+			     int xattr_len, const struct modsig *modsig)
 {
 	static const char op[] = "appraise_data";
 	const char *cause = "unknown";
@@ -379,7 +376,7 @@ int ima_appraise_measurement(enum ima_hooks func,
 		cause = iint->flags & IMA_DIGSIG_REQUIRED ?
 				"IMA-signature-required" : "missing-hash";
 		status = INTEGRITY_NOLABEL;
-		if (opened & FILE_CREATED)
+		if (file->f_mode & FMODE_CREATED)
 			iint->flags |= IMA_NEW_FILE;
 		if ((iint->flags & IMA_NEW_FILE) &&
 		    (!(iint->flags & IMA_DIGSIG_REQUIRED) ||

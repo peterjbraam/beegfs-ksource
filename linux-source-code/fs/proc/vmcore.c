@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *	fs/proc/vmcore.c Interface for accessing the crash
  * 				 dump from the system's previous life.
@@ -250,6 +251,7 @@ out_unlock:
 	return ret;
 }
 
+#ifdef CONFIG_MMU
 static int vmcoredd_mmap_dumps(struct vm_area_struct *vma, unsigned long dst,
 			       u64 start, size_t size)
 {
@@ -285,6 +287,7 @@ out_unlock:
 	mutex_unlock(&vmcoredd_mutex);
 	return ret;
 }
+#endif /* CONFIG_MMU */
 #endif /* CONFIG_PROC_VMCORE_DEVICE_DUMP */
 
 /* Read from the ELF header and then the crash dump. On error, negative value is

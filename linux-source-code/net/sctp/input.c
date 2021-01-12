@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* SCTP kernel implementation
  * Copyright (c) 1999-2000 Cisco, Inc.
  * Copyright (c) 1999-2001 Motorola, Inc.
@@ -9,22 +10,6 @@
  * This file is part of the SCTP kernel implementation
  *
  * These functions handle all input from the IP layer into SCTP.
- *
- * This SCTP implementation is free software;
- * you can redistribute it and/or modify it under the terms of
- * the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This SCTP implementation is distributed in the hope that it
- * will be useful, but WITHOUT ANY WARRANTY; without even the implied
- *                 ************************
- * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
- * See the GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with GNU CC; see the file COPYING.  If not, see
- * <http://www.gnu.org/licenses/>.
  *
  * Please send any bug reports or fixes you make to the
  * email address(es):
@@ -216,7 +201,7 @@ int sctp_rcv(struct sk_buff *skb)
 
 	if (!xfrm_policy_check(sk, XFRM_POLICY_IN, skb, family))
 		goto discard_release;
-	nf_reset(skb);
+	nf_reset_ct(skb);
 
 	if (sk_filter(sk, skb))
 		goto discard_release;
@@ -337,7 +322,7 @@ int sctp_backlog_rcv(struct sock *sk, struct sk_buff *skb)
 		bh_lock_sock(sk);
 
 		if (sock_owned_by_user(sk) || !sctp_newsk_ready(sk)) {
-			if (sk_add_backlog(sk, skb, sk->sk_rcvbuf))
+			if (sk_add_backlog(sk, skb, READ_ONCE(sk->sk_rcvbuf)))
 				sctp_chunk_free(chunk);
 			else
 				backloged = 1;
@@ -352,7 +337,7 @@ int sctp_backlog_rcv(struct sock *sk, struct sk_buff *skb)
 			return 0;
 	} else {
 		if (!sctp_newsk_ready(sk)) {
-			if (!sk_add_backlog(sk, skb, sk->sk_rcvbuf))
+			if (!sk_add_backlog(sk, skb, READ_ONCE(sk->sk_rcvbuf)))
 				return 0;
 			sctp_chunk_free(chunk);
 		} else {
@@ -379,7 +364,7 @@ static int sctp_add_backlog(struct sock *sk, struct sk_buff *skb)
 	struct sctp_ep_common *rcvr = chunk->rcvr;
 	int ret;
 
-	ret = sk_add_backlog(sk, skb, sk->sk_rcvbuf);
+	ret = sk_add_backlog(sk, skb, READ_ONCE(sk->sk_rcvbuf));
 	if (!ret) {
 		/* Hold the assoc/ep while hanging on the backlog queue.
 		 * This way, we know structures we need will not disappear
@@ -583,7 +568,7 @@ void sctp_err_finish(struct sock *sk, struct sctp_transport *t)
  * is probably better.
  *
  */
-void sctp_v4_err(struct sk_buff *skb, __u32 info)
+int sctp_v4_err(struct sk_buff *skb, __u32 info)
 {
 	const struct iphdr *iph = (const struct iphdr *)skb->data;
 	const int ihlen = iph->ihl * 4;
@@ -608,7 +593,7 @@ void sctp_v4_err(struct sk_buff *skb, __u32 info)
 	skb->transport_header = savesctp;
 	if (!sk) {
 		__ICMP_INC_STATS(net, ICMP_MIB_INERRORS);
-		return;
+		return -ENOENT;
 	}
 	/* Warning:  The sock lock is held.  Remember to call
 	 * sctp_err_finish!
@@ -662,6 +647,7 @@ void sctp_v4_err(struct sk_buff *skb, __u32 info)
 
 out_unlock:
 	sctp_err_finish(sk, transport);
+	return 0;
 }
 
 /*

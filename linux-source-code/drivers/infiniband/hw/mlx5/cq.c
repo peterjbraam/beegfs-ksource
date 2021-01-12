@@ -167,7 +167,7 @@ static void handle_responder(struct ib_wc *wc, struct mlx5_cqe64 *cqe,
 {
 	enum rdma_link_layer ll = rdma_port_get_link_layer(qp->ibqp.device, 1);
 	struct mlx5_ib_dev *dev = to_mdev(qp->ibqp.device);
-	struct mlx5_ib_srq *srq;
+	struct mlx5_ib_srq *srq = NULL;
 	struct mlx5_ib_wq *wq;
 	u16 wqe_ctr;
 	u8  roce_packet_type;
@@ -179,7 +179,8 @@ static void handle_responder(struct ib_wc *wc, struct mlx5_cqe64 *cqe,
 
 		if (qp->ibqp.xrcd) {
 			msrq = mlx5_cmd_get_srq(dev, be32_to_cpu(cqe->srqn));
-			srq = to_mibsrq(msrq);
+			if (msrq)
+				srq = to_mibsrq(msrq);
 		} else {
 			srq = to_msrq(qp->ibqp.srq);
 		}
@@ -201,7 +202,7 @@ static void handle_responder(struct ib_wc *wc, struct mlx5_cqe64 *cqe,
 	case MLX5_CQE_RESP_WR_IMM:
 		wc->opcode	= IB_WC_RECV_RDMA_WITH_IMM;
 		wc->wc_flags	= IB_WC_WITH_IMM;
-		wc->ex.imm_data = cqe->immediate;
+		wc->ex.imm_data = cqe->imm_inval_pkey;
 		break;
 	case MLX5_CQE_RESP_SEND:
 		wc->opcode   = IB_WC_RECV;
@@ -213,12 +214,12 @@ static void handle_responder(struct ib_wc *wc, struct mlx5_cqe64 *cqe,
 	case MLX5_CQE_RESP_SEND_IMM:
 		wc->opcode	= IB_WC_RECV;
 		wc->wc_flags	= IB_WC_WITH_IMM;
-		wc->ex.imm_data = cqe->immediate;
+		wc->ex.imm_data = cqe->imm_inval_pkey;
 		break;
 	case MLX5_CQE_RESP_SEND_INV:
 		wc->opcode	= IB_WC_RECV;
 		wc->wc_flags	= IB_WC_WITH_INVALIDATE;
-		wc->ex.invalidate_rkey = be32_to_cpu(cqe->inval_rkey);
+		wc->ex.invalidate_rkey = be32_to_cpu(cqe->imm_inval_pkey);
 		break;
 	}
 	wc->src_qp	   = be32_to_cpu(cqe->flags_rqpn) & 0xffffff;
@@ -226,7 +227,7 @@ static void handle_responder(struct ib_wc *wc, struct mlx5_cqe64 *cqe,
 	g = (be32_to_cpu(cqe->flags_rqpn) >> 28) & 3;
 	wc->wc_flags |= g ? IB_WC_GRH : 0;
 	if (unlikely(is_qp1(qp->ibqp.qp_type))) {
-		u16 pkey = be32_to_cpu(cqe->pkey) & 0xffff;
+		u16 pkey = be32_to_cpu(cqe->imm_inval_pkey) & 0xffff;
 
 		ib_find_cached_pkey(&dev->ib_dev, qp->port, pkey,
 				    &wc->pkey_index);
@@ -445,6 +446,9 @@ static int mlx5_poll_one(struct mlx5_ib_cq *cq,
 	struct mlx5_cqe64 *cqe64;
 	struct mlx5_core_qp *mqp;
 	struct mlx5_ib_wq *wq;
+	struct mlx5_sig_err_cqe *sig_err_cqe;
+	struct mlx5_core_mkey *mmkey;
+	struct mlx5_ib_mr *mr;
 	uint8_t opcode;
 	uint32_t qpn;
 	u16 wqe_ctr;
@@ -539,28 +543,26 @@ repoll:
 			}
 		}
 		break;
-	case MLX5_CQE_SIG_ERR: {
-		struct mlx5_sig_err_cqe *sig_err_cqe =
-			(struct mlx5_sig_err_cqe *)cqe64;
-		struct mlx5_core_sig_ctx *sig;
+	case MLX5_CQE_SIG_ERR:
+		sig_err_cqe = (struct mlx5_sig_err_cqe *)cqe64;
 
-		xa_lock(&dev->sig_mrs);
-		sig = xa_load(&dev->sig_mrs,
+		xa_lock(&dev->mdev->priv.mkey_table);
+		mmkey = xa_load(&dev->mdev->priv.mkey_table,
 				mlx5_base_mkey(be32_to_cpu(sig_err_cqe->mkey)));
-		get_sig_err_item(sig_err_cqe, &sig->err_item);
-		sig->sig_err_exists = true;
-		sig->sigerr_count++;
+		mr = to_mibmr(mmkey);
+		get_sig_err_item(sig_err_cqe, &mr->sig->err_item);
+		mr->sig->sig_err_exists = true;
+		mr->sig->sigerr_count++;
 
 		mlx5_ib_warn(dev, "CQN: 0x%x Got SIGERR on key: 0x%x err_type %x err_offset %llx expected %x actual %x\n",
-			     cq->mcq.cqn, sig->err_item.key,
-			     sig->err_item.err_type,
-			     sig->err_item.sig_err_offset,
-			     sig->err_item.expected,
-			     sig->err_item.actual);
+			     cq->mcq.cqn, mr->sig->err_item.key,
+			     mr->sig->err_item.err_type,
+			     mr->sig->err_item.sig_err_offset,
+			     mr->sig->err_item.expected,
+			     mr->sig->err_item.actual);
 
-		xa_unlock(&dev->sig_mrs);
+		xa_unlock(&dev->mdev->priv.mkey_table);
 		goto repoll;
-	}
 	}
 
 	return 0;
@@ -913,8 +915,8 @@ int mlx5_ib_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
 	int entries = attr->cqe;
 	int vector = attr->comp_vector;
 	struct mlx5_ib_dev *dev = to_mdev(ibdev);
-	u32 out[MLX5_ST_SZ_DW(create_cq_out)];
 	struct mlx5_ib_cq *cq = to_mcq(ibcq);
+	u32 out[MLX5_ST_SZ_DW(create_cq_out)];
 	int uninitialized_var(index);
 	int uninitialized_var(inlen);
 	u32 *cqb = NULL;

@@ -87,8 +87,8 @@ int mlx5i_init(struct mlx5_core_dev *mdev,
 	mlx5e_set_netdev_mtu_boundaries(priv);
 	netdev->mtu = netdev->max_mtu;
 
-	mlx5e_build_nic_params(priv, NULL, &priv->rss_params, &priv->channels.params,
-			       netdev->mtu);
+	mlx5e_build_nic_params(mdev, NULL, &priv->rss_params, &priv->channels.params,
+			       priv->max_nch, netdev->mtu);
 	mlx5i_build_nic_params(mdev, &priv->channels.params);
 
 	mlx5e_timestamp_init(priv);
@@ -256,11 +256,6 @@ void mlx5i_destroy_underlay_qp(struct mlx5_core_dev *mdev, struct mlx5_core_qp *
 	mlx5_core_destroy_qp(mdev, qp);
 }
 
-int mlx5i_update_nic_rx(struct mlx5e_priv *priv)
-{
-	return mlx5e_refresh_tirs(priv, true, true);
-}
-
 int mlx5i_create_tis(struct mlx5_core_dev *mdev, u32 underlay_qpn, u32 *tisn)
 {
 	u32 in[MLX5_ST_SZ_DW(create_tis_in)] = {};
@@ -424,28 +419,6 @@ static void mlx5i_cleanup_rx(struct mlx5e_priv *priv)
 	mlx5e_destroy_q_counters(priv);
 }
 
-/* The stats groups order is opposite to the update_stats() order calls */
-static mlx5e_stats_grp_t mlx5i_stats_grps[] = {
-	&MLX5E_STATS_GRP(sw),
-	&MLX5E_STATS_GRP(qcnt),
-	&MLX5E_STATS_GRP(vnic_env),
-	&MLX5E_STATS_GRP(vport),
-	&MLX5E_STATS_GRP(802_3),
-	&MLX5E_STATS_GRP(2863),
-	&MLX5E_STATS_GRP(2819),
-	&MLX5E_STATS_GRP(phy),
-	&MLX5E_STATS_GRP(pcie),
-	&MLX5E_STATS_GRP(per_prio),
-	&MLX5E_STATS_GRP(pme),
-	&MLX5E_STATS_GRP(channels),
-	&MLX5E_STATS_GRP(per_port_buff_congest),
-};
-
-static unsigned int mlx5i_stats_grps_num(struct mlx5e_priv *priv)
-{
-	return ARRAY_SIZE(mlx5i_stats_grps);
-}
-
 static const struct mlx5e_profile mlx5i_nic_profile = {
 	.init		   = mlx5i_init,
 	.cleanup	   = mlx5i_cleanup,
@@ -455,15 +428,13 @@ static const struct mlx5e_profile mlx5i_nic_profile = {
 	.cleanup_rx	   = mlx5i_cleanup_rx,
 	.enable		   = NULL, /* mlx5i_enable */
 	.disable	   = NULL, /* mlx5i_disable */
-	.update_rx	   = mlx5i_update_nic_rx,
+	.update_rx	   = mlx5e_update_nic_rx,
 	.update_stats	   = NULL, /* mlx5i_update_stats */
 	.update_carrier    = NULL, /* no HW update in IB link */
 	.rx_handlers.handle_rx_cqe       = mlx5i_handle_rx_cqe,
 	.rx_handlers.handle_rx_cqe_mpwqe = NULL, /* Not supported */
 	.max_tc		   = MLX5I_MAX_NUM_TC,
 	.rq_groups	   = MLX5E_NUM_RQ_GROUPS(REGULAR),
-	.stats_grps        = mlx5i_stats_grps,
-	.stats_grps_num    = mlx5i_stats_grps_num,
 };
 
 /* mlx5i netdev NDos */
@@ -488,7 +459,7 @@ static int mlx5i_change_mtu(struct net_device *netdev, int new_mtu)
 	new_channels.params = *params;
 	new_channels.params.sw_mtu = new_mtu;
 
-	err = mlx5e_safe_switch_channels(priv, &new_channels, NULL, NULL);
+	err = mlx5e_safe_switch_channels(priv, &new_channels, NULL);
 	if (err)
 		goto out;
 

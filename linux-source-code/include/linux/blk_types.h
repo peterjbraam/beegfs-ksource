@@ -9,7 +9,6 @@
 #include <linux/types.h>
 #include <linux/bvec.h>
 #include <linux/ktime.h>
-#include <linux/rh_kabi.h>
 
 struct bio_set;
 struct bio;
@@ -155,18 +154,6 @@ struct bio {
 	blk_status_t		bi_status;
 	u8			bi_partno;
 
-	/* Number of segments in this BIO after
-	 * physical address coalescing is performed.
-	 */
-	unsigned int		bi_phys_segments;
-
-	/*
-	 * To keep track of the max segment size, we account for the
-	 * sizes of the first and last mergeable segments in this bio.
-	 */
-	unsigned int		bi_seg_front_size;
-	unsigned int		bi_seg_back_size;
-
 	struct bvec_iter	bi_iter;
 
 	atomic_t		__bi_remaining;
@@ -182,6 +169,9 @@ struct bio {
 	 */
 	struct blkcg_gq		*bi_blkg;
 	struct bio_issue	bi_issue;
+#ifdef CONFIG_BLK_CGROUP_IOCOST
+	u64			bi_iocost_cost;
+#endif
 #endif
 	union {
 #if defined(CONFIG_BLK_DEV_INTEGRITY)
@@ -203,10 +193,6 @@ struct bio {
 
 	struct bio_set		*bi_pool;
 
-	RH_KABI_USE(1, u64	bi_iocost_cost)
-	RH_KABI_RESERVE(2)
-	RH_KABI_RESERVE(3)
-
 	/*
 	 * We can inline a number of vecs at the end of the bio, to avoid
 	 * double allocations for a small number of bio_vecs. This member
@@ -220,21 +206,24 @@ struct bio {
 /*
  * bio flags
  */
-#define BIO_NO_PAGE_REF	0	/* don't put release vec pages */
-#define BIO_SEG_VALID	1	/* bi_phys_segments valid */
-#define BIO_CLONED	2	/* doesn't own data */
-#define BIO_BOUNCED	3	/* bio is a bounce bio */
-#define BIO_USER_MAPPED 4	/* contains user pages */
-#define BIO_NULL_MAPPED 5	/* contains invalid user pages */
-#define BIO_QUIET	6	/* Make BIO Quiet */
-#define BIO_CHAIN	7	/* chained bio, ->bi_remaining in effect */
-#define BIO_REFFED	8	/* bio has elevated ->bi_cnt */
-#define BIO_THROTTLED	9	/* This bio has already been subjected to
+enum {
+	BIO_NO_PAGE_REF,	/* don't put release vec pages */
+	BIO_CLONED,		/* doesn't own data */
+	BIO_BOUNCED,		/* bio is a bounce bio */
+	BIO_USER_MAPPED,	/* contains user pages */
+	BIO_NULL_MAPPED,	/* contains invalid user pages */
+	BIO_WORKINGSET,		/* contains userspace workingset pages */
+	BIO_QUIET,		/* Make BIO Quiet */
+	BIO_CHAIN,		/* chained bio, ->bi_remaining in effect */
+	BIO_REFFED,		/* bio has elevated ->bi_cnt */
+	BIO_THROTTLED,		/* This bio has already been subjected to
 				 * throttling rules. Don't do it again. */
-#define BIO_TRACE_COMPLETION 10	/* bio_endio() should trace the final completion
+	BIO_TRACE_COMPLETION,	/* bio_endio() should trace the final completion
 				 * of this bio. */
-#define BIO_QUEUE_ENTERED 11	/* can use blk_queue_enter_live() */
-#define BIO_TRACKED 12		/* set if bio goes through the rq_qos path */
+	BIO_QUEUE_ENTERED,	/* can use blk_queue_enter_live() */
+	BIO_TRACKED,		/* set if bio goes through the rq_qos path */
+	BIO_FLAG_LAST
+};
 
 /* See BVEC_POOL_OFFSET below before adding new flags */
 
@@ -293,7 +282,7 @@ enum req_opf {
 	REQ_OP_DISCARD		= 3,
 	/* securely erase sectors */
 	REQ_OP_SECURE_ERASE	= 5,
-	/* seset a zone write pointer */
+	/* reset a zone write pointer */
 	REQ_OP_ZONE_RESET	= 6,
 	/* write the same sector many times */
 	REQ_OP_WRITE_SAME	= 7,
@@ -301,12 +290,6 @@ enum req_opf {
 	REQ_OP_ZONE_RESET_ALL	= 8,
 	/* write the zero filled sector many times */
 	REQ_OP_WRITE_ZEROES	= 9,
-	/* Open a zone */
-	REQ_OP_ZONE_OPEN	= 10,
-	/* Close a zone */
-	REQ_OP_ZONE_CLOSE	= 11,
-	/* Transition a zone to full */
-	REQ_OP_ZONE_FINISH	= 12,
 
 	/* SCSI passthrough using struct scsi_request */
 	REQ_OP_SCSI_IN		= 32,
@@ -334,6 +317,15 @@ enum req_flag_bits {
 	__REQ_RAHEAD,		/* read ahead, can fail anytime */
 	__REQ_BACKGROUND,	/* background IO */
 	__REQ_NOWAIT,           /* Don't wait if request will block */
+	__REQ_NOWAIT_INLINE,	/* Return would-block error inline */
+	/*
+	 * When a shared kthread needs to issue a bio for a cgroup, doing
+	 * so synchronously can lead to priority inversions as the kthread
+	 * can be trapped waiting for that cgroup.  CGROUP_PUNT flag makes
+	 * submit_bio() punt the actual issuing to a dedicated per-blkcg
+	 * work item to avoid such priority inversions.
+	 */
+	__REQ_CGROUP_PUNT,
 
 	/* command specific flags for REQ_OP_WRITE_ZEROES: */
 	__REQ_NOUNMAP,		/* do not free blocks when zeroing */
@@ -343,15 +335,6 @@ enum req_flag_bits {
 	/* for driver use */
 	__REQ_DRV,
 	__REQ_SWAP,		/* swapping request. */
-
-	/*
-	 * When a shared kthread needs to issue a bio for a cgroup, doing
-	 * so synchronously can lead to priority inversions as the kthread
-	 * can be trapped waiting for that cgroup.  CGROUP_PUNT flag makes
-	 * submit_bio() punt the actual issuing to a dedicated per-blkcg
-	 * work item to avoid such priority inversions.
-	 */
-	__REQ_CGROUP_PUNT,
 	__REQ_NR_BITS,		/* stops here */
 };
 
@@ -369,6 +352,7 @@ enum req_flag_bits {
 #define REQ_RAHEAD		(1ULL << __REQ_RAHEAD)
 #define REQ_BACKGROUND		(1ULL << __REQ_BACKGROUND)
 #define REQ_NOWAIT		(1ULL << __REQ_NOWAIT)
+#define REQ_NOWAIT_INLINE	(1ULL << __REQ_NOWAIT_INLINE)
 #define REQ_CGROUP_PUNT		(1ULL << __REQ_CGROUP_PUNT)
 
 #define REQ_NOUNMAP		(1ULL << __REQ_NOUNMAP)
@@ -433,25 +417,6 @@ static inline bool op_is_discard(unsigned int op)
 	return (op & REQ_OP_MASK) == REQ_OP_DISCARD;
 }
 
-/*
- * Check if a bio or request operation is a zone management operation, with
- * the exception of REQ_OP_ZONE_RESET_ALL which is treated as a special case
- * due to its different handling in the block layer and device response in
- * case of command failure.
- */
-static inline bool op_is_zone_mgmt(enum req_opf op)
-{
-	switch (op & REQ_OP_MASK) {
-	case REQ_OP_ZONE_RESET:
-	case REQ_OP_ZONE_OPEN:
-	case REQ_OP_ZONE_CLOSE:
-	case REQ_OP_ZONE_FINISH:
-		return true;
-	default:
-		return false;
-	}
-}
-
 static inline int op_stat_group(unsigned int op)
 {
 	if (op_is_discard(op))
@@ -461,12 +426,13 @@ static inline int op_stat_group(unsigned int op)
 
 typedef unsigned int blk_qc_t;
 #define BLK_QC_T_NONE		-1U
+#define BLK_QC_T_EAGAIN		-2U
 #define BLK_QC_T_SHIFT		16
 #define BLK_QC_T_INTERNAL	(1U << 31)
 
 static inline bool blk_qc_t_valid(blk_qc_t cookie)
 {
-	return cookie != BLK_QC_T_NONE;
+	return cookie != BLK_QC_T_NONE && cookie != BLK_QC_T_EAGAIN;
 }
 
 static inline unsigned int blk_qc_t_to_queue_num(blk_qc_t cookie)

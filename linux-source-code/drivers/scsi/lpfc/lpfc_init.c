@@ -2300,8 +2300,82 @@ lpfc_get_hba_model_desc(struct lpfc_hba *phba, uint8_t *mdp, uint8_t *descp)
 	vp = &phba->vpd;
 
 	switch (dev_id) {
+	case PCI_DEVICE_ID_FIREFLY:
+		m = (typeof(m)){"LP6000", "PCI",
+				"Obsolete, Unsupported Fibre Channel Adapter"};
+		break;
+	case PCI_DEVICE_ID_SUPERFLY:
+		if (vp->rev.biuRev >= 1 && vp->rev.biuRev <= 3)
+			m = (typeof(m)){"LP7000", "PCI", ""};
+		else
+			m = (typeof(m)){"LP7000E", "PCI", ""};
+		m.function = "Obsolete, Unsupported Fibre Channel Adapter";
+		break;
+	case PCI_DEVICE_ID_DRAGONFLY:
+		m = (typeof(m)){"LP8000", "PCI",
+				"Obsolete, Unsupported Fibre Channel Adapter"};
+		break;
+	case PCI_DEVICE_ID_CENTAUR:
+		if (FC_JEDEC_ID(vp->rev.biuRev) == CENTAUR_2G_JEDEC_ID)
+			m = (typeof(m)){"LP9002", "PCI", ""};
+		else
+			m = (typeof(m)){"LP9000", "PCI", ""};
+		m.function = "Obsolete, Unsupported Fibre Channel Adapter";
+		break;
+	case PCI_DEVICE_ID_RFLY:
+		m = (typeof(m)){"LP952", "PCI",
+				"Obsolete, Unsupported Fibre Channel Adapter"};
+		break;
+	case PCI_DEVICE_ID_PEGASUS:
+		m = (typeof(m)){"LP9802", "PCI-X",
+				"Obsolete, Unsupported Fibre Channel Adapter"};
+		break;
+	case PCI_DEVICE_ID_THOR:
+		m = (typeof(m)){"LP10000", "PCI-X",
+				"Obsolete, Unsupported Fibre Channel Adapter"};
+		break;
+	case PCI_DEVICE_ID_VIPER:
+		m = (typeof(m)){"LPX1000",  "PCI-X",
+				"Obsolete, Unsupported Fibre Channel Adapter"};
+		break;
+	case PCI_DEVICE_ID_PFLY:
+		m = (typeof(m)){"LP982", "PCI-X",
+				"Obsolete, Unsupported Fibre Channel Adapter"};
+		break;
+	case PCI_DEVICE_ID_TFLY:
+		m = (typeof(m)){"LP1050", "PCI-X",
+				"Obsolete, Unsupported Fibre Channel Adapter"};
+		break;
+	case PCI_DEVICE_ID_HELIOS:
+		m = (typeof(m)){"LP11000", "PCI-X2",
+				"Obsolete, Unsupported Fibre Channel Adapter"};
+		break;
+	case PCI_DEVICE_ID_HELIOS_SCSP:
+		m = (typeof(m)){"LP11000-SP", "PCI-X2",
+				"Obsolete, Unsupported Fibre Channel Adapter"};
+		break;
+	case PCI_DEVICE_ID_HELIOS_DCSP:
+		m = (typeof(m)){"LP11002-SP",  "PCI-X2",
+				"Obsolete, Unsupported Fibre Channel Adapter"};
+		break;
+	case PCI_DEVICE_ID_NEPTUNE:
+		m = (typeof(m)){"LPe1000", "PCIe",
+				"Obsolete, Unsupported Fibre Channel Adapter"};
+		break;
+	case PCI_DEVICE_ID_NEPTUNE_SCSP:
+		m = (typeof(m)){"LPe1000-SP", "PCIe",
+				"Obsolete, Unsupported Fibre Channel Adapter"};
+		break;
+	case PCI_DEVICE_ID_NEPTUNE_DCSP:
+		m = (typeof(m)){"LPe1002-SP", "PCIe",
+				"Obsolete, Unsupported Fibre Channel Adapter"};
+		break;
 	case PCI_DEVICE_ID_BMID:
 		m = (typeof(m)){"LP1150", "PCI-X2", "Fibre Channel Adapter"};
+		break;
+	case PCI_DEVICE_ID_BSMB:
+		m = (typeof(m)){"LP111", "PCI-X2",
+				"Obsolete, Unsupported Fibre Channel Adapter"};
 		break;
 	case PCI_DEVICE_ID_ZEPHYR:
 		m = (typeof(m)){"LPe11000", "PCIe", "Fibre Channel Adapter"};
@@ -2318,6 +2392,22 @@ lpfc_get_hba_model_desc(struct lpfc_hba *phba, uint8_t *mdp, uint8_t *descp)
 		break;
 	case PCI_DEVICE_ID_ZSMB:
 		m = (typeof(m)){"LPe111", "PCIe", "Fibre Channel Adapter"};
+		break;
+	case PCI_DEVICE_ID_LP101:
+		m = (typeof(m)){"LP101", "PCI-X",
+				"Obsolete, Unsupported Fibre Channel Adapter"};
+		break;
+	case PCI_DEVICE_ID_LP10000S:
+		m = (typeof(m)){"LP10000-S", "PCI",
+				"Obsolete, Unsupported Fibre Channel Adapter"};
+		break;
+	case PCI_DEVICE_ID_LP11000S:
+		m = (typeof(m)){"LP11000-S", "PCI-X2",
+				"Obsolete, Unsupported Fibre Channel Adapter"};
+		break;
+	case PCI_DEVICE_ID_LPE11000S:
+		m = (typeof(m)){"LPe11000-S", "PCIe",
+				"Obsolete, Unsupported Fibre Channel Adapter"};
 		break;
 	case PCI_DEVICE_ID_SAT:
 		m = (typeof(m)){"LPe12000", "PCIe", "Fibre Channel Adapter"};
@@ -2337,17 +2427,54 @@ lpfc_get_hba_model_desc(struct lpfc_hba *phba, uint8_t *mdp, uint8_t *descp)
 	case PCI_DEVICE_ID_SAT_S:
 		m = (typeof(m)){"LPe12000-S", "PCIe", "Fibre Channel Adapter"};
 		break;
+	case PCI_DEVICE_ID_HORNET:
+		m = (typeof(m)){"LP21000", "PCIe",
+				"Obsolete, Unsupported FCoE Adapter"};
+		GE = 1;
+		break;
+	case PCI_DEVICE_ID_PROTEUS_VF:
+		m = (typeof(m)){"LPev12000", "PCIe IOV",
+				"Obsolete, Unsupported Fibre Channel Adapter"};
+		break;
+	case PCI_DEVICE_ID_PROTEUS_PF:
+		m = (typeof(m)){"LPev12000", "PCIe IOV",
+				"Obsolete, Unsupported Fibre Channel Adapter"};
+		break;
+	case PCI_DEVICE_ID_PROTEUS_S:
+		m = (typeof(m)){"LPemv12002-S", "PCIe IOV",
+				"Obsolete, Unsupported Fibre Channel Adapter"};
+		break;
+	case PCI_DEVICE_ID_TIGERSHARK:
+		oneConnect = 1;
+		m = (typeof(m)){"OCe10100", "PCIe", "FCoE"};
+		break;
+	case PCI_DEVICE_ID_TOMCAT:
+		oneConnect = 1;
+		m = (typeof(m)){"OCe11100", "PCIe", "FCoE"};
+		break;
 	case PCI_DEVICE_ID_FALCON:
 		m = (typeof(m)){"LPSe12002-ML1-E", "PCIe",
 				"EmulexSecure Fibre"};
 		break;
+	case PCI_DEVICE_ID_BALIUS:
+		m = (typeof(m)){"LPVe12002", "PCIe Shared I/O",
+				"Obsolete, Unsupported Fibre Channel Adapter"};
+		break;
 	case PCI_DEVICE_ID_LANCER_FC:
 		m = (typeof(m)){"LPe16000", "PCIe", "Fibre Channel Adapter"};
 		break;
+	case PCI_DEVICE_ID_LANCER_FC_VF:
+		m = (typeof(m)){"LPe16000", "PCIe",
+				"Obsolete, Unsupported Fibre Channel Adapter"};
+		break;
 	case PCI_DEVICE_ID_LANCER_FCOE:
 		oneConnect = 1;
+		m = (typeof(m)){"OCe15100", "PCIe", "FCoE"};
+		break;
+	case PCI_DEVICE_ID_LANCER_FCOE_VF:
+		oneConnect = 1;
 		m = (typeof(m)){"OCe15100", "PCIe",
-				"Obsolete, Unsupported FCoE Adapter"};
+				"Obsolete, Unsupported FCoE"};
 		break;
 	case PCI_DEVICE_ID_LANCER_G6_FC:
 		m = (typeof(m)){"LPe32000", "PCIe", "Fibre Channel Adapter"};
@@ -3967,14 +4094,13 @@ lpfc_new_io_buf(struct lpfc_hba *phba, int num_to_alloc)
 		 * pci bus space for an I/O. The DMA buffer includes the
 		 * number of SGE's necessary to support the sg_tablesize.
 		 */
-		lpfc_ncmd->data = dma_pool_alloc(phba->lpfc_sg_dma_buf_pool,
-				GFP_KERNEL,
-				&lpfc_ncmd->dma_handle);
+		lpfc_ncmd->data = dma_pool_zalloc(phba->lpfc_sg_dma_buf_pool,
+						  GFP_KERNEL,
+						  &lpfc_ncmd->dma_handle);
 		if (!lpfc_ncmd->data) {
 			kfree(lpfc_ncmd);
 			break;
 		}
-		memset(lpfc_ncmd->data, 0, phba->cfg_sg_dma_buf_size);
 
 		if (phba->cfg_xpsgl && !phba->nvmet_support) {
 			INIT_LIST_HEAD(&lpfc_ncmd->dma_sgl_xtra_list);
@@ -5748,7 +5874,7 @@ void lpfc_sli4_async_event_proc(struct lpfc_hba *phba)
 			break;
 		default:
 			lpfc_printf_log(phba, KERN_ERR, LOG_SLI,
-					"1804 Invalid asynchronous event code: "
+					"1804 Invalid asynchrous event code: "
 					"x%x\n", bf_get(lpfc_trailer_code,
 					&cq_event->cqe.mcqe_cmpl));
 			break;
@@ -5859,6 +5985,29 @@ static void lpfc_log_intr_mode(struct lpfc_hba *phba, uint32_t intr_mode)
 		break;
 	}
 	return;
+}
+
+/**
+ * lpfc_cpumask_of_node_init - initalizes cpumask of phba's NUMA node
+ * @phba: Pointer to HBA context object.
+ *
+ **/
+static void
+lpfc_cpumask_of_node_init(struct lpfc_hba *phba)
+{
+	unsigned int cpu, numa_node;
+	struct cpumask *numa_mask = &phba->sli4_hba.numa_mask;
+
+	cpumask_clear(numa_mask);
+
+	/* Check if we're a NUMA architecture */
+	numa_node = dev_to_node(&phba->pcidev->dev);
+	if (numa_node == NUMA_NO_NODE)
+		return;
+
+	for_each_possible_cpu(cpu)
+		if (cpu_to_node(cpu) == numa_node)
+			cpumask_set_cpu(cpu, numa_mask);
 }
 
 /**
@@ -6133,6 +6282,13 @@ lpfc_sli_driver_resource_setup(struct lpfc_hba *phba)
 	if (rc)
 		return -ENODEV;
 
+	if (phba->pcidev->device == PCI_DEVICE_ID_HORNET) {
+		phba->menlo_flag |= HBA_MENLO_SUPPORT;
+		/* check for menlo minimum sg count */
+		if (phba->cfg_sg_seg_cnt < LPFC_DEFAULT_MENLO_SG_SEG_CNT)
+			phba->cfg_sg_seg_cnt = LPFC_DEFAULT_MENLO_SG_SEG_CNT;
+	}
+
 	if (!phba->sli.sli3_ring)
 		phba->sli.sli3_ring = kcalloc(LPFC_SLI3_MAX_RING,
 					      sizeof(struct lpfc_sli_ring),
@@ -6297,6 +6453,7 @@ lpfc_sli4_driver_resource_setup(struct lpfc_hba *phba)
 	phba->sli4_hba.num_present_cpu = lpfc_present_cpu;
 	phba->sli4_hba.num_possible_cpu = cpumask_last(cpu_possible_mask) + 1;
 	phba->sli4_hba.curr_disp_cpu = 0;
+	lpfc_cpumask_of_node_init(phba);
 
 	/* Get all the module params for configuring this host */
 	lpfc_get_cfgparam(phba);
@@ -6504,13 +6661,6 @@ lpfc_sli4_driver_resource_setup(struct lpfc_hba *phba)
 #endif
 				/* Not supported for NVMET */
 				phba->cfg_xri_rebalancing = 0;
-				if (phba->irq_chann_mode == NHT_MODE) {
-					phba->cfg_irq_chann =
-						phba->sli4_hba.num_present_cpu;
-					phba->cfg_hdw_queue =
-						phba->sli4_hba.num_present_cpu;
-					phba->irq_chann_mode = NORMAL_MODE;
-				}
 				break;
 			}
 		}
@@ -6776,17 +6926,6 @@ lpfc_sli4_driver_resource_setup(struct lpfc_hba *phba)
 		rc = -ENOMEM;
 		goto out_free_hba_cpu_map;
 	}
-
-#ifdef CONFIG_SCSI_LPFC_DEBUG_FS
-	phba->sli4_hba.c_stat = alloc_percpu(struct lpfc_hdwq_stat);
-	if (!phba->sli4_hba.c_stat) {
-		lpfc_printf_log(phba, KERN_ERR, LOG_INIT,
-				"3332 Failed allocating per cpu hdwq stats\n");
-		rc = -ENOMEM;
-		goto out_free_hba_eq_info;
-	}
-#endif
-
 	/*
 	 * Enable sr-iov virtual functions if supported and configured
 	 * through the module parameter.
@@ -6806,10 +6945,6 @@ lpfc_sli4_driver_resource_setup(struct lpfc_hba *phba)
 
 	return 0;
 
-#ifdef CONFIG_SCSI_LPFC_DEBUG_FS
-out_free_hba_eq_info:
-	free_percpu(phba->sli4_hba.eq_info);
-#endif
 out_free_hba_cpu_map:
 	kfree(phba->sli4_hba.cpu_map);
 out_free_hba_eq_hdl:
@@ -6848,16 +6983,13 @@ lpfc_sli4_driver_resource_unset(struct lpfc_hba *phba)
 	struct lpfc_fcf_conn_entry *conn_entry, *next_conn_entry;
 
 	free_percpu(phba->sli4_hba.eq_info);
-#ifdef CONFIG_SCSI_LPFC_DEBUG_FS
-	free_percpu(phba->sli4_hba.c_stat);
-#endif
 
 	/* Free memory allocated for msi-x interrupt vector to CPU mapping */
 	kfree(phba->sli4_hba.cpu_map);
 	phba->sli4_hba.num_possible_cpu = 0;
 	phba->sli4_hba.num_present_cpu = 0;
 	phba->sli4_hba.curr_disp_cpu = 0;
-	cpumask_clear(&phba->sli4_hba.irq_aff_mask);
+	cpumask_clear(&phba->sli4_hba.numa_mask);
 
 	/* Free memory allocated for fast-path work queue handles */
 	kfree(phba->sli4_hba.hba_eq_hdl);
@@ -7283,9 +7415,9 @@ lpfc_sli4_create_rpi_hdr(struct lpfc_hba *phba)
 	if (!dmabuf)
 		return NULL;
 
-	dmabuf->virt = dma_zalloc_coherent(&phba->pcidev->dev,
-					   LPFC_HDR_TEMPLATE_SIZE,
-					   &dmabuf->phys, GFP_KERNEL);
+	dmabuf->virt = dma_alloc_coherent(&phba->pcidev->dev,
+					  LPFC_HDR_TEMPLATE_SIZE,
+					  &dmabuf->phys, GFP_KERNEL);
 	if (!dmabuf->virt) {
 		rpi_hdr = NULL;
 		goto err_free_dmabuf;
@@ -7648,8 +7780,8 @@ lpfc_sli_pci_mem_setup(struct lpfc_hba *phba)
 	}
 
 	/* Allocate memory for SLI-2 structures */
-	phba->slim2p.virt = dma_zalloc_coherent(&pdev->dev, SLI2_SLIM_SIZE,
-						&phba->slim2p.phys, GFP_KERNEL);
+	phba->slim2p.virt = dma_alloc_coherent(&pdev->dev, SLI2_SLIM_SIZE,
+					       &phba->slim2p.phys, GFP_KERNEL);
 	if (!phba->slim2p.virt)
 		goto out_iounmap;
 
@@ -8067,8 +8199,8 @@ lpfc_create_bootstrap_mbox(struct lpfc_hba *phba)
 	 * plus an alignment restriction of 16 bytes.
 	 */
 	bmbx_size = sizeof(struct lpfc_bmbx_create) + (LPFC_ALIGN_16_BYTE - 1);
-	dmabuf->virt = dma_zalloc_coherent(&phba->pcidev->dev, bmbx_size,
-					   &dmabuf->phys, GFP_KERNEL);
+	dmabuf->virt = dma_alloc_coherent(&phba->pcidev->dev, bmbx_size,
+					  &dmabuf->phys, GFP_KERNEL);
 	if (!dmabuf->virt) {
 		kfree(dmabuf);
 		return -ENOMEM;
@@ -10691,9 +10823,6 @@ lpfc_cpu_affinity_check(struct lpfc_hba *phba, int vectors)
 #ifdef CONFIG_X86
 	struct cpuinfo_x86 *cpuinfo;
 #endif
-#ifdef CONFIG_SCSI_LPFC_DEBUG_FS
-	struct lpfc_hdwq_stat *c_stat;
-#endif
 
 	max_phys_id = 0;
 	min_phys_id = LPFC_VECTOR_MAP_EMPTY;
@@ -10853,7 +10982,7 @@ found_any:
 		/* 1 to 1, the first LPFC_CPU_FIRST_IRQ cpus to a unique hdwq */
 		cpup->hdwq = idx;
 		idx++;
-		lpfc_printf_log(phba, KERN_INFO, LOG_INIT,
+		lpfc_printf_log(phba, KERN_ERR, LOG_INIT,
 				"3333 Set Affinity: CPU %d (phys %d core %d): "
 				"hdwq %d eq %d flg x%x\n",
 				cpu, cpup->phys_id, cpup->core_id,
@@ -10931,7 +11060,7 @@ found_any:
 			start_cpu = first_cpu;
 		cpup->hdwq = new_cpup->hdwq;
  logit:
-		lpfc_printf_log(phba, KERN_INFO, LOG_INIT,
+		lpfc_printf_log(phba, KERN_ERR, LOG_INIT,
 				"3335 Set Affinity: CPU %d (phys %d core %d): "
 				"hdwq %d eq %d flg x%x\n",
 				cpu, cpup->phys_id, cpup->core_id,
@@ -10945,17 +11074,10 @@ found_any:
 	idx = 0;
 	for_each_possible_cpu(cpu) {
 		cpup = &phba->sli4_hba.cpu_map[cpu];
-#ifdef CONFIG_SCSI_LPFC_DEBUG_FS
-		c_stat = per_cpu_ptr(phba->sli4_hba.c_stat, cpu);
-		c_stat->hdwq_no = cpup->hdwq;
-#endif
 		if (cpup->hdwq != LPFC_VECTOR_MAP_EMPTY)
 			continue;
 
 		cpup->hdwq = idx++ % phba->cfg_hdw_queue;
-#ifdef CONFIG_SCSI_LPFC_DEBUG_FS
-		c_stat->hdwq_no = cpup->hdwq;
-#endif
 		lpfc_printf_log(phba, KERN_INFO, LOG_INIT,
 				"3340 Set Affinity: not present "
 				"CPU %d hdwq %d\n",
@@ -11051,9 +11173,11 @@ static void lpfc_cpuhp_add(struct lpfc_hba *phba)
 
 	rcu_read_lock();
 
-	if (!list_empty(&phba->poll_list))
+	if (!list_empty(&phba->poll_list)) {
+		timer_setup(&phba->cpuhp_poll_timer, lpfc_sli4_poll_hbtimer, 0);
 		mod_timer(&phba->cpuhp_poll_timer,
 			  jiffies + msecs_to_jiffies(LPFC_POLL_HB));
+	}
 
 	rcu_read_unlock();
 
@@ -11112,12 +11236,11 @@ lpfc_irq_clear_aff(struct lpfc_hba_eq_hdl *eqhdl)
  * @offline: true, cpu is going offline. false, cpu is coming online.
  *
  * If cpu is going offline, we'll try our best effort to find the next
- * online cpu on the phba's original_mask and migrate all offlining IRQ
- * affinities.
+ * online cpu on the phba's NUMA node and migrate all offlining IRQ affinities.
  *
- * If cpu is coming online, reaffinitize the IRQ back to the onlining cpu.
+ * If cpu is coming online, reaffinitize the IRQ back to the onlineng cpu.
  *
- * Note: Call only if NUMA or NHT mode is enabled, otherwise rely on
+ * Note: Call only if cfg_irq_numa is enabled, otherwise rely on
  *	 PCI_IRQ_AFFINITY to auto-manage IRQ affinity.
  *
  **/
@@ -11127,14 +11250,14 @@ lpfc_irq_rebalance(struct lpfc_hba *phba, unsigned int cpu, bool offline)
 	struct lpfc_vector_map_info *cpup;
 	struct cpumask *aff_mask;
 	unsigned int cpu_select, cpu_next, idx;
-	const struct cpumask *orig_mask;
+	const struct cpumask *numa_mask;
 
-	if (phba->irq_chann_mode == NORMAL_MODE)
+	if (!phba->cfg_irq_numa)
 		return;
 
-	orig_mask = &phba->sli4_hba.irq_aff_mask;
+	numa_mask = &phba->sli4_hba.numa_mask;
 
-	if (!cpumask_test_cpu(cpu, orig_mask))
+	if (!cpumask_test_cpu(cpu, numa_mask))
 		return;
 
 	cpup = &phba->sli4_hba.cpu_map[cpu];
@@ -11143,9 +11266,9 @@ lpfc_irq_rebalance(struct lpfc_hba *phba, unsigned int cpu, bool offline)
 		return;
 
 	if (offline) {
-		/* Find next online CPU on original mask */
-		cpu_next = cpumask_next_wrap(cpu, orig_mask, cpu, true);
-		cpu_select = lpfc_next_online_cpu(orig_mask, cpu_next);
+		/* Find next online CPU on NUMA node */
+		cpu_next = cpumask_next_wrap(cpu, numa_mask, cpu, true);
+		cpu_select = lpfc_next_online_numa_cpu(numa_mask, cpu_next);
 
 		/* Found a valid CPU */
 		if ((cpu_select < nr_cpu_ids) && (cpu_select != cpu)) {
@@ -11260,7 +11383,7 @@ lpfc_sli4_enable_msix(struct lpfc_hba *phba)
 {
 	int vectors, rc, index;
 	char *name;
-	const struct cpumask *aff_mask = NULL;
+	const struct cpumask *numa_mask = NULL;
 	unsigned int cpu = 0, cpu_cnt = 0, cpu_select = nr_cpu_ids;
 	struct lpfc_hba_eq_hdl *eqhdl;
 	const struct cpumask *maskp;
@@ -11270,18 +11393,16 @@ lpfc_sli4_enable_msix(struct lpfc_hba *phba)
 	/* Set up MSI-X multi-message vectors */
 	vectors = phba->cfg_irq_chann;
 
-	if (phba->irq_chann_mode != NORMAL_MODE)
-		aff_mask = &phba->sli4_hba.irq_aff_mask;
-
-	if (aff_mask) {
-		cpu_cnt = cpumask_weight(aff_mask);
+	if (phba->cfg_irq_numa) {
+		numa_mask = &phba->sli4_hba.numa_mask;
+		cpu_cnt = cpumask_weight(numa_mask);
 		vectors = min(phba->cfg_irq_chann, cpu_cnt);
 
-		/* cpu: iterates over aff_mask including offline or online
-		 * cpu_select: iterates over online aff_mask to set affinity
+		/* cpu: iterates over numa_mask including offline or online
+		 * cpu_select: iterates over online numa_mask to set affinity
 		 */
-		cpu = cpumask_first(aff_mask);
-		cpu_select = lpfc_next_online_cpu(aff_mask, cpu);
+		cpu = cpumask_first(numa_mask);
+		cpu_select = lpfc_next_online_numa_cpu(numa_mask, cpu);
 	} else {
 		flags |= PCI_IRQ_AFFINITY;
 	}
@@ -11315,7 +11436,7 @@ lpfc_sli4_enable_msix(struct lpfc_hba *phba)
 
 		eqhdl->irq = pci_irq_vector(phba->pcidev, index);
 
-		if (aff_mask) {
+		if (phba->cfg_irq_numa) {
 			/* If found a neighboring online cpu, set affinity */
 			if (cpu_select < nr_cpu_ids)
 				lpfc_irq_set_aff(eqhdl, cpu_select);
@@ -11325,11 +11446,11 @@ lpfc_sli4_enable_msix(struct lpfc_hba *phba)
 						LPFC_CPU_FIRST_IRQ,
 						cpu);
 
-			/* Iterate to next offline or online cpu in aff_mask */
-			cpu = cpumask_next(cpu, aff_mask);
+			/* Iterate to next offline or online cpu in numa_mask */
+			cpu = cpumask_next(cpu, numa_mask);
 
-			/* Find next online cpu in aff_mask to set affinity */
-			cpu_select = lpfc_next_online_cpu(aff_mask, cpu);
+			/* Find next online cpu in numa_mask to set affinity */
+			cpu_select = lpfc_next_online_numa_cpu(numa_mask, cpu);
 		} else if (vectors == 1) {
 			cpu = cpumask_first(cpu_present_mask);
 			lpfc_assign_eq_map_info(phba, index, LPFC_CPU_FIRST_IRQ,
@@ -11723,7 +11844,8 @@ lpfc_sli4_hba_unset(struct lpfc_hba *phba)
 	lpfc_sli4_xri_exchange_busy_wait(phba);
 
 	/* per-phba callback de-registration for hotplug event */
-	lpfc_cpuhp_remove(phba);
+	if (phba->pport)
+		lpfc_cpuhp_remove(phba);
 
 	/* Disable PCI subsystem interrupt */
 	lpfc_sli4_disable_intr(phba);
@@ -13024,7 +13146,6 @@ lpfc_pci_probe_one_s4(struct pci_dev *pdev, const struct pci_device_id *pid)
 	lpfc_sli4_ras_setup(phba);
 
 	INIT_LIST_HEAD(&phba->poll_list);
-	timer_setup(&phba->cpuhp_poll_timer, lpfc_sli4_poll_hbtimer, 0);
 	cpuhp_state_add_instance_nocalls(lpfc_cpuhp_state, &phba->cpuhp);
 
 	return 0;
@@ -13818,8 +13939,8 @@ lpfc_init(void)
 {
 	int error = 0;
 
-	pr_info(LPFC_MODULE_DESC "\n");
-	pr_info(LPFC_COPYRIGHT "\n");
+	printk(LPFC_MODULE_DESC "\n");
+	printk(LPFC_COPYRIGHT "\n");
 
 	error = misc_register(&lpfc_mgmt_dev);
 	if (error)

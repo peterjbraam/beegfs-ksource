@@ -151,13 +151,24 @@ unsigned long ib_umem_find_best_pgsz(struct ib_umem *umem,
 	dma_addr_t mask;
 	int i;
 
+	/* rdma_for_each_block() has a bug if the page size is smaller than the
+	 * page size used to build the umem. For now prevent smaller page sizes
+	 * from being returned.
+	 */
+	pgsz_bitmap &= GENMASK(BITS_PER_LONG - 1, PAGE_SHIFT);
+
 	/* At minimum, drivers must support PAGE_SIZE or smaller */
 	if (WARN_ON(!(pgsz_bitmap & GENMASK(PAGE_SHIFT, 0))))
 		return 0;
 
 	va = virt;
-	/* max page size not to exceed MR length */
-	mask = roundup_pow_of_two(umem->length);
+	/* The best result is the smallest page size that results in the minimum
+	 * number of required pages. Compute the largest page size that could
+	 * work based on VA address bits that don't change.
+	 */
+	mask = pgsz_bitmap &
+	       GENMASK(BITS_PER_LONG - 1,
+		       bits_per((umem->length - 1 + virt) ^ virt));
 	/* offset into first SGL */
 	pgoff = umem->address & ~PAGE_MASK;
 
@@ -229,7 +240,7 @@ struct ib_umem *ib_umem_get(struct ib_udata *udata, unsigned long addr,
 	umem = kzalloc(sizeof(*umem), GFP_KERNEL);
 	if (!umem)
 		return ERR_PTR(-ENOMEM);
-	umem->context    = context;
+	umem->ibdev = context->device;
 	umem->length     = size;
 	umem->address    = addr;
 	umem->writable   = ib_access_writable(access);
@@ -269,13 +280,16 @@ struct ib_umem *ib_umem_get(struct ib_udata *udata, unsigned long addr,
 	sg = umem->sg_head.sgl;
 
 	while (npages) {
-		ret = get_user_pages_fast(cur_base,
-					  min_t(unsigned long, npages,
-						PAGE_SIZE /
-						sizeof(struct page *)),
-					  gup_flags | FOLL_LONGTERM, page_list);
-		if (ret < 0)
+		down_read(&mm->mmap_sem);
+		ret = get_user_pages(cur_base,
+				     min_t(unsigned long, npages,
+					   PAGE_SIZE / sizeof (struct page *)),
+				     gup_flags | FOLL_LONGTERM,
+				     page_list, NULL);
+		if (ret < 0) {
+			up_read(&mm->mmap_sem);
 			goto umem_release;
+		}
 
 		cur_base += ret * PAGE_SIZE;
 		npages   -= ret;
@@ -283,6 +297,8 @@ struct ib_umem *ib_umem_get(struct ib_udata *udata, unsigned long addr,
 		sg = ib_umem_add_sg_table(sg, page_list, ret,
 			dma_get_max_seg_size(context->device->dma_device),
 			&umem->sg_nents);
+
+		up_read(&mm->mmap_sem);
 	}
 
 	sg_mark_end(sg);
@@ -326,7 +342,7 @@ void ib_umem_release(struct ib_umem *umem)
 	if (umem->is_odp)
 		return ib_umem_odp_release(to_ib_umem_odp(umem));
 
-	__ib_umem_release(umem->context->device, umem, 1);
+	__ib_umem_release(umem->ibdev, umem, 1);
 
 	atomic64_sub(ib_umem_num_pages(umem), &umem->owning_mm->pinned_vm);
 	mmdrop(umem->owning_mm);

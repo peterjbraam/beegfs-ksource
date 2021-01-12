@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * AppArmor security module
  *
@@ -5,17 +6,13 @@
  *
  * Copyright (C) 1998-2008 Novell/SUSE
  * Copyright 2009-2010 Canonical Ltd.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation, version 2 of the
- * License.
  */
 
 #include <linux/tty.h>
 #include <linux/fdtable.h>
 #include <linux/file.h>
 
+#include "include/af_unix.h"
 #include "include/apparmor.h"
 #include "include/audit.h"
 #include "include/cred.h"
@@ -47,7 +44,8 @@ static void audit_file_mask(struct audit_buffer *ab, u32 mask)
 {
 	char str[10];
 
-	aa_perm_mask_to_str(str, aa_file_perm_chrs, map_mask_to_chr_mask(mask));
+	aa_perm_mask_to_str(str, sizeof(str), aa_file_perm_chrs,
+			    map_mask_to_chr_mask(mask));
 	audit_log_string(ab, str);
 }
 
@@ -283,7 +281,8 @@ int __aa_path_perm(const char *op, struct aa_profile *profile, const char *name,
 {
 	int e = 0;
 
-	if (profile_unconfined(profile))
+	if (profile_unconfined(profile) ||
+	    ((flags & PATH_SOCK_COND) && !PROFILE_MEDIATES_AF(profile, AF_UNIX)))
 		return 0;
 	aa_str_perms(profile->file.dfa, profile->file.start, name, cond, perms);
 	if (request & ~perms->allow)
@@ -495,7 +494,7 @@ static void update_file_ctx(struct aa_file_ctx *fctx, struct aa_label *label,
 	/* update caching of label on file_ctx */
 	spin_lock(&fctx->lock);
 	old = rcu_dereference_protected(fctx->label,
-					spin_is_locked(&fctx->lock));
+					lockdep_is_held(&fctx->lock));
 	l = aa_label_merge(old, label, GFP_ATOMIC);
 	if (l) {
 		if (l != old) {

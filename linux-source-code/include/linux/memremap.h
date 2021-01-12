@@ -3,7 +3,6 @@
 #define _LINUX_MEMREMAP_H_
 #include <linux/ioport.h>
 #include <linux/percpu-refcount.h>
-#include <linux/mm_types.h>  /* needed in RHEL8 for dev_pagemap & vm_fault_t */
 
 struct resource;
 struct device;
@@ -18,11 +17,11 @@ struct device;
  */
 struct vmem_altmap {
 	const unsigned long base_pfn;
+	const unsigned long end_pfn;
 	const unsigned long reserve;
 	unsigned long free;
 	unsigned long align;
 	unsigned long alloc;
-	RH_KABI_EXTEND(const unsigned long end_pfn)
 };
 
 /*
@@ -38,13 +37,6 @@ struct vmem_altmap {
  *
  * A more complete discussion of unaddressable memory may be found in
  * include/linux/hmm.h and Documentation/vm/hmm.rst.
- *
- * MEMORY_DEVICE_PUBLIC:
- * Device memory that is cache coherent from device and CPU point of view. This
- * is use on platform that have an advance system bus (like CAPI or CCIX). A
- * driver can hotplug the device memory using ZONE_DEVICE and with that memory
- * type. Any page of a process can be migrated to such memory. However no one
- * should be allow to pin such memory so that it can always be evicted.
  *
  * MEMORY_DEVICE_FS_DAX:
  * Host memory that has similar access semantics as System RAM i.e. DMA
@@ -67,20 +59,11 @@ struct vmem_altmap {
 enum memory_type {
 	/* 0 is reserved to catch uninitialized type fields */
 	MEMORY_DEVICE_PRIVATE = 1,
-	MEMORY_DEVICE_PUBLIC,
 	MEMORY_DEVICE_FS_DAX,
-	MEMORY_DEVICE_PCI_P2PDMA,
-#ifndef __GENKSYMS__
 	MEMORY_DEVICE_DEVDAX,
-#endif /* __GENKSYMS__ */
+	MEMORY_DEVICE_PCI_P2PDMA,
 };
 
-typedef int (*dev_page_fault_t)(struct vm_area_struct *vma,
-				unsigned long addr,
-				const struct page *page,
-				unsigned int flags,
-				pmd_t *pmdp);
-typedef void (*dev_page_free_t)(struct page *page, void *data);
 struct dev_pagemap_ops {
 	/*
 	 * Called once the page refcount reaches 1.  (ZONE_DEVICE pages never
@@ -120,26 +103,16 @@ struct dev_pagemap_ops {
  * @type: memory type: see MEMORY_* in memory_hotplug.h
  * @flags: PGMAP_* flags to specify defailed behavior
  * @ops: method table
- * @owner: an opaque pointer identifying the entity that manages this
- *	instance.  Used by various helpers to make sure that no
- *	foreign ZONE_DEVICE memory is accessed.
  */
 struct dev_pagemap {
-	RH_KABI_DEPRECATE(dev_page_fault_t, page_fault)
-	RH_KABI_DEPRECATE(dev_page_free_t, page_free)
 	struct vmem_altmap altmap;
-	RH_KABI_DEPRECATE(bool, altmap_valid)
 	struct resource res;
 	struct percpu_ref *ref;
-	RH_KABI_DEPRECATE(struct device *, dev)
-	RH_KABI_DEPRECATE(void *, data)
+	struct percpu_ref internal_ref;
+	struct completion done;
 	enum memory_type type;
-	u64 pci_p2pdma_bus_offset;
-	RH_KABI_EXTEND(const struct dev_pagemap_ops *ops)
-	RH_KABI_EXTEND(unsigned int flags)
-	RH_KABI_EXTEND(struct percpu_ref internal_ref)
-	RH_KABI_EXTEND(struct completion done)
-	RH_KABI_EXTEND(void *owner)
+	unsigned int flags;
+	const struct dev_pagemap_ops *ops;
 };
 
 static inline struct vmem_altmap *pgmap_altmap(struct dev_pagemap *pgmap)
@@ -159,7 +132,6 @@ struct dev_pagemap *get_dev_pagemap(unsigned long pfn,
 
 unsigned long vmem_altmap_offset(struct vmem_altmap *altmap);
 void vmem_altmap_free(struct vmem_altmap *altmap, unsigned long nr_pfns);
-unsigned long memremap_compat_align(void);
 #else
 static inline void *devm_memremap_pages(struct device *dev,
 		struct dev_pagemap *pgmap)
@@ -193,12 +165,6 @@ static inline void vmem_altmap_free(struct vmem_altmap *altmap,
 		unsigned long nr_pfns)
 {
 }
-
-/* when memremap_pages() is disabled all archs can remap a single page */
-static inline unsigned long memremap_compat_align(void)
-{
-	return PAGE_SIZE;
-}
 #endif /* CONFIG_ZONE_DEVICE */
 
 static inline void put_dev_pagemap(struct dev_pagemap *pgmap)
@@ -206,5 +172,4 @@ static inline void put_dev_pagemap(struct dev_pagemap *pgmap)
 	if (pgmap)
 		percpu_ref_put(pgmap->ref);
 }
-
 #endif /* _LINUX_MEMREMAP_H_ */

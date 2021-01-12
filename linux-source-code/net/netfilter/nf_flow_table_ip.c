@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/module.h>
@@ -11,7 +12,6 @@
 #include <net/ip6_route.h>
 #include <net/neighbour.h>
 #include <net/netfilter/nf_flow_table.h>
-#include <net/netfilter/nf_conntrack_acct.h>
 /* For layer 4 checksum field offset. */
 #include <linux/tcp.h>
 #include <linux/udp.h>
@@ -144,15 +144,13 @@ static int nf_flow_nat_ip(const struct flow_offload *flow, struct sk_buff *skb,
 {
 	struct iphdr *iph = ip_hdr(skb);
 
-	if (test_bit(NF_FLOW_SNAT, &flow->flags) &&
+	if (flow->flags & FLOW_OFFLOAD_SNAT &&
 	    (nf_flow_snat_port(flow, skb, thoff, iph->protocol, dir) < 0 ||
-	     nf_flow_snat_ip(flow, skb, ip_hdr(skb), thoff, dir) < 0))
+	     nf_flow_snat_ip(flow, skb, iph, thoff, dir) < 0))
 		return -1;
-
-	iph = ip_hdr(skb);
-	if (test_bit(NF_FLOW_DNAT, &flow->flags) &&
+	if (flow->flags & FLOW_OFFLOAD_DNAT &&
 	    (nf_flow_dnat_port(flow, skb, thoff, iph->protocol, dir) < 0 ||
-	     nf_flow_dnat_ip(flow, skb, ip_hdr(skb), thoff, dir) < 0))
+	     nf_flow_dnat_ip(flow, skb, iph, thoff, dir) < 0))
 		return -1;
 
 	return 0;
@@ -275,8 +273,6 @@ nf_flow_offload_ip_hook(void *priv, struct sk_buff *skb,
 	if (nf_flow_state_check(flow, ip_hdr(skb)->protocol, skb, thoff))
 		return NF_ACCEPT;
 
-	flow_offload_refresh(flow_table, flow);
-
 	if (nf_flow_offload_dst_check(&rt->dst)) {
 		flow_offload_teardown(flow);
 		return NF_ACCEPT;
@@ -285,12 +281,10 @@ nf_flow_offload_ip_hook(void *priv, struct sk_buff *skb,
 	if (nf_flow_nat_ip(flow, skb, thoff, dir) < 0)
 		return NF_DROP;
 
+	flow->timeout = (u32)jiffies + NF_FLOW_TIMEOUT;
 	iph = ip_hdr(skb);
 	ip_decrease_ttl(iph);
 	skb->tstamp = 0;
-
-	if (flow_table->flags & NF_FLOWTABLE_COUNTER)
-		nf_ct_acct_update(flow->ct, tuplehash->tuple.dir, skb->len);
 
 	if (unlikely(dst_xfrm(&rt->dst))) {
 		memset(skb->cb, 0, sizeof(struct inet_skb_parm));
@@ -421,15 +415,13 @@ static int nf_flow_nat_ipv6(const struct flow_offload *flow,
 	struct ipv6hdr *ip6h = ipv6_hdr(skb);
 	unsigned int thoff = sizeof(*ip6h);
 
-	if (test_bit(NF_FLOW_SNAT, &flow->flags) &&
+	if (flow->flags & FLOW_OFFLOAD_SNAT &&
 	    (nf_flow_snat_port(flow, skb, thoff, ip6h->nexthdr, dir) < 0 ||
-	     nf_flow_snat_ipv6(flow, skb, ipv6_hdr(skb), thoff, dir) < 0))
+	     nf_flow_snat_ipv6(flow, skb, ip6h, thoff, dir) < 0))
 		return -1;
-
-	ip6h = ipv6_hdr(skb);
-	if (test_bit(NF_FLOW_DNAT, &flow->flags) &&
+	if (flow->flags & FLOW_OFFLOAD_DNAT &&
 	    (nf_flow_dnat_port(flow, skb, thoff, ip6h->nexthdr, dir) < 0 ||
-	     nf_flow_dnat_ipv6(flow, skb, ipv6_hdr(skb), thoff, dir) < 0))
+	     nf_flow_dnat_ipv6(flow, skb, ip6h, thoff, dir) < 0))
 		return -1;
 
 	return 0;
@@ -508,8 +500,6 @@ nf_flow_offload_ipv6_hook(void *priv, struct sk_buff *skb,
 				sizeof(*ip6h)))
 		return NF_ACCEPT;
 
-	flow_offload_refresh(flow_table, flow);
-
 	if (nf_flow_offload_dst_check(&rt->dst)) {
 		flow_offload_teardown(flow);
 		return NF_ACCEPT;
@@ -521,12 +511,10 @@ nf_flow_offload_ipv6_hook(void *priv, struct sk_buff *skb,
 	if (nf_flow_nat_ipv6(flow, skb, dir) < 0)
 		return NF_DROP;
 
+	flow->timeout = (u32)jiffies + NF_FLOW_TIMEOUT;
 	ip6h = ipv6_hdr(skb);
 	ip6h->hop_limit--;
 	skb->tstamp = 0;
-
-	if (flow_table->flags & NF_FLOWTABLE_COUNTER)
-		nf_ct_acct_update(flow->ct, tuplehash->tuple.dir, skb->len);
 
 	if (unlikely(dst_xfrm(&rt->dst))) {
 		memset(skb->cb, 0, sizeof(struct inet6_skb_parm));

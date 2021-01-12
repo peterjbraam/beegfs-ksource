@@ -34,7 +34,6 @@
 #include "mixer_scarlett.h"
 #include "mixer_scarlett_gen2.h"
 #include "mixer_us16x08.h"
-#include "mixer_s1810c.h"
 #include "helper.h"
 
 struct std_mono_table {
@@ -120,7 +119,7 @@ static int snd_create_std_mono_ctl(struct usb_mixer_interface *mixer,
  * Create a set of standard UAC controls from a table
  */
 static int snd_create_std_mono_table(struct usb_mixer_interface *mixer,
-				     const struct std_mono_table *t)
+				struct std_mono_table *t)
 {
 	int err;
 
@@ -158,7 +157,8 @@ static int add_single_ctl_with_resume(struct usb_mixer_interface *mixer,
 		return -ENOMEM;
 	}
 	kctl->private_free = snd_usb_mixer_elem_free;
-	return snd_usb_mixer_add_control(list, kctl);
+	/* don't use snd_usb_mixer_add_control() here, this is a special list element */
+	return snd_usb_mixer_add_list(list, kctl, false);
 }
 
 /*
@@ -184,6 +184,7 @@ static const struct rc_config {
 	{ USB_ID(0x041e, 0x3042), 0, 1, 1, 1,  1,  0x000d }, /* Usb X-Fi S51 */
 	{ USB_ID(0x041e, 0x30df), 0, 1, 1, 1,  1,  0x000d }, /* Usb X-Fi S51 Pro */
 	{ USB_ID(0x041e, 0x3237), 0, 1, 1, 1,  1,  0x000d }, /* Usb X-Fi S51 Pro */
+	{ USB_ID(0x041e, 0x3263), 0, 1, 1, 1,  1,  0x000d }, /* Usb X-Fi S51 Pro */
 	{ USB_ID(0x041e, 0x3048), 2, 2, 6, 6,  2,  0x6e91 }, /* Toshiba SB0500 */
 };
 
@@ -508,7 +509,7 @@ static int snd_emu0204_ch_switch_resume(struct usb_mixer_elem_list *list)
 					    list->kctl->private_value);
 }
 
-static const struct snd_kcontrol_new snd_emu0204_control = {
+static struct snd_kcontrol_new snd_emu0204_control = {
 	.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
 	.name = "Front Jack Channels",
 	.info = snd_emu0204_ch_switch_info,
@@ -576,7 +577,7 @@ static int snd_xonar_u1_switch_resume(struct usb_mixer_elem_list *list)
 					  list->kctl->private_value);
 }
 
-static const struct snd_kcontrol_new snd_xonar_u1_output_switch = {
+static struct snd_kcontrol_new snd_xonar_u1_output_switch = {
 	.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
 	.name = "Digital Playback Switch",
 	.info = snd_ctl_boolean_mono_info,
@@ -703,7 +704,7 @@ static int snd_mbox1_switch_resume(struct usb_mixer_elem_list *list)
 	return snd_mbox1_switch_update(list->mixer, list->kctl->private_value);
 }
 
-static const struct snd_kcontrol_new snd_mbox1_switch = {
+static struct snd_kcontrol_new snd_mbox1_switch = {
 	.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
 	.name = "Clock Source",
 	.index = 0,
@@ -788,7 +789,7 @@ static int snd_nativeinstruments_control_put(struct snd_kcontrol *kcontrol,
 	return err < 0 ? err : 1;
 }
 
-static const struct snd_kcontrol_new snd_nativeinstruments_ta6_mixers[] = {
+static struct snd_kcontrol_new snd_nativeinstruments_ta6_mixers[] = {
 	{
 		.name = "Direct Thru Channel A",
 		.private_value = _MAKE_NI_CONTROL(0x01, 0x03),
@@ -807,7 +808,7 @@ static const struct snd_kcontrol_new snd_nativeinstruments_ta6_mixers[] = {
 	},
 };
 
-static const struct snd_kcontrol_new snd_nativeinstruments_ta10_mixers[] = {
+static struct snd_kcontrol_new snd_nativeinstruments_ta10_mixers[] = {
 	{
 		.name = "Direct Thru Channel A",
 		.private_value = _MAKE_NI_CONTROL(0x01, 0x03),
@@ -1387,7 +1388,7 @@ static int snd_c400_create_mixer(struct usb_mixer_interface *mixer)
  * are valid they presents mono controls as L and R channels of
  * stereo. So we provide a good mixer here.
  */
-static const struct std_mono_table ebox44_table[] = {
+static struct std_mono_table ebox44_table[] = {
 	{
 		.unitid = 4,
 		.control = 1,
@@ -1667,7 +1668,7 @@ static int snd_microii_spdif_switch_put(struct snd_kcontrol *kcontrol,
 	return err < 0 ? err : 1;
 }
 
-static const struct snd_kcontrol_new snd_microii_mixer_spdif[] = {
+static struct snd_kcontrol_new snd_microii_mixer_spdif[] = {
 	{
 		.iface =    SNDRV_CTL_ELEM_IFACE_PCM,
 		.name =     SNDRV_CTL_NAME_IEC958("", PLAYBACK, DEFAULT),
@@ -1696,7 +1697,7 @@ static const struct snd_kcontrol_new snd_microii_mixer_spdif[] = {
 static int snd_microii_controls_create(struct usb_mixer_interface *mixer)
 {
 	int err, i;
-	static const usb_mixer_elem_resume_func_t resume_funcs[] = {
+	static usb_mixer_elem_resume_func_t resume_funcs[] = {
 		snd_microii_spdif_default_update,
 		NULL,
 		snd_microii_spdif_switch_update
@@ -1774,7 +1775,7 @@ static int snd_soundblaster_e1_switch_info(struct snd_kcontrol *kcontrol,
 	return snd_ctl_enum_info(uinfo, 1, ARRAY_SIZE(texts), texts);
 }
 
-static const struct snd_kcontrol_new snd_soundblaster_e1_input_switch = {
+static struct snd_kcontrol_new snd_soundblaster_e1_input_switch = {
 	.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
 	.name = "Input Source",
 	.info = snd_soundblaster_e1_switch_info,
@@ -2098,7 +2099,7 @@ static int snd_rme_sync_source_info(struct snd_kcontrol *kcontrol,
 				 ARRAY_SIZE(sync_sources), sync_sources);
 }
 
-static const struct snd_kcontrol_new snd_rme_controls[] = {
+static struct snd_kcontrol_new snd_rme_controls[] = {
 	{
 		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
 		.name = "AES Rate",
@@ -2281,10 +2282,6 @@ int snd_usb_mixer_apply_create_quirk(struct usb_mixer_interface *mixer)
 	case USB_ID(0x2a39, 0x3fd3): /* RME ADI-2 DAC */
 	case USB_ID(0x2a39, 0x3fd4): /* RME */
 		err = snd_rme_controls_create(mixer);
-		break;
-
-	case USB_ID(0x0194f, 0x010c): /* Presonus Studio 1810c */
-		err = snd_sc1810_init_mixer(mixer);
 		break;
 	}
 

@@ -1,22 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* audit -- definition of audit_context structure and supporting types 
  *
  * Copyright 2003-2004 Red Hat, Inc.
  * Copyright 2005 Hewlett-Packard Development Company, L.P.
  * Copyright 2005 IBM Corporation
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #include <linux/fs.h>
@@ -69,7 +56,7 @@ struct audit_cap_data {
 		kernel_cap_t	effective;	/* effective set of process */
 	};
 	kernel_cap_t		ambient;
-	RH_KABI_EXTEND(kuid_t			rootid;)
+	kuid_t			rootid;
 };
 
 /* When fs/namei.c:getname() is called, we store the pointer in name and bump
@@ -299,18 +286,10 @@ extern const char *audit_tree_path(struct audit_tree *tree);
 extern void audit_put_tree(struct audit_tree *tree);
 extern void audit_kill_trees(struct audit_context *context);
 
-extern int audit_signal_info(int sig, struct task_struct *t);
 extern int audit_signal_info_syscall(struct task_struct *t);
 extern void audit_filter_inodes(struct task_struct *tsk,
 				struct audit_context *ctx);
 extern struct list_head *audit_killed_trees(void);
-
-static inline void audit_clear_dummy(struct audit_context *ctx)
-{
-	if (ctx)
-		ctx->dummy = 0;
-}
-
 #else /* CONFIG_AUDITSYSCALL */
 #define auditsc_get_stamp(c, t, s) 0
 #define audit_put_watch(w) {}
@@ -338,14 +317,12 @@ static inline void audit_clear_dummy(struct audit_context *ctx)
 #define audit_tree_path(rule) ""	/* never called */
 #define audit_kill_trees(context) BUG()
 
-#define audit_signal_info(s, t) AUDIT_DISABLED
 static inline int audit_signal_info_syscall(struct task_struct *t)
 {
 	return 0;
 }
 
 #define audit_filter_inodes(t, c) AUDIT_DISABLED
-#define audit_clear_dummy(c) {}
 #endif /* CONFIG_AUDITSYSCALL */
 
 extern char *audit_unpack_string(void **bufp, size_t *remain, size_t len);

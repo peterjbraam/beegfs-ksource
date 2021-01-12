@@ -1,16 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Manage printing of source lines
  * Copyright (c) 2017, Intel Corporation.
  * Author: Andi Kleen
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
  */
 #include <linux/list.h>
 #include <linux/zalloc.h>
@@ -24,7 +16,6 @@
 #include "srccode.h"
 #include "debug.h"
 #include <internal/lib.h> // page_size
-#include "fncache.h"
 
 #define MAXSRCCACHE (32*1024*1024)
 #define MAXSRCFILES     64
@@ -44,6 +35,14 @@ static struct hlist_head srcfile_htab[SRC_HTAB_SZ];
 static LIST_HEAD(srcfile_list);
 static long map_total_sz;
 static int num_srcfiles;
+
+static unsigned shash(unsigned char *s)
+{
+	unsigned h = 0;
+	while (*s)
+		h = 65599 * h + *s++;
+	return h ^ (h >> 16);
+}
 
 static int countlines(char *map, int maplen)
 {

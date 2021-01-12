@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2013 Red Hat, Inc. and Parallels Inc. All rights reserved.
  * Authors: David Chinner and Glauber Costa
@@ -56,6 +57,16 @@ list_lru_from_memcg_idx(struct list_lru_node *nlru, int idx)
 	return &nlru->lru;
 }
 
+static __always_inline struct mem_cgroup *mem_cgroup_from_kmem(void *ptr)
+{
+	struct page *page;
+
+	if (!memcg_kmem_enabled())
+		return NULL;
+	page = virt_to_head_page(ptr);
+	return memcg_from_slab_page(page);
+}
+
 static inline struct list_lru_one *
 list_lru_from_kmem(struct list_lru_node *nlru, void *ptr,
 		   struct mem_cgroup **memcg_ptr)
@@ -66,7 +77,7 @@ list_lru_from_kmem(struct list_lru_node *nlru, void *ptr,
 	if (!nlru->memcg_lrus)
 		goto out;
 
-	memcg = mem_cgroup_from_obj(ptr);
+	memcg = mem_cgroup_from_kmem(ptr);
 	if (!memcg)
 		goto out;
 
@@ -590,7 +601,6 @@ int __list_lru_init(struct list_lru *lru, bool memcg_aware,
 		    struct lock_class_key *key, struct shrinker *shrinker)
 {
 	int i;
-	size_t size = sizeof(*lru->node) * nr_node_ids;
 	int err = -ENOMEM;
 
 #ifdef CONFIG_MEMCG_KMEM
@@ -601,7 +611,7 @@ int __list_lru_init(struct list_lru *lru, bool memcg_aware,
 #endif
 	memcg_get_cache_ids();
 
-	lru->node = kzalloc(size, GFP_KERNEL);
+	lru->node = kcalloc(nr_node_ids, sizeof(*lru->node), GFP_KERNEL);
 	if (!lru->node)
 		goto out;
 

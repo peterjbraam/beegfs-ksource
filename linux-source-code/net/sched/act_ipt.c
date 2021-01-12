@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * net/sched/act_ipt.c		iptables target interface
  *
  *TODO: Add other tables. For now we only support the ipv4 table targets
- *
- *		This program is free software; you can redistribute it and/or
- *		modify it under the terms of the GNU General Public License
- *		as published by the Free Software Foundation; either version
- *		2 of the License, or (at your option) any later version.
  *
  * Copyright:	Jamal Hadi Salim (2002-13)
  */
@@ -99,7 +95,7 @@ static const struct nla_policy ipt_policy[TCA_IPT_MAX + 1] = {
 static int __tcf_ipt_init(struct net *net, unsigned int id, struct nlattr *nla,
 			  struct nlattr *est, struct tc_action **a,
 			  const struct tc_action_ops *ops, int ovr, int bind,
-			  struct tcf_proto *tp, u32 flags)
+			  struct tcf_proto *tp)
 {
 	struct tc_action_net *tn = net_generic(net, id);
 	struct nlattr *tb[TCA_IPT_MAX + 1];
@@ -148,7 +144,7 @@ static int __tcf_ipt_init(struct net *net, unsigned int id, struct nlattr *nla,
 
 	if (!exists) {
 		ret = tcf_idr_create(tn, index, est, a, ops, bind,
-				     false, 0);
+				     false);
 		if (ret) {
 			tcf_idr_cleanup(tn, index);
 			return ret;
@@ -193,8 +189,6 @@ static int __tcf_ipt_init(struct net *net, unsigned int id, struct nlattr *nla,
 	ipt->tcfi_t     = t;
 	ipt->tcfi_hook  = hook;
 	spin_unlock_bh(&ipt->tcf_lock);
-	if (ret == ACT_P_CREATED)
-		tcf_idr_insert(tn, *a);
 	return ret;
 
 err3:
@@ -209,19 +203,19 @@ err1:
 static int tcf_ipt_init(struct net *net, struct nlattr *nla,
 			struct nlattr *est, struct tc_action **a, int ovr,
 			int bind, bool rtnl_held, struct tcf_proto *tp,
-			u32 flags, struct netlink_ext_ack *extack)
+			struct netlink_ext_ack *extack)
 {
 	return __tcf_ipt_init(net, ipt_net_id, nla, est, a, &act_ipt_ops, ovr,
-			      bind, tp, flags);
+			      bind, tp);
 }
 
 static int tcf_xt_init(struct net *net, struct nlattr *nla,
 		       struct nlattr *est, struct tc_action **a, int ovr,
 		       int bind, bool unlocked, struct tcf_proto *tp,
-		       u32 flags, struct netlink_ext_ack *extack)
+		       struct netlink_ext_ack *extack)
 {
 	return __tcf_ipt_init(net, xt_net_id, nla, est, a, &act_xt_ops, ovr,
-			      bind, tp, flags);
+			      bind, tp);
 }
 
 static int tcf_ipt_act(struct sk_buff *skb, const struct tc_action *a,

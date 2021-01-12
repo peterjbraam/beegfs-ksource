@@ -131,7 +131,18 @@
 #define RESP_REMOTE_BIT     0x40
 #define RESP_SMBUS_BIT      0x80
 
-#define CYTP_MAX_MT_SLOTS 2
+/*
+ * CYPRESS_SIMULATED_MT
+ *   set to 1 for simulated multitouch (up to 5 contact points)
+ *   set to 0 for SEMI_MT (only 2 corner points, and count of fingers)
+ */
+#define CYPRESS_SIMULATED_MT 1
+
+#if ( CYPRESS_SIMULATED_MT == 1 )
+# define CYTP_MAX_MT_SLOTS 5
+#else
+# define CYTP_MAX_MT_SLOTS 2
+#endif
 
 struct cytp_contact {
 	int x;
@@ -170,18 +181,7 @@ struct cytp_data {
 };
 
 
-#ifdef CONFIG_MOUSE_PS2_CYPRESS
 int cypress_detect(struct psmouse *psmouse, bool set_properties);
 int cypress_init(struct psmouse *psmouse);
-#else
-inline int cypress_detect(struct psmouse *psmouse, bool set_properties)
-{
-	return -ENOSYS;
-}
-inline int cypress_init(struct psmouse *psmouse)
-{
-	return -ENOSYS;
-}
-#endif /* CONFIG_MOUSE_PS2_CYPRESS */
 
 #endif  /* _CYPRESS_PS2_H */

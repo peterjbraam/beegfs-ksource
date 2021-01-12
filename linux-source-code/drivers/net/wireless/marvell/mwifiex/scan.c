@@ -1270,7 +1270,7 @@ int mwifiex_update_bss_desc_with_ie(struct mwifiex_adapter *adapter,
 			break;
 
 		case WLAN_EID_FH_PARAMS:
-			if (total_ie_len < sizeof(*fh_param_set))
+			if (element_len + 2 < sizeof(*fh_param_set))
 				return -EINVAL;
 			fh_param_set =
 				(struct ieee_types_fh_param_set *) current_ptr;
@@ -1280,7 +1280,7 @@ int mwifiex_update_bss_desc_with_ie(struct mwifiex_adapter *adapter,
 			break;
 
 		case WLAN_EID_DS_PARAMS:
-			if (total_ie_len < sizeof(*ds_param_set))
+			if (element_len + 2 < sizeof(*ds_param_set))
 				return -EINVAL;
 			ds_param_set =
 				(struct ieee_types_ds_param_set *) current_ptr;
@@ -1293,7 +1293,7 @@ int mwifiex_update_bss_desc_with_ie(struct mwifiex_adapter *adapter,
 			break;
 
 		case WLAN_EID_CF_PARAMS:
-			if (total_ie_len < sizeof(*cf_param_set))
+			if (element_len + 2 < sizeof(*cf_param_set))
 				return -EINVAL;
 			cf_param_set =
 				(struct ieee_types_cf_param_set *) current_ptr;
@@ -1303,7 +1303,7 @@ int mwifiex_update_bss_desc_with_ie(struct mwifiex_adapter *adapter,
 			break;
 
 		case WLAN_EID_IBSS_PARAMS:
-			if (total_ie_len < sizeof(*ibss_param_set))
+			if (element_len + 2 < sizeof(*ibss_param_set))
 				return -EINVAL;
 			ibss_param_set =
 				(struct ieee_types_ibss_param_set *)
@@ -1460,8 +1460,10 @@ int mwifiex_update_bss_desc_with_ie(struct mwifiex_adapter *adapter,
 			break;
 		}
 
-		current_ptr += total_ie_len;
-		bytes_left -= total_ie_len;
+		current_ptr += element_len + 2;
+
+		/* Need to account for IE ID and IE Len */
+		bytes_left -= (element_len + 2);
 
 	}	/* while (bytes_left > 2) */
 	return ret;
@@ -1889,7 +1891,7 @@ mwifiex_parse_single_response_buf(struct mwifiex_private *priv, u8 **bss_info,
 					    chan, CFG80211_BSS_FTYPE_UNKNOWN,
 					    bssid, timestamp,
 					    cap_info_bitmap, beacon_period,
-					    ie_buf, ie_len, rssi, GFP_KERNEL);
+					    ie_buf, ie_len, rssi, GFP_ATOMIC);
 			if (bss) {
 				bss_priv = (struct mwifiex_bss_priv *)bss->priv;
 				bss_priv->band = band;

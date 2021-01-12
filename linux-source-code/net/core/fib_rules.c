@@ -1,9 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * net/core/fib_rules.c		Generic Routing Rules
- *
- *	This program is free software; you can redistribute it and/or
- *	modify it under the terms of the GNU General Public License as
- *	published by the Free Software Foundation, version 2.
  *
  * Authors:	Thomas Graf <tgraf@suug.ch>
  */
@@ -324,18 +321,16 @@ out:
 }
 EXPORT_SYMBOL_GPL(fib_rules_lookup);
 
-static int call_fib_rule_notifier(struct notifier_block *nb,
+static int call_fib_rule_notifier(struct notifier_block *nb, struct net *net,
 				  enum fib_event_type event_type,
-				  struct fib_rule *rule, int family,
-				  struct netlink_ext_ack *extack)
+				  struct fib_rule *rule, int family)
 {
 	struct fib_rule_notifier_info info = {
 		.info.family = family,
-		.info.extack = extack,
 		.rule = rule,
 	};
 
-	return call_fib_notifier(nb, event_type, &info.info);
+	return call_fib_notifier(nb, net, event_type, &info.info);
 }
 
 static int call_fib_rule_notifiers(struct net *net,
@@ -355,25 +350,20 @@ static int call_fib_rule_notifiers(struct net *net,
 }
 
 /* Called with rcu_read_lock() */
-int fib_rules_dump(struct net *net, struct notifier_block *nb, int family,
-		   struct netlink_ext_ack *extack)
+int fib_rules_dump(struct net *net, struct notifier_block *nb, int family)
 {
 	struct fib_rules_ops *ops;
 	struct fib_rule *rule;
-	int err = 0;
 
 	ops = lookup_rules_ops(net, family);
 	if (!ops)
 		return -EAFNOSUPPORT;
-	list_for_each_entry_rcu(rule, &ops->rules_list, list) {
-		err = call_fib_rule_notifier(nb, FIB_EVENT_RULE_ADD,
-					     rule, family, extack);
-		if (err)
-			break;
-	}
+	list_for_each_entry_rcu(rule, &ops->rules_list, list)
+		call_fib_rule_notifier(nb, net, FIB_EVENT_RULE_ADD, rule,
+				       family);
 	rules_ops_put(ops);
 
-	return err;
+	return 0;
 }
 EXPORT_SYMBOL_GPL(fib_rules_dump);
 
@@ -933,8 +923,7 @@ int fib_nl_delrule(struct sk_buff *skb, struct nlmsghdr *nlh,
 	return 0;
 
 errout:
-	if (nlrule)
-		kfree(nlrule);
+	kfree(nlrule);
 	rules_ops_put(ops);
 	return err;
 }
@@ -978,7 +967,7 @@ static int fib_nl_fill_rule(struct sk_buff *skb, struct fib_rule *rule,
 
 	frh = nlmsg_data(nlh);
 	frh->family = ops->family;
-	frh->table = rule->table;
+	frh->table = rule->table < 256 ? rule->table : RT_TABLE_COMPAT;
 	if (nla_put_u32(skb, FRA_TABLE, rule->table))
 		goto nla_put_failure;
 	if (nla_put_u32(skb, FRA_SUPPRESS_PREFIXLEN, rule->suppress_prefixlen))

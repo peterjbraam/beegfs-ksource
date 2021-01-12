@@ -41,6 +41,7 @@
 #include <asm/mipsmtregs.h>
 #include <asm/pgtable.h>
 #include <asm/page.h>
+#include <asm/processor.h>
 #include <asm/syscall.h>
 #include <linux/uaccess.h>
 #include <asm/bootinfo.h>
@@ -48,25 +49,6 @@
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/syscalls.h>
-
-static void init_fp_ctx(struct task_struct *target)
-{
-	/* If FP has been used then the target already has context */
-	if (tsk_used_math(target))
-		return;
-
-	/* Begin with data registers set to all 1s... */
-	memset(&target->thread.fpu.fpr, ~0, sizeof(target->thread.fpu.fpr));
-
-	/* FCSR has been preset by `mips_set_personality_nan'.  */
-
-	/*
-	 * Record that the target has "used" math, such that the context
-	 * just initialised, and any modifications made by the caller,
-	 * aren't discarded.
-	 */
-	set_stopped_child_used_math(target);
-}
 
 /*
  * Called by kernel/ptrace.c when detaching..
@@ -77,21 +59,6 @@ void ptrace_disable(struct task_struct *child)
 {
 	/* Don't load the watchpoint registers for the ex-child. */
 	clear_tsk_thread_flag(child, TIF_LOAD_WATCH);
-}
-
-/*
- * Poke at FCSR according to its mask.  Set the Cause bits even
- * if a corresponding Enable bit is set.  This will be noticed at
- * the time the thread is switched to and SIGFPE thrown accordingly.
- */
-static void ptrace_setfcr31(struct task_struct *child, u32 value)
-{
-	u32 fcr31;
-	u32 mask;
-
-	fcr31 = child->thread.fpu.fcr31;
-	mask = boot_cpu_data.fpu_msk31;
-	child->thread.fpu.fcr31 = (value & ~mask) | (fcr31 & mask);
 }
 
 /*
@@ -146,55 +113,6 @@ int ptrace_setregs(struct task_struct *child, struct user_pt_regs __user *data)
 
 	/* System call number may have been changed */
 	mips_syscall_update_nr(child, regs);
-
-	return 0;
-}
-
-int ptrace_getfpregs(struct task_struct *child, __u32 __user *data)
-{
-	int i;
-
-	if (!access_ok(data, 33 * 8))
-		return -EIO;
-
-	if (tsk_used_math(child)) {
-		union fpureg *fregs = get_fpu_regs(child);
-		for (i = 0; i < 32; i++)
-			__put_user(get_fpr64(&fregs[i], 0),
-				   i + (__u64 __user *)data);
-	} else {
-		for (i = 0; i < 32; i++)
-			__put_user((__u64) -1, i + (__u64 __user *) data);
-	}
-
-	__put_user(child->thread.fpu.fcr31, data + 64);
-	__put_user(boot_cpu_data.fpu_id, data + 65);
-
-	return 0;
-}
-
-int ptrace_setfpregs(struct task_struct *child, __u32 __user *data)
-{
-	union fpureg *fregs;
-	u64 fpr_val;
-	u32 value;
-	int i;
-
-	if (!access_ok(data, 33 * 8))
-		return -EIO;
-
-	init_fp_ctx(child);
-	fregs = get_fpu_regs(child);
-
-	for (i = 0; i < 32; i++) {
-		__get_user(fpr_val, i + (__u64 __user *)data);
-		set_fpr64(&fregs[i], 0, fpr_val);
-	}
-
-	__get_user(value, data + 64);
-	ptrace_setfcr31(child, value);
-
-	/* FIR may not be written.  */
 
 	return 0;
 }
@@ -419,6 +337,73 @@ static int gpr64_set(struct task_struct *target,
 
 #endif /* CONFIG_64BIT */
 
+
+#ifdef CONFIG_MIPS_FP_SUPPORT
+
+/*
+ * Poke at FCSR according to its mask.  Set the Cause bits even
+ * if a corresponding Enable bit is set.  This will be noticed at
+ * the time the thread is switched to and SIGFPE thrown accordingly.
+ */
+static void ptrace_setfcr31(struct task_struct *child, u32 value)
+{
+	u32 fcr31;
+	u32 mask;
+
+	fcr31 = child->thread.fpu.fcr31;
+	mask = boot_cpu_data.fpu_msk31;
+	child->thread.fpu.fcr31 = (value & ~mask) | (fcr31 & mask);
+}
+
+int ptrace_getfpregs(struct task_struct *child, __u32 __user *data)
+{
+	int i;
+
+	if (!access_ok(data, 33 * 8))
+		return -EIO;
+
+	if (tsk_used_math(child)) {
+		union fpureg *fregs = get_fpu_regs(child);
+		for (i = 0; i < 32; i++)
+			__put_user(get_fpr64(&fregs[i], 0),
+				   i + (__u64 __user *)data);
+	} else {
+		for (i = 0; i < 32; i++)
+			__put_user((__u64) -1, i + (__u64 __user *) data);
+	}
+
+	__put_user(child->thread.fpu.fcr31, data + 64);
+	__put_user(boot_cpu_data.fpu_id, data + 65);
+
+	return 0;
+}
+
+int ptrace_setfpregs(struct task_struct *child, __u32 __user *data)
+{
+	union fpureg *fregs;
+	u64 fpr_val;
+	u32 value;
+	int i;
+
+	if (!access_ok(data, 33 * 8))
+		return -EIO;
+
+	init_fp_ctx(child);
+	fregs = get_fpu_regs(child);
+
+	for (i = 0; i < 32; i++) {
+		__get_user(fpr_val, i + (__u64 __user *)data);
+		set_fpr64(&fregs[i], 0, fpr_val);
+	}
+
+	__get_user(value, data + 64);
+	ptrace_setfcr31(child, value);
+
+	/* FIR may not be written.  */
+
+	return 0;
+}
+
 /*
  * Copy the floating-point context to the supplied NT_PRFPREG buffer,
  * !CONFIG_CPU_HAS_MSA variant.  FP context's general register slots
@@ -589,9 +574,357 @@ static int fpr_set(struct task_struct *target,
 	return err;
 }
 
+/* Copy the FP mode setting to the supplied NT_MIPS_FP_MODE buffer.  */
+static int fp_mode_get(struct task_struct *target,
+		       const struct user_regset *regset,
+		       unsigned int pos, unsigned int count,
+		       void *kbuf, void __user *ubuf)
+{
+	int fp_mode;
+
+	fp_mode = mips_get_process_fp_mode(target);
+	return user_regset_copyout(&pos, &count, &kbuf, &ubuf, &fp_mode, 0,
+				   sizeof(fp_mode));
+}
+
+/*
+ * Copy the supplied NT_MIPS_FP_MODE buffer to the FP mode setting.
+ *
+ * We optimize for the case where `count % sizeof(int) == 0', which
+ * is supposed to have been guaranteed by the kernel before calling
+ * us, e.g. in `ptrace_regset'.  We enforce that requirement, so
+ * that we can safely avoid preinitializing temporaries for partial
+ * mode writes.
+ */
+static int fp_mode_set(struct task_struct *target,
+		       const struct user_regset *regset,
+		       unsigned int pos, unsigned int count,
+		       const void *kbuf, const void __user *ubuf)
+{
+	int fp_mode;
+	int err;
+
+	BUG_ON(count % sizeof(int));
+
+	if (pos + count > sizeof(fp_mode))
+		return -EIO;
+
+	err = user_regset_copyin(&pos, &count, &kbuf, &ubuf, &fp_mode, 0,
+				 sizeof(fp_mode));
+	if (err)
+		return err;
+
+	if (count > 0)
+		err = mips_set_process_fp_mode(target, fp_mode);
+
+	return err;
+}
+
+#endif /* CONFIG_MIPS_FP_SUPPORT */
+
+#ifdef CONFIG_CPU_HAS_MSA
+
+struct msa_control_regs {
+	unsigned int fir;
+	unsigned int fcsr;
+	unsigned int msair;
+	unsigned int msacsr;
+};
+
+static int copy_pad_fprs(struct task_struct *target,
+			 const struct user_regset *regset,
+			 unsigned int *ppos, unsigned int *pcount,
+			 void **pkbuf, void __user **pubuf,
+			 unsigned int live_sz)
+{
+	int i, j, start, start_pad, err;
+	unsigned long long fill = ~0ull;
+	unsigned int cp_sz, pad_sz;
+
+	cp_sz = min(regset->size, live_sz);
+	pad_sz = regset->size - cp_sz;
+	WARN_ON(pad_sz % sizeof(fill));
+
+	i = start = err = 0;
+	for (; i < NUM_FPU_REGS; i++, start += regset->size) {
+		err |= user_regset_copyout(ppos, pcount, pkbuf, pubuf,
+					   &target->thread.fpu.fpr[i],
+					   start, start + cp_sz);
+
+		start_pad = start + cp_sz;
+		for (j = 0; j < (pad_sz / sizeof(fill)); j++) {
+			err |= user_regset_copyout(ppos, pcount, pkbuf, pubuf,
+						   &fill, start_pad,
+						   start_pad + sizeof(fill));
+			start_pad += sizeof(fill);
+		}
+	}
+
+	return err;
+}
+
+static int msa_get(struct task_struct *target,
+		   const struct user_regset *regset,
+		   unsigned int pos, unsigned int count,
+		   void *kbuf, void __user *ubuf)
+{
+	const unsigned int wr_size = NUM_FPU_REGS * regset->size;
+	const struct msa_control_regs ctrl_regs = {
+		.fir = boot_cpu_data.fpu_id,
+		.fcsr = target->thread.fpu.fcr31,
+		.msair = boot_cpu_data.msa_id,
+		.msacsr = target->thread.fpu.msacsr,
+	};
+	int err;
+
+	if (!tsk_used_math(target)) {
+		/* The task hasn't used FP or MSA, fill with 0xff */
+		err = copy_pad_fprs(target, regset, &pos, &count,
+				    &kbuf, &ubuf, 0);
+	} else if (!test_tsk_thread_flag(target, TIF_MSA_CTX_LIVE)) {
+		/* Copy scalar FP context, fill the rest with 0xff */
+		err = copy_pad_fprs(target, regset, &pos, &count,
+				    &kbuf, &ubuf, 8);
+	} else if (sizeof(target->thread.fpu.fpr[0]) == regset->size) {
+		/* Trivially copy the vector registers */
+		err = user_regset_copyout(&pos, &count, &kbuf, &ubuf,
+					  &target->thread.fpu.fpr,
+					  0, wr_size);
+	} else {
+		/* Copy as much context as possible, fill the rest with 0xff */
+		err = copy_pad_fprs(target, regset, &pos, &count,
+				    &kbuf, &ubuf,
+				    sizeof(target->thread.fpu.fpr[0]));
+	}
+
+	err |= user_regset_copyout(&pos, &count, &kbuf, &ubuf,
+				   &ctrl_regs, wr_size,
+				   wr_size + sizeof(ctrl_regs));
+	return err;
+}
+
+static int msa_set(struct task_struct *target,
+		   const struct user_regset *regset,
+		   unsigned int pos, unsigned int count,
+		   const void *kbuf, const void __user *ubuf)
+{
+	const unsigned int wr_size = NUM_FPU_REGS * regset->size;
+	struct msa_control_regs ctrl_regs;
+	unsigned int cp_sz;
+	int i, err, start;
+
+	init_fp_ctx(target);
+
+	if (sizeof(target->thread.fpu.fpr[0]) == regset->size) {
+		/* Trivially copy the vector registers */
+		err = user_regset_copyin(&pos, &count, &kbuf, &ubuf,
+					 &target->thread.fpu.fpr,
+					 0, wr_size);
+	} else {
+		/* Copy as much context as possible */
+		cp_sz = min_t(unsigned int, regset->size,
+			      sizeof(target->thread.fpu.fpr[0]));
+
+		i = start = err = 0;
+		for (; i < NUM_FPU_REGS; i++, start += regset->size) {
+			err |= user_regset_copyin(&pos, &count, &kbuf, &ubuf,
+						  &target->thread.fpu.fpr[i],
+						  start, start + cp_sz);
+		}
+	}
+
+	if (!err)
+		err = user_regset_copyin(&pos, &count, &kbuf, &ubuf, &ctrl_regs,
+					 wr_size, wr_size + sizeof(ctrl_regs));
+	if (!err) {
+		target->thread.fpu.fcr31 = ctrl_regs.fcsr & ~FPU_CSR_ALL_X;
+		target->thread.fpu.msacsr = ctrl_regs.msacsr & ~MSA_CSR_CAUSEF;
+	}
+
+	return err;
+}
+
+#endif /* CONFIG_CPU_HAS_MSA */
+
+#if defined(CONFIG_32BIT) || defined(CONFIG_MIPS32_O32)
+
+/*
+ * Copy the DSP context to the supplied 32-bit NT_MIPS_DSP buffer.
+ */
+static int dsp32_get(struct task_struct *target,
+		     const struct user_regset *regset,
+		     unsigned int pos, unsigned int count,
+		     void *kbuf, void __user *ubuf)
+{
+	unsigned int start, num_regs, i;
+	u32 dspregs[NUM_DSP_REGS + 1];
+
+	BUG_ON(count % sizeof(u32));
+
+	if (!cpu_has_dsp)
+		return -EIO;
+
+	start = pos / sizeof(u32);
+	num_regs = count / sizeof(u32);
+
+	if (start + num_regs > NUM_DSP_REGS + 1)
+		return -EIO;
+
+	for (i = start; i < num_regs; i++)
+		switch (i) {
+		case 0 ... NUM_DSP_REGS - 1:
+			dspregs[i] = target->thread.dsp.dspr[i];
+			break;
+		case NUM_DSP_REGS:
+			dspregs[i] = target->thread.dsp.dspcontrol;
+			break;
+		}
+	return user_regset_copyout(&pos, &count, &kbuf, &ubuf, dspregs, 0,
+				   sizeof(dspregs));
+}
+
+/*
+ * Copy the supplied 32-bit NT_MIPS_DSP buffer to the DSP context.
+ */
+static int dsp32_set(struct task_struct *target,
+		     const struct user_regset *regset,
+		     unsigned int pos, unsigned int count,
+		     const void *kbuf, const void __user *ubuf)
+{
+	unsigned int start, num_regs, i;
+	u32 dspregs[NUM_DSP_REGS + 1];
+	int err;
+
+	BUG_ON(count % sizeof(u32));
+
+	if (!cpu_has_dsp)
+		return -EIO;
+
+	start = pos / sizeof(u32);
+	num_regs = count / sizeof(u32);
+
+	if (start + num_regs > NUM_DSP_REGS + 1)
+		return -EIO;
+
+	err = user_regset_copyin(&pos, &count, &kbuf, &ubuf, dspregs, 0,
+				 sizeof(dspregs));
+	if (err)
+		return err;
+
+	for (i = start; i < num_regs; i++)
+		switch (i) {
+		case 0 ... NUM_DSP_REGS - 1:
+			target->thread.dsp.dspr[i] = (s32)dspregs[i];
+			break;
+		case NUM_DSP_REGS:
+			target->thread.dsp.dspcontrol = (s32)dspregs[i];
+			break;
+		}
+
+	return 0;
+}
+
+#endif /* CONFIG_32BIT || CONFIG_MIPS32_O32 */
+
+#ifdef CONFIG_64BIT
+
+/*
+ * Copy the DSP context to the supplied 64-bit NT_MIPS_DSP buffer.
+ */
+static int dsp64_get(struct task_struct *target,
+		     const struct user_regset *regset,
+		     unsigned int pos, unsigned int count,
+		     void *kbuf, void __user *ubuf)
+{
+	unsigned int start, num_regs, i;
+	u64 dspregs[NUM_DSP_REGS + 1];
+
+	BUG_ON(count % sizeof(u64));
+
+	if (!cpu_has_dsp)
+		return -EIO;
+
+	start = pos / sizeof(u64);
+	num_regs = count / sizeof(u64);
+
+	if (start + num_regs > NUM_DSP_REGS + 1)
+		return -EIO;
+
+	for (i = start; i < num_regs; i++)
+		switch (i) {
+		case 0 ... NUM_DSP_REGS - 1:
+			dspregs[i] = target->thread.dsp.dspr[i];
+			break;
+		case NUM_DSP_REGS:
+			dspregs[i] = target->thread.dsp.dspcontrol;
+			break;
+		}
+	return user_regset_copyout(&pos, &count, &kbuf, &ubuf, dspregs, 0,
+				   sizeof(dspregs));
+}
+
+/*
+ * Copy the supplied 64-bit NT_MIPS_DSP buffer to the DSP context.
+ */
+static int dsp64_set(struct task_struct *target,
+		     const struct user_regset *regset,
+		     unsigned int pos, unsigned int count,
+		     const void *kbuf, const void __user *ubuf)
+{
+	unsigned int start, num_regs, i;
+	u64 dspregs[NUM_DSP_REGS + 1];
+	int err;
+
+	BUG_ON(count % sizeof(u64));
+
+	if (!cpu_has_dsp)
+		return -EIO;
+
+	start = pos / sizeof(u64);
+	num_regs = count / sizeof(u64);
+
+	if (start + num_regs > NUM_DSP_REGS + 1)
+		return -EIO;
+
+	err = user_regset_copyin(&pos, &count, &kbuf, &ubuf, dspregs, 0,
+				 sizeof(dspregs));
+	if (err)
+		return err;
+
+	for (i = start; i < num_regs; i++)
+		switch (i) {
+		case 0 ... NUM_DSP_REGS - 1:
+			target->thread.dsp.dspr[i] = dspregs[i];
+			break;
+		case NUM_DSP_REGS:
+			target->thread.dsp.dspcontrol = dspregs[i];
+			break;
+		}
+
+	return 0;
+}
+
+#endif /* CONFIG_64BIT */
+
+/*
+ * Determine whether the DSP context is present.
+ */
+static int dsp_active(struct task_struct *target,
+		      const struct user_regset *regset)
+{
+	return cpu_has_dsp ? NUM_DSP_REGS + 1 : -ENODEV;
+}
+
 enum mips_regset {
 	REGSET_GPR,
+	REGSET_DSP,
+#ifdef CONFIG_MIPS_FP_SUPPORT
 	REGSET_FPR,
+	REGSET_FP_MODE,
+#endif
+#ifdef CONFIG_CPU_HAS_MSA
+	REGSET_MSA,
+#endif
 };
 
 struct pt_regs_offset {
@@ -689,6 +1022,16 @@ static const struct user_regset mips_regsets[] = {
 		.get		= gpr32_get,
 		.set		= gpr32_set,
 	},
+	[REGSET_DSP] = {
+		.core_note_type	= NT_MIPS_DSP,
+		.n		= NUM_DSP_REGS + 1,
+		.size		= sizeof(u32),
+		.align		= sizeof(u32),
+		.get		= dsp32_get,
+		.set		= dsp32_set,
+		.active		= dsp_active,
+	},
+#ifdef CONFIG_MIPS_FP_SUPPORT
 	[REGSET_FPR] = {
 		.core_note_type	= NT_PRFPREG,
 		.n		= ELF_NFPREG,
@@ -697,6 +1040,25 @@ static const struct user_regset mips_regsets[] = {
 		.get		= fpr_get,
 		.set		= fpr_set,
 	},
+	[REGSET_FP_MODE] = {
+		.core_note_type	= NT_MIPS_FP_MODE,
+		.n		= 1,
+		.size		= sizeof(int),
+		.align		= sizeof(int),
+		.get		= fp_mode_get,
+		.set		= fp_mode_set,
+	},
+#endif
+#ifdef CONFIG_CPU_HAS_MSA
+	[REGSET_MSA] = {
+		.core_note_type	= NT_MIPS_MSA,
+		.n		= NUM_FPU_REGS + 1,
+		.size		= 16,
+		.align		= 16,
+		.get		= msa_get,
+		.set		= msa_set,
+	},
+#endif
 };
 
 static const struct user_regset_view user_mips_view = {
@@ -720,6 +1082,24 @@ static const struct user_regset mips64_regsets[] = {
 		.get		= gpr64_get,
 		.set		= gpr64_set,
 	},
+	[REGSET_DSP] = {
+		.core_note_type	= NT_MIPS_DSP,
+		.n		= NUM_DSP_REGS + 1,
+		.size		= sizeof(u64),
+		.align		= sizeof(u64),
+		.get		= dsp64_get,
+		.set		= dsp64_set,
+		.active		= dsp_active,
+	},
+#ifdef CONFIG_MIPS_FP_SUPPORT
+	[REGSET_FP_MODE] = {
+		.core_note_type	= NT_MIPS_FP_MODE,
+		.n		= 1,
+		.size		= sizeof(int),
+		.align		= sizeof(int),
+		.get		= fp_mode_get,
+		.set		= fp_mode_set,
+	},
 	[REGSET_FPR] = {
 		.core_note_type	= NT_PRFPREG,
 		.n		= ELF_NFPREG,
@@ -728,6 +1108,17 @@ static const struct user_regset mips64_regsets[] = {
 		.get		= fpr_get,
 		.set		= fpr_set,
 	},
+#endif
+#ifdef CONFIG_CPU_HAS_MSA
+	[REGSET_MSA] = {
+		.core_note_type	= NT_MIPS_MSA,
+		.n		= NUM_FPU_REGS + 1,
+		.size		= 16,
+		.align		= 16,
+		.get		= msa_get,
+		.set		= msa_set,
+	},
+#endif
 };
 
 static const struct user_regset_view user_mips64_view = {
@@ -788,7 +1179,6 @@ long arch_ptrace(struct task_struct *child, long request,
 	/* Read the word at location addr in the USER area. */
 	case PTRACE_PEEKUSR: {
 		struct pt_regs *regs;
-		union fpureg *fregs;
 		unsigned long tmp = 0;
 
 		regs = task_pt_regs(child);
@@ -798,7 +1188,10 @@ long arch_ptrace(struct task_struct *child, long request,
 		case 0 ... 31:
 			tmp = regs->regs[addr];
 			break;
-		case FPR_BASE ... FPR_BASE + 31:
+#ifdef CONFIG_MIPS_FP_SUPPORT
+		case FPR_BASE ... FPR_BASE + 31: {
+			union fpureg *fregs;
+
 			if (!tsk_used_math(child)) {
 				/* FP not yet used */
 				tmp = -1;
@@ -820,6 +1213,15 @@ long arch_ptrace(struct task_struct *child, long request,
 #endif
 			tmp = get_fpr64(&fregs[addr - FPR_BASE], 0);
 			break;
+		}
+		case FPC_CSR:
+			tmp = child->thread.fpu.fcr31;
+			break;
+		case FPC_EIR:
+			/* implementation / version register */
+			tmp = boot_cpu_data.fpu_id;
+			break;
+#endif
 		case PC:
 			tmp = regs->cp0_epc;
 			break;
@@ -840,13 +1242,6 @@ long arch_ptrace(struct task_struct *child, long request,
 			tmp = regs->acx;
 			break;
 #endif
-		case FPC_CSR:
-			tmp = child->thread.fpu.fcr31;
-			break;
-		case FPC_EIR:
-			/* implementation / version register */
-			tmp = boot_cpu_data.fpu_id;
-			break;
 		case DSP_BASE ... DSP_BASE + 5: {
 			dspreg_t *dregs;
 
@@ -856,7 +1251,7 @@ long arch_ptrace(struct task_struct *child, long request,
 				goto out;
 			}
 			dregs = __get_dsp_regs(child);
-			tmp = (unsigned long) (dregs[addr - DSP_BASE]);
+			tmp = dregs[addr - DSP_BASE];
 			break;
 		}
 		case DSP_CONTROL:
@@ -897,6 +1292,7 @@ long arch_ptrace(struct task_struct *child, long request,
 				 mips_syscall_is_indirect(child, regs))
 				mips_syscall_update_nr(child, regs);
 			break;
+#ifdef CONFIG_MIPS_FP_SUPPORT
 		case FPR_BASE ... FPR_BASE + 31: {
 			union fpureg *fregs = get_fpu_regs(child);
 
@@ -916,6 +1312,11 @@ long arch_ptrace(struct task_struct *child, long request,
 			set_fpr64(&fregs[addr - FPR_BASE], 0, data);
 			break;
 		}
+		case FPC_CSR:
+			init_fp_ctx(child);
+			ptrace_setfcr31(child, data);
+			break;
+#endif
 		case PC:
 			regs->cp0_epc = data;
 			break;
@@ -930,10 +1331,6 @@ long arch_ptrace(struct task_struct *child, long request,
 			regs->acx = data;
 			break;
 #endif
-		case FPC_CSR:
-			init_fp_ctx(child);
-			ptrace_setfcr31(child, data);
-			break;
 		case DSP_BASE ... DSP_BASE + 5: {
 			dspreg_t *dregs;
 
@@ -969,6 +1366,7 @@ long arch_ptrace(struct task_struct *child, long request,
 		ret = ptrace_setregs(child, datavp);
 		break;
 
+#ifdef CONFIG_MIPS_FP_SUPPORT
 	case PTRACE_GETFPREGS:
 		ret = ptrace_getfpregs(child, datavp);
 		break;
@@ -976,7 +1374,7 @@ long arch_ptrace(struct task_struct *child, long request,
 	case PTRACE_SETFPREGS:
 		ret = ptrace_setfpregs(child, datavp);
 		break;
-
+#endif
 	case PTRACE_GET_THREAD_AREA:
 		ret = put_user(task_thread_info(child)->tp_value, datalp);
 		break;
@@ -1021,7 +1419,7 @@ asmlinkage long syscall_trace_enter(struct pt_regs *regs, long syscall)
 
 		sd.nr = syscall;
 		sd.arch = syscall_get_arch(current);
-		syscall_get_arguments(current, regs, 0, 6, args);
+		syscall_get_arguments(current, regs, args);
 		for (i = 0; i < 6; i++)
 			sd.args[i] = args[i];
 		sd.instruction_pointer = KSTK_EIP(current);

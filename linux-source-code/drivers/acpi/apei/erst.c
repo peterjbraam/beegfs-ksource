@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * APEI Error Record Serialization Table support
  *
@@ -9,15 +10,6 @@
  *
  * Copyright 2010 Intel Corp.
  *   Author: Huang Ying <ying.huang@intel.com>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License version
- * 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <linux/kernel.h>
@@ -1032,7 +1024,7 @@ skip:
 	else if (guid_equal(&rcd->sec_hdr.section_type, &CPER_SECTION_TYPE_MCE))
 		record->type = PSTORE_TYPE_MCE;
 	else
-		record->type = PSTORE_TYPE_UNKNOWN;
+		record->type = PSTORE_TYPE_MAX;
 
 	if (rcd->hdr.validation_bits & CPER_VALID_TIMESTAMP)
 		record->time.tv_sec = rcd->hdr.timestamp;

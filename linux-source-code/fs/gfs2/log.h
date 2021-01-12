@@ -1,10 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (C) Sistina Software, Inc.  1997-2003 All rights reserved.
  * Copyright (C) 2004-2006 Red Hat, Inc.  All rights reserved.
- *
- * This copyrighted material is made available to anyone wishing to use,
- * modify, copy, or redistribute it subject to the terms and conditions
- * of the GNU General Public License version 2.
  */
 
 #ifndef __LOG_DOT_H__
@@ -51,12 +48,11 @@ static inline void gfs2_log_pointers_init(struct gfs2_sbd *sdp,
 
 static inline void gfs2_ordered_add_inode(struct gfs2_inode *ip)
 {
-	struct gfs2_sbd *sdp;
+	struct gfs2_sbd *sdp = GFS2_SB(&ip->i_inode);
 
-	if (!gfs2_is_ordered(ip))
+	if (gfs2_is_jdata(ip) || !gfs2_is_ordered(sdp))
 		return;
 
-	sdp = GFS2_SB(&ip->i_inode);
 	if (!test_bit(GIF_ORDERED, &ip->i_flags)) {
 		spin_lock(&sdp->sd_ordered_lock);
 		if (!test_and_set_bit(GIF_ORDERED, &ip->i_flags))
@@ -79,6 +75,7 @@ extern void gfs2_log_commit(struct gfs2_sbd *sdp, struct gfs2_trans *trans);
 extern void gfs2_ail1_flush(struct gfs2_sbd *sdp, struct writeback_control *wbc);
 extern void log_flush_wait(struct gfs2_sbd *sdp);
 
+extern void gfs2_log_shutdown(struct gfs2_sbd *sdp);
 extern int gfs2_logd(void *data);
 extern void gfs2_add_revoke(struct gfs2_sbd *sdp, struct gfs2_bufdata *bd);
 extern void gfs2_glock_remove_revoke(struct gfs2_glock *gl);

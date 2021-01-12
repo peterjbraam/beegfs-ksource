@@ -244,8 +244,10 @@ cifs_do_create(struct inode *inode, struct dentry *direntry, unsigned int xid,
 		*oplock = REQ_OPLOCK;
 
 	full_path = build_path_from_dentry(direntry);
-	if (!full_path)
-		return -ENOMEM;
+	if (full_path == NULL) {
+		rc = -ENOMEM;
+		goto out;
+	}
 
 	if (tcon->unix_ext && cap_unix(tcon->ses) && !tcon->broken_posix_open &&
 	    (CIFS_UNIX_POSIX_PATH_OPS_CAP &
@@ -355,10 +357,13 @@ cifs_do_create(struct inode *inode, struct dentry *direntry, unsigned int xid,
 	if (!tcon->unix_ext && (mode & S_IWUGO) == 0)
 		create_options |= CREATE_OPTION_READONLY;
 
+	if (backup_cred(cifs_sb))
+		create_options |= CREATE_OPEN_BACKUP_INTENT;
+
 	oparms.tcon = tcon;
 	oparms.cifs_sb = cifs_sb;
 	oparms.desired_access = desired_access;
-	oparms.create_options = cifs_create_options(cifs_sb, create_options);
+	oparms.create_options = create_options;
 	oparms.disposition = disposition;
 	oparms.path = full_path;
 	oparms.fid = fid;
@@ -459,8 +464,7 @@ out_err:
 
 int
 cifs_atomic_open(struct inode *inode, struct dentry *direntry,
-		 struct file *file, unsigned oflags, umode_t mode,
-		 int *opened)
+		 struct file *file, unsigned oflags, umode_t mode)
 {
 	int rc;
 	unsigned int xid;
@@ -533,9 +537,9 @@ cifs_atomic_open(struct inode *inode, struct dentry *direntry,
 	}
 
 	if ((oflags & (O_CREAT | O_EXCL)) == (O_CREAT | O_EXCL))
-		*opened |= FILE_CREATED;
+		file->f_mode |= FMODE_CREATED;
 
-	rc = finish_open(file, direntry, generic_file_open, opened);
+	rc = finish_open(file, direntry, generic_file_open);
 	if (rc) {
 		if (server->ops->close)
 			server->ops->close(xid, tcon, &fid);
@@ -556,7 +560,6 @@ cifs_atomic_open(struct inode *inode, struct dentry *direntry,
 		if (server->ops->close)
 			server->ops->close(xid, tcon, &fid);
 		cifs_del_pending_open(&open);
-		fput(file);
 		rc = -ENOMEM;
 	}
 

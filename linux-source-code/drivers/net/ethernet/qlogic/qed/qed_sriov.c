@@ -33,7 +33,6 @@
 #include <linux/etherdevice.h>
 #include <linux/crc32.h>
 #include <linux/vmalloc.h>
-#include <linux/crash_dump.h>
 #include <linux/qed/qed_iov_if.h>
 #include "qed_cxt.h"
 #include "qed_hsi.h"
@@ -97,6 +96,7 @@ static int qed_sp_vf_start(struct qed_hwfn *p_hwfn, struct qed_vf_info *p_vf)
 		p_ramrod->personality = PERSONALITY_ETH;
 		break;
 	case QED_PCI_ETH_ROCE:
+	case QED_PCI_ETH_IWARP:
 		p_ramrod->personality = PERSONALITY_RDMA_AND_ETH;
 		break;
 	default:
@@ -353,7 +353,7 @@ static int qed_iov_post_vf_bulletin(struct qed_hwfn *p_hwfn,
 
 	/* propagate bulletin board via dmae to vm memory */
 	memset(&params, 0, sizeof(params));
-	SET_FIELD(params.flags, QED_DMAE_PARAMS_DST_VF_VALID, 0x1);
+	params.flags = QED_DMAE_FLAG_VF_DST;
 	params.dst_vfid = p_vf->abs_vf_id;
 	return qed_dmae_host2host(p_hwfn, p_ptt, p_vf->bulletin.phys,
 				  p_vf->vf_bulletin, p_vf->bulletin.size / 4,
@@ -607,9 +607,6 @@ int qed_iov_hw_info(struct qed_hwfn *p_hwfn)
 	struct qed_dev *cdev = p_hwfn->cdev;
 	int pos;
 	int rc;
-
-	if (is_kdump_kernel())
-		return 0;
 
 	if (IS_VF(p_hwfn->cdev))
 		return 0;
@@ -1229,8 +1226,8 @@ static void qed_iov_send_response(struct qed_hwfn *p_hwfn,
 
 	eng_vf_id = p_vf->abs_vf_id;
 
-	memset(&params, 0, sizeof(params));
-	SET_FIELD(params.flags, QED_DMAE_PARAMS_DST_VF_VALID, 0x1);
+	memset(&params, 0, sizeof(struct qed_dmae_params));
+	params.flags = QED_DMAE_FLAG_VF_DST;
 	params.dst_vfid = eng_vf_id;
 
 	qed_dmae_host2host(p_hwfn, p_ptt, mbx->reply_phys + sizeof(u64),
@@ -4107,9 +4104,8 @@ static int qed_iov_copy_vf_msg(struct qed_hwfn *p_hwfn, struct qed_ptt *ptt,
 	if (!vf_info)
 		return -EINVAL;
 
-	memset(&params, 0, sizeof(params));
-	SET_FIELD(params.flags, QED_DMAE_PARAMS_SRC_VF_VALID, 0x1);
-	SET_FIELD(params.flags, QED_DMAE_PARAMS_COMPLETION_DST, 0x1);
+	memset(&params, 0, sizeof(struct qed_dmae_params));
+	params.flags = QED_DMAE_FLAG_VF_SRC | QED_DMAE_FLAG_COMPLETION_DST;
 	params.src_vfid = vf_info->abs_vf_id;
 
 	if (qed_dmae_host2host(p_hwfn, ptt,
@@ -4359,9 +4355,9 @@ qed_iov_bulletin_get_forced_vlan(struct qed_hwfn *p_hwfn, u16 rel_vf_id)
 static int qed_iov_configure_tx_rate(struct qed_hwfn *p_hwfn,
 				     struct qed_ptt *p_ptt, int vfid, int val)
 {
+	struct qed_mcp_link_state *p_link;
 	struct qed_vf_info *vf;
 	u8 abs_vp_id = 0;
-	u16 rl_id;
 	int rc;
 
 	vf = qed_iov_get_vf_info(p_hwfn, (u16)vfid, true);
@@ -4372,8 +4368,10 @@ static int qed_iov_configure_tx_rate(struct qed_hwfn *p_hwfn,
 	if (rc)
 		return rc;
 
-	rl_id = abs_vp_id;	/* The "rl_id" is set as the "vport_id" */
-	return qed_init_global_rl(p_hwfn, p_ptt, rl_id, (u32)val);
+	p_link = &QED_LEADING_HWFN(p_hwfn->cdev)->mcp_info->link_output;
+
+	return qed_init_vport_rl(p_hwfn, p_ptt, abs_vp_id, (u32)val,
+				 p_link->speed);
 }
 
 static int

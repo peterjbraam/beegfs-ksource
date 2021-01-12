@@ -227,13 +227,9 @@ struct perf_session *perf_session__new(struct perf_data *data,
 			/* Open the directory data. */
 			if (data->is_dir) {
 				ret = perf_data__open_dir(data);
-				if (ret)
-					goto out_delete;
+			if (ret)
+				goto out_delete;
 			}
-
-			if (!symbol_conf.kallsyms_name &&
-			    !symbol_conf.vmlinux_name)
-				symbol_conf.kallsyms_name = perf_data__kallsyms_name(data);
 		}
 	} else  {
 		session->machines.host.env = &perf_env;
@@ -471,8 +467,6 @@ void perf_tool__fill_defaults(struct perf_tool *tool)
 		tool->comm = process_event_stub;
 	if (tool->namespaces == NULL)
 		tool->namespaces = process_event_stub;
-	if (tool->cgroup == NULL)
-		tool->cgroup = process_event_stub;
 	if (tool->fork == NULL)
 		tool->fork = process_event_stub;
 	if (tool->exit == NULL)
@@ -594,6 +588,7 @@ static void perf_event__mmap2_swap(union perf_event *event,
 	event->mmap2.maj   = bswap_32(event->mmap2.maj);
 	event->mmap2.min   = bswap_32(event->mmap2.min);
 	event->mmap2.ino   = bswap_64(event->mmap2.ino);
+	event->mmap2.ino_generation = bswap_64(event->mmap2.ino_generation);
 
 	if (sample_id_all) {
 		void *data = &event->mmap2.filename;
@@ -754,7 +749,6 @@ do { 						\
 	bswap_field_32(sample_stack_user);
 	bswap_field_32(aux_watermark);
 	bswap_field_16(sample_max_stack);
-	bswap_field_32(aux_sample_size);
 
 	/*
 	 * After read_format are bitfields. Check read_format because
@@ -1009,7 +1003,6 @@ static void callchain__lbr_callstack_printf(struct perf_sample *sample)
 {
 	struct ip_callchain *callchain = sample->callchain;
 	struct branch_stack *lbr_stack = sample->branch_stack;
-	struct branch_entry *entries = perf_sample__branch_entries(sample);
 	u64 kernel_callchain_nr = callchain->nr;
 	unsigned int i;
 
@@ -1046,10 +1039,10 @@ static void callchain__lbr_callstack_printf(struct perf_sample *sample)
 			       i, callchain->ips[i]);
 
 		printf("..... %2d: %016" PRIx64 "\n",
-		       (int)(kernel_callchain_nr), entries[0].to);
+		       (int)(kernel_callchain_nr), lbr_stack->entries[0].to);
 		for (i = 0; i < lbr_stack->nr; i++)
 			printf("..... %2d: %016" PRIx64 "\n",
-			       (int)(i + kernel_callchain_nr + 1), entries[i].from);
+			       (int)(i + kernel_callchain_nr + 1), lbr_stack->entries[i].from);
 	}
 }
 
@@ -1071,7 +1064,6 @@ static void callchain__printf(struct evsel *evsel,
 
 static void branch_stack__printf(struct perf_sample *sample, bool callstack)
 {
-	struct branch_entry *entries = perf_sample__branch_entries(sample);
 	uint64_t i;
 
 	printf("%s: nr:%" PRIu64 "\n",
@@ -1079,7 +1071,7 @@ static void branch_stack__printf(struct perf_sample *sample, bool callstack)
 		sample->branch_stack->nr);
 
 	for (i = 0; i < sample->branch_stack->nr; i++) {
-		struct branch_entry *e = &entries[i];
+		struct branch_entry *e = &sample->branch_stack->entries[i];
 
 		if (!callstack) {
 			printf("..... %2"PRIu64": %016" PRIx64 " -> %016" PRIx64 " %hu cycles %s%s%s%s %x\n",
@@ -1438,8 +1430,6 @@ static int machines__deliver_event(struct machines *machines,
 		return tool->comm(tool, event, sample, machine);
 	case PERF_RECORD_NAMESPACES:
 		return tool->namespaces(tool, event, sample, machine);
-	case PERF_RECORD_CGROUP:
-		return tool->cgroup(tool, event, sample, machine);
 	case PERF_RECORD_FORK:
 		return tool->fork(tool, event, sample, machine);
 	case PERF_RECORD_EXIT:
@@ -1502,13 +1492,8 @@ static int perf_session__deliver_event(struct perf_session *session,
 	if (ret > 0)
 		return 0;
 
-	ret = machines__deliver_event(&session->machines, session->evlist,
-				      event, &sample, tool, file_offset);
-
-	if (dump_trace && sample.aux_sample.size)
-		auxtrace__dump_auxtrace_sample(session, &sample);
-
-	return ret;
+	return machines__deliver_event(&session->machines, session->evlist,
+				       event, &sample, tool, file_offset);
 }
 
 static s64 perf_session__process_user_event(struct perf_session *session,
@@ -1663,34 +1648,6 @@ out_parse_sample:
 	*event_ptr = event;
 
 	return 0;
-}
-
-int perf_session__peek_events(struct perf_session *session, u64 offset,
-			      u64 size, peek_events_cb_t cb, void *data)
-{
-	u64 max_offset = offset + size;
-	char buf[PERF_SAMPLE_MAX_SIZE];
-	union perf_event *event;
-	int err;
-
-	do {
-		err = perf_session__peek_event(session, offset, buf,
-					       PERF_SAMPLE_MAX_SIZE, &event,
-					       NULL);
-		if (err)
-			return err;
-
-		err = cb(session, event, offset, data);
-		if (err)
-			return err;
-
-		offset += event->header.size;
-		if (event->header.type == PERF_RECORD_AUXTRACE)
-			offset += event->auxtrace.size;
-
-	} while (offset < max_offset);
-
-	return err;
 }
 
 static s64 perf_session__process_event(struct perf_session *session,
@@ -2407,6 +2364,35 @@ void perf_session__fprintf_info(struct perf_session *session, FILE *fp,
 	fprintf(fp, "# ========\n");
 	perf_header__fprintf_info(session, fp, full);
 	fprintf(fp, "# ========\n#\n");
+}
+
+
+int __perf_session__set_tracepoints_handlers(struct perf_session *session,
+					     const struct evsel_str_handler *assocs,
+					     size_t nr_assocs)
+{
+	struct evsel *evsel;
+	size_t i;
+	int err;
+
+	for (i = 0; i < nr_assocs; i++) {
+		/*
+		 * Adding a handler for an event not in the session,
+		 * just ignore it.
+		 */
+		evsel = perf_evlist__find_tracepoint_by_name(session->evlist, assocs[i].name);
+		if (evsel == NULL)
+			continue;
+
+		err = -EEXIST;
+		if (evsel->handler != NULL)
+			goto out;
+		evsel->handler = assocs[i].handler;
+	}
+
+	err = 0;
+out:
+	return err;
 }
 
 int perf_event__process_id_index(struct perf_session *session,

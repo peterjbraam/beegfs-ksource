@@ -1,15 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *	Linux NET3: IP/IP protocol decoder modified to support
  *		    virtual tunnel interface
  *
  *	Authors:
  *		Saurabh Mohan (saurabh.mohan@vyatta.com) 05/07/2012
- *
- *	This program is free software; you can redistribute it and/or
- *	modify it under the terms of the GNU General Public License
- *	as published by the Free Software Foundation; either version
- *	2 of the License, or (at your option) any later version.
- *
  */
 
 /*
@@ -96,6 +91,32 @@ static int vti_rcv_proto(struct sk_buff *skb)
 	return vti_rcv(skb, 0, false);
 }
 
+static int vti_rcv_tunnel(struct sk_buff *skb)
+{
+	struct ip_tunnel_net *itn = net_generic(dev_net(skb->dev), vti_net_id);
+	const struct iphdr *iph = ip_hdr(skb);
+	struct ip_tunnel *tunnel;
+
+	tunnel = ip_tunnel_lookup(itn, skb->dev->ifindex, TUNNEL_NO_KEY,
+				  iph->saddr, iph->daddr, 0);
+	if (tunnel) {
+		struct tnl_ptk_info tpi = {
+			.proto = htons(ETH_P_IP),
+		};
+
+		if (!xfrm4_policy_check(NULL, XFRM_POLICY_IN, skb))
+			goto drop;
+		if (iptunnel_pull_header(skb, 0, tpi.proto, false))
+			goto drop;
+		return ip_tunnel_rcv(tunnel, skb, &tpi, NULL, false);
+	}
+
+	return -EINVAL;
+drop:
+	kfree_skb(skb);
+	return 0;
+}
+
 static int vti_rcv_cb(struct sk_buff *skb, int err)
 {
 	unsigned short family;
@@ -121,7 +142,7 @@ static int vti_rcv_cb(struct sk_buff *skb, int err)
 
 	x = xfrm_input_state(skb);
 
-	inner_mode = x->inner_mode;
+	inner_mode = &x->inner_mode;
 
 	if (x->sel.family == AF_UNSPEC) {
 		inner_mode = xfrm_ip2inner_mode(x, XFRM_MODE_SKB_CB(skb)->protocol);
@@ -369,9 +390,9 @@ static int vti4_err(struct sk_buff *skb, u32 info)
 		return 0;
 
 	if (icmp_hdr(skb)->type == ICMP_DEST_UNREACH)
-		ipv4_update_pmtu(skb, net, info, 0, 0, protocol, 0);
+		ipv4_update_pmtu(skb, net, info, 0, protocol);
 	else
-		ipv4_redirect(skb, net, 0, 0, protocol, 0);
+		ipv4_redirect(skb, net, 0, protocol);
 	xfrm_state_put(x);
 
 	return 0;
@@ -480,29 +501,11 @@ static struct xfrm4_protocol vti_ipcomp4_protocol __read_mostly = {
 	.priority	=	100,
 };
 
-#if IS_ENABLED(CONFIG_INET_XFRM_TUNNEL)
-static int vti_rcv_tunnel(struct sk_buff *skb)
-{
-	XFRM_SPI_SKB_CB(skb)->family = AF_INET;
-	XFRM_SPI_SKB_CB(skb)->daddroff = offsetof(struct iphdr, daddr);
-
-	return vti_input(skb, IPPROTO_IPIP, ip_hdr(skb)->saddr, 0, false);
-}
-
-static struct xfrm_tunnel vti_ipip_handler __read_mostly = {
+static struct xfrm_tunnel ipip_handler __read_mostly = {
 	.handler	=	vti_rcv_tunnel,
-	.cb_handler	=	vti_rcv_cb,
 	.err_handler	=	vti4_err,
 	.priority	=	0,
 };
-
-static struct xfrm_tunnel vti_ipip6_handler __read_mostly = {
-	.handler	=	vti_rcv_tunnel,
-	.cb_handler	=	vti_rcv_cb,
-	.err_handler	=	vti4_err,
-	.priority	=	0,
-};
-#endif
 
 static int __net_init vti_init_net(struct net *net)
 {
@@ -672,17 +675,10 @@ static int __init vti_init(void)
 	if (err < 0)
 		goto xfrm_proto_comp_failed;
 
-#if IS_ENABLED(CONFIG_INET_XFRM_TUNNEL)
 	msg = "ipip tunnel";
-	err = xfrm4_tunnel_register(&vti_ipip_handler, AF_INET);
+	err = xfrm4_tunnel_register(&ipip_handler, AF_INET);
 	if (err < 0)
-		goto xfrm_tunnel_ipip_failed;
-#if IS_ENABLED(CONFIG_IPV6)
-	err = xfrm4_tunnel_register(&vti_ipip6_handler, AF_INET6);
-	if (err < 0)
-		goto xfrm_tunnel_ipip6_failed;
-#endif
-#endif
+		goto xfrm_tunnel_failed;
 
 	msg = "netlink interface";
 	err = rtnl_link_register(&vti_link_ops);
@@ -692,14 +688,8 @@ static int __init vti_init(void)
 	return err;
 
 rtnl_link_failed:
-#if IS_ENABLED(CONFIG_INET_XFRM_TUNNEL)
-#if IS_ENABLED(CONFIG_IPV6)
-	xfrm4_tunnel_deregister(&vti_ipip6_handler, AF_INET6);
-xfrm_tunnel_ipip6_failed:
-#endif
-	xfrm4_tunnel_deregister(&vti_ipip_handler, AF_INET);
-xfrm_tunnel_ipip_failed:
-#endif
+	xfrm4_tunnel_deregister(&ipip_handler, AF_INET);
+xfrm_tunnel_failed:
 	xfrm4_protocol_deregister(&vti_ipcomp4_protocol, IPPROTO_COMP);
 xfrm_proto_comp_failed:
 	xfrm4_protocol_deregister(&vti_ah4_protocol, IPPROTO_AH);
@@ -715,12 +705,7 @@ pernet_dev_failed:
 static void __exit vti_fini(void)
 {
 	rtnl_link_unregister(&vti_link_ops);
-#if IS_ENABLED(CONFIG_INET_XFRM_TUNNEL)
-#if IS_ENABLED(CONFIG_IPV6)
-	xfrm4_tunnel_deregister(&vti_ipip6_handler, AF_INET6);
-#endif
-	xfrm4_tunnel_deregister(&vti_ipip_handler, AF_INET);
-#endif
+	xfrm4_tunnel_deregister(&ipip_handler, AF_INET);
 	xfrm4_protocol_deregister(&vti_ipcomp4_protocol, IPPROTO_COMP);
 	xfrm4_protocol_deregister(&vti_ah4_protocol, IPPROTO_AH);
 	xfrm4_protocol_deregister(&vti_esp4_protocol, IPPROTO_ESP);

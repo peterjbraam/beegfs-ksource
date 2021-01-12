@@ -1,10 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) Sistina Software, Inc.  1997-2003 All rights reserved.
  * Copyright (C) 2004-2008 Red Hat, Inc.  All rights reserved.
- *
- * This copyrighted material is made available to anyone wishing to use,
- * modify, copy, or redistribute it subject to the terms and conditions
- * of the GNU General Public License version 2.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -273,15 +270,10 @@ static u32 gfs2_bitfit(const u8 *buf, const unsigned int len,
 
 static int gfs2_rbm_from_block(struct gfs2_rbm *rbm, u64 block)
 {
-	u64 rblock = block - rbm->rgd->rd_data0;
-
-	if (WARN_ON_ONCE(rblock > UINT_MAX))
-		return -EINVAL;
-	if (block >= rbm->rgd->rd_data0 + rbm->rgd->rd_data)
+	if (!rgrp_contains_block(rbm->rgd, block))
 		return -E2BIG;
-
 	rbm->bii = 0;
-	rbm->offset = (u32)(rblock);
+	rbm->offset = block - rbm->rgd->rd_data0;
 	/* Check if the block is within the first block */
 	if (rbm->offset < rbm_bi(rbm)->bi_blocks)
 		return 0;
@@ -475,24 +467,24 @@ void gfs2_rgrp_verify(struct gfs2_rgrpd *rgd)
 	}
 
 	if (count[0] != rgd->rd_free) {
-		gfs2_lm(sdp, "free data mismatch:  %u != %u\n",
-			count[0], rgd->rd_free);
-		gfs2_consist_rgrpd(rgd);
+		if (gfs2_consist_rgrpd(rgd))
+			fs_err(sdp, "free data mismatch:  %u != %u\n",
+			       count[0], rgd->rd_free);
 		return;
 	}
 
 	tmp = rgd->rd_data - rgd->rd_free - rgd->rd_dinodes;
 	if (count[1] != tmp) {
-		gfs2_lm(sdp, "used data mismatch:  %u != %u\n",
-			count[1], tmp);
-		gfs2_consist_rgrpd(rgd);
+		if (gfs2_consist_rgrpd(rgd))
+			fs_err(sdp, "used data mismatch:  %u != %u\n",
+			       count[1], tmp);
 		return;
 	}
 
 	if (count[2] + count[3] != rgd->rd_dinodes) {
-		gfs2_lm(sdp, "used metadata mismatch:  %u != %u\n",
-			count[2] + count[3], rgd->rd_dinodes);
-		gfs2_consist_rgrpd(rgd);
+		if (gfs2_consist_rgrpd(rgd))
+			fs_err(sdp, "used metadata mismatch:  %u != %u\n",
+			       count[2] + count[3], rgd->rd_dinodes);
 		return;
 	}
 }
@@ -608,6 +600,16 @@ void gfs2_free_clones(struct gfs2_rgrpd *rgd)
 	}
 }
 
+/**
+ * gfs2_rsqa_alloc - make sure we have a reservation assigned to the inode
+ *                 plus a quota allocations data structure, if necessary
+ * @ip: the inode for this reservation
+ */
+int gfs2_rsqa_alloc(struct gfs2_inode *ip)
+{
+	return gfs2_qa_alloc(ip);
+}
+
 static void dump_rs(struct seq_file *seq, const struct gfs2_blkreserv *rs,
 		    const char *fs_id_buf)
 {
@@ -680,17 +682,18 @@ void gfs2_rs_deltree(struct gfs2_blkreserv *rs)
 }
 
 /**
- * gfs2_rs_delete - delete a multi-block reservation
+ * gfs2_rsqa_delete - delete a multi-block reservation and quota allocation
  * @ip: The inode for this reservation
  * @wcount: The inode's write count, or NULL
  *
  */
-void gfs2_rs_delete(struct gfs2_inode *ip, atomic_t *wcount)
+void gfs2_rsqa_delete(struct gfs2_inode *ip, atomic_t *wcount)
 {
 	down_write(&ip->i_rw_mutex);
 	if ((wcount == NULL) || (atomic_read(wcount) <= 1))
 		gfs2_rs_deltree(&ip->i_res);
 	up_write(&ip->i_rw_mutex);
+	gfs2_qa_delete(ip, wcount);
 }
 
 /**
@@ -727,21 +730,28 @@ void gfs2_clear_rgrpd(struct gfs2_sbd *sdp)
 		rb_erase(n, &sdp->sd_rindex_tree);
 
 		if (gl) {
-			if (gl->gl_state != LM_ST_UNLOCKED) {
-				gfs2_glock_cb(gl, LM_ST_UNLOCKED);
-				flush_delayed_work(&gl->gl_work);
-			}
-			gfs2_rgrp_brelse(rgd);
 			glock_clear_object(gl, rgd);
+			gfs2_rgrp_brelse(rgd);
 			gfs2_glock_put(gl);
 		}
 
 		gfs2_free_clones(rgd);
+		return_all_reservations(rgd);
 		kfree(rgd->rd_bits);
 		rgd->rd_bits = NULL;
-		return_all_reservations(rgd);
 		kmem_cache_free(gfs2_rgrpd_cachep, rgd);
 	}
+}
+
+static void gfs2_rindex_print(const struct gfs2_rgrpd *rgd)
+{
+	struct gfs2_sbd *sdp = rgd->rd_sbd;
+
+	fs_info(sdp, "ri_addr = %llu\n", (unsigned long long)rgd->rd_addr);
+	fs_info(sdp, "ri_length = %u\n", rgd->rd_length);
+	fs_info(sdp, "ri_data0 = %llu\n", (unsigned long long)rgd->rd_data0);
+	fs_info(sdp, "ri_data = %u\n", rgd->rd_data);
+	fs_info(sdp, "ri_bitbytes = %u\n", rgd->rd_bitbytes);
 }
 
 /**
@@ -814,20 +824,11 @@ static int compute_bitstructs(struct gfs2_rgrpd *rgd)
 	}
 	bi = rgd->rd_bits + (length - 1);
 	if ((bi->bi_start + bi->bi_bytes) * GFS2_NBBY != rgd->rd_data) {
-		gfs2_lm(sdp,
-			"ri_addr = %llu\n"
-			"ri_length = %u\n"
-			"ri_data0 = %llu\n"
-			"ri_data = %u\n"
-			"ri_bitbytes = %u\n"
-			"start=%u len=%u offset=%u\n",
-			(unsigned long long)rgd->rd_addr,
-			rgd->rd_length,
-			(unsigned long long)rgd->rd_data0,
-			rgd->rd_data,
-			rgd->rd_bitbytes,
-			bi->bi_start, bi->bi_bytes, bi->bi_offset);
-		gfs2_consist_rgrpd(rgd);
+		if (gfs2_consist_rgrpd(rgd)) {
+			gfs2_rindex_print(rgd);
+			fs_err(sdp, "start=%u len=%u offset=%u\n",
+			       bi->bi_start, bi->bi_bytes, bi->bi_offset);
+		}
 		return -EIO;
 	}
 
@@ -1295,6 +1296,23 @@ void gfs2_rgrp_brelse(struct gfs2_rgrpd *rgd)
 			bi->bi_bh = NULL;
 		}
 	}
+
+}
+
+/**
+ * gfs2_rgrp_go_unlock - Unlock a rgrp glock
+ * @gh: The glock holder for the resource group
+ *
+ */
+
+void gfs2_rgrp_go_unlock(struct gfs2_holder *gh)
+{
+	struct gfs2_rgrpd *rgd = gh->gh_gl->gl_object;
+	int demote_requested = test_bit(GLF_DEMOTE, &gh->gh_gl->gl_flags) |
+		test_bit(GLF_PENDING_DEMOTE, &gh->gh_gl->gl_flags);
+
+	if (rgd && demote_requested)
+		gfs2_rgrp_brelse(rgd);
 }
 
 int gfs2_rgrp_send_discards(struct gfs2_sbd *sdp, u64 offset,
@@ -1391,6 +1409,9 @@ int gfs2_fitrim(struct file *filp, void __user *argp)
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
+
+	if (!test_bit(SDF_JOURNAL_LIVE, &sdp->sd_flags))
+		return -EROFS;
 
 	if (!blk_queue_discard(q))
 		return -EOPNOTSUPP;
@@ -1556,8 +1577,8 @@ static void rg_mblk_search(struct gfs2_rgrpd *rgd, struct gfs2_inode *ip,
 	if (S_ISDIR(inode->i_mode))
 		extlen = 1;
 	else {
-		extlen = max_t(u32, atomic_read(&rs->rs_sizehint), ap->target);
-		extlen = clamp(extlen, RGRP_RSRV_MINBLKS, free_blocks);
+		extlen = max_t(u32, atomic_read(&ip->i_sizehint), ap->target);
+		extlen = clamp(extlen, (u32)RGRP_RSRV_MINBLKS, free_blocks);
 	}
 	if ((rgd->rd_free_clone < rgd->rd_reserved) || (free_blocks < extlen))
 		return;
@@ -1855,7 +1876,7 @@ static void try_rgrp_unlink(struct gfs2_rgrpd *rgd, u64 *last_unlinked, u64 skip
 		 */
 		ip = gl->gl_object;
 
-		if (ip || !gfs2_queue_delete_work(gl, 0))
+		if (ip || queue_work(gfs2_delete_workqueue, &gl->gl_delete) == 0)
 			gfs2_glock_put(gl);
 		else
 			found++;
@@ -2010,7 +2031,7 @@ static inline int fast_to_acquire(struct gfs2_rgrpd *rgd)
  * We try our best to find an rgrp that has at least ap->target blocks
  * available. After a couple of passes (loops == 2), the prospects of finding
  * such an rgrp diminish. At this stage, we return the first rgrp that has
- * atleast ap->min_target blocks available. Either way, we set ap->allowed to
+ * at least ap->min_target blocks available. Either way, we set ap->allowed to
  * the number of blocks available in the chosen rgrp.
  *
  * Returns: 0 on success,
@@ -2064,7 +2085,7 @@ int gfs2_inplace_reserve(struct gfs2_inode *ip, struct gfs2_alloc_parms *ap)
 			}
 			error = gfs2_glock_nq_init(rs->rs_rbm.rgd->rd_gl,
 						   LM_ST_EXCLUSIVE, flags,
-						   &rs->rs_rgd_gh);
+						   &ip->i_rgd_gh);
 			if (unlikely(error))
 				return error;
 			if (!gfs2_rs_active(rs) && (loops < 2) &&
@@ -2073,13 +2094,13 @@ int gfs2_inplace_reserve(struct gfs2_inode *ip, struct gfs2_alloc_parms *ap)
 			if (sdp->sd_args.ar_rgrplvb) {
 				error = update_rgrp_lvb(rs->rs_rbm.rgd);
 				if (unlikely(error)) {
-					gfs2_glock_dq_uninit(&rs->rs_rgd_gh);
+					gfs2_glock_dq_uninit(&ip->i_rgd_gh);
 					return error;
 				}
 			}
 		}
 
-		/* Skip unuseable resource groups */
+		/* Skip unusable resource groups */
 		if ((rs->rs_rbm.rgd->rd_flags & (GFS2_RGF_NOALLOC |
 						 GFS2_RDF_ERROR)) ||
 		    (loops == 0 && ap->target > rs->rs_rbm.rgd->rd_extfail_pt))
@@ -2116,7 +2137,7 @@ skip_rgrp:
 
 		/* Unlock rgrp if required */
 		if (!rg_locked)
-			gfs2_glock_dq_uninit(&rs->rs_rgd_gh);
+			gfs2_glock_dq_uninit(&ip->i_rgd_gh);
 next_rgrp:
 		/* Find the next rgrp, and continue looking */
 		if (gfs2_select_rgrp(&rs->rs_rbm.rgd, begin))
@@ -2153,10 +2174,8 @@ next_rgrp:
 
 void gfs2_inplace_release(struct gfs2_inode *ip)
 {
-	struct gfs2_blkreserv *rs = &ip->i_res;
-
-	if (gfs2_holder_initialized(&rs->rs_rgd_gh))
-		gfs2_glock_dq_uninit(&rs->rs_rgd_gh);
+	if (gfs2_holder_initialized(&ip->i_rgd_gh))
+		gfs2_glock_dq_uninit(&ip->i_rgd_gh);
 }
 
 /**
@@ -2195,27 +2214,21 @@ static void gfs2_alloc_extent(const struct gfs2_rbm *rbm, bool dinode,
 /**
  * rgblk_free - Change alloc state of given block(s)
  * @sdp: the filesystem
+ * @rgd: the resource group the blocks are in
  * @bstart: the start of a run of blocks to free
  * @blen: the length of the block run (all must lie within ONE RG!)
  * @new_state: GFS2_BLKST_XXX the after-allocation block state
- *
- * Returns:  Resource group containing the block(s)
  */
 
-static struct gfs2_rgrpd *rgblk_free(struct gfs2_sbd *sdp, u64 bstart,
-				     u32 blen, unsigned char new_state)
+static void rgblk_free(struct gfs2_sbd *sdp, struct gfs2_rgrpd *rgd,
+		       u64 bstart, u32 blen, unsigned char new_state)
 {
 	struct gfs2_rbm rbm;
 	struct gfs2_bitmap *bi, *bi_prev = NULL;
 
-	rbm.rgd = gfs2_blk2rgrpd(sdp, bstart, 1);
-	if (!rbm.rgd) {
-		gfs2_lm(sdp, "block = %llu\n", (unsigned long long)bstart);
-		gfs2_consist(sdp);
-		return NULL;
-	}
-
-	gfs2_rbm_from_block(&rbm, bstart);
+	rbm.rgd = rgd;
+	if (WARN_ON_ONCE(gfs2_rbm_from_block(&rbm, bstart)))
+		return;
 	while (blen--) {
 		bi = rbm_bi(&rbm);
 		if (bi != bi_prev) {
@@ -2232,8 +2245,6 @@ static struct gfs2_rgrpd *rgblk_free(struct gfs2_sbd *sdp, u64 bstart,
 		gfs2_setbit(&rbm, false, new_state);
 		gfs2_rbm_incr(&rbm);
 	}
-
-	return rbm.rgd;
 }
 
 /**
@@ -2320,7 +2331,7 @@ static void gfs2_adjust_reservation(struct gfs2_inode *ip,
 				goto out;
 			/* We used up our block reservation, so we should
 			   reserve more blocks next time. */
-			atomic_add(RGRP_RSRV_ADDBLKS, &rs->rs_sizehint);
+			atomic_add(RGRP_RSRV_ADDBLKS, &ip->i_sizehint);
 		}
 		__rs_deltree(rs);
 	}
@@ -2354,7 +2365,10 @@ static void gfs2_set_alloc_start(struct gfs2_rbm *rbm,
 	else
 		goal = rbm->rgd->rd_last_alloc + rbm->rgd->rd_data0;
 
-	gfs2_rbm_from_block(rbm, goal);
+	if (WARN_ON_ONCE(gfs2_rbm_from_block(rbm, goal))) {
+		rbm->bii = 0;
+		rbm->offset = 0;
+	}
 }
 
 /**
@@ -2434,7 +2448,7 @@ int gfs2_alloc_blocks(struct gfs2_inode *ip, u64 *bn, unsigned int *nblocks,
 
 	gfs2_statfs_change(sdp, 0, -(s64)*nblocks, dinode ? 1 : 0);
 	if (dinode)
-		gfs2_trans_add_unrevoke(sdp, block, *nblocks);
+		gfs2_trans_remove_revoke(sdp, block, *nblocks);
 
 	gfs2_quota_change(ip, *nblocks, ip->i_inode.i_uid, ip->i_inode.i_gid);
 
@@ -2452,20 +2466,19 @@ rgrp_error:
 /**
  * __gfs2_free_blocks - free a contiguous run of block(s)
  * @ip: the inode these blocks are being freed from
+ * @rgd: the resource group the blocks are in
  * @bstart: first block of a run of contiguous blocks
  * @blen: the length of the block run
  * @meta: 1 if the blocks represent metadata
  *
  */
 
-void __gfs2_free_blocks(struct gfs2_inode *ip, u64 bstart, u32 blen, int meta)
+void __gfs2_free_blocks(struct gfs2_inode *ip, struct gfs2_rgrpd *rgd,
+			u64 bstart, u32 blen, int meta)
 {
 	struct gfs2_sbd *sdp = GFS2_SB(&ip->i_inode);
-	struct gfs2_rgrpd *rgd;
 
-	rgd = rgblk_free(sdp, bstart, blen, GFS2_BLKST_FREE);
-	if (!rgd)
-		return;
+	rgblk_free(sdp, rgd, bstart, blen, GFS2_BLKST_FREE);
 	trace_gfs2_block_alloc(ip, rgd, bstart, blen, GFS2_BLKST_FREE);
 	rgd->rd_free += blen;
 	rgd->rd_flags &= ~GFS2_RGF_TRIMMED;
@@ -2480,16 +2493,18 @@ void __gfs2_free_blocks(struct gfs2_inode *ip, u64 bstart, u32 blen, int meta)
 /**
  * gfs2_free_meta - free a contiguous run of data block(s)
  * @ip: the inode these blocks are being freed from
+ * @rgd: the resource group the blocks are in
  * @bstart: first block of a run of contiguous blocks
  * @blen: the length of the block run
  *
  */
 
-void gfs2_free_meta(struct gfs2_inode *ip, u64 bstart, u32 blen)
+void gfs2_free_meta(struct gfs2_inode *ip, struct gfs2_rgrpd *rgd,
+		    u64 bstart, u32 blen)
 {
 	struct gfs2_sbd *sdp = GFS2_SB(&ip->i_inode);
 
-	__gfs2_free_blocks(ip, bstart, blen, 1);
+	__gfs2_free_blocks(ip, rgd, bstart, blen, 1);
 	gfs2_statfs_change(sdp, 0, +blen, 0);
 	gfs2_quota_change(ip, -(s64)blen, ip->i_inode.i_uid, ip->i_inode.i_gid);
 }
@@ -2501,9 +2516,10 @@ void gfs2_unlink_di(struct inode *inode)
 	struct gfs2_rgrpd *rgd;
 	u64 blkno = ip->i_no_addr;
 
-	rgd = rgblk_free(sdp, blkno, 1, GFS2_BLKST_UNLINKED);
+	rgd = gfs2_blk2rgrpd(sdp, blkno, true);
 	if (!rgd)
 		return;
+	rgblk_free(sdp, rgd, blkno, 1, GFS2_BLKST_UNLINKED);
 	trace_gfs2_block_alloc(ip, rgd, blkno, 1, GFS2_BLKST_UNLINKED);
 	gfs2_trans_add_meta(rgd->rd_gl, rgd->rd_bits[0].bi_bh);
 	gfs2_rgrp_out(rgd, rgd->rd_bits[0].bi_bh->b_data);
@@ -2513,13 +2529,8 @@ void gfs2_unlink_di(struct inode *inode)
 void gfs2_free_di(struct gfs2_rgrpd *rgd, struct gfs2_inode *ip)
 {
 	struct gfs2_sbd *sdp = rgd->rd_sbd;
-	struct gfs2_rgrpd *tmp_rgd;
 
-	tmp_rgd = rgblk_free(sdp, ip->i_no_addr, 1, GFS2_BLKST_FREE);
-	if (!tmp_rgd)
-		return;
-	gfs2_assert_withdraw(sdp, rgd == tmp_rgd);
-
+	rgblk_free(sdp, rgd, ip->i_no_addr, 1, GFS2_BLKST_FREE);
 	if (!rgd->rd_dinodes)
 		gfs2_consist_rgrpd(rgd);
 	rgd->rd_dinodes--;
@@ -2563,7 +2574,8 @@ int gfs2_check_blk_type(struct gfs2_sbd *sdp, u64 no_addr, unsigned int type)
 
 	rbm.rgd = rgd;
 	error = gfs2_rbm_from_block(&rbm, no_addr);
-	WARN_ON_ONCE(error != 0);
+	if (WARN_ON_ONCE(error))
+		goto fail;
 
 	if (gfs2_testbit(&rbm, false) != type)
 		error = -ESTALE;
@@ -2649,13 +2661,12 @@ void gfs2_rlist_add(struct gfs2_inode *ip, struct gfs2_rgrp_list *rlist,
  * gfs2_rlist_alloc - all RGs have been added to the rlist, now allocate
  *      and initialize an array of glock holders for them
  * @rlist: the list of resource groups
- * @state: the lock state to acquire the RG lock in
  *
  * FIXME: Don't use NOFAIL
  *
  */
 
-void gfs2_rlist_alloc(struct gfs2_rgrp_list *rlist, unsigned int state)
+void gfs2_rlist_alloc(struct gfs2_rgrp_list *rlist)
 {
 	unsigned int x;
 
@@ -2664,7 +2675,7 @@ void gfs2_rlist_alloc(struct gfs2_rgrp_list *rlist, unsigned int state)
 				      GFP_NOFS | __GFP_NOFAIL);
 	for (x = 0; x < rlist->rl_rgrps; x++)
 		gfs2_holder_init(rlist->rl_rgd[x]->rd_gl,
-				state, 0,
+				LM_ST_EXCLUSIVE, 0,
 				&rlist->rl_ghs[x]);
 }
 

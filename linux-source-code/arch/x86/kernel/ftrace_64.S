@@ -9,6 +9,7 @@
 #include <asm/export.h>
 #include <asm/nospec-branch.h>
 #include <asm/unwind_hints.h>
+#include <asm/frame.h>
 
 	.code64
 	.section .entry.text, "ax"
@@ -87,7 +88,6 @@ EXPORT_SYMBOL(__fentry__)
 	movq %rdi, RDI(%rsp)
 	movq %r8, R8(%rsp)
 	movq %r9, R9(%rsp)
-	movq $0, ORIG_RAX(%rsp)
 	/*
 	 * Save the original RBP. Even though the mcount ABI does not
 	 * require this, it helps out callers.
@@ -114,11 +114,7 @@ EXPORT_SYMBOL(__fentry__)
 	subq $MCOUNT_INSN_SIZE, %rdi
 	.endm
 
-.macro restore_mcount_regs save=0
-
-	/* ftrace_regs_caller or frame pointers require this */
-	movq RBP(%rsp), %rbp
-
+.macro restore_mcount_regs
 	movq R9(%rsp), %r9
 	movq R8(%rsp), %r8
 	movq RDI(%rsp), %rdi
@@ -127,7 +123,10 @@ EXPORT_SYMBOL(__fentry__)
 	movq RCX(%rsp), %rcx
 	movq RAX(%rsp), %rax
 
-	addq $MCOUNT_REG_SIZE-\save, %rsp
+	/* ftrace_regs_caller can modify %rbp */
+	movq RBP(%rsp), %rbp
+
+	addq $MCOUNT_REG_SIZE, %rsp
 
 	.endm
 
@@ -154,9 +153,6 @@ GLOBAL(ftrace_call)
 	restore_mcount_regs
 
 	/*
-	 * The copied trampoline must call ftrace_epilogue as it
-	 * still may need to call the function graph tracer.
-	 *
 	 * The code up to this label is copied into trampolines so
 	 * think twice before adding any new code or changing the
 	 * layout here.
@@ -168,7 +164,10 @@ GLOBAL(ftrace_graph_call)
 	jmp ftrace_stub
 #endif
 
-/* This is weak to keep gas from relaxing the jumps */
+/*
+ * This is weak to keep gas from relaxing the jumps.
+ * It is also used to copy the retq for trampolines.
+ */
 WEAK(ftrace_stub)
 	retq
 ENDPROC(ftrace_caller)
@@ -176,8 +175,6 @@ ENDPROC(ftrace_caller)
 ENTRY(ftrace_regs_caller)
 	/* Save the current flags before any operations that can change them */
 	pushfq
-
-	UNWIND_HINT_SAVE
 
 	/* added 8 bytes to save flags */
 	save_mcount_regs 8
@@ -207,6 +204,8 @@ GLOBAL(ftrace_regs_caller_op_ptr)
 	leaq MCOUNT_REG_SIZE+8*2(%rsp), %rcx
 	movq %rcx, RSP(%rsp)
 
+	ENCODE_FRAME_POINTER
+
 	/* regs go into 4th parameter */
 	leaq (%rsp), %rcx
 
@@ -229,33 +228,7 @@ GLOBAL(ftrace_regs_call)
 	movq R10(%rsp), %r10
 	movq RBX(%rsp), %rbx
 
-	movq ORIG_RAX(%rsp), %rax
-	movq %rax, MCOUNT_REG_SIZE-8(%rsp)
-
-	/* If ORIG_RAX is anything but zero, make this a call to that */
-	movq ORIG_RAX(%rsp), %rax
-	cmpq	$0, %rax
-	je	1f
-
-	/* Swap the flags with orig_rax */
-	movq MCOUNT_REG_SIZE(%rsp), %rdi
-	movq %rdi, MCOUNT_REG_SIZE-8(%rsp)
-	movq %rax, MCOUNT_REG_SIZE(%rsp)
-
-	restore_mcount_regs 8
-
-	jmp	2f
-
-1:	restore_mcount_regs
-
-
-2:
-	/*
-	 * The stack layout is nondetermistic here, depending on which path was
-	 * taken.  This confuses objtool and ORC, rightfully so.  For now,
-	 * pretend the stack always looks like the non-direct case.
-	 */
-	UNWIND_HINT_RESTORE
+	restore_mcount_regs
 
 	/* Restore flags */
 	popfq

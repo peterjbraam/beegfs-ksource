@@ -13,10 +13,10 @@ Integer types
 
 	If variable is of Type,		use printk format specifier:
 	------------------------------------------------------------
-		char			%hhd or %hhx
-		unsigned char		%hhu or %hhx
-		short int		%hd or %hx
-		unsigned short int	%hu or %hx
+		char			%d or %x
+		unsigned char		%u or %x
+		short int		%d or %x
+		unsigned short int	%u or %x
 		int			%d or %x
 		unsigned int		%u or %x
 		long			%ld or %lx
@@ -25,10 +25,10 @@ Integer types
 		unsigned long long	%llu or %llx
 		size_t			%zu or %zx
 		ssize_t			%zd or %zx
-		s8			%hhd or %hhx
-		u8			%hhu or %hhx
-		s16			%hd or %hx
-		u16			%hu or %hx
+		s8			%d or %x
+		u8			%u or %x
+		s16			%d or %x
+		u16			%u or %x
 		s32			%d or %x
 		u32			%u or %x
 		s64			%lld or %llx
@@ -79,18 +79,6 @@ has the added benefit of providing a unique identifier. On 64-bit machines
 the first 32 bits are zeroed. The kernel will print ``(ptrval)`` until it
 gathers enough entropy. If you *really* want the address see %px below.
 
-Error Pointers
---------------
-
-::
-
-	%pe	-ENOSPC
-
-For printing error pointers (i.e. a pointer for which IS_ERR() is true)
-as a symbolic error name. Error values for which no symbolic name is
-known are printed in decimal, while a non-ERR_PTR passed as the
-argument to %pe gets treated as ordinary %p.
-
 Symbols/Function Pointers
 -------------------------
 
@@ -122,20 +110,6 @@ used when printing stack backtraces. The specifier takes into
 consideration the effect of compiler optimisations which may occur
 when tail-calls are used and marked with the noreturn GCC attribute.
 
-Probed Pointers from BPF / tracing
-----------------------------------
-
-::
-
-	%pks	kernel string
-	%pus	user string
-
-The ``k`` and ``u`` specifiers are used for printing prior probed memory from
-either kernel memory (k) or user memory (u). The subsequent ``s`` specifier
-results in printing a string. For direct use in regular vsnprintf() the (k)
-and (u) annotation is ignored, however, when used out of BPF's bpf_trace_printk(),
-for example, it reads the memory it is pointing to without faulting.
-
 Kernel Pointers
 ---------------
 
@@ -145,7 +119,7 @@ Kernel Pointers
 
 For printing kernel pointers which should be hidden from unprivileged
 users. The behaviour of %pK depends on the kptr_restrict sysctl - see
-Documentation/sysctl/kernel.txt for more details.
+Documentation/admin-guide/sysctl/kernel.rst for more details.
 
 Unmodified Addresses
 --------------------
@@ -533,6 +507,12 @@ Passed by reference.
 
 Thanks
 ======
+
+Kernel messages:
+
+       %pj	123456
+
+       For generating the jhash of a string truncated to six digits
 
 If you add other %p extensions, please extend <lib/test_printf.c> with
 one or more test cases, if at all feasible.

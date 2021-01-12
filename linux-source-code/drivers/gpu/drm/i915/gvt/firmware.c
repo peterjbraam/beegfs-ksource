@@ -146,7 +146,7 @@ void intel_gvt_free_firmware(struct intel_gvt *gvt)
 		clean_firmware_sysfs(gvt);
 
 	kfree(gvt->firmware.cfg_space);
-	vfree(gvt->firmware.mmio);
+	kfree(gvt->firmware.mmio);
 }
 
 static int verify_firmware(struct intel_gvt *gvt,
@@ -229,7 +229,7 @@ int intel_gvt_load_firmware(struct intel_gvt *gvt)
 
 	firmware->cfg_space = mem;
 
-	mem = vmalloc(info->mmio_size);
+	mem = kmalloc(info->mmio_size, GFP_KERNEL);
 	if (!mem) {
 		kfree(path);
 		kfree(firmware->cfg_space);

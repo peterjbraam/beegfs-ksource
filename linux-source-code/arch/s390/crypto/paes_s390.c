@@ -198,6 +198,7 @@ static int ecb_paes_set_key(struct crypto_tfm *tfm, const u8 *in_key,
 	if (__ecb_paes_set_key(ctx)) {
 		tfm->crt_flags |= CRYPTO_TFM_RES_BAD_KEY_LEN;
 		return -EINVAL;
+
 	}
 	return 0;
 }
@@ -702,14 +703,14 @@ static int ctr_paes_crypt(struct blkcipher_desc *desc, unsigned long modifier,
 
 	locked = mutex_trylock(&ctrblk_lock);
 
+
 	while ((nbytes = walk->nbytes) >= AES_BLOCK_SIZE) {
 		n = AES_BLOCK_SIZE;
 		if (nbytes >= 2*AES_BLOCK_SIZE && locked)
 			n = __ctrblk_init(ctrblk, walk->iv, nbytes);
 		ctrptr = (n > AES_BLOCK_SIZE) ? ctrblk : walk->iv;
-		k = cpacf_kmctr(ctx->fc | modifier, &param,
-				walk->dst.virt.addr, walk->src.virt.addr,
-				n, ctrptr);
+		k = cpacf_kmctr(ctx->fc | modifier, &param, walk->dst.virt.addr,
+				walk->src.virt.addr, n, ctrptr);
 		if (k) {
 			if (ctrptr == ctrblk)
 				memcpy(walk->iv, ctrptr + k - AES_BLOCK_SIZE,

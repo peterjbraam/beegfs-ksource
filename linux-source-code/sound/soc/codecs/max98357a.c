@@ -5,7 +5,6 @@
  */
 
 #include <linux/acpi.h>
-#include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/err.h>
 #include <linux/gpio.h>
@@ -25,24 +24,26 @@ struct max98357a_priv {
 	unsigned int sdmode_delay;
 };
 
-static int max98357a_sdmode_event(struct snd_soc_dapm_widget *w,
-		struct snd_kcontrol *kcontrol, int event)
+static int max98357a_daiops_trigger(struct snd_pcm_substream *substream,
+		int cmd, struct snd_soc_dai *dai)
 {
-	struct snd_soc_component *component =
-		snd_soc_dapm_to_component(w->dapm);
-	struct max98357a_priv *max98357a =
-		snd_soc_component_get_drvdata(component);
+	struct max98357a_priv *max98357a = snd_soc_dai_get_drvdata(dai);
 
 	if (!max98357a->sdmode)
 		return 0;
 
-	if (event & SND_SOC_DAPM_POST_PMU) {
-		msleep(max98357a->sdmode_delay);
+	switch (cmd) {
+	case SNDRV_PCM_TRIGGER_START:
+	case SNDRV_PCM_TRIGGER_RESUME:
+	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
+		mdelay(max98357a->sdmode_delay);
 		gpiod_set_value(max98357a->sdmode, 1);
-		dev_dbg(component->dev, "set sdmode to 1");
-	} else if (event & SND_SOC_DAPM_PRE_PMD) {
+		break;
+	case SNDRV_PCM_TRIGGER_STOP:
+	case SNDRV_PCM_TRIGGER_SUSPEND:
+	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
 		gpiod_set_value(max98357a->sdmode, 0);
-		dev_dbg(component->dev, "set sdmode to 0");
+		break;
 	}
 
 	return 0;
@@ -50,14 +51,10 @@ static int max98357a_sdmode_event(struct snd_soc_dapm_widget *w,
 
 static const struct snd_soc_dapm_widget max98357a_dapm_widgets[] = {
 	SND_SOC_DAPM_OUTPUT("Speaker"),
-	SND_SOC_DAPM_OUT_DRV_E("SD_MODE", SND_SOC_NOPM, 0, 0, NULL, 0,
-			max98357a_sdmode_event,
-			SND_SOC_DAPM_POST_PMU | SND_SOC_DAPM_PRE_PMD),
 };
 
 static const struct snd_soc_dapm_route max98357a_dapm_routes[] = {
-	{"SD_MODE", NULL, "HiFi Playback"},
-	{"Speaker", NULL, "SD_MODE"},
+	{"Speaker", NULL, "HiFi Playback"},
 };
 
 static const struct snd_soc_component_driver max98357a_component_driver = {
@@ -69,6 +66,10 @@ static const struct snd_soc_component_driver max98357a_component_driver = {
 	.use_pmdown_time	= 1,
 	.endianness		= 1,
 	.non_legacy_dai_naming	= 1,
+};
+
+static const struct snd_soc_dai_ops max98357a_dai_ops = {
+	.trigger	= max98357a_daiops_trigger,
 };
 
 static struct snd_soc_dai_driver max98357a_dai_driver = {
@@ -90,6 +91,7 @@ static struct snd_soc_dai_driver max98357a_dai_driver = {
 		.channels_min	= 1,
 		.channels_max	= 2,
 	},
+	.ops    = &max98357a_dai_ops,
 };
 
 static int max98357a_platform_probe(struct platform_device *pdev)
@@ -133,7 +135,6 @@ MODULE_DEVICE_TABLE(of, max98357a_device_id);
 #ifdef CONFIG_ACPI
 static const struct acpi_device_id max98357a_acpi_match[] = {
 	{ "MX98357A", 0 },
-	{ "MX98360A", 0 },
 	{},
 };
 MODULE_DEVICE_TABLE(acpi, max98357a_acpi_match);

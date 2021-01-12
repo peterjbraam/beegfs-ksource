@@ -78,7 +78,9 @@ struct ib_umem_odp {
 	bool is_implicit_odp;
 
 	struct completion	notifier_completion;
+	int			dying;
 	unsigned int		page_shift;
+	struct work_struct	work;
 };
 
 static inline struct ib_umem_odp *to_ib_umem_odp(struct ib_umem *umem)
@@ -120,20 +122,12 @@ static inline size_t ib_umem_odp_num_pages(struct ib_umem_odp *umem_odp)
 #ifdef CONFIG_INFINIBAND_ON_DEMAND_PAGING
 
 struct ib_ucontext_per_mm {
-	struct ib_ucontext *context;
-	struct mm_struct *mm;
+	struct mmu_notifier mn;
 	struct pid *tgid;
-	bool active;
 
 	struct rb_root_cached umem_tree;
 	/* Protects umem_tree */
 	struct rw_semaphore umem_rwsem;
-
-	struct mmu_notifier mn;
-	unsigned int odp_mrs_count;
-
-	struct list_head ucontext_list;
-	struct rcu_head rcu;
 };
 
 struct ib_umem_odp *ib_umem_odp_get(struct ib_udata *udata, unsigned long addr,
@@ -159,7 +153,24 @@ typedef int (*umem_call_back)(struct ib_umem_odp *item, u64 start, u64 end,
  */
 int rbt_ib_umem_for_each_in_range(struct rb_root_cached *root,
 				  u64 start, u64 end,
-				  umem_call_back cb, void *cookie);
+				  umem_call_back cb,
+				  bool blockable, void *cookie);
+
+/*
+ * Find first region intersecting with address range.
+ * Return NULL if not found
+ */
+static inline struct ib_umem_odp *
+rbt_ib_umem_lookup(struct rb_root_cached *root, u64 addr, u64 length)
+{
+	struct interval_tree_node *node;
+
+	node = interval_tree_iter_first(root, addr, addr + length - 1);
+	if (!node)
+		return NULL;
+	return container_of(node, struct ib_umem_odp, interval_tree);
+
+}
 
 static inline int ib_umem_mmu_notifier_retry(struct ib_umem_odp *umem_odp,
 					     unsigned long mmu_seq)

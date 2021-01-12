@@ -52,15 +52,12 @@ EXPORT_SYMBOL_GPL(tm6000_debug);
 
 static struct tm6000_fmt format[] = {
 	{
-		.name     = "4:2:2, packed, YVY2",
 		.fourcc   = V4L2_PIX_FMT_YUYV,
 		.depth    = 16,
 	}, {
-		.name     = "4:2:2, packed, UYVY",
 		.fourcc   = V4L2_PIX_FMT_UYVY,
 		.depth    = 16,
 	}, {
-		.name     = "A/V + VBI mux packet",
 		.fourcc   = V4L2_PIX_FMT_TM6000,
 		.depth    = 16,
 	}
@@ -106,7 +103,7 @@ static inline void buffer_filled(struct tm6000_core *dev,
 	dprintk(dev, V4L2_DEBUG_ISOC, "[%p/%d] wakeup\n", buf, buf->vb.i);
 	buf->vb.state = VIDEOBUF_DONE;
 	buf->vb.field_count++;
-	v4l2_get_timestamp(&buf->vb.ts);
+	buf->vb.ts = ktime_get_ns();
 
 	list_del(&buf->vb.queue);
 	wake_up(&buf->vb.done);
@@ -875,7 +872,6 @@ static int vidioc_enum_fmt_vid_cap(struct file *file, void  *priv,
 	if (f->index >= ARRAY_SIZE(format))
 		return -EINVAL;
 
-	strscpy(f->description, format[f->index].name, sizeof(f->description));
 	f->pixelformat = format[f->index].fourcc;
 	return 0;
 }

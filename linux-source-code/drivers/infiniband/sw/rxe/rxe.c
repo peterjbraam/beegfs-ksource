@@ -48,6 +48,8 @@ static void rxe_cleanup_ports(struct rxe_dev *rxe)
 
 }
 
+bool rxe_initialized;
+
 /* free resources for a rxe device all objects created for this device must
  * have been destroyed
  */
@@ -77,8 +79,12 @@ static void rxe_init_device_param(struct rxe_dev *rxe)
 {
 	rxe->max_inline_data			= RXE_MAX_INLINE_DATA;
 
+	rxe->attr.fw_ver			= RXE_FW_VER;
 	rxe->attr.max_mr_size			= RXE_MAX_MR_SIZE;
 	rxe->attr.page_size_cap			= RXE_PAGE_SIZE_CAP;
+	rxe->attr.vendor_id			= RXE_VENDOR_ID;
+	rxe->attr.vendor_part_id		= RXE_VENDOR_PART_ID;
+	rxe->attr.hw_ver			= RXE_HW_VER;
 	rxe->attr.max_qp			= RXE_MAX_QP;
 	rxe->attr.max_qp_wr			= RXE_MAX_QP_WR;
 	rxe->attr.device_cap_flags		= RXE_DEVICE_CAP_FLAGS;
@@ -90,13 +96,22 @@ static void rxe_init_device_param(struct rxe_dev *rxe)
 	rxe->attr.max_mr			= RXE_MAX_MR;
 	rxe->attr.max_pd			= RXE_MAX_PD;
 	rxe->attr.max_qp_rd_atom		= RXE_MAX_QP_RD_ATOM;
+	rxe->attr.max_ee_rd_atom		= RXE_MAX_EE_RD_ATOM;
 	rxe->attr.max_res_rd_atom		= RXE_MAX_RES_RD_ATOM;
 	rxe->attr.max_qp_init_rd_atom		= RXE_MAX_QP_INIT_RD_ATOM;
+	rxe->attr.max_ee_init_rd_atom		= RXE_MAX_EE_INIT_RD_ATOM;
 	rxe->attr.atomic_cap			= IB_ATOMIC_HCA;
+	rxe->attr.max_ee			= RXE_MAX_EE;
+	rxe->attr.max_rdd			= RXE_MAX_RDD;
+	rxe->attr.max_mw			= RXE_MAX_MW;
+	rxe->attr.max_raw_ipv6_qp		= RXE_MAX_RAW_IPV6_QP;
+	rxe->attr.max_raw_ethy_qp		= RXE_MAX_RAW_ETHY_QP;
 	rxe->attr.max_mcast_grp			= RXE_MAX_MCAST_GRP;
 	rxe->attr.max_mcast_qp_attach		= RXE_MAX_MCAST_QP_ATTACH;
 	rxe->attr.max_total_mcast_qp_attach	= RXE_MAX_TOT_MCAST_QP_ATTACH;
 	rxe->attr.max_ah			= RXE_MAX_AH;
+	rxe->attr.max_fmr			= RXE_MAX_FMR;
+	rxe->attr.max_map_per_fmr		= RXE_MAX_MAP_PER_FMR;
 	rxe->attr.max_srq			= RXE_MAX_SRQ;
 	rxe->attr.max_srq_wr			= RXE_MAX_SRQ_WR;
 	rxe->attr.max_srq_sge			= RXE_MAX_SRQ_SGE;
@@ -145,9 +160,6 @@ static int rxe_init_ports(struct rxe_dev *rxe)
 	struct rxe_port *port = &rxe->port;
 
 	rxe_init_port_param(port);
-
-	if (!port->attr.pkey_tbl_len || !port->attr.gid_tbl_len)
-		return -EINVAL;
 
 	port->pkey_tbl = kcalloc(port->attr.pkey_tbl_len,
 			sizeof(*port->pkey_tbl), GFP_KERNEL);
@@ -335,8 +347,6 @@ static int __init rxe_module_init(void)
 {
 	int err;
 
-	mark_tech_preview("Soft-RoCE Transport Driver", THIS_MODULE);
-
 	/* initialize slab caches for managed objects */
 	err = rxe_cache_init();
 	if (err) {
@@ -349,6 +359,7 @@ static int __init rxe_module_init(void)
 		return err;
 
 	rdma_link_register(&rxe_link_ops);
+	rxe_initialized = true;
 	pr_info("loaded\n");
 	return 0;
 }
@@ -360,6 +371,7 @@ static void __exit rxe_module_exit(void)
 	rxe_net_exit();
 	rxe_cache_exit();
 
+	rxe_initialized = false;
 	pr_info("unloaded\n");
 }
 

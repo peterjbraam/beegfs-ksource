@@ -7,8 +7,6 @@
 #include <linux/cpu.h>
 #include <linux/kernel.h>
 #include <linux/device.h>
-#include <linux/nospec.h>
-#include <linux/prctl.h>
 #include <linux/seq_buf.h>
 
 #include <asm/asm-prototypes.h>
@@ -18,7 +16,7 @@
 #include <asm/setup.h>
 
 
-unsigned long powerpc_security_features __read_mostly = SEC_FTR_DEFAULT;
+u64 powerpc_security_features __read_mostly = SEC_FTR_DEFAULT;
 
 enum count_cache_flush_type {
 	COUNT_CACHE_FLUSH_NONE	= 0x1,
@@ -60,7 +58,7 @@ void setup_barrier_nospec(void)
 	enable = security_ftr_enabled(SEC_FTR_FAVOUR_SECURITY) &&
 		 security_ftr_enabled(SEC_FTR_BNDS_CHK_SPEC_BAR);
 
-	if (!no_nospec)
+	if (!no_nospec && !cpu_mitigations_off())
 		enable_barrier_nospec(enable);
 }
 
@@ -107,6 +105,14 @@ static __init int barrier_nospec_debugfs_init(void)
 	return 0;
 }
 device_initcall(barrier_nospec_debugfs_init);
+
+static __init int security_feature_debugfs_init(void)
+{
+	debugfs_create_x64("security_features", 0400, powerpc_debugfs_root,
+			   &powerpc_security_features);
+	return 0;
+}
+device_initcall(security_feature_debugfs_init);
 #endif /* CONFIG_DEBUG_FS */
 
 #if defined(CONFIG_PPC_FSL_BOOK3E) || defined(CONFIG_PPC_BOOK3S_64)
@@ -122,7 +128,7 @@ early_param("nospectre_v2", handle_nospectre_v2);
 #ifdef CONFIG_PPC_FSL_BOOK3E
 void setup_spectre_v2(void)
 {
-	if (no_spectrev2)
+	if (no_spectrev2 || cpu_mitigations_off())
 		do_btb_flush_fixups();
 	else
 		btb_flush_enabled = true;
@@ -136,31 +142,32 @@ ssize_t cpu_show_meltdown(struct device *dev, struct device_attribute *attr, cha
 
 	thread_priv = security_ftr_enabled(SEC_FTR_L1D_THREAD_PRIV);
 
-	if (rfi_flush || thread_priv) {
+	if (rfi_flush) {
 		struct seq_buf s;
 		seq_buf_init(&s, buf, PAGE_SIZE - 1);
 
-		seq_buf_printf(&s, "Mitigation: ");
-
-		if (rfi_flush)
-			seq_buf_printf(&s, "RFI Flush");
-
-		if (rfi_flush && thread_priv)
-			seq_buf_printf(&s, ", ");
-
+		seq_buf_printf(&s, "Mitigation: RFI Flush");
 		if (thread_priv)
-			seq_buf_printf(&s, "L1D private per thread");
+			seq_buf_printf(&s, ", L1D private per thread");
 
 		seq_buf_printf(&s, "\n");
 
 		return s.len;
 	}
 
+	if (thread_priv)
+		return sprintf(buf, "Vulnerable: L1D private per thread\n");
+
 	if (!security_ftr_enabled(SEC_FTR_L1D_FLUSH_HV) &&
 	    !security_ftr_enabled(SEC_FTR_L1D_FLUSH_PR))
 		return sprintf(buf, "Not affected\n");
 
 	return sprintf(buf, "Vulnerable\n");
+}
+
+ssize_t cpu_show_l1tf(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	return cpu_show_meltdown(dev, attr, buf);
 }
 #endif
 
@@ -231,6 +238,7 @@ ssize_t cpu_show_spectre_v2(struct device *dev, struct device_attribute *attr, c
 	return s.len;
 }
 
+#ifdef CONFIG_PPC_BOOK3S_64
 /*
  * Store-forwarding barrier support.
  */
@@ -342,40 +350,6 @@ ssize_t cpu_show_spec_store_bypass(struct device *dev, struct device_attribute *
 		return sprintf(buf, "Not affected\n");
 
 	return sprintf(buf, "Vulnerable\n");
-}
-
-static int ssb_prctl_get(struct task_struct *task)
-{
-	if (stf_enabled_flush_types == STF_BARRIER_NONE)
-		/*
-		 * We don't have an explicit signal from firmware that we're
-		 * vulnerable or not, we only have certain CPU revisions that
-		 * are known to be vulnerable.
-		 *
-		 * We assume that if we're on another CPU, where the barrier is
-		 * NONE, then we are not vulnerable.
-		 */
-		return PR_SPEC_NOT_AFFECTED;
-	else
-		/*
-		 * If we do have a barrier type then we are vulnerable. The
-		 * barrier is not a global or per-process mitigation, so the
-		 * only value we can report here is PR_SPEC_ENABLE, which
-		 * appears as "vulnerable" in /proc.
-		 */
-		return PR_SPEC_ENABLE;
-
-	return -EINVAL;
-}
-
-int arch_prctl_spec_ctrl_get(struct task_struct *task, unsigned long which)
-{
-	switch (which) {
-	case PR_SPEC_STORE_BYPASS:
-		return ssb_prctl_get(task);
-	default:
-		return -ENODEV;
-	}
 }
 
 #ifdef CONFIG_DEBUG_FS
@@ -529,3 +503,4 @@ static __init int count_cache_flush_debugfs_init(void)
 }
 device_initcall(count_cache_flush_debugfs_init);
 #endif /* CONFIG_DEBUG_FS */
+#endif /* CONFIG_PPC_BOOK3S_64 */

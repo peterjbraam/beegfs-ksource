@@ -118,7 +118,7 @@ struct nfs_parsed_mount_data {
 		unsigned short		nconnect;
 	} nfs_server;
 
-	struct security_mnt_opts lsm_opts;
+	void			*lsm_opts;
 	struct net		*net;
 };
 
@@ -375,7 +375,7 @@ int nfs_check_flags(int);
 /* inode.c */
 extern struct workqueue_struct *nfsiod_workqueue;
 extern struct inode *nfs_alloc_inode(struct super_block *sb);
-extern void nfs_destroy_inode(struct inode *);
+extern void nfs_free_inode(struct inode *);
 extern int nfs_write_inode(struct inode *, struct writeback_control *);
 extern int nfs_drop_inode(struct inode *);
 extern void nfs_clear_inode(struct inode *);
@@ -436,7 +436,7 @@ struct vfsmount *nfs_do_submount(struct dentry *, struct nfs_fh *,
 				 struct nfs_fattr *, rpc_authflavor_t);
 
 /* getroot.c */
-extern struct dentry *nfs_get_root(struct super_block *, struct nfs_mount_info *,
+extern struct dentry *nfs_get_root(struct super_block *, struct nfs_fh *,
 				   const char *);
 #if IS_ENABLED(CONFIG_NFS_V4)
 extern struct dentry *nfs4_get_root(struct super_block *, struct nfs_fh *,
@@ -706,14 +706,14 @@ unsigned int nfs_page_array_len(unsigned int base, size_t len)
 }
 
 /*
- * Convert a struct timespec64 into a 64-bit change attribute
+ * Convert a struct timespec into a 64-bit change attribute
  *
- * This does approximately the same thing as timespec64_to_ns(),
+ * This does approximately the same thing as timespec_to_ns(),
  * but for calculation efficiency, we multiply the seconds by
  * 1024*1024*1024.
  */
 static inline
-u64 nfs_timespec_to_change_attr(const struct timespec64 *ts)
+u64 nfs_timespec_to_change_attr(const struct timespec *ts)
 {
 	return ((u64)ts->tv_sec << 30) + ts->tv_nsec;
 }

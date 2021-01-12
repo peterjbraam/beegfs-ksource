@@ -84,7 +84,7 @@ static int debug = -1;	/* the above default */
 module_param(debug, int, 0);
 MODULE_PARM_DESC(debug, "debugging messages level");
 
-static void mpc52xx_fec_tx_timeout(struct net_device *dev, unsigned int txqueue)
+static void mpc52xx_fec_tx_timeout(struct net_device *dev)
 {
 	struct mpc52xx_fec_priv *priv = netdev_priv(dev);
 	unsigned long flags;
@@ -305,7 +305,8 @@ static int mpc52xx_fec_close(struct net_device *dev)
  * invariant will hold if you make sure that the netif_*_queue()
  * calls are done at the proper times.
  */
-static int mpc52xx_fec_start_xmit(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t
+mpc52xx_fec_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct mpc52xx_fec_priv *priv = netdev_priv(dev);
 	struct bcom_fec_bd *bd;
@@ -368,7 +369,7 @@ static irqreturn_t mpc52xx_fec_tx_interrupt(int irq, void *dev_id)
 		dma_unmap_single(dev->dev.parent, bd->skb_pa, skb->len,
 				 DMA_TO_DEVICE);
 
-		dev_kfree_skb_irq(skb);
+		dev_consume_skb_irq(skb);
 	}
 	spin_unlock(&priv->lock);
 
@@ -901,8 +902,8 @@ static int mpc52xx_fec_probe(struct platform_device *op)
 	 * First try to read MAC address from DT
 	 */
 	mac_addr = of_get_mac_address(np);
-	if (mac_addr) {
-		memcpy(ndev->dev_addr, mac_addr, ETH_ALEN);
+	if (!IS_ERR(mac_addr)) {
+		ether_addr_copy(ndev->dev_addr, mac_addr);
 	} else {
 		struct mpc52xx_fec __iomem *fec = priv->fec;
 

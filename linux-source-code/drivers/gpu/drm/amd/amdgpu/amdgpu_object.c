@@ -369,7 +369,7 @@ int amdgpu_bo_create_kernel_at(struct amdgpu_device *adev,
 	size = ALIGN(size, PAGE_SIZE);
 
 	r = amdgpu_bo_create_reserved(adev, size, PAGE_SIZE, domain, bo_ptr,
-				      NULL, cpu_addr);
+				      NULL, NULL);
 	if (r)
 		return r;
 
@@ -377,15 +377,12 @@ int amdgpu_bo_create_kernel_at(struct amdgpu_device *adev,
 	 * Remove the original mem node and create a new one at the request
 	 * position.
 	 */
-	if (cpu_addr)
-		amdgpu_bo_kunmap(*bo_ptr);
-
-	ttm_bo_mem_put(&(*bo_ptr)->tbo, &(*bo_ptr)->tbo.mem);
-
 	for (i = 0; i < (*bo_ptr)->placement.num_placement; ++i) {
 		(*bo_ptr)->placements[i].fpfn = offset >> PAGE_SHIFT;
 		(*bo_ptr)->placements[i].lpfn = (offset + size) >> PAGE_SHIFT;
 	}
+
+	ttm_bo_mem_put(&(*bo_ptr)->tbo, &(*bo_ptr)->tbo.mem);
 	r = ttm_bo_mem_space(&(*bo_ptr)->tbo, &(*bo_ptr)->placement,
 			     &(*bo_ptr)->tbo.mem, &ctx);
 	if (r)
@@ -515,7 +512,7 @@ static int amdgpu_bo_do_create(struct amdgpu_device *adev,
 {
 	struct ttm_operation_ctx ctx = {
 		.interruptible = (bp->type != ttm_bo_type_kernel),
-		.no_wait_gpu = bp->no_wait_gpu,
+		.no_wait_gpu = false,
 		.resv = bp->resv,
 		.flags = bp->type != ttm_bo_type_kernel ?
 			TTM_OPT_FLAG_ALLOW_RES_EVICT : 0
@@ -1123,10 +1120,7 @@ void amdgpu_bo_fini(struct amdgpu_device *adev)
 int amdgpu_bo_fbdev_mmap(struct amdgpu_bo *bo,
 			     struct vm_area_struct *vma)
 {
-	if (vma->vm_pgoff != 0)
-		return -EACCES;
-
-	return ttm_bo_mmap_obj(vma, &bo->tbo);
+	return ttm_fbdev_mmap(vma, &bo->tbo);
 }
 
 /**

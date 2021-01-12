@@ -165,27 +165,16 @@ static void __cpuidle_driver_init(struct cpuidle_driver *drv)
 	if (!drv->cpumask)
 		drv->cpumask = (struct cpumask *)cpu_possible_mask;
 
-	for (i = 0; i < drv->state_count; i++) {
-		struct cpuidle_state *s = &drv->states[i];
-
-		/*
-		 * Look for the timer stop flag in the different states and if
-		 * it is found, indicate that the broadcast timer has to be set
-		 * up.
-		 */
-		if (s->flags & CPUIDLE_FLAG_TIMER_STOP)
+	/*
+	 * Look for the timer stop flag in the different states, so that we know
+	 * if the broadcast timer has to be set up.  The loop is in the reverse
+	 * order, because usually one of the deeper states have this flag set.
+	 */
+	for (i = drv->state_count - 1; i >= 0 ; i--) {
+		if (drv->states[i].flags & CPUIDLE_FLAG_TIMER_STOP) {
 			drv->bctimer = 1;
-
-		/*
-		 * The core will use the target residency and exit latency
-		 * values in nanoseconds, but allow drivers to provide them in
-		 * microseconds too.
-		 */
-		if (s->target_residency > 0)
-			s->target_residency_ns = s->target_residency * NSEC_PER_USEC;
-
-		if (s->exit_latency > 0)
-			s->exit_latency_ns = s->exit_latency * NSEC_PER_USEC;
+			break;
+		}
 	}
 }
 
@@ -262,7 +251,7 @@ static void __cpuidle_unregister_driver(struct cpuidle_driver *drv)
  * Returns 0 on success, a negative error code (returned by
  * __cpuidle_register_driver()) otherwise.
  */
-static int _cpuidle_register_driver(struct cpuidle_driver *drv, const char *governor)
+int cpuidle_register_driver(struct cpuidle_driver *drv)
 {
 	struct cpuidle_governor *gov;
 	int ret;
@@ -271,10 +260,10 @@ static int _cpuidle_register_driver(struct cpuidle_driver *drv, const char *gove
 	ret = __cpuidle_register_driver(drv);
 	spin_unlock(&cpuidle_driver_lock);
 
-	if (!ret && !strlen(param_governor) && governor &&
+	if (!ret && !strlen(param_governor) && drv->governor &&
 	    (cpuidle_get_driver() == drv)) {
 		mutex_lock(&cpuidle_lock);
-		gov = cpuidle_find_governor(governor);
+		gov = cpuidle_find_governor(drv->governor);
 		if (gov) {
 			cpuidle_prev_governor = cpuidle_curr_governor;
 			if (cpuidle_switch_governor(gov) < 0)
@@ -285,23 +274,7 @@ static int _cpuidle_register_driver(struct cpuidle_driver *drv, const char *gove
 
 	return ret;
 }
-
-int cpuidle_register_driver(struct cpuidle_driver *drv)
-{
-	return _cpuidle_register_driver(drv, NULL);
-}
 EXPORT_SYMBOL_GPL(cpuidle_register_driver);
-
-
-int rhel_cpuidle_register_driver_hpoll(struct cpuidle_driver *drv)
-{
-	/* only haltpoll driver should use this RHEL-only, temporary interface */
-	if (drv->name && strlen(drv->name) == 8 && strncmp(drv->name, "haltpoll", 8) == 0)
-		return _cpuidle_register_driver(drv, "haltpoll");
-
-	return -EINVAL;
-}
-EXPORT_SYMBOL_GPL(rhel_cpuidle_register_driver_hpoll);
 
 /**
  * cpuidle_unregister_driver - unregisters a driver
@@ -404,42 +377,4 @@ void cpuidle_driver_unref(void)
 		drv->refcnt--;
 
 	spin_unlock(&cpuidle_driver_lock);
-}
-
-/**
- * cpuidle_driver_state_disabled - Disable or enable an idle state
- * @drv: cpuidle driver owning the state
- * @idx: State index
- * @disable: Whether or not to disable the state
- */
-void cpuidle_driver_state_disabled(struct cpuidle_driver *drv, int idx,
-				 bool disable)
-{
-	unsigned int cpu;
-
-	mutex_lock(&cpuidle_lock);
-
-	spin_lock(&cpuidle_driver_lock);
-
-	if (!drv->cpumask) {
-		drv->states[idx].flags |= CPUIDLE_FLAG_UNUSABLE;
-		goto unlock;
-	}
-
-	for_each_cpu(cpu, drv->cpumask) {
-		struct cpuidle_device *dev = per_cpu(cpuidle_devices, cpu);
-
-		if (!dev)
-			continue;
-
-		if (disable)
-			dev->states_usage[idx].disable |= CPUIDLE_STATE_DISABLED_BY_DRIVER;
-		else
-			dev->states_usage[idx].disable &= ~CPUIDLE_STATE_DISABLED_BY_DRIVER;
-	}
-
-unlock:
-	spin_unlock(&cpuidle_driver_lock);
-
-	mutex_unlock(&cpuidle_lock);
 }

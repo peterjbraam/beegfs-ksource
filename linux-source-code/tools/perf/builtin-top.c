@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * builtin-top.c
  *
@@ -14,8 +15,6 @@
  *   Wu Fengguang <fengguang.wu@intel.com>
  *   Mike Galbraith <efault@gmx.de>
  *   Paul Mackerras <paulus@samba.org>
- *
- * Released under the GPL v2. (and only v2, not any later version)
  */
 #include "builtin.h"
 
@@ -83,7 +82,6 @@
 #include <linux/err.h>
 
 #include <linux/ctype.h>
-#include <perf/mmap.h>
 
 static volatile int done;
 static volatile int resize;
@@ -144,12 +142,12 @@ static int perf_top__parse_source(struct perf_top *top, struct hist_entry *he)
 		return err;
 	}
 
-	err = symbol__annotate(&he->ms, evsel, &top->annotation_opts, NULL);
+	err = symbol__annotate(sym, map, evsel, 0, &top->annotation_opts, NULL);
 	if (err == 0) {
 		top->sym_filter_entry = he;
 	} else {
 		char msg[BUFSIZ];
-		symbol__strerror_disassemble(&he->ms, err, msg, sizeof(msg));
+		symbol__strerror_disassemble(sym, map, err, msg, sizeof(msg));
 		pr_err("Couldn't annotate %s: %s\n", sym->name, msg);
 	}
 
@@ -258,7 +256,7 @@ static void perf_top__show_details(struct perf_top *top)
 	printf("Showing %s for %s\n", perf_evsel__name(top->sym_evsel), symbol->name);
 	printf("  Events  Pcnt (>=%d%%)\n", top->annotation_opts.min_pcnt);
 
-	more = symbol__annotate_printf(&he->ms, top->sym_evsel, &top->annotation_opts);
+	more = symbol__annotate_printf(symbol, he->ms.map, top->sym_evsel, &top->annotation_opts);
 
 	if (top->evlist->enabled) {
 		if (top->zero)
@@ -617,7 +615,6 @@ static void *display_thread_tui(void *arg)
 		.arg		= top,
 		.refresh	= top->delay_secs,
 	};
-	int ret;
 
 	/* In order to read symbols from other namespaces perf to  needs to call
 	 * setns(2).  This isn't permitted if the struct_fs has multiple users.
@@ -628,7 +625,6 @@ static void *display_thread_tui(void *arg)
 
 	prctl(PR_SET_NAME, "perf-top-UI", 0, 0, 0);
 
-repeat:
 	perf_top__sort_new_samples(top);
 
 	/*
@@ -641,18 +637,13 @@ repeat:
 		hists->uid_filter_str = top->record_opts.target.uid_str;
 	}
 
-	ret = perf_evlist__tui_browse_hists(top->evlist, help, &hbt,
+	perf_evlist__tui_browse_hists(top->evlist, help, &hbt,
 				      top->min_percent,
 				      &top->session->header.env,
 				      !top->record_opts.overwrite,
 				      &top->annotation_opts);
 
-	if (ret == K_RELOAD) {
-		top->zero = true;
-		goto repeat;
-	} else
-		stop_top();
-
+	stop_top();
 	return NULL;
 }
 
@@ -735,8 +726,7 @@ static int hist_iter__top_callback(struct hist_entry_iter *iter,
 		perf_top__record_precise_ip(top, he, iter->sample, evsel, al->addr);
 
 	hist__account_cycles(iter->sample->branch_stack, al, iter->sample,
-		     !(top->record_opts.branch_stack & PERF_SAMPLE_BRANCH_ANY),
-		     NULL);
+		     !(top->record_opts.branch_stack & PERF_SAMPLE_BRANCH_ANY));
 	return 0;
 }
 
@@ -881,10 +871,10 @@ static void perf_top__mmap_read_idx(struct perf_top *top, int idx)
 	union perf_event *event;
 
 	md = opts->overwrite ? &evlist->overwrite_mmap[idx] : &evlist->mmap[idx];
-	if (perf_mmap__read_init(&md->core) < 0)
+	if (perf_mmap__read_init(md) < 0)
 		return;
 
-	while ((event = perf_mmap__read_event(&md->core)) != NULL) {
+	while ((event = perf_mmap__read_event(md)) != NULL) {
 		int ret;
 
 		ret = perf_evlist__parse_sample_timestamp(evlist, event, &last_timestamp);
@@ -895,7 +885,7 @@ static void perf_top__mmap_read_idx(struct perf_top *top, int idx)
 		if (ret)
 			break;
 
-		perf_mmap__consume(&md->core);
+		perf_mmap__consume(md);
 
 		if (top->qe.rotate) {
 			pthread_mutex_lock(&top->qe.mutex);
@@ -905,7 +895,7 @@ static void perf_top__mmap_read_idx(struct perf_top *top, int idx)
 		}
 	}
 
-	perf_mmap__read_done(&md->core);
+	perf_mmap__read_done(md);
 }
 
 static void perf_top__mmap_read(struct perf_top *top)
@@ -1254,25 +1244,12 @@ static int __cmd_top(struct perf_top *top)
 
 	if (opts->record_namespaces)
 		top->tool.namespace_events = true;
-	if (opts->record_cgroup) {
-#ifdef HAVE_FILE_HANDLE
-		top->tool.cgroup_events = true;
-#else
-		pr_err("cgroup tracking is not supported.\n");
-		return -1;
-#endif
-	}
 
 	ret = perf_event__synthesize_bpf_events(top->session, perf_event__process,
 						&top->session->machines.host,
 						&top->record_opts);
 	if (ret < 0)
 		pr_debug("Couldn't synthesize BPF events: Pre-existing BPF programs won't have symbols resolved.\n");
-
-	ret = perf_event__synthesize_cgroups(&top->tool, perf_event__process,
-					     &top->session->machines.host);
-	if (ret < 0)
-		pr_debug("Couldn't synthesize cgroup events.\n");
 
 	machine__synthesize_threads(&top->session->machines.host, &opts->target,
 				    top->evlist->core.threads, false,
@@ -1535,10 +1512,6 @@ int cmd_top(int argc, const char **argv)
 		    "objdump binary to use for disassembly and annotations"),
 	OPT_STRING('M', "disassembler-style", &top.annotation_opts.disassembler_style, "disassembler style",
 		   "Specify disassembler style (e.g. -M intel for intel syntax)"),
-	OPT_STRING(0, "prefix", &top.annotation_opts.prefix, "prefix",
-		    "Add prefix to source file path names in programs (with --prefix-strip)"),
-	OPT_STRING(0, "prefix-strip", &top.annotation_opts.prefix_strip, "N",
-		    "Strip first N entries of source file path name in programs (with --prefix)"),
 	OPT_STRING('u', "uid", &target->uid_str, "user", "user to profile"),
 	OPT_CALLBACK(0, "percent-limit", &top, "percent",
 		     "Don't show entries under that percent", parse_percent_limit),
@@ -1566,12 +1539,6 @@ int cmd_top(int argc, const char **argv)
 			"number of thread to run event synthesize"),
 	OPT_BOOLEAN(0, "namespaces", &opts->record_namespaces,
 		    "Record namespaces events"),
-	OPT_BOOLEAN(0, "all-cgroups", &opts->record_cgroup,
-		    "Record cgroup events"),
-	OPT_INTEGER(0, "group-sort-idx", &symbol_conf.group_sort_idx,
-		    "Sort the output by the event at the index n in group. "
-		    "If n is invalid, sort by the first event. "
-		    "WARNING: should be used on grouped events."),
 	OPTS_EVSWITCH(&top.evswitch),
 	OPT_END()
 	};
@@ -1595,28 +1562,10 @@ int cmd_top(int argc, const char **argv)
 	status = perf_config(perf_top_config, &top);
 	if (status)
 		return status;
-	/*
-	 * Since the per arch annotation init routine may need the cpuid, read
-	 * it here, since we are not getting this from the perf.data header.
-	 */
-	status = perf_env__read_cpuid(&perf_env);
-	if (status) {
-		/*
-		 * Some arches do not provide a get_cpuid(), so just use pr_debug, otherwise
-		 * warn the user explicitely.
-		 */
-		eprintf(status == ENOSYS ? 1 : 0, verbose,
-			"Couldn't read the cpuid for this machine: %s\n",
-			str_error_r(errno, errbuf, sizeof(errbuf)));
-	}
-	top.evlist->env = &perf_env;
 
 	argc = parse_options(argc, argv, options, top_usage, 0);
 	if (argc)
 		usage_with_options(top_usage, options);
-
-	if (annotate_check_args(&top.annotation_opts) < 0)
-		goto out_delete_evlist;
 
 	if (!top.evlist->core.nr_entries &&
 	    perf_evlist__add_default(top.evlist) < 0) {
@@ -1712,7 +1661,7 @@ int cmd_top(int argc, const char **argv)
 	if (status < 0)
 		goto out_delete_evlist;
 
-	annotation_config__init(&top.annotation_opts);
+	annotation_config__init();
 
 	symbol_conf.try_vmlinux_path = (symbol_conf.vmlinux_name == NULL);
 	status = symbol__init(NULL);

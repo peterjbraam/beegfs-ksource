@@ -8,6 +8,7 @@
 #define NFT_SET_MAXNAMELEN	NFT_NAME_MAXLEN
 #define NFT_OBJ_MAXNAMELEN	NFT_NAME_MAXLEN
 #define NFT_USERDATA_MAXLEN	256
+#define NFT_OSF_MAXGENRELEN	16
 
 /**
  * enum nft_registers - nf_tables registers
@@ -47,7 +48,6 @@ enum nft_registers {
 
 #define NFT_REG_SIZE	16
 #define NFT_REG32_SIZE	4
-#define NFT_REG32_COUNT	(NFT_REG32_15 - NFT_REG32_00 + 1)
 
 /**
  * enum nft_verdicts - nf_tables internal verdicts
@@ -132,7 +132,7 @@ enum nf_tables_msg_types {
  * @NFTA_LIST_ELEM: list element (NLA_NESTED)
  */
 enum nft_list_attributes {
-	NFTA_LIST_UNPEC,
+	NFTA_LIST_UNSPEC,
 	NFTA_LIST_ELEM,
 	__NFTA_LIST_MAX
 };
@@ -144,14 +144,12 @@ enum nft_list_attributes {
  * @NFTA_HOOK_HOOKNUM: netfilter hook number (NLA_U32)
  * @NFTA_HOOK_PRIORITY: netfilter hook priority (NLA_U32)
  * @NFTA_HOOK_DEV: netdevice name (NLA_STRING)
- * @NFTA_HOOK_DEVS: list of netdevices (NLA_NESTED)
  */
 enum nft_hook_attributes {
 	NFTA_HOOK_UNSPEC,
 	NFTA_HOOK_HOOKNUM,
 	NFTA_HOOK_PRIORITY,
 	NFTA_HOOK_DEV,
-	NFTA_HOOK_DEVS,
 	__NFTA_HOOK_MAX
 };
 #define NFTA_HOOK_MAX		(__NFTA_HOOK_MAX - 1)
@@ -275,7 +273,6 @@ enum nft_rule_compat_attributes {
  * @NFT_SET_TIMEOUT: set uses timeouts
  * @NFT_SET_EVAL: set can be updated from the evaluation path
  * @NFT_SET_OBJECT: set contains stateful objects
- * @NFT_SET_CONCAT: set contains a concatenation
  */
 enum nft_set_flags {
 	NFT_SET_ANONYMOUS		= 0x1,
@@ -285,7 +282,6 @@ enum nft_set_flags {
 	NFT_SET_TIMEOUT			= 0x10,
 	NFT_SET_EVAL			= 0x20,
 	NFT_SET_OBJECT			= 0x40,
-	NFT_SET_CONCAT			= 0x80,
 };
 
 /**
@@ -303,27 +299,13 @@ enum nft_set_policies {
  * enum nft_set_desc_attributes - set element description
  *
  * @NFTA_SET_DESC_SIZE: number of elements in set (NLA_U32)
- * @NFTA_SET_DESC_CONCAT: description of field concatenation (NLA_NESTED)
  */
 enum nft_set_desc_attributes {
 	NFTA_SET_DESC_UNSPEC,
 	NFTA_SET_DESC_SIZE,
-	NFTA_SET_DESC_CONCAT,
 	__NFTA_SET_DESC_MAX
 };
 #define NFTA_SET_DESC_MAX	(__NFTA_SET_DESC_MAX - 1)
-
-/**
- * enum nft_set_field_attributes - attributes of concatenated fields
- *
- * @NFTA_SET_FIELD_LEN: length of single field, in bits (NLA_U32)
- */
-enum nft_set_field_attributes {
-	NFTA_SET_FIELD_UNSPEC,
-	NFTA_SET_FIELD_LEN,
-	__NFTA_SET_FIELD_MAX
-};
-#define NFTA_SET_FIELD_MAX	(__NFTA_SET_FIELD_MAX - 1)
 
 /**
  * enum nft_set_attributes - nf_tables set netlink attributes
@@ -386,7 +368,6 @@ enum nft_set_elem_flags {
  * @NFTA_SET_ELEM_USERDATA: user data (NLA_BINARY)
  * @NFTA_SET_ELEM_EXPR: expression (NLA_NESTED: nft_expr_attributes)
  * @NFTA_SET_ELEM_OBJREF: stateful object reference (NLA_STRING)
- * @NFTA_SET_ELEM_KEY_END: closing key value (NLA_NESTED: nft_data)
  */
 enum nft_set_elem_attributes {
 	NFTA_SET_ELEM_UNSPEC,
@@ -399,7 +380,6 @@ enum nft_set_elem_attributes {
 	NFTA_SET_ELEM_EXPR,
 	NFTA_SET_ELEM_PAD,
 	NFTA_SET_ELEM_OBJREF,
-	NFTA_SET_ELEM_KEY_END,
 	__NFTA_SET_ELEM_MAX
 };
 #define NFTA_SET_ELEM_MAX	(__NFTA_SET_ELEM_MAX - 1)
@@ -656,6 +636,7 @@ enum nft_lookup_attributes {
 enum nft_dynset_ops {
 	NFT_DYNSET_OP_ADD,
 	NFT_DYNSET_OP_UPDATE,
+	NFT_DYNSET_OP_DELETE,
 };
 
 enum nft_dynset_flags {
@@ -752,10 +733,12 @@ enum nft_exthdr_flags {
  *
  * @NFT_EXTHDR_OP_IPV6: match against ipv6 extension headers
  * @NFT_EXTHDR_OP_TCP: match against tcp options
+ * @NFT_EXTHDR_OP_IPV4: match against ipv4 options
  */
 enum nft_exthdr_op {
 	NFT_EXTHDR_OP_IPV6,
 	NFT_EXTHDR_OP_TCPOPT,
+	NFT_EXTHDR_OP_IPV4,
 	__NFT_EXTHDR_OP_MAX
 };
 #define NFT_EXTHDR_OP_MAX	(__NFT_EXTHDR_OP_MAX - 1)
@@ -815,6 +798,11 @@ enum nft_exthdr_attributes {
  * @NFT_META_SECPATH: boolean, secpath_exists (!!skb->sp)
  * @NFT_META_IIFKIND: packet input interface kind name (dev->rtnl_link_ops->kind)
  * @NFT_META_OIFKIND: packet output interface kind name (dev->rtnl_link_ops->kind)
+ * @NFT_META_BRI_IIFPVID: packet input bridge port pvid
+ * @NFT_META_BRI_IIFVPROTO: packet input bridge vlan proto
+ * @NFT_META_TIME_NS: time since epoch (in nanoseconds)
+ * @NFT_META_TIME_DAY: day of week (from 0 = Sunday to 6 = Saturday)
+ * @NFT_META_TIME_HOUR: hour of day (in seconds)
  */
 enum nft_meta_keys {
 	NFT_META_LEN,
@@ -845,6 +833,11 @@ enum nft_meta_keys {
 	NFT_META_SECPATH,
 	NFT_META_IIFKIND,
 	NFT_META_OIFKIND,
+	NFT_META_BRI_IIFPVID,
+	NFT_META_BRI_IIFVPROTO,
+	NFT_META_TIME_NS,
+	NFT_META_TIME_DAY,
+	NFT_META_TIME_HOUR,
 };
 
 /**
@@ -952,10 +945,12 @@ enum nft_socket_attributes {
 /*
  * enum nft_socket_keys - nf_tables socket expression keys
  *
- * @NFT_SOCKET_TRANSPARENT: Value of the IP(V6)_TRANSPARENT socket option_
+ * @NFT_SOCKET_TRANSPARENT: Value of the IP(V6)_TRANSPARENT socket option
+ * @NFT_SOCKET_MARK: Value of the socket mark
  */
 enum nft_socket_keys {
 	NFT_SOCKET_TRANSPARENT,
+	NFT_SOCKET_MARK,
 	__NFT_SOCKET_MAX
 };
 #define NFT_SOCKET_MAX	(__NFT_SOCKET_MAX - 1)
@@ -986,6 +981,7 @@ enum nft_socket_keys {
  * @NFT_CT_DST_IP: conntrack layer 3 protocol destination (IPv4 address)
  * @NFT_CT_SRC_IP6: conntrack layer 3 protocol source (IPv6 address)
  * @NFT_CT_DST_IP6: conntrack layer 3 protocol destination (IPv6 address)
+ * @NFT_CT_ID: conntrack id
  */
 enum nft_ct_keys {
 	NFT_CT_STATE,
@@ -1011,6 +1007,7 @@ enum nft_ct_keys {
 	NFT_CT_DST_IP,
 	NFT_CT_SRC_IP6,
 	NFT_CT_DST_IP6,
+	NFT_CT_ID,
 	__NFT_CT_MAX
 };
 #define NFT_CT_MAX		(__NFT_CT_MAX - 1)
@@ -1454,6 +1451,26 @@ enum nft_ct_helper_attributes {
 };
 #define NFTA_CT_HELPER_MAX	(__NFTA_CT_HELPER_MAX - 1)
 
+enum nft_ct_timeout_timeout_attributes {
+	NFTA_CT_TIMEOUT_UNSPEC,
+	NFTA_CT_TIMEOUT_L3PROTO,
+	NFTA_CT_TIMEOUT_L4PROTO,
+	NFTA_CT_TIMEOUT_DATA,
+	__NFTA_CT_TIMEOUT_MAX,
+};
+#define NFTA_CT_TIMEOUT_MAX	(__NFTA_CT_TIMEOUT_MAX - 1)
+
+enum nft_ct_expectation_attributes {
+	NFTA_CT_EXPECT_UNSPEC,
+	NFTA_CT_EXPECT_L3PROTO,
+	NFTA_CT_EXPECT_L4PROTO,
+	NFTA_CT_EXPECT_DPORT,
+	NFTA_CT_EXPECT_TIMEOUT,
+	NFTA_CT_EXPECT_SIZE,
+	__NFTA_CT_EXPECT_MAX,
+};
+#define NFTA_CT_EXPECT_MAX	(__NFTA_CT_EXPECT_MAX - 1)
+
 #define NFT_OBJECT_UNSPEC	0
 #define NFT_OBJECT_COUNTER	1
 #define NFT_OBJECT_QUOTA	2
@@ -1463,7 +1480,9 @@ enum nft_ct_helper_attributes {
 #define NFT_OBJECT_TUNNEL	6
 #define NFT_OBJECT_CT_TIMEOUT	7
 #define NFT_OBJECT_SECMARK	8
-#define __NFT_OBJECT_MAX	9
+#define NFT_OBJECT_CT_EXPECT	9
+#define NFT_OBJECT_SYNPROXY	10
+#define __NFT_OBJECT_MAX	11
 #define NFT_OBJECT_MAX		(__NFT_OBJECT_MAX - 1)
 
 /**
@@ -1490,19 +1509,6 @@ enum nft_object_attributes {
 #define NFTA_OBJ_MAX		(__NFTA_OBJ_MAX - 1)
 
 /**
- * enum nft_flowtable_flags - nf_tables flowtable flags
- *
- * @NFT_FLOWTABLE_HW_OFFLOAD: flowtable hardware offload is enabled
- * @NFT_FLOWTABLE_COUNTER: enable flow counters
- */
-enum nft_flowtable_flags {
-	NFT_FLOWTABLE_HW_OFFLOAD	= 0x1,
-	NFT_FLOWTABLE_COUNTER		= 0x2,
-	NFT_FLOWTABLE_MASK		= (NFT_FLOWTABLE_HW_OFFLOAD |
-					   NFT_FLOWTABLE_COUNTER)
-};
-
-/**
  * enum nft_flowtable_attributes - nf_tables flow table netlink attributes
  *
  * @NFTA_FLOWTABLE_TABLE: name of the table containing the expression (NLA_STRING)
@@ -1510,7 +1516,6 @@ enum nft_flowtable_flags {
  * @NFTA_FLOWTABLE_HOOK: netfilter hook configuration(NLA_U32)
  * @NFTA_FLOWTABLE_USE: number of references to this flow table (NLA_U32)
  * @NFTA_FLOWTABLE_HANDLE: object handle (NLA_U64)
- * @NFTA_FLOWTABLE_FLAGS: flags (NLA_U32)
  */
 enum nft_flowtable_attributes {
 	NFTA_FLOWTABLE_UNSPEC,
@@ -1520,7 +1525,6 @@ enum nft_flowtable_attributes {
 	NFTA_FLOWTABLE_USE,
 	NFTA_FLOWTABLE_HANDLE,
 	NFTA_FLOWTABLE_PAD,
-	NFTA_FLOWTABLE_FLAGS,
 	__NFTA_FLOWTABLE_MAX
 };
 #define NFTA_FLOWTABLE_MAX	(__NFTA_FLOWTABLE_MAX - 1)
@@ -1540,6 +1544,42 @@ enum nft_flowtable_hook_attributes {
 	__NFTA_FLOWTABLE_HOOK_MAX
 };
 #define NFTA_FLOWTABLE_HOOK_MAX	(__NFTA_FLOWTABLE_HOOK_MAX - 1)
+
+/**
+ * enum nft_osf_attributes - nftables osf expression netlink attributes
+ *
+ * @NFTA_OSF_DREG: destination register (NLA_U32: nft_registers)
+ * @NFTA_OSF_TTL: Value of the TTL osf option (NLA_U8)
+ * @NFTA_OSF_FLAGS: flags (NLA_U32)
+ */
+enum nft_osf_attributes {
+	NFTA_OSF_UNSPEC,
+	NFTA_OSF_DREG,
+	NFTA_OSF_TTL,
+	NFTA_OSF_FLAGS,
+	__NFTA_OSF_MAX,
+};
+#define NFTA_OSF_MAX (__NFTA_OSF_MAX - 1)
+
+enum nft_osf_flags {
+	NFT_OSF_F_VERSION = (1 << 0),
+};
+
+/**
+ * enum nft_synproxy_attributes - nf_tables synproxy expression netlink attributes
+ *
+ * @NFTA_SYNPROXY_MSS: mss value sent to the backend (NLA_U16)
+ * @NFTA_SYNPROXY_WSCALE: wscale value sent to the backend (NLA_U8)
+ * @NFTA_SYNPROXY_FLAGS: flags (NLA_U32)
+ */
+enum nft_synproxy_attributes {
+	NFTA_SYNPROXY_UNSPEC,
+	NFTA_SYNPROXY_MSS,
+	NFTA_SYNPROXY_WSCALE,
+	NFTA_SYNPROXY_FLAGS,
+	__NFTA_SYNPROXY_MAX,
+};
+#define NFTA_SYNPROXY_MAX (__NFTA_SYNPROXY_MAX - 1)
 
 /**
  * enum nft_device_attributes - nf_tables device netlink attributes
@@ -1663,5 +1703,95 @@ enum nft_ng_types {
 	__NFT_NG_MAX
 };
 #define NFT_NG_MAX	(__NFT_NG_MAX - 1)
+
+enum nft_tunnel_key_ip_attributes {
+	NFTA_TUNNEL_KEY_IP_UNSPEC,
+	NFTA_TUNNEL_KEY_IP_SRC,
+	NFTA_TUNNEL_KEY_IP_DST,
+	__NFTA_TUNNEL_KEY_IP_MAX
+};
+#define NFTA_TUNNEL_KEY_IP_MAX	(__NFTA_TUNNEL_KEY_IP_MAX - 1)
+
+enum nft_tunnel_ip6_attributes {
+	NFTA_TUNNEL_KEY_IP6_UNSPEC,
+	NFTA_TUNNEL_KEY_IP6_SRC,
+	NFTA_TUNNEL_KEY_IP6_DST,
+	NFTA_TUNNEL_KEY_IP6_FLOWLABEL,
+	__NFTA_TUNNEL_KEY_IP6_MAX
+};
+#define NFTA_TUNNEL_KEY_IP6_MAX	(__NFTA_TUNNEL_KEY_IP6_MAX - 1)
+
+enum nft_tunnel_opts_attributes {
+	NFTA_TUNNEL_KEY_OPTS_UNSPEC,
+	NFTA_TUNNEL_KEY_OPTS_VXLAN,
+	NFTA_TUNNEL_KEY_OPTS_ERSPAN,
+	__NFTA_TUNNEL_KEY_OPTS_MAX
+};
+#define NFTA_TUNNEL_KEY_OPTS_MAX	(__NFTA_TUNNEL_KEY_OPTS_MAX - 1)
+
+enum nft_tunnel_opts_vxlan_attributes {
+	NFTA_TUNNEL_KEY_VXLAN_UNSPEC,
+	NFTA_TUNNEL_KEY_VXLAN_GBP,
+	__NFTA_TUNNEL_KEY_VXLAN_MAX
+};
+#define NFTA_TUNNEL_KEY_VXLAN_MAX	(__NFTA_TUNNEL_KEY_VXLAN_MAX - 1)
+
+enum nft_tunnel_opts_erspan_attributes {
+	NFTA_TUNNEL_KEY_ERSPAN_UNSPEC,
+	NFTA_TUNNEL_KEY_ERSPAN_VERSION,
+	NFTA_TUNNEL_KEY_ERSPAN_V1_INDEX,
+	NFTA_TUNNEL_KEY_ERSPAN_V2_HWID,
+	NFTA_TUNNEL_KEY_ERSPAN_V2_DIR,
+	__NFTA_TUNNEL_KEY_ERSPAN_MAX
+};
+#define NFTA_TUNNEL_KEY_ERSPAN_MAX	(__NFTA_TUNNEL_KEY_ERSPAN_MAX - 1)
+
+enum nft_tunnel_flags {
+	NFT_TUNNEL_F_ZERO_CSUM_TX	= (1 << 0),
+	NFT_TUNNEL_F_DONT_FRAGMENT	= (1 << 1),
+	NFT_TUNNEL_F_SEQ_NUMBER		= (1 << 2),
+};
+#define NFT_TUNNEL_F_MASK	(NFT_TUNNEL_F_ZERO_CSUM_TX | \
+				 NFT_TUNNEL_F_DONT_FRAGMENT | \
+				 NFT_TUNNEL_F_SEQ_NUMBER)
+
+enum nft_tunnel_key_attributes {
+	NFTA_TUNNEL_KEY_UNSPEC,
+	NFTA_TUNNEL_KEY_ID,
+	NFTA_TUNNEL_KEY_IP,
+	NFTA_TUNNEL_KEY_IP6,
+	NFTA_TUNNEL_KEY_FLAGS,
+	NFTA_TUNNEL_KEY_TOS,
+	NFTA_TUNNEL_KEY_TTL,
+	NFTA_TUNNEL_KEY_SPORT,
+	NFTA_TUNNEL_KEY_DPORT,
+	NFTA_TUNNEL_KEY_OPTS,
+	__NFTA_TUNNEL_KEY_MAX
+};
+#define NFTA_TUNNEL_KEY_MAX	(__NFTA_TUNNEL_KEY_MAX - 1)
+
+enum nft_tunnel_keys {
+	NFT_TUNNEL_PATH,
+	NFT_TUNNEL_ID,
+	__NFT_TUNNEL_MAX
+};
+#define NFT_TUNNEL_MAX	(__NFT_TUNNEL_MAX - 1)
+
+enum nft_tunnel_mode {
+	NFT_TUNNEL_MODE_NONE,
+	NFT_TUNNEL_MODE_RX,
+	NFT_TUNNEL_MODE_TX,
+	__NFT_TUNNEL_MODE_MAX
+};
+#define NFT_TUNNEL_MODE_MAX	(__NFT_TUNNEL_MODE_MAX - 1)
+
+enum nft_tunnel_attributes {
+	NFTA_TUNNEL_UNSPEC,
+	NFTA_TUNNEL_KEY,
+	NFTA_TUNNEL_DREG,
+	NFTA_TUNNEL_MODE,
+	__NFTA_TUNNEL_MAX
+};
+#define NFTA_TUNNEL_MAX	(__NFTA_TUNNEL_MAX - 1)
 
 #endif /* _LINUX_NF_TABLES_H */

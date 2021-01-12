@@ -348,7 +348,7 @@ static int byt_rt5651_aif1_hw_params(struct snd_pcm_substream *substream,
 					struct snd_pcm_hw_params *params)
 {
 	struct snd_soc_pcm_runtime *rtd = substream->private_data;
-	struct snd_soc_dai *codec_dai = asoc_rtd_to_codec(rtd, 0);
+	struct snd_soc_dai *codec_dai = rtd->codec_dai;
 	snd_pcm_format_t format = params_format(params);
 	int rate = params_rate(params);
 	int bclk_ratio;
@@ -540,7 +540,7 @@ static int byt_rt5651_add_codec_device_props(struct device *i2c_dev)
 static int byt_rt5651_init(struct snd_soc_pcm_runtime *runtime)
 {
 	struct snd_soc_card *card = runtime->card;
-	struct snd_soc_component *codec = asoc_rtd_to_codec(runtime, 0)->component;
+	struct snd_soc_component *codec = runtime->codec_dai->component;
 	struct byt_rt5651_private *priv = snd_soc_card_get_drvdata(card);
 	const struct snd_soc_dapm_route *custom_map;
 	int num_routes;
@@ -656,6 +656,14 @@ static int byt_rt5651_init(struct snd_soc_pcm_runtime *runtime)
 	return 0;
 }
 
+static const struct snd_soc_pcm_stream byt_rt5651_dai_params = {
+	.formats = SNDRV_PCM_FMTBIT_S24_LE,
+	.rate_min = 48000,
+	.rate_max = 48000,
+	.channels_min = 2,
+	.channels_max = 2,
+};
+
 static int byt_rt5651_codec_fixup(struct snd_soc_pcm_runtime *rtd,
 			    struct snd_pcm_hw_params *params)
 {
@@ -685,7 +693,7 @@ static int byt_rt5651_codec_fixup(struct snd_soc_pcm_runtime *rtd,
 	 * with explicit setting to I2S 2ch. The word length is set with
 	 * dai_set_tdm_slot() since there is no other API exposed
 	 */
-	ret = snd_soc_dai_set_fmt(asoc_rtd_to_cpu(rtd, 0),
+	ret = snd_soc_dai_set_fmt(rtd->cpu_dai,
 				  SND_SOC_DAIFMT_I2S     |
 				  SND_SOC_DAIFMT_NB_NF   |
 				  SND_SOC_DAIFMT_CBS_CFS
@@ -696,7 +704,7 @@ static int byt_rt5651_codec_fixup(struct snd_soc_pcm_runtime *rtd,
 		return ret;
 	}
 
-	ret = snd_soc_dai_set_tdm_slot(asoc_rtd_to_cpu(rtd, 0), 0x3, 0x3, 2, bits);
+	ret = snd_soc_dai_set_tdm_slot(rtd->cpu_dai, 0x3, 0x3, 2, bits);
 	if (ret < 0) {
 		dev_err(rtd->dev, "can't set I2S config, err %d\n", ret);
 		return ret;
@@ -787,10 +795,9 @@ static struct snd_soc_dai_link byt_rt5651_dais[] = {
 
 /* SoC card */
 static char byt_rt5651_codec_name[SND_ACPI_I2C_ID_LEN];
-#if !IS_ENABLED(CONFIG_SND_SOC_INTEL_USER_FRIENDLY_LONG_NAMES)
+static char byt_rt5651_codec_aif_name[12]; /*  = "rt5651-aif[1|2]" */
+static char byt_rt5651_cpu_dai_name[10]; /*  = "ssp[0|2]-port" */
 static char byt_rt5651_long_name[50]; /* = "bytcr-rt5651-*-spk-*-mic[-swapped-hp]" */
-#endif
-static char byt_rt5651_components[50]; /* = "cfg-spk:* cfg-mic:*" */
 
 static int byt_rt5651_suspend(struct snd_soc_card *card)
 {
@@ -869,6 +876,7 @@ static int snd_byt_rt5651_mc_probe(struct platform_device *pdev)
 	const char *platform_name;
 	struct acpi_device *adev;
 	struct device *codec_dev;
+	const char *hp_swapped;
 	bool is_bytcr = false;
 	int ret_val = 0;
 	int dai_index = 0;
@@ -1033,12 +1041,26 @@ static int snd_byt_rt5651_mc_probe(struct platform_device *pdev)
 	log_quirks(&pdev->dev);
 
 	if ((byt_rt5651_quirk & BYT_RT5651_SSP2_AIF2) ||
-	    (byt_rt5651_quirk & BYT_RT5651_SSP0_AIF2))
-		byt_rt5651_dais[dai_index].codecs->dai_name = "rt5651-aif2";
+	    (byt_rt5651_quirk & BYT_RT5651_SSP0_AIF2)) {
+		/* fixup codec aif name */
+		snprintf(byt_rt5651_codec_aif_name,
+			sizeof(byt_rt5651_codec_aif_name),
+			"%s", "rt5651-aif2");
+
+		byt_rt5651_dais[dai_index].codecs->dai_name =
+			byt_rt5651_codec_aif_name;
+	}
 
 	if ((byt_rt5651_quirk & BYT_RT5651_SSP0_AIF1) ||
-	    (byt_rt5651_quirk & BYT_RT5651_SSP0_AIF2))
-		byt_rt5651_dais[dai_index].cpus->dai_name = "ssp0-port";
+	    (byt_rt5651_quirk & BYT_RT5651_SSP0_AIF2)) {
+		/* fixup cpu dai name name */
+		snprintf(byt_rt5651_cpu_dai_name,
+			sizeof(byt_rt5651_cpu_dai_name),
+			"%s", "ssp0-port");
+
+		byt_rt5651_dais[dai_index].cpus->dai_name =
+			byt_rt5651_cpu_dai_name;
+	}
 
 	if (byt_rt5651_quirk & BYT_RT5651_MCLK_EN) {
 		priv->mclk = devm_clk_get(&pdev->dev, "pmc_plt_clk_3");
@@ -1058,23 +1080,17 @@ static int snd_byt_rt5651_mc_probe(struct platform_device *pdev)
 		}
 	}
 
-	snprintf(byt_rt5651_components, sizeof(byt_rt5651_components),
-		 "cfg-spk:%s cfg-mic:%s%s",
-		 (byt_rt5651_quirk & BYT_RT5651_MONO_SPEAKER) ? "1" : "2",
-		 mic_name[BYT_RT5651_MAP(byt_rt5651_quirk)],
-		 (byt_rt5651_quirk & BYT_RT5651_HP_LR_SWAPPED) ?
-			" cfg-hp:lrswap" : "");
-	byt_rt5651_card.components = byt_rt5651_components;
-#if !IS_ENABLED(CONFIG_SND_SOC_INTEL_USER_FRIENDLY_LONG_NAMES)
+	if (byt_rt5651_quirk & BYT_RT5651_HP_LR_SWAPPED)
+		hp_swapped = "-hp-swapped";
+	else
+		hp_swapped = "";
+
 	snprintf(byt_rt5651_long_name, sizeof(byt_rt5651_long_name),
 		 "bytcr-rt5651-%s-spk-%s-mic%s",
 		 (byt_rt5651_quirk & BYT_RT5651_MONO_SPEAKER) ?
 			"mono" : "stereo",
-		 mic_name[BYT_RT5651_MAP(byt_rt5651_quirk)],
-		 (byt_rt5651_quirk & BYT_RT5651_HP_LR_SWAPPED) ?
-			"-hp-swapped" : "");
+		 mic_name[BYT_RT5651_MAP(byt_rt5651_quirk)], hp_swapped);
 	byt_rt5651_card.long_name = byt_rt5651_long_name;
-#endif
 
 	/* override plaform name, if required */
 	platform_name = mach->mach_params.platform;

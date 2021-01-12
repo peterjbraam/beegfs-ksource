@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * linux/fs/nfs/namespace.c
  *
@@ -30,9 +31,9 @@ int nfs_mountpoint_expiry_timeout = 500 * HZ;
 /*
  * nfs_path - reconstruct the path given an arbitrary dentry
  * @base - used to return pointer to the end of devname part of path
- * @dentry - pointer to dentry
+ * @dentry_in - pointer to dentry
  * @buffer - result buffer
- * @buflen - length of buffer
+ * @buflen_in - length of buffer
  * @flags - options (see below)
  *
  * Helper function for constructing the server pathname
@@ -47,15 +48,19 @@ int nfs_mountpoint_expiry_timeout = 500 * HZ;
  *		       the original device (export) name
  *		       (if unset, the original name is returned verbatim)
  */
-char *nfs_path(char **p, struct dentry *dentry, char *buffer, ssize_t buflen,
-	       unsigned flags)
+char *nfs_path(char **p, struct dentry *dentry_in, char *buffer,
+	       ssize_t buflen_in, unsigned flags)
 {
 	char *end;
 	int namelen;
 	unsigned seq;
 	const char *base;
+	struct dentry *dentry;
+	ssize_t buflen;
 
 rename_retry:
+	buflen = buflen_in;
+	dentry = dentry_in;
 	end = buffer+buflen;
 	*--end = '\0';
 	buflen--;
@@ -140,7 +145,6 @@ struct vfsmount *nfs_d_automount(struct path *path)
 {
 	struct vfsmount *mnt;
 	struct nfs_server *server = NFS_SERVER(d_inode(path->dentry));
-	int timeout = READ_ONCE(nfs_mountpoint_expiry_timeout);
 	struct nfs_fh *fh = NULL;
 	struct nfs_fattr *fattr = NULL;
 
@@ -158,11 +162,8 @@ struct vfsmount *nfs_d_automount(struct path *path)
 		goto out;
 
 	mntget(mnt); /* prevent immediate expiration */
-	if (timeout <= 0)
-		goto out;
-
 	mnt_set_expiry(mnt, &nfs_automount_list);
-	schedule_delayed_work(&nfs_automount_task, timeout);
+	schedule_delayed_work(&nfs_automount_task, nfs_mountpoint_expiry_timeout);
 
 out:
 	nfs_free_fattr(fattr);
@@ -201,11 +202,10 @@ const struct inode_operations nfs_referral_inode_operations = {
 static void nfs_expire_automounts(struct work_struct *work)
 {
 	struct list_head *list = &nfs_automount_list;
-	int timeout = READ_ONCE(nfs_mountpoint_expiry_timeout);
 
 	mark_mounts_for_expiry(list);
-	if (!list_empty(list) && timeout > 0)
-		schedule_delayed_work(&nfs_automount_task, timeout);
+	if (!list_empty(list))
+		schedule_delayed_work(&nfs_automount_task, nfs_mountpoint_expiry_timeout);
 }
 
 void nfs_release_automount_timer(void)

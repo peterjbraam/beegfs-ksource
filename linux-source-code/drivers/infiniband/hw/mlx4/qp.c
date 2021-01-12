@@ -849,7 +849,7 @@ static void mlx4_ib_release_wqn(struct mlx4_ib_ucontext *context,
 	 * reused for further WQN allocations.
 	 * The next created WQ will allocate a new range.
 	 */
-		range->dirty = true;
+		range->dirty = 1;
 	}
 
 	mutex_unlock(&context->wqn_ranges_mutex);
@@ -3087,7 +3087,7 @@ static int build_mlx_header(struct mlx4_ib_sqp *sqp, const struct ib_ud_wr *wr,
 		}
 		if (ah->av.eth.vlan != cpu_to_be16(0xffff)) {
 			vlan = be16_to_cpu(ah->av.eth.vlan) & 0x0fff;
-			is_vlan = true;
+			is_vlan = 1;
 		}
 	}
 	err = ib_ud_header_init(send_size, !is_eth, is_eth, is_vlan, is_grh,

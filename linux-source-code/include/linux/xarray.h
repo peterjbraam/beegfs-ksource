@@ -32,8 +32,8 @@
  * The following internal entries have a special meaning:
  *
  * 0-62: Sibling entries
- * 256: Retry entry
- * 257: Zero entry
+ * 256: Zero entry
+ * 257: Retry entry
  *
  * Errors are also represented as internal entries, but use the negative
  * space (-4094 to -2).  They're never stored in the slots array; only
@@ -273,36 +273,6 @@ enum xa_lock_type {
 #define XA_FLAGS_ALLOC	(XA_FLAGS_TRACK_FREE | XA_FLAGS_MARK(XA_FREE_MARK))
 #define XA_FLAGS_ALLOC1	(XA_FLAGS_TRACK_FREE | XA_FLAGS_ZERO_BUSY)
 
-#ifdef __GENKSYMS__
-struct radix_tree_node {
-	unsigned char	shift;		/* Bits remaining in each slot */
-	unsigned char	offset;		/* Slot offset in parent */
-	unsigned char	count;		/* Total entry count */
-	unsigned char	exceptional;	/* Value entry count */
-	struct radix_tree_node *parent;	/* NULL at top of tree */
-	struct radix_tree_root *root;	/* The array we belong to */
-	union {
-		struct list_head private_list;	/* For tree user */
-		struct rcu_head	rcu_head;	/* Used when freeing node */
-	};
-#define RADIX_TREE_MAP_SHIFT    (CONFIG_BASE_SMALL ? 4 : 6)
-#define RADIX_TREE_MAP_SIZE     (1UL << RADIX_TREE_MAP_SHIFT)
-#define RADIX_TREE_MAP_MASK     (RADIX_TREE_MAP_SIZE-1)
-#define RADIX_TREE_MAX_TAGS     3
-#define RADIX_TREE_TAG_LONGS \
-        ((RADIX_TREE_MAP_SIZE + BITS_PER_LONG - 1) / BITS_PER_LONG)
-	void __rcu	*slots[RADIX_TREE_MAP_SIZE];
-	unsigned long tags[RADIX_TREE_MAX_TAGS][RADIX_TREE_TAG_LONGS];
-	RH_KABI_AUX_EMBED(radix_tree_node);
-};
-#endif
-
-/**
- * struct xarray_rh  - Red Hat KABI extension struct
- */
-struct RH_KABI_RENAME(radix_tree_root_rh, xarray_rh) {
-};
-
 /**
  * struct xarray - The anchor of the XArray.
  * @xa_lock: Lock that protects the contents of the XArray.
@@ -319,19 +289,17 @@ struct RH_KABI_RENAME(radix_tree_root_rh, xarray_rh) {
  * entry.  If any other entry in the array is non-NULL, @xa_head points
  * to an @xa_node.
  */
-struct RH_KABI_RENAME(radix_tree_root, xarray) {
+struct xarray {
 	spinlock_t	xa_lock;
 /* private: The rest of the data structure is not to be used directly. */
-	gfp_t		RH_KABI_RENAME(gfp_mask, xa_flags);
-	RH_KABI_RENAME(struct radix_tree_node __rcu *rnode, void __rcu * xa_head);
-	RH_KABI_AUX_EMBED(RH_KABI_RENAME(radix_tree_root, xarray));
+	gfp_t		xa_flags;
+	void __rcu *	xa_head;
 };
 
 #define XARRAY_INIT(name, flags) {				\
 	.xa_lock = __SPIN_LOCK_UNLOCKED(name.xa_lock),		\
 	.xa_flags = flags,					\
 	.xa_head = NULL,					\
-	RH_KABI_AUX_INIT_SIZE(xarray)				\
 }
 
 /**
@@ -376,7 +344,6 @@ struct RH_KABI_RENAME(radix_tree_root, xarray) {
  */
 #define DEFINE_XARRAY_ALLOC1(name) DEFINE_XARRAY_FLAGS(name, XA_FLAGS_ALLOC1)
 
-void _xa_init_flags(struct xarray *, gfp_t flags);
 void *xa_load(struct xarray *, unsigned long index);
 void *xa_store(struct xarray *, unsigned long index, void *entry, gfp_t);
 void *xa_erase(struct xarray *, unsigned long index);
@@ -409,8 +376,6 @@ static inline void xa_init_flags(struct xarray *xa, gfp_t flags)
 	spin_lock_init(&xa->xa_lock);
 	xa->xa_flags = flags;
 	xa->xa_head = NULL;
-	RH_KABI_AUX_SET_SIZE(xa, xarray);
-	_xa_init_flags(xa, flags);
 }
 
 /**
@@ -452,36 +417,6 @@ static inline bool xa_marked(const struct xarray *xa, xa_mark_t mark)
 }
 
 /**
- * xa_for_each_range() - Iterate over a portion of an XArray.
- * @xa: XArray.
- * @index: Index of @entry.
- * @entry: Entry retrieved from array.
- * @start: First index to retrieve from array.
- * @last: Last index to retrieve from array.
- *
- * During the iteration, @entry will have the value of the entry stored
- * in @xa at @index.  You may modify @index during the iteration if you
- * want to skip or reprocess indices.  It is safe to modify the array
- * during the iteration.  At the end of the iteration, @entry will be set
- * to NULL and @index will have a value less than or equal to max.
- *
- * xa_for_each_range() is O(n.log(n)) while xas_for_each() is O(n).  You have
- * to handle your own locking with xas_for_each(), and if you have to unlock
- * after each iteration, it will also end up being O(n.log(n)).
- * xa_for_each_range() will spin if it hits a retry entry; if you intend to
- * see retry entries, you should use the xas_for_each() iterator instead.
- * The xas_for_each() iterator will expand into more inline code than
- * xa_for_each_range().
- *
- * Context: Any context.  Takes and releases the RCU lock.
- */
-#define xa_for_each_range(xa, index, entry, start, last)		\
-	for (index = start,						\
-	     entry = xa_find(xa, &index, last, XA_PRESENT);		\
-	     entry;							\
-	     entry = xa_find_after(xa, &index, last, XA_PRESENT))
-
-/**
  * xa_for_each_start() - Iterate over a portion of an XArray.
  * @xa: XArray.
  * @index: Index of @entry.
@@ -504,8 +439,11 @@ static inline bool xa_marked(const struct xarray *xa, xa_mark_t mark)
  *
  * Context: Any context.  Takes and releases the RCU lock.
  */
-#define xa_for_each_start(xa, index, entry, start) \
-	xa_for_each_range(xa, index, entry, start, ULONG_MAX)
+#define xa_for_each_start(xa, index, entry, start)			\
+	for (index = start,						\
+	     entry = xa_find(xa, &index, ULONG_MAX, XA_PRESENT);	\
+	     entry;							\
+	     entry = xa_find_after(xa, &index, ULONG_MAX, XA_PRESENT))
 
 /**
  * xa_for_each() - Iterate over present entries in an XArray.
@@ -570,14 +508,6 @@ static inline bool xa_marked(const struct xarray *xa, xa_mark_t mark)
 				spin_lock_irqsave(&(xa)->xa_lock, flags)
 #define xa_unlock_irqrestore(xa, flags) \
 				spin_unlock_irqrestore(&(xa)->xa_lock, flags)
-#define xa_lock_nested(xa, subclass) \
-				spin_lock_nested(&(xa)->xa_lock, subclass)
-#define xa_lock_bh_nested(xa, subclass) \
-				spin_lock_bh_nested(&(xa)->xa_lock, subclass)
-#define xa_lock_irq_nested(xa, subclass) \
-				spin_lock_irq_nested(&(xa)->xa_lock, subclass)
-#define xa_lock_irqsave_nested(xa, flags, subclass) \
-		spin_lock_irqsave_nested(&(xa)->xa_lock, flags, subclass)
 
 /*
  * Versions of the normal API which require the caller to hold the
@@ -1170,7 +1100,6 @@ struct xa_node {
 		unsigned long	tags[XA_MAX_MARKS][XA_MARK_LONGS];
 		unsigned long	marks[XA_MAX_MARKS][XA_MARK_LONGS];
 	};
-	/* RHEL kABI: this structure can be appended to by RH_KABI_EXTEND */
 };
 
 void xa_dump(const struct xarray *);

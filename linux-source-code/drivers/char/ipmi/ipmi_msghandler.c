@@ -33,7 +33,7 @@
 #include <linux/workqueue.h>
 #include <linux/uuid.h>
 #include <linux/nospec.h>
-#include <linux/dmi.h>
+#include <linux/vmalloc.h>
 
 #define IPMI_DRIVER_VERSION "39.2"
 
@@ -44,6 +44,25 @@ static void handle_new_recv_msgs(struct ipmi_smi *intf);
 static void need_waiter(struct ipmi_smi *intf);
 static int handle_one_recv_msg(struct ipmi_smi *intf,
 			       struct ipmi_smi_msg *msg);
+
+#ifdef DEBUG
+static void ipmi_debug_msg(const char *title, unsigned char *data,
+			   unsigned int len)
+{
+	int i, pos;
+	char buf[100];
+
+	pos = snprintf(buf, sizeof(buf), "%s: ", title);
+	for (i = 0; i < len; i++)
+		pos += snprintf(buf + pos, sizeof(buf) - pos,
+				" %2.2x", data[i]);
+	pr_debug("%s\n", buf);
+}
+#else
+static void ipmi_debug_msg(const char *title, unsigned char *data,
+			   unsigned int len)
+{ }
+#endif
 
 static bool initialized;
 static bool drvregistered;
@@ -430,6 +449,8 @@ enum ipmi_stat_indexes {
 
 #define IPMI_IPMB_NUM_SEQ	64
 struct ipmi_smi {
+	struct module *owner;
+
 	/* What interface number are we? */
 	int intf_num;
 
@@ -590,8 +611,6 @@ struct ipmi_smi {
 	 * parameters passed by "low" level IPMI code.
 	 */
 	int run_to_completion;
-
-	RH_KABI_EXTEND(struct module *owner)
 };
 #define to_si_intf_from_dev(device) container_of(device, struct ipmi_smi, dev)
 
@@ -619,8 +638,6 @@ static DEFINE_MUTEX(ipmidriver_mutex);
 
 static LIST_HEAD(ipmi_interfaces);
 static DEFINE_MUTEX(ipmi_interfaces_mutex);
-#define ipmi_interfaces_mutex_held() \
-	lockdep_is_held(&ipmi_interfaces_mutex)
 static struct srcu_struct ipmi_interfaces_srcu;
 
 /*
@@ -1154,7 +1171,7 @@ static void free_user_work(struct work_struct *work)
 					      remove_work);
 
 	cleanup_srcu_struct(&user->release_barrier);
-	kfree(user);
+	vfree(user);
 }
 
 int ipmi_create_user(unsigned int          if_num,
@@ -1186,7 +1203,7 @@ int ipmi_create_user(unsigned int          if_num,
 	if (rv)
 		return rv;
 
-	new_user = kmalloc(sizeof(*new_user), GFP_KERNEL);
+	new_user = vzalloc(sizeof(*new_user));
 	if (!new_user)
 		return -ENOMEM;
 
@@ -1233,7 +1250,7 @@ int ipmi_create_user(unsigned int          if_num,
 
 out_kfree:
 	srcu_read_unlock(&ipmi_interfaces_srcu, index);
-	kfree(new_user);
+	vfree(new_user);
 	return rv;
 }
 EXPORT_SYMBOL(ipmi_create_user);
@@ -1324,8 +1341,7 @@ static void _ipmi_destroy_user(struct ipmi_user *user)
 	 * synchronize_srcu()) then free everything in that list.
 	 */
 	mutex_lock(&intf->cmd_rcvrs_mutex);
-	list_for_each_entry_rcu(rcvr, &intf->cmd_rcvrs, link,
-				lockdep_is_held(&intf->cmd_rcvrs_mutex)) {
+	list_for_each_entry_rcu(rcvr, &intf->cmd_rcvrs, link) {
 		if (rcvr->user == user) {
 			list_del_rcu(&rcvr->link);
 			rcvr->next = rcvrs;
@@ -1603,8 +1619,7 @@ static struct cmd_rcvr *find_cmd_rcvr(struct ipmi_smi *intf,
 {
 	struct cmd_rcvr *rcvr;
 
-	list_for_each_entry_rcu(rcvr, &intf->cmd_rcvrs, link,
-				lockdep_is_held(&intf->cmd_rcvrs_mutex)) {
+	list_for_each_entry_rcu(rcvr, &intf->cmd_rcvrs, link) {
 		if ((rcvr->netfn == netfn) && (rcvr->cmd == cmd)
 					&& (rcvr->chans & (1 << chan)))
 			return rcvr;
@@ -1619,8 +1634,7 @@ static int is_cmd_rcvr_exclusive(struct ipmi_smi *intf,
 {
 	struct cmd_rcvr *rcvr;
 
-	list_for_each_entry_rcu(rcvr, &intf->cmd_rcvrs, link,
-				lockdep_is_held(&intf->cmd_rcvrs_mutex)) {
+	list_for_each_entry_rcu(rcvr, &intf->cmd_rcvrs, link) {
 		if ((rcvr->netfn == netfn) && (rcvr->cmd == cmd)
 					&& (rcvr->chans & chans))
 			return 0;
@@ -2262,7 +2276,7 @@ out_err:
 		ipmi_free_smi_msg(smi_msg);
 		ipmi_free_recv_msg(recv_msg);
 	} else {
-		pr_debug("Send: %*ph\n", smi_msg->data_size, smi_msg->data);
+		ipmi_debug_msg("Send", smi_msg->data, smi_msg->data_size);
 
 		smi_send(intf, intf->handlers, smi_msg, priority);
 	}
@@ -3456,8 +3470,7 @@ int ipmi_add_smi(struct module         *owner,
 	/* Look for a hole in the numbers. */
 	i = 0;
 	link = &ipmi_interfaces;
-	list_for_each_entry_rcu(tintf, &ipmi_interfaces, link,
-				ipmi_interfaces_mutex_held()) {
+	list_for_each_entry_rcu(tintf, &ipmi_interfaces, link) {
 		if (tintf->intf_num != i) {
 			link = &tintf->link;
 			break;
@@ -3515,19 +3528,6 @@ int ipmi_add_smi(struct module         *owner,
 	return rv;
 }
 EXPORT_SYMBOL(ipmi_add_smi);
-
-int ipmi_register_smi(const struct ipmi_smi_handlers *handlers,
-		      void		       *send_info,
-		      struct device            *si_dev,
-		      unsigned char            slave_addr)
-{
-	int rv;
-
-	rv = ipmi_add_smi(0, handlers, send_info, si_dev, slave_addr);
-
-	return rv;
-}
-EXPORT_SYMBOL(ipmi_register_smi);
 
 static void deliver_smi_err_response(struct ipmi_smi *intf,
 				     struct ipmi_smi_msg *msg,
@@ -3743,7 +3743,7 @@ static int handle_ipmb_get_msg_cmd(struct ipmi_smi *intf,
 		msg->data[10] = ipmb_checksum(&msg->data[6], 4);
 		msg->data_size = 11;
 
-		pr_debug("Invalid command: %*ph\n", msg->data_size, msg->data);
+		ipmi_debug_msg("Invalid command:", msg->data, msg->data_size);
 
 		rcu_read_lock();
 		if (!intf->in_shutdown) {
@@ -4230,7 +4230,7 @@ static int handle_one_recv_msg(struct ipmi_smi *intf,
 	int requeue;
 	int chan;
 
-	pr_debug("Recv: %*ph\n", msg->rsp_size, msg->rsp);
+	ipmi_debug_msg("Recv:", msg->rsp, msg->rsp_size);
 
 	if ((msg->data_size >= 2)
 	    && (msg->data[0] == (IPMI_NETFN_APP_REQUEST << 2))
@@ -4589,7 +4589,7 @@ smi_from_recv_msg(struct ipmi_smi *intf, struct ipmi_recv_msg *recv_msg,
 	smi_msg->data_size = recv_msg->msg.data_len;
 	smi_msg->msgid = STORE_SEQ_IN_MSGID(seq, seqid);
 
-	pr_debug("Resend: %*ph\n", smi_msg->data_size, smi_msg->data);
+	ipmi_debug_msg("Resend: ", smi_msg->data, smi_msg->data_size);
 
 	return smi_msg;
 }
@@ -5167,21 +5167,6 @@ out:
 static int __init ipmi_init_msghandler_mod(void)
 {
 	int rv;
-
-#ifdef CONFIG_ARM64
-	/* RHEL-only
-	 * If this is ARM-based HPE m400, return now, because that platform
-	 * reports the host-side ipmi address as intel port-io space, which
-	 * does not exist in the ARM architecture.
-	 */
-	const char *dmistr = dmi_get_system_info(DMI_PRODUCT_NAME);
-
-	if (dmistr && (strcmp("ProLiant m400 Server", dmistr) == 0)) {
-		pr_debug("%s does not support host ipmi\n", dmistr);
-		return -ENOSYS;
-	}
-	/* END RHEL-only */
-#endif
 
 	pr_info("version " IPMI_DRIVER_VERSION "\n");
 

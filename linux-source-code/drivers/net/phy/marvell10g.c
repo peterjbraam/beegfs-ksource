@@ -26,7 +26,6 @@
 #include <linux/hwmon.h>
 #include <linux/marvell_phy.h>
 #include <linux/phy.h>
-#include <linux/sfp.h>
 
 #define MV_PHY_ALASKA_NBT_QUIRK_MASK	0xfffffffe
 #define MV_PHY_ALASKA_NBT_QUIRK_REV	(MARVELL_PHY_ID_88X3310 | 0xa)
@@ -207,28 +206,6 @@ static int mv3310_hwmon_probe(struct phy_device *phydev)
 }
 #endif
 
-static int mv3310_sfp_insert(void *upstream, const struct sfp_eeprom_id *id)
-{
-	struct phy_device *phydev = upstream;
-	__ETHTOOL_DECLARE_LINK_MODE_MASK(support) = { 0, };
-	phy_interface_t iface;
-
-	sfp_parse_support(phydev->sfp_bus, id, support);
-	iface = sfp_select_interface(phydev->sfp_bus, support);
-
-	if (iface != PHY_INTERFACE_MODE_10GKR) {
-		dev_err(&phydev->mdio.dev, "incompatible SFP module inserted\n");
-		return -EINVAL;
-	}
-	return 0;
-}
-
-static const struct sfp_upstream_ops mv3310_sfp_ops = {
-	.attach = phy_sfp_attach,
-	.detach = phy_sfp_detach,
-	.module_insert = mv3310_sfp_insert,
-};
-
 static int mv3310_probe(struct phy_device *phydev)
 {
 	struct mv3310_priv *priv;
@@ -259,7 +236,7 @@ static int mv3310_probe(struct phy_device *phydev)
 	if (ret)
 		return ret;
 
-	return phy_sfp_probe(phydev, &mv3310_sfp_ops);
+	return 0;
 }
 
 static int mv3310_suspend(struct phy_device *phydev)

@@ -160,13 +160,7 @@ rpc_clnt_debugfs_register(struct rpc_clnt *clnt)
 	debugfs_create_file("tasks", S_IFREG | 0400, clnt->cl_debugfs, clnt,
 			    &tasks_fops);
 
-	if (rpc_clnt_iterate_for_each_xprt(clnt, do_xprt_debugfs, &xprtnum) < 0)
-		goto out_err;
-
-	return;
-out_err:
-	debugfs_remove_recursive(clnt->cl_debugfs);
-	clnt->cl_debugfs = NULL;
+	rpc_clnt_iterate_for_each_xprt(clnt, do_xprt_debugfs, &xprtnum);
 }
 
 void

@@ -91,9 +91,9 @@ struct attribute_group {
 	struct bin_attribute	**bin_attrs;
 };
 
-/**
- * Use these macros to make defining attributes easier. See include/linux/device.h
- * for examples..
+/*
+ * Use these macros to make defining attributes easier.
+ * See include/linux/device.h for examples..
  */
 
 #define SYSFS_PREALLOC 010000
@@ -300,10 +300,6 @@ void sysfs_remove_link_from_group(struct kobject *kobj, const char *group_name,
 int __compat_only_sysfs_link_entry_to_kobj(struct kobject *kobj,
 				      struct kobject *target_kobj,
 				      const char *target_name);
-int compat_only_sysfs_link_entry_to_kobj(struct kobject *kobj,
-					 struct kobject *target_kobj,
-					 const char *target_name,
-					 const char *symlink_name);
 
 void sysfs_notify(struct kobject *kobj, const char *dir, const char *attr);
 
@@ -313,6 +309,18 @@ static inline void sysfs_enable_ns(struct kernfs_node *kn)
 {
 	return kernfs_enable_ns(kn);
 }
+
+int sysfs_file_change_owner(struct kobject *kobj, const char *name, kuid_t kuid,
+			    kgid_t kgid);
+int sysfs_change_owner(struct kobject *kobj, kuid_t kuid, kgid_t kgid);
+int sysfs_link_change_owner(struct kobject *kobj, struct kobject *targ,
+			    const char *name, kuid_t kuid, kgid_t kgid);
+int sysfs_groups_change_owner(struct kobject *kobj,
+			      const struct attribute_group **groups,
+			      kuid_t kuid, kgid_t kgid);
+int sysfs_group_change_owner(struct kobject *kobj,
+			     const struct attribute_group *groups, kuid_t kuid,
+			     kgid_t kgid);
 
 #else /* CONFIG_SYSFS */
 
@@ -512,14 +520,6 @@ static inline int __compat_only_sysfs_link_entry_to_kobj(
 	return 0;
 }
 
-static int compat_only_sysfs_link_entry_to_kobj(struct kobject *kobj,
-						struct kobject *target_kobj,
-						const char *target_name,
-						const char *symlink_name)
-{
-	return 0;
-}
-
 static inline void sysfs_notify(struct kobject *kobj, const char *dir,
 				const char *attr)
 {
@@ -532,6 +532,40 @@ static inline int __must_check sysfs_init(void)
 
 static inline void sysfs_enable_ns(struct kernfs_node *kn)
 {
+}
+
+static inline int sysfs_file_change_owner(struct kobject *kobj,
+					  const char *name, kuid_t kuid,
+					  kgid_t kgid)
+{
+	return 0;
+}
+
+static inline int sysfs_link_change_owner(struct kobject *kobj,
+					  struct kobject *targ,
+					  const char *name, kuid_t kuid,
+					  kgid_t kgid)
+{
+	return 0;
+}
+
+static inline int sysfs_change_owner(struct kobject *kobj, kuid_t kuid, kgid_t kgid)
+{
+	return 0;
+}
+
+static inline int sysfs_groups_change_owner(struct kobject *kobj,
+			  const struct attribute_group **groups,
+			  kuid_t kuid, kgid_t kgid)
+{
+	return 0;
+}
+
+static inline int sysfs_group_change_owner(struct kobject *kobj,
+					   const struct attribute_group *groups,
+					   kuid_t kuid, kgid_t kgid)
+{
+	return 0;
 }
 
 #endif /* CONFIG_SYSFS */

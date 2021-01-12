@@ -58,6 +58,7 @@ enum parport_pc_pci_cards {
 	timedia_9079c,
 	wch_ch353_1s1p,
 	wch_ch353_2s1p,
+	wch_ch382_0s1p,
 	wch_ch382_2s1p,
 	brainboxes_5s1p,
 	sunix_4008a,
@@ -150,6 +151,7 @@ static struct parport_pc_pci cards[] = {
 	/* timedia_9079c */             { 1, { { 2, 3 }, } },
 	/* wch_ch353_1s1p*/             { 1, { { 1, -1}, } },
 	/* wch_ch353_2s1p*/             { 1, { { 2, -1}, } },
+	/* wch_ch382_0s1p*/		{ 1, { { 2, -1}, } },
 	/* wch_ch382_2s1p*/             { 1, { { 2, -1}, } },
 	/* brainboxes_5s1p */           { 1, { { 3, -1 }, } },
 	/* sunix_4008a */		{ 1, { { 1, 2 }, } },
@@ -258,6 +260,7 @@ static struct pci_device_id parport_serial_pci_tbl[] = {
 	/* WCH CARDS */
 	{ 0x4348, 0x5053, PCI_ANY_ID, PCI_ANY_ID, 0, 0, wch_ch353_1s1p},
 	{ 0x4348, 0x7053, 0x4348, 0x3253, 0, 0, wch_ch353_2s1p},
+	{ 0x1c00, 0x3050, 0x1c00, 0x3050, 0, 0, wch_ch382_0s1p},
 	{ 0x1c00, 0x3250, 0x1c00, 0x3250, 0, 0, wch_ch382_2s1p},
 
 	/* BrainBoxes PX272/PX306 MIO card */
@@ -502,6 +505,12 @@ static struct pciserial_board pci_parport_serial_boards[] = {
 		.base_baud      = 115200,
 		.uart_offset    = 8,
 	},
+	[wch_ch382_0s1p] = {
+		.flags          = FL_BASE0,
+		.num_ports      = 0,
+		.base_baud      = 115200,
+		.uart_offset    = 8,
+	},
 	[wch_ch382_2s1p] = {
 		.flags          = FL_BASE0,
 		.num_ports      = 2,
@@ -671,8 +680,7 @@ static void parport_serial_pci_remove(struct pci_dev *dev)
 
 static int __maybe_unused parport_serial_pci_suspend(struct device *dev)
 {
-	struct pci_dev *pdev = to_pci_dev(dev);
-	struct parport_serial_private *priv = pci_get_drvdata(pdev);
+	struct parport_serial_private *priv = dev_get_drvdata(dev);
 
 	if (priv->serial)
 		pciserial_suspend_ports(priv->serial);
@@ -683,8 +691,7 @@ static int __maybe_unused parport_serial_pci_suspend(struct device *dev)
 
 static int __maybe_unused parport_serial_pci_resume(struct device *dev)
 {
-	struct pci_dev *pdev = to_pci_dev(dev);
-	struct parport_serial_private *priv = pci_get_drvdata(pdev);
+	struct parport_serial_private *priv = dev_get_drvdata(dev);
 
 	if (priv->serial)
 		pciserial_resume_ports(priv->serial);

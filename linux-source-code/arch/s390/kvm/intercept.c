@@ -12,6 +12,7 @@
 #include <linux/errno.h>
 #include <linux/pagemap.h>
 
+#include <asm/kvm_host.h>
 #include <asm/asm-offsets.h>
 #include <asm/irq.h>
 #include <asm/sysinfo.h>

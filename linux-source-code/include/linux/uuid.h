@@ -1,17 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * UUID/GUID definition
  *
  * Copyright (C) 2010, 2016 Intel Corp.
  *	Huang Ying <ying.huang@intel.com>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License version
- * 2 as published by the Free Software Foundation;
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 #ifndef _LINUX_UUID_H_
 #define _LINUX_UUID_H_
@@ -51,16 +43,6 @@ static inline void guid_copy(guid_t *dst, const guid_t *src)
 	memcpy(dst, src, sizeof(guid_t));
 }
 
-static inline void import_guid(guid_t *dst, const __u8 *src)
-{
-	memcpy(dst, src, sizeof(guid_t));
-}
-
-static inline void export_guid(__u8 *dst, const guid_t *src)
-{
-	memcpy(dst, src, sizeof(guid_t));
-}
-
 static inline bool guid_is_null(const guid_t *guid)
 {
 	return guid_equal(guid, &guid_null);
@@ -72,16 +54,6 @@ static inline bool uuid_equal(const uuid_t *u1, const uuid_t *u2)
 }
 
 static inline void uuid_copy(uuid_t *dst, const uuid_t *src)
-{
-	memcpy(dst, src, sizeof(uuid_t));
-}
-
-static inline void import_uuid(uuid_t *dst, const __u8 *src)
-{
-	memcpy(dst, src, sizeof(uuid_t));
-}
-
-static inline void export_uuid(__u8 *dst, const uuid_t *src)
 {
 	memcpy(dst, src, sizeof(uuid_t));
 }

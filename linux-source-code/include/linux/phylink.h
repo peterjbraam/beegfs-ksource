@@ -63,12 +63,10 @@ enum phylink_op_type {
  * struct phylink_config - PHYLINK configuration structure
  * @dev: a pointer to a struct device associated with the MAC
  * @type: operation type of PHYLINK instance
- * @pcs_poll: MAC PCS cannot provide link change interrupt
  */
 struct phylink_config {
 	struct device *dev;
 	enum phylink_op_type type;
-	bool pcs_poll;
 };
 
 /**
@@ -111,12 +109,19 @@ struct phylink_mac_ops {
  * Note that the PHY may be able to transform from one connection
  * technology to another, so, eg, don't clear 1000BaseX just
  * because the MAC is unable to BaseX mode. This is more about
- * clearing unsupported speeds and duplex settings.
+ * clearing unsupported speeds and duplex settings. The port modes
+ * should not be cleared; phylink_set_port_modes() will help with this.
  *
  * If the @state->interface mode is %PHY_INTERFACE_MODE_1000BASEX
  * or %PHY_INTERFACE_MODE_2500BASEX, select the appropriate mode
  * based on @state->advertising and/or @state->speed and update
- * @state->interface accordingly.
+ * @state->interface accordingly. See phylink_helper_basex_speed().
+ *
+ * When @state->interface is %PHY_INTERFACE_MODE_NA, phylink expects the
+ * MAC driver to return all supported link modes.
+ *
+ * If the @state->interface mode is not supported, then the @supported
+ * mask must be cleared.
  */
 void validate(struct phylink_config *config, unsigned long *supported,
 	      struct phylink_link_state *state);
@@ -141,11 +146,20 @@ int mac_link_state(struct phylink_config *config,
  * @mode: one of %MLO_AN_FIXED, %MLO_AN_PHY, %MLO_AN_INBAND.
  * @state: a pointer to a &struct phylink_link_state.
  *
+ * Note - not all members of @state are valid.  In particular,
+ * @state->lp_advertising, @state->link, @state->an_complete are never
+ * guaranteed to be correct, and so any mac_config() implementation must
+ * never reference these fields.
+ *
  * The action performed depends on the currently selected mode:
  *
  * %MLO_AN_FIXED, %MLO_AN_PHY:
  *   Configure the specified @state->speed, @state->duplex and
- *   @state->pause (%MLO_PAUSE_TX / %MLO_PAUSE_RX) mode.
+ *   @state->pause (%MLO_PAUSE_TX / %MLO_PAUSE_RX) modes over a link
+ *   specified by @state->interface.  @state->advertising may be used,
+ *   but is not required.  Other members of @state must be ignored.
+ *
+ *   Valid state members: interface, speed, duplex, pause, advertising.
  *
  * %MLO_AN_INBAND:
  *   place the link in an inband negotiation mode (such as 802.3z
@@ -167,6 +181,8 @@ int mac_link_state(struct phylink_config *config,
  *   configuration word. Nothing is advertised by the MAC. The MAC is
  *   responsible for reading the configuration word and configuring
  *   itself accordingly.
+ *
+ *   Valid state members: interface, an_enabled, pause, advertising.
  *
  * Implementations are expected to update the MAC to reflect the
  * requested settings - i.o.w., if nothing has changed between two

@@ -32,6 +32,21 @@
 #include <asm/boot_data.h>
 #include "entry.h"
 
+static void __init reset_tod_clock(void)
+{
+	u64 time;
+
+	if (store_tod_clock(&time) == 0)
+		return;
+	/* TOD clock not running. Set the clock to Unix Epoch. */
+	if (set_tod_clock(TOD_UNIX_EPOCH) != 0 || store_tod_clock(&time) != 0)
+		disabled_wait();
+
+	memset(tod_clock_base, 0, 16);
+	*(__u64 *) &tod_clock_base[1] = TOD_UNIX_EPOCH;
+	S390_lowcore.last_update_clock = TOD_UNIX_EPOCH;
+}
+
 /*
  * Initialize storage key for kernel pages
  */
@@ -63,10 +78,10 @@ static noinline __init void detect_machine_type(void)
 	if (stsi(vmms, 3, 2, 2) || !vmms->count)
 		return;
 
-	/* Running under KVM? If not we assume z/VM */
+	/* Detect known hypervisors */
 	if (!memcmp(vmms->vm[0].cpi, "\xd2\xe5\xd4", 3))
 		S390_lowcore.machine_flags |= MACHINE_FLAG_KVM;
-	else
+	else if (!memcmp(vmms->vm[0].cpi, "\xa9\x61\xe5\xd4", 4))
 		S390_lowcore.machine_flags |= MACHINE_FLAG_VM;
 }
 
@@ -140,7 +155,7 @@ static void early_pgm_check_handler(void)
 	addr = S390_lowcore.program_old_psw.addr;
 	fixup = s390_search_extables(addr);
 	if (!fixup)
-		disabled_wait(0);
+		disabled_wait();
 	/* Disable low address protection before storing into lowcore. */
 	__ctl_store(cr0, 0, 0);
 	cr0_new = cr0 & ~(1UL << 28);
@@ -154,6 +169,8 @@ static noinline __init void setup_lowcore_early(void)
 	psw_t psw;
 
 	psw.mask = PSW_MASK_BASE | PSW_DEFAULT_KEY | PSW_MASK_EA | PSW_MASK_BA;
+	if (IS_ENABLED(CONFIG_KASAN))
+		psw.mask |= PSW_MASK_DAT;
 	psw.addr = (unsigned long) s390_base_ext_handler;
 	S390_lowcore.external_new_psw = psw;
 	psw.addr = (unsigned long) s390_base_pgm_handler;
@@ -296,11 +313,12 @@ static void __init check_image_bootable(void)
 	sclp_early_printk("Linux kernel boot failure: An attempt to boot a vmlinux ELF image failed.\n");
 	sclp_early_printk("This image does not contain all parts necessary for starting up. Use\n");
 	sclp_early_printk("bzImage or arch/s390/boot/compressed/vmlinux instead.\n");
-	disabled_wait(0xbadb007);
+	disabled_wait();
 }
 
 void __init startup_init(void)
 {
+	reset_tod_clock();
 	check_image_bootable();
 	time_early_init();
 	init_kernel_storage_key();

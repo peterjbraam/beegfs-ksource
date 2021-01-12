@@ -20,6 +20,7 @@
 #include <linux/usb.h>
 #include <linux/vmalloc.h>
 #include <linux/slab.h>
+#include <linux/proc_fs.h>
 #include <linux/highmem.h>
 #include <media/v4l2-common.h>
 #include <media/v4l2-ioctl.h>
@@ -140,7 +141,6 @@ struct zr364xx_pipeinfo {
 };
 
 struct zr364xx_fmt {
-	char *name;
 	u32 fourcc;
 	int depth;
 };
@@ -148,7 +148,6 @@ struct zr364xx_fmt {
 /* image formats.  */
 static const struct zr364xx_fmt formats[] = {
 	{
-		.name = "JPG",
 		.fourcc = V4L2_PIX_FMT_JPEG,
 		.depth = 24
 	}
@@ -198,11 +197,9 @@ static int send_control_msg(struct usb_device *udev, u8 request, u16 value,
 {
 	int status;
 
-	unsigned char *transfer_buffer = kmalloc(size, GFP_KERNEL);
+	unsigned char *transfer_buffer = kmemdup(cp, size, GFP_KERNEL);
 	if (!transfer_buffer)
 		return -ENOMEM;
-
-	memcpy(transfer_buffer, cp, size);
 
 	status = usb_control_msg(udev,
 				 usb_sndctrlpipe(udev, 0),
@@ -375,8 +372,7 @@ static int buffer_prepare(struct videobuf_queue *vq, struct videobuf_buffer *vb,
 						  vb);
 	int rc;
 
-	DBG("%s, field=%d, fmt name = %s\n", __func__, field,
-	    cam->fmt ? cam->fmt->name : "");
+	DBG("%s, field=%d\n", __func__, field);
 	if (!cam->fmt)
 		return -EINVAL;
 
@@ -511,7 +507,7 @@ static void zr364xx_fillbuff(struct zr364xx_camera *cam,
 	/* tell v4l buffer was filled */
 
 	buf->vb.field_count = cam->frame_count * 2;
-	v4l2_get_timestamp(&buf->vb.ts);
+	buf->vb.ts = ktime_get_ns();
 	buf->vb.state = VIDEOBUF_DONE;
 }
 
@@ -539,7 +535,7 @@ static int zr364xx_got_frame(struct zr364xx_camera *cam, int jpgsize)
 		goto unlock;
 	}
 	list_del(&buf->vb.queue);
-	v4l2_get_timestamp(&buf->vb.ts);
+	buf->vb.ts = ktime_get_ns();
 	DBG("[%p/%d] wakeup\n", buf, buf->vb.i);
 	zr364xx_fillbuff(cam, buf, jpgsize);
 	wake_up(&buf->vb.done);
@@ -750,8 +746,6 @@ static int zr364xx_vidioc_enum_fmt_vid_cap(struct file *file,
 {
 	if (f->index > 0)
 		return -EINVAL;
-	f->flags = V4L2_FMT_FLAG_COMPRESSED;
-	strscpy(f->description, formats[0].name, sizeof(f->description));
 	f->pixelformat = formats[0].fourcc;
 	return 0;
 }

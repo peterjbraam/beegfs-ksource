@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0
 #
 # For a description of the syntax of this configuration file,
-# see Documentation/kbuild/kconfig-language.txt.
+# see Documentation/kbuild/kconfig-language.rst.
 #
 mainmenu "Linux/$(ARCH) $(KERNELVERSION) Kernel Configuration"
 
@@ -9,13 +9,28 @@ comment "Compiler: $(CC_VERSION_TEXT)"
 
 source "scripts/Kconfig.include"
 
-source "arch/$(SRCARCH)/Kconfig"
+source "init/Kconfig"
 
-config RH_KABI_SIZE_ALIGN_CHECKS
-	bool "Enables more stringent kabi checks in the macros"
-	default y
-	help
-	  This option enables more stringent kabi checks. Those must be disable
-	  in case of a debug-build because they allow to change struct sizes.
+source "kernel/Kconfig.freezer"
 
+source "fs/Kconfig.binfmt"
 
+source "mm/Kconfig"
+
+source "net/Kconfig"
+
+source "drivers/Kconfig"
+
+source "ubuntu/Kconfig"
+
+source "fs/Kconfig"
+
+source "security/Kconfig"
+
+source "crypto/Kconfig"
+
+source "lib/Kconfig"
+
+source "lib/Kconfig.debug"
+
+source "Documentation/Kconfig"

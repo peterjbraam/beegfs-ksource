@@ -27,6 +27,7 @@
 #include "cache.h"
 #include "vfs.h"
 #include "netns.h"
+#include "filecache.h"
 
 #define NFSDDBG_FACILITY	NFSDDBG_SVC
 
@@ -312,22 +313,17 @@ static int nfsd_startup_generic(int nrservs)
 	if (nfsd_users++)
 		return 0;
 
-	/*
-	 * Readahead param cache - will no-op if it already exists.
-	 * (Note therefore results will be suboptimal if number of
-	 * threads is modified after nfsd start.)
-	 */
-	ret = nfsd_racache_init(2*nrservs);
+	ret = nfsd_file_cache_init();
 	if (ret)
 		goto dec_users;
 
 	ret = nfs4_state_start();
 	if (ret)
-		goto out_racache;
+		goto out_file_cache;
 	return 0;
 
-out_racache:
-	nfsd_racache_shutdown();
+out_file_cache:
+	nfsd_file_cache_shutdown();
 dec_users:
 	nfsd_users--;
 	return ret;
@@ -339,7 +335,7 @@ static void nfsd_shutdown_generic(void)
 		return;
 
 	nfs4_state_shutdown();
-	nfsd_racache_shutdown();
+	nfsd_file_cache_shutdown();
 }
 
 static bool nfsd_needs_lockd(struct nfsd_net *nn)
@@ -395,7 +391,7 @@ static int nfsd_startup_net(int nrservs, struct net *net, const struct cred *cre
 		ret = lockd_up(net, cred);
 		if (ret)
 			goto out_socks;
-		nn->lockd_up = true;
+		nn->lockd_up = 1;
 	}
 
 	ret = nfs4_state_start_net(net);
@@ -408,7 +404,7 @@ static int nfsd_startup_net(int nrservs, struct net *net, const struct cred *cre
 out_lockd:
 	if (nn->lockd_up) {
 		lockd_down(net);
-		nn->lockd_up = false;
+		nn->lockd_up = 0;
 	}
 out_socks:
 	nfsd_shutdown_generic();
@@ -419,10 +415,11 @@ static void nfsd_shutdown_net(struct net *net)
 {
 	struct nfsd_net *nn = net_generic(net, nfsd_net_id);
 
+	nfsd_file_cache_purge(net);
 	nfs4_state_shutdown_net(net);
 	if (nn->lockd_up) {
 		lockd_down(net);
-		nn->lockd_up = false;
+		nn->lockd_up = 0;
 	}
 	nn->nfsd_net_up = false;
 	nfsd_shutdown_generic();
@@ -740,9 +737,6 @@ nfsd_svc(int nrservs, struct net *net, const struct cred *cred)
 
 	if (nrservs == 0 && nn->nfsd_serv == NULL)
 		goto out;
-
-	strlcpy(nn->nfsd_name, utsname()->nodename,
-		sizeof(nn->nfsd_name));
 
 	error = nfsd_create_serv(net);
 	if (error)

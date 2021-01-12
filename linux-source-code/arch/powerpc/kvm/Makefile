@@ -3,8 +3,6 @@
 # Makefile for Kernel-based Virtual Machine module
 #
 
-subdir-ccflags-$(CONFIG_PPC_WERROR) := -Werror
-
 ccflags-y := -Ivirt/kvm -Iarch/powerpc/kvm
 KVM := ../../../virt/kvm
 
@@ -72,9 +70,6 @@ kvm-hv-y += \
 	book3s_64_mmu_hv.o \
 	book3s_64_mmu_radix.o \
 	book3s_hv_nested.o
-
-kvm-hv-$(CONFIG_PPC_UV) += \
-	book3s_hv_uvmem.o
 
 kvm-hv-$(CONFIG_PPC_TRANSACTIONAL_MEM) += \
 	book3s_hv_tm.o

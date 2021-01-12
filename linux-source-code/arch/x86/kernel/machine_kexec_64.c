@@ -1,9 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * handle transition of Linux booting another kernel
  * Copyright (C) 2002-2005 Eric Biederman  <ebiederm@xmission.com>
- *
- * This source code is licensed under the GNU General Public License,
- * Version 2.  See the file COPYING for more details.
  */
 
 #define pr_fmt(fmt)	"kexec: " fmt
@@ -300,6 +298,48 @@ static void load_segments(void)
 		);
 }
 
+#ifdef CONFIG_KEXEC_FILE
+/* Update purgatory as needed after various image segments have been prepared */
+static int arch_update_purgatory(struct kimage *image)
+{
+	int ret = 0;
+
+	if (!image->file_mode)
+		return 0;
+
+	/* Setup copying of backup region */
+	if (image->type == KEXEC_TYPE_CRASH) {
+		ret = kexec_purgatory_get_set_symbol(image,
+				"purgatory_backup_dest",
+				&image->arch.backup_load_addr,
+				sizeof(image->arch.backup_load_addr), 0);
+		if (ret)
+			return ret;
+
+		ret = kexec_purgatory_get_set_symbol(image,
+				"purgatory_backup_src",
+				&image->arch.backup_src_start,
+				sizeof(image->arch.backup_src_start), 0);
+		if (ret)
+			return ret;
+
+		ret = kexec_purgatory_get_set_symbol(image,
+				"purgatory_backup_sz",
+				&image->arch.backup_src_sz,
+				sizeof(image->arch.backup_src_sz), 0);
+		if (ret)
+			return ret;
+	}
+
+	return ret;
+}
+#else /* !CONFIG_KEXEC_FILE */
+static inline int arch_update_purgatory(struct kimage *image)
+{
+	return 0;
+}
+#endif /* CONFIG_KEXEC_FILE */
+
 int machine_kexec_prepare(struct kimage *image)
 {
 	unsigned long start_pgtable;
@@ -310,6 +350,11 @@ int machine_kexec_prepare(struct kimage *image)
 
 	/* Setup the identity mapped 64bit page table */
 	result = init_pgtable(image, start_pgtable);
+	if (result)
+		return result;
+
+	/* update purgatory as needed */
+	result = arch_update_purgatory(image);
 	if (result)
 		return result;
 

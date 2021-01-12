@@ -50,7 +50,6 @@ struct ring_buffer {
 	unsigned long			aux_mmap_locked;
 	void				(*free_aux)(void *);
 	refcount_t			aux_refcount;
-	int				aux_in_sampling;
 	void				**aux_pages;
 	void				*aux_priv;
 
@@ -211,7 +210,7 @@ static inline int get_recursion_context(int *recursion)
 		rctx = 3;
 	else if (in_irq())
 		rctx = 2;
-	else if (in_softirq())
+	else if (in_serving_softirq())
 		rctx = 1;
 	else
 		rctx = 0;

@@ -428,24 +428,24 @@ static PyObject *python_process_callchain(struct perf_sample *sample,
 		pydict_set_item_string_decref(pyelem, "ip",
 				PyLong_FromUnsignedLongLong(node->ip));
 
-		if (node->ms.sym) {
+		if (node->sym) {
 			PyObject *pysym  = PyDict_New();
 			if (!pysym)
 				Py_FatalError("couldn't create Python dictionary");
 			pydict_set_item_string_decref(pysym, "start",
-					PyLong_FromUnsignedLongLong(node->ms.sym->start));
+					PyLong_FromUnsignedLongLong(node->sym->start));
 			pydict_set_item_string_decref(pysym, "end",
-					PyLong_FromUnsignedLongLong(node->ms.sym->end));
+					PyLong_FromUnsignedLongLong(node->sym->end));
 			pydict_set_item_string_decref(pysym, "binding",
-					_PyLong_FromLong(node->ms.sym->binding));
+					_PyLong_FromLong(node->sym->binding));
 			pydict_set_item_string_decref(pysym, "name",
-					_PyUnicode_FromStringAndSize(node->ms.sym->name,
-							node->ms.sym->namelen));
+					_PyUnicode_FromStringAndSize(node->sym->name,
+							node->sym->namelen));
 			pydict_set_item_string_decref(pyelem, "sym", pysym);
 		}
 
-		if (node->ms.map) {
-			const char *dsoname = get_dsoname(node->ms.map);
+		if (node->map) {
+			const char *dsoname = get_dsoname(node->map);
 
 			pydict_set_item_string_decref(pyelem, "dso",
 					_PyUnicode_FromString(dsoname));
@@ -464,7 +464,6 @@ static PyObject *python_process_brstack(struct perf_sample *sample,
 					struct thread *thread)
 {
 	struct branch_stack *br = sample->branch_stack;
-	struct branch_entry *entries = perf_sample__branch_entries(sample);
 	PyObject *pylist;
 	u64 i;
 
@@ -485,28 +484,28 @@ static PyObject *python_process_brstack(struct perf_sample *sample,
 			Py_FatalError("couldn't create Python dictionary");
 
 		pydict_set_item_string_decref(pyelem, "from",
-		    PyLong_FromUnsignedLongLong(entries[i].from));
+		    PyLong_FromUnsignedLongLong(br->entries[i].from));
 		pydict_set_item_string_decref(pyelem, "to",
-		    PyLong_FromUnsignedLongLong(entries[i].to));
+		    PyLong_FromUnsignedLongLong(br->entries[i].to));
 		pydict_set_item_string_decref(pyelem, "mispred",
-		    PyBool_FromLong(entries[i].flags.mispred));
+		    PyBool_FromLong(br->entries[i].flags.mispred));
 		pydict_set_item_string_decref(pyelem, "predicted",
-		    PyBool_FromLong(entries[i].flags.predicted));
+		    PyBool_FromLong(br->entries[i].flags.predicted));
 		pydict_set_item_string_decref(pyelem, "in_tx",
-		    PyBool_FromLong(entries[i].flags.in_tx));
+		    PyBool_FromLong(br->entries[i].flags.in_tx));
 		pydict_set_item_string_decref(pyelem, "abort",
-		    PyBool_FromLong(entries[i].flags.abort));
+		    PyBool_FromLong(br->entries[i].flags.abort));
 		pydict_set_item_string_decref(pyelem, "cycles",
-		    PyLong_FromUnsignedLongLong(entries[i].flags.cycles));
+		    PyLong_FromUnsignedLongLong(br->entries[i].flags.cycles));
 
 		thread__find_map_fb(thread, sample->cpumode,
-				    entries[i].from, &al);
+				    br->entries[i].from, &al);
 		dsoname = get_dsoname(al.map);
 		pydict_set_item_string_decref(pyelem, "from_dsoname",
 					      _PyUnicode_FromString(dsoname));
 
 		thread__find_map_fb(thread, sample->cpumode,
-				    entries[i].to, &al);
+				    br->entries[i].to, &al);
 		dsoname = get_dsoname(al.map);
 		pydict_set_item_string_decref(pyelem, "to_dsoname",
 					      _PyUnicode_FromString(dsoname));
@@ -562,7 +561,6 @@ static PyObject *python_process_brstacksym(struct perf_sample *sample,
 					   struct thread *thread)
 {
 	struct branch_stack *br = sample->branch_stack;
-	struct branch_entry *entries = perf_sample__branch_entries(sample);
 	PyObject *pylist;
 	u64 i;
 	char bf[512];
@@ -583,22 +581,22 @@ static PyObject *python_process_brstacksym(struct perf_sample *sample,
 			Py_FatalError("couldn't create Python dictionary");
 
 		thread__find_symbol_fb(thread, sample->cpumode,
-				       entries[i].from, &al);
+				       br->entries[i].from, &al);
 		get_symoff(al.sym, &al, true, bf, sizeof(bf));
 		pydict_set_item_string_decref(pyelem, "from",
 					      _PyUnicode_FromString(bf));
 
 		thread__find_symbol_fb(thread, sample->cpumode,
-				       entries[i].to, &al);
+				       br->entries[i].to, &al);
 		get_symoff(al.sym, &al, true, bf, sizeof(bf));
 		pydict_set_item_string_decref(pyelem, "to",
 					      _PyUnicode_FromString(bf));
 
-		get_br_mspred(&entries[i].flags, bf, sizeof(bf));
+		get_br_mspred(&br->entries[i].flags, bf, sizeof(bf));
 		pydict_set_item_string_decref(pyelem, "pred",
 					      _PyUnicode_FromString(bf));
 
-		if (entries[i].flags.in_tx) {
+		if (br->entries[i].flags.in_tx) {
 			pydict_set_item_string_decref(pyelem, "in_tx",
 					      _PyUnicode_FromString("X"));
 		} else {
@@ -606,7 +604,7 @@ static PyObject *python_process_brstacksym(struct perf_sample *sample,
 					      _PyUnicode_FromString("-"));
 		}
 
-		if (entries[i].flags.abort) {
+		if (br->entries[i].flags.abort) {
 			pydict_set_item_string_decref(pyelem, "abort",
 					      _PyUnicode_FromString("A"));
 		} else {
@@ -693,9 +691,6 @@ static int regs_map(struct regs_dump *regs, uint64_t mask, char *bf, int size)
 	int printed = 0;
 
 	bf[0] = 0;
-
-	if (!regs || !regs->regs)
-		return 0;
 
 	for_each_set_bit(r, (unsigned long *) &mask, sizeof(mask) * 8) {
 		u64 val = regs->regs[i++];
@@ -1132,7 +1127,7 @@ static void python_export_sample_table(struct db_export *dbe,
 
 	tuple_set_u64(t, 0, es->db_id);
 	tuple_set_u64(t, 1, es->evsel->db_id);
-	tuple_set_u64(t, 2, es->al->maps->machine->db_id);
+	tuple_set_u64(t, 2, es->al->machine->db_id);
 	tuple_set_u64(t, 3, es->al->thread->db_id);
 	tuple_set_u64(t, 4, es->comm_db_id);
 	tuple_set_u64(t, 5, es->dso_db_id);
@@ -1592,7 +1587,6 @@ static void _free_command_line(wchar_t **command_line, int num)
 static int python_start_script(const char *script, int argc, const char **argv)
 {
 	struct tables *tables = &tables_global;
-	PyMODINIT_FUNC (*initfunc)(void);
 #if PY_MAJOR_VERSION < 3
 	const char **command_line;
 #else
@@ -1607,20 +1601,18 @@ static int python_start_script(const char *script, int argc, const char **argv)
 	FILE *fp;
 
 #if PY_MAJOR_VERSION < 3
-	initfunc = initperf_trace_context;
 	command_line = malloc((argc + 1) * sizeof(const char *));
 	command_line[0] = script;
 	for (i = 1; i < argc + 1; i++)
 		command_line[i] = argv[i - 1];
+	PyImport_AppendInittab(name, initperf_trace_context);
 #else
-	initfunc = PyInit_perf_trace_context;
 	command_line = malloc((argc + 1) * sizeof(wchar_t *));
 	command_line[0] = Py_DecodeLocale(script, NULL);
 	for (i = 1; i < argc + 1; i++)
 		command_line[i] = Py_DecodeLocale(argv[i - 1], NULL);
+	PyImport_AppendInittab(name, PyInit_perf_trace_context);
 #endif
-
-	PyImport_AppendInittab(name, initfunc);
 	Py_Initialize();
 
 #if PY_MAJOR_VERSION < 3

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-only
 include ../../scripts/Makefile.include
 include ../../scripts/utilities.mak
 
@@ -294,10 +295,7 @@ $(OUTPUT)%.1 $(OUTPUT)%.5 $(OUTPUT)%.7 : $(OUTPUT)%.xml
 $(OUTPUT)%.xml : %.txt
 	$(QUIET_ASCIIDOC)$(RM) $@+ $@ && \
 	$(ASCIIDOC) -b docbook -d manpage \
-		$(ASCIIDOC_EXTRA) -aperf_version=$(PERF_VERSION) \
-		-aperf_date=$(shell git log -1 --pretty="format:%cd" \
-				--date=short $<) \
-		-o $@+ $< && \
+		$(ASCIIDOC_EXTRA) -aperf_version=$(PERF_VERSION) -o $@+ $< && \
 	mv $@+ $@
 
 XSLT = docbook.xsl

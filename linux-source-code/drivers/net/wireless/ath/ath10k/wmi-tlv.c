@@ -841,7 +841,7 @@ static int ath10k_wmi_tlv_op_pull_mgmt_rx_ev(struct ath10k *ar,
 	const struct wmi_tlv_mgmt_rx_ev *ev;
 	const u8 *frame;
 	u32 msdu_len;
-	int ret, i;
+	int ret;
 
 	tb = ath10k_wmi_tlv_parse_alloc(ar, skb->data, skb->len, GFP_ATOMIC);
 	if (IS_ERR(tb)) {
@@ -864,9 +864,6 @@ static int ath10k_wmi_tlv_op_pull_mgmt_rx_ev(struct ath10k *ar,
 	arg->snr = ev->snr;
 	arg->phy_mode = ev->phy_mode;
 	arg->rate = ev->rate;
-
-	for (i = 0; i < ARRAY_SIZE(ev->rssi); i++)
-		arg->rssi[i] = ev->rssi[i];
 
 	msdu_len = __le32_to_cpu(arg->buf_len);
 
@@ -1250,15 +1247,12 @@ static int ath10k_wmi_tlv_op_pull_svc_rdy_ev(struct ath10k *ar,
 	arg->max_tx_power = ev->hw_max_tx_power;
 	arg->ht_cap = ev->ht_cap_info;
 	arg->vht_cap = ev->vht_cap_info;
-	arg->vht_supp_mcs = ev->vht_supp_mcs;
 	arg->sw_ver0 = ev->abi.abi_ver0;
 	arg->sw_ver1 = ev->abi.abi_ver1;
 	arg->fw_build = ev->fw_build_vers;
 	arg->phy_capab = ev->phy_capability;
 	arg->num_rf_chains = ev->num_rf_chains;
 	arg->eeprom_rd = reg->eeprom_rd;
-	arg->low_2ghz_chan = reg->low_2ghz_chan;
-	arg->high_2ghz_chan = reg->high_2ghz_chan;
 	arg->low_5ghz_chan = reg->low_5ghz_chan;
 	arg->high_5ghz_chan = reg->high_5ghz_chan;
 	arg->num_mem_reqs = ev->num_mem_reqs;
@@ -1702,9 +1696,8 @@ ath10k_wmi_tlv_op_gen_pdev_set_param(struct ath10k *ar, u32 param_id,
 static void
 ath10k_wmi_tlv_put_host_mem_chunks(struct ath10k *ar, void *host_mem_chunks)
 {
-	struct host_memory_chunk_tlv *chunk;
+	struct host_memory_chunk *chunk;
 	struct wmi_tlv *tlv;
-	dma_addr_t paddr;
 	int i;
 	__le16 tlv_len, tlv_tag;
 
@@ -1719,12 +1712,6 @@ ath10k_wmi_tlv_put_host_mem_chunks(struct ath10k *ar, void *host_mem_chunks)
 		chunk->ptr = __cpu_to_le32(ar->wmi.mem_chunks[i].paddr);
 		chunk->size = __cpu_to_le32(ar->wmi.mem_chunks[i].len);
 		chunk->req_id = __cpu_to_le32(ar->wmi.mem_chunks[i].req_id);
-
-		if (test_bit(WMI_SERVICE_SUPPORT_EXTEND_ADDRESS,
-			     ar->wmi.svc_map)) {
-			paddr = ar->wmi.mem_chunks[i].paddr;
-			chunk->ptr_high = __cpu_to_le32(upper_32_bits(paddr));
-		}
 
 		ath10k_dbg(ar, ATH10K_DBG_WMI,
 			   "wmi-tlv chunk %d len %d, addr 0x%llx, id 0x%x\n",
@@ -1749,7 +1736,7 @@ static struct sk_buff *ath10k_wmi_tlv_op_gen_init(struct ath10k *ar)
 	void *ptr;
 
 	chunks_len = ar->wmi.num_mem_chunks *
-		     (sizeof(struct host_memory_chunk_tlv) + sizeof(*tlv));
+		     (sizeof(struct host_memory_chunk) + sizeof(*tlv));
 	len = (sizeof(*tlv) + sizeof(*cmd)) +
 	      (sizeof(*tlv) + sizeof(*cfg)) +
 	      (sizeof(*tlv) + chunks_len);
@@ -2898,6 +2885,18 @@ ath10k_wmi_tlv_op_gen_request_stats(struct ath10k *ar, u32 stats_mask)
 }
 
 static int
+ath10k_wmi_tlv_op_cleanup_mgmt_tx_send(struct ath10k *ar,
+				       struct sk_buff *msdu)
+{
+	struct ath10k_skb_cb *cb = ATH10K_SKB_CB(msdu);
+	struct ath10k_wmi *wmi = &ar->wmi;
+
+	idr_remove(&wmi->mgmt_pending_tx, cb->msdu_id);
+
+	return 0;
+}
+
+static int
 ath10k_wmi_mgmt_tx_alloc_msdu_id(struct ath10k *ar, struct sk_buff *skb,
 				 dma_addr_t paddr)
 {
@@ -2970,6 +2969,8 @@ ath10k_wmi_tlv_op_gen_mgmt_tx_send(struct ath10k *ar, struct sk_buff *msdu,
 	desc_id = ath10k_wmi_mgmt_tx_alloc_msdu_id(ar, msdu, paddr);
 	if (desc_id < 0)
 		goto err_free_skb;
+
+	cb->msdu_id = desc_id;
 
 	ptr = (void *)skb->data;
 	tlv = ptr;
@@ -4271,24 +4272,6 @@ static struct wmi_pdev_param_map wmi_tlv_pdev_param_map = {
 	.rfkill_enable = WMI_TLV_PDEV_PARAM_RFKILL_ENABLE,
 };
 
-static struct wmi_peer_param_map wmi_tlv_peer_param_map = {
-	.smps_state = WMI_TLV_PEER_SMPS_STATE,
-	.ampdu = WMI_TLV_PEER_AMPDU,
-	.authorize = WMI_TLV_PEER_AUTHORIZE,
-	.chan_width = WMI_TLV_PEER_CHAN_WIDTH,
-	.nss = WMI_TLV_PEER_NSS,
-	.use_4addr = WMI_TLV_PEER_USE_4ADDR,
-	.membership = WMI_TLV_PEER_MEMBERSHIP,
-	.user_pos = WMI_TLV_PEER_USERPOS,
-	.crit_proto_hint_enabled = WMI_TLV_PEER_CRIT_PROTO_HINT_ENABLED,
-	.tx_fail_cnt_thr = WMI_TLV_PEER_TX_FAIL_CNT_THR,
-	.set_hw_retry_cts2s = WMI_TLV_PEER_SET_HW_RETRY_CTS2S,
-	.ibss_atim_win_len = WMI_TLV_PEER_IBSS_ATIM_WINDOW_LENGTH,
-	.phymode = WMI_TLV_PEER_PHYMODE,
-	.use_fixed_power = WMI_TLV_PEER_USE_FIXED_PWR,
-	.dummy_var = WMI_TLV_PEER_DUMMY_VAR,
-};
-
 static struct wmi_vdev_param_map wmi_tlv_vdev_param_map = {
 	.rts_threshold = WMI_TLV_VDEV_PARAM_RTS_THRESHOLD,
 	.fragmentation_threshold = WMI_TLV_VDEV_PARAM_FRAGMENTATION_THRESHOLD,
@@ -4419,6 +4402,7 @@ static const struct wmi_ops wmi_tlv_ops = {
 	.gen_force_fw_hang = ath10k_wmi_tlv_op_gen_force_fw_hang,
 	/* .gen_mgmt_tx = not implemented; HTT is used */
 	.gen_mgmt_tx_send = ath10k_wmi_tlv_op_gen_mgmt_tx_send,
+	.cleanup_mgmt_tx_send = ath10k_wmi_tlv_op_cleanup_mgmt_tx_send,
 	.gen_dbglog_cfg = ath10k_wmi_tlv_op_gen_dbglog_cfg,
 	.gen_pktlog_enable = ath10k_wmi_tlv_op_gen_pktlog_enable,
 	.gen_pktlog_disable = ath10k_wmi_tlv_op_gen_pktlog_disable,
@@ -4477,7 +4461,6 @@ void ath10k_wmi_tlv_attach(struct ath10k *ar)
 	ar->wmi.cmd = &wmi_tlv_cmd_map;
 	ar->wmi.vdev_param = &wmi_tlv_vdev_param_map;
 	ar->wmi.pdev_param = &wmi_tlv_pdev_param_map;
-	ar->wmi.peer_param = &wmi_tlv_peer_param_map;
 	ar->wmi.ops = &wmi_tlv_ops;
 	ar->wmi.peer_flags = &wmi_tlv_peer_flags_map;
 }

@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* sysctls for configuring RxRPC operating parameters
  *
  * Copyright (C) 2014 Red Hat, Inc. All Rights Reserved.
  * Written by David Howells (dhowells@redhat.com)
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public Licence
- * as published by the Free Software Foundation; either version
- * 2 of the Licence, or (at your option) any later version.
  */
 
 #include <linux/sysctl.h>
@@ -69,15 +65,6 @@ static struct ctl_table rxrpc_sysctl_table[] = {
 	{
 		.procname	= "idle_conn_fast_expiry",
 		.data		= &rxrpc_conn_idle_client_fast_expiry,
-		.maxlen		= sizeof(unsigned long),
-		.mode		= 0644,
-		.proc_handler	= proc_doulongvec_ms_jiffies_minmax,
-		.extra1		= (void *)&one_jiffy,
-		.extra2		= (void *)&max_jiffies,
-	},
-	{
-		.procname	= "resend_timeout",
-		.data		= &rxrpc_resend_timeout,
 		.maxlen		= sizeof(unsigned long),
 		.mode		= 0644,
 		.proc_handler	= proc_doulongvec_ms_jiffies_minmax,

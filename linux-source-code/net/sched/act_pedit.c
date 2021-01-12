@@ -1,10 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * net/sched/act_pedit.c	Generic packet editor
- *
- *		This program is free software; you can redistribute it and/or
- *		modify it under the terms of the GNU General Public License
- *		as published by the Free Software Foundation; either version
- *		2 of the License, or (at your option) any later version.
  *
  * Authors:	Jamal Hadi Salim (2002-4)
  */
@@ -141,8 +137,7 @@ nla_failure:
 static int tcf_pedit_init(struct net *net, struct nlattr *nla,
 			  struct nlattr *est, struct tc_action **a,
 			  int ovr, int bind, bool rtnl_held,
-			  struct tcf_proto *tp, u32 flags,
-			  struct netlink_ext_ack *extack)
+			  struct tcf_proto *tp, struct netlink_ext_ack *extack)
 {
 	struct tc_action_net *tn = net_generic(net, pedit_net_id);
 	struct nlattr *tb[TCA_PEDIT_MAX + 1];
@@ -193,7 +188,7 @@ static int tcf_pedit_init(struct net *net, struct nlattr *nla,
 	err = tcf_idr_check_alloc(tn, &index, a, bind);
 	if (!err) {
 		ret = tcf_idr_create(tn, index, est, a,
-				     &act_pedit_ops, bind, false, 0);
+				     &act_pedit_ops, bind, false);
 		if (ret) {
 			tcf_idr_cleanup(tn, index);
 			goto out_free;
@@ -242,8 +237,6 @@ static int tcf_pedit_init(struct net *net, struct nlattr *nla,
 	spin_unlock_bh(&p->tcf_lock);
 	if (goto_ch)
 		tcf_chain_put_by_act(goto_ch);
-	if (ret == ACT_P_CREATED)
-		tcf_idr_insert(tn, *a);
 	return ret;
 
 put_chain:
@@ -413,16 +406,6 @@ done:
 	return p->tcf_action;
 }
 
-static void tcf_pedit_stats_update(struct tc_action *a, u64 bytes, u32 packets,
-				   u64 lastuse, bool hw)
-{
-	struct tcf_pedit *d = to_pedit(a);
-	struct tcf_t *tm = &d->tcf_tm;
-
-	tcf_action_update_stats(a, bytes, packets, false, hw);
-	tm->lastuse = max_t(u64, tm->lastuse, lastuse);
-}
-
 static int tcf_pedit_dump(struct sk_buff *skb, struct tc_action *a,
 			  int bind, int ref)
 {
@@ -499,7 +482,6 @@ static struct tc_action_ops act_pedit_ops = {
 	.id		=	TCA_ID_PEDIT,
 	.owner		=	THIS_MODULE,
 	.act		=	tcf_pedit_act,
-	.stats_update	=	tcf_pedit_stats_update,
 	.dump		=	tcf_pedit_dump,
 	.cleanup	=	tcf_pedit_cleanup,
 	.init		=	tcf_pedit_init,

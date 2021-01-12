@@ -19,6 +19,7 @@
 #include <drm/drm_fb_helper.h>
 #include <drm/drm_gem.h>
 #include <drm/drm_gem_vram_helper.h>
+#include <drm/drm_vram_mm_helper.h>
 
 #include "mgag200_reg.h"
 
@@ -129,8 +130,16 @@ struct mga_connector {
 };
 
 struct mga_cursor {
-	struct drm_gem_vram_object *gbo[2];
-	unsigned int next_index;
+	/*
+	   We have to have 2 buffers for the cursor to avoid occasional
+	   corruption while switching cursor icons.
+	   If either of these is NULL, then don't do hardware cursors, and
+	   fall back to software.
+	*/
+	struct drm_gem_vram_object *pixels_1;
+	struct drm_gem_vram_object *pixels_2;
+	/* The currently displayed icon, this points to one of pixels_1, or pixels_2 */
+	struct drm_gem_vram_object *pixels_current;
 };
 
 struct mga_mc {
@@ -170,8 +179,6 @@ struct mga_device {
 	struct mga_mode_info		mode_info;
 
 	struct mga_cursor cursor;
-
-	size_t vram_fb_available;
 
 	bool				suspended;
 	int				num_crtc;
@@ -215,10 +222,8 @@ int mgag200_mm_init(struct mga_device *mdev);
 void mgag200_mm_fini(struct mga_device *mdev);
 int mgag200_mmap(struct file *filp, struct vm_area_struct *vma);
 
-int mgag200_cursor_init(struct mga_device *mdev);
-void mgag200_cursor_fini(struct mga_device *mdev);
-int mgag200_crtc_cursor_set(struct drm_crtc *crtc, struct drm_file *file_priv,
-			    uint32_t handle, uint32_t width, uint32_t height);
-int mgag200_crtc_cursor_move(struct drm_crtc *crtc, int x, int y);
+int mga_crtc_cursor_set(struct drm_crtc *crtc, struct drm_file *file_priv,
+						uint32_t handle, uint32_t width, uint32_t height);
+int mga_crtc_cursor_move(struct drm_crtc *crtc, int x, int y);
 
 #endif				/* __MGAG200_DRV_H__ */

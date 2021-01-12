@@ -1,7 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* net/core/xdp.c
  *
  * Copyright (c) 2017 Jesper Dangaard Brouer, Red Hat Inc.
- * Released under terms in GPL version 2.  See COPYING.
  */
 #include <linux/bpf.h>
 #include <linux/filter.h>
@@ -72,6 +72,11 @@ static void __xdp_mem_allocator_rcu_free(struct rcu_head *rcu)
 
 	/* Allow this ID to be reused */
 	ida_simple_remove(&mem_id_pool, xa->mem.id);
+
+	/* Poison memory */
+	xa->mem.id = 0xFFFF;
+	xa->mem.type = 0xF0F0;
+	xa->allocator = (void *)0xDEAD9001;
 
 	kfree(xa);
 }
@@ -355,7 +360,7 @@ EXPORT_SYMBOL_GPL(xdp_rxq_info_reg_mem_model);
 
 /* XDP RX runs under NAPI protection, and in different delivery error
  * scenarios (e.g. queue full), it is possible to return the xdp_frame
- * while still leveraging this protection.  The @napi_direct boolean
+ * while still leveraging this protection.  The @napi_direct boolian
  * is used for those calls sites.  Thus, allowing for faster recycling
  * of xdp_frames/pages in those cases.
  */
@@ -372,7 +377,7 @@ static void __xdp_return(void *data, struct xdp_mem_info *mem, bool napi_direct,
 		xa = rhashtable_lookup(mem_id_ht, &mem->id, mem_id_rht_params);
 		page = virt_to_head_page(data);
 		napi_direct &= !xdp_return_frame_no_direct();
-		page_pool_put_full_page(xa->page_pool, page, napi_direct);
+		page_pool_put_page(xa->page_pool, page, napi_direct);
 		rcu_read_unlock();
 		break;
 	case MEM_TYPE_PAGE_SHARED:

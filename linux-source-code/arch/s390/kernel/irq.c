@@ -26,6 +26,7 @@
 #include <asm/lowcore.h>
 #include <asm/irq.h>
 #include <asm/hw_irq.h>
+#include <asm/stacktrace.h>
 #include "entry.h"
 
 DEFINE_PER_CPU_SHARED_ALIGNED(struct irq_stat, irq_stat);
@@ -203,15 +204,7 @@ void do_softirq_own_stack(void)
 	/* Check against async. stack address range. */
 	new = S390_lowcore.async_stack;
 	if (((new - old) >> (PAGE_SHIFT + THREAD_SIZE_ORDER)) != 0) {
-		/* Need to switch to the async. stack. */
-		new -= STACK_FRAME_OVERHEAD;
-		((struct stack_frame *) new)->back_chain = old;
-		asm volatile("   la    15,0(%0)\n"
-			     "   brasl 14,__do_softirq\n"
-			     "   la    15,0(%1)\n"
-			     : : "a" (new), "a" (old)
-			     : "0", "1", "2", "3", "4", "5", "14",
-			       "cc", "memory" );
+		CALL_ON_STACK(__do_softirq, new, 0);
 	} else {
 		/* We are already on the async stack. */
 		__do_softirq();
@@ -301,11 +294,6 @@ static irqreturn_t do_ext_interrupt(int irq, void *dummy)
 	return IRQ_HANDLED;
 }
 
-static struct irqaction external_interrupt = {
-	.name	 = "EXT",
-	.handler = do_ext_interrupt,
-};
-
 void __init init_ext_interrupts(void)
 {
 	int idx;
@@ -315,7 +303,8 @@ void __init init_ext_interrupts(void)
 
 	irq_set_chip_and_handler(EXT_INTERRUPT,
 				 &dummy_irq_chip, handle_percpu_irq);
-	setup_irq(EXT_INTERRUPT, &external_interrupt);
+	if (request_irq(EXT_INTERRUPT, do_ext_interrupt, 0, "EXT", NULL))
+		panic("Failed to register EXT interrupt\n");
 }
 
 static DEFINE_SPINLOCK(irq_subclass_lock);

@@ -70,8 +70,8 @@ Optional features:
    feature being enabled.
 
 
-* snapshot-merge <origin> <COW device> <persistent> <chunksize>
-  [<# feature args> [<arg>]*]
+-  snapshot-merge <origin> <COW device> <persistent> <chunksize>
+   [<# feature args> [<arg>]*]
 
 takes the same table arguments as the snapshot target except it only
 works with persistent snapshots.  This target assumes the role of the

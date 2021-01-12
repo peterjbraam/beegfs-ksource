@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Cryptographic API.
  *
@@ -5,28 +6,19 @@
  *
  * Copyright (c) 2008 Neil Horman <nhorman@tuxdriver.com>
  * Copyright (c) 2015 Herbert Xu <herbert@gondor.apana.org.au>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option)
- * any later version.
- *
  */
 
 #include <linux/atomic.h>
 #include <crypto/internal/rng.h>
 #include <linux/err.h>
-#include <linux/fips.h>
-#include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/random.h>
 #include <linux/seq_file.h>
-#include <linux/sched.h>
-#include <linux/sched/signal.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/cryptouser.h>
+#include <linux/compiler.h>
 #include <net/netlink.h>
 
 #include "internal.h"
@@ -38,21 +30,28 @@ static int crypto_default_rng_refcnt;
 
 int crypto_rng_reset(struct crypto_rng *tfm, const u8 *seed, unsigned int slen)
 {
+	struct crypto_alg *alg = tfm->base.__crt_alg;
 	u8 *buf = NULL;
 	int err;
 
+	crypto_stats_get(alg);
 	if (!seed && slen) {
 		buf = kmalloc(slen, GFP_KERNEL);
-		if (!buf)
+		if (!buf) {
+			crypto_alg_put(alg);
 			return -ENOMEM;
+		}
 
 		err = get_random_bytes_wait(buf, slen);
-		if (err)
+		if (err) {
+			crypto_alg_put(alg);
 			goto out;
+		}
 		seed = buf;
 	}
 
 	err = crypto_rng_alg(tfm)->seed(tfm, seed, slen);
+	crypto_stats_rng_seed(alg, err);
 out:
 	kzfree(buf);
 	return err;
@@ -76,17 +75,13 @@ static int crypto_rng_report(struct sk_buff *skb, struct crypto_alg *alg)
 {
 	struct crypto_report_rng rrng;
 
-	strncpy(rrng.type, "rng", sizeof(rrng.type));
+	memset(&rrng, 0, sizeof(rrng));
+
+	strscpy(rrng.type, "rng", sizeof(rrng.type));
 
 	rrng.seedsize = seedsize(alg);
 
-	if (nla_put(skb, CRYPTOCFGA_REPORT_RNG,
-		    sizeof(struct crypto_report_rng), &rrng))
-		goto nla_put_failure;
-	return 0;
-
-nla_put_failure:
-	return -EMSGSIZE;
+	return nla_put(skb, CRYPTOCFGA_REPORT_RNG, sizeof(rrng), &rrng);
 }
 #else
 static int crypto_rng_report(struct sk_buff *skb, struct crypto_alg *alg)
@@ -232,74 +227,6 @@ void crypto_unregister_rngs(struct rng_alg *algs, int count)
 		crypto_unregister_rng(algs + i);
 }
 EXPORT_SYMBOL_GPL(crypto_unregister_rngs);
-
-ssize_t crypto_devrandom_read(void *buf, size_t buflen)
-{
-	u8 tmp[256];
-	ssize_t ret;
-
-	if (!buflen)
-		return 0;
-
-	ret = crypto_get_default_rng();
-	if (ret)
-		return ret;
-
-	for (;;) {
-		int err;
-		int i;
-
-		i = min_t(int, buflen, 256);
-		err = crypto_rng_get_bytes(crypto_default_rng, tmp, i);
-		if (err) {
-			ret = err;
-			break;
-		}
-
-		if (copy_to_user(buf, tmp, i)) {
-			ret = -EFAULT;
-			break;
-		}
-
-		buflen -= i;
-		buf += i;
-		ret += i;
-
-		if (!buflen)
-			break;
-
-		if (need_resched()) {
-			if (signal_pending(current))
-				break;
-			schedule();
-		}
-	}
-
-	crypto_put_default_rng();
-	memzero_explicit(tmp, sizeof(tmp));
-
-	return ret;
-}
-
-static const struct random_extrng crypto_devrandom_rng = {
-	.extrng_read = crypto_devrandom_read,
-	.owner = THIS_MODULE,
-};
-
-static int __init crypto_rng_init(void)
-{
-	if (fips_enabled)
-		random_register_extrng(&crypto_devrandom_rng);
-	return 0;
-}
-
-static void __exit crypto_rng_exit(void)
-{
-	random_unregister_extrng();
-}
-
-late_initcall(crypto_rng_init);
-module_exit(crypto_rng_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Random Number Generator");

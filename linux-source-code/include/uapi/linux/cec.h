@@ -317,8 +317,6 @@ static inline int cec_is_unconfigured(__u16 log_addr_mask)
 #define CEC_CAP_NEEDS_HPD	(1 << 6)
 /* Hardware can monitor CEC pin transitions */
 #define CEC_CAP_MONITOR_PIN	(1 << 7)
-/* CEC_ADAP_G_CONNECTOR_INFO is available */
-#define CEC_CAP_CONNECTOR_INFO	(1 << 8)
 
 /**
  * struct cec_caps - CEC capabilities structure.
@@ -377,34 +375,6 @@ struct cec_log_addrs {
 /* CDC-Only device: supports only CDC messages */
 #define CEC_LOG_ADDRS_FL_CDC_ONLY		(1 << 2)
 
-/**
- * struct cec_drm_connector_info - tells which drm connector is
- * associated with the CEC adapter.
- * @card_no: drm card number
- * @connector_id: drm connector ID
- */
-struct cec_drm_connector_info {
-	__u32 card_no;
-	__u32 connector_id;
-};
-
-#define CEC_CONNECTOR_TYPE_NO_CONNECTOR	0
-#define CEC_CONNECTOR_TYPE_DRM		1
-
-/**
- * struct cec_connector_info - tells if and which connector is
- * associated with the CEC adapter.
- * @type: connector type (if any)
- * @drm: drm connector info
- */
-struct cec_connector_info {
-	__u32 type;
-	union {
-		struct cec_drm_connector_info drm;
-		__u32 raw[16];
-	};
-};
-
 /* Events */
 
 /* Event that occurs when the adapter state changes */
@@ -428,17 +398,10 @@ struct cec_connector_info {
  * struct cec_event_state_change - used when the CEC adapter changes state.
  * @phys_addr: the current physical address
  * @log_addr_mask: the current logical address mask
- * @have_conn_info: if non-zero, then HDMI connector information is available.
- *	This field is only valid if CEC_CAP_CONNECTOR_INFO is set. If that
- *	capability is set and @have_conn_info is zero, then that indicates
- *	that the HDMI connector device is not instantiated, either because
- *	the HDMI driver is still configuring the device or because the HDMI
- *	device was unbound.
  */
 struct cec_event_state_change {
 	__u16 phys_addr;
 	__u16 log_addr_mask;
-	__u16 have_conn_info;
 };
 
 /**
@@ -512,9 +475,6 @@ struct cec_event {
  */
 #define CEC_G_MODE		_IOR('a',  8, __u32)
 #define CEC_S_MODE		_IOW('a',  9, __u32)
-
-/* Get the connector info */
-#define CEC_ADAP_G_CONNECTOR_INFO _IOR('a',  10, struct cec_connector_info)
 
 /*
  * The remainder of this header defines all CEC messages and operands.
@@ -808,8 +768,8 @@ struct cec_event {
 #define CEC_MSG_SELECT_DIGITAL_SERVICE			0x93
 #define CEC_MSG_TUNER_DEVICE_STATUS			0x07
 /* Recording Flag Operand (rec_flag) */
-#define CEC_OP_REC_FLAG_USED				0
-#define CEC_OP_REC_FLAG_NOT_USED			1
+#define CEC_OP_REC_FLAG_NOT_USED			0
+#define CEC_OP_REC_FLAG_USED				1
 /* Tuner Display Info Operand (tuner_display_info) */
 #define CEC_OP_TUNER_DISPLAY_INFO_DIGITAL		0
 #define CEC_OP_TUNER_DISPLAY_INFO_NONE			1

@@ -101,6 +101,7 @@ config R8169
 	select FW_LOADER
 	select CRC32
 	select PHYLIB
+	select REALTEK_PHY
 	---help---
 	  Say Y here if you have a Realtek Ethernet adapter belonging to
 	  the following families:

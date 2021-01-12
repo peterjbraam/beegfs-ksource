@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Basic general purpose allocator for managing special purpose
  * memory, for example, memory that is not managed by the regular
@@ -21,9 +22,6 @@
  * the allocator can NOT be used in NMI handler.  So code uses the
  * allocator in NMI handler should depend on
  * CONFIG_ARCH_HAVE_NMI_SAFE_CMPXCHG.
- *
- * This source code is licensed under the GNU General Public License,
- * Version 2.  See the file COPYING for more details.
  */
 
 
@@ -208,7 +206,7 @@ extern struct gen_pool *devm_gen_pool_create(struct device *dev,
 		int min_alloc_order, int nid, const char *name);
 extern struct gen_pool *gen_pool_get(struct device *dev, const char *name);
 
-extern bool gen_pool_has_addr(struct gen_pool *pool, unsigned long start,
+bool addr_in_gen_pool(struct gen_pool *pool, unsigned long start,
 			size_t size);
 
 #ifdef CONFIG_OF

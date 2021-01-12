@@ -1,9 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2014 Arturo Borrero Gonzalez <arturo@debian.org>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/kernel.h>
@@ -14,8 +11,7 @@
 #include <linux/netfilter/nf_tables.h>
 #include <net/netfilter/nf_tables.h>
 #include <net/netfilter/nf_nat.h>
-#include <net/netfilter/ipv4/nf_nat_masquerade.h>
-#include <net/netfilter/ipv6/nf_nat_masquerade.h>
+#include <net/netfilter/nf_nat_masquerade.h>
 
 struct nft_masq {
 	u32			flags;
@@ -196,22 +192,12 @@ static struct nft_expr_type nft_masq_ipv6_type __read_mostly = {
 
 static int __init nft_masq_module_init_ipv6(void)
 {
-	int ret = nft_register_expr(&nft_masq_ipv6_type);
-
-	if (ret)
-		return ret;
-
-	ret = nf_nat_masquerade_ipv6_register_notifier();
-	if (ret < 0)
-		nft_unregister_expr(&nft_masq_ipv6_type);
-
-	return ret;
+	return nft_register_expr(&nft_masq_ipv6_type);
 }
 
 static void nft_masq_module_exit_ipv6(void)
 {
 	nft_unregister_expr(&nft_masq_ipv6_type);
-	nf_nat_masquerade_ipv6_unregister_notifier();
 }
 #else
 static inline int nft_masq_module_init_ipv6(void) { return 0; }
@@ -294,7 +280,7 @@ static int __init nft_masq_module_init(void)
 		return ret;
 	}
 
-	ret = nf_nat_masquerade_ipv4_register_notifier();
+	ret = nf_nat_masquerade_inet_register_notifiers();
 	if (ret < 0) {
 		nft_masq_module_exit_ipv6();
 		nft_masq_module_exit_inet();
@@ -310,7 +296,7 @@ static void __exit nft_masq_module_exit(void)
 	nft_masq_module_exit_ipv6();
 	nft_masq_module_exit_inet();
 	nft_unregister_expr(&nft_masq_ipv4_type);
-	nf_nat_masquerade_ipv4_unregister_notifier();
+	nf_nat_masquerade_inet_unregister_notifiers();
 }
 
 module_init(nft_masq_module_init);

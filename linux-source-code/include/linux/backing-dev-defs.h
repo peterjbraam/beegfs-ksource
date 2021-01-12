@@ -13,7 +13,6 @@
 #include <linux/workqueue.h>
 #include <linux/kref.h>
 #include <linux/refcount.h>
-#include <linux/rh_kabi.h>
 
 struct page;
 struct device;
@@ -64,6 +63,7 @@ enum wb_reason {
 	 * so it has a mismatch name.
 	 */
 	WB_REASON_FORKER_THREAD,
+	WB_REASON_FOREIGN_FLUSH,
 
 	WB_REASON_MAX,
 };
@@ -97,8 +97,7 @@ struct wb_completion {
  */
 struct bdi_writeback_congested {
 	unsigned long state;		/* WB_[a]sync_congested flags */
-	/* nr of attached wb's and blkg */
-	RH_KABI_REPLACE(atomic_t refcnt, refcount_t refcnt)
+	refcount_t refcnt;		/* nr of attached wb's and blkg */
 
 #ifdef CONFIG_CGROUP_WRITEBACK
 	struct backing_dev_info *__bdi;	/* the associated bdi, set to NULL
@@ -184,14 +183,11 @@ struct bdi_writeback {
 		struct rcu_head rcu;
 	};
 #endif
-
-	RH_KABI_RESERVE(1)
-	RH_KABI_RESERVE(2)
-	RH_KABI_RESERVE(3)
-	RH_KABI_RESERVE(4)
 };
 
 struct backing_dev_info {
+	u64 id;
+	struct rb_node rb_node; /* keyed by ->id */
 	struct list_head bdi_list;
 	unsigned long ra_pages;	/* max readahead in PAGE_SIZE units */
 	unsigned long io_pages;	/* max allowed IO size */
@@ -217,29 +213,22 @@ struct backing_dev_info {
 	struct radix_tree_root cgwb_tree; /* radix tree of active cgroup wbs */
 	struct rb_root cgwb_congested_tree; /* their congested states */
 	struct mutex cgwb_release_mutex;  /* protect shutdown of wb structs */
+	struct rw_semaphore wb_switch_rwsem; /* no cgwb switch while syncing */
 #else
 	struct bdi_writeback_congested *wb_congested;
 #endif
 	wait_queue_head_t wb_waitq;
 
 	struct device *dev;
+	char dev_name[64];
 	struct device *owner;
 
 	struct timer_list laptop_mode_wb_timer;
 
 #ifdef CONFIG_DEBUG_FS
 	struct dentry *debug_dir;
-	struct dentry *debug_stats;
 #endif
-
-	/* no cgwb switch while syncing */
-	RH_KABI_USE(1, struct rw_semaphore *wb_switch_rwsem)
-	RH_KABI_USE(2, char *dev_name)
-	RH_KABI_RESERVE(3)
-	RH_KABI_RESERVE(4)
 };
-
-#define BDI_DEV_NAME_LEN 64
 
 enum {
 	BLK_RW_ASYNC	= 0,

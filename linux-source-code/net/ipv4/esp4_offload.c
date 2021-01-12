@@ -1,13 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * IPV4 GSO/GRO offload support
  * Linux INET implementation
  *
  * Copyright (C) 2016 secunet Security Networks AG
  * Author: Steffen Klassert <steffen.klassert@secunet.com>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
  *
  * ESP GRO support
  */
@@ -46,11 +43,12 @@ static struct sk_buff *esp4_gro_receive(struct list_head *head,
 
 	xo = xfrm_offload(skb);
 	if (!xo || !(xo->flags & CRYPTO_DONE)) {
-		err = secpath_set(skb);
-		if (err)
+		struct sec_path *sp = secpath_set(skb);
+
+		if (!sp)
 			goto out;
 
-		if (skb->sp->len == XFRM_MAX_DEPTH)
+		if (sp->len == XFRM_MAX_DEPTH)
 			goto out_reset;
 
 		x = xfrm_state_lookup(dev_net(skb->dev), skb->mark,
@@ -61,8 +59,8 @@ static struct sk_buff *esp4_gro_receive(struct list_head *head,
 
 		skb->mark = xfrm_smark_get(skb->mark, x);
 
-		skb->sp->xvec[skb->sp->len++] = x;
-		skb->sp->olen++;
+		sp->xvec[sp->len++] = x;
+		sp->olen++;
 
 		xo = xfrm_offload(skb);
 		if (!xo)
@@ -132,55 +130,15 @@ static struct sk_buff *xfrm4_transport_gso_segment(struct xfrm_state *x,
 	return segs;
 }
 
-static struct sk_buff *xfrm4_beet_gso_segment(struct xfrm_state *x,
-					      struct sk_buff *skb,
-					      netdev_features_t features)
-{
-	struct xfrm_offload *xo = xfrm_offload(skb);
-	struct sk_buff *segs = ERR_PTR(-EINVAL);
-	const struct net_offload *ops;
-	u8 proto = xo->proto;
-
-	skb->transport_header += x->props.header_len;
-
-	if (x->sel.family != AF_INET6) {
-		if (proto == IPPROTO_BEETPH) {
-			struct ip_beet_phdr *ph =
-				(struct ip_beet_phdr *)skb->data;
-
-			skb->transport_header += ph->hdrlen * 8;
-			proto = ph->nexthdr;
-		} else {
-			skb->transport_header -= IPV4_BEET_PHMAXLEN;
-		}
-	} else {
-		__be16 frag;
-
-		skb->transport_header +=
-			ipv6_skip_exthdr(skb, 0, &proto, &frag);
-		if (proto == IPPROTO_TCP)
-			skb_shinfo(skb)->gso_type |= SKB_GSO_TCPV4;
-	}
-
-	__skb_pull(skb, skb_transport_offset(skb));
-	ops = rcu_dereference(inet_offloads[proto]);
-	if (likely(ops && ops->callbacks.gso_segment))
-		segs = ops->callbacks.gso_segment(skb, features);
-
-	return segs;
-}
-
 static struct sk_buff *xfrm4_outer_mode_gso_segment(struct xfrm_state *x,
 						    struct sk_buff *skb,
 						    netdev_features_t features)
 {
-	switch (x->outer_mode->encap) {
+	switch (x->outer_mode.encap) {
 	case XFRM_MODE_TUNNEL:
 		return xfrm4_tunnel_gso_segment(x, skb, features);
 	case XFRM_MODE_TRANSPORT:
 		return xfrm4_transport_gso_segment(x, skb, features);
-	case XFRM_MODE_BEET:
-		return xfrm4_beet_gso_segment(x, skb, features);
 	}
 
 	return ERR_PTR(-EOPNOTSUPP);
@@ -194,6 +152,7 @@ static struct sk_buff *esp4_gso_segment(struct sk_buff *skb,
 	struct crypto_aead *aead;
 	netdev_features_t esp_features = features;
 	struct xfrm_offload *xo = xfrm_offload(skb);
+	struct sec_path *sp;
 
 	if (!xo)
 		return ERR_PTR(-EINVAL);
@@ -201,7 +160,8 @@ static struct sk_buff *esp4_gso_segment(struct sk_buff *skb,
 	if (!(skb_shinfo(skb)->gso_type & SKB_GSO_ESP))
 		return ERR_PTR(-EINVAL);
 
-	x = skb->sp->xvec[skb->sp->len - 1];
+	sp = skb_sec_path(skb);
+	x = sp->xvec[sp->len - 1];
 	aead = x->data;
 	esph = ip_esp_hdr(skb);
 
@@ -352,9 +312,7 @@ static int __init esp4_offload_init(void)
 
 static void __exit esp4_offload_exit(void)
 {
-	if (xfrm_unregister_type_offload(&esp_type_offload, AF_INET) < 0)
-		pr_info("%s: can't remove xfrm type offload\n", __func__);
-
+	xfrm_unregister_type_offload(&esp_type_offload, AF_INET);
 	inet_del_offload(&esp4_offload, IPPROTO_ESP);
 }
 

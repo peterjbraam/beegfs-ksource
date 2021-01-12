@@ -1,15 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2016, Semihalf
  *	Author: Tomasz Nowicki <tn@semihalf.com>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
  *
  * This file implements early detection/parsing of I/O mapping
  * reported to OS through firmware via I/O Remapping Table (IORT)
@@ -19,7 +11,6 @@
 #define pr_fmt(fmt)	"ACPI: IORT: " fmt
 
 #include <linux/acpi_iort.h>
-#include <linux/bitfield.h>
 #include <linux/iommu.h>
 #include <linux/kernel.h>
 #include <linux/list.h>
@@ -307,59 +298,6 @@ out:
 	return status;
 }
 
-struct iort_workaround_oem_info {
-	char oem_id[ACPI_OEM_ID_SIZE + 1];
-	char oem_table_id[ACPI_OEM_TABLE_ID_SIZE + 1];
-	u32 oem_revision;
-};
-
-static bool apply_id_count_workaround;
-
-static struct iort_workaround_oem_info wa_info[] __initdata = {
-	{
-		.oem_id		= "HISI  ",
-		.oem_table_id	= "HIP07   ",
-		.oem_revision	= 0,
-	}, {
-		.oem_id		= "HISI  ",
-		.oem_table_id	= "HIP08   ",
-		.oem_revision	= 0,
-	}
-};
-
-static void __init
-iort_check_id_count_workaround(struct acpi_table_header *tbl)
-{
-	int i;
-
-	for (i = 0; i < ARRAY_SIZE(wa_info); i++) {
-		if (!memcmp(wa_info[i].oem_id, tbl->oem_id, ACPI_OEM_ID_SIZE) &&
-		    !memcmp(wa_info[i].oem_table_id, tbl->oem_table_id, ACPI_OEM_TABLE_ID_SIZE) &&
-		    wa_info[i].oem_revision == tbl->oem_revision) {
-			apply_id_count_workaround = true;
-			pr_warn(FW_BUG "ID count for ID mapping entry is wrong, applying workaround\n");
-			break;
-		}
-	}
-}
-
-static inline u32 iort_get_map_max(struct acpi_iort_id_mapping *map)
-{
-	u32 map_max = map->input_base + map->id_count;
-
-	/*
-	 * The IORT specification revision D (Section 3, table 4, page 9) says
-	 * Number of IDs = The number of IDs in the range minus one, but the
-	 * IORT code ignored the "minus one", and some firmware did that too,
-	 * so apply a workaround here to keep compatible with both the spec
-	 * compliant and non-spec compliant firmwares.
-	 */
-	if (apply_id_count_workaround)
-		map_max--;
-
-	return map_max;
-}
-
 static int iort_id_map(struct acpi_iort_id_mapping *map, u8 type, u32 rid_in,
 		       u32 *rid_out)
 {
@@ -376,7 +314,8 @@ static int iort_id_map(struct acpi_iort_id_mapping *map, u8 type, u32 rid_in,
 		return -ENXIO;
 	}
 
-	if (rid_in < map->input_base || rid_in > iort_get_map_max(map))
+	if (rid_in < map->input_base ||
+	    (rid_in >= map->input_base + map->id_count))
 		return -ENXIO;
 
 	*rid_out = map->output_base + (rid_in - map->input_base);
@@ -422,6 +361,7 @@ static struct acpi_iort_node *iort_node_get_id(struct acpi_iort_node *node,
 static int iort_get_id_mapping_index(struct acpi_iort_node *node)
 {
 	struct acpi_iort_smmu_v3 *smmu;
+	struct acpi_iort_pmcg *pmcg;
 
 	switch (node->type) {
 	case ACPI_IORT_NODE_SMMU_V3:
@@ -449,6 +389,10 @@ static int iort_get_id_mapping_index(struct acpi_iort_node *node)
 
 		return smmu->id_mapping_index;
 	case ACPI_IORT_NODE_PMCG:
+		pmcg = (struct acpi_iort_pmcg *)node->node_data;
+		if (pmcg->overflow_gsiv || node->mapping_count == 0)
+			return -EINVAL;
+
 		return 0;
 	default:
 		return -EINVAL;
@@ -985,20 +929,6 @@ static int iort_pci_iommu_init(struct pci_dev *pdev, u16 alias, void *data)
 	return iort_iommu_xlate(info->dev, parent, streamid);
 }
 
-static void iort_named_component_init(struct device *dev,
-				      struct acpi_iort_node *node)
-{
-	struct acpi_iort_named_component *nc;
-	struct iommu_fwspec *fwspec = dev_iommu_fwspec_get(dev);
-
-	if (!fwspec)
-		return;
-
-	nc = (struct acpi_iort_named_component *)node->node_data;
-	fwspec->num_pasid_bits = FIELD_GET(ACPI_IORT_NC_PASID_BITS,
-					   nc->node_flags);
-}
-
 /**
  * iort_iommu_configure - Set-up IOMMU configuration for a device.
  *
@@ -1023,7 +953,6 @@ const struct iommu_ops *iort_iommu_configure(struct device *dev)
 		return ops;
 
 	if (dev_is_pci(dev)) {
-		struct iommu_fwspec *fwspec;
 		struct pci_bus *bus = to_pci_dev(dev)->bus;
 		struct iort_pci_alias_info info = { .dev = dev };
 
@@ -1036,9 +965,8 @@ const struct iommu_ops *iort_iommu_configure(struct device *dev)
 		err = pci_for_each_dma_alias(to_pci_dev(dev),
 					     iort_pci_iommu_init, &info);
 
-		fwspec = dev_iommu_fwspec_get(dev);
-		if (fwspec && iort_pci_rc_supports_ats(node))
-			fwspec->flags |= IOMMU_FWSPEC_PCI_RC_ATS;
+		if (!err && iort_pci_rc_supports_ats(node))
+			dev->iommu_fwspec->flags |= IOMMU_FWSPEC_PCI_RC_ATS;
 	} else {
 		int i = 0;
 
@@ -1055,9 +983,6 @@ const struct iommu_ops *iort_iommu_configure(struct device *dev)
 			if (parent)
 				err = iort_iommu_xlate(dev, parent, streamid);
 		} while (parent && !err);
-
-		if (!err)
-			iort_named_component_init(dev, node);
 	}
 
 	/*
@@ -1137,8 +1062,8 @@ static int rc_dma_get_range(struct device *dev, u64 *size)
  */
 void iort_dma_setup(struct device *dev, u64 *dma_addr, u64 *dma_size)
 {
-	u64 end, mask, dmaaddr = 0, size = 0, offset = 0;
-	int ret;
+	u64 mask, dmaaddr = 0, size = 0, offset = 0;
+	int ret, msb;
 
 	/*
 	 * If @dev is expected to be DMA-capable then the bus code that created
@@ -1165,13 +1090,19 @@ void iort_dma_setup(struct device *dev, u64 *dma_addr, u64 *dma_size)
 	}
 
 	if (!ret) {
+		msb = fls64(dmaaddr + size - 1);
 		/*
-		 * Limit coherent and dma mask based on size retrieved from
-		 * firmware.
+		 * Round-up to the power-of-two mask or set
+		 * the mask to the whole 64-bit address space
+		 * in case the DMA region covers the full
+		 * memory window.
 		 */
-		end = dmaaddr + size - 1;
-		mask = DMA_BIT_MASK(ilog2(end) + 1);
-		dev->bus_dma_limit = end;
+		mask = msb == 64 ? U64_MAX : (1ULL << msb) - 1;
+		/*
+		 * Limit coherent and dma mask based on size
+		 * retrieved from firmware.
+		 */
+		dev->bus_dma_mask = mask;
 		dev->coherent_dma_mask = mask;
 		*dev->dma_mask = mask;
 	}
@@ -1451,9 +1382,23 @@ static void __init arm_smmu_v3_pmcg_init_resources(struct resource *res,
 				       ACPI_EDGE_SENSITIVE, &res[2]);
 }
 
+static struct acpi_platform_list pmcg_plat_info[] __initdata = {
+	/* HiSilicon Hip08 Platform */
+	{"HISI  ", "HIP08   ", 0, ACPI_SIG_IORT, greater_than_or_equal,
+	 "Erratum #162001800", IORT_SMMU_V3_PMCG_HISI_HIP08},
+	{ }
+};
+
 static int __init arm_smmu_v3_pmcg_add_platdata(struct platform_device *pdev)
 {
-	u32 model = IORT_SMMU_V3_PMCG_GENERIC;
+	u32 model;
+	int idx;
+
+	idx = acpi_match_platform_list(pmcg_plat_info);
+	if (idx >= 0)
+		model = pmcg_plat_info[idx].data;
+	else
+		model = IORT_SMMU_V3_PMCG_GENERIC;
 
 	return platform_device_add_data(pdev, &model, sizeof(model));
 }
@@ -1697,6 +1642,5 @@ void __init acpi_iort_init(void)
 		return;
 	}
 
-	iort_check_id_count_workaround(iort_table);
 	iort_init_platform_devices();
 }

@@ -88,8 +88,8 @@ static int register_sba(struct ism_dev *ism)
 	dma_addr_t dma_handle;
 	struct ism_sba *sba;
 
-	sba = dma_zalloc_coherent(&ism->pdev->dev, PAGE_SIZE,
-				  &dma_handle, GFP_KERNEL);
+	sba = dma_alloc_coherent(&ism->pdev->dev, PAGE_SIZE, &dma_handle,
+				 GFP_KERNEL);
 	if (!sba)
 		return -ENOMEM;
 
@@ -115,8 +115,8 @@ static int register_ieq(struct ism_dev *ism)
 	dma_addr_t dma_handle;
 	struct ism_eq *ieq;
 
-	ieq = dma_zalloc_coherent(&ism->pdev->dev, PAGE_SIZE,
-				  &dma_handle, GFP_KERNEL);
+	ieq = dma_alloc_coherent(&ism->pdev->dev, PAGE_SIZE, &dma_handle,
+				 GFP_KERNEL);
 	if (!ieq)
 		return -ENOMEM;
 
@@ -231,7 +231,7 @@ static int ism_alloc_dmb(struct ism_dev *ism, struct smcd_dmb *dmb)
 		bit = find_next_zero_bit(ism->sba_bitmap, ISM_NR_DMBS,
 					 ISM_DMB_BIT_OFFSET);
 		if (bit == ISM_NR_DMBS)
-			return -ENOSPC;
+			return -ENOMEM;
 
 		dmb->sba_idx = bit;
 	}
@@ -239,10 +239,9 @@ static int ism_alloc_dmb(struct ism_dev *ism, struct smcd_dmb *dmb)
 	    test_and_set_bit(dmb->sba_idx, ism->sba_bitmap))
 		return -EINVAL;
 
-	dmb->cpu_addr = dma_zalloc_coherent(&ism->pdev->dev, dmb->dmb_len,
-					    &dmb->dma_addr, GFP_KERNEL |
-					    __GFP_NOWARN | __GFP_NOMEMALLOC |
-					    __GFP_COMP | __GFP_NORETRY);
+	dmb->cpu_addr = dma_alloc_coherent(&ism->pdev->dev, dmb->dmb_len,
+					   &dmb->dma_addr,
+					   GFP_KERNEL | __GFP_NOWARN | __GFP_NOMEMALLOC | __GFP_COMP | __GFP_NORETRY);
 	if (!dmb->cpu_addr)
 		clear_bit(dmb->sba_idx, ism->sba_bitmap);
 
@@ -522,8 +521,10 @@ static int ism_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
 	ism->smcd = smcd_alloc_dev(&pdev->dev, dev_name(&pdev->dev), &ism_ops,
 				   ISM_NR_DMBS);
-	if (!ism->smcd)
+	if (!ism->smcd) {
+		ret = -ENOMEM;
 		goto err_resource;
+	}
 
 	ism->smcd->priv = ism;
 	ret = ism_dev_init(ism);

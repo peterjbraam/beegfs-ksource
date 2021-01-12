@@ -1,12 +1,10 @@
 #ifndef _LINUX_PSI_H
 #define _LINUX_PSI_H
 
-#include <linux/rh_kabi.h>
-
 #include <linux/jump_label.h>
 #include <linux/psi_types.h>
 #include <linux/sched.h>
-#include RH_KABI_HIDE_INCLUDE(<linux/poll.h>)
+#include <linux/poll.h>
 
 struct seq_file;
 struct css_set;

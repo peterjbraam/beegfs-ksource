@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Generic waiting primitives.
  *
@@ -69,6 +70,8 @@ static int __wake_up_common(struct wait_queue_head *wq_head, unsigned int mode,
 	wait_queue_entry_t *curr, *next;
 	int cnt = 0;
 
+	lockdep_assert_held(&wq_head->lock);
+
 	if (bookmark && (bookmark->flags & WQ_FLAG_BOOKMARK)) {
 		curr = list_next_entry(bookmark, entry);
 
@@ -115,16 +118,12 @@ static void __wake_up_common_lock(struct wait_queue_head *wq_head, unsigned int 
 	bookmark.func = NULL;
 	INIT_LIST_HEAD(&bookmark.entry);
 
-	spin_lock_irqsave(&wq_head->lock, flags);
-	nr_exclusive = __wake_up_common(wq_head, mode, nr_exclusive, wake_flags, key, &bookmark);
-	spin_unlock_irqrestore(&wq_head->lock, flags);
-
-	while (bookmark.flags & WQ_FLAG_BOOKMARK) {
+	do {
 		spin_lock_irqsave(&wq_head->lock, flags);
 		nr_exclusive = __wake_up_common(wq_head, mode, nr_exclusive,
 						wake_flags, key, &bookmark);
 		spin_unlock_irqrestore(&wq_head->lock, flags);
-	}
+	} while (bookmark.flags & WQ_FLAG_BOOKMARK);
 }
 
 /**
@@ -170,6 +169,7 @@ EXPORT_SYMBOL_GPL(__wake_up_locked_key_bookmark);
  * __wake_up_sync_key - wake up threads blocked on a waitqueue.
  * @wq_head: the waitqueue
  * @mode: which threads
+ * @nr_exclusive: how many wake-one or wake-many threads to wake up
  * @key: opaque value to be passed to wakeup targets
  *
  * The sync wakeup differs that the waker knows that it will schedule
@@ -183,44 +183,26 @@ EXPORT_SYMBOL_GPL(__wake_up_locked_key_bookmark);
  * accessing the task state.
  */
 void __wake_up_sync_key(struct wait_queue_head *wq_head, unsigned int mode,
-			void *key)
+			int nr_exclusive, void *key)
 {
+	int wake_flags = 1; /* XXX WF_SYNC */
+
 	if (unlikely(!wq_head))
 		return;
 
-	__wake_up_common_lock(wq_head, mode, 1, WF_SYNC, key);
+	if (unlikely(nr_exclusive != 1))
+		wake_flags = 0;
+
+	__wake_up_common_lock(wq_head, mode, nr_exclusive, wake_flags, key);
 }
 EXPORT_SYMBOL_GPL(__wake_up_sync_key);
-
-/**
- * __wake_up_locked_sync_key - wake up a thread blocked on a locked waitqueue.
- * @wq_head: the waitqueue
- * @mode: which threads
- * @key: opaque value to be passed to wakeup targets
- *
- * The sync wakeup differs in that the waker knows that it will schedule
- * away soon, so while the target thread will be woken up, it will not
- * be migrated to another CPU - ie. the two threads are 'synchronized'
- * with each other. This can prevent needless bouncing between CPUs.
- *
- * On UP it can prevent extra preemption.
- *
- * If this function wakes up a task, it executes a full memory barrier before
- * accessing the task state.
- */
-void __wake_up_locked_sync_key(struct wait_queue_head *wq_head,
-			       unsigned int mode, void *key)
-{
-        __wake_up_common(wq_head, mode, 1, WF_SYNC, key, NULL);
-}
-EXPORT_SYMBOL_GPL(__wake_up_locked_sync_key);
 
 /*
  * __wake_up_sync - see __wake_up_sync_key()
  */
-void __wake_up_sync(struct wait_queue_head *wq_head, unsigned int mode)
+void __wake_up_sync(struct wait_queue_head *wq_head, unsigned int mode, int nr_exclusive)
 {
-	__wake_up_sync_key(wq_head, mode, NULL);
+	__wake_up_sync_key(wq_head, mode, nr_exclusive, NULL);
 }
 EXPORT_SYMBOL_GPL(__wake_up_sync);	/* For internal use only */
 

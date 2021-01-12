@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Procedures for interfacing to Open Firmware.
  *
@@ -6,11 +7,6 @@
  * 
  *  Adapted for 64bit PowerPC by Dave Engebretsen and Peter Bergner.
  *    {engebret|bergner}@us.ibm.com 
- *
- *      This program is free software; you can redistribute it and/or
- *      modify it under the terms of the GNU General Public License
- *      as published by the Free Software Foundation; either version
- *      2 of the License, or (at your option) any later version.
  */
 
 #undef DEBUG_PROM
@@ -27,7 +23,6 @@
 #include <linux/types.h>
 #include <linux/pci.h>
 #include <linux/proc_fs.h>
-#include <linux/stringify.h>
 #include <linux/delay.h>
 #include <linux/initrd.h>
 #include <linux/bitops.h>
@@ -156,10 +151,8 @@ static struct prom_t __prombss prom;
 
 static unsigned long __prombss prom_entry;
 
-#define PROM_SCRATCH_SIZE 256
-
 static char __prombss of_stdout_device[256];
-static char __prombss prom_scratch[PROM_SCRATCH_SIZE];
+static char __prombss prom_scratch[256];
 
 static unsigned long __prombss dt_header_start;
 static unsigned long __prombss dt_struct_start, dt_struct_end;
@@ -637,14 +630,14 @@ static int __init prom_next_node(phandle *nodep)
 	}
 }
 
-static inline int prom_getprop(phandle node, const char *pname,
-			       void *value, size_t valuelen)
+static inline int __init prom_getprop(phandle node, const char *pname,
+				      void *value, size_t valuelen)
 {
 	return call_prom("getprop", 4, 1, node, ADDR(pname),
 			 (u32)(unsigned long) value, (u32) valuelen);
 }
 
-static inline int prom_getproplen(phandle node, const char *pname)
+static inline int __init prom_getproplen(phandle node, const char *pname)
 {
 	return call_prom("getproplen", 2, 1, node, ADDR(pname));
 }
@@ -1080,7 +1073,7 @@ static struct ibm_arch_vec __prombss ibm_architecture_vec  ____cacheline_aligned
 
 /* Old method - ELF header with PT_NOTE sections only works on BE */
 #ifdef __BIG_ENDIAN__
-static struct fake_elf {
+static const struct fake_elf {
 	Elf32_Ehdr	elfhdr;
 	Elf32_Phdr	phdr[2];
 	struct chrpnote {
@@ -1295,17 +1288,26 @@ static void __init prom_check_platform_support(void)
 	int prop_len = prom_getproplen(prom.chosen,
 				       "ibm,arch-vec-5-platform-support");
 
-	/* First copy the architecture vec template */
-	ibm_architecture_vec = ibm_architecture_vec_template;
+	/*
+	 * First copy the architecture vec template
+	 *
+	 * use memcpy() instead of *vec = *vec_template so that GCC replaces it
+	 * by __memcpy() when KASAN is active
+	 */
+	memcpy(&ibm_architecture_vec, &ibm_architecture_vec_template,
+	       sizeof(ibm_architecture_vec));
 
 	if (prop_len > 1) {
 		int i;
-		u8 vec[prop_len];
+		u8 vec[8];
 		prom_debug("Found ibm,arch-vec-5-platform-support, len: %d\n",
 			   prop_len);
+		if (prop_len > sizeof(vec))
+			prom_printf("WARNING: ibm,arch-vec-5-platform-support longer than expected (len: %d)\n",
+				    prop_len);
 		prom_getprop(prom.chosen, "ibm,arch-vec-5-platform-support",
 			     &vec, sizeof(vec));
-		for (i = 0; i < prop_len; i += 2) {
+		for (i = 0; i < sizeof(vec); i += 2) {
 			prom_debug("%d: index = 0x%x val = 0x%x\n", i / 2
 								  , vec[i]
 								  , vec[i + 1]);
@@ -1590,9 +1592,6 @@ static void __init reserve_mem(u64 base, u64 size)
 static void __init prom_init_mem(void)
 {
 	phandle node;
-#ifdef DEBUG_PROM
-	char *path;
-#endif
 	char type[64];
 	unsigned int plen;
 	cell_t *p, *endp;
@@ -1614,9 +1613,6 @@ static void __init prom_init_mem(void)
 	prom_debug("root_size_cells: %x\n", rsc);
 
 	prom_debug("scanning memory:\n");
-#ifdef DEBUG_PROM
-	path = prom_scratch;
-#endif
 
 	for (node = 0; prom_next_node(&node); ) {
 		type[0] = 0;
@@ -1641,9 +1637,10 @@ static void __init prom_init_mem(void)
 		endp = p + (plen / sizeof(cell_t));
 
 #ifdef DEBUG_PROM
-		memset(path, 0, PROM_SCRATCH_SIZE);
-		call_prom("package-to-path", 3, 1, node, path, PROM_SCRATCH_SIZE-1);
-		prom_debug("  node %s :\n", path);
+		memset(prom_scratch, 0, sizeof(prom_scratch));
+		call_prom("package-to-path", 3, 1, node, prom_scratch,
+			  sizeof(prom_scratch) - 1);
+		prom_debug("  node %s :\n", prom_scratch);
 #endif /* DEBUG_PROM */
 
 		while ((endp - p) >= (rac + rsc)) {
@@ -1990,10 +1987,10 @@ static void __init prom_initialize_tce_table(void)
 			local_alloc_bottom = base;
 
 		/* It seems OF doesn't null-terminate the path :-( */
-		memset(path, 0, PROM_SCRATCH_SIZE);
+		memset(path, 0, sizeof(prom_scratch));
 		/* Call OF to setup the TCE hardware */
 		if (call_prom("package-to-path", 3, 1, node,
-			      path, PROM_SCRATCH_SIZE-1) == PROM_ERROR) {
+			      path, sizeof(prom_scratch) - 1) == PROM_ERROR) {
 			prom_printf("package-to-path failed\n");
 		}
 
@@ -2233,8 +2230,6 @@ static void __init prom_init_stdout(void)
 	stdout_node = call_prom("instance-to-package", 1, 1, prom.stdout);
 	if (stdout_node != PROM_ERROR) {
 		val = cpu_to_be32(stdout_node);
-		prom_setprop(prom.chosen, "/chosen", "linux,stdout-package",
-			     &val, sizeof(val));
 
 		/* If it's a display, note it */
 		memset(type, 0, sizeof(type));
@@ -2356,14 +2351,14 @@ static void __init prom_check_displays(void)
 
 		/* It seems OF doesn't null-terminate the path :-( */
 		path = prom_scratch;
-		memset(path, 0, PROM_SCRATCH_SIZE);
+		memset(path, 0, sizeof(prom_scratch));
 
 		/*
 		 * leave some room at the end of the path for appending extra
 		 * arguments
 		 */
 		if (call_prom("package-to-path", 3, 1, node, path,
-			      PROM_SCRATCH_SIZE-10) == PROM_ERROR)
+			      sizeof(prom_scratch) - 10) == PROM_ERROR)
 			continue;
 		prom_printf("found display   : %s, opening... ", path);
 		
@@ -2406,6 +2401,7 @@ static void __init prom_check_displays(void)
 			prom_printf("W=%d H=%d LB=%d addr=0x%x\n",
 				    width, height, pitch, addr);
 			btext_setup_display(width, height, 8, pitch, addr);
+			btext_prepare_BAT();
 		}
 #endif /* CONFIG_PPC_EARLY_DEBUG_BOOTX */
 	}
@@ -2559,8 +2555,8 @@ static void __init scan_dt_build_struct(phandle node, unsigned long *mem_start,
 
 	/* get it again for debugging */
 	path = prom_scratch;
-	memset(path, 0, PROM_SCRATCH_SIZE);
-	call_prom("package-to-path", 3, 1, node, path, PROM_SCRATCH_SIZE-1);
+	memset(path, 0, sizeof(prom_scratch));
+	call_prom("package-to-path", 3, 1, node, path, sizeof(prom_scratch) - 1);
 
 	/* get and store all properties */
 	prev_name = "";

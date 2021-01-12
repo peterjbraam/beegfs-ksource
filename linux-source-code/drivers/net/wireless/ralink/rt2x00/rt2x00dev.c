@@ -1,20 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
 	Copyright (C) 2010 Willow Garage <http://www.willowgarage.com>
 	Copyright (C) 2004 - 2010 Ivo van Doorn <IvDoorn@gmail.com>
 	<http://rt2x00.serialmonkey.com>
 
-	This program is free software; you can redistribute it and/or modify
-	it under the terms of the GNU General Public License as published by
-	the Free Software Foundation; either version 2 of the License, or
-	(at your option) any later version.
-
-	This program is distributed in the hope that it will be useful,
-	but WITHOUT ANY WARRANTY; without even the implied warranty of
-	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-	GNU General Public License for more details.
-
-	You should have received a copy of the GNU General Public License
-	along with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
 /*
@@ -1004,7 +993,7 @@ void rt2x00lib_set_mac_address(struct rt2x00_dev *rt2x00dev, u8 *eeprom_mac_addr
 	const char *mac_addr;
 
 	mac_addr = of_get_mac_address(rt2x00dev->dev->of_node);
-	if (mac_addr)
+	if (!IS_ERR(mac_addr))
 		ether_addr_copy(eeprom_mac_addr, mac_addr);
 
 	if (!is_valid_ether_addr(eeprom_mac_addr)) {
@@ -1266,6 +1255,16 @@ int rt2x00lib_start(struct rt2x00_dev *rt2x00dev)
 {
 	int retval = 0;
 
+	if (test_bit(DEVICE_STATE_STARTED, &rt2x00dev->flags)) {
+		/*
+		 * This is special case for ieee80211_restart_hw(), otherwise
+		 * mac80211 never call start() two times in row without stop();
+		 */
+		set_bit(DEVICE_STATE_RESET, &rt2x00dev->flags);
+		rt2x00dev->ops->lib->pre_reset_hw(rt2x00dev);
+		rt2x00lib_stop(rt2x00dev);
+	}
+
 	/*
 	 * If this is the first interface which is added,
 	 * we should load the firmware now.
@@ -1293,6 +1292,7 @@ int rt2x00lib_start(struct rt2x00_dev *rt2x00dev)
 	set_bit(DEVICE_STATE_STARTED, &rt2x00dev->flags);
 
 out:
+	clear_bit(DEVICE_STATE_RESET, &rt2x00dev->flags);
 	return retval;
 }
 

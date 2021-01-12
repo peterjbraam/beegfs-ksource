@@ -7,7 +7,7 @@
    License.  See linux/COPYING for more information.
 
    Uniform CD-ROM driver for Linux.
-   See Documentation/cdrom/cdrom-standard.tex for usage information.
+   See Documentation/cdrom/cdrom-standard.rst for usage information.
 
    The routines in the file provide a uniform interface between the
    software that uses CD-ROMs and the various low-level drivers that
@@ -265,6 +265,7 @@
 /* #define ERRLOGMASK (CD_WARNING|CD_OPEN|CD_COUNT_TRACKS|CD_CLOSE) */
 /* #define ERRLOGMASK (CD_WARNING|CD_REG_UNREG|CD_DO_IOCTL|CD_OPEN|CD_CLOSE|CD_COUNT_TRACKS) */
 
+#include <linux/atomic.h>
 #include <linux/module.h>
 #include <linux/fs.h>
 #include <linux/major.h>
@@ -290,7 +291,7 @@ static bool debug;
 /* default compatibility mode */
 static bool autoclose=1;
 static bool autoeject;
-static bool lockdoor = 1;
+static bool lockdoor = 0;
 /* will we ever get to use this... sigh. */
 static bool check_media_type;
 /* automatically restart mrw format */
@@ -3702,9 +3703,9 @@ static struct ctl_table_header *cdrom_sysctl_header;
 
 static void cdrom_sysctl_register(void)
 {
-	static int initialized;
+	static atomic_t initialized = ATOMIC_INIT(0);
 
-	if (initialized == 1)
+	if (!atomic_add_unless(&initialized, 1, 1))
 		return;
 
 	cdrom_sysctl_header = register_sysctl_table(cdrom_root_table);
@@ -3715,8 +3716,6 @@ static void cdrom_sysctl_register(void)
 	cdrom_sysctl_settings.debug = debug;
 	cdrom_sysctl_settings.lock = lockdoor;
 	cdrom_sysctl_settings.check = check_media_type;
-
-	initialized = 1;
 }
 
 static void cdrom_sysctl_unregister(void)

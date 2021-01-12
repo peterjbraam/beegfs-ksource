@@ -19,30 +19,31 @@ static int ionic_dl_info_get(struct devlink *dl, struct devlink_info_req *req,
 
 	err = devlink_info_driver_name_put(req, IONIC_DRV_NAME);
 	if (err)
-		return err;
+		goto info_out;
 
 	err = devlink_info_version_running_put(req,
 					       DEVLINK_INFO_VERSION_GENERIC_FW,
 					       idev->dev_info.fw_version);
 	if (err)
-		return err;
+		goto info_out;
 
 	snprintf(buf, sizeof(buf), "0x%x", idev->dev_info.asic_type);
 	err = devlink_info_version_fixed_put(req,
 					     DEVLINK_INFO_VERSION_GENERIC_ASIC_ID,
 					     buf);
 	if (err)
-		return err;
+		goto info_out;
 
 	snprintf(buf, sizeof(buf), "0x%x", idev->dev_info.asic_rev);
 	err = devlink_info_version_fixed_put(req,
 					     DEVLINK_INFO_VERSION_GENERIC_ASIC_REV,
 					     buf);
 	if (err)
-		return err;
+		goto info_out;
 
 	err = devlink_info_serial_number_put(req, idev->dev_info.serial_num);
 
+info_out:
 	return err;
 }
 
@@ -93,7 +94,6 @@ void ionic_devlink_unregister(struct ionic *ionic)
 {
 	struct devlink *dl = priv_to_devlink(ionic);
 
-	if (ionic->dl_port.registered)
-		devlink_port_unregister(&ionic->dl_port);
+	devlink_port_unregister(&ionic->dl_port);
 	devlink_unregister(dl);
 }

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * raid1.c : Multiple Devices driver for Linux
  *
@@ -20,15 +21,6 @@
  *
  * Additions to bitmap code, (C) 2003-2004 Paul Clements, SteelEye Technology:
  * - persistent bitmap code
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * You should have received a copy of the GNU General Public License
- * (for example /usr/src/linux/COPYING); if not, write to the Free
- * Software Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #include <linux/slab.h>
@@ -37,7 +29,6 @@
 #include <linux/module.h>
 #include <linux/seq_file.h>
 #include <linux/ratelimit.h>
-#include <linux/interval_tree_generic.h>
 
 #include <trace/events/block.h>
 
@@ -59,71 +50,55 @@ static void lower_barrier(struct r1conf *conf, sector_t sector_nr);
 
 #include "raid1-10.c"
 
-#define START(node) ((node)->start)
-#define LAST(node) ((node)->last)
-INTERVAL_TREE_DEFINE(struct serial_info, node, sector_t, _subtree_last,
-		     START, LAST, static inline, raid1_rb);
-
-static int check_and_add_serial(struct md_rdev *rdev, struct r1bio *r1_bio,
-				struct serial_info *si, int idx)
+static int check_and_add_wb(struct md_rdev *rdev, sector_t lo, sector_t hi)
 {
+	struct wb_info *wi, *temp_wi;
 	unsigned long flags;
 	int ret = 0;
-	sector_t lo = r1_bio->sector;
-	sector_t hi = lo + r1_bio->sectors;
-	struct serial_in_rdev *serial = &rdev->serial[idx];
+	struct mddev *mddev = rdev->mddev;
 
-	spin_lock_irqsave(&serial->serial_lock, flags);
-	/* collision happened */
-	if (raid1_rb_iter_first(&serial->serial_rb, lo, hi))
-		ret = -EBUSY;
-	else {
-		si->start = lo;
-		si->last = hi;
-		raid1_rb_insert(si, &serial->serial_rb);
+	wi = mempool_alloc(mddev->wb_info_pool, GFP_NOIO);
+
+	spin_lock_irqsave(&rdev->wb_list_lock, flags);
+	list_for_each_entry(temp_wi, &rdev->wb_list, list) {
+		/* collision happened */
+		if (hi > temp_wi->lo && lo < temp_wi->hi) {
+			ret = -EBUSY;
+			break;
+		}
 	}
-	spin_unlock_irqrestore(&serial->serial_lock, flags);
+
+	if (!ret) {
+		wi->lo = lo;
+		wi->hi = hi;
+		list_add(&wi->list, &rdev->wb_list);
+	} else
+		mempool_free(wi, mddev->wb_info_pool);
+	spin_unlock_irqrestore(&rdev->wb_list_lock, flags);
 
 	return ret;
 }
 
-static void wait_for_serialization(struct md_rdev *rdev, struct r1bio *r1_bio)
+static void remove_wb(struct md_rdev *rdev, sector_t lo, sector_t hi)
 {
-	struct mddev *mddev = rdev->mddev;
-	struct serial_info *si;
-	int idx = sector_to_idx(r1_bio->sector);
-	struct serial_in_rdev *serial = &rdev->serial[idx];
-
-	if (WARN_ON(!mddev->serial_info_pool))
-		return;
-	si = mempool_alloc(mddev->serial_info_pool, GFP_NOIO);
-	wait_event(serial->serial_io_wait,
-		   check_and_add_serial(rdev, r1_bio, si, idx) == 0);
-}
-
-static void remove_serial(struct md_rdev *rdev, sector_t lo, sector_t hi)
-{
-	struct serial_info *si;
+	struct wb_info *wi;
 	unsigned long flags;
 	int found = 0;
 	struct mddev *mddev = rdev->mddev;
-	int idx = sector_to_idx(lo);
-	struct serial_in_rdev *serial = &rdev->serial[idx];
 
-	spin_lock_irqsave(&serial->serial_lock, flags);
-	for (si = raid1_rb_iter_first(&serial->serial_rb, lo, hi);
-	     si; si = raid1_rb_iter_next(si, lo, hi)) {
-		if (si->start == lo && si->last == hi) {
-			raid1_rb_remove(si, &serial->serial_rb);
-			mempool_free(si, mddev->serial_info_pool);
+	spin_lock_irqsave(&rdev->wb_list_lock, flags);
+	list_for_each_entry(wi, &rdev->wb_list, list)
+		if (hi == wi->hi && lo == wi->lo) {
+			list_del(&wi->list);
+			mempool_free(wi, mddev->wb_info_pool);
 			found = 1;
 			break;
 		}
-	}
+
 	if (!found)
-		WARN(1, "The write IO is not recorded for serialization\n");
-	spin_unlock_irqrestore(&serial->serial_lock, flags);
-	wake_up(&serial->serial_io_wait);
+		WARN(1, "The write behind IO is not recorded\n");
+	spin_unlock_irqrestore(&rdev->wb_list_lock, flags);
+	wake_up(&rdev->wb_io_wait);
 }
 
 /*
@@ -455,8 +430,6 @@ static void raid1_end_write_request(struct bio *bio)
 	int mirror = find_bio_disk(r1_bio, bio);
 	struct md_rdev *rdev = conf->mirrors[mirror].rdev;
 	bool discard_error;
-	sector_t lo = r1_bio->sector;
-	sector_t hi = r1_bio->sector + r1_bio->sectors;
 
 	discard_error = bio->bi_status && bio_op(bio) == REQ_OP_DISCARD;
 
@@ -526,8 +499,12 @@ static void raid1_end_write_request(struct bio *bio)
 	}
 
 	if (behind) {
-		if (test_bit(CollisionCheck, &rdev->flags))
-			remove_serial(rdev, lo, hi);
+		if (test_bit(WBCollisionCheck, &rdev->flags)) {
+			sector_t lo = r1_bio->sector;
+			sector_t hi = r1_bio->sector + r1_bio->sectors;
+
+			remove_wb(rdev, lo, hi);
+		}
 		if (test_bit(WriteMostly, &rdev->flags))
 			atomic_dec(&r1_bio->behind_remaining);
 
@@ -550,8 +527,7 @@ static void raid1_end_write_request(struct bio *bio)
 				call_bio_endio(r1_bio);
 			}
 		}
-	} else if (rdev->mddev->serialize_policy)
-		remove_serial(rdev, lo, hi);
+	}
 	if (r1_bio->bios[mirror] == NULL)
 		rdev_dec_pending(rdev, conf->mddev);
 
@@ -843,7 +819,6 @@ static void flush_bio_list(struct r1conf *conf, struct bio *bio)
 		else
 			generic_make_request(bio);
 		bio = next;
-		cond_resched();
 	}
 }
 
@@ -1503,7 +1478,6 @@ static void raid1_write_request(struct mddev *mddev, struct bio *bio,
 
 	for (i = 0; i < disks; i++) {
 		struct bio *mbio = NULL;
-		struct md_rdev *rdev = conf->mirrors[i].rdev;
 		if (!r1_bio->bios[i])
 			continue;
 
@@ -1531,12 +1505,18 @@ static void raid1_write_request(struct mddev *mddev, struct bio *bio,
 			mbio = bio_clone_fast(bio, GFP_NOIO, &mddev->bio_set);
 
 		if (r1_bio->behind_master_bio) {
-			if (test_bit(CollisionCheck, &rdev->flags))
-				wait_for_serialization(rdev, r1_bio);
+			struct md_rdev *rdev = conf->mirrors[i].rdev;
+
+			if (test_bit(WBCollisionCheck, &rdev->flags)) {
+				sector_t lo = r1_bio->sector;
+				sector_t hi = r1_bio->sector + r1_bio->sectors;
+
+				wait_event(rdev->wb_io_wait,
+					   check_and_add_wb(rdev, lo, hi) == 0);
+			}
 			if (test_bit(WriteMostly, &rdev->flags))
 				atomic_inc(&r1_bio->behind_remaining);
-		} else if (mddev->serialize_policy)
-			wait_for_serialization(rdev, r1_bio);
+		}
 
 		r1_bio->bios[i] = mbio;
 
@@ -2167,7 +2147,7 @@ static void process_checks(struct r1bio *r1_bio)
 		}
 	r1_bio->read_disk = primary;
 	for (i = 0; i < conf->raid_disks * 2; i++) {
-		int j;
+		int j = 0;
 		struct bio *pbio = r1_bio->bios[primary];
 		struct bio *sbio = r1_bio->bios[i];
 		blk_status_t status = sbio->bi_status;
@@ -2175,14 +2155,15 @@ static void process_checks(struct r1bio *r1_bio)
 		struct page **spages = get_resync_pages(sbio)->pages;
 		struct bio_vec *bi;
 		int page_len[RESYNC_PAGES] = { 0 };
+		struct bvec_iter_all iter_all;
 
 		if (sbio->bi_end_io != end_sync_read)
 			continue;
 		/* Now we can 'fixup' the error value */
 		sbio->bi_status = 0;
 
-		bio_for_each_segment_all(bi, sbio, j)
-			page_len[j] = bi->bv_len;
+		bio_for_each_segment_all(bi, sbio, iter_all)
+			page_len[j++] = bi->bv_len;
 
 		if (!status) {
 			for (j = vcnt; j-- ; ) {

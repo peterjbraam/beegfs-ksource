@@ -1,11 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* -*- linux-c -*- ------------------------------------------------------- *
  *
  *   Copyright (C) 1991, 1992 Linus Torvalds
  *   Copyright 2007 rPath, Inc. - All Rights Reserved
  *   Copyright 2009 Intel Corporation; author H. Peter Anvin
- *
- *   This file is part of the Linux kernel, and is made available under
- *   the terms of the GNU General Public License version 2.
  *
  * ----------------------------------------------------------------------- */
 
@@ -190,7 +188,7 @@ static void vga_set_80x60(void)
 	vga_set_vertical_end(60*8);
 }
 
-static int vga_set_mode(struct mode_info *mode)
+static int __attribute__((optimize("no-jump-tables"))) vga_set_mode(struct mode_info *mode)
 {
 	/* Set the basic mode */
 	vga_set_basic_mode();

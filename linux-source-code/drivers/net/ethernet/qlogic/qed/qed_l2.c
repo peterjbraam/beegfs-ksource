@@ -369,8 +369,8 @@ int qed_sp_eth_vport_start(struct qed_hwfn *p_hwfn,
 	struct qed_spq_entry *p_ent =  NULL;
 	struct qed_sp_init_data init_data;
 	u8 abs_vport_id = 0;
+	int rc = -EINVAL;
 	u16 rx_mode = 0;
-	int rc;
 
 	rc = qed_fw_vport(p_hwfn, p_params->vport_id, &abs_vport_id);
 	if (rc)
@@ -2001,6 +2001,9 @@ void qed_arfs_mode_configure(struct qed_hwfn *p_hwfn,
 			     struct qed_ptt *p_ptt,
 			     struct qed_arfs_config_params *p_cfg_params)
 {
+	if (test_bit(QED_MF_DISABLE_ARFS, &p_hwfn->cdev->mf_bits))
+		return;
+
 	if (p_cfg_params->mode != QED_FILTER_CONFIG_MODE_DISABLE) {
 		qed_gft_config(p_hwfn, p_ptt, p_hwfn->rel_pf_id,
 			       p_cfg_params->tcp,

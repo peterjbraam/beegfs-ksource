@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-2.0
-/* Glue code to lib/swiotlb.c */
 
 #include <linux/pci.h>
 #include <linux/cache.h>
@@ -42,10 +41,8 @@ IOMMU_INIT_FINISH(pci_swiotlb_detect_override,
 int __init pci_swiotlb_detect_4gb(void)
 {
 	/* don't initialize swiotlb if iommu=off (no_iommu=1) */
-#ifdef CONFIG_X86_64
 	if (!no_iommu && max_possible_pfn > MAX_DMA32_PFN)
 		swiotlb = 1;
-#endif
 
 	/*
 	 * If SME is active then swiotlb will be set to 1 so that bounce

@@ -1,19 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Copyright (c) 2009-2013, NVIDIA Corporation. All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; if not, write to the Free Software Foundation, Inc.,
- * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  */
 
 #ifndef __LINUX_HOST1X_H
@@ -81,6 +68,8 @@ struct host1x_bo_ops {
 	void (*unpin)(struct host1x_bo *bo, struct sg_table *sgt);
 	void *(*mmap)(struct host1x_bo *bo);
 	void (*munmap)(struct host1x_bo *bo, void *addr);
+	void *(*kmap)(struct host1x_bo *bo, unsigned int pagenum);
+	void (*kunmap)(struct host1x_bo *bo, unsigned int pagenum, void *addr);
 };
 
 struct host1x_bo {
@@ -122,6 +111,17 @@ static inline void *host1x_bo_mmap(struct host1x_bo *bo)
 static inline void host1x_bo_munmap(struct host1x_bo *bo, void *addr)
 {
 	bo->ops->munmap(bo, addr);
+}
+
+static inline void *host1x_bo_kmap(struct host1x_bo *bo, unsigned int pagenum)
+{
+	return bo->ops->kmap(bo, pagenum);
+}
+
+static inline void host1x_bo_kunmap(struct host1x_bo *bo,
+				    unsigned int pagenum, void *addr)
+{
+	bo->ops->kunmap(bo, pagenum, addr);
 }
 
 /*
@@ -297,6 +297,8 @@ struct host1x_device {
 	struct list_head clients;
 
 	bool registered;
+
+	struct device_dma_parameters dma_parms;
 };
 
 static inline struct host1x_device *to_host1x_device(struct device *dev)

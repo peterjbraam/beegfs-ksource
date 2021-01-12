@@ -22,7 +22,7 @@
 #include "nfsfh.h"
 #include "netns.h"
 #include "pnfs.h"
-#include "trace.h"
+#include "filecache.h"
 
 #define NFSDDBG_FACILITY	NFSDDBG_EXPORT
 
@@ -140,9 +140,7 @@ static int expkey_parse(struct cache_detail *cd, char *mesg, int mlen)
 	if (len == 0) {
 		set_bit(CACHE_NEGATIVE, &key.h.flags);
 		ek = svc_expkey_update(cd, &key, ek);
-		if (ek)
-			trace_nfsd_expkey_update(ek, NULL);
-		else
+		if (!ek)
 			err = -ENOMEM;
 	} else {
 		err = kern_path(buf, 0, &key.ek_path);
@@ -152,9 +150,7 @@ static int expkey_parse(struct cache_detail *cd, char *mesg, int mlen)
 		dprintk("Found the path %s\n", buf);
 
 		ek = svc_expkey_update(cd, &key, ek);
-		if (ek)
-			trace_nfsd_expkey_update(ek, buf);
-		else
+		if (!ek)
 			err = -ENOMEM;
 		path_put(&key.ek_path);
 	}
@@ -237,6 +233,17 @@ static struct cache_head *expkey_alloc(void)
 		return NULL;
 }
 
+static void expkey_flush(void)
+{
+	/*
+	 * Take the nfsd_mutex here to ensure that the file cache is not
+	 * destroyed while we're in the middle of flushing.
+	 */
+	mutex_lock(&nfsd_mutex);
+	nfsd_file_cache_purge(current->nsproxy->net_ns);
+	mutex_unlock(&nfsd_mutex);
+}
+
 static const struct cache_detail svc_expkey_cache_template = {
 	.owner		= THIS_MODULE,
 	.hash_size	= EXPKEY_HASHMAX,
@@ -249,6 +256,7 @@ static const struct cache_detail svc_expkey_cache_template = {
 	.init		= expkey_init,
 	.update       	= expkey_update,
 	.alloc		= expkey_alloc,
+	.flush		= expkey_flush,
 };
 
 static int
@@ -635,17 +643,15 @@ static int svc_export_parse(struct cache_detail *cd, char *mesg, int mlen)
 	}
 
 	expp = svc_export_lookup(&exp);
-	if (!expp) {
+	if (expp)
+		expp = svc_export_update(&exp, expp);
+	else
 		err = -ENOMEM;
-		goto out4;
-	}
-	expp = svc_export_update(&exp, expp);
-	if (expp) {
-		trace_nfsd_export_update(expp);
-		cache_flush();
+	cache_flush();
+	if (expp == NULL)
+		err = -ENOMEM;
+	else
 		exp_put(expp);
-	} else
-		err = -ENOMEM;
 out4:
 	nfsd4_fslocs_free(&exp.ex_fslocs);
 	kfree(exp.ex_uuid);
@@ -826,10 +832,8 @@ exp_find_key(struct cache_detail *cd, struct auth_domain *clp, int fsid_type,
 	if (ek == NULL)
 		return ERR_PTR(-ENOMEM);
 	err = cache_check(cd, &ek->h, reqp);
-	if (err) {
-		trace_nfsd_exp_find_key(&key, err);
+	if (err)
 		return ERR_PTR(err);
-	}
 	return ek;
 }
 
@@ -851,10 +855,8 @@ exp_get_by_name(struct cache_detail *cd, struct auth_domain *clp,
 	if (exp == NULL)
 		return ERR_PTR(-ENOMEM);
 	err = cache_check(cd, &exp->h, reqp);
-	if (err) {
-		trace_nfsd_exp_get_by_name(&key, err);
+	if (err)
 		return ERR_PTR(err);
-	}
 	return exp;
 }
 

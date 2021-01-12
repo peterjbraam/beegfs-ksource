@@ -1,9 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * include/linux/idr.h
  * 
  * 2002-10-18  written by Jim Houston jim.houston@ccur.com
  *	Copyright (C) 2002 by Concurrent Computer Corporation
- *	Distributed under the GNU GPL license version 2.
  *
  * Small id to pointer translation service avoiding fixed sized
  * tables.
@@ -185,7 +185,7 @@ static inline void idr_preload_end(void)
  * is convenient for a "not found" value.
  */
 #define idr_for_each_entry(idr, entry, id)			\
-	for (id = 0; ((entry) = idr_get_next(idr, &(id))) != NULL; ++id)
+	for (id = 0; ((entry) = idr_get_next(idr, &(id))) != NULL; id += 1U)
 
 /**
  * idr_for_each_entry_ul() - Iterate over an IDR's elements of a given type.

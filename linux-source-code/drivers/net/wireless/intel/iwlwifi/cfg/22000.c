@@ -54,10 +54,9 @@
 #include <linux/module.h>
 #include <linux/stringify.h>
 #include "iwl-config.h"
-#include "iwl-prph.h"
 
 /* Highest firmware API version supported */
-#define IWL_22000_UCODE_API_MAX	52
+#define IWL_22000_UCODE_API_MAX	50
 
 /* Lowest firmware API version supported */
 #define IWL_22000_UCODE_API_MIN	39
@@ -92,7 +91,6 @@
 #define IWL_22000_SO_A_GF_A_FW_PRE      "iwlwifi-so-a0-gf-a0-"
 #define IWL_22000_TY_A_GF_A_FW_PRE      "iwlwifi-ty-a0-gf-a0-"
 #define IWL_22000_SO_A_GF4_A_FW_PRE     "iwlwifi-so-a0-gf4-a0-"
-#define IWL_22000_SOSNJ_A_GF4_A_FW_PRE  "iwlwifi-SoSnj-a0-gf4-a0-"
 
 #define IWL_22000_HR_MODULE_FIRMWARE(api) \
 	IWL_22000_HR_FW_PRE __stringify(api) ".ucode"
@@ -185,55 +183,27 @@ static const struct iwl_ht_params iwl_22000_ht_params = {
 	.min_umac_error_event_table = 0x400000,				\
 	.d3_debug_data_base_addr = 0x401000,				\
 	.d3_debug_data_length = 60 * 1024,				\
-	.mon_smem_regs = {						\
-		.write_ptr = {						\
-			.addr = LDBG_M2S_BUF_WPTR,			\
-			.mask = LDBG_M2S_BUF_WPTR_VAL_MSK,		\
-	},								\
-		.cycle_cnt = {						\
-			.addr = LDBG_M2S_BUF_WRAP_CNT,			\
-			.mask = LDBG_M2S_BUF_WRAP_CNT_VAL_MSK,		\
-		},							\
-	}
+	.fw_mon_smem_write_ptr_addr = 0xa0c16c,				\
+	.fw_mon_smem_write_ptr_msk = 0xfffff,				\
+	.fw_mon_smem_cycle_cnt_ptr_addr = 0xa0c174,			\
+	.fw_mon_smem_cycle_cnt_ptr_msk = 0xfffff
 
 #define IWL_DEVICE_22500						\
 	IWL_DEVICE_22000_COMMON,					\
 	.trans.device_family = IWL_DEVICE_FAMILY_22000,			\
 	.trans.base_params = &iwl_22000_base_params,			\
-	.gp2_reg_addr = 0xa02c68,					\
-	.mon_dram_regs = {						\
-		.write_ptr = {						\
-			.addr = MON_BUFF_WRPTR_VER2,			\
-			.mask = 0xffffffff,				\
-		},							\
-		.cycle_cnt = {						\
-			.addr = MON_BUFF_CYCLE_CNT_VER2,		\
-			.mask = 0xffffffff,				\
-		},							\
-	}
+	.trans.csr = &iwl_csr_v1,					\
+	.gp2_reg_addr = 0xa02c68
 
 #define IWL_DEVICE_AX210						\
 	IWL_DEVICE_22000_COMMON,					\
 	.trans.umac_prph_offset = 0x300000,				\
 	.trans.device_family = IWL_DEVICE_FAMILY_AX210,			\
 	.trans.base_params = &iwl_ax210_base_params,			\
+	.trans.csr = &iwl_csr_v1,					\
 	.min_txq_size = 128,						\
 	.gp2_reg_addr = 0xd02c68,					\
-	.min_256_ba_txq_size = 512,					\
-	.mon_dram_regs = {						\
-		.write_ptr = {						\
-			.addr = DBGC_CUR_DBGBUF_STATUS,			\
-			.mask = DBGC_CUR_DBGBUF_STATUS_OFFSET_MSK,	\
-		},							\
-		.cycle_cnt = {						\
-			.addr = DBGC_DBGBUF_WRAP_AROUND,		\
-			.mask = 0xffffffff,				\
-		},							\
-		.cur_frag = {						\
-			.addr = DBGC_CUR_DBGBUF_STATUS,			\
-			.mask = DBGC_CUR_DBGBUF_STATUS_IDX_MSK,		\
-		},							\
-	}
+	.min_256_ba_txq_size = 512
 
 /*
  * If the device doesn't support HE, no need to have that many buffers.
@@ -283,7 +253,6 @@ const struct iwl_cfg iwl_ax101_cfg_qu_c0_hr_b0 = {
 	 * HT size; mac80211 would otherwise pick the HE max (256) by default.
 	 */
 	.max_tx_agg_size = IEEE80211_MAX_AMPDU_BUF_HT,
-	.tx_with_siso_diversity = true,
 	.num_rbds = IWL_NUM_RBDS_22000_HE,
 };
 
@@ -310,7 +279,6 @@ const struct iwl_cfg iwl_ax101_cfg_quz_hr = {
 	 * HT size; mac80211 would otherwise pick the HE max (256) by default.
 	 */
 	.max_tx_agg_size = IEEE80211_MAX_AMPDU_BUF_HT,
-	.tx_with_siso_diversity = true,
 	.num_rbds = IWL_NUM_RBDS_22000_HE,
 };
 
@@ -710,15 +678,6 @@ const struct iwl_cfg iwlax210_2ax_cfg_ty_gf_a0 = {
 const struct iwl_cfg iwlax411_2ax_cfg_so_gf4_a0 = {
 	.name = "Intel(R) Wi-Fi 7 AX411 160MHz",
 	.fw_name_pre = IWL_22000_SO_A_GF4_A_FW_PRE,
-	.uhb_supported = true,
-	IWL_DEVICE_AX210,
-	.num_rbds = IWL_NUM_RBDS_AX210_HE,
-};
-
-const struct iwl_cfg iwlax411_2ax_cfg_sosnj_gf4_a0 = {
-	.name = "Intel(R) Wi-Fi 7 AX411 160MHz",
-	.fw_name_pre = IWL_22000_SOSNJ_A_GF4_A_FW_PRE,
-	.uhb_supported = true,
 	IWL_DEVICE_AX210,
 	.num_rbds = IWL_NUM_RBDS_AX210_HE,
 };

@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * drivers/net/macsec.c - MACsec device
  *
  * Copyright (c) 2015 Sabrina Dubroca <sd@queasysnail.net>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  */
 
 #include <linux/types.h>
@@ -1084,6 +1080,7 @@ static rx_handler_result_t macsec_handle_frame(struct sk_buff **pskb)
 	struct macsec_rx_sa *rx_sa;
 	struct macsec_rxh_data *rxd;
 	struct macsec_dev *macsec;
+	unsigned int len;
 	sci_t sci;
 	u32 pn;
 	bool cbit;
@@ -1240,9 +1237,10 @@ deliver:
 	macsec_rxsc_put(rx_sc);
 
 	skb_orphan(skb);
+	len = skb->len;
 	ret = gro_cells_receive(&macsec->gro_cells, skb);
 	if (ret == NET_RX_SUCCESS)
-		count_rx(dev, skb->len);
+		count_rx(dev, len);
 	else
 		macsec->secy.netdev->stats.rx_dropped++;
 
@@ -1313,7 +1311,8 @@ static struct crypto_aead *macsec_alloc_tfm(char *key, int key_len, int icv_len)
 	struct crypto_aead *tfm;
 	int ret;
 
-	tfm = crypto_alloc_aead("gcm(aes)", 0, 0);
+	/* Pick a sync gcm(aes) cipher to ensure order is preserved. */
+	tfm = crypto_alloc_aead("gcm(aes)", 0, CRYPTO_ALG_ASYNC);
 
 	if (IS_ERR(tfm))
 		return tfm;
@@ -2172,8 +2171,9 @@ static int copy_tx_sa_stats(struct sk_buff *skb,
 	return 0;
 }
 
-static int copy_rx_sa_stats(struct sk_buff *skb,
-			    struct macsec_rx_sa_stats __percpu *pstats)
+static noinline_for_stack int
+copy_rx_sa_stats(struct sk_buff *skb,
+		 struct macsec_rx_sa_stats __percpu *pstats)
 {
 	struct macsec_rx_sa_stats sum = {0, };
 	int cpu;
@@ -2198,8 +2198,8 @@ static int copy_rx_sa_stats(struct sk_buff *skb,
 	return 0;
 }
 
-static int copy_rx_sc_stats(struct sk_buff *skb,
-			    struct pcpu_rx_sc_stats __percpu *pstats)
+static noinline_for_stack int
+copy_rx_sc_stats(struct sk_buff *skb, struct pcpu_rx_sc_stats __percpu *pstats)
 {
 	struct macsec_rx_sc_stats sum = {0, };
 	int cpu;
@@ -2262,8 +2262,8 @@ static int copy_rx_sc_stats(struct sk_buff *skb,
 	return 0;
 }
 
-static int copy_tx_sc_stats(struct sk_buff *skb,
-			    struct pcpu_tx_sc_stats __percpu *pstats)
+static noinline_for_stack int
+copy_tx_sc_stats(struct sk_buff *skb, struct pcpu_tx_sc_stats __percpu *pstats)
 {
 	struct macsec_tx_sc_stats sum = {0, };
 	int cpu;
@@ -2302,8 +2302,8 @@ static int copy_tx_sc_stats(struct sk_buff *skb,
 	return 0;
 }
 
-static int copy_secy_stats(struct sk_buff *skb,
-			   struct pcpu_secy_stats __percpu *pstats)
+static noinline_for_stack int
+copy_secy_stats(struct sk_buff *skb, struct pcpu_secy_stats __percpu *pstats)
 {
 	struct macsec_dev_stats sum = {0, };
 	int cpu;
@@ -2408,8 +2408,9 @@ cancel:
 	return 1;
 }
 
-static int dump_secy(struct macsec_secy *secy, struct net_device *dev,
-		     struct sk_buff *skb, struct netlink_callback *cb)
+static noinline_for_stack int
+dump_secy(struct macsec_secy *secy, struct net_device *dev,
+	  struct sk_buff *skb, struct netlink_callback *cb)
 {
 	struct macsec_rx_sc *rx_sc;
 	struct macsec_tx_sc *tx_sc = &secy->tx_sc;
@@ -2885,6 +2886,11 @@ static void macsec_dev_set_rx_mode(struct net_device *dev)
 	dev_uc_sync(real_dev, dev);
 }
 
+static sci_t dev_to_sci(struct net_device *dev, __be16 port)
+{
+	return make_sci(dev->dev_addr, port);
+}
+
 static int macsec_set_mac_address(struct net_device *dev, void *p)
 {
 	struct macsec_dev *macsec = macsec_priv(dev);
@@ -2906,6 +2912,7 @@ static int macsec_set_mac_address(struct net_device *dev, void *p)
 
 out:
 	ether_addr_copy(dev->dev_addr, addr->sa_data);
+	macsec->secy.sci = dev_to_sci(dev, MACSEC_PORT_ES);
 	return 0;
 }
 
@@ -3178,11 +3185,6 @@ static bool sci_exists(struct net_device *dev, sci_t sci)
 	}
 
 	return false;
-}
-
-static sci_t dev_to_sci(struct net_device *dev, __be16 port)
-{
-	return make_sci(dev->dev_addr, port);
 }
 
 static int macsec_add_dev(struct net_device *dev, sci_t sci, u8 icv_len)

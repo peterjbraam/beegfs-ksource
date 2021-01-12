@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /**************************************************************************/
 /*                                                                        */
 /*  IBM System i and System p Virtual NIC Device Driver                   */
@@ -6,18 +7,6 @@
 /*  Thomas Falcon (tlfalcon@linux.vnet.ibm.com)                           */
 /*  John Allen (jallen@linux.vnet.ibm.com)                                */
 /*                                                                        */
-/*  This program is free software; you can redistribute it and/or modify  */
-/*  it under the terms of the GNU General Public License as published by  */
-/*  the Free Software Foundation; either version 2 of the License, or     */
-/*  (at your option) any later version.                                   */
-/*                                                                        */
-/*  This program is distributed in the hope that it will be useful,       */
-/*  but WITHOUT ANY WARRANTY; without even the implied warranty of        */
-/*  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the         */
-/*  GNU General Public License for more details.                          */
-/*                                                                        */
-/*  You should have received a copy of the GNU General Public License     */
-/*  along with this program.                                              */
 /*                                                                        */
 /* This module contains the implementation of a virtual ethernet device   */
 /* for use with IBM i/pSeries LPAR Linux.  It utilizes the logical LAN    */
@@ -384,7 +373,7 @@ struct ibmvnic_phys_parms {
 #define IBMVNIC_10MBPS		0x40000000
 #define IBMVNIC_100MBPS		0x20000000
 #define IBMVNIC_1GBPS		0x10000000
-#define IBMVNIC_10GBP		0x08000000
+#define IBMVNIC_10GBPS		0x08000000
 #define IBMVNIC_40GBPS		0x04000000
 #define IBMVNIC_100GBPS		0x02000000
 #define IBMVNIC_25GBPS		0x01000000
@@ -952,8 +941,7 @@ enum vnic_state {VNIC_PROBING = 1,
 		 VNIC_CLOSING,
 		 VNIC_CLOSED,
 		 VNIC_REMOVING,
-		 VNIC_REMOVED,
-		 VNIC_RESETTING};
+		 VNIC_REMOVED};
 
 enum ibmvnic_reset_reason {VNIC_RESET_FAILOVER = 1,
 			   VNIC_RESET_MOBILITY,
@@ -1038,8 +1026,6 @@ struct ibmvnic_adapter {
 	int init_done_rc;
 
 	struct completion fw_done;
-	/* Used for serialization of device commands */
-	struct mutex fw_lock;
 	int fw_done_rc;
 
 	struct completion reset_done;
@@ -1102,7 +1088,4 @@ struct ibmvnic_adapter {
 
 	struct ibmvnic_tunables desired;
 	struct ibmvnic_tunables fallback;
-
-	/* Used for serializatin of state field */
-	spinlock_t state_lock;
 };

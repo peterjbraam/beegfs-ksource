@@ -1,20 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Based on arch/arm/include/asm/tlbflush.h
  *
  * Copyright (C) 1999-2003 Russell King
  * Copyright (C) 2012 ARM Ltd.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 #ifndef __ASM_TLBFLUSH_H
 #define __ASM_TLBFLUSH_H
@@ -147,15 +136,6 @@ static inline void local_flush_tlb_all(void)
 	isb();
 }
 
-static inline void local_flush_tlb_asid(unsigned long asid)
-{
-	asid = __TLBI_VADDR(0, __ASID(asid));
-	dsb(nshst);
-	__tlbi(aside1, asid);
-	__tlbi_user(aside1, asid);
-	dsb(nsh);
-}
-
 static inline void flush_tlb_all(void)
 {
 	dsb(ishst);
@@ -164,44 +144,14 @@ static inline void flush_tlb_all(void)
 	isb();
 }
 
-DECLARE_PER_CPU(bool, cpu_not_lazy_tlb);
-
-enum tlb_flush_types {
-	TLB_FLUSH_NO,
-	TLB_FLUSH_LOCAL,
-	TLB_FLUSH_BROADCAST,
-};
-extern enum tlb_flush_types tlb_flush_check(struct mm_struct *mm,
-					    unsigned int cpu);
-
 static inline void flush_tlb_mm(struct mm_struct *mm)
 {
 	unsigned long asid = __TLBI_VADDR(0, ASID(mm));
-	enum tlb_flush_types flush;
 
-	flush = tlb_flush_check(mm, get_cpu());
-	switch (flush) {
-	case TLB_FLUSH_LOCAL:
-
-		dsb(nshst);
-		__tlbi(aside1, asid);
-		__tlbi_user(aside1, asid);
-		dsb(nsh);
-
-		/* fall through */
-	case TLB_FLUSH_NO:
-		put_cpu();
-		break;
-	case TLB_FLUSH_BROADCAST:
-		put_cpu();
-
-		dsb(ishst);
-		__tlbi(aside1is, asid);
-		__tlbi_user(aside1is, asid);
-		dsb(ish);
-
-		break;
-	}
+	dsb(ishst);
+	__tlbi(aside1is, asid);
+	__tlbi_user(aside1is, asid);
+	dsb(ish);
 }
 
 static inline void flush_tlb_page_nosync(struct vm_area_struct *vma,
@@ -217,52 +167,28 @@ static inline void flush_tlb_page_nosync(struct vm_area_struct *vma,
 static inline void flush_tlb_page(struct vm_area_struct *vma,
 				  unsigned long uaddr)
 {
-	struct mm_struct *mm = vma->vm_mm;
-	unsigned long addr = __TLBI_VADDR(uaddr, ASID(mm));
-	enum tlb_flush_types flush;
-
-	flush = tlb_flush_check(mm, get_cpu());
-	switch (flush) {
-	case TLB_FLUSH_LOCAL:
-
-		dsb(nshst);
-		__tlbi(vale1, addr);
-		__tlbi_user(vale1, addr);
-		dsb(nsh);
-
-		/* fall through */
-	case TLB_FLUSH_NO:
-		put_cpu();
-		break;
-	case TLB_FLUSH_BROADCAST:
-		put_cpu();
-
-		dsb(ishst);
-		__tlbi(vale1is, addr);
-		__tlbi_user(vale1is, addr);
-		dsb(ish);
-
-		break;
-	}
+	flush_tlb_page_nosync(vma, uaddr);
+	dsb(ish);
 }
 
 /*
  * This is meant to avoid soft lock-ups on large TLB flushing ranges and not
  * necessarily a performance improvement.
  */
-#define MAX_TLBI_OPS	1024UL
+#define MAX_TLBI_OPS	PTRS_PER_PTE
 
 static inline void __flush_tlb_range(struct vm_area_struct *vma,
 				     unsigned long start, unsigned long end,
 				     unsigned long stride, bool last_level)
 {
-	struct mm_struct *mm = vma->vm_mm;
-	unsigned long asid = ASID(mm);
+	unsigned long asid = ASID(vma->vm_mm);
 	unsigned long addr;
-	enum tlb_flush_types flush;
 
-	if ((end - start) > (MAX_TLBI_OPS * stride)) {
-		flush_tlb_mm(mm);
+	start = round_down(start, stride);
+	end = round_up(end, stride);
+
+	if ((end - start) >= (MAX_TLBI_OPS * stride)) {
+		flush_tlb_mm(vma->vm_mm);
 		return;
 	}
 
@@ -272,43 +198,17 @@ static inline void __flush_tlb_range(struct vm_area_struct *vma,
 	start = __TLBI_VADDR(start, asid);
 	end = __TLBI_VADDR(end, asid);
 
-	flush = tlb_flush_check(mm, get_cpu());
-	switch (flush) {
-	case TLB_FLUSH_LOCAL:
-
-		dsb(nshst);
-		for (addr = start; addr < end; addr += stride) {
-			if (last_level) {
-				__tlbi(vale1, addr);
-				__tlbi_user(vale1, addr);
-			} else {
-				__tlbi(vae1, addr);
-				__tlbi_user(vae1, addr);
-			}
+	dsb(ishst);
+	for (addr = start; addr < end; addr += stride) {
+		if (last_level) {
+			__tlbi(vale1is, addr);
+			__tlbi_user(vale1is, addr);
+		} else {
+			__tlbi(vae1is, addr);
+			__tlbi_user(vae1is, addr);
 		}
-		dsb(nsh);
-
-		/* fall through */
-	case TLB_FLUSH_NO:
-		put_cpu();
-		break;
-	case TLB_FLUSH_BROADCAST:
-		put_cpu();
-
-		dsb(ishst);
-		for (addr = start; addr < end; addr += stride) {
-			if (last_level) {
-				__tlbi(vale1is, addr);
-				__tlbi_user(vale1is, addr);
-			} else {
-				__tlbi(vae1is, addr);
-				__tlbi_user(vae1is, addr);
-			}
-		}
-		dsb(ish);
-
-		break;
 	}
+	dsb(ish);
 }
 
 static inline void flush_tlb_range(struct vm_area_struct *vma,
@@ -344,17 +244,6 @@ static inline void flush_tlb_kernel_range(unsigned long start, unsigned long end
  * Used to invalidate the TLB (walk caches) corresponding to intermediate page
  * table levels (pgd/pud/pmd).
  */
-static inline void __flush_tlb_pgtable(struct mm_struct *mm,
-				       unsigned long uaddr)
-{
-	unsigned long addr = __TLBI_VADDR(uaddr, ASID(mm));
-
-	dsb(ishst);
-	__tlbi(vae1is, addr);
-	__tlbi_user(vae1is, addr);
-	dsb(ish);
-}
-
 static inline void __flush_tlb_kernel_pgtable(unsigned long kaddr)
 {
 	unsigned long addr = __TLBI_VADDR(kaddr, 0);
@@ -362,6 +251,7 @@ static inline void __flush_tlb_kernel_pgtable(unsigned long kaddr)
 	dsb(ishst);
 	__tlbi(vaae1is, addr);
 	dsb(ish);
+	isb();
 }
 #endif
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *	Low-Level PCI Support for PC
  *
@@ -32,6 +33,7 @@ int noioapicreroute = 1;
 #endif
 int pcibios_last_bus = -1;
 unsigned long pirq_table_addr;
+unsigned int pci_early_clear_msi;
 const struct pci_raw_ops *__read_mostly raw_pci_ops;
 const struct pci_raw_ops *__read_mostly raw_pci_ext_ops;
 
@@ -134,7 +136,7 @@ static void pcibios_fixup_device_resources(struct pci_dev *dev)
 		* resource so the kernel doesn't attempt to assign
 		* it later on in pci_assign_unassigned_resources
 		*/
-		for (bar = 0; bar < PCI_STD_NUM_BARS; bar++) {
+		for (bar = 0; bar <= PCI_STD_RESOURCE_END; bar++) {
 			bar_r = &dev->resource[bar];
 			if (bar_r->start == 0 && bar_r->end != 0) {
 				bar_r->flags = 0;
@@ -604,6 +606,9 @@ char *__init pcibios_setup(char *str)
 	} else if (!strcmp(str, "skip_isa_align")) {
 		pci_probe |= PCI_CAN_SKIP_ISA_ALIGN;
 		return NULL;
+	} else if (!strcmp(str, "clearmsi")) {
+		pci_early_clear_msi = 1;
+		return NULL;
 	} else if (!strcmp(str, "noioapicquirk")) {
 		noioapicquirk = 1;
 		return NULL;
@@ -735,13 +740,3 @@ int pci_ext_cfg_avail(void)
 	else
 		return 0;
 }
-
-#if IS_ENABLED(CONFIG_VMD)
-struct pci_dev *pci_real_dma_dev(struct pci_dev *dev)
-{
-	if (is_vmd(dev->bus))
-		return to_pci_sysdata(dev->bus)->vmd_dev;
-
-	return dev;
-}
-#endif

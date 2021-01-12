@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * net/sched/sch_fq.c Fair Queue Packet Scheduler (per flow pacing)
  *
  *  Copyright (C) 2013-2015 Eric Dumazet <edumazet@google.com>
- *
- *	This program is free software; you can redistribute it and/or
- *	modify it under the terms of the GNU General Public License
- *	as published by the Free Software Foundation; either version
- *	2 of the License, or (at your option) any later version.
  *
  *  Meant to be mostly used for locally generated traffic :
  *  Fast classification depends on skb->sk being set before reaching us.
@@ -54,10 +50,23 @@
 #include <net/tcp_states.h>
 #include <net/tcp.h>
 
+struct fq_skb_cb {
+	u64	        time_to_send;
+};
+
+static inline struct fq_skb_cb *fq_skb_cb(struct sk_buff *skb)
+{
+	qdisc_cb_private_validate(skb, sizeof(struct fq_skb_cb));
+	return (struct fq_skb_cb *)qdisc_skb_cb(skb)->data;
+}
+
 /*
- * Per flow structure, dynamically allocated
+ * Per flow structure, dynamically allocated.
+ * If packets have monotically increasing time_to_send, they are placed in O(1)
+ * in linear list (head,tail), otherwise are placed in a rbtree (t_root).
  */
 struct fq_flow {
+	struct rb_root	t_root;
 	struct sk_buff	*head;		/* list of skbs for this flow : first skb */
 	union {
 		struct sk_buff *tail;	/* last skb in the list */
@@ -92,8 +101,8 @@ struct fq_sched_data {
 	u32		quantum;
 	u32		initial_quantum;
 	u32		flow_refill_delay;
-	u32		flow_max_rate;	/* optional max rate per flow */
 	u32		flow_plimit;	/* max packets per flow */
+	unsigned long	flow_max_rate;	/* optional max rate per flow */
 	u64		ce_threshold;
 	u32		orphan_mask;	/* mask for orphaned skb */
 	u32		low_rate_threshold;
@@ -112,8 +121,6 @@ struct fq_sched_data {
 	u64		stat_flows_plimit;
 	u64		stat_pkts_too_long;
 	u64		stat_allocation_errors;
-
-	u32		timer_slack; /* hrtimer slack in ns */
 	struct qdisc_watchdog watchdog;
 };
 
@@ -259,6 +266,17 @@ static struct fq_flow *fq_classify(struct sk_buff *skb, struct fq_sched_data *q)
 		 */
 		sk = (struct sock *)((hash << 1) | 1UL);
 		skb_orphan(skb);
+	} else if (sk->sk_state == TCP_CLOSE) {
+		unsigned long hash = skb_get_hash(skb) & q->orphan_mask;
+		/*
+		 * Sockets in TCP_CLOSE are non connected.
+		 * Typical use case is UDP sockets, they can send packets
+		 * with sendto() to many different destinations.
+		 * We probably could use a generic bit advertising
+		 * non connected sockets, instead of sk_state == TCP_CLOSE,
+		 * if we care enough.
+		 */
+		sk = (struct sock *)((hash << 1) | 1UL);
 	}
 
 	root = &q->fq_root[hash_ptr(sk, q->fq_trees_log)];
@@ -279,7 +297,7 @@ static struct fq_flow *fq_classify(struct sk_buff *skb, struct fq_sched_data *q)
 			 * It not, we need to refill credit with
 			 * initial quantum
 			 */
-			if (unlikely(skb->sk &&
+			if (unlikely(skb->sk == sk &&
 				     f->socket_hash != sk->sk_hash)) {
 				f->credit = q->initial_quantum;
 				f->socket_hash = sk->sk_hash;
@@ -303,9 +321,11 @@ static struct fq_flow *fq_classify(struct sk_buff *skb, struct fq_sched_data *q)
 		q->stat_allocation_errors++;
 		return &q->internal;
 	}
+	/* f->t_root is already zeroed after kmem_cache_zalloc() */
+
 	fq_flow_set_detached(f);
 	f->sk = sk;
-	if (skb->sk) {
+	if (skb->sk == sk) {
 		f->socket_hash = sk->sk_hash;
 		if (q->rate_enable)
 			smp_store_release(&sk->sk_pacing_status,
@@ -321,14 +341,40 @@ static struct fq_flow *fq_classify(struct sk_buff *skb, struct fq_sched_data *q)
 	return f;
 }
 
+static struct sk_buff *fq_peek(struct fq_flow *flow)
+{
+	struct sk_buff *skb = skb_rb_first(&flow->t_root);
+	struct sk_buff *head = flow->head;
+
+	if (!skb)
+		return head;
+
+	if (!head)
+		return skb;
+
+	if (fq_skb_cb(skb)->time_to_send < fq_skb_cb(head)->time_to_send)
+		return skb;
+	return head;
+}
+
+static void fq_erase_head(struct Qdisc *sch, struct fq_flow *flow,
+			  struct sk_buff *skb)
+{
+	if (skb == flow->head) {
+		flow->head = skb->next;
+	} else {
+		rb_erase(&skb->rbnode, &flow->t_root);
+		skb->dev = qdisc_dev(sch);
+	}
+}
 
 /* remove one skb from head of flow queue */
 static struct sk_buff *fq_dequeue_head(struct Qdisc *sch, struct fq_flow *flow)
 {
-	struct sk_buff *skb = flow->head;
+	struct sk_buff *skb = fq_peek(flow);
 
 	if (skb) {
-		flow->head = skb->next;
+		fq_erase_head(sch, flow, skb);
 		skb_mark_not_on_list(skb);
 		flow->qlen--;
 		qdisc_qstats_backlog_dec(sch, skb);
@@ -339,15 +385,36 @@ static struct sk_buff *fq_dequeue_head(struct Qdisc *sch, struct fq_flow *flow)
 
 static void flow_queue_add(struct fq_flow *flow, struct sk_buff *skb)
 {
-	struct sk_buff *head = flow->head;
+	struct rb_node **p, *parent;
+	struct sk_buff *head, *aux;
 
-	skb->next = NULL;
-	if (!head)
-		flow->head = skb;
-	else
-		flow->tail->next = skb;
+	fq_skb_cb(skb)->time_to_send = skb->tstamp ?: ktime_get_ns();
 
-	flow->tail = skb;
+	head = flow->head;
+	if (!head ||
+	    fq_skb_cb(skb)->time_to_send >= fq_skb_cb(flow->tail)->time_to_send) {
+		if (!head)
+			flow->head = skb;
+		else
+			flow->tail->next = skb;
+		flow->tail = skb;
+		skb->next = NULL;
+		return;
+	}
+
+	p = &flow->t_root.rb_node;
+	parent = NULL;
+
+	while (*p) {
+		parent = *p;
+		aux = rb_to_skb(parent);
+		if (fq_skb_cb(skb)->time_to_send >= fq_skb_cb(aux)->time_to_send)
+			p = &parent->rb_right;
+		else
+			p = &parent->rb_left;
+	}
+	rb_link_node(&skb->rbnode, parent, p);
+	rb_insert_color(&skb->rbnode, &flow->t_root);
 }
 
 static int fq_enqueue(struct sk_buff *skb, struct Qdisc *sch,
@@ -418,7 +485,8 @@ static struct sk_buff *fq_dequeue(struct Qdisc *sch)
 	struct fq_flow_head *head;
 	struct sk_buff *skb;
 	struct fq_flow *f;
-	u32 rate, plen;
+	unsigned long rate;
+	u32 plen;
 	u64 now;
 
 	if (!sch->q.qlen)
@@ -436,9 +504,8 @@ begin:
 		head = &q->old_flows;
 		if (!head->first) {
 			if (q->time_next_delayed_flow != ~0ULL)
-				qdisc_watchdog_schedule_range_ns(&q->watchdog,
-							q->time_next_delayed_flow,
-							q->timer_slack);
+				qdisc_watchdog_schedule_ns(&q->watchdog,
+							   q->time_next_delayed_flow);
 			return NULL;
 		}
 	}
@@ -451,11 +518,14 @@ begin:
 		goto begin;
 	}
 
-	skb = f->head;
-	if (skb && !skb_is_tcp_pure_ack(skb)) {
-		u64 time_next_packet = f->time_next_packet;
+	skb = fq_peek(f);
+	if (skb) {
+		u64 time_next_packet = max_t(u64, fq_skb_cb(skb)->time_to_send,
+					     f->time_next_packet);
+
 		if (now < time_next_packet) {
 			head->first = f->next;
+			f->time_next_packet = time_next_packet;
 			fq_flow_set_throttled(q, f);
 			goto begin;
 		}
@@ -479,32 +549,35 @@ begin:
 		goto begin;
 	}
 	prefetch(&skb->end);
-	f->credit -= qdisc_pkt_len(skb);
+	plen = qdisc_pkt_len(skb);
+	f->credit -= plen;
 
 	if (!q->rate_enable)
 		goto out;
 
-	/* Do not pace locally generated ack packets */
-	if (skb_is_tcp_pure_ack(skb))
-		goto out;
-
 	rate = q->flow_max_rate;
-	if (skb->sk)
-		rate = min(skb->sk->sk_pacing_rate, rate);
 
-	if (rate <= q->low_rate_threshold) {
-		f->credit = 0;
-		plen = qdisc_pkt_len(skb);
-	} else {
-		plen = max(qdisc_pkt_len(skb), q->quantum);
-		if (f->credit > 0)
-			goto out;
+	/* If EDT time was provided for this skb, we need to
+	 * update f->time_next_packet only if this qdisc enforces
+	 * a flow max rate.
+	 */
+	if (!skb->tstamp) {
+		if (skb->sk)
+			rate = min(skb->sk->sk_pacing_rate, rate);
+
+		if (rate <= q->low_rate_threshold) {
+			f->credit = 0;
+		} else {
+			plen = max(plen, q->quantum);
+			if (f->credit > 0)
+				goto out;
+		}
 	}
-	if (rate != ~0U) {
+	if (rate != ~0UL) {
 		u64 len = (u64)plen * NSEC_PER_SEC;
 
 		if (likely(rate))
-			do_div(len, rate);
+			len = div64_ul(len, rate);
 		/* Since socket rate can change later,
 		 * clamp the delay to 1 second.
 		 * Really, providers of too big packets should be fixed !
@@ -528,6 +601,15 @@ out:
 
 static void fq_flow_purge(struct fq_flow *flow)
 {
+	struct rb_node *p = rb_first(&flow->t_root);
+
+	while (p) {
+		struct sk_buff *skb = rb_to_skb(p);
+
+		p = rb_next(p);
+		rb_erase(&skb->rbnode, &flow->t_root);
+		rtnl_kfree_skbs(skb, skb);
+	}
 	rtnl_kfree_skbs(flow->head, flow->tail);
 	flow->head = NULL;
 	flow->qlen = 0;
@@ -654,8 +736,6 @@ static int fq_resize(struct Qdisc *sch, u32 log)
 }
 
 static const struct nla_policy fq_policy[TCA_FQ_MAX + 1] = {
-	[TCA_FQ_UNSPEC]			= { .strict_start_type = TCA_FQ_TIMER_SLACK },
-
 	[TCA_FQ_PLIMIT]			= { .type = NLA_U32 },
 	[TCA_FQ_FLOW_PLIMIT]		= { .type = NLA_U32 },
 	[TCA_FQ_QUANTUM]		= { .type = NLA_U32 },
@@ -668,7 +748,6 @@ static const struct nla_policy fq_policy[TCA_FQ_MAX + 1] = {
 	[TCA_FQ_ORPHAN_MASK]		= { .type = NLA_U32 },
 	[TCA_FQ_LOW_RATE_THRESHOLD]	= { .type = NLA_U32 },
 	[TCA_FQ_CE_THRESHOLD]		= { .type = NLA_U32 },
-	[TCA_FQ_TIMER_SLACK]		= { .type = NLA_U32 },
 };
 
 static int fq_change(struct Qdisc *sch, struct nlattr *opt,
@@ -724,9 +803,11 @@ static int fq_change(struct Qdisc *sch, struct nlattr *opt,
 		pr_warn_ratelimited("sch_fq: defrate %u ignored.\n",
 				    nla_get_u32(tb[TCA_FQ_FLOW_DEFAULT_RATE]));
 
-	if (tb[TCA_FQ_FLOW_MAX_RATE])
-		q->flow_max_rate = nla_get_u32(tb[TCA_FQ_FLOW_MAX_RATE]);
+	if (tb[TCA_FQ_FLOW_MAX_RATE]) {
+		u32 rate = nla_get_u32(tb[TCA_FQ_FLOW_MAX_RATE]);
 
+		q->flow_max_rate = (rate == ~0U) ? ~0UL : rate;
+	}
 	if (tb[TCA_FQ_LOW_RATE_THRESHOLD])
 		q->low_rate_threshold =
 			nla_get_u32(tb[TCA_FQ_LOW_RATE_THRESHOLD]);
@@ -752,9 +833,6 @@ static int fq_change(struct Qdisc *sch, struct nlattr *opt,
 	if (tb[TCA_FQ_CE_THRESHOLD])
 		q->ce_threshold = (u64)NSEC_PER_USEC *
 				  nla_get_u32(tb[TCA_FQ_CE_THRESHOLD]);
-
-	if (tb[TCA_FQ_TIMER_SLACK])
-		q->timer_slack = nla_get_u32(tb[TCA_FQ_TIMER_SLACK]);
 
 	if (!err) {
 		sch_tree_unlock(sch);
@@ -796,7 +874,7 @@ static int fq_init(struct Qdisc *sch, struct nlattr *opt,
 	q->quantum		= 2 * psched_mtu(qdisc_dev(sch));
 	q->initial_quantum	= 10 * psched_mtu(qdisc_dev(sch));
 	q->flow_refill_delay	= msecs_to_jiffies(40);
-	q->flow_max_rate	= ~0U;
+	q->flow_max_rate	= ~0UL;
 	q->time_next_delayed_flow = ~0ULL;
 	q->rate_enable		= 1;
 	q->new_flows.first	= NULL;
@@ -807,12 +885,10 @@ static int fq_init(struct Qdisc *sch, struct nlattr *opt,
 	q->orphan_mask		= 1024 - 1;
 	q->low_rate_threshold	= 550000 / 8;
 
-	q->timer_slack = 10 * NSEC_PER_USEC; /* 10 usec of hrtimer slack */
-
 	/* Default ce_threshold of 4294 seconds */
 	q->ce_threshold		= (u64)NSEC_PER_USEC * ~0U;
 
-	qdisc_watchdog_init(&q->watchdog, sch);
+	qdisc_watchdog_init_clockid(&q->watchdog, sch, CLOCK_MONOTONIC);
 
 	if (opt)
 		err = fq_change(sch, opt, extack);
@@ -841,15 +917,15 @@ static int fq_dump(struct Qdisc *sch, struct sk_buff *skb)
 	    nla_put_u32(skb, TCA_FQ_QUANTUM, q->quantum) ||
 	    nla_put_u32(skb, TCA_FQ_INITIAL_QUANTUM, q->initial_quantum) ||
 	    nla_put_u32(skb, TCA_FQ_RATE_ENABLE, q->rate_enable) ||
-	    nla_put_u32(skb, TCA_FQ_FLOW_MAX_RATE, q->flow_max_rate) ||
+	    nla_put_u32(skb, TCA_FQ_FLOW_MAX_RATE,
+			min_t(unsigned long, q->flow_max_rate, ~0U)) ||
 	    nla_put_u32(skb, TCA_FQ_FLOW_REFILL_DELAY,
 			jiffies_to_usecs(q->flow_refill_delay)) ||
 	    nla_put_u32(skb, TCA_FQ_ORPHAN_MASK, q->orphan_mask) ||
 	    nla_put_u32(skb, TCA_FQ_LOW_RATE_THRESHOLD,
 			q->low_rate_threshold) ||
 	    nla_put_u32(skb, TCA_FQ_CE_THRESHOLD, (u32)ce_threshold) ||
-	    nla_put_u32(skb, TCA_FQ_BUCKETS_LOG, q->fq_trees_log) ||
-	    nla_put_u32(skb, TCA_FQ_TIMER_SLACK, q->timer_slack))
+	    nla_put_u32(skb, TCA_FQ_BUCKETS_LOG, q->fq_trees_log))
 		goto nla_put_failure;
 
 	return nla_nest_end(skb, opts);
@@ -872,8 +948,7 @@ static int fq_dump_stats(struct Qdisc *sch, struct gnet_dump *d)
 	st.flows_plimit		  = q->stat_flows_plimit;
 	st.pkts_too_long	  = q->stat_pkts_too_long;
 	st.allocation_errors	  = q->stat_allocation_errors;
-	st.time_next_delayed_flow = q->time_next_delayed_flow + q->timer_slack -
-				    ktime_get_ns();
+	st.time_next_delayed_flow = q->time_next_delayed_flow - ktime_get_ns();
 	st.flows		  = q->flows;
 	st.inactive_flows	  = q->inactive_flows;
 	st.throttled_flows	  = q->throttled_flows;

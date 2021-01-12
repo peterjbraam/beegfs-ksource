@@ -1,22 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  FUJITSU Extended Socket Network Device driver
  *  Copyright (c) 2015 FUJITSU LIMITED
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; if not, see <http://www.gnu.org/licenses/>.
- *
- * The full GNU General Public License is included in this distribution in
- * the file called "COPYING".
- *
  */
 
 #include <linux/module.h>
@@ -63,7 +48,7 @@ static void fjes_get_stats64(struct net_device *, struct rtnl_link_stats64 *);
 static int fjes_change_mtu(struct net_device *, int);
 static int fjes_vlan_rx_add_vid(struct net_device *, __be16 proto, u16);
 static int fjes_vlan_rx_kill_vid(struct net_device *, __be16 proto, u16);
-static void fjes_tx_retry(struct net_device *, unsigned int txqueue);
+static void fjes_tx_retry(struct net_device *);
 
 static int fjes_acpi_add(struct acpi_device *);
 static int fjes_acpi_remove(struct acpi_device *);
@@ -181,6 +166,9 @@ static int fjes_acpi_add(struct acpi_device *device)
 	/* create platform_device */
 	plat_dev = platform_device_register_simple(DRV_NAME, 0, fjes_resource,
 						   ARRAY_SIZE(fjes_resource));
+	if (IS_ERR(plat_dev))
+		return PTR_ERR(plat_dev);
+
 	device->driver_data = plat_dev;
 
 	return 0;
@@ -807,7 +795,7 @@ fjes_xmit_frame(struct sk_buff *skb, struct net_device *netdev)
 	return ret;
 }
 
-static void fjes_tx_retry(struct net_device *netdev, unsigned int txqueue)
+static void fjes_tx_retry(struct net_device *netdev)
 {
 	struct netdev_queue *queue = netdev_get_tx_queue(netdev, 0);
 
@@ -1408,8 +1396,8 @@ static void fjes_watch_unshare_task(struct work_struct *work)
 
 	while ((unshare_watch_bitmask || hw->txrx_stop_req_bit) &&
 	       (wait_time < 3000)) {
-		for (epidx = 0; epidx < hw->max_epid; epidx++) {
-			if (epidx == hw->my_epid)
+		for (epidx = 0; epidx < max_epid; epidx++) {
+			if (epidx == my_epid)
 				continue;
 
 			is_shared = fjes_hw_epid_is_shared(hw->hw_info.share,
@@ -1466,8 +1454,8 @@ static void fjes_watch_unshare_task(struct work_struct *work)
 	}
 
 	if (hw->hw_info.buffer_unshare_reserve_bit) {
-		for (epidx = 0; epidx < hw->max_epid; epidx++) {
-			if (epidx == hw->my_epid)
+		for (epidx = 0; epidx < max_epid; epidx++) {
+			if (epidx == my_epid)
 				continue;
 
 			if (test_bit(epidx,

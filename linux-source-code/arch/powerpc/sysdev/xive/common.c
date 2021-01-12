@@ -1,10 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright 2016,2017 IBM Corporation.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 
 #define pr_fmt(fmt) "xive: " fmt
@@ -194,7 +190,7 @@ static u32 xive_scan_interrupts(struct xive_cpu *xc, bool just_peek)
 
 /*
  * This is used to perform the magic loads from an ESB
- * described in xive.h
+ * described in xive-regs.h
  */
 static notrace u8 xive_esb_read(struct xive_irq_data *xd, u32 offset)
 {
@@ -263,10 +259,14 @@ notrace void xmon_xive_do_dump(int cpu)
 
 int xmon_xive_get_irq_config(u32 hw_irq, struct irq_data *d)
 {
+	struct irq_chip *chip = irq_data_get_irq_chip(d);
 	int rc;
 	u32 target;
 	u8 prio;
 	u32 lirq;
+
+	if (!is_xive_irq(chip))
+		return -EINVAL;
 
 	rc = xive_ops->get_irq_config(hw_irq, &target, &prio, &lirq);
 	if (rc) {
@@ -349,7 +349,7 @@ static void xive_do_queue_eoi(struct xive_cpu *xc)
  * EOI an interrupt at the source. There are several methods
  * to do this depending on the HW version and source type
  */
-void xive_do_source_eoi(u32 hw_irq, struct xive_irq_data *xd)
+static void xive_do_source_eoi(u32 hw_irq, struct xive_irq_data *xd)
 {
 	xd->stale_p = false;
 	/* If the XIVE supports the new "store EOI facility, use it */
@@ -490,7 +490,7 @@ static void xive_dec_target_count(int cpu)
 	struct xive_cpu *xc = per_cpu(xive_cpu, cpu);
 	struct xive_q *q = &xc->queue[xive_irq_priority];
 
-	if (unlikely(WARN_ON(cpu < 0 || !xc))) {
+	if (WARN_ON(cpu < 0 || !xc)) {
 		pr_err("%s: cpu=%d xc=%p\n", __func__, cpu, xc);
 		return;
 	}
@@ -1096,12 +1096,13 @@ static void xive_ipi_eoi(struct irq_data *d)
 {
 	struct xive_cpu *xc = __this_cpu_read(xive_cpu);
 
-	DBG_VERBOSE("IPI eoi: irq=%d [0x%lx] (HW IRQ 0x%x) pending=%02x\n",
-		    d->irq, irqd_to_hwirq(d), xc->hw_ipi, xc->pending_prio);
-
 	/* Handle possible race with unplug and drop stale IPIs */
 	if (!xc)
 		return;
+
+	DBG_VERBOSE("IPI eoi: irq=%d [0x%lx] (HW IRQ 0x%x) pending=%02x\n",
+		    d->irq, irqd_to_hwirq(d), xc->hw_ipi, xc->pending_prio);
+
 	xive_do_source_eoi(xc->hw_ipi, &xc->ipi_data);
 	xive_do_queue_eoi(xc);
 }
@@ -1488,28 +1489,6 @@ void xive_teardown_cpu(void)
 	xc->cppr = 0;
 	out_8(xive_tima + xive_tima_offset + TM_CPPR, 0);
 
-	if (xive_ops->teardown_cpu)
-		xive_ops->teardown_cpu(cpu, xc);
-
-#ifdef CONFIG_SMP
-	/* Get rid of IPI */
-	xive_cleanup_cpu_ipi(cpu, xc);
-#endif
-
-	/* Disable and free the queues */
-	xive_cleanup_cpu_queues(cpu, xc);
-}
-
-void xive_kexec_teardown_cpu(int secondary)
-{
-	struct xive_cpu *xc = __this_cpu_read(xive_cpu);
-	unsigned int cpu = smp_processor_id();
-
-	/* Set CPPR to 0 to disable flow of interrupts */
-	xc->cppr = 0;
-	out_8(xive_tima + xive_tima_offset + TM_CPPR, 0);
-
-	/* Backend cleanup if any */
 	if (xive_ops->teardown_cpu)
 		xive_ops->teardown_cpu(cpu, xc);
 

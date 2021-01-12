@@ -18,6 +18,10 @@ Linux Tracing Technologies
    events-nmi
    events-msr
    mmiotrace
+   histogram
    hwlat_detector
    intel_th
    stm
+   sys-t
+   coresight
+   coresight-cpu-debug

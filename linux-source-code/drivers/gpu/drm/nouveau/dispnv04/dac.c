@@ -35,8 +35,7 @@
 
 #include <subdev/bios/gpio.h>
 #include <subdev/gpio.h>
-
-#include <nvif/timer.h>
+#include <subdev/timer.h>
 
 int nv04_dac_output_offset(struct drm_encoder *encoder)
 {

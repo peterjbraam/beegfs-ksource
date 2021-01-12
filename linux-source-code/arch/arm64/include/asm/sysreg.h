@@ -1,26 +1,15 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Macros for accessing system registers with older binutils.
  *
  * Copyright (C) 2014 ARM Ltd.
  * Author: Catalin Marinas <catalin.marinas@arm.com>
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #ifndef __ASM_SYSREG_H
 #define __ASM_SYSREG_H
 
-#include <asm/compiler.h>
+#include <linux/bits.h>
 #include <linux/stringify.h>
 
 /*
@@ -60,7 +49,9 @@
 #ifndef CONFIG_BROKEN_GAS_INST
 
 #ifdef __ASSEMBLY__
-#define __emit_inst(x)			.inst (x)
+// The space separator is omitted so that __emit_inst(x) can be parsed as
+// either an assembler directive or an assembler macro argument.
+#define __emit_inst(x)			.inst(x)
 #else
 #define __emit_inst(x)			".inst " __stringify((x)) "\n\t"
 #endif
@@ -84,16 +75,26 @@
 
 #endif	/* CONFIG_BROKEN_GAS_INST */
 
-#define REG_PSTATE_PAN_IMM		sys_reg(0, 0, 4, 0, 4)
-#define REG_PSTATE_UAO_IMM		sys_reg(0, 0, 4, 0, 3)
-#define REG_PSTATE_SSBS_IMM		sys_reg(0, 3, 4, 0, 1)
+/*
+ * Instructions for modifying PSTATE fields.
+ * As per Arm ARM for v8-A, Section "C.5.1.3 op0 == 0b00, architectural hints,
+ * barriers and CLREX, and PSTATE access", ARM DDI 0487 C.a, system instructions
+ * for accessing PSTATE fields have the following encoding:
+ *	Op0 = 0, CRn = 4
+ *	Op1, Op2 encodes the PSTATE field modified and defines the constraints.
+ *	CRm = Imm4 for the instruction.
+ *	Rt = 0x1f
+ */
+#define pstate_field(op1, op2)		((op1) << Op1_shift | (op2) << Op2_shift)
+#define PSTATE_Imm_shift		CRm_shift
 
-#define SET_PSTATE_PAN(x) __emit_inst(0xd5000000 | REG_PSTATE_PAN_IMM |	\
-				      (!!x)<<8 | 0x1f)
-#define SET_PSTATE_UAO(x) __emit_inst(0xd5000000 | REG_PSTATE_UAO_IMM |	\
-				      (!!x)<<8 | 0x1f)
-#define SET_PSTATE_SSBS(x) __emit_inst(0xd5000000 | REG_PSTATE_SSBS_IMM | \
-				       (!!x)<<8 | 0x1f)
+#define PSTATE_PAN			pstate_field(0, 4)
+#define PSTATE_UAO			pstate_field(0, 3)
+#define PSTATE_SSBS			pstate_field(3, 1)
+
+#define SET_PSTATE_PAN(x)		__emit_inst(0xd500401f | PSTATE_PAN | ((!!x) << PSTATE_Imm_shift))
+#define SET_PSTATE_UAO(x)		__emit_inst(0xd500401f | PSTATE_UAO | ((!!x) << PSTATE_Imm_shift))
+#define SET_PSTATE_SSBS(x)		__emit_inst(0xd500401f | PSTATE_SSBS | ((!!x) << PSTATE_Imm_shift))
 
 #define __SYS_BARRIER_INSN(CRm, op2, Rt) \
 	__emit_inst(0xd5000000 | sys_insn(0, 3, 3, (CRm), (op2)) | ((Rt) & 0x1f))
@@ -147,7 +148,6 @@
 #define SYS_ID_ISAR4_EL1		sys_reg(3, 0, 0, 2, 4)
 #define SYS_ID_ISAR5_EL1		sys_reg(3, 0, 0, 2, 5)
 #define SYS_ID_MMFR4_EL1		sys_reg(3, 0, 0, 2, 6)
-#define SYS_ID_ISAR6_EL1		sys_reg(3, 0, 0, 2, 7)
 
 #define SYS_MVFR0_EL1			sys_reg(3, 0, 0, 3, 0)
 #define SYS_MVFR1_EL1			sys_reg(3, 0, 0, 3, 1)
@@ -483,91 +483,62 @@
 #define SYS_CNTV_CVAL_EL02		sys_reg(3, 5, 14, 3, 2)
 
 /* Common SCTLR_ELx flags. */
-#define SCTLR_ELx_DSSBS	(1UL << 44)
-#define SCTLR_ELx_ENIA	(1U << 31)
-#define SCTLR_ELx_ENIB	(1 << 30)
-#define SCTLR_ELx_ENDA	(1 << 27)
-#define SCTLR_ELx_EE    (1 << 25)
-#define SCTLR_ELx_IESB	(1 << 21)
-#define SCTLR_ELx_WXN	(1 << 19)
-#define SCTLR_ELx_ENDB	(1 << 13)
-#define SCTLR_ELx_I	(1 << 12)
-#define SCTLR_ELx_SA	(1 << 3)
-#define SCTLR_ELx_C	(1 << 2)
-#define SCTLR_ELx_A	(1 << 1)
-#define SCTLR_ELx_M	1
+#define SCTLR_ELx_DSSBS	(BIT(44))
+#define SCTLR_ELx_ENIA	(BIT(31))
+#define SCTLR_ELx_ENIB	(BIT(30))
+#define SCTLR_ELx_ENDA	(BIT(27))
+#define SCTLR_ELx_EE    (BIT(25))
+#define SCTLR_ELx_IESB	(BIT(21))
+#define SCTLR_ELx_WXN	(BIT(19))
+#define SCTLR_ELx_ENDB	(BIT(13))
+#define SCTLR_ELx_I	(BIT(12))
+#define SCTLR_ELx_SA	(BIT(3))
+#define SCTLR_ELx_C	(BIT(2))
+#define SCTLR_ELx_A	(BIT(1))
+#define SCTLR_ELx_M	(BIT(0))
 
 #define SCTLR_ELx_FLAGS	(SCTLR_ELx_M  | SCTLR_ELx_A | SCTLR_ELx_C | \
 			 SCTLR_ELx_SA | SCTLR_ELx_I | SCTLR_ELx_IESB)
 
 /* SCTLR_EL2 specific flags. */
-#define SCTLR_EL2_RES1	((1 << 4)  | (1 << 5)  | (1 << 11) | (1 << 16) | \
-			 (1 << 18) | (1 << 22) | (1 << 23) | (1 << 28) | \
-			 (1 << 29))
-#define SCTLR_EL2_RES0	((1 << 6)  | (1 << 7)  | (1 << 8)  | (1 << 9)  | \
-			 (1 << 10) | (1 << 13) | (1 << 14) | (1 << 15) | \
-			 (1 << 17) | (1 << 20) | (1 << 24) | (1 << 26) | \
-			 (1 << 27) | (1 << 30) | (1 << 31) | \
-			 (0xffffefffUL << 32))
+#define SCTLR_EL2_RES1	((BIT(4))  | (BIT(5))  | (BIT(11)) | (BIT(16)) | \
+			 (BIT(18)) | (BIT(22)) | (BIT(23)) | (BIT(28)) | \
+			 (BIT(29)))
 
 #ifdef CONFIG_CPU_BIG_ENDIAN
 #define ENDIAN_SET_EL2		SCTLR_ELx_EE
-#define ENDIAN_CLEAR_EL2	0
 #else
 #define ENDIAN_SET_EL2		0
-#define ENDIAN_CLEAR_EL2	SCTLR_ELx_EE
-#endif
-
-/* SCTLR_EL2 value used for the hyp-stub */
-#define SCTLR_EL2_SET	(SCTLR_ELx_IESB   | ENDIAN_SET_EL2   | SCTLR_EL2_RES1)
-#define SCTLR_EL2_CLEAR	(SCTLR_ELx_M      | SCTLR_ELx_A    | SCTLR_ELx_C   | \
-			 SCTLR_ELx_SA     | SCTLR_ELx_I    | SCTLR_ELx_WXN | \
-			 SCTLR_ELx_DSSBS | ENDIAN_CLEAR_EL2 | SCTLR_EL2_RES0)
-
-#if (SCTLR_EL2_SET ^ SCTLR_EL2_CLEAR) != 0xffffffffffffffff
-#error "Inconsistent SCTLR_EL2 set/clear bits"
 #endif
 
 /* SCTLR_EL1 specific flags. */
-#define SCTLR_EL1_UCI		(1 << 26)
-#define SCTLR_EL1_E0E		(1 << 24)
-#define SCTLR_EL1_SPAN		(1 << 23)
-#define SCTLR_EL1_NTWE		(1 << 18)
-#define SCTLR_EL1_NTWI		(1 << 16)
-#define SCTLR_EL1_UCT		(1 << 15)
-#define SCTLR_EL1_DZE		(1 << 14)
-#define SCTLR_EL1_UMA		(1 << 9)
-#define SCTLR_EL1_SED		(1 << 8)
-#define SCTLR_EL1_ITD		(1 << 7)
-#define SCTLR_EL1_CP15BEN	(1 << 5)
-#define SCTLR_EL1_SA0		(1 << 4)
+#define SCTLR_EL1_UCI		(BIT(26))
+#define SCTLR_EL1_E0E		(BIT(24))
+#define SCTLR_EL1_SPAN		(BIT(23))
+#define SCTLR_EL1_NTWE		(BIT(18))
+#define SCTLR_EL1_NTWI		(BIT(16))
+#define SCTLR_EL1_UCT		(BIT(15))
+#define SCTLR_EL1_DZE		(BIT(14))
+#define SCTLR_EL1_UMA		(BIT(9))
+#define SCTLR_EL1_SED		(BIT(8))
+#define SCTLR_EL1_ITD		(BIT(7))
+#define SCTLR_EL1_CP15BEN	(BIT(5))
+#define SCTLR_EL1_SA0		(BIT(4))
 
-#define SCTLR_EL1_RES1	((1 << 11) | (1 << 20) | (1 << 22) | (1 << 28) | \
-			 (1 << 29))
-#define SCTLR_EL1_RES0  ((1 << 6)  | (1 << 10) | (1 << 13) | (1 << 17) | \
-			 (1 << 27) | (1 << 30) | (1 << 31) | \
-			 (0xffffefffUL << 32))
+#define SCTLR_EL1_RES1	((BIT(11)) | (BIT(20)) | (BIT(22)) | (BIT(28)) | \
+			 (BIT(29)))
 
 #ifdef CONFIG_CPU_BIG_ENDIAN
 #define ENDIAN_SET_EL1		(SCTLR_EL1_E0E | SCTLR_ELx_EE)
-#define ENDIAN_CLEAR_EL1	0
 #else
 #define ENDIAN_SET_EL1		0
-#define ENDIAN_CLEAR_EL1	(SCTLR_EL1_E0E | SCTLR_ELx_EE)
 #endif
 
 #define SCTLR_EL1_SET	(SCTLR_ELx_M    | SCTLR_ELx_C    | SCTLR_ELx_SA   |\
 			 SCTLR_EL1_SA0  | SCTLR_EL1_SED  | SCTLR_ELx_I    |\
-			 SCTLR_EL1_DZE  | SCTLR_EL1_UCT  | SCTLR_EL1_NTWI |\
+			 SCTLR_EL1_DZE  | SCTLR_EL1_UCT                   |\
 			 SCTLR_EL1_NTWE | SCTLR_ELx_IESB | SCTLR_EL1_SPAN |\
 			 ENDIAN_SET_EL1 | SCTLR_EL1_UCI  | SCTLR_EL1_RES1)
-#define SCTLR_EL1_CLEAR	(SCTLR_ELx_A   | SCTLR_EL1_CP15BEN | SCTLR_EL1_ITD    |\
-			 SCTLR_EL1_UMA | SCTLR_ELx_WXN     | ENDIAN_CLEAR_EL1 |\
-			 SCTLR_ELx_DSSBS | SCTLR_EL1_RES0)
-
-#if (SCTLR_EL1_SET ^ SCTLR_EL1_CLEAR) != 0xffffffffffffffff
-#error "Inconsistent SCTLR_EL1 set/clear bits"
-#endif
 
 /* id_aa64isar0 */
 #define ID_AA64ISAR0_TS_SHIFT		52
@@ -585,6 +556,7 @@
 
 /* id_aa64isar1 */
 #define ID_AA64ISAR1_SB_SHIFT		36
+#define ID_AA64ISAR1_FRINTTS_SHIFT	32
 #define ID_AA64ISAR1_GPI_SHIFT		28
 #define ID_AA64ISAR1_GPA_SHIFT		24
 #define ID_AA64ISAR1_LRCPC_SHIFT	20
@@ -624,7 +596,6 @@
 #define ID_AA64PFR0_ASIMD_NI		0xf
 #define ID_AA64PFR0_ASIMD_SUPPORTED	0x0
 #define ID_AA64PFR0_EL1_64BIT_ONLY	0x1
-#define ID_AA64PFR0_EL1_32BIT_64BIT	0x2
 #define ID_AA64PFR0_EL0_64BIT_ONLY	0x1
 #define ID_AA64PFR0_EL0_32BIT_64BIT	0x2
 
@@ -634,6 +605,20 @@
 #define ID_AA64PFR1_SSBS_PSTATE_NI	0
 #define ID_AA64PFR1_SSBS_PSTATE_ONLY	1
 #define ID_AA64PFR1_SSBS_PSTATE_INSNS	2
+
+/* id_aa64zfr0 */
+#define ID_AA64ZFR0_SM4_SHIFT		40
+#define ID_AA64ZFR0_SHA3_SHIFT		32
+#define ID_AA64ZFR0_BITPERM_SHIFT	16
+#define ID_AA64ZFR0_AES_SHIFT		4
+#define ID_AA64ZFR0_SVEVER_SHIFT	0
+
+#define ID_AA64ZFR0_SM4			0x1
+#define ID_AA64ZFR0_SHA3		0x1
+#define ID_AA64ZFR0_BITPERM		0x1
+#define ID_AA64ZFR0_AES			0x1
+#define ID_AA64ZFR0_AES_PMULL		0x2
+#define ID_AA64ZFR0_SVEVER_SVE2		0x1
 
 /* id_aa64mmfr0 */
 #define ID_AA64MMFR0_TGRAN4_SHIFT	28
@@ -689,26 +674,12 @@
 #define ID_AA64DFR0_TRACEVER_SHIFT	4
 #define ID_AA64DFR0_DEBUGVER_SHIFT	0
 
-#define ID_AA64DFR0_PMUVER_8_1		0x4
-
-#define ID_DFR0_PERFMON_SHIFT		24
-
-#define ID_DFR0_PERFMON_8_1		0x4
-
 #define ID_ISAR5_RDM_SHIFT		24
 #define ID_ISAR5_CRC32_SHIFT		16
 #define ID_ISAR5_SHA2_SHIFT		12
 #define ID_ISAR5_SHA1_SHIFT		8
 #define ID_ISAR5_AES_SHIFT		4
 #define ID_ISAR5_SEVL_SHIFT		0
-
-#define ID_ISAR6_I8MM_SHIFT		24
-#define ID_ISAR6_BF16_SHIFT		20
-#define ID_ISAR6_SPECRES_SHIFT		16
-#define ID_ISAR6_SB_SHIFT		12
-#define ID_ISAR6_FHM_SHIFT		8
-#define ID_ISAR6_DP_SHIFT		4
-#define ID_ISAR6_JSCVT_SHIFT		0
 
 #define MVFR0_FPROUND_SHIFT		28
 #define MVFR0_FPSHVEC_SHIFT		24
@@ -761,13 +732,13 @@
 #define ZCR_ELx_LEN_SIZE	9
 #define ZCR_ELx_LEN_MASK	0x1ff
 
-#define CPACR_EL1_ZEN_EL1EN	(1 << 16) /* enable EL1 access */
-#define CPACR_EL1_ZEN_EL0EN	(1 << 17) /* enable EL0 access, if EL1EN set */
+#define CPACR_EL1_ZEN_EL1EN	(BIT(16)) /* enable EL1 access */
+#define CPACR_EL1_ZEN_EL0EN	(BIT(17)) /* enable EL0 access, if EL1EN set */
 #define CPACR_EL1_ZEN		(CPACR_EL1_ZEN_EL1EN | CPACR_EL1_ZEN_EL0EN)
 
 
 /* Safe value for MPIDR_EL1: Bit31:RES1, Bit30:U:0, Bit24:MT:0 */
-#define SYS_MPIDR_SAFE_VAL		(1UL << 31)
+#define SYS_MPIDR_SAFE_VAL	(BIT(31))
 
 #ifdef __ASSEMBLY__
 

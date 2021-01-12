@@ -103,9 +103,9 @@ struct lowcore {
 	__u64	current_task;			/* 0x0340 */
 	__u64	kernel_stack;			/* 0x0348 */
 
-	/* Interrupt, panic and restart stack. */
+	/* Interrupt, DAT-off and restartstack. */
 	__u64	async_stack;			/* 0x0350 */
-	__u64	panic_stack;			/* 0x0358 */
+	__u64	nodat_stack;			/* 0x0358 */
 	__u64	restart_stack;			/* 0x0360 */
 
 	/* Restart function and parameter. */
@@ -129,7 +129,7 @@ struct lowcore {
 	/* SMP info area */
 	__u32	cpu_nr;				/* 0x03a0 */
 	__u32	softirq_pending;		/* 0x03a4 */
-	__u32	preempt_count;			/* 0x03a8 */
+	__s32	preempt_count;			/* 0x03a8 */
 	__u32	spinlock_lockval;		/* 0x03ac */
 	__u32	spinlock_index;			/* 0x03b0 */
 	__u32	fpu_flags;			/* 0x03b4 */

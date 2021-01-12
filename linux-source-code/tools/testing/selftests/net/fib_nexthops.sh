@@ -150,31 +150,31 @@ setup()
 	$IP li add veth1 type veth peer name veth2
 	$IP li set veth1 up
 	$IP addr add 172.16.1.1/24 dev veth1
-	$IP -6 addr add 2001:db8:91::1/64 dev veth1 nodad
+	$IP -6 addr add 2001:db8:91::1/64 dev veth1
 
 	$IP li add veth3 type veth peer name veth4
 	$IP li set veth3 up
 	$IP addr add 172.16.2.1/24 dev veth3
-	$IP -6 addr add 2001:db8:92::1/64 dev veth3 nodad
+	$IP -6 addr add 2001:db8:92::1/64 dev veth3
 
 	$IP li set veth2 netns peer up
 	ip -netns peer addr add 172.16.1.2/24 dev veth2
-	ip -netns peer -6 addr add 2001:db8:91::2/64 dev veth2 nodad
+	ip -netns peer -6 addr add 2001:db8:91::2/64 dev veth2
 
 	$IP li set veth4 netns peer up
 	ip -netns peer addr add 172.16.2.2/24 dev veth4
-	ip -netns peer -6 addr add 2001:db8:92::2/64 dev veth4 nodad
+	ip -netns peer -6 addr add 2001:db8:92::2/64 dev veth4
 
 	ip -netns remote li add veth5 type veth peer name veth6
 	ip -netns remote li set veth5 up
 	ip -netns remote addr add dev veth5 172.16.101.1/24
-	ip -netns remote -6 addr add dev veth5 2001:db8:101::1/64 nodad
+	ip -netns remote addr add dev veth5 2001:db8:101::1/64
 	ip -netns remote ro add 172.16.0.0/22 via 172.16.101.2
 	ip -netns remote -6 ro add 2001:db8:90::/40 via 2001:db8:101::2
 
 	ip -netns remote li set veth6 netns peer up
 	ip -netns peer addr add dev veth6 172.16.101.2/24
-	ip -netns peer -6 addr add dev veth6 2001:db8:101::2/64 nodad
+	ip -netns peer addr add dev veth6 2001:db8:101::2/64
 	set +e
 }
 
@@ -248,7 +248,7 @@ check_route6()
 	local expected="$2"
 	local out
 
-	out=$($IP -6 route ls match ${pfx} 2>/dev/null | sed -e 's/pref medium//')
+	out=$($IP -6 route ls match ${pfx} 2>/dev/null)
 
 	check_output "${out}" "${expected}"
 }
@@ -423,6 +423,8 @@ ipv6_fcnal_runtime()
 	echo "IPv6 functional runtime"
 	echo "-----------------------"
 
+	sleep 5
+
 	#
 	# IPv6 - the basics
 	#
@@ -479,12 +481,12 @@ ipv6_fcnal_runtime()
 	run_cmd "$IP -6 nexthop add id 85 dev veth1"
 	run_cmd "$IP ro replace 2001:db8:101::1/128 nhid 85"
 	log_test $? 0 "IPv6 route with device only nexthop"
-	check_route6 "2001:db8:101::1" "2001:db8:101::1 nhid 85 dev veth1 metric 1024"
+	check_route6 "2001:db8:101::1" "2001:db8:101::1 nhid 85 dev veth1 metric 1024 pref medium"
 
 	run_cmd "$IP nexthop add id 123 group 81/85"
 	run_cmd "$IP ro replace 2001:db8:101::1/128 nhid 123"
 	log_test $? 0 "IPv6 multipath route with nexthop mix - dev only + gw"
-	check_route6 "2001:db8:101::1" "2001:db8:101::1 nhid 123 metric 1024 nexthop via 2001:db8:91::2 dev veth1 weight 1 nexthop dev veth1 weight 1"
+	check_route6 "2001:db8:101::1" "2001:db8:101::1 nhid 123 metric 1024 nexthop via 2001:db8:91::2 dev veth1 weight 1 nexthop dev veth1 weight 1 pref medium"
 
 	#
 	# IPv6 route with v4 nexthop - not allowed
@@ -509,6 +511,19 @@ ipv6_fcnal_runtime()
 	#
 	run_cmd "$IP nexthop add id 86 via 2001:db8:91::2 dev veth1"
 	run_cmd "$IP ro add 2001:db8:101::1/128 nhid 81"
+
+	# rpfilter and default route
+	$IP nexthop flush >/dev/null 2>&1
+	run_cmd "ip netns exec me ip6tables -t mangle -I PREROUTING 1 -m rpfilter --invert -j DROP"
+	run_cmd "$IP nexthop add id 91 via 2001:db8:91::2 dev veth1"
+	run_cmd "$IP nexthop add id 92 via 2001:db8:92::2 dev veth3"
+	run_cmd "$IP nexthop add id 93 group 91/92"
+	run_cmd "$IP -6 ro add default nhid 91"
+	run_cmd "ip netns exec me ping -c1 -w1 2001:db8:101::1"
+	log_test $? 0 "Nexthop with default route and rpfilter"
+	run_cmd "$IP -6 ro replace default nhid 93"
+	run_cmd "ip netns exec me ping -c1 -w1 2001:db8:101::1"
+	log_test $? 0 "Nexthop with multipath default route and rpfilter"
 
 	# TO-DO:
 	# existing route with old nexthop; append route with new nexthop
@@ -747,6 +762,29 @@ ipv4_fcnal_runtime()
 	run_cmd "ip netns exec me ping -c1 -w1 172.16.101.1"
 	log_test $? 0 "Ping - multipath"
 
+	run_cmd "$IP ro delete 172.16.101.1/32 nhid 122"
+
+	#
+	# multiple default routes
+	# - tests fib_select_default
+	run_cmd "$IP nexthop add id 501 via 172.16.1.2 dev veth1"
+	run_cmd "$IP ro add default nhid 501"
+	run_cmd "$IP ro add default via 172.16.1.3 dev veth1 metric 20"
+	run_cmd "ip netns exec me ping -c1 -w1 172.16.101.1"
+	log_test $? 0 "Ping - multiple default routes, nh first"
+
+	# flip the order
+	run_cmd "$IP ro del default nhid 501"
+	run_cmd "$IP ro del default via 172.16.1.3 dev veth1 metric 20"
+	run_cmd "$IP ro add default via 172.16.1.2 dev veth1 metric 20"
+	run_cmd "$IP nexthop replace id 501 via 172.16.1.3 dev veth1"
+	run_cmd "$IP ro add default nhid 501 metric 20"
+	run_cmd "ip netns exec me ping -c1 -w1 172.16.101.1"
+	log_test $? 0 "Ping - multiple default routes, nh second"
+
+	run_cmd "$IP nexthop delete nhid 501"
+	run_cmd "$IP ro del default"
+
 	#
 	# IPv4 with blackhole nexthops
 	#
@@ -840,11 +878,6 @@ ipv4_fcnal_runtime()
 		echo "    WARNING: Neigh entry exists for 172.16.101.1"
 		$IP neigh sh | grep 'dev veth1'
 	fi
-
-	run_cmd "$IP ro del 172.16.101.1/32 via inet6 ${lladdr} dev veth1"
-	run_cmd "$IP -4 ro add default via inet6 ${lladdr} dev veth1"
-	run_cmd "ip netns exec me ping -c1 -w1 172.16.101.1"
-	log_test $? 0 "IPv4 default route with IPv6 gateway"
 
 	#
 	# MPLS as an example of LWT encap

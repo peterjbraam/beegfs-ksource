@@ -49,7 +49,7 @@ INTERACTIVE COMMANDS
 
 *r*::	reset stats
 
-*s*::   set delay between refreshs
+*s*::   set update interval
 
 *x*::	toggle reporting of stats for child trace events
  ::     *Note*: The stats for the parents summarize the respective child trace
@@ -64,45 +64,37 @@ OPTIONS
 --batch::
 	run in batch mode for one second
 
--c::
---csv=<file>::
-        log in csv format - requires option -l/--log
+-l::
+--log::
+	run in logging mode (like vmstat)
+
+-t::
+--tracepoints::
+	retrieve statistics from tracepoints
 
 -d::
 --debugfs::
 	retrieve statistics from debugfs
 
--f<fields>::
---fields=<fields>::
-        fields to display (regex), "-f help" for a list of available events
-
--g<guest>::
---guest=<guest_name>::
-        limit statistics to one virtual machine (guest name)
-
--h::
---help::
-        show help message
-
 -i::
 --debugfs-include-past::
 	include all available data on past events for debugfs
-
--l::
---log::
-        run in logging mode (like vmstat)
 
 -p<pid>::
 --pid=<pid>::
 	limit statistics to one virtual machine (pid)
 
--s::
---set-delay::
-        set delay between refreshs (value range: 0.1-25.5 secs)
+-g<guest>::
+--guest=<guest_name>::
+	limit statistics to one virtual machine (guest name)
 
--t::
---tracepoints::
-        retrieve statistics from tracepoints
+-f<fields>::
+--fields=<fields>::
+	fields to display (regex), "-f help" for a list of available events
+
+-h::
+--help::
+	show help message
 
 SEE ALSO
 --------

@@ -118,19 +118,29 @@ static unsigned int __read_mostly devkmsg_log = DEVKMSG_LOG_MASK_DEFAULT;
 
 static int __control_devkmsg(char *str)
 {
+	size_t len;
+
 	if (!str)
 		return -EINVAL;
 
-	if (!strncmp(str, "on", 2)) {
+	len = str_has_prefix(str, "on");
+	if (len) {
 		devkmsg_log = DEVKMSG_LOG_MASK_ON;
-		return 2;
-	} else if (!strncmp(str, "off", 3)) {
-		devkmsg_log = DEVKMSG_LOG_MASK_OFF;
-		return 3;
-	} else if (!strncmp(str, "ratelimit", 9)) {
-		devkmsg_log = DEVKMSG_LOG_MASK_DEFAULT;
-		return 9;
+		return len;
 	}
+
+	len = str_has_prefix(str, "off");
+	if (len) {
+		devkmsg_log = DEVKMSG_LOG_MASK_OFF;
+		return len;
+	}
+
+	len = str_has_prefix(str, "ratelimit");
+	if (len) {
+		devkmsg_log = DEVKMSG_LOG_MASK_DEFAULT;
+		return len;
+	}
+
 	return -EINVAL;
 }
 
@@ -238,7 +248,7 @@ static void __up_console_sem(unsigned long ip)
 {
 	unsigned long flags;
 
-	mutex_release(&console_lock_dep_map, ip);
+	mutex_release(&console_lock_dep_map, 1, ip);
 
 	printk_safe_enter_irqsave(flags);
 	up(&console_sem);
@@ -1179,14 +1189,7 @@ void __init setup_log_buf(int early)
 	if (!new_log_buf_len)
 		return;
 
-	if (early) {
-		new_log_buf =
-			memblock_alloc(new_log_buf_len, LOG_ALIGN);
-	} else {
-		new_log_buf = memblock_alloc_nopanic(new_log_buf_len,
-							  LOG_ALIGN);
-	}
-
+	new_log_buf = memblock_alloc(new_log_buf_len, LOG_ALIGN);
 	if (unlikely(!new_log_buf)) {
 		pr_err("log_buf_len: %lu bytes not available\n",
 			new_log_buf_len);
@@ -1704,20 +1707,20 @@ static int console_lock_spinning_disable_and_check(void)
 	raw_spin_unlock(&console_owner_lock);
 
 	if (!waiter) {
-		spin_release(&console_owner_dep_map, _THIS_IP_);
+		spin_release(&console_owner_dep_map, 1, _THIS_IP_);
 		return 0;
 	}
 
 	/* The waiter is now free to continue */
 	WRITE_ONCE(console_waiter, false);
 
-	spin_release(&console_owner_dep_map, _THIS_IP_);
+	spin_release(&console_owner_dep_map, 1, _THIS_IP_);
 
 	/*
 	 * Hand off console_lock to waiter. The waiter will perform
 	 * the up(). After this, the waiter is the console_lock owner.
 	 */
-	mutex_release(&console_lock_dep_map, _THIS_IP_);
+	mutex_release(&console_lock_dep_map, 1, _THIS_IP_);
 	return 1;
 }
 
@@ -1771,7 +1774,7 @@ static int console_trylock_spinning(void)
 	/* Owner will clear console_waiter on hand off */
 	while (READ_ONCE(console_waiter))
 		cpu_relax();
-	spin_release(&console_owner_dep_map, _THIS_IP_);
+	spin_release(&console_owner_dep_map, 1, _THIS_IP_);
 
 	printk_safe_exit_irqrestore(flags);
 	/*
@@ -2189,6 +2192,9 @@ static int __init console_setup(char *str)
 	char buf[sizeof(console_cmdline[0].name) + 4]; /* 4 for "ttyS" */
 	char *s, *options, *brl_options = NULL;
 	int idx;
+
+	if (str[0] == 0)
+		return 1;
 
 	if (_braille_console_setup(&str, &brl_options))
 		return 1;
@@ -2795,8 +2801,6 @@ void register_console(struct console *newcon)
 		 * for us.
 		 */
 		logbuf_lock_irqsave(flags);
-		console_seq = syslog_seq;
-		console_idx = syslog_idx;
 		/*
 		 * We're about to replay the log buffer.  Only do this to the
 		 * just-registered console to avoid excessive message spam to
@@ -2808,6 +2812,8 @@ void register_console(struct console *newcon)
 		 */
 		exclusive_console = newcon;
 		exclusive_console_stop_seq = console_seq;
+		console_seq = syslog_seq;
+		console_idx = syslog_idx;
 		logbuf_unlock_irqrestore(flags);
 	}
 	console_unlock();
@@ -3315,7 +3321,7 @@ bool kmsg_dump_get_buffer(struct kmsg_dumper *dumper, bool syslog,
 	/* move first record forward until length fits into the buffer */
 	seq = dumper->cur_seq;
 	idx = dumper->cur_idx;
-	while (l > size && seq < dumper->next_seq) {
+	while (l >= size && seq < dumper->next_seq) {
 		struct printk_log *msg = log_from_idx(idx);
 
 		l -= msg_print_text(msg, true, time, NULL, 0);

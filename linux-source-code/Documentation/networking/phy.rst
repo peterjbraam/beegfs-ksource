@@ -73,7 +73,7 @@ The Reduced Gigabit Medium Independent Interface (RGMII) is a 12-pin
 electrical signal interface using a synchronous 125Mhz clock signal and several
 data lines. Due to this design decision, a 1.5ns to 2ns delay must be added
 between the clock line (RXC or TXC) and the data lines to let the PHY (clock
-sink) have a large enough setup and hold time to sample the data lines correctly. The
+sink) have enough setup and hold times to sample the data lines correctly. The
 PHY library offers different types of PHY_INTERFACE_MODE_RGMII* values to let
 the PHY driver and optionally the MAC driver, implement the required delay. The
 values of phy_interface_t must be understood from the perspective of the PHY
@@ -352,8 +352,7 @@ Fills the phydev structure with up-to-date information about the current
 settings in the PHY.
 ::
 
- int phy_ethtool_ksettings_set(struct phy_device *phydev,
-                               const struct ethtool_link_ksettings *cmd);
+ int phy_ethtool_sset(struct phy_device *phydev, struct ethtool_cmd *cmd);
 
 Ethtool convenience functions.
 ::
@@ -469,9 +468,8 @@ phy_register_fixup_for_id()::
 The stubs set one of the two matching criteria, and set the other one to
 match anything.
 
-When phy_register_fixup() or \*_for_uid()/\*_for_id() is called at module load
-time, the module needs to unregister the fixup and free allocated memory when
-it's unloaded.
+When phy_register_fixup() or \*_for_uid()/\*_for_id() is called at module,
+unregister fixup and free allocate memory are required.
 
 Call one of following function before unloading module::
 

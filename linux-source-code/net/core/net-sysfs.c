@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * net-sysfs.c - network device class and attributes
  *
  * Copyright (c) 2003 Stephen Hemminger <shemminger@osdl.org>
- *
- *	This program is free software; you can redistribute it and/or
- *	modify it under the terms of the GNU General Public License
- *	as published by the Free Software Foundation; either version
- *	2 of the License, or (at your option) any later version.
  */
 
 #include <linux/capability.h>
@@ -15,7 +11,6 @@
 #include <linux/if_arp.h>
 #include <linux/slab.h>
 #include <linux/sched/signal.h>
-#include <linux/sched/isolation.h>
 #include <linux/nsproxy.h>
 #include <net/sock.h>
 #include <net/net_namespace.h>
@@ -555,7 +550,7 @@ static ssize_t netstat_show(const struct device *d,
 	struct net_device *dev = to_net_dev(d);
 	ssize_t ret = -EINVAL;
 
-	WARN_ON(offset > sizeof_rtnl_link_stats64 ||
+	WARN_ON(offset > sizeof(struct rtnl_link_stats64) ||
 		offset % sizeof(u64) != 0);
 
 	read_lock(&dev_base_lock);
@@ -715,7 +710,7 @@ static ssize_t store_rps_map(struct netdev_rx_queue *queue,
 {
 	struct rps_map *old_map, *map;
 	cpumask_var_t mask;
-	int err, cpu, i, hk_flags;
+	int err, cpu, i;
 	static DEFINE_MUTEX(rps_map_mutex);
 
 	if (!capable(CAP_NET_ADMIN))
@@ -728,15 +723,6 @@ static ssize_t store_rps_map(struct netdev_rx_queue *queue,
 	if (err) {
 		free_cpumask_var(mask);
 		return err;
-	}
-
-	if (!cpumask_empty(mask)) {
-		hk_flags = HK_FLAG_DOMAIN | HK_FLAG_WQ;
-		cpumask_and(mask, mask, housekeeping_cpumask(hk_flags));
-		if (cpumask_empty(mask)) {
-			free_cpumask_var(mask);
-			return -EINVAL;
-		}
 	}
 
 	map = kzalloc(max_t(unsigned int,
@@ -873,6 +859,7 @@ static struct attribute *rx_queue_default_attrs[] __ro_after_init = {
 #endif
 	NULL
 };
+ATTRIBUTE_GROUPS(rx_queue_default);
 
 static void rx_queue_release(struct kobject *kobj)
 {
@@ -910,11 +897,20 @@ static const void *rx_queue_namespace(struct kobject *kobj)
 	return ns;
 }
 
+static void rx_queue_get_ownership(struct kobject *kobj,
+				   kuid_t *uid, kgid_t *gid)
+{
+	const struct net *net = rx_queue_namespace(kobj);
+
+	net_ns_get_ownership(net, uid, gid);
+}
+
 static struct kobj_type rx_queue_ktype __ro_after_init = {
 	.sysfs_ops = &rx_queue_sysfs_ops,
 	.release = rx_queue_release,
-	.default_attrs = rx_queue_default_attrs,
-	.namespace = rx_queue_namespace
+	.default_groups = rx_queue_default_groups,
+	.namespace = rx_queue_namespace,
+	.get_ownership = rx_queue_get_ownership,
 };
 
 static int rx_queue_add_kobject(struct net_device *dev, int index)
@@ -923,23 +919,46 @@ static int rx_queue_add_kobject(struct net_device *dev, int index)
 	struct kobject *kobj = &queue->kobj;
 	int error = 0;
 
+	/* Kobject_put later will trigger rx_queue_release call which
+	 * decreases dev refcount: Take that reference here
+	 */
+	dev_hold(queue->dev);
+
 	kobj->kset = dev->queues_kset;
 	error = kobject_init_and_add(kobj, &rx_queue_ktype, NULL,
 				     "rx-%u", index);
 	if (error)
-		return error;
-
-	dev_hold(queue->dev);
+		goto err;
 
 	if (dev->sysfs_rx_queue_group) {
 		error = sysfs_create_group(kobj, dev->sysfs_rx_queue_group);
-		if (error) {
-			kobject_put(kobj);
-			return error;
-		}
+		if (error)
+			goto err;
 	}
 
 	kobject_uevent(kobj, KOBJ_ADD);
+
+	return error;
+
+err:
+	kobject_put(kobj);
+	return error;
+}
+
+static int rx_queue_change_owner(struct net_device *dev, int index, kuid_t kuid,
+				 kgid_t kgid)
+{
+	struct netdev_rx_queue *queue = dev->_rx + index;
+	struct kobject *kobj = &queue->kobj;
+	int error;
+
+	error = sysfs_change_owner(kobj, kuid, kgid);
+	if (error)
+		return error;
+
+	if (dev->sysfs_rx_queue_group)
+		error = sysfs_group_change_owner(
+			kobj, dev->sysfs_rx_queue_group, kuid, kgid);
 
 	return error;
 }
@@ -972,6 +991,29 @@ net_rx_queue_update_kobjects(struct net_device *dev, int old_num, int new_num)
 		if (dev->sysfs_rx_queue_group)
 			sysfs_remove_group(kobj, dev->sysfs_rx_queue_group);
 		kobject_put(kobj);
+	}
+
+	return error;
+#else
+	return 0;
+#endif
+}
+
+static int net_rx_queue_change_owner(struct net_device *dev, int num,
+				     kuid_t kuid, kgid_t kgid)
+{
+#ifdef CONFIG_SYSFS
+	int error = 0;
+	int i;
+
+#ifndef CONFIG_RPS
+	if (!dev->sysfs_rx_queue_group)
+		return 0;
+#endif
+	for (i = 0; i < num; i++) {
+		error = rx_queue_change_owner(dev, i, kuid, kgid);
+		if (error)
+			break;
 	}
 
 	return error;
@@ -1035,7 +1077,7 @@ static ssize_t tx_timeout_show(struct netdev_queue *queue, char *buf)
 	trans_timeout = queue->trans_timeout;
 	spin_unlock_irq(&queue->_xmit_lock);
 
-	return sprintf(buf, "%lu", trans_timeout);
+	return sprintf(buf, fmt_ulong, trans_timeout);
 }
 
 static unsigned int get_netdev_queue_index(struct netdev_queue *queue)
@@ -1092,6 +1134,9 @@ static ssize_t tx_maxrate_store(struct netdev_queue *queue,
 	struct net_device *dev = queue->dev;
 	int err, index = get_netdev_queue_index(queue);
 	u32 rate = 0;
+
+	if (!capable(CAP_NET_ADMIN))
+		return -EPERM;
 
 	err = kstrtou32(buf, 10, &rate);
 	if (err < 0)
@@ -1335,8 +1380,7 @@ static ssize_t xps_rxqs_show(struct netdev_queue *queue, char *buf)
 		if (tc < 0)
 			return -EINVAL;
 	}
-	mask = kcalloc(BITS_TO_LONGS(dev->num_rx_queues), sizeof(long),
-		       GFP_KERNEL);
+	mask = bitmap_zalloc(dev->num_rx_queues, GFP_KERNEL);
 	if (!mask)
 		return -ENOMEM;
 
@@ -1365,7 +1409,7 @@ out_no_maps:
 	rcu_read_unlock();
 
 	len = bitmap_print_to_pagebuf(false, buf, mask, dev->num_rx_queues);
-	kfree(mask);
+	bitmap_free(mask);
 
 	return len < PAGE_SIZE ? len : -EINVAL;
 }
@@ -1381,8 +1425,7 @@ static ssize_t xps_rxqs_store(struct netdev_queue *queue, const char *buf,
 	if (!ns_capable(net->user_ns, CAP_NET_ADMIN))
 		return -EPERM;
 
-	mask = kcalloc(BITS_TO_LONGS(dev->num_rx_queues), sizeof(long),
-		       GFP_KERNEL);
+	mask = bitmap_zalloc(dev->num_rx_queues, GFP_KERNEL);
 	if (!mask)
 		return -ENOMEM;
 
@@ -1390,7 +1433,7 @@ static ssize_t xps_rxqs_store(struct netdev_queue *queue, const char *buf,
 
 	err = bitmap_parse(buf, len, mask, dev->num_rx_queues);
 	if (err) {
-		kfree(mask);
+		bitmap_free(mask);
 		return err;
 	}
 
@@ -1398,7 +1441,7 @@ static ssize_t xps_rxqs_store(struct netdev_queue *queue, const char *buf,
 	err = __netif_set_xps_queue(dev, mask, index, true);
 	cpus_read_unlock();
 
-	kfree(mask);
+	bitmap_free(mask);
 	return err ? : len;
 }
 
@@ -1416,6 +1459,7 @@ static struct attribute *netdev_queue_default_attrs[] __ro_after_init = {
 #endif
 	NULL
 };
+ATTRIBUTE_GROUPS(netdev_queue_default);
 
 static void netdev_queue_release(struct kobject *kobj)
 {
@@ -1437,11 +1481,20 @@ static const void *netdev_queue_namespace(struct kobject *kobj)
 	return ns;
 }
 
+static void netdev_queue_get_ownership(struct kobject *kobj,
+				       kuid_t *uid, kgid_t *gid)
+{
+	const struct net *net = netdev_queue_namespace(kobj);
+
+	net_ns_get_ownership(net, uid, gid);
+}
+
 static struct kobj_type netdev_queue_ktype __ro_after_init = {
 	.sysfs_ops = &netdev_queue_sysfs_ops,
 	.release = netdev_queue_release,
-	.default_attrs = netdev_queue_default_attrs,
+	.default_groups = netdev_queue_default_groups,
 	.namespace = netdev_queue_namespace,
+	.get_ownership = netdev_queue_get_ownership,
 };
 
 static int netdev_queue_add_kobject(struct net_device *dev, int index)
@@ -1450,25 +1503,46 @@ static int netdev_queue_add_kobject(struct net_device *dev, int index)
 	struct kobject *kobj = &queue->kobj;
 	int error = 0;
 
+	/* Kobject_put later will trigger netdev_queue_release call
+	 * which decreases dev refcount: Take that reference here
+	 */
+	dev_hold(queue->dev);
+
 	kobj->kset = dev->queues_kset;
 	error = kobject_init_and_add(kobj, &netdev_queue_ktype, NULL,
 				     "tx-%u", index);
 	if (error)
-		return error;
-
-	dev_hold(queue->dev);
+		goto err;
 
 #ifdef CONFIG_BQL
 	error = sysfs_create_group(kobj, &dql_group);
-	if (error) {
-		kobject_put(kobj);
-		return error;
-	}
+	if (error)
+		goto err;
 #endif
 
 	kobject_uevent(kobj, KOBJ_ADD);
-
 	return 0;
+
+err:
+	kobject_put(kobj);
+	return error;
+}
+
+static int tx_queue_change_owner(struct net_device *ndev, int index,
+				 kuid_t kuid, kgid_t kgid)
+{
+	struct netdev_queue *queue = ndev->_tx + index;
+	struct kobject *kobj = &queue->kobj;
+	int error;
+
+	error = sysfs_change_owner(kobj, kuid, kgid);
+	if (error)
+		return error;
+
+#ifdef CONFIG_BQL
+	error = sysfs_group_change_owner(kobj, &dql_group, kuid, kgid);
+#endif
+	return error;
 }
 #endif /* CONFIG_SYSFS */
 
@@ -1496,6 +1570,25 @@ netdev_queue_update_kobjects(struct net_device *dev, int old_num, int new_num)
 		sysfs_remove_group(&queue->kobj, &dql_group);
 #endif
 		kobject_put(&queue->kobj);
+	}
+
+	return error;
+#else
+	return 0;
+#endif /* CONFIG_SYSFS */
+}
+
+static int net_tx_queue_change_owner(struct net_device *dev, int num,
+				     kuid_t kuid, kgid_t kgid)
+{
+#ifdef CONFIG_SYSFS
+	int error = 0;
+	int i;
+
+	for (i = 0; i < num; i++) {
+		error = tx_queue_change_owner(dev, i, kuid, kgid);
+		if (error)
+			break;
 	}
 
 	return error;
@@ -1536,6 +1629,31 @@ error:
 	kset_unregister(dev->queues_kset);
 #endif
 	return error;
+}
+
+static int queue_change_owner(struct net_device *ndev, kuid_t kuid, kgid_t kgid)
+{
+	int error = 0, real_rx = 0, real_tx = 0;
+
+#ifdef CONFIG_SYSFS
+	if (ndev->queues_kset) {
+		error = sysfs_change_owner(&ndev->queues_kset->kobj, kuid, kgid);
+		if (error)
+			return error;
+	}
+	real_rx = ndev->real_num_rx_queues;
+#endif
+	real_tx = ndev->real_num_tx_queues;
+
+	error = net_rx_queue_change_owner(ndev, real_rx, kuid, kgid);
+	if (error)
+		return error;
+
+	error = net_tx_queue_change_owner(ndev, real_tx, kuid, kgid);
+	if (error)
+		return error;
+
+	return 0;
 }
 
 static void remove_queue_kobjects(struct net_device *dev)
@@ -1635,6 +1753,14 @@ static const void *net_namespace(struct device *d)
 	return dev_net(dev);
 }
 
+static void net_get_ownership(struct device *d, kuid_t *uid, kgid_t *gid)
+{
+	struct net_device *dev = to_net_dev(d);
+	const struct net *net = dev_net(dev);
+
+	net_ns_get_ownership(net, uid, gid);
+}
+
 static struct class net_class __ro_after_init = {
 	.name = "net",
 	.dev_release = netdev_release,
@@ -1642,6 +1768,7 @@ static struct class net_class __ro_after_init = {
 	.dev_uevent = netdev_uevent,
 	.ns_type = &net_ns_type_operations,
 	.namespace = net_namespace,
+	.get_ownership = net_get_ownership,
 };
 
 #ifdef CONFIG_OF_NET
@@ -1740,6 +1867,37 @@ int netdev_register_kobject(struct net_device *ndev)
 	pm_runtime_set_memalloc_noio(dev, true);
 
 	return error;
+}
+
+/* Change owner for sysfs entries when moving network devices across network
+ * namespaces owned by different user namespaces.
+ */
+int netdev_change_owner(struct net_device *ndev, const struct net *net_old,
+			const struct net *net_new)
+{
+	struct device *dev = &ndev->dev;
+	kuid_t old_uid, new_uid;
+	kgid_t old_gid, new_gid;
+	int error;
+
+	net_ns_get_ownership(net_old, &old_uid, &old_gid);
+	net_ns_get_ownership(net_new, &new_uid, &new_gid);
+
+	/* The network namespace was changed but the owning user namespace is
+	 * identical so there's no need to change the owner of sysfs entries.
+	 */
+	if (uid_eq(old_uid, new_uid) && gid_eq(old_gid, new_gid))
+		return 0;
+
+	error = device_change_owner(dev, new_uid, new_gid);
+	if (error)
+		return error;
+
+	error = queue_change_owner(ndev, new_uid, new_gid);
+	if (error)
+		return error;
+
+	return 0;
 }
 
 int netdev_class_create_file_ns(const struct class_attribute *class_attr,

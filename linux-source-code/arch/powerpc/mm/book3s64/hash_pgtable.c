@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright 2005, Paul Mackerras, IBM Corporation.
  * Copyright 2009, Benjamin Herrenschmidt, IBM Corporation.
  * Copyright 2015-2016, Aneesh Kumar K.V, IBM Corporation.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 
 #include <linux/sched.h>
@@ -112,9 +108,16 @@ int __meminit hash__vmemmap_create_mapping(unsigned long start,
 				       unsigned long page_size,
 				       unsigned long phys)
 {
-	int rc = htab_bolt_mapping(start, start + page_size, phys,
-				   pgprot_val(PAGE_KERNEL),
-				   mmu_vmemmap_psize, mmu_kernel_ssize);
+	int rc;
+
+	if ((start + page_size) >= H_VMEMMAP_END) {
+		pr_warn("Outside the supported range\n");
+		return -1;
+	}
+
+	rc = htab_bolt_mapping(start, start + page_size, phys,
+			       pgprot_val(PAGE_KERNEL),
+			       mmu_vmemmap_psize, mmu_kernel_ssize);
 	if (rc < 0) {
 		int rc2 = htab_remove_mapping(start, start + page_size,
 					      mmu_vmemmap_psize,
@@ -360,6 +363,17 @@ pmd_t hash__pmdp_huge_get_and_clear(struct mm_struct *mm,
 	 * hash fault look at them.
 	 */
 	memset(pgtable, 0, PTE_FRAG_SIZE);
+	/*
+	 * Serialize against find_current_mm_pte variants which does lock-less
+	 * lookup in page tables with local interrupts disabled. For huge pages
+	 * it casts pmd_t to pte_t. Since format of pte_t is different from
+	 * pmd_t we want to prevent transit from pmd pointing to page table
+	 * to pmd pointing to huge page (and back) while interrupts are disabled.
+	 * We clear pmd to possibly replace it with page table pointer in
+	 * different code paths. So make sure we wait for the parallel
+	 * find_curren_mm_pte to finish.
+	 */
+	serialize_against_pte_lookup(mm);
 	return old_pmd;
 }
 
@@ -392,6 +406,8 @@ int hash__has_transparent_hugepage(void)
 
 	return 1;
 }
+EXPORT_SYMBOL_GPL(hash__has_transparent_hugepage);
+
 #endif /* CONFIG_TRANSPARENT_HUGEPAGE */
 
 #ifdef CONFIG_STRICT_KERNEL_RWX

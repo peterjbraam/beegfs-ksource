@@ -79,9 +79,10 @@ static void cw1200_queue_register_post_gc(struct list_head *gc_list,
 					  struct cw1200_queue_item *item)
 {
 	struct cw1200_queue_item *gc_item;
-	gc_item = kmemdup(item, sizeof(struct cw1200_queue_item),
+	gc_item = kmalloc(sizeof(struct cw1200_queue_item),
 			GFP_ATOMIC);
 	BUG_ON(!gc_item);
+	memcpy(gc_item, item, sizeof(struct cw1200_queue_item));
 	list_add_tail(&gc_item->head, gc_list);
 }
 
@@ -279,7 +280,6 @@ int cw1200_queue_put(struct cw1200_queue *queue,
 		     struct cw1200_txpriv *txpriv)
 {
 	int ret = 0;
-	LIST_HEAD(gc_list);
 	struct cw1200_queue_stats *stats = queue->stats;
 
 	if (txpriv->link_id >= queue->stats->map_capacity)

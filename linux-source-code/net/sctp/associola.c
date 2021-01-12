@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* SCTP kernel implementation
  * (C) Copyright IBM Corp. 2001, 2004
  * Copyright (c) 1999-2000 Cisco, Inc.
@@ -8,22 +9,6 @@
  * This file is part of the SCTP kernel implementation
  *
  * This module provides the abstraction for an SCTP association.
- *
- * This SCTP implementation is free software;
- * you can redistribute it and/or modify it under the terms of
- * the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This SCTP implementation is distributed in the hope that it
- * will be useful, but WITHOUT ANY WARRANTY; without even the implied
- *                 ************************
- * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
- * See the GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with GNU CC; see the file COPYING.  If not, see
- * <http://www.gnu.org/licenses/>.
  *
  * Please send any bug reports or fixes you make to the
  * email address(es):
@@ -340,7 +325,7 @@ void sctp_association_free(struct sctp_association *asoc)
 		 * socket.
 		 */
 		if (sctp_style(sk, TCP) && sctp_sstate(sk, LISTENING))
-			sk_acceptq_removed(sk);
+			sk->sk_ack_backlog--;
 	}
 
 	/* Mark as dead, so other users can know this structure is
@@ -445,8 +430,6 @@ void sctp_assoc_set_primary(struct sctp_association *asoc,
 		changeover = 1 ;
 
 	asoc->peer.primary_path = transport;
-	sctp_ulpevent_notify_peer_addr_change(transport,
-					      SCTP_ADDR_MADE_PRIM, 0);
 
 	/* Set a default msg_name for events. */
 	memcpy(&asoc->peer.primary_addr, &transport->ipaddr,
@@ -587,7 +570,6 @@ void sctp_assoc_rm_peer(struct sctp_association *asoc,
 
 	asoc->peer.transport_count--;
 
-	sctp_ulpevent_notify_peer_addr_change(peer, SCTP_ADDR_REMOVED, 0);
 	sctp_transport_free(peer);
 }
 
@@ -726,8 +708,6 @@ struct sctp_transport *sctp_assoc_add_peer(struct sctp_association *asoc,
 	list_add_tail_rcu(&peer->transports, &asoc->peer.transport_addr_list);
 	asoc->peer.transport_count++;
 
-	sctp_ulpevent_notify_peer_addr_change(peer, SCTP_ADDR_ADDED, 0);
-
 	/* If we do not yet have a primary path, set one.  */
 	if (!asoc->peer.primary_path) {
 		sctp_assoc_set_primary(asoc, peer);
@@ -802,8 +782,10 @@ void sctp_assoc_control_transport(struct sctp_association *asoc,
 				  enum sctp_transport_cmd command,
 				  sctp_sn_error_t error)
 {
-	bool ulp_notify = true;
+	struct sctp_ulpevent *event;
+	struct sockaddr_storage addr;
 	int spc_state = 0;
+	bool ulp_notify = true;
 
 	/* Record the transition on the transport.  */
 	switch (command) {
@@ -855,9 +837,16 @@ void sctp_assoc_control_transport(struct sctp_association *asoc,
 	/* Generate and send a SCTP_PEER_ADDR_CHANGE notification
 	 * to the user.
 	 */
-	if (ulp_notify)
-		sctp_ulpevent_notify_peer_addr_change(transport,
-						      spc_state, error);
+	if (ulp_notify) {
+		memset(&addr, 0, sizeof(struct sockaddr_storage));
+		memcpy(&addr, &transport->ipaddr,
+		       transport->af_specific->sockaddr_len);
+
+		event = sctp_ulpevent_make_peer_addr_change(asoc, &addr,
+					0, spc_state, error, GFP_ATOMIC);
+		if (event)
+			asoc->stream.si->enqueue_event(&asoc->ulpq, event);
+	}
 
 	/* Select new active and retran paths. */
 	sctp_select_active_and_retran_path(asoc);
@@ -1089,7 +1078,7 @@ void sctp_assoc_migrate(struct sctp_association *assoc, struct sock *newsk)
 
 	/* Decrement the backlog value for a TCP-style socket. */
 	if (sctp_style(oldsk, TCP))
-		sk_acceptq_removed(oldsk);
+		oldsk->sk_ack_backlog--;
 
 	/* Release references to the old endpoint and the sock.  */
 	sctp_endpoint_put(assoc->ep);

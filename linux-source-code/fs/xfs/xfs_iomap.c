@@ -54,7 +54,7 @@ xfs_bmbt_to_iomap(
 	struct xfs_inode	*ip,
 	struct iomap		*iomap,
 	struct xfs_bmbt_irec	*imap,
-	u16			flags)
+	bool			shared)
 {
 	struct xfs_mount	*mp = ip->i_mount;
 
@@ -79,11 +79,12 @@ xfs_bmbt_to_iomap(
 	iomap->length = XFS_FSB_TO_B(mp, imap->br_blockcount);
 	iomap->bdev = xfs_find_bdev_for_inode(VFS_I(ip));
 	iomap->dax_dev = xfs_find_daxdev_for_inode(VFS_I(ip));
-	iomap->flags = flags;
 
 	if (xfs_ipincount(ip) &&
 	    (ip->i_itemp->ili_fsync_fields & ~XFS_ILOG_TIMESTAMP))
 		iomap->flags |= IOMAP_F_DIRTY;
+	if (shared)
+		iomap->flags |= IOMAP_F_SHARED;
 	return 0;
 }
 
@@ -539,7 +540,6 @@ xfs_file_iomap_begin_delay(
 	struct xfs_iext_cursor	icur, ccur;
 	xfs_fsblock_t		prealloc_blocks = 0;
 	bool			eof = false, cow_eof = false, shared = false;
-	u16			iomap_flags = 0;
 	int			whichfork = XFS_DATA_FORK;
 	int			error = 0;
 
@@ -707,28 +707,22 @@ retry:
 	 * Flag newly allocated delalloc blocks with IOMAP_F_NEW so we punch
 	 * them out if the write happens to fail.
 	 */
-	if (whichfork == XFS_DATA_FORK) {
-		iomap_flags |= IOMAP_F_NEW;
-		trace_xfs_iomap_alloc(ip, offset, count, whichfork, &imap);
-	} else {
-		trace_xfs_iomap_alloc(ip, offset, count, whichfork, &cmap);
-	}
+	iomap->flags |= IOMAP_F_NEW;
+	trace_xfs_iomap_alloc(ip, offset, count, whichfork,
+			whichfork == XFS_DATA_FORK ? &imap : &cmap);
 done:
 	if (whichfork == XFS_COW_FORK) {
 		if (imap.br_startoff > offset_fsb) {
 			xfs_trim_extent(&cmap, offset_fsb,
 					imap.br_startoff - offset_fsb);
-			error = xfs_bmbt_to_iomap(ip, iomap, &cmap,
-					IOMAP_F_SHARED);
+			error = xfs_bmbt_to_iomap(ip, iomap, &cmap, true);
 			goto out_unlock;
 		}
 		/* ensure we only report blocks we have a reservation for */
 		xfs_trim_extent(&imap, cmap.br_startoff, cmap.br_blockcount);
 		shared = true;
 	}
-	if (shared)
-		iomap_flags |= IOMAP_F_SHARED;
-	error = xfs_bmbt_to_iomap(ip, iomap, &imap, iomap_flags);
+	error = xfs_bmbt_to_iomap(ip, iomap, &imap, shared);
 out_unlock:
 	xfs_iunlock(ip, XFS_ILOCK_EXCL);
 	return error;
@@ -771,11 +765,6 @@ xfs_iomap_write_unwritten(
 	 */
 	resblks = XFS_DIOSTRAT_SPACE_RES(mp, 0) << 1;
 
-	/* Attach dquots so that bmbt splits are accounted correctly. */
-	error = xfs_qm_dqattach(ip);
-	if (error)
-		return error;
-
 	do {
 		/*
 		 * Set up a transaction to convert the range of extents
@@ -793,11 +782,6 @@ xfs_iomap_write_unwritten(
 
 		xfs_ilock(ip, XFS_ILOCK_EXCL);
 		xfs_trans_ijoin(tp, ip, 0);
-
-		error = xfs_trans_reserve_quota_nblks(tp, ip, resblks, 0,
-				XFS_QMOPT_RES_REGBLKS);
-		if (error)
-			goto error_on_bmapi_transaction;
 
 		/*
 		 * Modify the unwritten extent state of the buffer.
@@ -938,8 +922,7 @@ xfs_file_iomap_begin(
 	loff_t			offset,
 	loff_t			length,
 	unsigned		flags,
-	struct iomap		*iomap,
-	struct iomap		*srcmap)
+	struct iomap		*iomap)
 {
 	struct xfs_inode	*ip = XFS_I(inode);
 	struct xfs_mount	*mp = ip->i_mount;
@@ -947,7 +930,6 @@ xfs_file_iomap_begin(
 	xfs_fileoff_t		offset_fsb, end_fsb;
 	int			nimaps = 1, error = 0;
 	bool			shared = false;
-	u16			iomap_flags = 0;
 	unsigned		lockmode;
 
 	if (XFS_FORCED_SHUTDOWN(mp))
@@ -1020,9 +1002,15 @@ xfs_file_iomap_begin(
 		 * I/O, which must be block aligned, we need to report the
 		 * newly allocated address.  If the data fork has a hole, copy
 		 * the COW fork mapping to avoid allocating to the data fork.
+		 *
+		 * Otherwise, ensure that the imap range does not extend past
+		 * the range allocated/found in cmap.
 		 */
 		if (directio || imap.br_startblock == HOLESTARTBLOCK)
 			imap = cmap;
+		else
+			xfs_trim_extent(&imap, cmap.br_startoff,
+					cmap.br_blockcount);
 
 		end_fsb = imap.br_startoff + imap.br_blockcount;
 		length = XFS_FSB_TO_B(mp, end_fsb) - offset;
@@ -1063,20 +1051,11 @@ xfs_file_iomap_begin(
 	if (error)
 		return error;
 
-	iomap_flags |= IOMAP_F_NEW;
+	iomap->flags |= IOMAP_F_NEW;
 	trace_xfs_iomap_alloc(ip, offset, length, XFS_DATA_FORK, &imap);
 
 out_finish:
-	/*
-	 * Writes that span EOF might trigger an IO size update on completion,
-	 * so consider them to be dirty for the purposes of O_DSYNC even if
-	 * there is no other metadata changes pending or have been made here.
-	 */
-	if ((flags & IOMAP_WRITE) && offset + length > i_size_read(inode))
-		iomap_flags |= IOMAP_F_DIRTY;
-	if (shared)
-		iomap_flags |= IOMAP_F_SHARED;
-	return xfs_bmbt_to_iomap(ip, iomap, &imap, iomap_flags);
+	return xfs_bmbt_to_iomap(ip, iomap, &imap, shared);
 
 out_found:
 	ASSERT(nimaps);
@@ -1172,8 +1151,7 @@ xfs_seek_iomap_begin(
 	loff_t			offset,
 	loff_t			length,
 	unsigned		flags,
-	struct iomap		*iomap,
-	struct iomap		*srcmap)
+	struct iomap		*iomap)
 {
 	struct xfs_inode	*ip = XFS_I(inode);
 	struct xfs_mount	*mp = ip->i_mount;
@@ -1221,7 +1199,7 @@ xfs_seek_iomap_begin(
 		if (data_fsb < cow_fsb + cmap.br_blockcount)
 			end_fsb = min(end_fsb, data_fsb);
 		xfs_trim_extent(&cmap, offset_fsb, end_fsb);
-		error = xfs_bmbt_to_iomap(ip, iomap, &cmap, IOMAP_F_SHARED);
+		error = xfs_bmbt_to_iomap(ip, iomap, &cmap, true);
 		/*
 		 * This is a COW extent, so we must probe the page cache
 		 * because there could be dirty page cache being backed
@@ -1243,7 +1221,7 @@ xfs_seek_iomap_begin(
 	imap.br_state = XFS_EXT_NORM;
 done:
 	xfs_trim_extent(&imap, offset_fsb, end_fsb);
-	error = xfs_bmbt_to_iomap(ip, iomap, &imap, 0);
+	error = xfs_bmbt_to_iomap(ip, iomap, &imap, false);
 out_unlock:
 	xfs_iunlock(ip, lockmode);
 	return error;
@@ -1259,8 +1237,7 @@ xfs_xattr_iomap_begin(
 	loff_t			offset,
 	loff_t			length,
 	unsigned		flags,
-	struct iomap		*iomap,
-	struct iomap		*srcmap)
+	struct iomap		*iomap)
 {
 	struct xfs_inode	*ip = XFS_I(inode);
 	struct xfs_mount	*mp = ip->i_mount;
@@ -1290,7 +1267,7 @@ out_unlock:
 	if (error)
 		return error;
 	ASSERT(nimaps);
-	return xfs_bmbt_to_iomap(ip, iomap, &imap, 0);
+	return xfs_bmbt_to_iomap(ip, iomap, &imap, false);
 }
 
 const struct iomap_ops xfs_xattr_iomap_ops = {

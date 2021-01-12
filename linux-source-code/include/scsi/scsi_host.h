@@ -11,8 +11,6 @@
 #include <linux/blk-mq.h>
 #include <scsi/scsi.h>
 
-#include <linux/rh_kabi.h>
-
 struct block_device;
 struct completion;
 struct module;
@@ -44,9 +42,6 @@ struct scsi_transport_template;
 #define MODE_INITIATOR 0x01
 #define MODE_TARGET 0x02
 
-#define DISABLE_CLUSTERING 0
-#define ENABLE_CLUSTERING 1
-
 struct scsi_host_template {
 	struct module *module;
 	const char *name;
@@ -65,7 +60,8 @@ struct scsi_host_template {
 	 *
 	 * Status: OPTIONAL
 	 */
-	int (* ioctl)(struct scsi_device *dev, int cmd, void __user *arg);
+	int (*ioctl)(struct scsi_device *dev, unsigned int cmd,
+		     void __user *arg);
 
 
 #ifdef CONFIG_COMPAT
@@ -75,7 +71,8 @@ struct scsi_host_template {
 	 *
 	 * Status: OPTIONAL
 	 */
-	int (* compat_ioctl)(struct scsi_device *dev, int cmd, void __user *arg);
+	int (*compat_ioctl)(struct scsi_device *dev, unsigned int cmd,
+			    void __user *arg);
 #endif
 
 	/*
@@ -113,6 +110,16 @@ struct scsi_host_template {
 	 * STATUS: REQUIRED
 	 */
 	int (* queuecommand)(struct Scsi_Host *, struct scsi_cmnd *);
+
+	/*
+	 * The commit_rqs function is used to trigger a hardware
+	 * doorbell after some requests have been queued with
+	 * queuecommand, when an error is encountered before sending
+	 * the request with SCMD_LAST set.
+	 *
+	 * STATUS: OPTIONAL
+	 */
+	void (*commit_rqs)(struct Scsi_Host *, u16);
 
 	/*
 	 * This is an error handling strategy routine.  You don't need to
@@ -305,11 +312,7 @@ struct scsi_host_template {
 	/*
 	 * This is an optional routine that allows the transport to become
 	 * involved when a scsi io timer fires. The return value tells the
-	 * timer routine how to finish the io timeout handling:
-	 * EH_HANDLED:		I fixed the error, please complete the command
-	 * EH_RESET_TIMER:	I need more time, reset the timer and
-	 *			begin counting again
-	 * EH_DONE:		Begin normal error recovery
+	 * timer routine how to finish the io timeout handling.
 	 *
 	 * Status: OPTIONAL
 	 */
@@ -342,7 +345,7 @@ struct scsi_host_template {
 	/*
 	 * This determines if we will use a non-interrupt driven
 	 * or an interrupt driven scheme.  It is set to the maximum number
-	 * of simultaneous commands a single hw queue in HBA will accept.
+	 * of simultaneous commands a given host adapter will accept.
 	 */
 	int can_queue;
 
@@ -368,10 +371,17 @@ struct scsi_host_template {
 	unsigned int max_sectors;
 
 	/*
+	 * Maximum size in bytes of a single segment.
+	 */
+	unsigned int max_segment_size;
+
+	/*
 	 * DMA scatter gather segment boundary limit. A segment crossing this
 	 * boundary will be split in two.
 	 */
 	unsigned long dma_boundary;
+
+	unsigned long virt_boundary_mask;
 
 	/*
 	 * This specifies "machine infinity" for host templates which don't
@@ -415,16 +425,6 @@ struct scsi_host_template {
 	 * True if this host adapter uses unchecked DMA onto an ISA bus.
 	 */
 	unsigned unchecked_isa_dma:1;
-
-	/*
-	 * True if this host adapter can make good use of clustering.
-	 * I originally thought that if the tablesize was large that it
-	 * was a waste of CPU cycles to prepare a cluster list, but
-	 * it works out that the Buslogic is faster if you use a smaller
-	 * number of segments (i.e. use clustering).  I guess it is
-	 * inefficient.
-	 */
-	unsigned use_clustering:1;
 
 	/*
 	 * True for emulated SCSI host adapters (e.g. ATAPI).
@@ -486,26 +486,6 @@ struct scsi_host_template {
 	 */
 	unsigned int cmd_size;
 	struct scsi_host_cmd_pool *cmd_pool;
-
-	/*
-	 * The commit_rqs function is used to trigger a hardware
-	 * doorbell after some requests have been queued with
-	 * queuecommand, when an error is encountered before sending
-	 * the request with SCMD_LAST set.
-	 *
-	 * STATUS: OPTIONAL
-	 */
-	RH_KABI_USE(1, void (*commit_rqs)(struct Scsi_Host *, u16))
-
-	/* FOR RH USE ONLY
-	 *
-	 * The following padding has been inserted before ABI freeze to
-	 * allow extending the structure while preserving ABI.
-	 */
-
-	RH_KABI_RESERVE(2)
-	RH_KABI_RESERVE(3)
-	RH_KABI_RESERVE(4)
 };
 
 /*
@@ -520,7 +500,6 @@ struct scsi_host_template {
 		unsigned long irq_flags;				\
 		int rc;							\
 		spin_lock_irqsave(shost->host_lock, irq_flags);		\
-		scsi_cmd_get_serial(shost, cmd);			\
 		rc = func_name##_lck (cmd, cmd->scsi_done);			\
 		spin_unlock_irqrestore(shost->host_lock, irq_flags);	\
 		return rc;						\
@@ -572,7 +551,7 @@ struct Scsi_Host {
 	/* Area to keep a shared tag map */
 	struct blk_mq_tag_set	tag_set;
 
-	RH_KABI_DEPRECATE(atomic_t, host_busy)  /* commands actually active on low-level */
+	atomic_t host_busy;		   /* commands actually active on low-level */
 	atomic_t host_blocked;
 
 	unsigned int host_failed;	   /* commands that failed.
@@ -620,7 +599,9 @@ struct Scsi_Host {
 	short unsigned int sg_tablesize;
 	short unsigned int sg_prot_tablesize;
 	unsigned int max_sectors;
+	unsigned int max_segment_size;
 	unsigned long dma_boundary;
+	unsigned long virt_boundary_mask;
 	/*
 	 * In scsi-mq mode, the number of hardware queues supported by the LLD.
 	 *
@@ -629,15 +610,8 @@ struct Scsi_Host {
 	 * is nr_hw_queues * can_queue.
 	 */
 	unsigned nr_hw_queues;
-	/* 
-	 * Used to assign serial numbers to the cmds.
-	 * Protected by the host lock.
-	 */
-	unsigned long cmd_serial_number;
-	
 	unsigned active_mode:2;
 	unsigned unchecked_isa_dma:1;
-	unsigned use_clustering:1;
 
 	/*
 	 * Host has requested that no further requests come through for the
@@ -669,6 +643,9 @@ struct Scsi_Host {
 	/* Host responded with short (<36 bytes) INQUIRY result */
 	unsigned short_inquiry:1;
 
+	/* The transport requires the LUN bits NOT to be stored in CDB[1] */
+	unsigned no_scsi2_lun_in_cdb:1;
+
 	/*
 	 * Optional work queue to be utilized by the transport
 	 */
@@ -679,9 +656,6 @@ struct Scsi_Host {
 	 * Task management function work queue
 	 */
 	struct workqueue_struct *tmf_work_q;
-
-	/* The transport requires the LUN bits NOT to be stored in CDB[1] */
-	unsigned no_scsi2_lun_in_cdb:1;
 
 	/*
 	 * Value host_blocked counts down from
@@ -716,18 +690,6 @@ struct Scsi_Host {
 	 * Needed just in case we have virtual hosts.
 	 */
 	struct device *dma_dev;
-
-	/* FOR RH USE ONLY
-	 *
-	 * The following padding has been inserted before ABI freeze to
-	 * allow extending the structure while preserving ABI.
-	 */
-	RH_KABI_RESERVE(1)
-	RH_KABI_RESERVE(2)
-	RH_KABI_RESERVE(3)
-	RH_KABI_RESERVE(4)
-	RH_KABI_RESERVE(5)
-	RH_KABI_RESERVE(6)
 
 	/*
 	 * We should ensure that this is aligned, both for better performance
@@ -784,7 +746,6 @@ extern int scsi_host_busy(struct Scsi_Host *shost);
 extern void scsi_host_put(struct Scsi_Host *t);
 extern struct Scsi_Host *scsi_host_lookup(unsigned short);
 extern const char *scsi_host_state_name(enum scsi_host_state);
-extern void scsi_cmd_get_serial(struct Scsi_Host *, struct scsi_cmnd *);
 
 static inline int __must_check scsi_add_host(struct Scsi_Host *host,
 					     struct device *dev)

@@ -1,19 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2007-2014 Nicira, Inc.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of version 2 of the GNU General Public
- * License as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
- * 02110-1301, USA
  */
 
 #include <linux/uaccess.h>
@@ -327,7 +314,7 @@ static int parse_vlan_tag(struct sk_buff *skb, struct vlan_head *key_vh,
 		return -ENOMEM;
 
 	vh = (struct vlan_head *)skb->data;
-	key_vh->tci = vh->tci | htons(VLAN_TAG_PRESENT);
+	key_vh->tci = vh->tci | htons(VLAN_CFI_MASK);
 	key_vh->tpid = vh->tpid;
 
 	if (unlikely(untag_vlan)) {
@@ -360,7 +347,7 @@ static int parse_vlan(struct sk_buff *skb, struct sw_flow_key *key)
 	int res;
 
 	if (skb_vlan_tag_present(skb)) {
-		key->eth.vlan.tci = htons(skb->vlan_tci);
+		key->eth.vlan.tci = htons(skb->vlan_tci) | htons(VLAN_CFI_MASK);
 		key->eth.vlan.tpid = skb->vlan_proto;
 	} else {
 		/* Parse outer vlan tag in the non-accelerated case. */
@@ -650,35 +637,27 @@ static int key_extract_l3l4(struct sk_buff *skb, struct sw_flow_key *key)
 			memset(&key->ipv4, 0, sizeof(key->ipv4));
 		}
 	} else if (eth_p_mpls(key->eth.type)) {
-		u8 label_count = 1;
+		size_t stack_len = MPLS_HLEN;
 
-		memset(&key->mpls, 0, sizeof(key->mpls));
 		skb_set_inner_network_header(skb, skb->mac_len);
 		while (1) {
 			__be32 lse;
 
-			error = check_header(skb, skb->mac_len +
-					     label_count * MPLS_HLEN);
+			error = check_header(skb, skb->mac_len + stack_len);
 			if (unlikely(error))
 				return 0;
 
 			memcpy(&lse, skb_inner_network_header(skb), MPLS_HLEN);
 
-			if (label_count <= MPLS_LABEL_DEPTH)
-				memcpy(&key->mpls.lse[label_count - 1], &lse,
-				       MPLS_HLEN);
+			if (stack_len == MPLS_HLEN)
+				memcpy(&key->mpls.top_lse, &lse, MPLS_HLEN);
 
-			skb_set_inner_network_header(skb, skb->mac_len +
-						     label_count * MPLS_HLEN);
+			skb_set_inner_network_header(skb, skb->mac_len + stack_len);
 			if (lse & htonl(MPLS_LS_S_MASK))
 				break;
 
-			label_count++;
+			stack_len += MPLS_HLEN;
 		}
-		if (label_count > MPLS_LABEL_DEPTH)
-			label_count = MPLS_LABEL_DEPTH;
-
-		key->mpls.num_labels_mask = GENMASK(label_count - 1, 0);
 	} else if (key->eth.type == htons(ETH_P_IPV6)) {
 		int nh_len;             /* IPv6 Header + Extensions */
 
@@ -812,7 +791,7 @@ static int key_extract(struct sk_buff *skb, struct sw_flow_key *key)
 		 * skb_vlan_pop(), which will later shift the ethertype into
 		 * skb->protocol.
 		 */
-		if (key->eth.cvlan.tci & htons(VLAN_TAG_PRESENT))
+		if (key->eth.cvlan.tci & htons(VLAN_CFI_MASK))
 			skb->protocol = key->eth.cvlan.tpid;
 		else
 			skb->protocol = key->eth.type;

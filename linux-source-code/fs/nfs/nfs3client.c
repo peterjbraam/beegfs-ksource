@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 #include <linux/nfs_fs.h>
 #include <linux/nfs_mount.h>
 #include <linux/sunrpc/addr.h>
@@ -105,10 +106,7 @@ struct nfs_client *nfs3_set_ds_client(struct nfs_server *mds_srv,
 		cl_init.nconnect = mds_clp->cl_nconnect;
 
 	if (mds_srv->flags & NFS_MOUNT_NORESVPORT)
-		__set_bit(NFS_CS_NORESVPORT, &cl_init.init_flags);
-
-	__set_bit(NFS_CS_NOPING, &cl_init.init_flags);
-	__set_bit(NFS_CS_DS, &cl_init.init_flags);
+		set_bit(NFS_CS_NORESVPORT, &cl_init.init_flags);
 
 	/* Use the MDS nfs_client cl_ipaddr. */
 	nfs_init_timeout_values(&ds_timeout, ds_proto, ds_timeo, ds_retrans);

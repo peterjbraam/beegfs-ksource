@@ -1,16 +1,13 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Page table handling routines for radix page table.
  *
  * Copyright 2015-2016, Aneesh Kumar K.V, IBM Corporation.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 
 #define pr_fmt(fmt) "radix-mmu: " fmt
 
+#include <linux/io.h>
 #include <linux/kernel.h>
 #include <linux/sched/mm.h>
 #include <linux/memblock.h>
@@ -29,6 +26,7 @@
 #include <asm/powernv.h>
 #include <asm/sections.h>
 #include <asm/trace.h>
+#include <asm/uaccess.h>
 #include <asm/ultravisor.h>
 
 #include <trace/events/thp.h>
@@ -36,42 +34,25 @@
 unsigned int mmu_pid_bits;
 unsigned int mmu_base_pid;
 
-static int native_register_process_table(unsigned long base, unsigned long pg_sz,
-					 unsigned long table_size)
-{
-	unsigned long patb0, patb1;
-
-	patb0 = be64_to_cpu(partition_tb[0].patb0);
-	patb1 = base | table_size | PATB_GR;
-
-	mmu_partition_table_set_entry(0, patb0, patb1);
-
-	return 0;
-}
-
 static __ref void *early_alloc_pgtable(unsigned long size, int nid,
 			unsigned long region_start, unsigned long region_end)
 {
-	unsigned long pa = 0;
-	void *pt;
+	phys_addr_t min_addr = MEMBLOCK_LOW_LIMIT;
+	phys_addr_t max_addr = MEMBLOCK_ALLOC_ANYWHERE;
+	void *ptr;
 
-	if (region_start || region_end) /* has region hint */
-		pa = memblock_alloc_range(size, size, region_start, region_end,
-						MEMBLOCK_NONE);
-	else if (nid != -1) /* has node hint */
-		pa = memblock_alloc_base_nid(size, size,
-						MEMBLOCK_ALLOC_ANYWHERE,
-						nid, MEMBLOCK_NONE);
+	if (region_start)
+		min_addr = region_start;
+	if (region_end)
+		max_addr = region_end;
 
-	if (!pa)
-		pa = memblock_alloc_base(size, size, MEMBLOCK_ALLOC_ANYWHERE);
+	ptr = memblock_alloc_try_nid(size, size, min_addr, max_addr, nid);
 
-	BUG_ON(!pa);
+	if (!ptr)
+		panic("%s: Failed to allocate %lu bytes align=0x%lx nid=%d from=%pa max_addr=%pa\n",
+		      __func__, size, size, nid, &min_addr, &max_addr);
 
-	pt = __va(pa);
-	memset(pt, 0, size);
-
-	return pt;
+	return ptr;
 }
 
 static int early_map_kernel_page(unsigned long ea, unsigned long pa,
@@ -140,6 +121,10 @@ static int __map_kernel_page(unsigned long ea, unsigned long pa,
 	 */
 	BUILD_BUG_ON(TASK_SIZE_USER64 > RADIX_PGTABLE_RANGE);
 
+#ifdef CONFIG_PPC_64K_PAGES
+	BUILD_BUG_ON(RADIX_KERN_MAP_SIZE != (1UL << MAX_EA_BITS_PER_CONTEXT));
+#endif
+
 	if (unlikely(!slab_is_available()))
 		return early_map_kernel_page(ea, pa, flags, map_page_size,
 						nid, region_start, region_end);
@@ -202,14 +187,14 @@ void radix__change_memory_range(unsigned long start, unsigned long end,
 		pudp = pud_alloc(&init_mm, pgdp, idx);
 		if (!pudp)
 			continue;
-		if (pud_huge(*pudp)) {
+		if (pud_is_leaf(*pudp)) {
 			ptep = (pte_t *)pudp;
 			goto update_the_pte;
 		}
 		pmdp = pmd_alloc(&init_mm, pudp, idx);
 		if (!pmdp)
 			continue;
-		if (pmd_huge(*pmdp)) {
+		if (pmd_is_leaf(*pmdp)) {
 			ptep = pmdp_ptep(pmdp);
 			goto update_the_pte;
 		}
@@ -242,9 +227,8 @@ void radix__mark_initmem_nx(void)
 }
 #endif /* CONFIG_STRICT_KERNEL_RWX */
 
-static inline void __meminit print_mapping(unsigned long start,
-					   unsigned long end,
-					   unsigned long size)
+static inline void __meminit
+print_mapping(unsigned long start, unsigned long end, unsigned long size, bool exec)
 {
 	char buf[10];
 
@@ -253,7 +237,17 @@ static inline void __meminit print_mapping(unsigned long start,
 
 	string_get_size(size, 1, STRING_UNITS_2, buf, sizeof(buf));
 
-	pr_info("Mapped 0x%016lx-0x%016lx with %s pages\n", start, end, buf);
+	pr_info("Mapped 0x%016lx-0x%016lx with %s pages%s\n", start, end, buf,
+		exec ? " (exec)" : "");
+}
+
+static unsigned long next_boundary(unsigned long addr, unsigned long end)
+{
+#ifdef CONFIG_STRICT_KERNEL_RWX
+	if (addr < __pa_symbol(__init_begin))
+		return __pa_symbol(__init_begin);
+#endif
+	return end;
 }
 
 static int __meminit create_physical_mapping(unsigned long start,
@@ -261,69 +255,60 @@ static int __meminit create_physical_mapping(unsigned long start,
 					     int nid)
 {
 	unsigned long vaddr, addr, mapping_size = 0;
+	bool prev_exec, exec = false;
 	pgprot_t prot;
-	unsigned long max_mapping_size;
-#ifdef CONFIG_STRICT_KERNEL_RWX
-	int split_text_mapping = 1;
-#else
-	int split_text_mapping = 0;
-#endif
+	int psize;
 
 	start = _ALIGN_UP(start, PAGE_SIZE);
 	for (addr = start; addr < end; addr += mapping_size) {
 		unsigned long gap, previous_size;
 		int rc;
 
-		gap = end - addr;
+		gap = next_boundary(addr, end) - addr;
 		previous_size = mapping_size;
-		max_mapping_size = PUD_SIZE;
+		prev_exec = exec;
 
-retry:
 		if (IS_ALIGNED(addr, PUD_SIZE) && gap >= PUD_SIZE &&
-		    mmu_psize_defs[MMU_PAGE_1G].shift &&
-		    PUD_SIZE <= max_mapping_size)
+		    mmu_psize_defs[MMU_PAGE_1G].shift) {
 			mapping_size = PUD_SIZE;
-		else if (IS_ALIGNED(addr, PMD_SIZE) && gap >= PMD_SIZE &&
-			 mmu_psize_defs[MMU_PAGE_2M].shift)
+			psize = MMU_PAGE_1G;
+		} else if (IS_ALIGNED(addr, PMD_SIZE) && gap >= PMD_SIZE &&
+			   mmu_psize_defs[MMU_PAGE_2M].shift) {
 			mapping_size = PMD_SIZE;
-		else
+			psize = MMU_PAGE_2M;
+		} else {
 			mapping_size = PAGE_SIZE;
-
-		if (split_text_mapping && (mapping_size == PUD_SIZE) &&
-			(addr <= __pa_symbol(__init_begin)) &&
-			(addr + mapping_size) >= __pa_symbol(_stext)) {
-			max_mapping_size = PMD_SIZE;
-			goto retry;
-		}
-
-		if (split_text_mapping && (mapping_size == PMD_SIZE) &&
-		    (addr <= __pa_symbol(__init_begin)) &&
-		    (addr + mapping_size) >= __pa_symbol(_stext))
-			mapping_size = PAGE_SIZE;
-
-		if (mapping_size != previous_size) {
-			print_mapping(start, addr, previous_size);
-			start = addr;
+			psize = mmu_virtual_psize;
 		}
 
 		vaddr = (unsigned long)__va(addr);
 
 		if (overlaps_kernel_text(vaddr, vaddr + mapping_size) ||
-		    overlaps_interrupt_vector_text(vaddr, vaddr + mapping_size))
+		    overlaps_interrupt_vector_text(vaddr, vaddr + mapping_size)) {
 			prot = PAGE_KERNEL_X;
-		else
+			exec = true;
+		} else {
 			prot = PAGE_KERNEL;
+			exec = false;
+		}
+
+		if (mapping_size != previous_size || exec != prev_exec) {
+			print_mapping(start, addr, previous_size, prev_exec);
+			start = addr;
+		}
 
 		rc = __map_kernel_page(vaddr, addr, prot, mapping_size, nid, start, end);
 		if (rc)
 			return rc;
+
+		update_page_count(psize, 1);
 	}
 
-	print_mapping(start, addr, mapping_size);
+	print_mapping(start, addr, mapping_size, exec);
 	return 0;
 }
 
-void __init radix_init_pgtable(void)
+static void __init radix_init_pgtable(void)
 {
 	unsigned long rts_field;
 	struct memblock_region *reg;
@@ -339,17 +324,19 @@ void __init radix_init_pgtable(void)
 		 * page tables will be allocated within the range. No
 		 * need or a node (which we don't have yet).
 		 */
+
+		if ((reg->base + reg->size) >= RADIX_VMALLOC_START) {
+			pr_warn("Outside the supported range\n");
+			continue;
+		}
+
 		WARN_ON(create_physical_mapping(reg->base,
 						reg->base + reg->size,
 						-1));
 	}
 
 	/* Find out how many PID bits are supported */
-	if (!cpu_has_feature(CPU_FTR_P9_RADIX_PREFETCH_BUG)) {
-		if (!mmu_pid_bits)
-			mmu_pid_bits = 20;
-		mmu_base_pid = 1;
-	} else if (cpu_has_feature(CPU_FTR_HVMODE)) {
+	if (cpu_has_feature(CPU_FTR_HVMODE)) {
 		if (!mmu_pid_bits)
 			mmu_pid_bits = 20;
 #ifdef CONFIG_KVM_BOOK3S_HV_POSSIBLE
@@ -381,18 +368,6 @@ void __init radix_init_pgtable(void)
 	 */
 	rts_field = radix__get_tree_size();
 	process_tb->prtb0 = cpu_to_be64(rts_field | __pa(init_mm.pgd) | RADIX_PGD_INDEX_SIZE);
-	/*
-	 * Fill in the partition table. We are suppose to use effective address
-	 * of process table here. But our linear mapping also enable us to use
-	 * physical address here.
-	 */
-	register_process_table(__pa(process_tb), 0, PRTB_SIZE_SHIFT - 12);
-	pr_info("Process table %p and radix root for kernel: %p\n", process_tb, init_mm.pgd);
-	asm volatile("ptesync" : : : "memory");
-	asm volatile(PPC_TLBIE_5(%0,%1,2,1,1) : :
-		     "r" (TLBIEL_INVAL_SET_LPID), "r" (0));
-	asm volatile("eieio; tlbsync; ptesync" : : : "memory");
-	trace_tlbie(0, 0, TLBIEL_INVAL_SET_LPID, 0, 2, 1, 1);
 
 	/*
 	 * The init_mm context is given the first available (non-zero) PID,
@@ -413,20 +388,15 @@ void __init radix_init_pgtable(void)
 
 static void __init radix_init_partition_table(void)
 {
-	unsigned long rts_field, dw0;
+	unsigned long rts_field, dw0, dw1;
 
 	mmu_partition_table_init();
 	rts_field = radix__get_tree_size();
 	dw0 = rts_field | __pa(init_mm.pgd) | RADIX_PGD_INDEX_SIZE | PATB_HR;
-	mmu_partition_table_set_entry(0, dw0, 0);
+	dw1 = __pa(process_tb) | (PRTB_SIZE_SHIFT - 12) | PATB_GR;
+	mmu_partition_table_set_entry(0, dw0, dw1, false);
 
 	pr_info("Initializing Radix MMU\n");
-	pr_info("Partition table %p\n", partition_tb);
-}
-
-void __init radix_init_native(void)
-{
-	register_process_table = native_register_process_table;
 }
 
 static int __init get_idx_from_shift(unsigned int shift)
@@ -532,8 +502,15 @@ static void radix_init_amor(void)
 	mtspr(SPRN_AMOR, (3ul << 62));
 }
 
-static void radix_init_iamr(void)
+#ifdef CONFIG_PPC_KUEP
+void setup_kuep(bool disabled)
 {
+	if (disabled || !early_radix_enabled())
+		return;
+
+	if (smp_processor_id() == boot_cpuid)
+		pr_info("Activating Kernel Userspace Execution Prevention\n");
+
 	/*
 	 * Radix always uses key0 of the IAMR to determine if an access is
 	 * allowed. We set bit 0 (IBM bit 1) of key0, to prevent instruction
@@ -541,6 +518,25 @@ static void radix_init_iamr(void)
 	 */
 	mtspr(SPRN_IAMR, (1ul << 62));
 }
+#endif
+
+#ifdef CONFIG_PPC_KUAP
+void setup_kuap(bool disabled)
+{
+	if (disabled || !early_radix_enabled())
+		return;
+
+	if (smp_processor_id() == boot_cpuid) {
+		pr_info("Activating Kernel Userspace Access Prevention\n");
+		cur_cpu_spec->mmu_features |= MMU_FTR_RADIX_KUAP;
+	}
+
+	/* Make sure userspace can't change the AMR */
+	mtspr(SPRN_UAMOR, 0);
+	mtspr(SPRN_AMR, AMR_KUAP_BLOCKED);
+	isync();
+}
+#endif
 
 void __init radix__early_init_mmu(void)
 {
@@ -581,11 +577,11 @@ void __init radix__early_init_mmu(void)
 	__pgd_val_bits = RADIX_PGD_VAL_BITS;
 
 	__kernel_virt_start = RADIX_KERN_VIRT_START;
-	__kernel_virt_size = RADIX_KERN_VIRT_SIZE;
 	__vmalloc_start = RADIX_VMALLOC_START;
 	__vmalloc_end = RADIX_VMALLOC_END;
 	__kernel_io_start = RADIX_KERN_IO_START;
-	vmemmap = (struct page *)RADIX_VMEMMAP_BASE;
+	__kernel_io_end = RADIX_KERN_IO_END;
+	vmemmap = (struct page *)RADIX_VMEMMAP_START;
 	ioremap_bot = IOREMAP_BASE;
 
 #ifdef CONFIG_PCI
@@ -596,8 +592,9 @@ void __init radix__early_init_mmu(void)
 	__pmd_frag_nr = RADIX_PMD_FRAG_NR;
 	__pmd_frag_size_shift = RADIX_PMD_FRAG_SIZE_SHIFT;
 
+	radix_init_pgtable();
+
 	if (!firmware_has_feature(FW_FEATURE_LPAR)) {
-		radix_init_native();
 		lpcr = mfspr(SPRN_LPCR);
 		mtspr(SPRN_LPCR, lpcr | LPCR_UPRT | LPCR_HR);
 		radix_init_partition_table();
@@ -608,12 +605,9 @@ void __init radix__early_init_mmu(void)
 
 	memblock_set_current_limit(MEMBLOCK_ALLOC_ANYWHERE);
 
-	radix_init_iamr();
-	radix_init_pgtable();
 	/* Switch to the guard PID before turning on MMU */
 	radix__switch_mmu_context(NULL, &init_mm);
-	if (cpu_has_feature(CPU_FTR_HVMODE))
-		tlbiel_all();
+	tlbiel_all();
 }
 
 void radix__early_init_mmu_secondary(void)
@@ -631,11 +625,9 @@ void radix__early_init_mmu_secondary(void)
 
 		radix_init_amor();
 	}
-	radix_init_iamr();
 
 	radix__switch_mmu_context(NULL, &init_mm);
-	if (cpu_has_feature(CPU_FTR_HVMODE))
-		tlbiel_all();
+	tlbiel_all();
 }
 
 void radix__mmu_cleanup_all(void)
@@ -649,21 +641,6 @@ void radix__mmu_cleanup_all(void)
 		powernv_set_nmmu_ptcr(0);
 		radix__flush_tlb_all();
 	}
-}
-
-void radix__setup_initial_memory_limit(phys_addr_t first_memblock_base,
-				phys_addr_t first_memblock_size)
-{
-	/*
-	 * We don't currently support the first MEMBLOCK not mapping 0
-	 * physical on those processors
-	 */
-	BUG_ON(first_memblock_base != 0);
-
-	/*
-	 * Radix mode is not limited by RMA / VRMA addressing.
-	 */
-	ppc64_rma_size = ULONG_MAX;
 }
 
 #ifdef CONFIG_MEMORY_HOTPLUG
@@ -715,8 +692,8 @@ static int __meminit stop_machine_change_mapping(void *data)
 
 	spin_unlock(&init_mm.page_table_lock);
 	pte_clear(&init_mm, params->aligned_start, params->pte);
-	create_physical_mapping(params->aligned_start, params->start, -1);
-	create_physical_mapping(params->end, params->aligned_end, -1);
+	create_physical_mapping(__pa(params->aligned_start), __pa(params->start), -1);
+	create_physical_mapping(__pa(params->end), __pa(params->aligned_end), -1);
 	spin_lock(&init_mm.page_table_lock);
 	return 0;
 }
@@ -809,7 +786,7 @@ static void remove_pmd_table(pmd_t *pmd_start, unsigned long addr,
 		if (!pmd_present(*pmd))
 			continue;
 
-		if (pmd_huge(*pmd)) {
+		if (pmd_is_leaf(*pmd)) {
 			split_kernel_mapping(addr, end, PMD_SIZE, (pte_t *)pmd);
 			continue;
 		}
@@ -834,7 +811,7 @@ static void remove_pud_table(pud_t *pud_start, unsigned long addr,
 		if (!pud_present(*pud))
 			continue;
 
-		if (pud_huge(*pud)) {
+		if (pud_is_leaf(*pud)) {
 			split_kernel_mapping(addr, end, PUD_SIZE, (pte_t *)pud);
 			continue;
 		}
@@ -860,7 +837,7 @@ static void __meminit remove_pagetable(unsigned long start, unsigned long end)
 		if (!pgd_present(*pgd))
 			continue;
 
-		if (pgd_huge(*pgd)) {
+		if (pgd_is_leaf(*pgd)) {
 			split_kernel_mapping(addr, end, PGDIR_SIZE, (pte_t *)pgd);
 			continue;
 		}
@@ -875,7 +852,12 @@ static void __meminit remove_pagetable(unsigned long start, unsigned long end)
 
 int __meminit radix__create_section_mapping(unsigned long start, unsigned long end, int nid)
 {
-	return create_physical_mapping(start, end, nid);
+	if (end >= RADIX_VMALLOC_START) {
+		pr_warn("Outside the supported range\n");
+		return -1;
+	}
+
+	return create_physical_mapping(__pa(start), __pa(end), nid);
 }
 
 int __meminit radix__remove_section_mapping(unsigned long start, unsigned long end)
@@ -901,6 +883,11 @@ int __meminit radix__vmemmap_create_mapping(unsigned long start,
 	unsigned long flags = _PAGE_PRESENT | _PAGE_ACCESSED | _PAGE_KERNEL_RW;
 	int nid = early_pfn_to_nid(phys >> PAGE_SHIFT);
 	int ret;
+
+	if ((start + page_size) >= RADIX_VMEMMAP_END) {
+		pr_warn("Outside the supported range\n");
+		return -1;
+	}
 
 	ret = __map_kernel_page_nid(start, phys, __pgprot(flags), page_size, nid);
 	BUG_ON(ret);
@@ -950,13 +937,7 @@ pmd_t radix__pmdp_collapse_flush(struct vm_area_struct *vma, unsigned long addre
 	pmd = *pmdp;
 	pmd_clear(pmdp);
 
-	/*
-	 * pmdp collapse_flush need to ensure that there are no parallel gup
-	 * walk after this call. This is needed so that we can have stable
-	 * page ref count when collapsing a page. We don't allow a collapse page
-	 * if we have gup taken on the page. We can ensure that by sending IPI
-	 * because gup walk happens with IRQ disabled.
-	 */
+	/*FIXME!!  Verify whether we need this kick below */
 	serialize_against_pte_lookup(vma->vm_mm);
 
 	radix__flush_tlb_collapsed_pmd(vma->vm_mm, address);
@@ -1017,16 +998,20 @@ pmd_t radix__pmdp_huge_get_and_clear(struct mm_struct *mm,
 
 	old = radix__pmd_hugepage_update(mm, addr, pmdp, ~0UL, 0);
 	old_pmd = __pmd(old);
+	/*
+	 * Serialize against find_current_mm_pte which does lock-less
+	 * lookup in page tables with local interrupts disabled. For huge pages
+	 * it casts pmd_t to pte_t. Since format of pte_t is different from
+	 * pmd_t we want to prevent transit from pmd pointing to page table
+	 * to pmd pointing to huge page (and back) while interrupts are disabled.
+	 * We clear pmd to possibly replace it with page table pointer in
+	 * different code paths. So make sure we wait for the parallel
+	 * find_current_mm_pte to finish.
+	 */
+	serialize_against_pte_lookup(mm);
 	return old_pmd;
 }
 
-int radix__has_transparent_hugepage(void)
-{
-	/* For radix 2M at PMD level means thp */
-	if (mmu_psize_defs[MMU_PAGE_2M].shift == PMD_SHIFT)
-		return 1;
-	return 0;
-}
 #endif /* CONFIG_TRANSPARENT_HUGEPAGE */
 
 void radix__ptep_set_access_flags(struct vm_area_struct *vma, pte_t *ptep,
@@ -1061,4 +1046,127 @@ void radix__ptep_set_access_flags(struct vm_area_struct *vma, pte_t *ptep,
 		 */
 	}
 	/* See ptesync comment in radix__set_pte_at */
+}
+
+void radix__ptep_modify_prot_commit(struct vm_area_struct *vma,
+				    unsigned long addr, pte_t *ptep,
+				    pte_t old_pte, pte_t pte)
+{
+	struct mm_struct *mm = vma->vm_mm;
+
+	/*
+	 * To avoid NMMU hang while relaxing access we need to flush the tlb before
+	 * we set the new value. We need to do this only for radix, because hash
+	 * translation does flush when updating the linux pte.
+	 */
+	if (is_pte_rw_upgrade(pte_val(old_pte), pte_val(pte)) &&
+	    (atomic_read(&mm->context.copros) > 0))
+		radix__flush_tlb_page(vma, addr);
+
+	set_pte_at(mm, addr, ptep, pte);
+}
+
+int __init arch_ioremap_pud_supported(void)
+{
+	/* HPT does not cope with large pages in the vmalloc area */
+	return radix_enabled();
+}
+
+int __init arch_ioremap_pmd_supported(void)
+{
+	return radix_enabled();
+}
+
+int p4d_free_pud_page(p4d_t *p4d, unsigned long addr)
+{
+	return 0;
+}
+
+int pud_set_huge(pud_t *pud, phys_addr_t addr, pgprot_t prot)
+{
+	pte_t *ptep = (pte_t *)pud;
+	pte_t new_pud = pfn_pte(__phys_to_pfn(addr), prot);
+
+	if (!radix_enabled())
+		return 0;
+
+	set_pte_at(&init_mm, 0 /* radix unused */, ptep, new_pud);
+
+	return 1;
+}
+
+int pud_clear_huge(pud_t *pud)
+{
+	if (pud_huge(*pud)) {
+		pud_clear(pud);
+		return 1;
+	}
+
+	return 0;
+}
+
+int pud_free_pmd_page(pud_t *pud, unsigned long addr)
+{
+	pmd_t *pmd;
+	int i;
+
+	pmd = (pmd_t *)pud_page_vaddr(*pud);
+	pud_clear(pud);
+
+	flush_tlb_kernel_range(addr, addr + PUD_SIZE);
+
+	for (i = 0; i < PTRS_PER_PMD; i++) {
+		if (!pmd_none(pmd[i])) {
+			pte_t *pte;
+			pte = (pte_t *)pmd_page_vaddr(pmd[i]);
+
+			pte_free_kernel(&init_mm, pte);
+		}
+	}
+
+	pmd_free(&init_mm, pmd);
+
+	return 1;
+}
+
+int pmd_set_huge(pmd_t *pmd, phys_addr_t addr, pgprot_t prot)
+{
+	pte_t *ptep = (pte_t *)pmd;
+	pte_t new_pmd = pfn_pte(__phys_to_pfn(addr), prot);
+
+	if (!radix_enabled())
+		return 0;
+
+	set_pte_at(&init_mm, 0 /* radix unused */, ptep, new_pmd);
+
+	return 1;
+}
+
+int pmd_clear_huge(pmd_t *pmd)
+{
+	if (pmd_huge(*pmd)) {
+		pmd_clear(pmd);
+		return 1;
+	}
+
+	return 0;
+}
+
+int pmd_free_pte_page(pmd_t *pmd, unsigned long addr)
+{
+	pte_t *pte;
+
+	pte = (pte_t *)pmd_page_vaddr(*pmd);
+	pmd_clear(pmd);
+
+	flush_tlb_kernel_range(addr, addr + PMD_SIZE);
+
+	pte_free_kernel(&init_mm, pte);
+
+	return 1;
+}
+
+int __init arch_ioremap_p4d_supported(void)
+{
+	return 0;
 }

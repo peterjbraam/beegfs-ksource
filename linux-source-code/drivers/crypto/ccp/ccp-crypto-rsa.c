@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * AMD Cryptographic Coprocessor (CCP) RSA crypto API support
  *
@@ -243,7 +243,7 @@ static struct ccp_rsa_def rsa_algs[] = {
 };
 
 static int ccp_register_rsa_alg(struct list_head *head,
-				const struct ccp_rsa_def *def)
+			        const struct ccp_rsa_def *def)
 {
 	struct ccp_crypto_akcipher_alg *ccp_alg;
 	struct akcipher_alg *alg;

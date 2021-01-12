@@ -1,17 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* delayacct.h - per-task delay accounting
  *
  * Copyright (C) Shailabh Nagar, IBM Corp. 2006
- *
- * This program is free software;  you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY;  without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See
- * the GNU General Public License for more details.
- *
  */
 
 #ifndef _LINUX_DELAYACCT_H
@@ -57,18 +47,12 @@ struct task_delay_info {
 
 	u64 freepages_start;
 	u64 freepages_delay;	/* wait for memory reclaim */
+
+	u64 thrashing_start;
+	u64 thrashing_delay;	/* wait for thrashing page */
+
 	u32 freepages_count;	/* total count of memory reclaim */
-
-	/*
-	 * RHEL8:
-	 * New stat items should put at the end for maintaining kABI
-	 * signature of task_struct. The task_delay_info structures are
-	 * only allocated in kernel/delayacct.c by using slab cache.
-	 */
-	RH_KABI_EXTEND(u32 thrashing_count) /* total count of thrash waits */
-
-	RH_KABI_EXTEND(u64 thrashing_start)
-	RH_KABI_EXTEND(u64 thrashing_delay) /* wait for thrashing page */
+	u32 thrashing_count;	/* total count of thrash waits */
 };
 #endif
 

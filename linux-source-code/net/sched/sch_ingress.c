@@ -1,9 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* net/sched/sch_ingress.c - Ingress and clsact qdisc
- *
- *              This program is free software; you can redistribute it and/or
- *              modify it under the terms of the GNU General Public License
- *              as published by the Free Software Foundation; either version
- *              2 of the License, or (at your option) any later version.
  *
  * Authors:     Jamal Hadi Salim 1999
  */
@@ -82,7 +78,6 @@ static int ingress_init(struct Qdisc *sch, struct nlattr *opt,
 {
 	struct ingress_sched_data *q = qdisc_priv(sch);
 	struct net_device *dev = qdisc_dev(sch);
-	int err;
 
 	net_inc_ingress_queue();
 
@@ -92,13 +87,7 @@ static int ingress_init(struct Qdisc *sch, struct nlattr *opt,
 	q->block_info.chain_head_change = clsact_chain_head_change;
 	q->block_info.chain_head_change_priv = &q->miniqp;
 
-	err = tcf_block_get_ext(&q->block, sch, &q->block_info, extack);
-	if (err)
-		return err;
-
-	mini_qdisc_pair_block_init(&q->miniqp, q->block);
-
-	return 0;
+	return tcf_block_get_ext(&q->block, sch, &q->block_info, extack);
 }
 
 static void ingress_destroy(struct Qdisc *sch)
@@ -236,8 +225,6 @@ static int clsact_init(struct Qdisc *sch, struct nlattr *opt,
 				extack);
 	if (err)
 		return err;
-
-	mini_qdisc_pair_block_init(&q->miniqp_ingress, q->ingress_block);
 
 	mini_qdisc_pair_init(&q->miniqp_egress, sch, &dev->miniq_egress);
 

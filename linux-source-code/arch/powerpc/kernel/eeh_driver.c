@@ -36,8 +36,8 @@
 #include <asm/rtas.h>
 
 struct eeh_rmv_data {
-	struct list_head RH_KABI_RENAME(edev_list, removed_vf_list);
-	int RH_KABI_RENAME(removed, removed_dev_count);
+	struct list_head removed_vf_list;
+	int removed_dev_count;
 };
 
 static int eeh_result_priority(enum pci_ers_result result)
@@ -61,7 +61,7 @@ static int eeh_result_priority(enum pci_ers_result result)
 	}
 };
 
-const char *pci_ers_result_name(enum pci_ers_result result)
+static const char *pci_ers_result_name(enum pci_ers_result result)
 {
 	switch (result) {
 	case PCI_ERS_RESULT_NONE:
@@ -891,12 +891,12 @@ void eeh_handle_normal_event(struct eeh_pe *pe)
 
 	/* Log the event */
 	if (pe->type & EEH_PE_PHB) {
-		pr_err("EEH: PHB#%x failure detected, location: %s\n",
+		pr_err("EEH: Recovering PHB#%x, location: %s\n",
 			pe->phb->global_number, eeh_pe_loc_get(pe));
 	} else {
 		struct eeh_pe *phb_pe = eeh_phb_pe_get(pe->phb);
 
-		pr_err("EEH: Frozen PHB#%x-PE#%x detected\n",
+		pr_err("EEH: Recovering PHB#%x-PE#%x\n",
 		       pe->phb->global_number, pe->addr);
 		pr_err("EEH: PE location: %s, PHB location: %s\n",
 		       eeh_pe_loc_get(pe), eeh_pe_loc_get(phb_pe));

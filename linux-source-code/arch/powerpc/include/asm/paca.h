@@ -1,14 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * This control block defines the PACA which defines the processor
  * specific data for each logical processor on the system.
  * There are some pointers defined that are utilized by PLIC.
  *
  * C 2001 PPC 64 Team, IBM Corp
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 #ifndef _ASM_POWERPC_PACA_H
 #define _ASM_POWERPC_PACA_H
@@ -16,7 +12,6 @@
 
 #ifdef CONFIG_PPC64
 
-#include <linux/rh_kabi.h>
 #include <linux/string.h>
 #include <asm/types.h>
 #include <asm/lppaca.h>
@@ -116,7 +111,13 @@ struct paca_struct {
  				 * on the linear mapping */
 	/* SLB related definitions */
 	u16 vmalloc_sllp;
-	u16 slb_cache_ptr;
+	u8 slb_cache_ptr;
+	u8 stab_rr;			/* stab/slb round-robin counter */
+#ifdef CONFIG_DEBUG_VM
+	u8 in_kernel_slb_handler;
+#endif
+	u32 slb_used_bitmap;		/* Bitmaps for first 32 SLB entries. */
+	u32 slb_kern_bitmap;
 	u32 slb_cache[SLB_CACHE_ENTRIES];
 #endif /* CONFIG_PPC_BOOK3S_64 */
 
@@ -163,10 +164,11 @@ struct paca_struct {
 	 */
 	struct task_struct *__current;	/* Pointer to current */
 	u64 kstack;			/* Saved Kernel stack addr */
-	u64 stab_rr;			/* stab/slb round-robin counter */
 	u64 saved_r1;			/* r1 save for RTAS calls or PM or EE=0 */
 	u64 saved_msr;			/* MSR saved here by enter_rtas */
+#ifdef CONFIG_PPC_BOOK3E
 	u16 trap_save;			/* Used when bad stack is encountered */
+#endif
 	u8 irq_soft_mask;		/* mask for irq soft masking */
 	u8 irq_happened;		/* irq happened while soft-disabled */
 	u8 irq_work_pending;		/* IRQ_WORK interrupt while soft-disable */
@@ -262,12 +264,11 @@ struct paca_struct {
 	struct slb_entry *mce_faulty_slbs;
 	u16 slb_save_cache_ptr;
 #endif /* CONFIG_PPC_BOOK3S_64 */
+#ifdef CONFIG_STACKPROTECTOR
+	unsigned long canary;
+#endif
 #ifdef CONFIG_MMIOWB
 	struct mmiowb_state mmiowb_state;
-#endif
-
-#ifdef CONFIG_STACKPROTECTOR
-	RH_KABI_EXTEND(unsigned long canary)
 #endif
 } ____cacheline_aligned;
 

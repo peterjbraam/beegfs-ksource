@@ -1,14 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * The file intends to implement the platform dependent EEH operations on
- * powernv platform. Actually, the powernv was created in order to fully
- * hypervisor support.
+ * PowerNV Platform dependent EEH operations
  *
  * Copyright Benjamin Herrenschmidt & Gavin Shan, IBM Corporation 2013.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  */
 
 #include <linux/atomic.h>
@@ -54,6 +48,7 @@ void pnv_pcibios_bus_add_device(struct pci_dev *pdev)
 	dev_dbg(&pdev->dev, "EEH: Setting up device\n");
 	eeh_add_device_early(pdn);
 	eeh_add_device_late(pdev);
+	eeh_sysfs_add_device(pdev);
 }
 
 static int pnv_eeh_init(void)
@@ -576,8 +571,8 @@ static void pnv_eeh_get_phb_diag(struct eeh_pe *pe)
 static int pnv_eeh_get_phb_state(struct eeh_pe *pe)
 {
 	struct pnv_phb *phb = pe->phb->private_data;
-	u8 fstate;
-	__be16 pcierr;
+	u8 fstate = 0;
+	__be16 pcierr = 0;
 	s64 rc;
 	int result = 0;
 
@@ -615,8 +610,8 @@ static int pnv_eeh_get_phb_state(struct eeh_pe *pe)
 static int pnv_eeh_get_pe_state(struct eeh_pe *pe)
 {
 	struct pnv_phb *phb = pe->phb->private_data;
-	u8 fstate;
-	__be16 pcierr;
+	u8 fstate = 0;
+	__be16 pcierr = 0;
 	s64 rc;
 	int result;
 

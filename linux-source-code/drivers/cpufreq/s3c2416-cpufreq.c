@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * S3C2416/2450 CPUfreq Support
  *
@@ -6,10 +7,6 @@
  * based on s3c64xx_cpufreq.c
  *
  * Copyright 2009 Wolfson Microelectronics plc
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/kernel.h>
@@ -307,7 +304,6 @@ static int s3c2416_cpufreq_reboot_notifier_evt(struct notifier_block *this,
 {
 	struct s3c2416_data *s3c_freq = &s3c2416_cpufreq;
 	int ret;
-	struct cpufreq_policy *policy;
 
 	mutex_lock(&cpufreq_lock);
 
@@ -322,16 +318,7 @@ static int s3c2416_cpufreq_reboot_notifier_evt(struct notifier_block *this,
 	 */
 	if (s3c_freq->is_dvs) {
 		pr_debug("cpufreq: leave dvs on reboot\n");
-
-		policy = cpufreq_cpu_get(0);
-		if (!policy) {
-			pr_debug("cpufreq: get no policy for cpu0\n");
-			return NOTIFY_BAD;
-		}
-
-		ret = cpufreq_driver_target(policy, FREQ_SLEEP, 0);
-		cpufreq_cpu_put(policy);
-
+		ret = cpufreq_driver_target(cpufreq_cpu_get(0), FREQ_SLEEP, 0);
 		if (ret < 0)
 			return NOTIFY_BAD;
 	}

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-only
 #
 # ARM CPU Frequency scaling drivers
 #
@@ -18,12 +19,36 @@ config ACPI_CPPC_CPUFREQ
 
 	  If in doubt, say N.
 
+config ARM_ALLWINNER_SUN50I_CPUFREQ_NVMEM
+	tristate "Allwinner nvmem based SUN50I CPUFreq driver"
+	depends on ARCH_SUNXI
+	depends on NVMEM_SUNXI_SID
+	select PM_OPP
+	help
+	  This adds the nvmem based CPUFreq driver for Allwinner
+	  h6 SoC.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called sun50i-cpufreq-nvmem.
+
 config ARM_ARMADA_37XX_CPUFREQ
 	tristate "Armada 37xx CPUFreq support"
 	depends on ARCH_MVEBU && CPUFREQ_DT
 	help
 	  This adds the CPUFreq driver support for Marvell Armada 37xx SoCs.
 	  The Armada 37xx PMU supports 4 frequency and VDD levels.
+
+config ARM_ARMADA_8K_CPUFREQ
+	tristate "Armada 8K CPUFreq driver"
+	depends on ARCH_MVEBU && CPUFREQ_DT
+	select ARMADA_AP_CPU_CLK
+	help
+	  This enables the CPUFreq driver support for Marvell
+	  Armada8k SOCs.
+	  Armada8K device has the AP806 which supports scaling
+	  to any full integer divider.
+
+	  If in doubt, say N.
 
 # big LITTLE core layer and glue drivers
 config ARM_BIG_LITTLE_CPUFREQ
@@ -61,20 +86,6 @@ config ARM_BRCMSTB_AVS_CPUFREQ
 
 	  Say Y, if you have a Broadcom SoC with AVS support for DFS or DVFS.
 
-config ARM_EXYNOS5440_CPUFREQ
-	tristate "SAMSUNG EXYNOS5440"
-	depends on SOC_EXYNOS5440
-	depends on HAVE_CLK && OF
-	select PM_OPP
-	default y
-	help
-	  This adds the CPUFreq driver for Samsung EXYNOS5440
-	  SoC. The nature of exynos5440 clock controller is
-	  different than previous exynos controllers so not using
-	  the common exynos framework.
-
-	  If in doubt, say N.
-
 config ARM_HIGHBANK_CPUFREQ
 	tristate "Calxeda Highbank-based"
 	depends on ARCH_HIGHBANK && CPUFREQ_DT && REGULATOR
@@ -92,6 +103,15 @@ config ARM_IMX6Q_CPUFREQ
 	select PM_OPP
 	help
 	  This adds cpufreq driver support for Freescale i.MX6 series SoCs.
+
+	  If in doubt, say N.
+
+config ARM_IMX_CPUFREQ_DT
+	tristate "Freescale i.MX8M cpufreq support"
+	depends on ARCH_MXC && CPUFREQ_DT
+	help
+	  This adds cpufreq driver support for Freescale i.MX8M series SoCs,
+	  based on cpufreq-dt.
 
 	  If in doubt, say N.
 
@@ -113,14 +133,33 @@ config ARM_OMAP2PLUS_CPUFREQ
 	depends on ARCH_OMAP2PLUS
 	default ARCH_OMAP2PLUS
 
-config ARM_QCOM_CPUFREQ_KRYO
-	tristate "Qualcomm Kryo based CPUFreq"
+config ARM_QCOM_CPUFREQ_NVMEM
+	tristate "Qualcomm nvmem based CPUFreq"
 	depends on ARM64
 	depends on QCOM_QFPROM
 	depends on QCOM_SMEM
 	select PM_OPP
 	help
 	  This adds the CPUFreq driver for Qualcomm Kryo SoC based boards.
+
+	  If in doubt, say N.
+
+config ARM_QCOM_CPUFREQ_HW
+	tristate "QCOM CPUFreq HW driver"
+	depends on ARCH_QCOM || COMPILE_TEST
+	help
+	  Support for the CPUFreq HW driver.
+	  Some QCOM chipsets have a HW engine to offload the steps
+	  necessary for changing the frequency of the CPUs. Firmware loaded
+	  in this engine exposes a programming interface to the OS.
+	  The driver implements the cpufreq interface for this HW engine.
+	  Say Y if you want to support CPUFreq HW.
+
+config ARM_RASPBERRYPI_CPUFREQ
+	tristate "Raspberry Pi cpufreq support"
+	depends on CLK_RASPBERRYPI || COMPILE_TEST
+	help
+	  This adds the CPUFreq driver for Raspberry Pi
 
 	  If in doubt, say N.
 
@@ -270,8 +309,8 @@ config ARM_TEGRA20_CPUFREQ
 	  This adds the CPUFreq driver support for Tegra20 SOCs.
 
 config ARM_TEGRA124_CPUFREQ
-	tristate "Tegra124 CPUFreq support"
-	depends on ARCH_TEGRA && CPUFREQ_DT && REGULATOR
+	bool "Tegra124 CPUFreq support"
+	depends on ARCH_TEGRA && CPUFREQ_DT
 	default y
 	help
 	  This adds the CPUFreq driver support for Tegra124 SOCs.

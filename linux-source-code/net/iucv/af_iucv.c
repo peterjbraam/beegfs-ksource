@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  IUCV protocol stack for Linux on zSeries
  *
@@ -49,7 +50,7 @@ static struct iucv_interface *pr_iucv;
 static const u8 iprm_shutdown[8] =
 	{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
 
-#define TRGCLS_SIZE	(sizeof(((struct iucv_message *)0)->class))
+#define TRGCLS_SIZE	FIELD_SIZEOF(struct iucv_message, class)
 
 #define __iucv_sock_wait(sk, condition, timeo, ret)			\
 do {									\
@@ -151,7 +152,6 @@ static int afiucv_pm_freeze(struct device *dev)
 {
 	struct iucv_sock *iucv;
 	struct sock *sk;
-	int err = 0;
 
 #ifdef CONFIG_PM_DEBUG
 	printk(KERN_WARNING "afiucv_pm_freeze\n");
@@ -176,7 +176,7 @@ static int afiucv_pm_freeze(struct device *dev)
 		skb_queue_purge(&iucv->backlog_skb_q);
 	}
 	read_unlock(&iucv_sk_list.lock);
-	return err;
+	return 0;
 }
 
 /**
@@ -512,7 +512,9 @@ static void iucv_sock_close(struct sock *sk)
 			sk->sk_state = IUCV_DISCONN;
 			sk->sk_state_change(sk);
 		}
-	case IUCV_DISCONN:   /* fall through */
+		/* fall through */
+
+	case IUCV_DISCONN:
 		sk->sk_state = IUCV_CLOSING;
 		sk->sk_state_change(sk);
 
@@ -525,8 +527,9 @@ static void iucv_sock_close(struct sock *sk)
 					iucv_sock_in_state(sk, IUCV_CLOSED, 0),
 					timeo);
 		}
+		/* fall through */
 
-	case IUCV_CLOSING:   /* fall through */
+	case IUCV_CLOSING:
 		sk->sk_state = IUCV_CLOSED;
 		sk->sk_state_change(sk);
 
@@ -535,8 +538,9 @@ static void iucv_sock_close(struct sock *sk)
 
 		skb_queue_purge(&iucv->send_skb_q);
 		skb_queue_purge(&iucv->backlog_skb_q);
+		/* fall through */
 
-	default:   /* fall through */
+	default:
 		iucv_sever_path(sk, 1);
 	}
 
@@ -1570,7 +1574,8 @@ static int iucv_sock_shutdown(struct socket *sock, int how)
 		break;
 	}
 
-	if (how == SEND_SHUTDOWN || how == SHUTDOWN_MASK) {
+	if ((how == SEND_SHUTDOWN || how == SHUTDOWN_MASK) &&
+	    sk->sk_state == IUCV_CONNECTED) {
 		if (iucv->transport == AF_IUCV_TRANS_IUCV) {
 			txmsg.class = 0;
 			txmsg.tag = 0;
@@ -1884,30 +1889,26 @@ static void iucv_callback_txdone(struct iucv_path *path,
 	struct sock *sk = path->private;
 	struct sk_buff *this = NULL;
 	struct sk_buff_head *list = &iucv_sk(sk)->send_skb_q;
-	struct sk_buff *list_skb = list->next;
+	struct sk_buff *list_skb;
 	unsigned long flags;
 
 	bh_lock_sock(sk);
-	if (!skb_queue_empty(list)) {
-		spin_lock_irqsave(&list->lock, flags);
 
-		while (list_skb != (struct sk_buff *)list) {
-			if (msg->tag == IUCV_SKB_CB(list_skb)->tag) {
-				this = list_skb;
-				break;
-			}
-			list_skb = list_skb->next;
+	spin_lock_irqsave(&list->lock, flags);
+	skb_queue_walk(list, list_skb) {
+		if (msg->tag == IUCV_SKB_CB(list_skb)->tag) {
+			this = list_skb;
+			break;
 		}
-		if (this)
-			__skb_unlink(this, list);
+	}
+	if (this)
+		__skb_unlink(this, list);
+	spin_unlock_irqrestore(&list->lock, flags);
 
-		spin_unlock_irqrestore(&list->lock, flags);
-
-		if (this) {
-			kfree_skb(this);
-			/* wake up any process waiting for sending */
-			iucv_sock_wake_msglim(sk);
-		}
+	if (this) {
+		kfree_skb(this);
+		/* wake up any process waiting for sending */
+		iucv_sock_wake_msglim(sk);
 	}
 
 	if (sk->sk_state == IUCV_CLOSING) {
@@ -2251,10 +2252,10 @@ static int afiucv_hs_rcv(struct sk_buff *skb, struct net_device *dev,
 			kfree_skb(skb);
 			break;
 		}
-		/* fall through and receive non-zero length data */
+		/* fall through - and receive non-zero length data */
 	case (AF_IUCV_FLAG_SHT):
 		/* shutdown request */
-		/* fall through and receive zero length data */
+		/* fall through - and receive zero length data */
 	case 0:
 		/* plain data frame */
 		IUCV_SKB_CB(skb)->class = trans_hdr->iucv_hdr.class;
@@ -2295,11 +2296,7 @@ static void afiucv_hs_callback_txnotify(struct sk_buff *skb,
 
 	list = &iucv->send_skb_q;
 	spin_lock_irqsave(&list->lock, flags);
-	if (skb_queue_empty(list))
-		goto out_unlock;
-	list_skb = list->next;
-	nskb = list_skb->next;
-	while (list_skb != (struct sk_buff *)list) {
+	skb_queue_walk_safe(list, list_skb, nskb) {
 		if (skb_shinfo(list_skb) == skb_shinfo(skb)) {
 			switch (n) {
 			case TX_NOTIFY_OK:
@@ -2332,10 +2329,7 @@ static void afiucv_hs_callback_txnotify(struct sk_buff *skb,
 			}
 			break;
 		}
-		list_skb = nskb;
-		nskb = nskb->next;
 	}
-out_unlock:
 	spin_unlock_irqrestore(&list->lock, flags);
 
 	if (sk->sk_state == IUCV_CLOSING) {
@@ -2451,6 +2445,13 @@ out:
 	return err;
 }
 
+static void afiucv_iucv_exit(void)
+{
+	device_unregister(af_iucv_dev);
+	driver_unregister(&af_iucv_driver);
+	pr_iucv->iucv_unregister(&af_iucv_handler, 0);
+}
+
 static int __init afiucv_init(void)
 {
 	int err;
@@ -2484,11 +2485,18 @@ static int __init afiucv_init(void)
 		err = afiucv_iucv_init();
 		if (err)
 			goto out_sock;
-	} else
-		register_netdevice_notifier(&afiucv_netdev_notifier);
+	}
+
+	err = register_netdevice_notifier(&afiucv_netdev_notifier);
+	if (err)
+		goto out_notifier;
+
 	dev_add_pack(&iucv_packet_type);
 	return 0;
 
+out_notifier:
+	if (pr_iucv)
+		afiucv_iucv_exit();
 out_sock:
 	sock_unregister(PF_IUCV);
 out_proto:
@@ -2502,12 +2510,11 @@ out:
 static void __exit afiucv_exit(void)
 {
 	if (pr_iucv) {
-		device_unregister(af_iucv_dev);
-		driver_unregister(&af_iucv_driver);
-		pr_iucv->iucv_unregister(&af_iucv_handler, 0);
+		afiucv_iucv_exit();
 		symbol_put(iucv_if);
-	} else
-		unregister_netdevice_notifier(&afiucv_netdev_notifier);
+	}
+
+	unregister_netdevice_notifier(&afiucv_netdev_notifier);
 	dev_remove_pack(&iucv_packet_type);
 	sock_unregister(PF_IUCV);
 	proto_unregister(&iucv_proto);
@@ -2521,4 +2528,3 @@ MODULE_DESCRIPTION("IUCV Sockets ver " VERSION);
 MODULE_VERSION(VERSION);
 MODULE_LICENSE("GPL");
 MODULE_ALIAS_NETPROTO(PF_IUCV);
-

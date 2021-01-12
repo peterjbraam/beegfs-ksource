@@ -165,11 +165,9 @@ struct taskstats {
 	__u64	freepages_count;
 	__u64	freepages_delay_total;
 
-#ifndef __GENKSYMS__
 	/* Delay waiting for thrashing page */
 	__u64	thrashing_count;
 	__u64	thrashing_delay_total;
-#endif
 };
 
 

@@ -436,7 +436,7 @@ static int kirin_pcie_host_init(struct pcie_port *pp)
 	return 0;
 }
 
-static struct dw_pcie_ops kirin_dw_pcie_ops = {
+static const struct dw_pcie_ops kirin_dw_pcie_ops = {
 	.read_dbi = kirin_pcie_read_dbi,
 	.write_dbi = kirin_pcie_write_dbi,
 	.link_up = kirin_pcie_link_up,
@@ -467,8 +467,8 @@ static int kirin_pcie_add_msi(struct dw_pcie *pci,
 	return 0;
 }
 
-static int __init kirin_add_pcie_port(struct dw_pcie *pci,
-				      struct platform_device *pdev)
+static int kirin_add_pcie_port(struct dw_pcie *pci,
+			       struct platform_device *pdev)
 {
 	int ret;
 

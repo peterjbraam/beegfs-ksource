@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
  /*
  *	x86 SMP booting functions
  *
@@ -11,9 +12,6 @@
  *	Thanks to Intel for making available several different Pentium,
  *	Pentium Pro and Pentium-II/Xeon MP machines.
  *	Original development of Linux SMP code supported by Caldera.
- *
- *	This code is released under the GNU General Public License version 2 or
- *	later.
  *
  *	Fixes
  *		Felix Koop	:	NR_CPUS used properly
@@ -56,6 +54,7 @@
 #include <linux/stackprotector.h>
 #include <linux/gfp.h>
 #include <linux/cpuidle.h>
+#include <linux/numa.h>
 
 #include <asm/acpi.h>
 #include <asm/desc.h>
@@ -148,15 +147,13 @@ static inline void smpboot_restore_warm_reset_vector(void)
 	*((volatile u32 *)phys_to_virt(TRAMPOLINE_PHYS_LOW)) = 0;
 }
 
-static void init_freq_invariance(bool secondary);
-
 /*
  * Report back to the Boot Processor during boot time or to the caller processor
  * during CPU online.
  */
 static void smp_callin(void)
 {
-	int cpuid, phys_id;
+	int cpuid;
 
 	/*
 	 * If waken up by an INIT in an 82489DX configuration
@@ -165,11 +162,6 @@ static void smp_callin(void)
 	 * now safe to touch our local APIC.
 	 */
 	cpuid = smp_processor_id();
-
-	/*
-	 * (This works even if the APIC is not enabled.)
-	 */
-	phys_id = read_apic_id();
 
 	/*
 	 * the boot CPU has finished the init stage and is spinning
@@ -190,8 +182,6 @@ static void smp_callin(void)
 	 * calibrate_delay() and notify_cpu_starting().
 	 */
 	set_cpu_sibling_map(raw_smp_processor_id());
-
-	init_freq_invariance(true);
 
 	/*
 	 * Get our bogomips.
@@ -225,17 +215,11 @@ static void notrace start_secondary(void *unused)
 	 * before cpu_init(), SMP booting is too fragile that we want to
 	 * limit the things done here to the most necessary things.
 	 */
-	if (boot_cpu_has(X86_FEATURE_PCID))
-		__write_cr4(__read_cr4() | X86_CR4_PCIDE);
+	cr4_init();
 
 #ifdef CONFIG_X86_32
 	/* switch away from the initial page table */
 	load_cr3(swapper_pg_dir);
-	/*
-	 * Initialize the CR4 shadow before doing anything that could
-	 * try to read it.
-	 */
-	cr4_init_shadow();
 	__flush_tlb_all();
 #endif
 	load_current_idt();
@@ -278,6 +262,14 @@ static void notrace start_secondary(void *unused)
 
 	wmb();
 	cpu_startup_entry(CPUHP_AP_ONLINE_IDLE);
+
+	/*
+	 * Prevent tail call to cpu_startup_entry() because the stack protector
+	 * guard has been changed a couple of function calls up, in
+	 * boot_init_stack_canary() and must not be checked before tail calling
+	 * another function.
+	 */
+	prevent_tail_call_optimization();
 }
 
 /**
@@ -328,9 +320,9 @@ int topology_phys_to_logical_die(unsigned int die_id, unsigned int cur_cpu)
 	for_each_possible_cpu(cpu) {
 		struct cpuinfo_x86 *c = &cpu_data(cpu);
 
-		if (c->initialized && c->_rh.cpu_die_id == die_id &&
+		if (c->initialized && c->cpu_die_id == die_id &&
 		    c->phys_proc_id == proc_id)
-			return c->_rh.logical_die_id;
+			return c->logical_die_id;
 	}
 	return -1;
 }
@@ -379,7 +371,7 @@ int topology_update_die_map(unsigned int die, unsigned int cpu)
 			cpu, die, new);
 	}
 found:
-	cpu_data(cpu)._rh.logical_die_id = new;
+	cpu_data(cpu).logical_die_id = new;
 	return 0;
 }
 
@@ -391,7 +383,7 @@ void __init smp_store_boot_cpu_info(void)
 	*c = boot_cpu_data;
 	c->cpu_index = id;
 	topology_update_package_map(c->phys_proc_id, id);
-	topology_update_die_map(c->_rh.cpu_die_id, id);
+	topology_update_die_map(c->cpu_die_id, id);
 	c->initialized = true;
 }
 
@@ -446,7 +438,7 @@ static bool match_smt(struct cpuinfo_x86 *c, struct cpuinfo_x86 *o)
 		int cpu1 = c->cpu_index, cpu2 = o->cpu_index;
 
 		if (c->phys_proc_id == o->phys_proc_id &&
-		    (c->_rh.cpu_die_id == o->_rh.cpu_die_id) &&
+		    c->cpu_die_id == o->cpu_die_id &&
 		    per_cpu(cpu_llc_id, cpu1) == per_cpu(cpu_llc_id, cpu2)) {
 			if (c->cpu_core_id == o->cpu_core_id)
 				return topology_sane(c, o, "smt");
@@ -458,7 +450,7 @@ static bool match_smt(struct cpuinfo_x86 *c, struct cpuinfo_x86 *o)
 		}
 
 	} else if (c->phys_proc_id == o->phys_proc_id &&
-		   (c->_rh.cpu_die_id == o->_rh.cpu_die_id) &&
+		   c->cpu_die_id == o->cpu_die_id &&
 		   c->cpu_core_id == o->cpu_core_id) {
 		return topology_sane(c, o, "smt");
 	}
@@ -482,7 +474,7 @@ static bool match_smt(struct cpuinfo_x86 *c, struct cpuinfo_x86 *o)
  */
 
 static const struct x86_cpu_id snc_cpu[] = {
-	X86_MATCH_INTEL_FAM6_MODEL(SKYLAKE_X, NULL),
+	{ X86_VENDOR_INTEL, 6, INTEL_FAM6_SKYLAKE_X },
 	{}
 };
 
@@ -524,7 +516,7 @@ static bool match_pkg(struct cpuinfo_x86 *c, struct cpuinfo_x86 *o)
 static bool match_die(struct cpuinfo_x86 *c, struct cpuinfo_x86 *o)
 {
 	if ((c->phys_proc_id == o->phys_proc_id) &&
-	    (c->_rh.cpu_die_id == o->_rh.cpu_die_id))
+		(c->cpu_die_id == o->cpu_die_id))
 		return true;
 	return false;
 }
@@ -744,6 +736,7 @@ static void __init smp_quirk_init_udelay(void)
 
 	/* if modern processor, use no delay */
 	if (((boot_cpu_data.x86_vendor == X86_VENDOR_INTEL) && (boot_cpu_data.x86 == 6)) ||
+	    ((boot_cpu_data.x86_vendor == X86_VENDOR_HYGON) && (boot_cpu_data.x86 >= 0x18)) ||
 	    ((boot_cpu_data.x86_vendor == X86_VENDOR_AMD) && (boot_cpu_data.x86 >= 0xF))) {
 		init_udelay = 0;
 		return;
@@ -908,7 +901,7 @@ wakeup_secondary_cpu_via_init(int phys_apicid, unsigned long start_eip)
 /* reduce the number of lines printed when booting a large cpu count system */
 static void announce_cpu(int cpu, int apicid)
 {
-	static int current_node = -1;
+	static int current_node = NUMA_NO_NODE;
 	int node = early_cpu_to_node(cpu);
 	static int width, node_width;
 
@@ -1006,20 +999,27 @@ out:
 	return boot_error;
 }
 
-void common_cpu_up(unsigned int cpu, struct task_struct *idle)
+int common_cpu_up(unsigned int cpu, struct task_struct *idle)
 {
+	int ret;
+
 	/* Just in case we booted with a single CPU. */
 	alternatives_enable_smp();
 
 	per_cpu(current_task, cpu) = idle;
 
+	/* Initialize the interrupt stack(s) */
+	ret = irq_init_percpu_irqstack(cpu);
+	if (ret)
+		return ret;
+
 #ifdef CONFIG_X86_32
 	/* Stack for startup_32 can be just as for start_secondary onwards */
-	irq_ctx_init(cpu);
 	per_cpu(cpu_current_top_of_stack, cpu) = task_top_of_stack(idle);
 #else
 	initial_gs = per_cpu_offset(cpu);
 #endif
+	return 0;
 }
 
 /*
@@ -1031,8 +1031,6 @@ void common_cpu_up(unsigned int cpu, struct task_struct *idle)
 static int do_boot_cpu(int apicid, int cpu, struct task_struct *idle,
 		       int *cpu0_nmi_registered)
 {
-	volatile u32 *trampoline_status =
-		(volatile u32 *) __va(real_mode_header->trampoline_status);
 	/* start_ip had better be page-aligned! */
 	unsigned long start_ip = real_mode_header->trampoline_start;
 
@@ -1124,9 +1122,6 @@ static int do_boot_cpu(int apicid, int cpu, struct task_struct *idle,
 		}
 	}
 
-	/* mark "stuck" area as not stuck */
-	*trampoline_status = 0;
-
 	if (x86_platform.legacy.warm_reset) {
 		/*
 		 * Cleanup possible dangling ends...
@@ -1177,7 +1172,9 @@ int native_cpu_up(unsigned int cpu, struct task_struct *tidle)
 	/* the FPU context is blank, nobody can own it */
 	per_cpu(fpu_fpregs_owner_ctx, cpu) = NULL;
 
-	common_cpu_up(cpu, tidle);
+	err = common_cpu_up(cpu, tidle);
+	if (err)
+		return err;
 
 	err = do_boot_cpu(apicid, cpu, tidle, &cpu0_nmi_registered);
 	if (err) {
@@ -1348,7 +1345,7 @@ void __init native_smp_prepare_cpus(unsigned int max_cpus)
 	set_sched_topology(x86_topology);
 
 	set_cpu_sibling_map(0);
-	init_freq_invariance(false);
+
 	smp_sanity_check();
 
 	switch (apic_intr_mode) {
@@ -1415,7 +1412,7 @@ void __init calculate_max_logical_packages(void)
 	 * extrapolate the boot cpu's data to all packages.
 	 */
 	ncpus = cpu_data(0).booted_cores * topology_max_smt_threads();
-	__max_logical_packages = DIV_ROUND_UP(nr_cpu_ids, ncpus);
+	__max_logical_packages = DIV_ROUND_UP(total_cpus, ncpus);
 	pr_info("Max logical packages: %u\n", __max_logical_packages);
 }
 
@@ -1602,8 +1599,27 @@ int native_cpu_disable(void)
 	if (ret)
 		return ret;
 
-	clear_local_APIC();
 	cpu_disable_common();
+
+        /*
+         * Disable the local APIC. Otherwise IPI broadcasts will reach
+         * it. It still responds normally to INIT, NMI, SMI, and SIPI
+         * messages.
+         *
+         * Disabling the APIC must happen after cpu_disable_common()
+         * which invokes fixup_irqs().
+         *
+         * Disabling the APIC preserves already set bits in IRR, but
+         * an interrupt arriving after disabling the local APIC does not
+         * set the corresponding IRR bit.
+         *
+         * fixup_irqs() scans IRR for set bits so it can raise a not
+         * yet handled interrupt on the new destination CPU via an IPI
+         * but obviously it can't do so for IRR bits which are not set.
+         * IOW, interrupts arriving after disabling the local APIC will
+         * be lost.
+         */
+	apic_soft_disable();
 
 	return 0;
 }
@@ -1664,7 +1680,8 @@ static inline void mwait_play_dead(void)
 	void *mwait_ptr;
 	int i;
 
-	if (boot_cpu_data.x86_vendor == X86_VENDOR_AMD)
+	if (boot_cpu_data.x86_vendor == X86_VENDOR_AMD ||
+	    boot_cpu_data.x86_vendor == X86_VENDOR_HYGON)
 		return;
 	if (!this_cpu_has(X86_FEATURE_MWAIT))
 		return;
@@ -1769,306 +1786,3 @@ void native_play_dead(void)
 }
 
 #endif
-
-/*
- * APERF/MPERF frequency ratio computation.
- *
- * The scheduler wants to do frequency invariant accounting and needs a <1
- * ratio to account for the 'current' frequency, corresponding to
- * freq_curr / freq_max.
- *
- * Since the frequency freq_curr on x86 is controlled by micro-controller and
- * our P-state setting is little more than a request/hint, we need to observe
- * the effective frequency 'BusyMHz', i.e. the average frequency over a time
- * interval after discarding idle time. This is given by:
- *
- *   BusyMHz = delta_APERF / delta_MPERF * freq_base
- *
- * where freq_base is the max non-turbo P-state.
- *
- * The freq_max term has to be set to a somewhat arbitrary value, because we
- * can't know which turbo states will be available at a given point in time:
- * it all depends on the thermal headroom of the entire package. We set it to
- * the turbo level with 4 cores active.
- *
- * Benchmarks show that's a good compromise between the 1C turbo ratio
- * (freq_curr/freq_max would rarely reach 1) and something close to freq_base,
- * which would ignore the entire turbo range (a conspicuous part, making
- * freq_curr/freq_max always maxed out).
- *
- * An exception to the heuristic above is the Atom uarch, where we choose the
- * highest turbo level for freq_max since Atom's are generally oriented towards
- * power efficiency.
- *
- * Setting freq_max to anything less than the 1C turbo ratio makes the ratio
- * freq_curr / freq_max to eventually grow >1, in which case we clip it to 1.
- */
-
-DEFINE_STATIC_KEY_FALSE(arch_scale_freq_key);
-
-static DEFINE_PER_CPU(u64, arch_prev_aperf);
-static DEFINE_PER_CPU(u64, arch_prev_mperf);
-static u64 arch_turbo_freq_ratio = SCHED_CAPACITY_SCALE;
-static u64 arch_max_freq_ratio = SCHED_CAPACITY_SCALE;
-
-void arch_set_max_freq_ratio(bool turbo_disabled)
-{
-	arch_max_freq_ratio = turbo_disabled ? SCHED_CAPACITY_SCALE :
-					arch_turbo_freq_ratio;
-}
-
-static bool turbo_disabled(void)
-{
-	u64 misc_en;
-	int err;
-
-	err = rdmsrl_safe(MSR_IA32_MISC_ENABLE, &misc_en);
-	if (err)
-		return false;
-
-	return (misc_en & MSR_IA32_MISC_ENABLE_TURBO_DISABLE);
-}
-
-static bool slv_set_max_freq_ratio(u64 *base_freq, u64 *turbo_freq)
-{
-	int err;
-
-	err = rdmsrl_safe(MSR_ATOM_CORE_RATIOS, base_freq);
-	if (err)
-		return false;
-
-	err = rdmsrl_safe(MSR_ATOM_CORE_TURBO_RATIOS, turbo_freq);
-	if (err)
-		return false;
-
-	*base_freq = (*base_freq >> 16) & 0x3F;     /* max P state */
-	*turbo_freq = *turbo_freq & 0x3F;           /* 1C turbo    */
-
-	return true;
-}
-
-#include <asm/cpu_device_id.h>
-#include <asm/intel-family.h>
-
-#define ICPU(model) \
-	{X86_VENDOR_INTEL, 6, model, X86_FEATURE_APERFMPERF, 0}
-
-static const struct x86_cpu_id has_knl_turbo_ratio_limits[] = {
-	ICPU(INTEL_FAM6_XEON_PHI_KNL),
-	ICPU(INTEL_FAM6_XEON_PHI_KNM),
-	{}
-};
-
-static const struct x86_cpu_id has_skx_turbo_ratio_limits[] = {
-	ICPU(INTEL_FAM6_SKYLAKE_X),
-	{}
-};
-
-static const struct x86_cpu_id has_glm_turbo_ratio_limits[] = {
-	ICPU(INTEL_FAM6_ATOM_GOLDMONT),
-	ICPU(INTEL_FAM6_ATOM_GOLDMONT_D),
-	ICPU(INTEL_FAM6_ATOM_GOLDMONT_PLUS),
-	{}
-};
-
-static bool knl_set_max_freq_ratio(u64 *base_freq, u64 *turbo_freq,
-				int num_delta_fratio)
-{
-	int fratio, delta_fratio, found;
-	int err, i;
-	u64 msr;
-
-	err = rdmsrl_safe(MSR_PLATFORM_INFO, base_freq);
-	if (err)
-		return false;
-
-	*base_freq = (*base_freq >> 8) & 0xFF;	    /* max P state */
-
-	err = rdmsrl_safe(MSR_TURBO_RATIO_LIMIT, &msr);
-	if (err)
-		return false;
-
-	fratio = (msr >> 8) & 0xFF;
-	i = 16;
-	found = 0;
-	do {
-		if (found >= num_delta_fratio) {
-			*turbo_freq = fratio;
-			return true;
-		}
-
-		delta_fratio = (msr >> (i + 5)) & 0x7;
-
-		if (delta_fratio) {
-			found += 1;
-			fratio -= delta_fratio;
-		}
-
-		i += 8;
-	} while (i < 64);
-
-	return true;
-}
-
-static bool skx_set_max_freq_ratio(u64 *base_freq, u64 *turbo_freq, int size)
-{
-	u64 ratios, counts;
-	u32 group_size;
-	int err, i;
-
-	err = rdmsrl_safe(MSR_PLATFORM_INFO, base_freq);
-	if (err)
-		return false;
-
-	*base_freq = (*base_freq >> 8) & 0xFF;      /* max P state */
-
-	err = rdmsrl_safe(MSR_TURBO_RATIO_LIMIT, &ratios);
-	if (err)
-		return false;
-
-	err = rdmsrl_safe(MSR_TURBO_RATIO_LIMIT1, &counts);
-	if (err)
-		return false;
-
-	for (i = 0; i < 64; i += 8) {
-		group_size = (counts >> i) & 0xFF;
-		if (group_size >= size) {
-			*turbo_freq = (ratios >> i) & 0xFF;
-			return true;
-		}
-	}
-
-	return false;
-}
-
-static bool core_set_max_freq_ratio(u64 *base_freq, u64 *turbo_freq)
-{
-	u64 msr;
-	int err;
-
-	err = rdmsrl_safe(MSR_PLATFORM_INFO, base_freq);
-	if (err)
-		return false;
-
-	err = rdmsrl_safe(MSR_TURBO_RATIO_LIMIT, &msr);
-	if (err)
-		return false;
-
-	*base_freq = (*base_freq >> 8) & 0xFF;    /* max P state */
-	*turbo_freq = (msr >> 24) & 0xFF;         /* 4C turbo    */
-
-	/* The CPU may have less than 4 cores */
-	if (!*turbo_freq)
-		*turbo_freq = msr & 0xFF;         /* 1C turbo    */
-
-	return true;
-}
-
-static bool intel_set_max_freq_ratio(void)
-{
-	u64 base_freq, turbo_freq;
-
-	if (slv_set_max_freq_ratio(&base_freq, &turbo_freq))
-		goto out;
-
-	if (x86_match_cpu(has_glm_turbo_ratio_limits) &&
-	    skx_set_max_freq_ratio(&base_freq, &turbo_freq, 1))
-		goto out;
-
-	if (x86_match_cpu(has_knl_turbo_ratio_limits) &&
-	    knl_set_max_freq_ratio(&base_freq, &turbo_freq, 1))
-		goto out;
-
-	if (x86_match_cpu(has_skx_turbo_ratio_limits) &&
-	    skx_set_max_freq_ratio(&base_freq, &turbo_freq, 4))
-		goto out;
-
-	if (core_set_max_freq_ratio(&base_freq, &turbo_freq))
-		goto out;
-
-	return false;
-
-out:
-	/*
-	 * Some hypervisors advertise X86_FEATURE_APERFMPERF
-	 * but then fill all MSR's with zeroes.
-	 */
-	if (!base_freq) {
-		pr_debug("Couldn't determine cpu base frequency, necessary for scale-invariant accounting.\n");
-		return false;
-	}
-
-	arch_turbo_freq_ratio = div_u64(turbo_freq * SCHED_CAPACITY_SCALE,
-					base_freq);
-	arch_set_max_freq_ratio(turbo_disabled());
-	return true;
-}
-
-static void init_counter_refs(void)
-{
-	u64 aperf, mperf;
-
-	rdmsrl(MSR_IA32_APERF, aperf);
-	rdmsrl(MSR_IA32_MPERF, mperf);
-
-	this_cpu_write(arch_prev_aperf, aperf);
-	this_cpu_write(arch_prev_mperf, mperf);
-}
-
-static void init_freq_invariance(bool secondary)
-{
-	bool ret = false;
-
-	if (!boot_cpu_has(X86_FEATURE_APERFMPERF))
-		return;
-
-	if (secondary) {
-		if (static_branch_likely(&arch_scale_freq_key)) {
-			init_counter_refs();
-		}
-		return;
-	}
-
-	if (boot_cpu_data.x86_vendor == X86_VENDOR_INTEL)
-		ret = intel_set_max_freq_ratio();
-
-	if (ret) {
-		init_counter_refs();
-		static_branch_enable(&arch_scale_freq_key);
-	} else {
-		pr_debug("Couldn't determine max cpu frequency, necessary for scale-invariant accounting.\n");
-	}
-}
-
-DEFINE_PER_CPU(unsigned long, arch_freq_scale) = SCHED_CAPACITY_SCALE;
-
-void arch_scale_freq_tick(void)
-{
-	u64 freq_scale;
-	u64 aperf, mperf;
-	u64 acnt, mcnt;
-
-	if (!arch_scale_freq_invariant())
-		return;
-
-	rdmsrl(MSR_IA32_APERF, aperf);
-	rdmsrl(MSR_IA32_MPERF, mperf);
-
-	acnt = aperf - this_cpu_read(arch_prev_aperf);
-	mcnt = mperf - this_cpu_read(arch_prev_mperf);
-	if (!mcnt)
-		return;
-
-	this_cpu_write(arch_prev_aperf, aperf);
-	this_cpu_write(arch_prev_mperf, mperf);
-
-	acnt <<= 2*SCHED_CAPACITY_SHIFT;
-	mcnt *= arch_max_freq_ratio;
-
-	freq_scale = div64_u64(acnt, mcnt);
-
-	if (freq_scale > SCHED_CAPACITY_SCALE)
-		freq_scale = SCHED_CAPACITY_SCALE;
-
-	this_cpu_write(arch_freq_scale, freq_scale);
-}

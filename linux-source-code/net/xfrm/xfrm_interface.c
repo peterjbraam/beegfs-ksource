@@ -145,6 +145,7 @@ static int xfrmi_create(struct net_device *dev)
 	if (err < 0)
 		goto out;
 
+	dev_hold(dev);
 	xfrmi_link(xfrmn, xi);
 
 	return 0;
@@ -174,6 +175,7 @@ static void xfrmi_dev_uninit(struct net_device *dev)
 	struct xfrmi_net *xfrmn = net_generic(xi->net, xfrmi_net_id);
 
 	xfrmi_unlink(xfrmn, xi);
+	dev_put(dev);
 }
 
 static void xfrmi_scrub_packet(struct sk_buff *skb, bool xnet)
@@ -183,7 +185,7 @@ static void xfrmi_scrub_packet(struct sk_buff *skb, bool xnet)
 	skb->skb_iif = 0;
 	skb->ignore_df = 0;
 	skb_dst_drop(skb);
-	nf_reset(skb);
+	nf_reset_ct(skb);
 	nf_reset_trace(skb);
 
 	if (!xnet)
@@ -204,7 +206,7 @@ static int xfrmi_rcv_cb(struct sk_buff *skb, int err)
 	struct xfrm_if *xi;
 	bool xnet;
 
-	if (err && !skb->sp)
+	if (err && !secpath_exists(skb))
 		return 0;
 
 	x = xfrm_input_state(skb);
@@ -226,7 +228,7 @@ static int xfrmi_rcv_cb(struct sk_buff *skb, int err)
 	xnet = !net_eq(xi->net, dev_net(skb->dev));
 
 	if (xnet) {
-		inner_mode = x->inner_mode;
+		inner_mode = &x->inner_mode;
 
 		if (x->sel.family == AF_UNSPEC) {
 			inner_mode = xfrm_ip2inner_mode(x, XFRM_MODE_SKB_CB(skb)->protocol);
@@ -291,7 +293,7 @@ xfrmi_xmit2(struct sk_buff *skb, struct net_device *dev, struct flowi *fl)
 	}
 
 	mtu = dst_mtu(dst);
-	if (!skb->ignore_df && skb->len > mtu) {
+	if (skb->len > mtu) {
 		skb_dst_update_pmtu_no_confirm(skb, mtu);
 
 		if (skb->protocol == htons(ETH_P_IPV6)) {
@@ -446,9 +448,9 @@ static int xfrmi4_err(struct sk_buff *skb, u32 info)
 	}
 
 	if (icmp_hdr(skb)->type == ICMP_DEST_UNREACH)
-		ipv4_update_pmtu(skb, net, info, 0, 0, protocol, 0);
+		ipv4_update_pmtu(skb, net, info, 0, protocol);
 	else
-		ipv4_redirect(skb, net, 0, 0, protocol, 0);
+		ipv4_redirect(skb, net, 0, protocol);
 	xfrm_state_put(x);
 
 	return 0;
@@ -748,6 +750,28 @@ static struct rtnl_link_ops xfrmi_link_ops __read_mostly = {
 	.get_link_net	= xfrmi_get_link_net,
 };
 
+static void __net_exit xfrmi_destroy_interfaces(struct xfrmi_net *xfrmn)
+{
+	struct xfrm_if *xi;
+	LIST_HEAD(list);
+
+	xi = rtnl_dereference(xfrmn->xfrmi[0]);
+	if (!xi)
+		return;
+
+	unregister_netdevice_queue(xi->dev, &list);
+	unregister_netdevice_many(&list);
+}
+
+static void __net_exit xfrmi_exit_net(struct net *net)
+{
+	struct xfrmi_net *xfrmn = net_generic(net, xfrmi_net_id);
+
+	rtnl_lock();
+	xfrmi_destroy_interfaces(xfrmn);
+	rtnl_unlock();
+}
+
 static void __net_exit xfrmi_exit_batch_net(struct list_head *net_exit_list)
 {
 	struct net *net;
@@ -770,13 +794,13 @@ static void __net_exit xfrmi_exit_batch_net(struct list_head *net_exit_list)
 
 static struct pernet_operations xfrmi_net_ops = {
 	.exit_batch = xfrmi_exit_batch_net,
+	.exit = xfrmi_exit_net,
 	.id   = &xfrmi_net_id,
 	.size = sizeof(struct xfrmi_net),
 };
 
 static struct xfrm6_protocol xfrmi_esp6_protocol __read_mostly = {
 	.handler	=	xfrm6_rcv,
-	.input_handler	=	xfrm_input,
 	.cb_handler	=	xfrmi_rcv_cb,
 	.err_handler	=	xfrmi6_err,
 	.priority	=	10,
@@ -784,7 +808,6 @@ static struct xfrm6_protocol xfrmi_esp6_protocol __read_mostly = {
 
 static struct xfrm6_protocol xfrmi_ah6_protocol __read_mostly = {
 	.handler	=	xfrm6_rcv,
-	.input_handler	=	xfrm_input,
 	.cb_handler	=	xfrmi_rcv_cb,
 	.err_handler	=	xfrmi6_err,
 	.priority	=	10,
@@ -792,38 +815,10 @@ static struct xfrm6_protocol xfrmi_ah6_protocol __read_mostly = {
 
 static struct xfrm6_protocol xfrmi_ipcomp6_protocol __read_mostly = {
 	.handler	=	xfrm6_rcv,
-	.input_handler	=	xfrm_input,
 	.cb_handler	=	xfrmi_rcv_cb,
 	.err_handler	=	xfrmi6_err,
 	.priority	=	10,
 };
-
-#if IS_REACHABLE(CONFIG_INET6_XFRM_TUNNEL)
-static int xfrmi6_rcv_tunnel(struct sk_buff *skb)
-{
-	const xfrm_address_t *saddr;
-	__be32 spi;
-
-	saddr = (const xfrm_address_t *)&ipv6_hdr(skb)->saddr;
-	spi = xfrm6_tunnel_spi_lookup(dev_net(skb->dev), saddr);
-
-	return xfrm6_rcv_spi(skb, IPPROTO_IPV6, spi, NULL);
-}
-
-static struct xfrm6_tunnel xfrmi_ipv6_handler __read_mostly = {
-	.handler	=	xfrmi6_rcv_tunnel,
-	.cb_handler	=	xfrmi_rcv_cb,
-	.err_handler	=	xfrmi6_err,
-	.priority	=	-1,
-};
-
-static struct xfrm6_tunnel xfrmi_ip6ip_handler __read_mostly = {
-	.handler	=	xfrmi6_rcv_tunnel,
-	.cb_handler	=	xfrmi_rcv_cb,
-	.err_handler	=	xfrmi6_err,
-	.priority	=	-1,
-};
-#endif
 
 static struct xfrm4_protocol xfrmi_esp4_protocol __read_mostly = {
 	.handler	=	xfrm4_rcv,
@@ -849,27 +844,6 @@ static struct xfrm4_protocol xfrmi_ipcomp4_protocol __read_mostly = {
 	.priority	=	10,
 };
 
-#if IS_REACHABLE(CONFIG_INET_XFRM_TUNNEL)
-static int xfrmi4_rcv_tunnel(struct sk_buff *skb)
-{
-	return xfrm4_rcv_spi(skb, IPPROTO_IPIP, ip_hdr(skb)->saddr);
-}
-
-static struct xfrm_tunnel xfrmi_ipip_handler __read_mostly = {
-	.handler	=	xfrmi4_rcv_tunnel,
-	.cb_handler	=	xfrmi_rcv_cb,
-	.err_handler	=	xfrmi4_err,
-	.priority	=	-1,
-};
-
-static struct xfrm_tunnel xfrmi_ipip6_handler __read_mostly = {
-	.handler	=	xfrmi4_rcv_tunnel,
-	.cb_handler	=	xfrmi_rcv_cb,
-	.err_handler	=	xfrmi4_err,
-	.priority	=	-1,
-};
-#endif
-
 static int __init xfrmi4_init(void)
 {
 	int err;
@@ -883,23 +857,9 @@ static int __init xfrmi4_init(void)
 	err = xfrm4_protocol_register(&xfrmi_ipcomp4_protocol, IPPROTO_COMP);
 	if (err < 0)
 		goto xfrm_proto_comp_failed;
-#if IS_REACHABLE(CONFIG_INET_XFRM_TUNNEL)
-	err = xfrm4_tunnel_register(&xfrmi_ipip_handler, AF_INET);
-	if (err < 0)
-		goto xfrm_tunnel_ipip_failed;
-	err = xfrm4_tunnel_register(&xfrmi_ipip6_handler, AF_INET6);
-	if (err < 0)
-		goto xfrm_tunnel_ipip6_failed;
-#endif
 
 	return 0;
 
-#if IS_REACHABLE(CONFIG_INET_XFRM_TUNNEL)
-xfrm_tunnel_ipip6_failed:
-	xfrm4_tunnel_deregister(&xfrmi_ipip_handler, AF_INET);
-xfrm_tunnel_ipip_failed:
-	xfrm4_protocol_deregister(&xfrmi_ipcomp4_protocol, IPPROTO_COMP);
-#endif
 xfrm_proto_comp_failed:
 	xfrm4_protocol_deregister(&xfrmi_ah4_protocol, IPPROTO_AH);
 xfrm_proto_ah_failed:
@@ -910,10 +870,6 @@ xfrm_proto_esp_failed:
 
 static void xfrmi4_fini(void)
 {
-#if IS_REACHABLE(CONFIG_INET_XFRM_TUNNEL)
-	xfrm4_tunnel_deregister(&xfrmi_ipip6_handler, AF_INET6);
-	xfrm4_tunnel_deregister(&xfrmi_ipip_handler, AF_INET);
-#endif
 	xfrm4_protocol_deregister(&xfrmi_ipcomp4_protocol, IPPROTO_COMP);
 	xfrm4_protocol_deregister(&xfrmi_ah4_protocol, IPPROTO_AH);
 	xfrm4_protocol_deregister(&xfrmi_esp4_protocol, IPPROTO_ESP);
@@ -932,23 +888,9 @@ static int __init xfrmi6_init(void)
 	err = xfrm6_protocol_register(&xfrmi_ipcomp6_protocol, IPPROTO_COMP);
 	if (err < 0)
 		goto xfrm_proto_comp_failed;
-#if IS_REACHABLE(CONFIG_INET6_XFRM_TUNNEL)
-	err = xfrm6_tunnel_register(&xfrmi_ipv6_handler, AF_INET6);
-	if (err < 0)
-		goto xfrm_tunnel_ipv6_failed;
-	err = xfrm6_tunnel_register(&xfrmi_ip6ip_handler, AF_INET);
-	if (err < 0)
-		goto xfrm_tunnel_ip6ip_failed;
-#endif
 
 	return 0;
 
-#if IS_REACHABLE(CONFIG_INET6_XFRM_TUNNEL)
-xfrm_tunnel_ip6ip_failed:
-	xfrm6_tunnel_deregister(&xfrmi_ipv6_handler, AF_INET6);
-xfrm_tunnel_ipv6_failed:
-	xfrm6_protocol_deregister(&xfrmi_ipcomp6_protocol, IPPROTO_COMP);
-#endif
 xfrm_proto_comp_failed:
 	xfrm6_protocol_deregister(&xfrmi_ah6_protocol, IPPROTO_AH);
 xfrm_proto_ah_failed:
@@ -959,10 +901,6 @@ xfrm_proto_esp_failed:
 
 static void xfrmi6_fini(void)
 {
-#if IS_REACHABLE(CONFIG_INET6_XFRM_TUNNEL)
-	xfrm6_tunnel_deregister(&xfrmi_ip6ip_handler, AF_INET);
-	xfrm6_tunnel_deregister(&xfrmi_ipv6_handler, AF_INET6);
-#endif
 	xfrm6_protocol_deregister(&xfrmi_ipcomp6_protocol, IPPROTO_COMP);
 	xfrm6_protocol_deregister(&xfrmi_ah6_protocol, IPPROTO_AH);
 	xfrm6_protocol_deregister(&xfrmi_esp6_protocol, IPPROTO_ESP);

@@ -10,13 +10,13 @@
 
 #include <linux/bio.h>
 #include <linux/blkdev.h>
+#include <linux/dm-ioctl.h>
 #include <linux/math64.h>
 #include <linux/ratelimit.h>
 
 struct dm_dev;
 struct dm_target;
 struct dm_table;
-struct dm_report_zones_args;
 struct mapped_device;
 struct bio_vec;
 
@@ -93,9 +93,9 @@ typedef int (*dm_message_fn) (struct dm_target *ti, unsigned argc, char **argv,
 
 typedef int (*dm_prepare_ioctl_fn) (struct dm_target *ti, struct block_device **bdev);
 
-typedef int (*dm_report_zones_fn) (struct dm_target *ti,
-				   struct dm_report_zones_args *args,
-				   unsigned int nr_zones);
+typedef int (*dm_report_zones_fn) (struct dm_target *ti, sector_t sector,
+				   struct blk_zone *zones,
+				   unsigned int *nr_zones);
 
 /*
  * These iteration functions are typically used to check (and combine)
@@ -185,7 +185,7 @@ struct target_type {
 	dm_status_fn status;
 	dm_message_fn message;
 	dm_prepare_ioctl_fn prepare_ioctl;
-#if 1 /* CONFIG_BLK_DEV_ZONED */
+#ifdef CONFIG_BLK_DEV_ZONED
 	dm_report_zones_fn report_zones;
 #endif
 	dm_busy_fn busy;
@@ -316,12 +316,6 @@ struct dm_target {
 	 * whether or not its underlying devices have support.
 	 */
 	bool discards_supported:1;
-
-	/*
-	 * Set if the target required discard bios to be split
-	 * on max_io_len boundary.
-	 */
-	bool split_discard_bios:1;
 };
 
 /* Each target can link one of these into the table */
@@ -429,22 +423,17 @@ int dm_suspended(struct dm_target *ti);
 int dm_post_suspending(struct dm_target *ti);
 int dm_noflush_suspending(struct dm_target *ti);
 void dm_accept_partial_bio(struct bio *bio, unsigned n_sectors);
+void dm_remap_zone_report(struct dm_target *ti, sector_t start,
+			  struct blk_zone *zones, unsigned int *nr_zones);
 union map_info *dm_get_rq_mapinfo(struct request *rq);
 
-#ifdef CONFIG_BLK_DEV_ZONED
-struct dm_report_zones_args {
-	struct dm_target *tgt;
-	sector_t next_sector;
-
-	void *orig_data;
-	report_zones_cb orig_cb;
-	unsigned int zone_idx;
-
-	/* must be filled by ->report_zones before calling dm_report_zones_cb */
-	sector_t start;
-};
-int dm_report_zones_cb(struct blk_zone *zone, unsigned int idx, void *data);
-#endif /* CONFIG_BLK_DEV_ZONED */
+/*
+ * Device mapper functions to parse and create devices specified by the
+ * parameter "dm-mod.create="
+ */
+int __init dm_early_create(struct dm_ioctl *dmi,
+			   struct dm_target_spec **spec_array,
+			   char **target_params_array);
 
 struct queue_limits *dm_get_queue_limits(struct mapped_device *md);
 
@@ -552,8 +541,13 @@ void *dm_vcalloc(unsigned long nmemb, unsigned long elem_size);
 #define DMINFO(fmt, ...) pr_info(DM_FMT(fmt), ##__VA_ARGS__)
 #define DMINFO_LIMIT(fmt, ...) pr_info_ratelimited(DM_FMT(fmt), ##__VA_ARGS__)
 
-#define DMDEBUG(fmt, ...) pr_debug(DM_FMT(fmt), ##__VA_ARGS__)
+#ifdef CONFIG_DM_DEBUG
+#define DMDEBUG(fmt, ...) printk(KERN_DEBUG DM_FMT(fmt), ##__VA_ARGS__)
 #define DMDEBUG_LIMIT(fmt, ...) pr_debug_ratelimited(DM_FMT(fmt), ##__VA_ARGS__)
+#else
+#define DMDEBUG(fmt, ...) no_printk(fmt, ##__VA_ARGS__)
+#define DMDEBUG_LIMIT(fmt, ...) no_printk(fmt, ##__VA_ARGS__)
+#endif
 
 #define DMEMIT(x...) sz += ((sz >= maxlen) ? \
 			  0 : scnprintf(result + sz, maxlen - sz, x))
@@ -601,13 +595,16 @@ void *dm_vcalloc(unsigned long nmemb, unsigned long elem_size);
  */
 #define dm_round_up(n, sz) (dm_div_up((n), (sz)) * (sz))
 
+#define dm_array_too_big(fixed, obj, num) \
+	((num) > (UINT_MAX - (fixed)) / (obj))
+
 /*
  * Sector offset taken relative to the start of the target instead of
  * relative to the start of the device.
  */
 #define dm_target_offset(ti, sector) ((sector) - (ti)->begin)
 
-static inline sector_t to_sector(unsigned long n)
+static inline sector_t to_sector(unsigned long long n)
 {
 	return (n >> SECTOR_SHIFT);
 }

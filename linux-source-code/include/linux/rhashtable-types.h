@@ -9,14 +9,10 @@
 #ifndef _LINUX_RHASHTABLE_TYPES_H
 #define _LINUX_RHASHTABLE_TYPES_H
 
-#include <linux/rh_kabi.h>
-
 #include <linux/atomic.h>
 #include <linux/compiler.h>
 #include <linux/mutex.h>
 #include <linux/workqueue.h>
-
-#include RH_KABI_FAKE_INCLUDE(<linux/rhashtable.h>)
 
 struct rhash_head {
 	struct rhash_head __rcu		*next;
@@ -52,7 +48,6 @@ typedef int (*rht_obj_cmpfn_t)(struct rhashtable_compare_arg *arg,
  * @head_offset: Offset of rhash_head in struct to be hashed
  * @max_size: Maximum size while expanding
  * @min_size: Minimum size while shrinking
- * @locks_mul: Number of bucket locks to allocate per cpu (default: 32)
  * @automatic_shrinking: Enable automatic shrinking of tables
  * @hashfn: Hash function (default: jhash2 if !(key_len % 4), or jhash)
  * @obj_hashfn: Function to hash object
@@ -66,8 +61,6 @@ struct rhashtable_params {
 	unsigned int		max_size;
 	u16			min_size;
 	bool			automatic_shrinking;
-	u8			locks_mul;
-	RH_KABI_DEPRECATE(u32,	nulls_base)
 	rht_hashfn_t		hashfn;
 	rht_obj_hashfn_t	obj_hashfn;
 	rht_obj_cmpfn_t		obj_cmpfn;

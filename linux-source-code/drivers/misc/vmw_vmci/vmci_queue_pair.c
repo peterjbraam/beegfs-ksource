@@ -1,16 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * VMware VMCI Driver
  *
  * Copyright (C) 2012 VMware, Inc. All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation version 2 and no later version.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
- * or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
- * for more details.
  */
 
 #include <linux/vmw_vmci_defs.h>
@@ -662,11 +654,12 @@ static int qp_host_get_user_memory(u64 produce_uva,
 				     produce_q->kernel_if->num_pages,
 				     FOLL_WRITE,
 				     produce_q->kernel_if->u.h.header_page);
-	if (retval < produce_q->kernel_if->num_pages) {
+	if (retval < (int)produce_q->kernel_if->num_pages) {
 		pr_debug("get_user_pages_fast(produce) failed (retval=%d)",
 			retval);
-		qp_release_pages(produce_q->kernel_if->u.h.header_page,
-				 retval, false);
+		if (retval > 0)
+			qp_release_pages(produce_q->kernel_if->u.h.header_page,
+					retval, false);
 		err = VMCI_ERROR_NO_MEM;
 		goto out;
 	}
@@ -675,11 +668,12 @@ static int qp_host_get_user_memory(u64 produce_uva,
 				     consume_q->kernel_if->num_pages,
 				     FOLL_WRITE,
 				     consume_q->kernel_if->u.h.header_page);
-	if (retval < consume_q->kernel_if->num_pages) {
+	if (retval < (int)consume_q->kernel_if->num_pages) {
 		pr_debug("get_user_pages_fast(consume) failed (retval=%d)",
 			retval);
-		qp_release_pages(consume_q->kernel_if->u.h.header_page,
-				 retval, false);
+		if (retval > 0)
+			qp_release_pages(consume_q->kernel_if->u.h.header_page,
+					retval, false);
 		qp_release_pages(produce_q->kernel_if->u.h.header_page,
 				 produce_q->kernel_if->num_pages, false);
 		err = VMCI_ERROR_NO_MEM;
@@ -2211,7 +2205,6 @@ int vmci_qp_broker_map(struct vmci_handle handle,
 {
 	struct qp_broker_entry *entry;
 	const u32 context_id = vmci_ctx_get_id(context);
-	bool is_local = false;
 	int result;
 
 	if (vmci_handle_is_invalid(handle) || !context ||
@@ -2240,7 +2233,6 @@ int vmci_qp_broker_map(struct vmci_handle handle,
 		goto out;
 	}
 
-	is_local = entry->qp.flags & VMCI_QPFLAG_LOCAL;
 	result = VMCI_SUCCESS;
 
 	if (context_id != VMCI_HOST_CONTEXT_ID) {
@@ -2322,7 +2314,6 @@ int vmci_qp_broker_unmap(struct vmci_handle handle,
 {
 	struct qp_broker_entry *entry;
 	const u32 context_id = vmci_ctx_get_id(context);
-	bool is_local = false;
 	int result;
 
 	if (vmci_handle_is_invalid(handle) || !context ||
@@ -2350,8 +2341,6 @@ int vmci_qp_broker_unmap(struct vmci_handle handle,
 		result = VMCI_ERROR_QUEUEPAIR_NOTATTACHED;
 		goto out;
 	}
-
-	is_local = entry->qp.flags & VMCI_QPFLAG_LOCAL;
 
 	if (context_id != VMCI_HOST_CONTEXT_ID) {
 		qp_acquire_queue_mutex(entry->produce_q);

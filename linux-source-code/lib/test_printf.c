@@ -212,6 +212,7 @@ test_string(void)
 #define PTR_STR "ffff0123456789ab"
 #define PTR_VAL_NO_CRNG "(____ptrval____)"
 #define ZEROS "00000000"	/* hex 32 zero bits */
+#define ONES "ffffffff"		/* hex 32 one bits */
 
 static int __init
 plain_format(void)
@@ -243,6 +244,7 @@ plain_format(void)
 #define PTR_STR "456789ab"
 #define PTR_VAL_NO_CRNG "(ptrval)"
 #define ZEROS ""
+#define ONES ""
 
 static int __init
 plain_format(void)
@@ -328,12 +330,26 @@ test_hashed(const char *fmt, const void *p)
 	test(buf, fmt, p);
 }
 
+/*
+ * NULL pointers aren't hashed.
+ */
 static void __init
 null_pointer(void)
 {
-	test_hashed("%p", NULL);
+	test(ZEROS "00000000", "%p", NULL);
 	test(ZEROS "00000000", "%px", NULL);
 	test("(null)", "%pE", NULL);
+}
+
+/*
+ * Error pointers aren't hashed.
+ */
+static void __init
+error_pointer(void)
+{
+	test(ONES "fffffff5", "%p", ERR_PTR(-11));
+	test(ONES "fffffff5", "%px", ERR_PTR(-11));
+	test("(efault)", "%pE", ERR_PTR(-11));
 }
 
 #define PTR_INVALID ((void *)0x000000ab)
@@ -454,6 +470,11 @@ dentry(void)
 {
 	test("foo", "%pd", &test_dentry[0]);
 	test("foo", "%pd2", &test_dentry[0]);
+
+	test("(null)", "%pd", NULL);
+	test("(efault)", "%pd", PTR_INVALID);
+	test("(null)", "%pD", NULL);
+	test("(efault)", "%pD", PTR_INVALID);
 
 	test("romeo", "%pd", &test_dentry[3]);
 	test("alfa/romeo", "%pd2", &test_dentry[3]);
@@ -589,30 +610,11 @@ flags(void)
 }
 
 static void __init
-errptr(void)
-{
-	test("-1234", "%pe", ERR_PTR(-1234));
-
-	/* Check that %pe with a non-ERR_PTR gets treated as ordinary %p. */
-	BUILD_BUG_ON(IS_ERR(PTR));
-	test_hashed("%pe", PTR);
-
-#ifdef CONFIG_SYMBOLIC_ERRNAME
-	test("(-ENOTSOCK)", "(%pe)", ERR_PTR(-ENOTSOCK));
-	test("(-EAGAIN)", "(%pe)", ERR_PTR(-EAGAIN));
-	BUILD_BUG_ON(EAGAIN != EWOULDBLOCK);
-	test("(-EAGAIN)", "(%pe)", ERR_PTR(-EWOULDBLOCK));
-	test("[-EIO    ]", "[%-8pe]", ERR_PTR(-EIO));
-	test("[    -EIO]", "[%8pe]", ERR_PTR(-EIO));
-	test("-EPROBE_DEFER", "%pe", ERR_PTR(-EPROBE_DEFER));
-#endif
-}
-
-static void __init
 test_pointer(void)
 {
 	plain();
 	null_pointer();
+	error_pointer();
 	invalid_pointer();
 	symbol_ptr();
 	kernel_ptr();
@@ -630,7 +632,6 @@ test_pointer(void)
 	bitmap();
 	netdev_features();
 	flags();
-	errptr();
 }
 
 static void __init selftest(void)

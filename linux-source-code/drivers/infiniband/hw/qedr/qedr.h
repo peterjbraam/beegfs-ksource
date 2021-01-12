@@ -231,16 +231,14 @@ struct qedr_ucontext {
 	struct qedr_dev *dev;
 	struct qedr_pd *pd;
 	void __iomem *dpi_addr;
-	struct rdma_user_mmap_entry *db_mmap_entry;
 	u64 dpi_phys_addr;
 	u32 dpi_size;
 	u16 dpi;
-	bool db_rec;
-};
 
-union db_prod32 {
-	struct rdma_pwm_val16_data data;
-	u32 raw;
+	struct list_head mm_head;
+
+	/* Lock to protect mm list */
+	struct mutex mm_list_lock;
 };
 
 union db_prod64 {
@@ -268,13 +266,6 @@ struct qedr_userq {
 	struct qedr_pbl *pbl_tbl;
 	u64 buf_addr;
 	size_t buf_len;
-
-	/* doorbell recovery */
-	void __iomem *db_addr;
-	struct qedr_user_db_rec *db_rec_data;
-	struct rdma_user_mmap_entry *db_mmap_entry;
-	void __iomem *db_rec_db2_addr;
-	union db_prod32 db_rec_db2_data;
 };
 
 struct qedr_cq {
@@ -308,6 +299,19 @@ struct qedr_pd {
 	struct ib_pd ibpd;
 	u32 pd_id;
 	struct qedr_ucontext *uctx;
+};
+
+struct qedr_mm {
+	struct {
+		u64 phy_addr;
+		unsigned long len;
+	} key;
+	struct list_head entry;
+};
+
+union db_prod32 {
+	struct rdma_pwm_val16_data data;
+	u32 raw;
 };
 
 struct qedr_qp_hwq_info {
@@ -345,10 +349,10 @@ struct qedr_srq_hwq_info {
 	u32 wqe_prod;
 	u32 sge_prod;
 	u32 wr_prod_cnt;
-	u32 wr_cons_cnt;
+	atomic_t wr_cons_cnt;
 	u32 num_elems;
 
-	u32 *virt_prod_pair_addr;
+	struct rdma_srq_producers *virt_prod_pair_addr;
 	dma_addr_t phy_prod_pair_addr;
 };
 
@@ -487,18 +491,6 @@ struct qedr_mr {
 	u32 npages;
 };
 
-struct qedr_user_mmap_entry {
-	struct rdma_user_mmap_entry rdma_entry;
-	struct qedr_dev *dev;
-	union {
-		u64 io_address;
-		void *address;
-	};
-	size_t length;
-	u16 dpi;
-	u8 mmap_flag;
-};
-
 #define SET_FIELD2(value, name, flag) ((value) |= ((flag) << (name ## _SHIFT)))
 
 #define QEDR_RESP_IMM	(RDMA_CQE_RESPONDER_IMM_FLG_MASK << \
@@ -596,12 +588,5 @@ static inline struct qedr_mr *get_qedr_mr(struct ib_mr *ibmr)
 static inline struct qedr_srq *get_qedr_srq(struct ib_srq *ibsrq)
 {
 	return container_of(ibsrq, struct qedr_srq, ibsrq);
-}
-
-static inline struct qedr_user_mmap_entry *
-get_qedr_mmap_entry(struct rdma_user_mmap_entry *rdma_entry)
-{
-	return container_of(rdma_entry, struct qedr_user_mmap_entry,
-			    rdma_entry);
 }
 #endif

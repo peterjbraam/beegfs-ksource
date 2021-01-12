@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Budget Fair Queueing (BFQ) I/O scheduler.
  *
@@ -12,21 +13,11 @@
  *
  * Copyright (C) 2017 Paolo Valente <paolo.valente@linaro.org>
  *
- *  This program is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU General Public License as
- *  published by the Free Software Foundation; either version 2 of the
- *  License, or (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  General Public License for more details.
- *
  * BFQ is a proportional-share I/O scheduler, with some extra
  * low-latency capabilities. BFQ also supports full hierarchical
  * scheduling through cgroups. Next paragraphs provide an introduction
  * on BFQ inner workings. Details on BFQ benefits, usage and
- * limitations can be found in Documentation/block/bfq-iosched.txt.
+ * limitations can be found in Documentation/block/bfq-iosched.rst.
  *
  * BFQ is a proportional-share storage-I/O scheduling algorithm based
  * on the slice-by-slice service scheme of CFQ. But BFQ assigns
@@ -132,7 +123,6 @@
 #include <linux/ioprio.h>
 #include <linux/sbitmap.h>
 #include <linux/delay.h>
-#include <linux/backing-dev.h>
 
 #include "blk.h"
 #include "blk-mq.h"
@@ -191,7 +181,7 @@ static const int bfq_default_max_budget = 16 * 1024;
 /*
  * When a sync request is dispatched, the queue that contains that
  * request, and all the ancestor entities of that queue, are charged
- * with the number of sectors of the request. In constrast, if the
+ * with the number of sectors of the request. In contrast, if the
  * request is async, then the queue and its ancestor entities are
  * charged with the number of sectors of the request, multiplied by
  * the factor below. This throttles the bandwidth for async I/O,
@@ -219,7 +209,7 @@ const int bfq_timeout = HZ / 8;
  * queue merging.
  *
  * As can be deduced from the low time limit below, queue merging, if
- * successful, happens at the very beggining of the I/O of the involved
+ * successful, happens at the very beginning of the I/O of the involved
  * cooperating processes, as a consequence of the arrival of the very
  * first requests from each cooperator.  After that, there is very
  * little chance to find cooperators.
@@ -251,7 +241,7 @@ static struct kmem_cache *bfq_pool;
  * containing only random (seeky) I/O are prevented from being tagged
  * as soft real-time.
  */
-#define BFQQ_TOTALLY_SEEKY(bfqq)	(bfqq->seek_history & -1)
+#define BFQQ_TOTALLY_SEEKY(bfqq)	(bfqq->seek_history == -1)
 
 /* Min number of samples required to perform peak-rate update */
 #define BFQ_RATE_MIN_SAMPLES	32
@@ -437,12 +427,13 @@ void bfq_schedule_dispatch(struct bfq_data *bfqd)
 }
 
 #define bfq_class_idle(bfqq)	((bfqq)->ioprio_class == IOPRIO_CLASS_IDLE)
+#define bfq_class_rt(bfqq)	((bfqq)->ioprio_class == IOPRIO_CLASS_RT)
 
 #define bfq_sample_valid(samples)	((samples) > 80)
 
 /*
  * Lifted from AS - choose which of rq1 and rq2 that is best served now.
- * We choose the request that is closesr to the head right now.  Distance
+ * We choose the request that is closer to the head right now.  Distance
  * behind the head is penalized and only allowed to a certain extent.
  */
 static struct request *bfq_choose_req(struct bfq_data *bfqd,
@@ -994,7 +985,7 @@ static unsigned int bfq_wr_duration(struct bfq_data *bfqd)
 	 *   of several files
 	 * mplayer took 23 seconds to start, if constantly weight-raised.
 	 *
-	 * As for higher values than that accomodating the above bad
+	 * As for higher values than that accommodating the above bad
 	 * scenario, tests show that higher values would often yield
 	 * the opposite of the desired result, i.e., would worsen
 	 * responsiveness by allowing non-interactive applications to
@@ -1069,7 +1060,7 @@ bfq_bfqq_resume_state(struct bfq_queue *bfqq, struct bfq_data *bfqd,
 
 static int bfqq_process_refs(struct bfq_queue *bfqq)
 {
-	return bfqq->ref - bfqq->allocated - bfqq->entity.on_st_or_in_serv -
+	return bfqq->ref - bfqq->allocated - bfqq->entity.on_st -
 		(bfqq->weight_counter != NULL);
 }
 
@@ -2219,7 +2210,8 @@ static void bfq_remove_request(struct request_queue *q,
 
 }
 
-static bool bfq_bio_merge(struct blk_mq_hw_ctx *hctx, struct bio *bio)
+static bool bfq_bio_merge(struct blk_mq_hw_ctx *hctx, struct bio *bio,
+		unsigned int nr_segs)
 {
 	struct request_queue *q = hctx->queue;
 	struct bfq_data *bfqd = q->elevator->elevator_data;
@@ -2242,7 +2234,7 @@ static bool bfq_bio_merge(struct blk_mq_hw_ctx *hctx, struct bio *bio)
 		bfqd->bio_bfqq = NULL;
 	bfqd->bio_bic = bic;
 
-	ret = blk_mq_sched_try_merge(q, bio, &free);
+	ret = blk_mq_sched_try_merge(q, bio, nr_segs, &free);
 
 	if (free)
 		blk_mq_free_request(free);
@@ -2725,8 +2717,6 @@ static void bfq_bfqq_save_state(struct bfq_queue *bfqq)
 	}
 }
 
-
-static
 void bfq_release_process_ref(struct bfq_data *bfqd, struct bfq_queue *bfqq)
 {
 	/*
@@ -2849,8 +2839,8 @@ static bool bfq_allow_bio_merge(struct request_queue *q, struct request *rq,
 		/*
 		 * bic still points to bfqq, then it has not yet been
 		 * redirected to some other bfq_queue, and a queue
-		 * merge beween bfqq and new_bfqq can be safely
-		 * fulfillled, i.e., bic can be redirected to new_bfqq
+		 * merge between bfqq and new_bfqq can be safely
+		 * fulfilled, i.e., bic can be redirected to new_bfqq
 		 * and bfqq can be put.
 		 */
 		bfq_merge_bfqqs(bfqd, bfqd->bio_bic, bfqq,
@@ -4955,6 +4945,7 @@ static void bfq_exit_icq_bfqq(struct bfq_io_cq *bic, bool is_sync)
 		unsigned long flags;
 
 		spin_lock_irqsave(&bfqd->lock, flags);
+		bfqq->bic = NULL;
 		bfq_exit_bfqq(bfqd, bfqq);
 		bic_set_bfqq(bic, NULL, is_sync);
 		spin_unlock_irqrestore(&bfqd->lock, flags);
@@ -4986,9 +4977,8 @@ bfq_set_next_ioprio_data(struct bfq_queue *bfqq, struct bfq_io_cq *bic)
 	ioprio_class = IOPRIO_PRIO_CLASS(bic->ioprio);
 	switch (ioprio_class) {
 	default:
-		pr_err("bdi %s: bfq: bad prio class %d\n",
-				bdi_dev_name(bfqq->bfqd->queue->backing_dev_info),
-				ioprio_class);
+		dev_err(bfqq->bfqd->queue->backing_dev_info->dev,
+			"bfq: bad prio class %d\n", ioprio_class);
 		/* fall through */
 	case IOPRIO_CLASS_NONE:
 		/*
@@ -5901,18 +5891,6 @@ static void bfq_finish_requeue_request(struct request *rq)
 	struct bfq_data *bfqd;
 
 	/*
-	 * Requeue and finish hooks are invoked in blk-mq without
-	 * checking whether the involved request is actually still
-	 * referenced in the scheduler. To handle this fact, the
-	 * following two checks make this function exit in case of
-	 * spurious invocations, for which there is nothing to do.
-	 *
-	 * First, check whether rq has nothing to do with an elevator.
-	 */
-	if (unlikely(!(rq->rq_flags & RQF_ELVPRIV)))
-		return;
-
-	/*
 	 * rq either is not associated with any icq, or is an already
 	 * requeued request that has not (yet) been re-inserted into
 	 * a bfq_queue.
@@ -5984,8 +5962,6 @@ static void bfq_finish_requeue_request(struct request *rq)
 }
 
 /*
- * Removes the association between the current task and bfqq, assuming
- * that bic points to the bfq iocontext of the task.
  * Returns NULL if a new bfqq should be allocated, or the old bfqq if this
  * was the last process referring to that bfqq.
  */
@@ -6101,7 +6077,7 @@ static void bfq_prepare_request(struct request *rq, struct bio *bio)
  * preparation is that, after the prepare_request hook is invoked for
  * rq, rq may still be transformed into a request with no icq, i.e., a
  * request not associated with any queue. No bfq hook is invoked to
- * signal this tranformation. As a consequence, should these
+ * signal this transformation. As a consequence, should these
  * preparation operations be performed when the prepare_request hook
  * is invoked, and should rq be transformed one moment later, bfq
  * would end up in an inconsistent state, because it would have

@@ -2362,7 +2362,7 @@ static int et131x_tx_dma_memory_alloc(struct et131x_adapter *adapter)
 
 	/* Allocate memory for the TCB's (Transmit Control Block) */
 	tx_ring->tcb_ring = kcalloc(NUM_TCB, sizeof(struct tcb),
-				    GFP_ATOMIC | GFP_DMA);
+				    GFP_KERNEL | GFP_DMA);
 	if (!tx_ring->tcb_ring)
 		return -ENOMEM;
 
@@ -2426,7 +2426,7 @@ static int nic_send_packet(struct et131x_adapter *adapter, struct tcb *tcb)
 	u32 thiscopy, remainder;
 	struct sk_buff *skb = tcb->skb;
 	u32 nr_frags = skb_shinfo(skb)->nr_frags + 1;
-	struct skb_frag_struct *frags = &skb_shinfo(skb)->frags[0];
+	skb_frag_t *frags = &skb_shinfo(skb)->frags[0];
 	struct phy_device *phydev = adapter->netdev->phydev;
 	dma_addr_t dma_addr;
 	struct tx_ring *tx_ring = &adapter->tx_ring;
@@ -2488,11 +2488,11 @@ static int nic_send_packet(struct et131x_adapter *adapter, struct tcb *tcb)
 				frag++;
 			}
 		} else {
-			desc[frag].len_vlan = frags[i - 1].size;
+			desc[frag].len_vlan = skb_frag_size(&frags[i - 1]);
 			dma_addr = skb_frag_dma_map(&adapter->pdev->dev,
 						    &frags[i - 1],
 						    0,
-						    frags[i - 1].size,
+						    desc[frag].len_vlan,
 						    DMA_TO_DEVICE);
 			desc[frag].addr_lo = lower_32_bits(dma_addr);
 			desc[frag].addr_hi = upper_32_bits(dma_addr);
@@ -3811,7 +3811,7 @@ drop_err:
  * specified by the 'tx_timeo" element in the net_device structure (see
  * et131x_alloc_device() to see how this value is set).
  */
-static void et131x_tx_timeout(struct net_device *netdev, unsigned int txqueue)
+static void et131x_tx_timeout(struct net_device *netdev)
 {
 	struct et131x_adapter *adapter = netdev_priv(netdev);
 	struct tx_ring *tx_ring = &adapter->tx_ring;

@@ -1,16 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * intel_pt.c: Intel Processor Trace support
  * Copyright (c) 2013-2015, Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
  */
 
 #include <inttypes.h>
@@ -240,16 +231,6 @@ static void intel_pt_log_event(union perf_event *event)
 		return;
 
 	perf_event__fprintf(event, f);
-}
-
-static void intel_pt_dump_sample(struct perf_session *session,
-				 struct perf_sample *sample)
-{
-	struct intel_pt *pt = container_of(session->auxtrace, struct intel_pt,
-					   auxtrace);
-
-	printf("\n");
-	intel_pt_dump(pt, sample->aux_sample.data, sample->aux_sample.size);
 }
 
 static int intel_pt_do_fix_overlap(struct intel_pt *pt, struct auxtrace_buffer *a,
@@ -855,18 +836,6 @@ static bool intel_pt_have_tsc(struct intel_pt *pt)
 	return have_tsc;
 }
 
-static bool intel_pt_sampling_mode(struct intel_pt *pt)
-{
-	struct evsel *evsel;
-
-	evlist__for_each_entry(pt->session->evlist, evsel) {
-		if ((evsel->core.attr.sample_type & PERF_SAMPLE_AUX) &&
-		    evsel->core.attr.aux_sample_size)
-			return true;
-	}
-	return false;
-}
-
 static u64 intel_pt_ns_to_ticks(const struct intel_pt *pt, u64 ns)
 {
 	u64 quot, rem;
@@ -1005,6 +974,8 @@ static void intel_pt_set_pid_tid_cpu(struct intel_pt *pt,
 
 	if (queue->tid == -1 || pt->have_sched_switch) {
 		ptq->tid = machine__get_current_tid(pt->machine, ptq->cpu);
+		if (ptq->tid == -1)
+			ptq->pid = -1;
 		thread__zput(ptq->thread);
 	}
 
@@ -1304,7 +1275,6 @@ static int intel_pt_synth_branch_sample(struct intel_pt_queue *ptq)
 	struct perf_sample sample = { .ip = 0, };
 	struct dummy_branch_stack {
 		u64			nr;
-		u64			hw_idx;
 		struct branch_entry	entries;
 	} dummy_bs;
 
@@ -1326,7 +1296,6 @@ static int intel_pt_synth_branch_sample(struct intel_pt_queue *ptq)
 	if (pt->synth_opts.last_branch && sort__mode == SORT_MODE__BRANCH) {
 		dummy_bs = (struct dummy_branch_stack){
 			.nr = 1,
-			.hw_idx = -1ULL,
 			.entries = {
 				.from = sample.ip,
 				.to = sample.addr,
@@ -1740,6 +1709,7 @@ static int intel_pt_synth_pebs_sample(struct intel_pt_queue *ptq)
 	u64 sample_type = evsel->core.attr.sample_type;
 	u64 id = evsel->core.id[0];
 	u8 cpumode;
+	u64 regs[8 * sizeof(sample.intr_regs.mask)];
 
 	if (intel_pt_skip_event(pt))
 		return 0;
@@ -1789,8 +1759,8 @@ static int intel_pt_synth_pebs_sample(struct intel_pt_queue *ptq)
 	}
 
 	if (sample_type & PERF_SAMPLE_REGS_INTR &&
-	    items->mask[INTEL_PT_GP_REGS_POS]) {
-		u64 regs[sizeof(sample.intr_regs.mask)];
+	    (items->mask[INTEL_PT_GP_REGS_POS] ||
+	     items->mask[INTEL_PT_XMM_POS])) {
 		u64 regs_mask = evsel->core.attr.sample_regs_intr;
 		u64 *pos;
 
@@ -2353,56 +2323,6 @@ static int intel_pt_process_timeless_queues(struct intel_pt *pt, pid_t tid,
 	return 0;
 }
 
-static void intel_pt_sample_set_pid_tid_cpu(struct intel_pt_queue *ptq,
-					    struct auxtrace_queue *queue,
-					    struct perf_sample *sample)
-{
-	struct machine *m = ptq->pt->machine;
-
-	ptq->pid = sample->pid;
-	ptq->tid = sample->tid;
-	ptq->cpu = queue->cpu;
-
-	intel_pt_log("queue %u cpu %d pid %d tid %d\n",
-		     ptq->queue_nr, ptq->cpu, ptq->pid, ptq->tid);
-
-	thread__zput(ptq->thread);
-
-	if (ptq->tid == -1)
-		return;
-
-	if (ptq->pid == -1) {
-		ptq->thread = machine__find_thread(m, -1, ptq->tid);
-		if (ptq->thread)
-			ptq->pid = ptq->thread->pid_;
-		return;
-	}
-
-	ptq->thread = machine__findnew_thread(m, ptq->pid, ptq->tid);
-}
-
-static int intel_pt_process_timeless_sample(struct intel_pt *pt,
-					    struct perf_sample *sample)
-{
-	struct auxtrace_queue *queue;
-	struct intel_pt_queue *ptq;
-	u64 ts = 0;
-
-	queue = auxtrace_queues__sample_queue(&pt->queues, sample, pt->session);
-	if (!queue)
-		return -EINVAL;
-
-	ptq = queue->priv;
-	if (!ptq)
-		return 0;
-
-	ptq->stop = false;
-	ptq->time = sample->time;
-	intel_pt_sample_set_pid_tid_cpu(ptq, queue, sample);
-	intel_pt_run_decoder(ptq, &ts);
-	return 0;
-}
-
 static int intel_pt_lost(struct intel_pt *pt, struct perf_sample *sample)
 {
 	return intel_pt_synth_error(pt, INTEL_PT_ERR_LOST, sample->cpu,
@@ -2570,10 +2490,8 @@ static int intel_pt_context_switch(struct intel_pt *pt, union perf_event *event,
 		tid = sample->tid;
 	}
 
-	if (tid == -1) {
-		pr_err("context_switch event has no tid\n");
-		return -EINVAL;
-	}
+	if (tid == -1)
+		intel_pt_log("context_switch event has no tid\n");
 
 	intel_pt_log("context_switch: cpu %d pid %d tid %d time %"PRIu64" tsc %#"PRIx64"\n",
 		     cpu, pid, tid, sample->time, perf_time_to_tsc(sample->time,
@@ -2633,11 +2551,7 @@ static int intel_pt_process_event(struct perf_session *session,
 	}
 
 	if (pt->timeless_decoding) {
-		if (pt->sampling_mode) {
-			if (sample->aux_sample.size)
-				err = intel_pt_process_timeless_sample(pt,
-								       sample);
-		} else if (event->header.type == PERF_RECORD_EXIT) {
+		if (event->header.type == PERF_RECORD_EXIT) {
 			err = intel_pt_process_timeless_queues(pt,
 							       event->fork.tid,
 							       sample->time);
@@ -2761,28 +2675,6 @@ static int intel_pt_process_auxtrace_event(struct perf_session *session,
 	}
 
 	return 0;
-}
-
-static int intel_pt_queue_data(struct perf_session *session,
-			       struct perf_sample *sample,
-			       union perf_event *event, u64 data_offset)
-{
-	struct intel_pt *pt = container_of(session->auxtrace, struct intel_pt,
-					   auxtrace);
-	u64 timestamp;
-
-	if (event) {
-		return auxtrace_queues__add_event(&pt->queues, session, event,
-						  data_offset, NULL);
-	}
-
-	if (sample->time && sample->time != (u64)-1)
-		timestamp = perf_time_to_tsc(sample->time, &pt->tc);
-	else
-		timestamp = 0;
-
-	return auxtrace_queues__add_sample(&pt->queues, session, sample,
-					   data_offset, timestamp);
 }
 
 struct intel_pt_synth {
@@ -3287,7 +3179,7 @@ int intel_pt_process_auxtrace_info(union perf_event *event,
 	if (pt->timeless_decoding && !pt->tc.time_mult)
 		pt->tc.time_mult = 1;
 	pt->have_tsc = intel_pt_have_tsc(pt);
-	pt->sampling_mode = intel_pt_sampling_mode(pt);
+	pt->sampling_mode = false;
 	pt->est_tsc = !pt->timeless_decoding;
 
 	pt->unknown_thread = thread__new(999999999, 999999999);
@@ -3307,15 +3199,13 @@ int intel_pt_process_auxtrace_info(union perf_event *event,
 	err = thread__set_comm(pt->unknown_thread, "unknown", 0);
 	if (err)
 		goto err_delete_thread;
-	if (thread__init_maps(pt->unknown_thread, pt->machine)) {
+	if (thread__init_map_groups(pt->unknown_thread, pt->machine)) {
 		err = -ENOMEM;
 		goto err_delete_thread;
 	}
 
 	pt->auxtrace.process_event = intel_pt_process_event;
 	pt->auxtrace.process_auxtrace_event = intel_pt_process_auxtrace_event;
-	pt->auxtrace.queue_data = intel_pt_queue_data;
-	pt->auxtrace.dump_auxtrace_sample = intel_pt_dump_sample;
 	pt->auxtrace.flush_events = intel_pt_flush;
 	pt->auxtrace.free_events = intel_pt_free_events;
 	pt->auxtrace.free = intel_pt_free;
@@ -3393,10 +3283,7 @@ int intel_pt_process_auxtrace_info(union perf_event *event,
 
 	intel_pt_setup_pebs_events(pt);
 
-	if (pt->sampling_mode || list_empty(&session->auxtrace_index))
-		err = auxtrace_queue_data(session, true, true);
-	else
-		err = auxtrace_queues__process_index(&pt->queues, session);
+	err = auxtrace_queues__process_index(&pt->queues, session);
 	if (err)
 		goto err_delete_thread;
 

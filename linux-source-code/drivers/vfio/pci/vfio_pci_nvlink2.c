@@ -97,8 +97,10 @@ static void vfio_pci_nvgpu_release(struct vfio_pci_device *vdev,
 
 	/* If there were any mappings at all... */
 	if (data->mm) {
-		ret = mm_iommu_put(data->mm, data->mem);
-		WARN_ON(ret);
+		if (data->mem) {
+			ret = mm_iommu_put(data->mm, data->mem);
+			WARN_ON(ret);
+		}
 
 		mmdrop(data->mm);
 	}
@@ -161,8 +163,7 @@ static int vfio_pci_nvgpu_mmap(struct vfio_pci_device *vdev,
 
 	atomic_inc(&data->mm->mm_count);
 	ret = (int) mm_iommu_newdev(data->mm, data->useraddr,
-			(vma->vm_end - vma->vm_start) >> PAGE_SHIFT,
-			data->gpu_hpa, &data->mem);
+			vma_pages(vma), data->gpu_hpa, &data->mem);
 
 	trace_vfio_pci_nvgpu_mmap(vdev->pdev, data->gpu_hpa, data->useraddr,
 			vma->vm_end - vma->vm_start, ret);
@@ -421,14 +422,8 @@ int vfio_pci_ibm_npu2_init(struct vfio_pci_device *vdev)
 
 	if (of_property_read_u64_index(hose->dn, "ibm,mmio-atsd", nvlink_index,
 			&mmio_atsd)) {
-		if (of_property_read_u64_index(hose->dn, "ibm,mmio-atsd", 0,
-				&mmio_atsd)) {
-			dev_warn(&vdev->pdev->dev, "No available ATSD found\n");
-			mmio_atsd = 0;
-		} else {
-			dev_warn(&vdev->pdev->dev,
-				 "Using fallback ibm,mmio-atsd[0] for ATSD.\n");
-		}
+		dev_warn(&vdev->pdev->dev, "No available ATSD found\n");
+		mmio_atsd = 0;
 	}
 
 	if (of_property_read_u64(npu_node, "ibm,device-tgt-addr", &tgt)) {
@@ -478,6 +473,8 @@ int vfio_pci_ibm_npu2_init(struct vfio_pci_device *vdev)
 	return 0;
 
 free_exit:
+	if (data->base)
+		memunmap(data->base);
 	kfree(data);
 
 	return ret;

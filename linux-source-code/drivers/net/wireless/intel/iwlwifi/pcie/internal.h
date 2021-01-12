@@ -106,8 +106,6 @@ struct iwl_host_cmd;
  * @page: driver's pointer to the rxb page
  * @invalid: rxb is in driver ownership - not owned by HW
  * @vid: index of this rxb in the global table
- * @offset: indicates which offset of the page (in bytes)
- *	this buffer uses (if multiple RBs fit into one page)
  */
 struct iwl_rx_mem_buffer {
 	dma_addr_t page_dma;
@@ -115,7 +113,6 @@ struct iwl_rx_mem_buffer {
 	u16 vid;
 	bool invalid;
 	struct list_head list;
-	u32 offset;
 };
 
 /**
@@ -494,7 +491,6 @@ struct cont_rec {
  * @sw_csum_tx: if true, then the transport will compute the csum of the TXed
  *	frame.
  * @rx_page_order: page order for receive buffer size
- * @rx_buf_bytes: RX buffer (RB) size in bytes
  * @reg_lock: protect hw register access
  * @mutex: to protect stop_device / start_fw / start_hw
  * @cmd_in_flight: true when we have a host command in flight
@@ -514,11 +510,6 @@ struct cont_rec {
  * @in_rescan: true if we have triggered a device rescan
  * @base_rb_stts: base virtual address of receive buffer status for all queues
  * @base_rb_stts_dma: base physical address of receive buffer status
- * @supported_dma_mask: DMA mask to validate the actual address against,
- *	will be DMA_BIT_MASK(11) or DMA_BIT_MASK(12) depending on the device
- * @alloc_page_lock: spinlock for the page allocator
- * @alloc_page: allocated page to still use parts of
- * @alloc_page_used: how much of the allocated page was already used (bytes)
  */
 struct iwl_trans_pcie {
 	struct iwl_rxq *rxq;
@@ -590,13 +581,6 @@ struct iwl_trans_pcie {
 	bool sw_csum_tx;
 	bool pcie_dbg_dumped_once;
 	u32 rx_page_order;
-	u32 rx_buf_bytes;
-	u32 supported_dma_mask;
-
-	/* allocator lock for the two values below */
-	spinlock_t alloc_page_lock;
-	struct page *alloc_page;
-	u32 alloc_page_used;
 
 	/*protect hw register */
 	spinlock_t reg_lock;
@@ -663,6 +647,7 @@ void iwl_trans_pcie_free(struct iwl_trans *trans);
 /*****************************************************
 * RX
 ******************************************************/
+int _iwl_pcie_rx_init(struct iwl_trans *trans);
 int iwl_pcie_rx_init(struct iwl_trans *trans);
 int iwl_pcie_gen2_rx_init(struct iwl_trans *trans);
 irqreturn_t iwl_pcie_msix_isr(int irq, void *data);
@@ -676,6 +661,7 @@ void iwl_pcie_rx_init_rxb_lists(struct iwl_rxq *rxq);
 int iwl_pcie_dummy_napi_poll(struct napi_struct *napi, int budget);
 void iwl_pcie_rxq_alloc_rbs(struct iwl_trans *trans, gfp_t priority,
 			    struct iwl_rxq *rxq);
+int iwl_pcie_rx_alloc(struct iwl_trans *trans);
 
 /*****************************************************
 * ICT - interrupt handling
@@ -689,16 +675,6 @@ void iwl_pcie_disable_ict(struct iwl_trans *trans);
 /*****************************************************
 * TX / HCMD
 ******************************************************/
-/*
- * We need this inline in case dma_addr_t is only 32-bits - since the
- * hardware is always 64-bit, the issue can still occur in that case,
- * so use u64 for 'phys' here to force the addition in 64-bit.
- */
-static inline bool iwl_pcie_crosses_4g_boundary(u64 phys, u16 len)
-{
-	return upper_32_bits(phys) != upper_32_bits(phys + len);
-}
-
 int iwl_pcie_tx_init(struct iwl_trans *trans);
 int iwl_pcie_gen2_tx_init(struct iwl_trans *trans, int txq_id,
 			  int queue_size);
@@ -727,6 +703,9 @@ void iwl_trans_pcie_reclaim(struct iwl_trans *trans, int txq_id, int ssn,
 			    struct sk_buff_head *skbs);
 void iwl_trans_pcie_set_q_ptrs(struct iwl_trans *trans, int txq_id, int ptr);
 void iwl_trans_pcie_tx_reset(struct iwl_trans *trans);
+void iwl_pcie_gen2_update_byte_tbl(struct iwl_trans_pcie *trans_pcie,
+				   struct iwl_txq *txq, u16 byte_cnt,
+				   int num_tbs);
 
 static inline u16 iwl_pcie_tfd_tb_get_len(struct iwl_trans *trans, void *_tfd,
 					  u8 idx)
@@ -1109,8 +1088,7 @@ void iwl_pcie_apply_destination(struct iwl_trans *trans);
 void iwl_pcie_free_tso_page(struct iwl_trans_pcie *trans_pcie,
 			    struct sk_buff *skb);
 #ifdef CONFIG_INET
-struct iwl_tso_hdr_page *get_page_hdr(struct iwl_trans *trans, size_t len,
-				      struct sk_buff *skb);
+struct iwl_tso_hdr_page *get_page_hdr(struct iwl_trans *trans, size_t len);
 #endif
 
 /* common functions that are used by gen3 transport */

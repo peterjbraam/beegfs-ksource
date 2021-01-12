@@ -40,6 +40,7 @@
 #include <linux/parser.h>
 
 static const struct super_operations xfs_super_operations;
+struct bio_set xfs_ioend_bioset;
 
 static struct kset *xfs_kset;		/* top-level xfs sysfs dir */
 #ifdef DEBUG
@@ -1675,7 +1676,6 @@ xfs_fs_fill_super(
 
 	if (mp->m_flags & XFS_MOUNT_DAX) {
 		bool rtdev_is_dax = false, datadev_is_dax;
-		static bool printed = false;
 
 		xfs_warn(mp,
 		"DAX enabled. Warning: EXPERIMENTAL, use at your own risk");
@@ -1695,10 +1695,6 @@ xfs_fs_fill_super(
 		"DAX and reflink cannot be used together!");
 			error = -EINVAL;
 			goto out_filestream_unmount;
-		}
-		if (!printed) {
-			mark_tech_preview("xfs direct access (dax)", NULL);
-			printed = true;
 		}
 	}
 
@@ -1857,10 +1853,15 @@ MODULE_ALIAS_FS("xfs");
 STATIC int __init
 xfs_init_zones(void)
 {
+	if (bioset_init(&xfs_ioend_bioset, 4 * (PAGE_SIZE / SECTOR_SIZE),
+			offsetof(struct xfs_ioend, io_inline_bio),
+			BIOSET_NEED_BVECS))
+		goto out;
+
 	xfs_log_ticket_zone = kmem_zone_init(sizeof(xlog_ticket_t),
 						"xfs_log_ticket");
 	if (!xfs_log_ticket_zone)
-		goto out;
+		goto out_free_ioend_bioset;
 
 	xfs_bmap_free_item_zone = kmem_zone_init(
 			sizeof(struct xfs_extent_free_item),
@@ -1995,6 +1996,8 @@ xfs_init_zones(void)
 	kmem_zone_destroy(xfs_bmap_free_item_zone);
  out_destroy_log_ticket_zone:
 	kmem_zone_destroy(xfs_log_ticket_zone);
+ out_free_ioend_bioset:
+	bioset_exit(&xfs_ioend_bioset);
  out:
 	return -ENOMEM;
 }
@@ -2025,6 +2028,7 @@ xfs_destroy_zones(void)
 	kmem_zone_destroy(xfs_btree_cur_zone);
 	kmem_zone_destroy(xfs_bmap_free_item_zone);
 	kmem_zone_destroy(xfs_log_ticket_zone);
+	bioset_exit(&xfs_ioend_bioset);
 }
 
 STATIC int __init

@@ -67,6 +67,8 @@
 
 #define RXE_ROCE_V2_SPORT		(0xc000)
 
+extern bool rxe_initialized;
+
 static inline u32 rxe_crc32(struct rxe_dev *rxe,
 			    u32 crc, void *next, size_t len)
 {
@@ -76,7 +78,6 @@ static inline u32 rxe_crc32(struct rxe_dev *rxe,
 	SHASH_DESC_ON_STACK(shash, rxe->tfm);
 
 	shash->tfm = rxe->tfm;
-	shash->flags = 0;
 	*(u32 *)shash_desc_ctx(shash) = crc;
 	err = crypto_shash_update(shash, next, len);
 	if (unlikely(err)) {

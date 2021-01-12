@@ -167,7 +167,7 @@ static int mlx5e_tls_resync(struct net_device *netdev, struct sock *sk,
 	struct tls_context *tls_ctx = tls_get_ctx(sk);
 	struct mlx5e_priv *priv = netdev_priv(netdev);
 	struct mlx5e_tls_offload_context_rx *rx_ctx;
-	__be64 rcd_sn = *(__be64 *)rcd_sn_data;
+	u64 rcd_sn = *(u64 *)rcd_sn_data;
 
 	if (WARN_ON_ONCE(direction != TLS_OFFLOAD_CTX_DIR_RX))
 		return -EINVAL;

@@ -1,19 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * x86_pkg_temp_thermal driver
  * Copyright (c) 2013, Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; if not, write to the Free Software Foundation, Inc.
- *
  */
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
@@ -87,29 +75,14 @@ static struct dentry *debugfs;
 static unsigned int pkg_interrupt_cnt;
 static unsigned int pkg_work_cnt;
 
-static int pkg_temp_debugfs_init(void)
+static void pkg_temp_debugfs_init(void)
 {
-	struct dentry *d;
-
 	debugfs = debugfs_create_dir("pkg_temp_thermal", NULL);
-	if (!debugfs)
-		return -ENOENT;
 
-	d = debugfs_create_u32("pkg_thres_interrupt", S_IRUGO, debugfs,
-			       &pkg_interrupt_cnt);
-	if (!d)
-		goto err_out;
-
-	d = debugfs_create_u32("pkg_thres_work", S_IRUGO, debugfs,
-			       &pkg_work_cnt);
-	if (!d)
-		goto err_out;
-
-	return 0;
-
-err_out:
-	debugfs_remove_recursive(debugfs);
-	return -ENOENT;
+	debugfs_create_u32("pkg_thres_interrupt", S_IRUGO, debugfs,
+			   &pkg_interrupt_cnt);
+	debugfs_create_u32("pkg_thres_work", S_IRUGO, debugfs,
+			   &pkg_work_cnt);
 }
 
 /*
@@ -505,7 +478,7 @@ static int pkg_thermal_cpu_online(unsigned int cpu)
 }
 
 static const struct x86_cpu_id __initconst pkg_temp_thermal_ids[] = {
-	X86_MATCH_VENDOR_FEATURE(INTEL, X86_FEATURE_PTS, NULL),
+	{ X86_VENDOR_INTEL, X86_FAMILY_ANY, X86_MODEL_ANY, X86_FEATURE_PTS },
 	{}
 };
 MODULE_DEVICE_TABLE(x86cpu, pkg_temp_thermal_ids);

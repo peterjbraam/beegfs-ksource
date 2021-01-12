@@ -1,19 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Common code for Intel Running Average Power Limit (RAPL) support.
  * Copyright (c) 2019, Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; if not, write to the Free Software Foundation, Inc.
- *
  */
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
@@ -963,48 +951,50 @@ static const struct rapl_defaults rapl_defaults_cht = {
 };
 
 static const struct x86_cpu_id rapl_ids[] __initconst = {
-	X86_MATCH_INTEL_FAM6_MODEL(SANDYBRIDGE,		&rapl_defaults_core),
-	X86_MATCH_INTEL_FAM6_MODEL(SANDYBRIDGE_X,	&rapl_defaults_core),
+	INTEL_CPU_FAM6(SANDYBRIDGE, rapl_defaults_core),
+	INTEL_CPU_FAM6(SANDYBRIDGE_X, rapl_defaults_core),
 
-	X86_MATCH_INTEL_FAM6_MODEL(IVYBRIDGE,		&rapl_defaults_core),
-	X86_MATCH_INTEL_FAM6_MODEL(IVYBRIDGE_X,		&rapl_defaults_core),
+	INTEL_CPU_FAM6(IVYBRIDGE, rapl_defaults_core),
+	INTEL_CPU_FAM6(IVYBRIDGE_X, rapl_defaults_core),
 
-	X86_MATCH_INTEL_FAM6_MODEL(HASWELL,		&rapl_defaults_core),
-	X86_MATCH_INTEL_FAM6_MODEL(HASWELL_L,		&rapl_defaults_core),
-	X86_MATCH_INTEL_FAM6_MODEL(HASWELL_G,		&rapl_defaults_core),
-	X86_MATCH_INTEL_FAM6_MODEL(HASWELL_X,		&rapl_defaults_hsw_server),
+	INTEL_CPU_FAM6(HASWELL, rapl_defaults_core),
+	INTEL_CPU_FAM6(HASWELL_L, rapl_defaults_core),
+	INTEL_CPU_FAM6(HASWELL_G, rapl_defaults_core),
+	INTEL_CPU_FAM6(HASWELL_X, rapl_defaults_hsw_server),
 
-	X86_MATCH_INTEL_FAM6_MODEL(BROADWELL,		&rapl_defaults_core),
-	X86_MATCH_INTEL_FAM6_MODEL(BROADWELL_G,		&rapl_defaults_core),
-	X86_MATCH_INTEL_FAM6_MODEL(BROADWELL_D,		&rapl_defaults_core),
-	X86_MATCH_INTEL_FAM6_MODEL(BROADWELL_X,		&rapl_defaults_hsw_server),
+	INTEL_CPU_FAM6(BROADWELL, rapl_defaults_core),
+	INTEL_CPU_FAM6(BROADWELL_G, rapl_defaults_core),
+	INTEL_CPU_FAM6(BROADWELL_D, rapl_defaults_core),
+	INTEL_CPU_FAM6(BROADWELL_X, rapl_defaults_hsw_server),
 
-	X86_MATCH_INTEL_FAM6_MODEL(SKYLAKE,		&rapl_defaults_core),
-	X86_MATCH_INTEL_FAM6_MODEL(SKYLAKE_L,		&rapl_defaults_core),
-	X86_MATCH_INTEL_FAM6_MODEL(SKYLAKE_X,		&rapl_defaults_hsw_server),
-	X86_MATCH_INTEL_FAM6_MODEL(KABYLAKE_L,		&rapl_defaults_core),
-	X86_MATCH_INTEL_FAM6_MODEL(KABYLAKE,		&rapl_defaults_core),
-	X86_MATCH_INTEL_FAM6_MODEL(CANNONLAKE_L,	&rapl_defaults_core),
-	X86_MATCH_INTEL_FAM6_MODEL(ICELAKE_L,		&rapl_defaults_core),
-	X86_MATCH_INTEL_FAM6_MODEL(ICELAKE_X,		&rapl_defaults_hsw_server),
-	X86_MATCH_INTEL_FAM6_MODEL(ICELAKE_D,		&rapl_defaults_hsw_server),
-	X86_MATCH_INTEL_FAM6_MODEL(COMETLAKE_L,		&rapl_defaults_core),
-	X86_MATCH_INTEL_FAM6_MODEL(COMETLAKE,		&rapl_defaults_core),
-	X86_MATCH_INTEL_FAM6_MODEL(TIGERLAKE_L,		&rapl_defaults_core),
+	INTEL_CPU_FAM6(SKYLAKE, rapl_defaults_core),
+	INTEL_CPU_FAM6(SKYLAKE_L, rapl_defaults_core),
+	INTEL_CPU_FAM6(SKYLAKE_X, rapl_defaults_hsw_server),
+	INTEL_CPU_FAM6(KABYLAKE_L, rapl_defaults_core),
+	INTEL_CPU_FAM6(KABYLAKE, rapl_defaults_core),
+	INTEL_CPU_FAM6(CANNONLAKE_L, rapl_defaults_core),
+	INTEL_CPU_FAM6(ICELAKE_L, rapl_defaults_core),
+	INTEL_CPU_FAM6(ICELAKE, rapl_defaults_core),
+	INTEL_CPU_FAM6(ICELAKE_NNPI, rapl_defaults_core),
+	INTEL_CPU_FAM6(ICELAKE_X, rapl_defaults_hsw_server),
+	INTEL_CPU_FAM6(ICELAKE_D, rapl_defaults_hsw_server),
+	INTEL_CPU_FAM6(COMETLAKE_L, rapl_defaults_core),
+	INTEL_CPU_FAM6(COMETLAKE, rapl_defaults_core),
 
-	X86_MATCH_INTEL_FAM6_MODEL(ATOM_SILVERMONT,	&rapl_defaults_byt),
-	X86_MATCH_INTEL_FAM6_MODEL(ATOM_AIRMONT,	&rapl_defaults_cht),
-	X86_MATCH_INTEL_FAM6_MODEL(ATOM_SILVERMONT_MID,	&rapl_defaults_tng),
-	X86_MATCH_INTEL_FAM6_MODEL(ATOM_AIRMONT_MID,	&rapl_defaults_ann),
-	X86_MATCH_INTEL_FAM6_MODEL(ATOM_GOLDMONT,	&rapl_defaults_core),
-	X86_MATCH_INTEL_FAM6_MODEL(ATOM_GOLDMONT_PLUS,	&rapl_defaults_core),
-	X86_MATCH_INTEL_FAM6_MODEL(ATOM_GOLDMONT_D,	&rapl_defaults_core),
-	X86_MATCH_INTEL_FAM6_MODEL(ATOM_TREMONT_D,	&rapl_defaults_core),
+	INTEL_CPU_FAM6(ATOM_SILVERMONT, rapl_defaults_byt),
+	INTEL_CPU_FAM6(ATOM_AIRMONT, rapl_defaults_cht),
+	INTEL_CPU_FAM6(ATOM_SILVERMONT_MID, rapl_defaults_tng),
+	INTEL_CPU_FAM6(ATOM_AIRMONT_MID, rapl_defaults_ann),
+	INTEL_CPU_FAM6(ATOM_GOLDMONT, rapl_defaults_core),
+	INTEL_CPU_FAM6(ATOM_GOLDMONT_PLUS, rapl_defaults_core),
+	INTEL_CPU_FAM6(ATOM_GOLDMONT_D, rapl_defaults_core),
+	INTEL_CPU_FAM6(ATOM_TREMONT_D, rapl_defaults_core),
 
-	X86_MATCH_INTEL_FAM6_MODEL(XEON_PHI_KNL,	&rapl_defaults_hsw_server),
-	X86_MATCH_INTEL_FAM6_MODEL(XEON_PHI_KNM,	&rapl_defaults_hsw_server),
+	INTEL_CPU_FAM6(XEON_PHI_KNL, rapl_defaults_hsw_server),
+	INTEL_CPU_FAM6(XEON_PHI_KNM, rapl_defaults_hsw_server),
 	{}
 };
+
 MODULE_DEVICE_TABLE(x86cpu, rapl_ids);
 
 /* Read once for all raw primitive data for domains */
@@ -1305,6 +1295,9 @@ struct rapl_package *rapl_add_package(int cpu, struct rapl_if_priv *priv)
 	struct cpuinfo_x86 *c = &cpu_data(cpu);
 	int ret;
 
+	if (!rapl_defaults)
+		return ERR_PTR(-ENODEV);
+
 	rp = kzalloc(sizeof(struct rapl_package), GFP_KERNEL);
 	if (!rp)
 		return ERR_PTR(-ENOMEM);
@@ -1316,8 +1309,7 @@ struct rapl_package *rapl_add_package(int cpu, struct rapl_if_priv *priv)
 
 	if (topology_max_die_per_package() > 1)
 		snprintf(rp->name, PACKAGE_DOMAIN_NAME_LENGTH,
-			 "package-%d-die-%d", c->phys_proc_id,
-			 c->_rh.cpu_die_id);
+			 "package-%d-die-%d", c->phys_proc_id, c->cpu_die_id);
 	else
 		snprintf(rp->name, PACKAGE_DOMAIN_NAME_LENGTH, "package-%d",
 			 c->phys_proc_id);
@@ -1432,7 +1424,7 @@ static int __init rapl_init(void)
 
 	id = x86_match_cpu(rapl_ids);
 	if (!id) {
-		pr_err("driver does not support CPU family %d model %d\n",
+		pr_info("driver does not support CPU family %d model %d\n",
 		       boot_cpu_data.x86, boot_cpu_data.x86_model);
 
 		return -ENODEV;

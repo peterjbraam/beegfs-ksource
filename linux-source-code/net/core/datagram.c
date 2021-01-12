@@ -62,6 +62,8 @@
 #include <trace/events/skb.h>
 #include <net/busy_poll.h>
 
+#include "datagram.h"
+
 /*
  *	Is a socket 'connection oriented' ?
  */
@@ -83,8 +85,7 @@ static int receiver_wake_function(wait_queue_entry_t *wait, unsigned int mode, i
 /*
  * Wait for the last received packet to be different from skb
  */
-int __skb_wait_for_more_packets(struct sock *sk, struct sk_buff_head *queue,
-				int *err, long *timeo_p,
+int __skb_wait_for_more_packets(struct sock *sk, int *err, long *timeo_p,
 				const struct sk_buff *skb)
 {
 	int error;
@@ -97,7 +98,7 @@ int __skb_wait_for_more_packets(struct sock *sk, struct sk_buff_head *queue,
 	if (error)
 		goto out_err;
 
-	if (READ_ONCE(queue->prev) != skb)
+	if (READ_ONCE(sk->sk_receive_queue.prev) != skb)
 		goto out;
 
 	/* Socket shut down? */
@@ -209,7 +210,6 @@ struct sk_buff *__skb_try_recv_from_queue(struct sock *sk,
 /**
  *	__skb_try_recv_datagram - Receive a datagram skbuff
  *	@sk: socket
- *	@queue: socket queue from which to receive
  *	@flags: MSG\_ flags
  *	@destructor: invoked under the receive lock on successful dequeue
  *	@off: an offset in bytes to peek skb from. Returns an offset
@@ -242,14 +242,13 @@ struct sk_buff *__skb_try_recv_from_queue(struct sock *sk,
  *	quite explicitly by POSIX 1003.1g, don't change them without having
  *	the standard around please.
  */
-struct sk_buff *__skb_try_recv_datagram(struct sock *sk,
-					struct sk_buff_head *queue,
-					unsigned int flags,
+struct sk_buff *__skb_try_recv_datagram(struct sock *sk, unsigned int flags,
 					void (*destructor)(struct sock *sk,
 							   struct sk_buff *skb),
 					int *off, int *err,
 					struct sk_buff **last)
 {
+	struct sk_buff_head *queue = &sk->sk_receive_queue;
 	struct sk_buff *skb;
 	unsigned long cpu_flags;
 	/*
@@ -280,7 +279,7 @@ struct sk_buff *__skb_try_recv_datagram(struct sock *sk,
 			break;
 
 		sk_busy_loop(sk, flags & MSG_DONTWAIT);
-	} while (READ_ONCE(queue->prev) != *last);
+	} while (READ_ONCE(sk->sk_receive_queue.prev) != *last);
 
 	error = -EAGAIN;
 
@@ -290,9 +289,7 @@ no_packet:
 }
 EXPORT_SYMBOL(__skb_try_recv_datagram);
 
-struct sk_buff *__skb_recv_datagram(struct sock *sk,
-				    struct sk_buff_head *sk_queue,
-				    unsigned int flags,
+struct sk_buff *__skb_recv_datagram(struct sock *sk, unsigned int flags,
 				    void (*destructor)(struct sock *sk,
 						       struct sk_buff *skb),
 				    int *off, int *err)
@@ -303,16 +300,15 @@ struct sk_buff *__skb_recv_datagram(struct sock *sk,
 	timeo = sock_rcvtimeo(sk, flags & MSG_DONTWAIT);
 
 	do {
-		skb = __skb_try_recv_datagram(sk, sk_queue, flags, destructor,
-					      off, err, &last);
+		skb = __skb_try_recv_datagram(sk, flags, destructor, off, err,
+					      &last);
 		if (skb)
 			return skb;
 
 		if (*err != -EAGAIN)
 			break;
 	} while (timeo &&
-		 !__skb_wait_for_more_packets(sk, sk_queue, err,
-					      &timeo, last));
+		!__skb_wait_for_more_packets(sk, err, &timeo, last));
 
 	return NULL;
 }
@@ -323,8 +319,7 @@ struct sk_buff *skb_recv_datagram(struct sock *sk, unsigned int flags,
 {
 	int off = 0;
 
-	return __skb_recv_datagram(sk, &sk->sk_receive_queue,
-				   flags | (noblock ? MSG_DONTWAIT : 0),
+	return __skb_recv_datagram(sk, flags | (noblock ? MSG_DONTWAIT : 0),
 				   NULL, &off, err);
 }
 EXPORT_SYMBOL(skb_recv_datagram);
@@ -586,7 +581,7 @@ int skb_copy_datagram_from_iter(struct sk_buff *skb, int offset,
 			if (copy > len)
 				copy = len;
 			copied = copy_page_from_iter(skb_frag_page(frag),
-					  frag->page_offset + offset - start,
+					  skb_frag_off(frag) + offset - start,
 					  copy, from);
 			if (copied != copy)
 				goto fault;
@@ -709,49 +704,6 @@ static int skb_copy_and_csum_datagram(const struct sk_buff *skb, int offset,
 			csum_and_copy_to_iter, csump);
 }
 
-__sum16 __skb_checksum_complete_head(struct sk_buff *skb, int len)
-{
-	__sum16 sum;
-
-	sum = csum_fold(skb_checksum(skb, 0, len, skb->csum));
-	if (likely(!sum)) {
-		if (unlikely(skb->ip_summed == CHECKSUM_COMPLETE) &&
-		    !skb->csum_complete_sw)
-			netdev_rx_csum_fault(skb->dev);
-	}
-	if (!skb_shared(skb))
-		skb->csum_valid = !sum;
-	return sum;
-}
-EXPORT_SYMBOL(__skb_checksum_complete_head);
-
-__sum16 __skb_checksum_complete(struct sk_buff *skb)
-{
-	__wsum csum;
-	__sum16 sum;
-
-	csum = skb_checksum(skb, 0, skb->len, 0);
-
-	/* skb->csum holds pseudo checksum */
-	sum = csum_fold(csum_add(skb->csum, csum));
-	if (likely(!sum)) {
-		if (unlikely(skb->ip_summed == CHECKSUM_COMPLETE) &&
-		    !skb->csum_complete_sw)
-			netdev_rx_csum_fault(skb->dev);
-	}
-
-	if (!skb_shared(skb)) {
-		/* Save full packet checksum */
-		skb->csum = csum;
-		skb->ip_summed = CHECKSUM_COMPLETE;
-		skb->csum_complete_sw = 1;
-		skb->csum_valid = !sum;
-	}
-
-	return sum;
-}
-EXPORT_SYMBOL(__skb_checksum_complete);
-
 /**
  *	skb_copy_and_csum_datagram_msg - Copy and checksum skb to user iovec.
  *	@skb: skbuff
@@ -791,7 +743,7 @@ int skb_copy_and_csum_datagram_msg(struct sk_buff *skb,
 
 		if (unlikely(skb->ip_summed == CHECKSUM_COMPLETE) &&
 		    !skb->csum_complete_sw)
-			netdev_rx_csum_fault(NULL);
+			netdev_rx_csum_fault(NULL, skb);
 	}
 	return 0;
 fault:

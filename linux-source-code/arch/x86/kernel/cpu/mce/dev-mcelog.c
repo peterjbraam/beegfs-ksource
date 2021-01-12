@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * /dev/mcelog driver
  *
@@ -7,8 +8,6 @@
  * Copyright 2008 Intel Corporation
  * Author: Andi Kleen
  */
-
-#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/miscdevice.h>
 #include <linux/slab.h>

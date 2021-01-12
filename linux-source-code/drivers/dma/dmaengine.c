@@ -1,18 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright(c) 2004 - 2006 Intel Corporation. All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * The full GNU General Public License is included in this distribution in the
- * file called COPYING.
  */
 
 /*
@@ -63,6 +51,7 @@
 #include <linux/acpi_dma.h>
 #include <linux/of_dma.h>
 #include <linux/mempool.h>
+#include <linux/numa.h>
 
 static DEFINE_MUTEX(dma_list_mutex);
 static DEFINE_IDA(dma_ida);
@@ -72,7 +61,7 @@ static long dmaengine_ref_count;
 /* --- sysfs implementation --- */
 
 /**
- * dev_to_dma_chan - convert a device pointer to the its sysfs container object
+ * dev_to_dma_chan - convert a device pointer to its sysfs container object
  * @dev - device node
  *
  * Must be called under dma_list_mutex
@@ -190,7 +179,7 @@ __dma_device_satisfies_mask(struct dma_device *device,
 
 static struct module *dma_chan_to_owner(struct dma_chan *chan)
 {
-	return chan->device->dev->driver->owner;
+	return chan->device->owner;
 }
 
 /**
@@ -386,7 +375,8 @@ EXPORT_SYMBOL(dma_issue_pending_all);
 static bool dma_chan_is_local(struct dma_chan *chan, int cpu)
 {
 	int node = dev_to_node(chan->device->dev);
-	return node == -1 || cpumask_test_cpu(cpu, cpumask_of_node(node));
+	return node == NUMA_NO_NODE ||
+		cpumask_test_cpu(cpu, cpumask_of_node(node));
 }
 
 /**
@@ -715,7 +705,7 @@ struct dma_chan *dma_request_chan(struct device *dev, const char *name)
 		chan = acpi_dma_request_slave_chan_by_name(dev, name);
 
 	if (chan) {
-		/* Valid channel found or requester need to be deferred */
+		/* Valid channel found or requester needs to be deferred */
 		if (!IS_ERR(chan) || PTR_ERR(chan) == -EPROBE_DEFER)
 			return chan;
 	}
@@ -929,6 +919,8 @@ int dma_async_device_register(struct dma_device *device)
 		return -EIO;
 	}
 
+	device->owner = device->dev->driver->owner;
+
 	if (dma_has_cap(DMA_MEMCPY, device->cap_mask) && !device->device_prep_dma_memcpy) {
 		dev_err(device->dev,
 			"Device claims capability %s, but op is not defined\n",
@@ -1137,6 +1129,41 @@ void dma_async_device_unregister(struct dma_device *device)
 	}
 }
 EXPORT_SYMBOL(dma_async_device_unregister);
+
+static void dmam_device_release(struct device *dev, void *res)
+{
+	struct dma_device *device;
+
+	device = *(struct dma_device **)res;
+	dma_async_device_unregister(device);
+}
+
+/**
+ * dmaenginem_async_device_register - registers DMA devices found
+ * @device: &dma_device
+ *
+ * The operation is managed and will be undone on driver detach.
+ */
+int dmaenginem_async_device_register(struct dma_device *device)
+{
+	void *p;
+	int ret;
+
+	p = devres_alloc(dmam_device_release, sizeof(void *), GFP_KERNEL);
+	if (!p)
+		return -ENOMEM;
+
+	ret = dma_async_device_register(device);
+	if (!ret) {
+		*(struct dma_device **)p = device;
+		devres_add(device->dev, p);
+	} else {
+		devres_free(p);
+	}
+
+	return ret;
+}
+EXPORT_SYMBOL(dmaenginem_async_device_register);
 
 struct dmaengine_unmap_pool {
 	struct kmem_cache *cache;

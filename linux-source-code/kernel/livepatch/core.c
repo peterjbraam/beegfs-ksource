@@ -1,21 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * core.c - Kernel Live Patching Core
  *
  * Copyright (C) 2014 Seth Jennings <sjenning@redhat.com>
  * Copyright (C) 2014 SUSE
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -34,7 +22,6 @@
 #include <asm/cacheflush.h>
 #include "core.h"
 #include "patch.h"
-#include "state.h"
 #include "transition.h"
 
 /*
@@ -421,6 +408,7 @@ static struct attribute *klp_patch_attrs[] = {
 	&force_kobj_attr.attr,
 	NULL
 };
+ATTRIBUTE_GROUPS(klp_patch);
 
 static void klp_free_object_dynamic(struct klp_object *obj)
 {
@@ -551,7 +539,7 @@ static void klp_kobj_release_patch(struct kobject *kobj)
 static struct kobj_type klp_ktype_patch = {
 	.release = klp_kobj_release_patch,
 	.sysfs_ops = &kobj_sysfs_ops,
-	.default_attrs = klp_patch_attrs,
+	.default_groups = klp_patch_groups,
 };
 
 static void klp_kobj_release_object(struct kobject *kobj)
@@ -644,7 +632,7 @@ static void klp_free_objects_dynamic(struct klp_patch *patch)
  * The operation must be completed by calling klp_free_patch_finish()
  * outside klp_mutex.
  */
-static void klp_free_patch_start(struct klp_patch *patch)
+void klp_free_patch_start(struct klp_patch *patch)
 {
 	if (!list_empty(&patch->list))
 		list_del(&patch->list);
@@ -687,23 +675,6 @@ static void klp_free_patch_work_fn(struct work_struct *work)
 		container_of(work, struct klp_patch, free_work);
 
 	klp_free_patch_finish(patch);
-}
-
-void klp_free_patch_async(struct klp_patch *patch)
-{
-	klp_free_patch_start(patch);
-	schedule_work(&patch->free_work);
-}
-
-void klp_free_replaced_patches_async(struct klp_patch *new_patch)
-{
-	struct klp_patch *old_patch, *tmp_patch;
-
-	klp_for_each_patch_safe(old_patch, tmp_patch) {
-		if (old_patch == new_patch)
-			return;
-		klp_free_patch_async(old_patch);
-	}
 }
 
 static int klp_init_func(struct klp_object *obj, struct klp_func *func)
@@ -1021,13 +992,6 @@ int klp_enable_patch(struct klp_patch *patch)
 
 	mutex_lock(&klp_mutex);
 
-	if (!klp_is_patch_compatible(patch)) {
-		pr_err("Livepatch patch (%s) is not compatible with the already installed livepatches.\n",
-			patch->mod->name);
-		mutex_unlock(&klp_mutex);
-		return -EINVAL;
-	}
-
 	ret = klp_init_patch_early(patch);
 	if (ret) {
 		mutex_unlock(&klp_mutex);
@@ -1058,13 +1022,12 @@ err:
 EXPORT_SYMBOL_GPL(klp_enable_patch);
 
 /*
- * This function unpatches objects from the replaced livepatches.
+ * This function removes replaced patches.
  *
  * We could be pretty aggressive here. It is called in the situation where
- * these structures are no longer accessed from the ftrace handler.
- * All functions are redirected by the klp_transition_patch. They
- * use either a new code or they are in the original code because
- * of the special nop function patches.
+ * these structures are no longer accessible. All functions are redirected
+ * by the klp_transition_patch. They use either a new code or they are in
+ * the original code because of the special nop function patches.
  *
  * The only exception is when the transition was forced. In this case,
  * klp_ftrace_handler() might still see the replaced patch on the stack.
@@ -1072,16 +1035,18 @@ EXPORT_SYMBOL_GPL(klp_enable_patch);
  * thanks to RCU. We only have to keep the patches on the system. Also
  * this is handled transparently by patch->module_put.
  */
-void klp_unpatch_replaced_patches(struct klp_patch *new_patch)
+void klp_discard_replaced_patches(struct klp_patch *new_patch)
 {
-	struct klp_patch *old_patch;
+	struct klp_patch *old_patch, *tmp_patch;
 
-	klp_for_each_patch(old_patch) {
+	klp_for_each_patch_safe(old_patch, tmp_patch) {
 		if (old_patch == new_patch)
 			return;
 
 		old_patch->enabled = false;
 		klp_unpatch_objects(old_patch);
+		klp_free_patch_start(old_patch);
+		schedule_work(&old_patch->free_work);
 	}
 }
 

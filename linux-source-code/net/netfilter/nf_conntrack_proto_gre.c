@@ -1,6 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
- * ip_conntrack_proto_gre.c - Version 3.0
- *
  * Connection tracking protocol helper module for GRE.
  *
  * GRE is a generic encapsulation protocol, which is generally not very
@@ -53,7 +52,7 @@ static DEFINE_SPINLOCK(keymap_lock);
 
 static inline struct nf_gre_net *gre_pernet(struct net *net)
 {
-	return &net->nf_ct_gre;
+	return &net->ct.nf_ct_proto.gre;
 }
 
 void nf_ct_gre_keymap_flush(struct net *net)
@@ -249,19 +248,6 @@ int nf_conntrack_gre_packet(struct nf_conn *ct,
 	return NF_ACCEPT;
 }
 
-/* Called when a conntrack entry has already been removed from the hashes
- * and is about to be deleted from memory */
-static void gre_destroy(struct nf_conn *ct)
-{
-	struct nf_conn *master = ct->master;
-	pr_debug(" entering\n");
-
-	if (!master)
-		pr_debug("no master !?!\n");
-	else
-		nf_ct_gre_keymap_destroy(master);
-}
-
 #ifdef CONFIG_NF_CONNTRACK_TIMEOUT
 
 #include <linux/netfilter/nfnetlink.h>
@@ -313,7 +299,7 @@ gre_timeout_nla_policy[CTA_TIMEOUT_GRE_MAX+1] = {
 };
 #endif /* CONFIG_NF_CONNTRACK_TIMEOUT */
 
-static int gre_init_net(struct net *net)
+void nf_conntrack_gre_init_net(struct net *net)
 {
 	struct nf_gre_net *net_gre = gre_pernet(net);
 	int i;
@@ -321,8 +307,6 @@ static int gre_init_net(struct net *net)
 	INIT_LIST_HEAD(&net_gre->keymap_list);
 	for (i = 0; i < GRE_CT_MAX; i++)
 		net_gre->timeouts[i] = gre_timeouts[i];
-
-	return 0;
 }
 
 /* protocol helper struct */
@@ -331,7 +315,6 @@ const struct nf_conntrack_l4proto nf_conntrack_l4proto_gre = {
 #ifdef CONFIG_NF_CONNTRACK_PROCFS
 	.print_conntrack = gre_print_conntrack,
 #endif
-	.destroy	 = gre_destroy,
 #if IS_ENABLED(CONFIG_NF_CT_NETLINK)
 	.tuple_to_nlattr = nf_ct_port_tuple_to_nlattr,
 	.nlattr_tuple_size = nf_ct_port_nlattr_tuple_size,
@@ -347,5 +330,4 @@ const struct nf_conntrack_l4proto nf_conntrack_l4proto_gre = {
 		.nla_policy	= gre_timeout_nla_policy,
 	},
 #endif /* CONFIG_NF_CONNTRACK_TIMEOUT */
-	.init_net	= gre_init_net,
 };

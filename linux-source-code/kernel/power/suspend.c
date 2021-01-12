@@ -1,11 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * kernel/power/suspend.c - Suspend to RAM and standby functionality.
  *
  * Copyright (c) 2003 Patrick Mochel
  * Copyright (c) 2003 Open Source Development Lab
  * Copyright (c) 2009 Rafael J. Wysocki <rjw@sisk.pl>, Novell Inc.
- *
- * This file is released under the GPLv2.
  */
 
 #define pr_fmt(fmt) "PM: " fmt
@@ -120,13 +119,6 @@ static void s2idle_enter(void)
 
 static void s2idle_loop(void)
 {
-	int error;
-
-	dpm_noirq_begin();
-	error = dpm_noirq_suspend_devices(PMSG_SUSPEND);
-	if (error)
-		goto resume;
-
 	pm_pr_dbg("suspend-to-idle\n");
 
 	/*
@@ -152,10 +144,6 @@ static void s2idle_loop(void)
 	}
 
 	pm_pr_dbg("resume from suspend-to-idle\n");
-
-resume:
-	dpm_noirq_resume_devices(PMSG_RESUME);
-	dpm_noirq_end();
 }
 
 void s2idle_wake(void)
@@ -417,11 +405,6 @@ static int suspend_enter(suspend_state_t state, bool *wakeup)
 	if (error)
 		goto Devices_early_resume;
 
-	if (state == PM_SUSPEND_TO_IDLE && pm_test_level != TEST_PLATFORM) {
-		s2idle_loop();
-		goto Platform_early_resume;
-	}
-
 	error = dpm_suspend_noirq(PMSG_SUSPEND);
 	if (error) {
 		pr_err("noirq suspend of devices failed\n");
@@ -433,6 +416,11 @@ static int suspend_enter(suspend_state_t state, bool *wakeup)
 
 	if (suspend_test(TEST_PLATFORM))
 		goto Platform_wake;
+
+	if (state == PM_SUSPEND_TO_IDLE) {
+		s2idle_loop();
+		goto Platform_wake;
+	}
 
 	error = suspend_disable_secondary_cpus();
 	if (error || suspend_test(TEST_CPUS))

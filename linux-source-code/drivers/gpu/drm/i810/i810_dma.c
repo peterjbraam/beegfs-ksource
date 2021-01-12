@@ -32,7 +32,6 @@
 
 #include <linux/delay.h>
 #include <linux/mman.h>
-#include <linux/pci.h>
 
 #include <drm/drm_agpsupport.h>
 #include <drm/drm_device.h>
@@ -40,6 +39,7 @@
 #include <drm/drm_file.h>
 #include <drm/drm_ioctl.h>
 #include <drm/drm_irq.h>
+#include <drm/drm_pci.h>
 #include <drm/drm_print.h>
 #include <drm/i810_drm.h>
 

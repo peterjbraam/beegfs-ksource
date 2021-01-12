@@ -1,13 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * arch/sh/kernel/traps_64.c
  *
  * Copyright (C) 2000, 2001  Paolo Alberelli
  * Copyright (C) 2003, 2004  Paul Mundt
  * Copyright (C) 2003, 2004  Richard Curnow
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file "COPYING" in the main directory of this archive
- * for more details.
  */
 #include <linux/sched.h>
 #include <linux/sched/debug.h>
@@ -602,7 +599,7 @@ static void do_unhandled_exception(int signr, char *str, unsigned long error,
 				   struct pt_regs *regs)
 {
 	if (user_mode(regs))
-		force_sig(signr, current);
+		force_sig(signr);
 
 	die_if_no_fixup(str, regs, error);
 }

@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * net/sched/em_ipt.c IPtables matches Ematch
  *
  * (c) 2018 Eyal Birger <eyal.birger@gmail.com>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 
 #include <linux/gfp.h>
@@ -26,7 +22,7 @@ struct em_ipt_match {
 	const struct xt_match *match;
 	u32 hook;
 	u8 nfproto;
-	u8 match_data[] __aligned(8);
+	u8 match_data[0] __aligned(8);
 };
 
 struct em_ipt_xt_match {
@@ -203,7 +199,7 @@ static void em_ipt_destroy(struct tcf_ematch *em)
 		im->match->destroy(&par);
 	}
 	module_put(im->match->me);
-	kfree(im);
+	kfree((void *)im);
 }
 
 static int em_ipt_match(struct sk_buff *skb, struct tcf_ematch *em,
@@ -216,7 +212,7 @@ static int em_ipt_match(struct sk_buff *skb, struct tcf_ematch *em,
 	struct nf_hook_state state;
 	int ret;
 
-	switch (tc_skb_protocol(skb)) {
+	switch (skb_protocol(skb, true)) {
 	case htons(ETH_P_IP):
 		if (!pskb_network_may_pull(skb, sizeof(struct iphdr)))
 			return 0;

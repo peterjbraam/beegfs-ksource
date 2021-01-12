@@ -57,107 +57,109 @@
 #define VCPU_IRQS_MAX_BUF (sizeof(struct kvm_s390_irq) * \
 			   (KVM_MAX_VCPUS + LOCAL_IRQS))
 
+#define VCPU_STAT(x) offsetof(struct kvm_vcpu, stat.x), KVM_STAT_VCPU
+#define VM_STAT(x) offsetof(struct kvm, stat.x), KVM_STAT_VM
+
 struct kvm_stats_debugfs_item debugfs_entries[] = {
-	VCPU_STAT("userspace_handled", exit_userspace),
-	VCPU_STAT("exit_null", exit_null),
-	VCPU_STAT("exit_validity", exit_validity),
-	VCPU_STAT("exit_stop_request", exit_stop_request),
-	VCPU_STAT("exit_external_request", exit_external_request),
-	VCPU_STAT("exit_io_request", exit_io_request),
-	VCPU_STAT("exit_external_interrupt", exit_external_interrupt),
-	VCPU_STAT("exit_instruction", exit_instruction),
-	VCPU_STAT("exit_pei", exit_pei),
-	VCPU_STAT("exit_program_interruption", exit_program_interruption),
-	VCPU_STAT("exit_instr_and_program_int", exit_instr_and_program),
-	VCPU_STAT("exit_operation_exception", exit_operation_exception),
-	VCPU_STAT("halt_successful_poll", halt_successful_poll),
-	VCPU_STAT("halt_attempted_poll", halt_attempted_poll),
-	VCPU_STAT("halt_poll_invalid", halt_poll_invalid),
-	VCPU_STAT("halt_no_poll_steal", halt_no_poll_steal),
-	VCPU_STAT("halt_wakeup", halt_wakeup),
-	VCPU_STAT("instruction_lctlg", instruction_lctlg),
-	VCPU_STAT("instruction_lctl", instruction_lctl),
-	VCPU_STAT("instruction_stctl", instruction_stctl),
-	VCPU_STAT("instruction_stctg", instruction_stctg),
-	VCPU_STAT("deliver_ckc", deliver_ckc),
-	VCPU_STAT("deliver_cputm", deliver_cputm),
-	VCPU_STAT("deliver_emergency_signal", deliver_emergency_signal),
-	VCPU_STAT("deliver_external_call", deliver_external_call),
-	VCPU_STAT("deliver_service_signal", deliver_service_signal),
-	VCPU_STAT("deliver_virtio", deliver_virtio),
-	VCPU_STAT("deliver_stop_signal", deliver_stop_signal),
-	VCPU_STAT("deliver_prefix_signal", deliver_prefix_signal),
-	VCPU_STAT("deliver_restart_signal", deliver_restart_signal),
-	VCPU_STAT("deliver_program", deliver_program),
-	VCPU_STAT("deliver_io", deliver_io),
-	VCPU_STAT("deliver_machine_check", deliver_machine_check),
-	VCPU_STAT("exit_wait_state", exit_wait_state),
-	VCPU_STAT("inject_ckc", inject_ckc),
-	VCPU_STAT("inject_cputm", inject_cputm),
-	VCPU_STAT("inject_external_call", inject_external_call),
-	VM_STAT("inject_float_mchk", inject_float_mchk),
-	VCPU_STAT("inject_emergency_signal", inject_emergency_signal),
-	VM_STAT("inject_io", inject_io),
-	VCPU_STAT("inject_mchk", inject_mchk),
-	VM_STAT("inject_pfault_done", inject_pfault_done),
-	VCPU_STAT("inject_program", inject_program),
-	VCPU_STAT("inject_restart", inject_restart),
-	VM_STAT("inject_service_signal", inject_service_signal),
-	VCPU_STAT("inject_set_prefix", inject_set_prefix),
-	VCPU_STAT("inject_stop_signal", inject_stop_signal),
-	VCPU_STAT("inject_pfault_init", inject_pfault_init),
-	VM_STAT("inject_virtio", inject_virtio),
-	VCPU_STAT("instruction_epsw", instruction_epsw),
-	VCPU_STAT("instruction_gs", instruction_gs),
-	VCPU_STAT("instruction_io_other", instruction_io_other),
-	VCPU_STAT("instruction_lpsw", instruction_lpsw),
-	VCPU_STAT("instruction_lpswe", instruction_lpswe),
-	VCPU_STAT("instruction_pfmf", instruction_pfmf),
-	VCPU_STAT("instruction_ptff", instruction_ptff),
-	VCPU_STAT("instruction_stidp", instruction_stidp),
-	VCPU_STAT("instruction_sck", instruction_sck),
-	VCPU_STAT("instruction_sckpf", instruction_sckpf),
-	VCPU_STAT("instruction_spx", instruction_spx),
-	VCPU_STAT("instruction_stpx", instruction_stpx),
-	VCPU_STAT("instruction_stap", instruction_stap),
-	VCPU_STAT("instruction_iske", instruction_iske),
-	VCPU_STAT("instruction_ri", instruction_ri),
-	VCPU_STAT("instruction_rrbe", instruction_rrbe),
-	VCPU_STAT("instruction_sske", instruction_sske),
-	VCPU_STAT("instruction_ipte_interlock", instruction_ipte_interlock),
-	VCPU_STAT("instruction_essa", instruction_essa),
-	VCPU_STAT("instruction_stsi", instruction_stsi),
-	VCPU_STAT("instruction_stfl", instruction_stfl),
-	VCPU_STAT("instruction_tb", instruction_tb),
-	VCPU_STAT("instruction_tpi", instruction_tpi),
-	VCPU_STAT("instruction_tprot", instruction_tprot),
-	VCPU_STAT("instruction_tsch", instruction_tsch),
-	VCPU_STAT("instruction_sthyi", instruction_sthyi),
-	VCPU_STAT("instruction_sie", instruction_sie),
-	VCPU_STAT("instruction_sigp_sense", instruction_sigp_sense),
-	VCPU_STAT("instruction_sigp_sense_running", instruction_sigp_sense_running),
-	VCPU_STAT("instruction_sigp_external_call", instruction_sigp_external_call),
-	VCPU_STAT("instruction_sigp_emergency", instruction_sigp_emergency),
-	VCPU_STAT("instruction_sigp_cond_emergency", instruction_sigp_cond_emergency),
-	VCPU_STAT("instruction_sigp_start", instruction_sigp_start),
-	VCPU_STAT("instruction_sigp_stop", instruction_sigp_stop),
-	VCPU_STAT("instruction_sigp_stop_store_status", instruction_sigp_stop_store_status),
-	VCPU_STAT("instruction_sigp_store_status", instruction_sigp_store_status),
-	VCPU_STAT("instruction_sigp_store_adtl_status", instruction_sigp_store_adtl_status),
-	VCPU_STAT("instruction_sigp_set_arch", instruction_sigp_arch),
-	VCPU_STAT("instruction_sigp_set_prefix", instruction_sigp_prefix),
-	VCPU_STAT("instruction_sigp_restart", instruction_sigp_restart),
-	VCPU_STAT("instruction_sigp_cpu_reset", instruction_sigp_cpu_reset),
-	VCPU_STAT("instruction_sigp_init_cpu_reset", instruction_sigp_init_cpu_reset),
-	VCPU_STAT("instruction_sigp_unknown", instruction_sigp_unknown),
-	VCPU_STAT("instruction_diag_10", diagnose_10),
-	VCPU_STAT("instruction_diag_44", diagnose_44),
-	VCPU_STAT("instruction_diag_9c", diagnose_9c),
-	VCPU_STAT("diag_9c_ignored", diagnose_9c_ignored),
-	VCPU_STAT("instruction_diag_258", diagnose_258),
-	VCPU_STAT("instruction_diag_308", diagnose_308),
-	VCPU_STAT("instruction_diag_500", diagnose_500),
-	VCPU_STAT("instruction_diag_other", diagnose_other),
+	{ "userspace_handled", VCPU_STAT(exit_userspace) },
+	{ "exit_null", VCPU_STAT(exit_null) },
+	{ "exit_validity", VCPU_STAT(exit_validity) },
+	{ "exit_stop_request", VCPU_STAT(exit_stop_request) },
+	{ "exit_external_request", VCPU_STAT(exit_external_request) },
+	{ "exit_io_request", VCPU_STAT(exit_io_request) },
+	{ "exit_external_interrupt", VCPU_STAT(exit_external_interrupt) },
+	{ "exit_instruction", VCPU_STAT(exit_instruction) },
+	{ "exit_pei", VCPU_STAT(exit_pei) },
+	{ "exit_program_interruption", VCPU_STAT(exit_program_interruption) },
+	{ "exit_instr_and_program_int", VCPU_STAT(exit_instr_and_program) },
+	{ "exit_operation_exception", VCPU_STAT(exit_operation_exception) },
+	{ "halt_successful_poll", VCPU_STAT(halt_successful_poll) },
+	{ "halt_attempted_poll", VCPU_STAT(halt_attempted_poll) },
+	{ "halt_poll_invalid", VCPU_STAT(halt_poll_invalid) },
+	{ "halt_no_poll_steal", VCPU_STAT(halt_no_poll_steal) },
+	{ "halt_wakeup", VCPU_STAT(halt_wakeup) },
+	{ "instruction_lctlg", VCPU_STAT(instruction_lctlg) },
+	{ "instruction_lctl", VCPU_STAT(instruction_lctl) },
+	{ "instruction_stctl", VCPU_STAT(instruction_stctl) },
+	{ "instruction_stctg", VCPU_STAT(instruction_stctg) },
+	{ "deliver_ckc", VCPU_STAT(deliver_ckc) },
+	{ "deliver_cputm", VCPU_STAT(deliver_cputm) },
+	{ "deliver_emergency_signal", VCPU_STAT(deliver_emergency_signal) },
+	{ "deliver_external_call", VCPU_STAT(deliver_external_call) },
+	{ "deliver_service_signal", VCPU_STAT(deliver_service_signal) },
+	{ "deliver_virtio", VCPU_STAT(deliver_virtio) },
+	{ "deliver_stop_signal", VCPU_STAT(deliver_stop_signal) },
+	{ "deliver_prefix_signal", VCPU_STAT(deliver_prefix_signal) },
+	{ "deliver_restart_signal", VCPU_STAT(deliver_restart_signal) },
+	{ "deliver_program", VCPU_STAT(deliver_program) },
+	{ "deliver_io", VCPU_STAT(deliver_io) },
+	{ "deliver_machine_check", VCPU_STAT(deliver_machine_check) },
+	{ "exit_wait_state", VCPU_STAT(exit_wait_state) },
+	{ "inject_ckc", VCPU_STAT(inject_ckc) },
+	{ "inject_cputm", VCPU_STAT(inject_cputm) },
+	{ "inject_external_call", VCPU_STAT(inject_external_call) },
+	{ "inject_float_mchk", VM_STAT(inject_float_mchk) },
+	{ "inject_emergency_signal", VCPU_STAT(inject_emergency_signal) },
+	{ "inject_io", VM_STAT(inject_io) },
+	{ "inject_mchk", VCPU_STAT(inject_mchk) },
+	{ "inject_pfault_done", VM_STAT(inject_pfault_done) },
+	{ "inject_program", VCPU_STAT(inject_program) },
+	{ "inject_restart", VCPU_STAT(inject_restart) },
+	{ "inject_service_signal", VM_STAT(inject_service_signal) },
+	{ "inject_set_prefix", VCPU_STAT(inject_set_prefix) },
+	{ "inject_stop_signal", VCPU_STAT(inject_stop_signal) },
+	{ "inject_pfault_init", VCPU_STAT(inject_pfault_init) },
+	{ "inject_virtio", VM_STAT(inject_virtio) },
+	{ "instruction_epsw", VCPU_STAT(instruction_epsw) },
+	{ "instruction_gs", VCPU_STAT(instruction_gs) },
+	{ "instruction_io_other", VCPU_STAT(instruction_io_other) },
+	{ "instruction_lpsw", VCPU_STAT(instruction_lpsw) },
+	{ "instruction_lpswe", VCPU_STAT(instruction_lpswe) },
+	{ "instruction_pfmf", VCPU_STAT(instruction_pfmf) },
+	{ "instruction_ptff", VCPU_STAT(instruction_ptff) },
+	{ "instruction_stidp", VCPU_STAT(instruction_stidp) },
+	{ "instruction_sck", VCPU_STAT(instruction_sck) },
+	{ "instruction_sckpf", VCPU_STAT(instruction_sckpf) },
+	{ "instruction_spx", VCPU_STAT(instruction_spx) },
+	{ "instruction_stpx", VCPU_STAT(instruction_stpx) },
+	{ "instruction_stap", VCPU_STAT(instruction_stap) },
+	{ "instruction_iske", VCPU_STAT(instruction_iske) },
+	{ "instruction_ri", VCPU_STAT(instruction_ri) },
+	{ "instruction_rrbe", VCPU_STAT(instruction_rrbe) },
+	{ "instruction_sske", VCPU_STAT(instruction_sske) },
+	{ "instruction_ipte_interlock", VCPU_STAT(instruction_ipte_interlock) },
+	{ "instruction_essa", VCPU_STAT(instruction_essa) },
+	{ "instruction_stsi", VCPU_STAT(instruction_stsi) },
+	{ "instruction_stfl", VCPU_STAT(instruction_stfl) },
+	{ "instruction_tb", VCPU_STAT(instruction_tb) },
+	{ "instruction_tpi", VCPU_STAT(instruction_tpi) },
+	{ "instruction_tprot", VCPU_STAT(instruction_tprot) },
+	{ "instruction_tsch", VCPU_STAT(instruction_tsch) },
+	{ "instruction_sthyi", VCPU_STAT(instruction_sthyi) },
+	{ "instruction_sie", VCPU_STAT(instruction_sie) },
+	{ "instruction_sigp_sense", VCPU_STAT(instruction_sigp_sense) },
+	{ "instruction_sigp_sense_running", VCPU_STAT(instruction_sigp_sense_running) },
+	{ "instruction_sigp_external_call", VCPU_STAT(instruction_sigp_external_call) },
+	{ "instruction_sigp_emergency", VCPU_STAT(instruction_sigp_emergency) },
+	{ "instruction_sigp_cond_emergency", VCPU_STAT(instruction_sigp_cond_emergency) },
+	{ "instruction_sigp_start", VCPU_STAT(instruction_sigp_start) },
+	{ "instruction_sigp_stop", VCPU_STAT(instruction_sigp_stop) },
+	{ "instruction_sigp_stop_store_status", VCPU_STAT(instruction_sigp_stop_store_status) },
+	{ "instruction_sigp_store_status", VCPU_STAT(instruction_sigp_store_status) },
+	{ "instruction_sigp_store_adtl_status", VCPU_STAT(instruction_sigp_store_adtl_status) },
+	{ "instruction_sigp_set_arch", VCPU_STAT(instruction_sigp_arch) },
+	{ "instruction_sigp_set_prefix", VCPU_STAT(instruction_sigp_prefix) },
+	{ "instruction_sigp_restart", VCPU_STAT(instruction_sigp_restart) },
+	{ "instruction_sigp_cpu_reset", VCPU_STAT(instruction_sigp_cpu_reset) },
+	{ "instruction_sigp_init_cpu_reset", VCPU_STAT(instruction_sigp_init_cpu_reset) },
+	{ "instruction_sigp_unknown", VCPU_STAT(instruction_sigp_unknown) },
+	{ "instruction_diag_10", VCPU_STAT(diagnose_10) },
+	{ "instruction_diag_44", VCPU_STAT(diagnose_44) },
+	{ "instruction_diag_9c", VCPU_STAT(diagnose_9c) },
+	{ "instruction_diag_258", VCPU_STAT(diagnose_258) },
+	{ "instruction_diag_308", VCPU_STAT(diagnose_308) },
+	{ "instruction_diag_500", VCPU_STAT(diagnose_500) },
+	{ "instruction_diag_other", VCPU_STAT(diagnose_other) },
 	{ NULL }
 };
 
@@ -181,11 +183,6 @@ MODULE_PARM_DESC(hpage, "1m huge page backing support");
 static u8 halt_poll_max_steal = 10;
 module_param(halt_poll_max_steal, byte, 0644);
 MODULE_PARM_DESC(halt_poll_max_steal, "Maximum percentage of steal time to allow polling");
-
-/* if set to true, the GISA will be initialized and used if available */
-static bool use_gisa  = true;
-module_param(use_gisa, bool, 0644);
-MODULE_PARM_DESC(use_gisa, "Use the GISA if the host supports it.");
 
 /*
  * For now we handle at most 16 double words as this is what the s390 base
@@ -232,7 +229,7 @@ int kvm_arch_hardware_enable(void)
 	return 0;
 }
 
-int kvm_arch_check_processor_compat(void *opaque)
+int kvm_arch_check_processor_compat(void)
 {
 	return 0;
 }
@@ -299,7 +296,7 @@ static struct notifier_block kvm_clock_notifier = {
 	.notifier_call = kvm_clock_sync,
 };
 
-int kvm_arch_hardware_setup(void *opaque)
+int kvm_arch_hardware_setup(void)
 {
 	gmap_notifier.notifier_call = kvm_gmap_notifier;
 	gmap_register_pte_notifier(&gmap_notifier);
@@ -542,7 +539,6 @@ int kvm_vm_ioctl_check_extension(struct kvm *kvm, long ext)
 	case KVM_CAP_S390_AIS:
 	case KVM_CAP_S390_AIS_MIGRATION:
 	case KVM_CAP_S390_VCPU_RESETS:
-	case KVM_CAP_SET_GUEST_DEBUG:
 		r = 1;
 		break;
 	case KVM_CAP_S390_HPAGE_1M:
@@ -586,7 +582,8 @@ int kvm_vm_ioctl_check_extension(struct kvm *kvm, long ext)
 	return r;
 }
 
-void kvm_arch_sync_dirty_log(struct kvm *kvm, struct kvm_memory_slot *memslot)
+static void kvm_s390_sync_dirty_log(struct kvm *kvm,
+				    struct kvm_memory_slot *memslot)
 {
 	int i;
 	gfn_t cur_gfn, last_gfn;
@@ -627,8 +624,9 @@ int kvm_vm_ioctl_get_dirty_log(struct kvm *kvm,
 {
 	int r;
 	unsigned long n;
+	struct kvm_memslots *slots;
 	struct kvm_memory_slot *memslot;
-	int is_dirty;
+	int is_dirty = 0;
 
 	if (kvm_is_ucontrol(kvm))
 		return -EINVAL;
@@ -639,7 +637,14 @@ int kvm_vm_ioctl_get_dirty_log(struct kvm *kvm,
 	if (log->slot >= KVM_USER_MEM_SLOTS)
 		goto out;
 
-	r = kvm_get_dirty_log(kvm, log, &is_dirty, &memslot);
+	slots = kvm_memslots(kvm);
+	memslot = id_to_memslot(slots, log->slot);
+	r = -ENOENT;
+	if (!memslot->dirty_bitmap)
+		goto out;
+
+	kvm_s390_sync_dirty_log(kvm, memslot);
+	r = kvm_get_dirty_log(kvm, log, &is_dirty);
 	if (r)
 		goto out;
 
@@ -2003,9 +2008,6 @@ static int kvm_s390_get_cmma(struct kvm *kvm, struct kvm_s390_cmma_log *args,
 	struct kvm_memslots *slots = kvm_memslots(kvm);
 	struct kvm_memory_slot *ms;
 
-	if (unlikely(!slots->used_slots))
-		return 0;
-
 	cur_gfn = kvm_s390_next_dirty_cmma(slots, args->start_gfn);
 	ms = gfn_to_memslot(kvm, cur_gfn);
 	args->count = 0;
@@ -2732,8 +2734,7 @@ int kvm_arch_init_vm(struct kvm *kvm, unsigned long type)
 	kvm->arch.use_skf = sclp.has_skey;
 	spin_lock_init(&kvm->arch.start_stop_lock);
 	kvm_s390_vsie_init(kvm);
-	if (use_gisa)
-		kvm_s390_gisa_init(kvm);
+	kvm_s390_gisa_init(kvm);
 	KVM_EVENT(3, "vm 0x%pK created by pid %u", kvm, current->pid);
 
 	return 0;
@@ -2765,6 +2766,9 @@ void kvm_arch_vcpu_destroy(struct kvm_vcpu *vcpu)
 	if (kvm_s390_pv_cpu_get_handle(vcpu))
 		kvm_s390_pv_destroy_cpu(vcpu, &rc, &rrc);
 	free_page((unsigned long)(vcpu->arch.sie_block));
+
+	kvm_vcpu_uninit(vcpu);
+	kmem_cache_free(kvm_vcpu_cache, vcpu);
 }
 
 static void kvm_free_vcpus(struct kvm *kvm)
@@ -2773,7 +2777,7 @@ static void kvm_free_vcpus(struct kvm *kvm)
 	struct kvm_vcpu *vcpu;
 
 	kvm_for_each_vcpu(i, vcpu, kvm)
-		kvm_vcpu_destroy(vcpu);
+		kvm_arch_vcpu_destroy(vcpu);
 
 	mutex_lock(&kvm->lock);
 	for (i = 0; i < atomic_read(&kvm->online_vcpus); i++)
@@ -2946,6 +2950,39 @@ static int sca_can_add_vcpu(struct kvm *kvm, unsigned int id)
 	mutex_unlock(&kvm->lock);
 
 	return rc == 0 && id < KVM_S390_ESCA_CPU_SLOTS;
+}
+
+int kvm_arch_vcpu_init(struct kvm_vcpu *vcpu)
+{
+	vcpu->arch.pfault_token = KVM_S390_PFAULT_TOKEN_INVALID;
+	kvm_clear_async_pf_completion_queue(vcpu);
+	vcpu->run->kvm_valid_regs = KVM_SYNC_PREFIX |
+				    KVM_SYNC_GPRS |
+				    KVM_SYNC_ACRS |
+				    KVM_SYNC_CRS |
+				    KVM_SYNC_ARCH0 |
+				    KVM_SYNC_PFAULT;
+	kvm_s390_set_prefix(vcpu, 0);
+	if (test_kvm_facility(vcpu->kvm, 64))
+		vcpu->run->kvm_valid_regs |= KVM_SYNC_RICCB;
+	if (test_kvm_facility(vcpu->kvm, 82))
+		vcpu->run->kvm_valid_regs |= KVM_SYNC_BPBC;
+	if (test_kvm_facility(vcpu->kvm, 133))
+		vcpu->run->kvm_valid_regs |= KVM_SYNC_GSCB;
+	if (test_kvm_facility(vcpu->kvm, 156))
+		vcpu->run->kvm_valid_regs |= KVM_SYNC_ETOKEN;
+	/* fprs can be synchronized via vrs, even if the guest has no vx. With
+	 * MACHINE_HAS_VX, (load|store)_fpu_regs() will work with vrs format.
+	 */
+	if (MACHINE_HAS_VX)
+		vcpu->run->kvm_valid_regs |= KVM_SYNC_VRS;
+	else
+		vcpu->run->kvm_valid_regs |= KVM_SYNC_FPRS;
+
+	if (kvm_is_ucontrol(vcpu->kvm))
+		return __kvm_ucontrol_vcpu_init(vcpu);
+
+	return 0;
 }
 
 /* needs disabled preemption to protect from TOD sync and vcpu_load/put */
@@ -3145,7 +3182,7 @@ static void kvm_s390_vcpu_setup_model(struct kvm_vcpu *vcpu)
 		vcpu->arch.sie_block->fac = (u32)(u64) model->fac_list;
 }
 
-static int kvm_s390_vcpu_setup(struct kvm_vcpu *vcpu)
+int kvm_arch_vcpu_setup(struct kvm_vcpu *vcpu)
 {
 	int rc = 0;
 	u16 uvrc, uvrrc;
@@ -3227,22 +3264,26 @@ static int kvm_s390_vcpu_setup(struct kvm_vcpu *vcpu)
 	return rc;
 }
 
-int kvm_arch_vcpu_precreate(struct kvm *kvm, unsigned int id)
+struct kvm_vcpu *kvm_arch_vcpu_create(struct kvm *kvm,
+				      unsigned int id)
 {
-	if (!kvm_is_ucontrol(kvm) && !sca_can_add_vcpu(kvm, id))
-		return -EINVAL;
-	return 0;
-}
-
-int kvm_arch_vcpu_create(struct kvm_vcpu *vcpu)
-{
+	struct kvm_vcpu *vcpu;
 	struct sie_page *sie_page;
-	int rc;
+	int rc = -EINVAL;
+
+	if (!kvm_is_ucontrol(kvm) && !sca_can_add_vcpu(kvm, id))
+		goto out;
+
+	rc = -ENOMEM;
+
+	vcpu = kmem_cache_zalloc(kvm_vcpu_cache, GFP_KERNEL);
+	if (!vcpu)
+		goto out;
 
 	BUILD_BUG_ON(sizeof(struct sie_page) != 4096);
 	sie_page = (struct sie_page *) get_zeroed_page(GFP_KERNEL);
 	if (!sie_page)
-		return -ENOMEM;
+		goto out_free_cpu;
 
 	vcpu->arch.sie_block = &sie_page->sie_block;
 	vcpu->arch.sie_block->itdba = (unsigned long) &sie_page->itdb;
@@ -3251,59 +3292,27 @@ int kvm_arch_vcpu_create(struct kvm_vcpu *vcpu)
 	vcpu->arch.sie_block->mso = 0;
 	vcpu->arch.sie_block->msl = sclp.hamax;
 
-	vcpu->arch.sie_block->icpua = vcpu->vcpu_id;
+	vcpu->arch.sie_block->icpua = id;
 	spin_lock_init(&vcpu->arch.local_int.lock);
-	vcpu->arch.sie_block->gd = (u32)(u64)vcpu->kvm->arch.gisa_int.origin;
+	vcpu->arch.sie_block->gd = (u32)(u64)kvm->arch.gisa_int.origin;
 	if (vcpu->arch.sie_block->gd && sclp.has_gisaf)
 		vcpu->arch.sie_block->gd |= GISA_FORMAT1;
 	seqcount_init(&vcpu->arch.cputm_seqcount);
 
-	vcpu->arch.pfault_token = KVM_S390_PFAULT_TOKEN_INVALID;
-	kvm_clear_async_pf_completion_queue(vcpu);
-	vcpu->run->kvm_valid_regs = KVM_SYNC_PREFIX |
-				    KVM_SYNC_GPRS |
-				    KVM_SYNC_ACRS |
-				    KVM_SYNC_CRS |
-				    KVM_SYNC_ARCH0 |
-				    KVM_SYNC_PFAULT;
-	kvm_s390_set_prefix(vcpu, 0);
-	if (test_kvm_facility(vcpu->kvm, 64))
-		vcpu->run->kvm_valid_regs |= KVM_SYNC_RICCB;
-	if (test_kvm_facility(vcpu->kvm, 82))
-		vcpu->run->kvm_valid_regs |= KVM_SYNC_BPBC;
-	if (test_kvm_facility(vcpu->kvm, 133))
-		vcpu->run->kvm_valid_regs |= KVM_SYNC_GSCB;
-	if (test_kvm_facility(vcpu->kvm, 156))
-		vcpu->run->kvm_valid_regs |= KVM_SYNC_ETOKEN;
-	/* fprs can be synchronized via vrs, even if the guest has no vx. With
-	 * MACHINE_HAS_VX, (load|store)_fpu_regs() will work with vrs format.
-	 */
-	if (MACHINE_HAS_VX)
-		vcpu->run->kvm_valid_regs |= KVM_SYNC_VRS;
-	else
-		vcpu->run->kvm_valid_regs |= KVM_SYNC_FPRS;
-
-	if (kvm_is_ucontrol(vcpu->kvm)) {
-		rc = __kvm_ucontrol_vcpu_init(vcpu);
-		if (rc)
-			goto out_free_sie_block;
-	}
-
-	VM_EVENT(vcpu->kvm, 3, "create cpu %d at 0x%pK, sie block at 0x%pK",
-		 vcpu->vcpu_id, vcpu, vcpu->arch.sie_block);
-	trace_kvm_s390_create_vcpu(vcpu->vcpu_id, vcpu, vcpu->arch.sie_block);
-
-	rc = kvm_s390_vcpu_setup(vcpu);
+	rc = kvm_vcpu_init(vcpu, kvm, id);
 	if (rc)
-		goto out_ucontrol_uninit;
-	return 0;
+		goto out_free_sie_block;
+	VM_EVENT(kvm, 3, "create cpu %d at 0x%pK, sie block at 0x%pK", id, vcpu,
+		 vcpu->arch.sie_block);
+	trace_kvm_s390_create_vcpu(id, vcpu, vcpu->arch.sie_block);
 
-out_ucontrol_uninit:
-	if (kvm_is_ucontrol(vcpu->kvm))
-		gmap_remove(vcpu->arch.gmap);
+	return vcpu;
 out_free_sie_block:
 	free_page((unsigned long)(vcpu->arch.sie_block));
-	return rc;
+out_free_cpu:
+	kmem_cache_free(kvm_vcpu_cache, vcpu);
+out:
+	return ERR_PTR(rc);
 }
 
 int kvm_arch_vcpu_runnable(struct kvm_vcpu *vcpu)
@@ -3524,10 +3533,7 @@ static void kvm_arch_vcpu_ioctl_initial_reset(struct kvm_vcpu *vcpu)
 	/* Initial reset is a superset of the normal reset */
 	kvm_arch_vcpu_ioctl_normal_reset(vcpu);
 
-	/*
-	 * This equals initial cpu reset in pop, but we don't switch to ESA.
-	 * We do not only reset the internal data, but also ...
-	 */
+	/* this equals initial cpu reset in pop, but we don't switch to ESA */
 	vcpu->arch.sie_block->gpsw.mask = 0;
 	vcpu->arch.sie_block->gpsw.addr = 0;
 	kvm_s390_set_prefix(vcpu, 0);
@@ -3536,19 +3542,6 @@ static void kvm_arch_vcpu_ioctl_initial_reset(struct kvm_vcpu *vcpu)
 	memset(vcpu->arch.sie_block->gcr, 0, sizeof(vcpu->arch.sie_block->gcr));
 	vcpu->arch.sie_block->gcr[0] = CR0_INITIAL_MASK;
 	vcpu->arch.sie_block->gcr[14] = CR14_INITIAL_MASK;
-
-	/* ... the data in sync regs */
-	memset(vcpu->run->s.regs.crs, 0, sizeof(vcpu->run->s.regs.crs));
-	vcpu->run->s.regs.ckc = 0;
-	vcpu->run->s.regs.crs[0] = CR0_INITIAL_MASK;
-	vcpu->run->s.regs.crs[14] = CR14_INITIAL_MASK;
-	vcpu->run->psw_addr = 0;
-	vcpu->run->psw_mask = 0;
-	vcpu->run->s.regs.todpr = 0;
-	vcpu->run->s.regs.cputm = 0;
-	vcpu->run->s.regs.ckc = 0;
-	vcpu->run->s.regs.pp = 0;
-	vcpu->run->s.regs.gbea = 1;
 	vcpu->run->s.regs.fpc = 0;
 	/*
 	 * Do not reset these registers in the protected case, as some of
@@ -3921,13 +3914,11 @@ static void __kvm_inject_pfault_token(struct kvm_vcpu *vcpu, bool start_token,
 	}
 }
 
-bool kvm_arch_async_page_not_present(struct kvm_vcpu *vcpu,
+void kvm_arch_async_page_not_present(struct kvm_vcpu *vcpu,
 				     struct kvm_async_pf *work)
 {
 	trace_kvm_s390_pfault_init(vcpu, work->arch.pfault_token);
 	__kvm_inject_pfault_token(vcpu, true, work->arch.pfault_token);
-
-	return true;
 }
 
 void kvm_arch_async_page_present(struct kvm_vcpu *vcpu,
@@ -3943,7 +3934,7 @@ void kvm_arch_async_page_ready(struct kvm_vcpu *vcpu,
 	/* s390 will always inject the page directly */
 }
 
-bool kvm_arch_can_dequeue_async_page_present(struct kvm_vcpu *vcpu)
+bool kvm_arch_can_inject_async_page_present(struct kvm_vcpu *vcpu)
 {
 	/*
 	 * s390 will always inject the page directly,
@@ -4336,9 +4327,8 @@ static void store_regs(struct kvm_vcpu *vcpu, struct kvm_run *kvm_run)
 		store_regs_fmt2(vcpu, kvm_run);
 }
 
-int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu)
+int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu, struct kvm_run *kvm_run)
 {
-	struct kvm_run *kvm_run = vcpu->run;
 	int rc;
 
 	if (kvm_run->immediate_exit)
@@ -4949,6 +4939,12 @@ vm_fault_t kvm_arch_vcpu_fault(struct kvm_vcpu *vcpu, struct vm_fault *vmf)
 	return VM_FAULT_SIGBUS;
 }
 
+int kvm_arch_create_memslot(struct kvm *kvm, struct kvm_memory_slot *slot,
+			    unsigned long npages)
+{
+	return 0;
+}
+
 /* Section: memory related */
 int kvm_arch_prepare_memory_region(struct kvm *kvm,
 				   struct kvm_memory_slot *memslot,
@@ -4977,7 +4973,7 @@ int kvm_arch_prepare_memory_region(struct kvm *kvm,
 
 void kvm_arch_commit_memory_region(struct kvm *kvm,
 				const struct kvm_userspace_memory_region *mem,
-				struct kvm_memory_slot *old,
+				const struct kvm_memory_slot *old,
 				const struct kvm_memory_slot *new,
 				enum kvm_mr_change change)
 {

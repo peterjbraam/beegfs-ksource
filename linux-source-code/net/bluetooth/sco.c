@@ -922,7 +922,6 @@ static int sco_sock_getsockopt(struct socket *sock, int level, int optname,
 	struct sock *sk = sock->sk;
 	int len, err = 0;
 	struct bt_voice voice;
-	u32 phys;
 
 	BT_DBG("sk %p", sk);
 
@@ -955,18 +954,6 @@ static int sco_sock_getsockopt(struct socket *sock, int level, int optname,
 		if (copy_to_user(optval, (char *)&voice, len))
 			err = -EFAULT;
 
-		break;
-
-	case BT_PHY:
-		if (sk->sk_state != BT_CONNECTED) {
-			err = -ENOTCONN;
-			break;
-		}
-
-		phys = hci_conn_get_phy(sco_pi(sk)->conn->hcon);
-
-		if (put_user(phys, (u32 __user *) optval))
-			err = -EFAULT;
 		break;
 
 	default:
@@ -1203,6 +1190,7 @@ static const struct proto_ops sco_sock_ops = {
 	.recvmsg	= sco_sock_recvmsg,
 	.poll		= bt_sock_poll,
 	.ioctl		= bt_sock_ioctl,
+	.gettstamp	= sock_gettstamp,
 	.mmap		= sock_no_mmap,
 	.socketpair	= sock_no_socketpair,
 	.shutdown	= sco_sock_shutdown,

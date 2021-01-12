@@ -1,18 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (c) 2016 Avago Technologies.  All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of version 2 of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful.
- * ALL EXPRESS OR IMPLIED CONDITIONS, REPRESENTATIONS AND WARRANTIES,
- * INCLUDING ANY IMPLIED WARRANTY OF MERCHANTABILITY, FITNESS FOR A
- * PARTICULAR PURPOSE, OR NON-INFRINGEMENT, ARE DISCLAIMED, EXCEPT TO
- * THE EXTENT THAT SUCH DISCLAIMERS ARE HELD TO BE LEGALLY INVALID.
- * See the GNU General Public License for more details, a copy of which
- * can be found in the file COPYING included with this package
- *
  */
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 #include <linux/module.h>
@@ -926,8 +914,6 @@ nvmet_fc_find_target_assoc(struct nvmet_fc_tgtport *tgtport,
 	return ret;
 }
 
-bool tech_preview_warning_issued = false;
-
 static void
 nvmet_fc_portentry_bind(struct nvmet_fc_tgtport *tgtport,
 			struct nvmet_fc_port_entry *pe,
@@ -1033,11 +1019,6 @@ nvmet_fc_register_targetport(struct nvmet_fc_port_info *pinfo,
 	unsigned long flags;
 	int ret, idx;
 
-	if (!tech_preview_warning_issued) {
-		mark_driver_unsupported("NVMe over FC Target");
-		tech_preview_warning_issued = true;
-	}
-
 	if (!template->xmt_ls_rsp || !template->fcp_op ||
 	    !template->fcp_abort ||
 	    !template->fcp_req_release || !template->targetport_delete ||
@@ -1067,10 +1048,7 @@ nvmet_fc_register_targetport(struct nvmet_fc_port_info *pinfo,
 
 	newrec->fc_target_port.node_name = pinfo->node_name;
 	newrec->fc_target_port.port_name = pinfo->port_name;
-	if (template->target_priv_sz)
-		newrec->fc_target_port.private = &newrec[1];
-	else
-		newrec->fc_target_port.private = NULL;
+	newrec->fc_target_port.private = &newrec[1];
 	newrec->fc_target_port.port_id = pinfo->port_id;
 	newrec->fc_target_port.port_num = idx;
 	INIT_LIST_HEAD(&newrec->tgt_list);
@@ -2019,9 +1997,9 @@ nvmet_fc_fod_op_done(struct nvmet_fc_fcp_iod *fod)
 			return;
 		if (fcpreq->fcp_error ||
 		    fcpreq->transferred_length != fcpreq->transfer_length) {
-			spin_lock(&fod->flock);
+			spin_lock_irqsave(&fod->flock, flags);
 			fod->abort = true;
-			spin_unlock(&fod->flock);
+			spin_unlock_irqrestore(&fod->flock, flags);
 
 			nvmet_req_complete(&fod->req, NVME_SC_INTERNAL);
 			return;
@@ -2040,7 +2018,7 @@ nvmet_fc_fod_op_done(struct nvmet_fc_fcp_iod *fod)
 		}
 
 		/* data transfer complete, resume with nvmet layer */
-		fod->req.execute(&fod->req);
+		nvmet_req_execute(&fod->req);
 		break;
 
 	case NVMET_FCOP_READDATA:
@@ -2256,7 +2234,7 @@ nvmet_fc_handle_fcp_rqst(struct nvmet_fc_tgtport *tgtport,
 	 * can invoke the nvmet_layer now. If read data, cmd completion will
 	 * push the data
 	 */
-	fod->req.execute(&fod->req);
+	nvmet_req_execute(&fod->req);
 	return;
 
 transport_error:

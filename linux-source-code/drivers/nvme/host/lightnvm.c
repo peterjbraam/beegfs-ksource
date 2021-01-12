@@ -553,23 +553,28 @@ static int nvme_nvm_set_bb_tbl(struct nvm_dev *nvmdev, struct ppa_addr *ppas,
  * Expect the lba in device format
  */
 static int nvme_nvm_get_chk_meta(struct nvm_dev *ndev,
-				 struct nvm_chk_meta *meta,
-				 sector_t slba, int nchks)
+				 sector_t slba, int nchks,
+				 struct nvm_chk_meta *meta)
 {
 	struct nvm_geo *geo = &ndev->geo;
 	struct nvme_ns *ns = ndev->q->queuedata;
 	struct nvme_ctrl *ctrl = ns->ctrl;
-	struct nvme_nvm_chk_meta *dev_meta = (struct nvme_nvm_chk_meta *)meta;
+	struct nvme_nvm_chk_meta *dev_meta, *dev_meta_off;
 	struct ppa_addr ppa;
 	size_t left = nchks * sizeof(struct nvme_nvm_chk_meta);
 	size_t log_pos, offset, len;
-	int ret, i, max_len;
+	int i, max_len;
+	int ret = 0;
 
 	/*
 	 * limit requests to maximum 256K to avoid issuing arbitrary large
 	 * requests when the device does not specific a maximum transfer size.
 	 */
 	max_len = min_t(unsigned int, ctrl->max_hw_sectors << 9, 256 * 1024);
+
+	dev_meta = kmalloc(max_len, GFP_KERNEL);
+	if (!dev_meta)
+		return -ENOMEM;
 
 	/* Normalize lba address space to obtain log offset */
 	ppa.ppa = slba;
@@ -584,6 +589,9 @@ static int nvme_nvm_get_chk_meta(struct nvm_dev *ndev,
 	while (left) {
 		len = min_t(unsigned int, left, max_len);
 
+		memset(dev_meta, 0, max_len);
+		dev_meta_off = dev_meta;
+
 		ret = nvme_get_log(ctrl, ns->head->ns_id,
 				NVME_NVM_LOG_REPORT_CHUNK, 0, dev_meta, len,
 				offset);
@@ -593,20 +601,22 @@ static int nvme_nvm_get_chk_meta(struct nvm_dev *ndev,
 		}
 
 		for (i = 0; i < len; i += sizeof(struct nvme_nvm_chk_meta)) {
-			meta->state = dev_meta->state;
-			meta->type = dev_meta->type;
-			meta->wi = dev_meta->wi;
-			meta->slba = le64_to_cpu(dev_meta->slba);
-			meta->cnlb = le64_to_cpu(dev_meta->cnlb);
-			meta->wp = le64_to_cpu(dev_meta->wp);
+			meta->state = dev_meta_off->state;
+			meta->type = dev_meta_off->type;
+			meta->wi = dev_meta_off->wi;
+			meta->slba = le64_to_cpu(dev_meta_off->slba);
+			meta->cnlb = le64_to_cpu(dev_meta_off->cnlb);
+			meta->wp = le64_to_cpu(dev_meta_off->wp);
 
 			meta++;
-			dev_meta++;
+			dev_meta_off++;
 		}
 
 		offset += len;
 		left -= len;
 	}
+
+	kfree(dev_meta);
 
 	return ret;
 }
@@ -657,11 +667,14 @@ static struct request *nvme_nvm_alloc_request(struct request_queue *q,
 	return rq;
 }
 
-static int nvme_nvm_submit_io(struct nvm_dev *dev, struct nvm_rq *rqd)
+static int nvme_nvm_submit_io(struct nvm_dev *dev, struct nvm_rq *rqd,
+			      void *buf)
 {
+	struct nvm_geo *geo = &dev->geo;
 	struct request_queue *q = dev->q;
 	struct nvme_nvm_command *cmd;
 	struct request *rq;
+	int ret;
 
 	cmd = kzalloc(sizeof(struct nvme_nvm_command), GFP_KERNEL);
 	if (!cmd)
@@ -669,8 +682,15 @@ static int nvme_nvm_submit_io(struct nvm_dev *dev, struct nvm_rq *rqd)
 
 	rq = nvme_nvm_alloc_request(q, rqd, cmd);
 	if (IS_ERR(rq)) {
-		kfree(cmd);
-		return PTR_ERR(rq);
+		ret = PTR_ERR(rq);
+		goto err_free_cmd;
+	}
+
+	if (buf) {
+		ret = blk_rq_map_kern(q, rq, buf, geo->csecs * rqd->nr_ppas,
+				GFP_KERNEL);
+		if (ret)
+			goto err_free_cmd;
 	}
 
 	rq->end_io_data = rqd;
@@ -678,13 +698,18 @@ static int nvme_nvm_submit_io(struct nvm_dev *dev, struct nvm_rq *rqd)
 	blk_execute_rq_nowait(q, NULL, rq, 0, nvme_nvm_end_io);
 
 	return 0;
+
+err_free_cmd:
+	kfree(cmd);
+	return ret;
 }
 
-static void *nvme_nvm_create_dma_pool(struct nvm_dev *nvmdev, char *name)
+static void *nvme_nvm_create_dma_pool(struct nvm_dev *nvmdev, char *name,
+					int size)
 {
 	struct nvme_ns *ns = nvmdev->q->queuedata;
 
-	return dma_pool_create(name, ns->ctrl->dev, PAGE_SIZE, PAGE_SIZE, 0);
+	return dma_pool_create(name, ns->ctrl->dev, size, PAGE_SIZE, 0);
 }
 
 static void nvme_nvm_destroy_dma_pool(void *pool)
@@ -936,6 +961,8 @@ int nvme_nvm_register(struct nvme_ns *ns, char *disk_name, int node)
 	geo = &dev->geo;
 	geo->csecs = 1 << ns->lba_shift;
 	geo->sos = ns->ms;
+	geo->ext = ns->ext;
+	geo->mdts = ns->ctrl->max_hw_sectors;
 
 	dev->q = q;
 	memcpy(dev->name, disk_name, DISK_NAME_LEN);

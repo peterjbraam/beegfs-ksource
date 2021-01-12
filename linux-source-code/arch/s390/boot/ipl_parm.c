@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0
+#include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/ctype.h>
 #include <asm/ebcdic.h>
 #include <asm/sclp.h>
 #include <asm/sections.h>
 #include <asm/boot_data.h>
+#include <asm/facility.h>
+#include <asm/pgtable.h>
 #include <asm/uv.h>
 #include "boot.h"
 
@@ -13,6 +16,7 @@ struct ipl_parameter_block __bootdata_preserved(ipl_block);
 int __bootdata_preserved(ipl_block_valid);
 unsigned int __bootdata_preserved(zlib_dfltcc_support) = ZLIB_DFLTCC_FULL;
 
+unsigned long __bootdata(vmalloc_size) = VMALLOC_DEFAULT_SIZE;
 unsigned long __bootdata(memory_end);
 int __bootdata(memory_end_set);
 int __bootdata(noexec_disabled);
@@ -53,7 +57,7 @@ void store_ipl_parmblock(void)
 		ipl_block_valid = 1;
 }
 
-static size_t scpdata_length(const char *buf, size_t count)
+static size_t scpdata_length(const u8 *buf, size_t count)
 {
 	while (count) {
 		if (buf[count - 1] != '\0' && buf[count - 1] != ' ')
@@ -66,30 +70,44 @@ static size_t scpdata_length(const char *buf, size_t count)
 static size_t ipl_block_get_ascii_scpdata(char *dest, size_t size,
 					  const struct ipl_parameter_block *ipb)
 {
-	size_t count;
-	size_t i;
+	const __u8 *scp_data;
+	__u32 scp_data_len;
 	int has_lowercase;
+	size_t count = 0;
+	size_t i;
 
-	count = min(size - 1, scpdata_length(ipb->fcp.scp_data,
-					     ipb->fcp.scp_data_len));
+	switch (ipb->pb0_hdr.pbt) {
+	case IPL_PBT_FCP:
+		scp_data_len = ipb->fcp.scp_data_len;
+		scp_data = ipb->fcp.scp_data;
+		break;
+	case IPL_PBT_NVME:
+		scp_data_len = ipb->nvme.scp_data_len;
+		scp_data = ipb->nvme.scp_data;
+		break;
+	default:
+		goto out;
+	}
+
+	count = min(size - 1, scpdata_length(scp_data, scp_data_len));
 	if (!count)
 		goto out;
 
 	has_lowercase = 0;
 	for (i = 0; i < count; i++) {
-		if (!isascii(ipb->fcp.scp_data[i])) {
+		if (!isascii(scp_data[i])) {
 			count = 0;
 			goto out;
 		}
-		if (!has_lowercase && islower(ipb->fcp.scp_data[i]))
+		if (!has_lowercase && islower(scp_data[i]))
 			has_lowercase = 1;
 	}
 
 	if (has_lowercase)
-		memcpy(dest, ipb->fcp.scp_data, count);
+		memcpy(dest, scp_data, count);
 	else
 		for (i = 0; i < count; i++)
-			dest[i] = tolower(ipb->fcp.scp_data[i]);
+			dest[i] = tolower(scp_data[i]);
 out:
 	dest[count] = '\0';
 	return count;
@@ -111,6 +129,7 @@ static void append_ipl_block_parm(void)
 			parm, COMMAND_LINE_SIZE - len - 1, &ipl_block);
 		break;
 	case IPL_PBT_FCP:
+	case IPL_PBT_NVME:
 		rc = ipl_block_get_ascii_scpdata(
 			parm, COMMAND_LINE_SIZE - len - 1, &ipl_block);
 		break;
@@ -147,8 +166,66 @@ void setup_boot_command_line(void)
 		append_ipl_block_parm();
 }
 
+static void modify_facility(unsigned long nr, bool clear)
+{
+	if (clear)
+		__clear_facility(nr, S390_lowcore.stfle_fac_list);
+	else
+		__set_facility(nr, S390_lowcore.stfle_fac_list);
+}
+
+static void check_cleared_facilities(void)
+{
+	unsigned long als[] = { FACILITIES_ALS };
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(als); i++) {
+		if ((S390_lowcore.stfle_fac_list[i] & als[i]) != als[i]) {
+			sclp_early_printk("Warning: The Linux kernel requires facilities cleared via command line option\n");
+			print_missing_facilities();
+			break;
+		}
+	}
+}
+
+static void modify_fac_list(char *str)
+{
+	unsigned long val, endval;
+	char *endp;
+	bool clear;
+
+	while (*str) {
+		clear = false;
+		if (*str == '!') {
+			clear = true;
+			str++;
+		}
+		val = simple_strtoull(str, &endp, 0);
+		if (str == endp)
+			break;
+		str = endp;
+		if (*str == '-') {
+			str++;
+			endval = simple_strtoull(str, &endp, 0);
+			if (str == endp)
+				break;
+			str = endp;
+			while (val <= endval) {
+				modify_facility(val, clear);
+				val++;
+			}
+		} else {
+			modify_facility(val, clear);
+		}
+		if (*str != ',')
+			break;
+		str++;
+	}
+	check_cleared_facilities();
+}
+
 static char command_line_buf[COMMAND_LINE_SIZE] __section(.data);
-static void parse_mem_opt(void)
+void parse_boot_command_line(void)
 {
 	char *param, *val;
 	bool enabled;
@@ -160,10 +237,13 @@ static void parse_mem_opt(void)
 	while (*args) {
 		args = next_arg(args, &param, &val);
 
-		if (!strcmp(param, "mem")) {
-			memory_end = memparse(val, NULL);
+		if (!strcmp(param, "mem") && val) {
+			memory_end = round_down(memparse(val, NULL), PAGE_SIZE);
 			memory_end_set = 1;
 		}
+
+		if (!strcmp(param, "vmalloc") && val)
+			vmalloc_size = round_up(memparse(val, NULL), PAGE_SIZE);
 
 		if (!strcmp(param, "dfltcc")) {
 			if (!strcmp(val, "off"))
@@ -184,6 +264,9 @@ static void parse_mem_opt(void)
 				noexec_disabled = 1;
 		}
 
+		if (!strcmp(param, "facilities") && val)
+			modify_fac_list(val);
+
 		if (!strcmp(param, "nokaslr"))
 			kaslr_enabled = 0;
 	}
@@ -191,7 +274,6 @@ static void parse_mem_opt(void)
 
 void setup_memory_end(void)
 {
-	parse_mem_opt();
 #ifdef CONFIG_CRASH_DUMP
 	if (OLDMEM_BASE) {
 		kaslr_enabled = 0;

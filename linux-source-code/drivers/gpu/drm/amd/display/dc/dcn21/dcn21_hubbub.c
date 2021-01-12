@@ -52,7 +52,7 @@
 #ifdef NUM_VMID
 #undef NUM_VMID
 #endif
-#define NUM_VMID 16
+#define NUM_VMID 1
 
 static uint32_t convert_and_clamp(
 	uint32_t wm_ns,
@@ -107,41 +107,30 @@ void dcn21_dchvm_init(struct hubbub *hubbub)
 	}
 }
 
-int hubbub21_init_dchub(struct hubbub *hubbub,
+static int hubbub21_init_dchub(struct hubbub *hubbub,
 		struct dcn_hubbub_phys_addr_config *pa_config)
 {
 	struct dcn20_hubbub *hubbub1 = TO_DCN20_HUBBUB(hubbub);
-	struct dcn_vmid_page_table_config phys_config;
 
 	REG_SET(DCN_VM_FB_LOCATION_BASE, 0,
-			FB_BASE, pa_config->system_aperture.fb_base >> 24);
+		FB_BASE, pa_config->system_aperture.fb_base);
 	REG_SET(DCN_VM_FB_LOCATION_TOP, 0,
-			FB_TOP, pa_config->system_aperture.fb_top >> 24);
+			FB_TOP, pa_config->system_aperture.fb_top);
 	REG_SET(DCN_VM_FB_OFFSET, 0,
-			FB_OFFSET, pa_config->system_aperture.fb_offset >> 24);
+			FB_OFFSET, pa_config->system_aperture.fb_offset);
 	REG_SET(DCN_VM_AGP_BOT, 0,
-			AGP_BOT, pa_config->system_aperture.agp_bot >> 24);
+			AGP_BOT, pa_config->system_aperture.agp_bot);
 	REG_SET(DCN_VM_AGP_TOP, 0,
-			AGP_TOP, pa_config->system_aperture.agp_top >> 24);
+			AGP_TOP, pa_config->system_aperture.agp_top);
 	REG_SET(DCN_VM_AGP_BASE, 0,
-			AGP_BASE, pa_config->system_aperture.agp_base >> 24);
-
-	if (pa_config->gart_config.page_table_start_addr != pa_config->gart_config.page_table_end_addr) {
-		phys_config.page_table_start_addr = pa_config->gart_config.page_table_start_addr >> 12;
-		phys_config.page_table_end_addr = pa_config->gart_config.page_table_end_addr >> 12;
-		phys_config.page_table_base_addr = pa_config->gart_config.page_table_base_addr | 1; //Note: hack
-		phys_config.depth = 0;
-		phys_config.block_size = 0;
-		// Init VMID 0 based on PA config
-		dcn20_vmid_setup(&hubbub1->vmid[0], &phys_config);
-	}
+			AGP_BASE, pa_config->system_aperture.agp_base);
 
 	dcn21_dchvm_init(hubbub);
 
 	return NUM_VMID;
 }
 
-void hubbub21_program_urgent_watermarks(
+static void hubbub21_program_urgent_watermarks(
 		struct hubbub *hubbub,
 		struct dcn_watermark_set *watermarks,
 		unsigned int refclk_mhz,
@@ -181,13 +170,6 @@ void hubbub21_program_urgent_watermarks(
 		REG_SET(DCHUBBUB_ARB_FRAC_URG_BW_NOM_A, 0,
 				DCHUBBUB_ARB_FRAC_URG_BW_NOM_A, watermarks->a.frac_urg_bw_nom);
 	}
-	if (safe_to_lower || watermarks->a.urgent_latency_ns > hubbub1->watermarks.a.urgent_latency_ns) {
-		hubbub1->watermarks.a.urgent_latency_ns = watermarks->a.urgent_latency_ns;
-		prog_wm_value = convert_and_clamp(watermarks->a.urgent_latency_ns,
-				refclk_mhz, 0x1fffff);
-		REG_SET(DCHUBBUB_ARB_REFCYC_PER_TRIP_TO_MEMORY_A, 0,
-				DCHUBBUB_ARB_REFCYC_PER_TRIP_TO_MEMORY_A, prog_wm_value);
-	}
 
 	/* clock state B */
 	if (safe_to_lower || watermarks->b.urgent_ns > hubbub1->watermarks.b.urgent_ns) {
@@ -218,14 +200,6 @@ void hubbub21_program_urgent_watermarks(
 
 		REG_SET(DCHUBBUB_ARB_FRAC_URG_BW_NOM_B, 0,
 				DCHUBBUB_ARB_FRAC_URG_BW_NOM_B, watermarks->a.frac_urg_bw_nom);
-	}
-
-	if (safe_to_lower || watermarks->b.urgent_latency_ns > hubbub1->watermarks.b.urgent_latency_ns) {
-		hubbub1->watermarks.b.urgent_latency_ns = watermarks->b.urgent_latency_ns;
-		prog_wm_value = convert_and_clamp(watermarks->b.urgent_latency_ns,
-				refclk_mhz, 0x1fffff);
-		REG_SET(DCHUBBUB_ARB_REFCYC_PER_TRIP_TO_MEMORY_B, 0,
-				DCHUBBUB_ARB_REFCYC_PER_TRIP_TO_MEMORY_B, prog_wm_value);
 	}
 
 	/* clock state C */
@@ -259,14 +233,6 @@ void hubbub21_program_urgent_watermarks(
 				DCHUBBUB_ARB_FRAC_URG_BW_NOM_C, watermarks->a.frac_urg_bw_nom);
 	}
 
-	if (safe_to_lower || watermarks->c.urgent_latency_ns > hubbub1->watermarks.c.urgent_latency_ns) {
-		hubbub1->watermarks.c.urgent_latency_ns = watermarks->c.urgent_latency_ns;
-		prog_wm_value = convert_and_clamp(watermarks->c.urgent_latency_ns,
-				refclk_mhz, 0x1fffff);
-		REG_SET(DCHUBBUB_ARB_REFCYC_PER_TRIP_TO_MEMORY_C, 0,
-				DCHUBBUB_ARB_REFCYC_PER_TRIP_TO_MEMORY_C, prog_wm_value);
-	}
-
 	/* clock state D */
 	if (safe_to_lower || watermarks->d.urgent_ns > hubbub1->watermarks.d.urgent_ns) {
 		hubbub1->watermarks.d.urgent_ns = watermarks->d.urgent_ns;
@@ -297,17 +263,9 @@ void hubbub21_program_urgent_watermarks(
 		REG_SET(DCHUBBUB_ARB_FRAC_URG_BW_NOM_D, 0,
 				DCHUBBUB_ARB_FRAC_URG_BW_NOM_D, watermarks->a.frac_urg_bw_nom);
 	}
-
-	if (safe_to_lower || watermarks->d.urgent_latency_ns > hubbub1->watermarks.d.urgent_latency_ns) {
-		hubbub1->watermarks.d.urgent_latency_ns = watermarks->d.urgent_latency_ns;
-		prog_wm_value = convert_and_clamp(watermarks->d.urgent_latency_ns,
-				refclk_mhz, 0x1fffff);
-		REG_SET(DCHUBBUB_ARB_REFCYC_PER_TRIP_TO_MEMORY_D, 0,
-				DCHUBBUB_ARB_REFCYC_PER_TRIP_TO_MEMORY_D, prog_wm_value);
-	}
 }
 
-void hubbub21_program_stutter_watermarks(
+static void hubbub21_program_stutter_watermarks(
 		struct hubbub *hubbub,
 		struct dcn_watermark_set *watermarks,
 		unsigned int refclk_mhz,
@@ -441,7 +399,7 @@ void hubbub21_program_stutter_watermarks(
 	}
 }
 
-void hubbub21_program_pstate_watermarks(
+static void hubbub21_program_pstate_watermarks(
 		struct hubbub *hubbub,
 		struct dcn_watermark_set *watermarks,
 		unsigned int refclk_mhz,
@@ -616,26 +574,17 @@ void hubbub21_wm_read_state(struct hubbub *hubbub,
 			DCHUBBUB_ARB_ALLOW_DRAM_CLK_CHANGE_WATERMARK_D, &s->dram_clk_chanage);
 }
 
-void hubbub21_apply_DEDCN21_147_wa(struct hubbub *hubbub)
-{
-	struct dcn20_hubbub *hubbub1 = TO_DCN20_HUBBUB(hubbub);
-	uint32_t prog_wm_value;
-
-	prog_wm_value = REG_READ(DCHUBBUB_ARB_DATA_URGENCY_WATERMARK_A);
-	REG_WRITE(DCHUBBUB_ARB_DATA_URGENCY_WATERMARK_A, prog_wm_value);
-}
 
 static const struct hubbub_funcs hubbub21_funcs = {
 	.update_dchub = hubbub2_update_dchub,
 	.init_dchub_sys_ctx = hubbub21_init_dchub,
-	.init_vm_ctx = hubbub2_init_vm_ctx,
+	.init_vm_ctx = NULL,
 	.dcc_support_swizzle = hubbub2_dcc_support_swizzle,
 	.dcc_support_pixel_format = hubbub2_dcc_support_pixel_format,
 	.get_dcc_compression_cap = hubbub2_get_dcc_compression_cap,
 	.wm_read_state = hubbub21_wm_read_state,
 	.get_dchub_ref_freq = hubbub2_get_dchub_ref_freq,
 	.program_watermarks = hubbub21_program_watermarks,
-	.apply_DEDCN21_147_wa = hubbub21_apply_DEDCN21_147_wa,
 };
 
 void hubbub21_construct(struct dcn20_hubbub *hubbub,
@@ -653,5 +602,4 @@ void hubbub21_construct(struct dcn20_hubbub *hubbub,
 	hubbub->masks = hubbub_mask;
 
 	hubbub->debug_test_index_pstate = 0xB;
-	hubbub->detile_buf_size = 164 * 1024; /* 164KB for DCN2.0 */
 }

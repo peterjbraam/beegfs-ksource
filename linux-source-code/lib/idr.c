@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 #include <linux/bitmap.h>
 #include <linux/bug.h>
 #include <linux/export.h>
@@ -75,7 +76,6 @@ EXPORT_SYMBOL_GPL(idr_alloc_u32);
  * Return: The newly allocated ID, -ENOMEM if memory allocation failed,
  * or -ENOSPC if no free IDs could be found.
  */
-RH_KABI_FORCE_CHANGE(1)
 int idr_alloc(struct idr *idr, void *ptr, int start, int end, gfp_t gfp)
 {
 	u32 id = start;
@@ -169,7 +169,6 @@ EXPORT_SYMBOL_GPL(idr_remove);
  *
  * Return: The pointer associated with this ID.
  */
-RH_KABI_FORCE_CHANGE(1)
 void *idr_find(const struct idr *idr, unsigned long id)
 {
 	return radix_tree_lookup(&idr->idr_rt, id - idr->idr_base);
@@ -193,7 +192,6 @@ EXPORT_SYMBOL_GPL(idr_find);
  * seen and deleted entries may be seen, but adding and removing entries
  * will not cause other entries to be skipped, nor spurious ones to be seen.
  */
-RH_KABI_FORCE_CHANGE(1)
 int idr_for_each(const struct idr *idr,
 		int (*fn)(int id, void *p, void *data), void *data)
 {
@@ -217,7 +215,7 @@ int idr_for_each(const struct idr *idr,
 EXPORT_SYMBOL(idr_for_each);
 
 /**
- * idr_get_next() - Find next populated entry.
+ * idr_get_next_ul() - Find next populated entry.
  * @idr: IDR handle.
  * @nextid: Pointer to an ID.
  *
@@ -226,7 +224,7 @@ EXPORT_SYMBOL(idr_for_each);
  * to the ID of the found value.  To use in a loop, the value pointed to by
  * nextid must be incremented by the user.
  */
-void *idr_get_next(struct idr *idr, int *nextid)
+void *idr_get_next_ul(struct idr *idr, unsigned long *nextid)
 {
 	struct radix_tree_iter iter;
 	void __rcu **slot;
@@ -247,18 +245,14 @@ void *idr_get_next(struct idr *idr, int *nextid)
 	}
 	if (!slot)
 		return NULL;
-	id = iter.index + base;
 
-	if (WARN_ON_ONCE(id > INT_MAX))
-		return NULL;
-
-	*nextid = id;
+	*nextid = iter.index + base;
 	return entry;
 }
-EXPORT_SYMBOL(idr_get_next);
+EXPORT_SYMBOL(idr_get_next_ul);
 
 /**
- * idr_get_next_ul() - Find next populated entry.
+ * idr_get_next() - Find next populated entry.
  * @idr: IDR handle.
  * @nextid: Pointer to an ID.
  *
@@ -267,22 +261,17 @@ EXPORT_SYMBOL(idr_get_next);
  * to the ID of the found value.  To use in a loop, the value pointed to by
  * nextid must be incremented by the user.
  */
-void *idr_get_next_ul(struct idr *idr, unsigned long *nextid)
+void *idr_get_next(struct idr *idr, int *nextid)
 {
-	struct radix_tree_iter iter;
-	void __rcu **slot;
-	unsigned long base = idr->idr_base;
 	unsigned long id = *nextid;
+	void *entry = idr_get_next_ul(idr, &id);
 
-	id = (id < base) ? 0 : id - base;
-	slot = radix_tree_iter_find(&idr->idr_rt, &iter, id);
-	if (!slot)
+	if (WARN_ON_ONCE(id > INT_MAX))
 		return NULL;
-
-	*nextid = iter.index + base;
-	return rcu_dereference_raw(*slot);
+	*nextid = id;
+	return entry;
 }
-EXPORT_SYMBOL(idr_get_next_ul);
+EXPORT_SYMBOL(idr_get_next);
 
 /**
  * idr_replace() - replace pointer for given ID.
@@ -310,7 +299,7 @@ void *idr_replace(struct idr *idr, void *ptr, unsigned long id)
 	if (!slot || radix_tree_tag_get(&idr->idr_rt, id, IDR_FREE))
 		return ERR_PTR(-ENOENT);
 
-	__radix_tree_replace(&idr->idr_rt, node, slot, ptr, NULL);
+	__radix_tree_replace(&idr->idr_rt, node, slot, ptr);
 
 	return entry;
 }
@@ -481,6 +470,7 @@ alloc:
 	goto retry;
 nospc:
 	xas_unlock_irqrestore(&xas, flags);
+	kfree(alloc);
 	return -ENOSPC;
 }
 EXPORT_SYMBOL(ida_alloc_range);

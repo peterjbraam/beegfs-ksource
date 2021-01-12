@@ -432,9 +432,6 @@ static int mlx5_cmd_set_fte(struct mlx5_core_dev *dev,
 	MLX5_SET(set_fte_in, in, table_type, ft->type);
 	MLX5_SET(set_fte_in, in, table_id,   ft->id);
 	MLX5_SET(set_fte_in, in, flow_index, fte->index);
-	MLX5_SET(set_fte_in, in, ignore_flow_level,
-		 !!(fte->action.flags & FLOW_ACT_IGNORE_FLOW_LEVEL));
-
 	if (ft->vport) {
 		MLX5_SET(set_fte_in, in, vport_number, ft->vport);
 		MLX5_SET(set_fte_in, in, other_vport, 1);
@@ -806,7 +803,7 @@ static int mlx5_cmd_modify_header_alloc(struct mlx5_flow_root_namespace *ns,
 		return -EOPNOTSUPP;
 	}
 
-	actions_size = MLX5_UN_SZ_BYTES(set_add_copy_action_in_auto) * num_actions;
+	actions_size = MLX5_UN_SZ_BYTES(set_action_in_add_action_in_auto) * num_actions;
 	inlen = MLX5_ST_SZ_BYTES(alloc_modify_header_context_in) + actions_size;
 
 	in = kzalloc(inlen, GFP_KERNEL);

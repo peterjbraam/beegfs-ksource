@@ -637,6 +637,28 @@ qla2x00_load_ram(scsi_qla_host_t *vha, dma_addr_t req_dma, uint32_t risc_addr,
 
 #define	EXTENDED_BB_CREDITS	BIT_0
 #define	NVME_ENABLE_FLAG	BIT_3
+static inline uint16_t qla25xx_set_sfp_lr_dist(struct qla_hw_data *ha)
+{
+	uint16_t mb4 = BIT_0;
+
+	if (IS_QLA83XX(ha) || IS_QLA27XX(ha) || IS_QLA28XX(ha))
+		mb4 |= ha->long_range_distance << LR_DIST_FW_POS;
+
+	return mb4;
+}
+
+static inline uint16_t qla25xx_set_nvr_lr_dist(struct qla_hw_data *ha)
+{
+	uint16_t mb4 = BIT_0;
+
+	if (IS_QLA83XX(ha) || IS_QLA27XX(ha) || IS_QLA28XX(ha)) {
+		struct nvram_81xx *nv = ha->nvram;
+
+		mb4 |= LR_DIST_FW_FIELD(nv->enhanced_features);
+	}
+
+	return mb4;
+}
 
 /*
  * qla2x00_execute_fw
@@ -660,14 +682,10 @@ qla2x00_execute_fw(scsi_qla_host_t *vha, uint32_t risc_addr)
 	struct qla_hw_data *ha = vha->hw;
 	mbx_cmd_t mc;
 	mbx_cmd_t *mcp = &mc;
-	u8 semaphore = 0;
-#define EXE_FW_FORCE_SEMAPHORE BIT_7
-	u8 retry = 3;
 
 	ql_dbg(ql_dbg_mbx + ql_dbg_verbose, vha, 0x1025,
 	    "Entered %s.\n", __func__);
 
-again:
 	mcp->mb[0] = MBC_EXECUTE_FIRMWARE;
 	mcp->out_mb = MBX_0;
 	mcp->in_mb = MBX_0;
@@ -677,13 +695,25 @@ again:
 		mcp->mb[3] = 0;
 		mcp->mb[4] = 0;
 		mcp->mb[11] = 0;
-
-		/* Enable BPM? */
-		if (ha->flags.lr_detected) {
-			mcp->mb[4] = BIT_0;
-			if (IS_BPM_RANGE_CAPABLE(ha))
-				mcp->mb[4] |=
-				    ha->lr_distance << LR_DIST_FW_POS;
+		ha->flags.using_lr_setting = 0;
+		if (IS_QLA25XX(ha) || IS_QLA81XX(ha) || IS_QLA83XX(ha) ||
+		    IS_QLA27XX(ha) || IS_QLA28XX(ha)) {
+			if (ql2xautodetectsfp) {
+				if (ha->flags.detected_lr_sfp) {
+					mcp->mb[4] |=
+					    qla25xx_set_sfp_lr_dist(ha);
+					ha->flags.using_lr_setting = 1;
+				}
+			} else {
+				struct nvram_81xx *nv = ha->nvram;
+				/* set LR distance if specified in nvram */
+				if (nv->enhanced_features &
+				    NEF_LR_DIST_ENABLE) {
+					mcp->mb[4] |=
+					    qla25xx_set_nvr_lr_dist(ha);
+					ha->flags.using_lr_setting = 1;
+				}
+			}
 		}
 
 		if (ql2xnvmeenable && (IS_QLA27XX(ha) || IS_QLA28XX(ha)))
@@ -709,9 +739,6 @@ again:
 		if (ha->flags.exchoffld_enabled)
 			mcp->mb[4] |= ENABLE_EXCHANGE_OFFLD;
 
-		if (semaphore)
-			mcp->mb[11] |= EXE_FW_FORCE_SEMAPHORE;
-
 		mcp->out_mb |= MBX_4 | MBX_3 | MBX_2 | MBX_1 | MBX_11;
 		mcp->in_mb |= MBX_3 | MBX_2 | MBX_1;
 	} else {
@@ -728,15 +755,6 @@ again:
 	rval = qla2x00_mailbox_command(vha, mcp);
 
 	if (rval != QLA_SUCCESS) {
-		if (IS_QLA28XX(ha) && rval == QLA_COMMAND_ERROR &&
-		    mcp->mb[1] == 0x27 && retry) {
-			semaphore = 1;
-			retry--;
-			ql_dbg(ql_dbg_async, vha, 0x1026,
-			    "Exe FW: force semaphore.\n");
-			goto again;
-		}
-
 		ql_dbg(ql_dbg_mbx, vha, 0x1026,
 		    "Failed=%x mb[0]=%x.\n", rval, mcp->mb[0]);
 		return rval;
@@ -1379,9 +1397,6 @@ qla2x00_issue_iocb_timeout(scsi_qla_host_t *vha, void *buffer,
 	mbx_cmd_t	mc;
 	mbx_cmd_t	*mcp = &mc;
 
-	if (!vha->hw->flags.fw_started)
-		return QLA_INVALID_COMMAND;
-
 	ql_dbg(ql_dbg_mbx + ql_dbg_verbose, vha, 0x1038,
 	    "Entered %s.\n", __func__);
 
@@ -1452,7 +1467,7 @@ qla2x00_abort_command(srb_t *sp)
 	ql_dbg(ql_dbg_mbx + ql_dbg_verbose, vha, 0x103b,
 	    "Entered %s.\n", __func__);
 
-	if (sp->qpair)
+	if (vha->flags.qpairs_available && sp->qpair)
 		req = sp->qpair->req;
 	else
 		req = vha->req;
@@ -1909,7 +1924,7 @@ qla2x00_get_port_database(scsi_qla_host_t *vha, fc_port_t *fcport, uint8_t opt)
 		pd24 = (struct port_database_24xx *) pd;
 
 		/* Check for logged in state. */
-		if (NVME_TARGET(ha, fcport)) {
+		if (fcport->fc4f_nvme) {
 			current_login_state = pd24->current_login_state >> 4;
 			last_login_state = pd24->last_login_state >> 4;
 		} else {
@@ -3865,28 +3880,10 @@ qla24xx_report_id_acquisition(scsi_qla_host_t *vha,
 				fcport->scan_state = QLA_FCPORT_SCAN;
 				fcport->n2n_flag = 0;
 			}
-			id.b24 = 0;
-			if (wwn_to_u64(vha->port_name) >
-			    wwn_to_u64(rptid_entry->u.f1.port_name)) {
-				vha->d_id.b24 = 0;
-				vha->d_id.b.al_pa = 1;
-				ha->flags.n2n_bigger = 1;
-
-				id.b.al_pa = 2;
-				ql_dbg(ql_dbg_async, vha, 0x5075,
-				    "Format 1: assign local id %x remote id %x\n",
-				    vha->d_id.b24, id.b24);
-			} else {
-				ql_dbg(ql_dbg_async, vha, 0x5075,
-				    "Format 1: Remote login - Waiting for WWPN %8phC.\n",
-				    rptid_entry->u.f1.port_name);
-				ha->flags.n2n_bigger = 0;
-			}
 
 			fcport = qla2x00_find_fcport_by_wwpn(vha,
 			    rptid_entry->u.f1.port_name, 1);
 			spin_unlock_irqrestore(&vha->hw->tgt.sess_lock, flags);
-
 
 			if (fcport) {
 				fcport->plogi_nack_done_deadline = jiffies + HZ;
@@ -3894,14 +3891,8 @@ qla24xx_report_id_acquisition(scsi_qla_host_t *vha,
 				fcport->scan_state = QLA_FCPORT_FOUND;
 				fcport->n2n_flag = 1;
 				fcport->keep_nport_handle = 1;
-				fcport->fc4_type = FS_FC4TYPE_FCP;
 				if (vha->flags.nvme_enabled)
-					fcport->fc4_type |= FS_FC4TYPE_NVME;
-
-				if (wwn_to_u64(vha->port_name) >
-				    wwn_to_u64(fcport->port_name)) {
-					fcport->d_id = id;
-				}
+					fcport->fc4f_nvme = 1;
 
 				switch (fcport->disc_state) {
 				case DSC_DELETED:
@@ -3915,6 +3906,25 @@ qla24xx_report_id_acquisition(scsi_qla_host_t *vha,
 					break;
 				}
 			} else {
+				id.b24 = 0;
+				if (wwn_to_u64(vha->port_name) >
+				    wwn_to_u64(rptid_entry->u.f1.port_name)) {
+					vha->d_id.b24 = 0;
+					vha->d_id.b.al_pa = 1;
+					ha->flags.n2n_bigger = 1;
+					ha->flags.n2n_ae = 0;
+
+					id.b.al_pa = 2;
+					ql_dbg(ql_dbg_async, vha, 0x5075,
+					    "Format 1: assign local id %x remote id %x\n",
+					    vha->d_id.b24, id.b24);
+				} else {
+					ql_dbg(ql_dbg_async, vha, 0x5075,
+					    "Format 1: Remote login - Waiting for WWPN %8phC.\n",
+					    rptid_entry->u.f1.port_name);
+					ha->flags.n2n_bigger = 0;
+					ha->flags.n2n_ae = 1;
+				}
 				qla24xx_post_newsess_work(vha, &id,
 				    rptid_entry->u.f1.port_name,
 				    rptid_entry->u.f1.node_name,
@@ -6340,7 +6350,7 @@ int __qla24xx_parse_gpdb(struct scsi_qla_host *vha, fc_port_t *fcport,
 	uint64_t zero = 0;
 	u8 current_login_state, last_login_state;
 
-	if (NVME_TARGET(vha->hw, fcport)) {
+	if (fcport->fc4f_nvme) {
 		current_login_state = pd->current_login_state >> 4;
 		last_login_state = pd->last_login_state >> 4;
 	} else {
@@ -6375,8 +6385,8 @@ int __qla24xx_parse_gpdb(struct scsi_qla_host *vha, fc_port_t *fcport,
 	fcport->d_id.b.al_pa = pd->port_id[2];
 	fcport->d_id.b.rsvd_1 = 0;
 
-	if (NVME_TARGET(vha->hw, fcport)) {
-		fcport->port_type = FCT_NVME;
+	if (fcport->fc4f_nvme) {
+		fcport->port_type = 0;
 		if ((pd->prli_svc_param_word_3[0] & BIT_5) == 0)
 			fcport->port_type |= FCT_NVME_INITIATOR;
 		if ((pd->prli_svc_param_word_3[0] & BIT_4) == 0)

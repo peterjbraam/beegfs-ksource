@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * vvvvvvvvvvvvvvvvvvvvvvv Original vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
  *  Copyright (C) 1992  Eric Youngdale
@@ -8,13 +9,7 @@
  *
  * Copyright (C) 2001 - 2018 Douglas Gilbert
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
  *  For documentation see http://sg.danny.cz/sg/sdebug26.html
- *
  */
 
 
@@ -833,7 +828,8 @@ static void mk_sense_invalid_opcode(struct scsi_cmnd *scp)
 	mk_sense_buffer(scp, ILLEGAL_REQUEST, INVALID_OPCODE, 0);
 }
 
-static int scsi_debug_ioctl(struct scsi_device *dev, int cmd, void __user *arg)
+static int scsi_debug_ioctl(struct scsi_device *dev, unsigned int cmd,
+			    void __user *arg)
 {
 	if (sdebug_verbose) {
 		if (0x1261 == cmd)
@@ -1016,7 +1012,7 @@ static int fill_from_dev_buffer(struct scsi_cmnd *scp, unsigned char *arr,
 
 	act_len = sg_copy_from_buffer(sdb->table.sgl, sdb->table.nents,
 				      arr, arr_len);
-	sdb->resid = scsi_bufflen(scp) - act_len;
+	scsi_set_resid(scp, scsi_bufflen(scp) - act_len);
 
 	return 0;
 }
@@ -1041,9 +1037,10 @@ static int p_fill_from_dev_buffer(struct scsi_cmnd *scp, const void *arr,
 	act_len = sg_pcopy_from_buffer(sdb->table.sgl, sdb->table.nents,
 				       arr, arr_len, skip);
 	pr_debug("%s: off_dst=%u, scsi_bufflen=%u, act_len=%u, resid=%d\n",
-		 __func__, off_dst, scsi_bufflen(scp), act_len, sdb->resid);
+		 __func__, off_dst, scsi_bufflen(scp), act_len,
+		 scsi_get_resid(scp));
 	n = (int)scsi_bufflen(scp) - ((int)off_dst + act_len);
-	sdb->resid = min(sdb->resid, n);
+	scsi_set_resid(scp, min(scsi_get_resid(scp), n));
 	return 0;
 }
 
@@ -2770,7 +2767,7 @@ static int resp_read_dt0(struct scsi_cmnd *scp, struct sdebug_dev_info *devip)
 	if (unlikely(ret == -1))
 		return DID_ERROR << 16;
 
-	scp->sdb.resid = scsi_bufflen(scp) - ret;
+	scsi_set_resid(scp, scsi_bufflen(scp) - ret);
 
 	if (unlikely(sqcp)) {
 		if (sqcp->inj_recovered) {
@@ -3888,7 +3885,6 @@ static int scsi_debug_slave_configure(struct scsi_device *sdp)
 			return 1;  /* no resources, will be marked offline */
 	}
 	sdp->hostdata = devip;
-	blk_queue_max_segment_size(sdp->request_queue, -1U);
 	if (sdebug_no_uld)
 		sdp->no_uld_attach = 1;
 	config_cdb_len(sdp);
@@ -5300,6 +5296,12 @@ static int __init scsi_debug_init(void)
 		pr_err("submit_queues must be 1 or more\n");
 		return -EINVAL;
 	}
+
+	if ((sdebug_max_queue > SDEBUG_CANQUEUE) || (sdebug_max_queue < 1)) {
+		pr_err("max_queue must be in range [1, %d]\n", SDEBUG_CANQUEUE);
+		return -EINVAL;
+	}
+
 	sdebug_q_arr = kcalloc(submit_queues, sizeof(struct sdebug_queue),
 			       GFP_KERNEL);
 	if (sdebug_q_arr == NULL)
@@ -5773,7 +5775,7 @@ static struct scsi_host_template sdebug_driver_template = {
 	.sg_tablesize =		SG_MAX_SEGMENTS,
 	.cmd_per_lun =		DEF_CMD_PER_LUN,
 	.max_sectors =		-1U,
-	.use_clustering = 	DISABLE_CLUSTERING,
+	.max_segment_size =	-1U,
 	.module =		THIS_MODULE,
 	.track_queue_depth =	1,
 };
@@ -5788,8 +5790,9 @@ static int sdebug_driver_probe(struct device *dev)
 	sdbg_host = to_sdebug_host(dev);
 
 	sdebug_driver_template.can_queue = sdebug_max_queue;
-	if (sdebug_clustering)
-		sdebug_driver_template.use_clustering = ENABLE_CLUSTERING;
+	if (!sdebug_clustering)
+		sdebug_driver_template.dma_boundary = PAGE_SIZE - 1;
+
 	hpnt = scsi_host_alloc(&sdebug_driver_template, sizeof(sdbg_host));
 	if (NULL == hpnt) {
 		pr_err("scsi_host_alloc failed\n");

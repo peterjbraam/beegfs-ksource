@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * AppArmor security module
  *
@@ -5,11 +6,6 @@
  *
  * Copyright (C) 1998-2008 Novell/SUSE
  * Copyright 2009-2010 Canonical Ltd.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation, version 2 of the
- * License.
  */
 
 #include <linux/ctype.h>
@@ -23,6 +19,7 @@
 #include <linux/capability.h>
 #include <linux/rcupdate.h>
 #include <linux/fs.h>
+#include <linux/fs_context.h>
 #include <linux/poll.h>
 #include <uapi/linux/major.h>
 #include <uapi/linux/magic.h>
@@ -123,21 +120,20 @@ static int aafs_show_path(struct seq_file *seq, struct dentry *dentry)
 	return 0;
 }
 
-static void aafs_evict_inode(struct inode *inode)
+static void aafs_free_inode(struct inode *inode)
 {
-	truncate_inode_pages_final(&inode->i_data);
-	clear_inode(inode);
 	if (S_ISLNK(inode->i_mode))
 		kfree(inode->i_link);
+	free_inode_nonrcu(inode);
 }
 
 static const struct super_operations aafs_super_ops = {
 	.statfs = simple_statfs,
-	.evict_inode = aafs_evict_inode,
+	.free_inode = aafs_free_inode,
 	.show_path = aafs_show_path,
 };
 
-static int fill_super(struct super_block *sb, void *data, int silent)
+static int apparmorfs_fill_super(struct super_block *sb, struct fs_context *fc)
 {
 	static struct tree_descr files[] = { {""} };
 	int error;
@@ -150,16 +146,25 @@ static int fill_super(struct super_block *sb, void *data, int silent)
 	return 0;
 }
 
-static struct dentry *aafs_mount(struct file_system_type *fs_type,
-				 int flags, const char *dev_name, void *data)
+static int apparmorfs_get_tree(struct fs_context *fc)
 {
-	return mount_single(fs_type, flags, data, fill_super);
+	return get_tree_single(fc, apparmorfs_fill_super);
+}
+
+static const struct fs_context_operations apparmorfs_context_ops = {
+	.get_tree	= apparmorfs_get_tree,
+};
+
+static int apparmorfs_init_fs_context(struct fs_context *fc)
+{
+	fc->ops = &apparmorfs_context_ops;
+	return 0;
 }
 
 static struct file_system_type aafs_ops = {
 	.owner = THIS_MODULE,
 	.name = AAFS_NAME,
-	.mount = aafs_mount,
+	.init_fs_context = apparmorfs_init_fs_context,
 	.kill_sb = kill_anon_super,
 };
 
@@ -306,38 +311,6 @@ static struct dentry *aafs_create_dir(const char *name, struct dentry *parent)
 }
 
 /**
- * aafs_create_symlink - create a symlink in the apparmorfs filesystem
- * @name: name of dentry to create
- * @parent: parent directory for this dentry
- * @target: if symlink, symlink target string
- * @private: private data
- * @iops: struct of inode_operations that should be used
- *
- * If @target parameter is %NULL, then the @iops parameter needs to be
- * setup to handle .readlink and .get_link inode_operations.
- */
-static struct dentry *aafs_create_symlink(const char *name,
-					  struct dentry *parent,
-					  const char *target,
-					  void *private,
-					  const struct inode_operations *iops)
-{
-	struct dentry *dent;
-	char *link = NULL;
-
-	if (target) {
-		if (!link)
-			return ERR_PTR(-ENOMEM);
-	}
-	dent = aafs_create(name, S_IFLNK | 0444, parent, private, link, NULL,
-			   iops);
-	if (IS_ERR(dent))
-		kfree(link);
-
-	return dent;
-}
-
-/**
  * aafs_remove - removes a file or directory from the apparmorfs filesystem
  *
  * @dentry: dentry of the file/directory/symlink to removed.
@@ -356,6 +329,7 @@ static void aafs_remove(struct dentry *dentry)
 			simple_rmdir(dir, dentry);
 		else
 			simple_unlink(dir, dentry);
+		d_delete(dentry);
 		dput(dentry);
 	}
 	inode_unlock(dir);
@@ -418,7 +392,7 @@ static ssize_t policy_update(u32 mask, const char __user *buf, size_t size,
 	 */
 	error = aa_may_manage_policy(label, ns, mask);
 	if (error)
-		return error;
+		goto end_section;
 
 	data = aa_simple_write_to_buffer(buf, size, size, pos);
 	error = PTR_ERR(data);
@@ -426,6 +400,7 @@ static ssize_t policy_update(u32 mask, const char __user *buf, size_t size,
 		error = aa_replace_profiles(ns, label, mask, data);
 		aa_put_loaddata(data);
 	}
+end_section:
 	end_current_label_crit_section(label);
 
 	return error;
@@ -587,7 +562,7 @@ static __poll_t ns_revision_poll(struct file *file, poll_table *pt)
 
 void __aa_bump_ns_revision(struct aa_ns *ns)
 {
-	ns->revision++;
+	WRITE_ONCE(ns->revision, ns->revision + 1);
 	wake_up_interruptible(&ns->wait);
 }
 
@@ -603,7 +578,7 @@ static const struct file_operations aa_fs_ns_revision_fops = {
 static void profile_query_cb(struct aa_profile *profile, struct aa_perms *perms,
 			     const char *match_str, size_t match_len)
 {
-	struct aa_perms tmp;
+	struct aa_perms tmp = { };
 	struct aa_dfa *dfa;
 	unsigned int state = 0;
 
@@ -613,7 +588,6 @@ static void profile_query_cb(struct aa_profile *profile, struct aa_perms *perms,
 		dfa = profile->file.dfa;
 		state = aa_dfa_match_len(dfa, profile->file.start,
 					 match_str + 1, match_len - 1);
-		tmp = nullperms;
 		if (state) {
 			struct path_cond cond = { };
 
@@ -627,8 +601,6 @@ static void profile_query_cb(struct aa_profile *profile, struct aa_perms *perms,
 					 match_str, match_len);
 		if (state)
 			aa_compute_perms(dfa, state, &tmp);
-		else
-			tmp = nullperms;
 	}
 	aa_apply_modes_to_perms(profile, &tmp);
 	aa_perms_accum_raw(perms, &tmp);
@@ -1641,25 +1613,25 @@ int __aafs_profile_mkdir(struct aa_profile *profile, struct dentry *parent)
 	}
 
 	if (profile->rawdata) {
-		dent = aafs_create_symlink("raw_sha1", dir, NULL,
-					   profile->label.proxy,
-					   &rawdata_link_sha1_iops);
+		dent = aafs_create("raw_sha1", S_IFLNK | 0444, dir,
+				   profile->label.proxy, NULL, NULL,
+				   &rawdata_link_sha1_iops);
 		if (IS_ERR(dent))
 			goto fail;
 		aa_get_proxy(profile->label.proxy);
 		profile->dents[AAFS_PROF_RAW_HASH] = dent;
 
-		dent = aafs_create_symlink("raw_abi", dir, NULL,
-					   profile->label.proxy,
-					   &rawdata_link_abi_iops);
+		dent = aafs_create("raw_abi", S_IFLNK | 0444, dir,
+				   profile->label.proxy, NULL, NULL,
+				   &rawdata_link_abi_iops);
 		if (IS_ERR(dent))
 			goto fail;
 		aa_get_proxy(profile->label.proxy);
 		profile->dents[AAFS_PROF_RAW_ABI] = dent;
 
-		dent = aafs_create_symlink("raw_data", dir, NULL,
-					   profile->label.proxy,
-					   &rawdata_link_data_iops);
+		dent = aafs_create("raw_data", S_IFLNK | 0444, dir,
+				   profile->label.proxy, NULL, NULL,
+				   &rawdata_link_data_iops);
 		if (IS_ERR(dent))
 			goto fail;
 		aa_get_proxy(profile->label.proxy);
@@ -1745,7 +1717,7 @@ static int ns_rmdir_op(struct inode *dir, struct dentry *dentry)
 	if (error)
 		return error;
 
-	 parent = aa_get_ns(dir->i_private);
+	parent = aa_get_ns(dir->i_private);
 	/* rmdir calls the generic securityfs functions to remove files
 	 * from the apparmor dir. It is up to the apparmor ns locking
 	 * to avoid races.
@@ -2195,6 +2167,63 @@ static const struct file_operations aa_sfs_profiles_fops = {
 	.release = profiles_release,
 };
 
+static ssize_t attr_read(struct file * file, char __user * buf, size_t count,
+			 loff_t *ppos)
+{
+	char *p = NULL;
+	ssize_t length;
+
+	length = apparmor_getprocattr(current,
+				      (char*)file->f_path.dentry->d_name.name,
+				      &p);
+	if (length > 0)
+		length = simple_read_from_buffer(buf, count, ppos, p, length);
+	kfree(p);
+
+	return length;
+}
+
+static ssize_t attr_write(struct file * file, const char __user * buf,
+			  size_t count, loff_t *ppos)
+{
+	void *page;
+	ssize_t length;
+
+	length = -ESRCH;
+
+	if (count > PAGE_SIZE)
+		count = PAGE_SIZE;
+
+	/* No partial writes. */
+	length = -EINVAL;
+	if (*ppos != 0)
+		goto out;
+
+	page = memdup_user(buf, count);
+	if (IS_ERR(page)) {
+		length = PTR_ERR(page);
+		goto out;
+	}
+
+	/* Guard against adverse ptrace interaction */
+	length = mutex_lock_interruptible(&current->signal->cred_guard_mutex);
+	if (length < 0)
+		goto out_free;
+
+	length = apparmor_setprocattr(file->f_path.dentry->d_name.name, page,
+				      count);
+	mutex_unlock(&current->signal->cred_guard_mutex);
+out_free:
+	kfree(page);
+out:
+	return length;
+}
+
+static const struct file_operations attr_fops = {
+	.read = attr_read,
+	.write = attr_write,
+};
+
 
 /** Base file system setup **/
 static struct aa_sfs_entry aa_sfs_entry_file[] = {
@@ -2256,6 +2285,11 @@ static struct aa_sfs_entry aa_sfs_entry_ns[] = {
 	{ }
 };
 
+static struct aa_sfs_entry aa_sfs_entry_dbus[] = {
+	AA_SFS_FILE_STRING("mask", "acquire send receive"),
+	{ }
+};
+
 static struct aa_sfs_entry aa_sfs_entry_query_label[] = {
 	AA_SFS_FILE_STRING("perms", "allow deny audit quiet"),
 	AA_SFS_FILE_BOOLEAN("data",		1),
@@ -2267,11 +2301,13 @@ static struct aa_sfs_entry aa_sfs_entry_query[] = {
 	AA_SFS_DIR("label",			aa_sfs_entry_query_label),
 	{ }
 };
+
 static struct aa_sfs_entry aa_sfs_entry_features[] = {
 	AA_SFS_DIR("policy",			aa_sfs_entry_policy),
 	AA_SFS_DIR("domain",			aa_sfs_entry_domain),
 	AA_SFS_DIR("file",			aa_sfs_entry_file),
 	AA_SFS_DIR("network_v8",		aa_sfs_entry_network),
+	AA_SFS_DIR("network",			aa_sfs_entry_network_compat),
 	AA_SFS_DIR("mount",			aa_sfs_entry_mount),
 	AA_SFS_DIR("namespaces",		aa_sfs_entry_ns),
 	AA_SFS_FILE_U64("capability",		VFS_CAP_FLAGS_MASK),
@@ -2279,7 +2315,15 @@ static struct aa_sfs_entry aa_sfs_entry_features[] = {
 	AA_SFS_DIR("caps",			aa_sfs_entry_caps),
 	AA_SFS_DIR("ptrace",			aa_sfs_entry_ptrace),
 	AA_SFS_DIR("signal",			aa_sfs_entry_signal),
+	AA_SFS_DIR("dbus",			aa_sfs_entry_dbus),
 	AA_SFS_DIR("query",			aa_sfs_entry_query),
+	{ }
+};
+
+static struct aa_sfs_entry aa_sfs_entry_attr[] = {
+	AA_SFS_FILE_FOPS("current", 0666, &attr_fops),
+	AA_SFS_FILE_FOPS("prev", 0444, &attr_fops),
+	AA_SFS_FILE_FOPS("exec", 0666, &attr_fops),
 	{ }
 };
 
@@ -2291,6 +2335,7 @@ static struct aa_sfs_entry aa_sfs_entry_apparmor[] = {
 	AA_SFS_FILE_FOPS(".ns_name", 0444, &seq_ns_name_fops),
 	AA_SFS_FILE_FOPS("profiles", 0444, &aa_sfs_profiles_fops),
 	AA_SFS_DIR("features", aa_sfs_entry_features),
+	AA_SFS_DIR("attr", aa_sfs_entry_attr),
 	{ }
 };
 

@@ -1,10 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  *  Copyright 1997-1998 Transmeta Corporation - All Rights Reserved
  *  Copyright 2005-2006 Ian Kent <raven@themaw.net>
- *
- * This file is part of the Linux kernel and is made available under
- * the terms of the GNU General Public License, version 2, or at your
- * option, any later version, incorporated herein by reference.
  */
 
 /* Internal header file for autofs */
@@ -27,6 +24,7 @@
 #include <linux/list.h>
 #include <linux/completion.h>
 #include <linux/file.h>
+#include <linux/magic.h>
 
 /* This is the range of ioctl() numbers we claim as ours */
 #define AUTOFS_IOC_FIRST     AUTOFS_IOC_READY
@@ -60,7 +58,6 @@ struct autofs_info {
 	struct completion expire_complete;
 
 	struct list_head active;
-	int active_count;
 
 	struct list_head expiring;
 
@@ -70,6 +67,7 @@ struct autofs_info {
 
 	kuid_t uid;
 	kgid_t gid;
+	struct rcu_head rcu;
 };
 
 #define AUTOFS_INF_EXPIRING	(1<<0) /* dentry in the process of expiring */
@@ -215,6 +213,8 @@ static inline int autofs_prepare_pipe(struct file *pipe)
 		return -EINVAL;
 	/* We want a packet pipe */
 	pipe->f_flags |= O_DIRECT;
+	/* We don't expect -EAGAIN */
+	pipe->f_flags &= ~O_NONBLOCK;
 	return 0;
 }
 

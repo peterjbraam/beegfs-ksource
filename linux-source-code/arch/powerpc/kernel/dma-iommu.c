@@ -20,14 +20,14 @@
  */
 static inline bool dma_iommu_alloc_bypass(struct device *dev)
 {
-	return dev->iommu_bypass && !iommu_fixed_is_weak &&
+	return dev->archdata.iommu_bypass && !iommu_fixed_is_weak &&
 		dma_direct_supported(dev, dev->coherent_dma_mask);
 }
 
 static inline bool dma_iommu_map_bypass(struct device *dev,
 		unsigned long attrs)
 {
-	return dev->iommu_bypass &&
+	return dev->archdata.iommu_bypass &&
 		(!iommu_fixed_is_weak || (attrs & DMA_ATTR_WEAK_ORDERING));
 }
 
@@ -71,7 +71,7 @@ static dma_addr_t dma_iommu_map_page(struct device *dev, struct page *page,
 		return dma_direct_map_page(dev, page, offset, size, direction,
 				attrs);
 	return iommu_map_page(dev, get_iommu_table_base(dev), page, offset,
-			      size, device_to_mask(dev), direction, attrs);
+			      size, dma_get_mask(dev), direction, attrs);
 }
 
 
@@ -94,7 +94,7 @@ static int dma_iommu_map_sg(struct device *dev, struct scatterlist *sglist,
 	if (dma_iommu_map_bypass(dev, attrs))
 		return dma_direct_map_sg(dev, sglist, nelems, direction, attrs);
 	return ppc_iommu_map_sg(dev, get_iommu_table_base(dev), sglist, nelems,
-				device_to_mask(dev), direction, attrs);
+				dma_get_mask(dev), direction, attrs);
 }
 
 static void dma_iommu_unmap_sg(struct device *dev, struct scatterlist *sglist,
@@ -122,16 +122,15 @@ int dma_iommu_dma_supported(struct device *dev, u64 mask)
 {
 	struct iommu_table *tbl = get_iommu_table_base(dev);
 
-	if (!tbl) {
-		dev_info(dev, "Warning: IOMMU dma not supported: mask 0x%08llx"
-			", table unavailable\n", mask);
-		return 0;
-	}
-
 	if (dev_is_pci(dev) && dma_iommu_bypass_supported(dev, mask)) {
-		dev->iommu_bypass = true;
+		dev->archdata.iommu_bypass = true;
 		dev_dbg(dev, "iommu: 64-bit OK, using fixed ops\n");
 		return 1;
+	}
+
+	if (!tbl) {
+		dev_err(dev, "Warning: IOMMU dma not supported: mask 0x%08llx, table unavailable\n", mask);
+		return 0;
 	}
 
 	if (tbl->it_offset > (mask >> tbl->it_page_shift)) {
@@ -142,7 +141,7 @@ int dma_iommu_dma_supported(struct device *dev, u64 mask)
 	}
 
 	dev_dbg(dev, "iommu: not 64-bit, using default ops\n");
-	dev->iommu_bypass = false;
+	dev->archdata.iommu_bypass = false;
 	return 1;
 }
 
@@ -161,7 +160,8 @@ u64 dma_iommu_get_required_mask(struct device *dev)
 			return bypass_mask;
 	}
 
-	mask = 1ULL < (fls_long(tbl->it_offset + tbl->it_size) - 1);
+	mask = 1ULL << (fls_long(tbl->it_offset + tbl->it_size) +
+			tbl->it_page_shift - 1);
 	mask += mask - 1;
 
 	return mask;

@@ -1,25 +1,12 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  *
  * Copyright (c) 2011, Microsoft Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
- * Place - Suite 330, Boston, MA 02111-1307 USA.
  *
  * Authors:
  *   Haiyang Zhang <haiyangz@microsoft.com>
  *   Hank Janssen  <hjanssen@microsoft.com>
  *   K. Y. Srinivasan <kys@microsoft.com>
- *
  */
 
 #ifndef _HYPERV_H
@@ -195,21 +182,19 @@ static inline u32 hv_get_avail_to_write_percent(
  * 2 . 4  (Windows 8)
  * 3 . 0  (Windows 8 R2)
  * 4 . 0  (Windows 10)
- * 4 . 1  (Windows 10 RS3)
  * 5 . 0  (Newer Windows 10)
- * 5 . 1  (Windows 10 RS4)
- * 5 . 2  (Windows Server 2019, RS5)
  */
 
 #define VERSION_WS2008  ((0 << 16) | (13))
 #define VERSION_WIN7    ((1 << 16) | (1))
 #define VERSION_WIN8    ((2 << 16) | (4))
 #define VERSION_WIN8_1    ((3 << 16) | (0))
-#define VERSION_WIN10 ((4 << 16) | (0))
-#define VERSION_WIN10_V4_1 ((4 << 16) | (1))
+#define VERSION_WIN10	((4 << 16) | (0))
 #define VERSION_WIN10_V5 ((5 << 16) | (0))
-#define VERSION_WIN10_V5_1 ((5 << 16) | (1))
-#define VERSION_WIN10_V5_2 ((5 << 16) | (2))
+
+#define VERSION_INVAL -1
+
+#define VERSION_CURRENT VERSION_WIN10_V5
 
 /* Make maximum size of pipe payload of 16K */
 #define MAX_PIPE_DATA_PAYLOAD		(sizeof(u8) * 16384)
@@ -949,21 +934,6 @@ struct vmbus_channel {
 	 * full outbound ring buffer.
 	 */
 	u64 out_full_first;
-
-	/* enabling/disabling fuzz testing on the channel (default is false)*/
-	bool fuzz_testing_state;
-
-	/*
-	 * Interrupt delay will delay the guest from emptying the ring buffer
-	 * for a specific amount of time. The delay is in microseconds and will
-	 * be between 1 to a maximum of 1000, its default is 0 (no delay).
-	 * The  Message delay will delay guest reading on a per message basis
-	 * in microseconds between 1 to 1000 with the default being 0
-	 * (no delay).
-	 */
-	u32 fuzz_testing_interrupt_delay;
-	u32 fuzz_testing_message_delay;
-
 };
 
 static inline bool is_hvsock_channel(const struct vmbus_channel *c)
@@ -1212,10 +1182,6 @@ struct hv_device {
 
 	struct vmbus_channel *channel;
 	struct kset	     *channels_kset;
-
-	/* place holder to keep track of the dir for hv device in debugfs */
-	struct dentry *debug_dir;
-
 };
 
 
@@ -1448,8 +1414,6 @@ struct hv_util_service {
 	void (*util_cb)(void *);
 	int (*util_init)(struct hv_util_service *);
 	void (*util_deinit)(void);
-	int (*util_pre_suspend)(void);
-	int (*util_pre_resume)(void);
 };
 
 struct vmbuspipe_hdr {

@@ -1,10 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* (C) 1999-2001 Paul `Rusty' Russell
  * (C) 2002-2004 Netfilter Core Team <coreteam@netfilter.org>
  * (C) 2006-2012 Patrick McHardy <kaber@trash.net>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/types.h>
@@ -35,18 +32,6 @@ static const unsigned int udp_timeouts[UDP_CT_MAX] = {
 static unsigned int *udp_get_timeouts(struct net *net)
 {
 	return nf_udp_pernet(net)->timeouts;
-}
-
-static void nf_conntrack_udp_refresh_unreplied(struct nf_conn *ct,
-					       const struct sk_buff *skb,
-					       enum ip_conntrack_info ctinfo,
-					       u32 extra_jiffies)
-{
-	if (unlikely(ctinfo == IP_CT_ESTABLISHED_REPLY &&
-		     ct->status & IPS_NAT_CLASH))
-		nf_ct_kill(ct);
-	else
-		nf_ct_refresh_acct(ct, ctinfo, skb, extra_jiffies);
 }
 
 static void udp_error_log(const struct sk_buff *skb,
@@ -131,8 +116,8 @@ int nf_conntrack_udp_packet(struct nf_conn *ct,
 		if (!test_and_set_bit(IPS_ASSURED_BIT, &ct->status))
 			nf_conntrack_event_cache(IPCT_ASSURED, ct);
 	} else {
-		nf_conntrack_udp_refresh_unreplied(ct, skb, ctinfo,
-						   timeouts[UDP_CT_UNREPLIED]);
+		nf_ct_refresh_acct(ct, ctinfo, skb,
+				   timeouts[UDP_CT_UNREPLIED]);
 	}
 	return NF_ACCEPT;
 }
@@ -272,59 +257,13 @@ udp_timeout_nla_policy[CTA_TIMEOUT_UDP_MAX+1] = {
 };
 #endif /* CONFIG_NF_CONNTRACK_TIMEOUT */
 
-#ifdef CONFIG_SYSCTL
-static struct ctl_table udp_sysctl_table[] = {
-	{
-		.procname	= "nf_conntrack_udp_timeout",
-		.maxlen		= sizeof(unsigned int),
-		.mode		= 0644,
-		.proc_handler	= proc_dointvec_jiffies,
-	},
-	{
-		.procname	= "nf_conntrack_udp_timeout_stream",
-		.maxlen		= sizeof(unsigned int),
-		.mode		= 0644,
-		.proc_handler	= proc_dointvec_jiffies,
-	},
-	{ }
-};
-#endif /* CONFIG_SYSCTL */
-
-static int udp_kmemdup_sysctl_table(struct nf_proto_net *pn,
-				    struct nf_udp_net *un)
-{
-#ifdef CONFIG_SYSCTL
-	if (pn->ctl_table)
-		return 0;
-	pn->ctl_table = kmemdup(udp_sysctl_table,
-				sizeof(udp_sysctl_table),
-				GFP_KERNEL);
-	if (!pn->ctl_table)
-		return -ENOMEM;
-	pn->ctl_table[0].data = &un->timeouts[UDP_CT_UNREPLIED];
-	pn->ctl_table[1].data = &un->timeouts[UDP_CT_REPLIED];
-#endif
-	return 0;
-}
-
-static int udp_init_net(struct net *net)
+void nf_conntrack_udp_init_net(struct net *net)
 {
 	struct nf_udp_net *un = nf_udp_pernet(net);
-	struct nf_proto_net *pn = &un->pn;
+	int i;
 
-	if (!pn->users) {
-		int i;
-
-		for (i = 0; i < UDP_CT_MAX; i++)
-			un->timeouts[i] = udp_timeouts[i];
-	}
-
-	return udp_kmemdup_sysctl_table(pn, un);
-}
-
-static struct nf_proto_net *udp_get_net_proto(struct net *net)
-{
-	return &net->ct.nf_ct_proto.udp.pn;
+	for (i = 0; i < UDP_CT_MAX; i++)
+		un->timeouts[i] = udp_timeouts[i];
 }
 
 const struct nf_conntrack_l4proto nf_conntrack_l4proto_udp =
@@ -346,8 +285,6 @@ const struct nf_conntrack_l4proto nf_conntrack_l4proto_udp =
 		.nla_policy	= udp_timeout_nla_policy,
 	},
 #endif /* CONFIG_NF_CONNTRACK_TIMEOUT */
-	.init_net		= udp_init_net,
-	.get_net_proto		= udp_get_net_proto,
 };
 
 #ifdef CONFIG_NF_CT_PROTO_UDPLITE
@@ -370,7 +307,5 @@ const struct nf_conntrack_l4proto nf_conntrack_l4proto_udplite =
 		.nla_policy	= udp_timeout_nla_policy,
 	},
 #endif /* CONFIG_NF_CONNTRACK_TIMEOUT */
-	.init_net		= udp_init_net,
-	.get_net_proto		= udp_get_net_proto,
 };
 #endif

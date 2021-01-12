@@ -283,6 +283,27 @@ extern int kptr_restrict;
 #define pr_fmt(fmt) fmt
 #endif
 
+#if defined(__KMSG_CHECKER) && defined(KMSG_COMPONENT)
+
+/* generate magic string for scripts/kmsg-doc to parse */
+#define pr_printk_hash(level, format, ...) \
+	__KMSG_PRINT(level _FMT_ format _ARGS_ __VA_ARGS__ _END_)
+
+#elif defined(CONFIG_KMSG_IDS) && defined(KMSG_COMPONENT)
+
+/* format element '%pj' prints the six digit jhash of a string */
+#define _pr_printk_hash(pfx, fmt, ...) \
+	printk(pfx fmt, pfx fmt + __builtin_strlen(pfx), ##__VA_ARGS__)
+#define pr_printk_hash(level, format, ...) \
+	_pr_printk_hash(level KMSG_COMPONENT ".%pj: ", format, ##__VA_ARGS__)
+
+#else /* !defined(CONFIG_KMSG_IDS) */
+
+#define pr_printk_hash(level, format, ...) \
+	printk(level pr_fmt(format), ##__VA_ARGS__)
+
+#endif
+
 /*
  * These can be used to print at the various log levels.
  * All of these will print unconditionally, although note that pr_debug()
@@ -290,20 +311,20 @@ extern int kptr_restrict;
  * or CONFIG_DYNAMIC_DEBUG is set.
  */
 #define pr_emerg(fmt, ...) \
-	printk(KERN_EMERG pr_fmt(fmt), ##__VA_ARGS__)
+	pr_printk_hash(KERN_EMERG, fmt, ##__VA_ARGS__)
 #define pr_alert(fmt, ...) \
-	printk(KERN_ALERT pr_fmt(fmt), ##__VA_ARGS__)
+	pr_printk_hash(KERN_ALERT, fmt, ##__VA_ARGS__)
 #define pr_crit(fmt, ...) \
-	printk(KERN_CRIT pr_fmt(fmt), ##__VA_ARGS__)
+	pr_printk_hash(KERN_CRIT, fmt, ##__VA_ARGS__)
 #define pr_err(fmt, ...) \
-	printk(KERN_ERR pr_fmt(fmt), ##__VA_ARGS__)
+	pr_printk_hash(KERN_ERR, fmt, ##__VA_ARGS__)
 #define pr_warning(fmt, ...) \
-	printk(KERN_WARNING pr_fmt(fmt), ##__VA_ARGS__)
+	pr_printk_hash(KERN_WARNING, fmt, ##__VA_ARGS__)
 #define pr_warn pr_warning
 #define pr_notice(fmt, ...) \
-	printk(KERN_NOTICE pr_fmt(fmt), ##__VA_ARGS__)
+	pr_printk_hash(KERN_NOTICE, fmt, ##__VA_ARGS__)
 #define pr_info(fmt, ...) \
-	printk(KERN_INFO pr_fmt(fmt), ##__VA_ARGS__)
+	pr_printk_hash(KERN_INFO, fmt, ##__VA_ARGS__)
 /*
  * Like KERN_CONT, pr_cont() should only be used when continuing
  * a line with no newline ('\n') enclosed. Otherwise it defaults
@@ -483,13 +504,6 @@ extern int hex_dump_to_buffer(const void *buf, size_t len, int rowsize,
 extern void print_hex_dump(const char *level, const char *prefix_str,
 			   int prefix_type, int rowsize, int groupsize,
 			   const void *buf, size_t len, bool ascii);
-#if defined(CONFIG_DYNAMIC_DEBUG)
-#define print_hex_dump_bytes(prefix_str, prefix_type, buf, len)	\
-	dynamic_hex_dump(prefix_str, prefix_type, 16, 1, buf, len, true)
-#else
-extern void print_hex_dump_bytes(const char *prefix_str, int prefix_type,
-				 const void *buf, size_t len);
-#endif /* defined(CONFIG_DYNAMIC_DEBUG) */
 #else
 static inline void print_hex_dump(const char *level, const char *prefix_str,
 				  int prefix_type, int rowsize, int groupsize,
@@ -520,5 +534,20 @@ static inline void print_hex_dump_debug(const char *prefix_str, int prefix_type,
 {
 }
 #endif
+
+/**
+ * print_hex_dump_bytes - shorthand form of print_hex_dump() with default params
+ * @prefix_str: string to prefix each line with;
+ *  caller supplies trailing spaces for alignment if desired
+ * @prefix_type: controls whether prefix of an offset, address, or none
+ *  is printed (%DUMP_PREFIX_OFFSET, %DUMP_PREFIX_ADDRESS, %DUMP_PREFIX_NONE)
+ * @buf: data blob to dump
+ * @len: number of bytes in the @buf
+ *
+ * Calls print_hex_dump(), with log level of KERN_DEBUG,
+ * rowsize of 16, groupsize of 1, and ASCII output included.
+ */
+#define print_hex_dump_bytes(prefix_str, prefix_type, buf, len)	\
+	print_hex_dump_debug(prefix_str, prefix_type, 16, 1, buf, len, true)
 
 #endif

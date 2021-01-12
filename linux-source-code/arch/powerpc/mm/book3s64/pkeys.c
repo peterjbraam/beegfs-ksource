@@ -6,20 +6,22 @@
  */
 
 #include <asm/mman.h>
+#include <asm/mmu_context.h>
+#include <asm/mmu.h>
 #include <asm/setup.h>
 #include <linux/pkeys.h>
 #include <linux/of_device.h>
 
 DEFINE_STATIC_KEY_TRUE(pkey_disabled);
-bool pkey_execute_disable_supported;
 int  pkeys_total;		/* Total pkeys as per device tree */
-bool pkeys_devtree_defined;	/* pkey property exported by device tree */
 u32  initial_allocation_mask;   /* Bits set for the initially allocated keys */
 u32  reserved_allocation_mask;  /* Bits set for reserved keys */
-u64  pkey_amr_mask;		/* Bits in AMR not to be touched */
-u64  pkey_iamr_mask;		/* Bits in AMR not to be touched */
-u64  pkey_uamor_mask;		/* Bits in UMOR not to be touched */
-int  execute_only_key = 2;
+static bool pkey_execute_disable_supported;
+static bool pkeys_devtree_defined;	/* property exported by device tree */
+static u64 pkey_amr_mask;		/* Bits in AMR not to be touched */
+static u64 pkey_iamr_mask;		/* Bits in AMR not to be touched */
+static u64 pkey_uamor_mask;		/* Bits in UMOR not to be touched */
+static int execute_only_key = 2;
 
 #define AMR_BITS_PER_PKEY 2
 #define AMR_RD_BIT 0x1UL
@@ -57,7 +59,7 @@ static inline bool pkey_mmu_enabled(void)
 		return cpu_has_feature(CPU_FTR_PKEY);
 }
 
-int pkey_initialize(void)
+static int pkey_initialize(void)
 {
 	int os_reserved, i;
 
@@ -81,13 +83,17 @@ int pkey_initialize(void)
 	scan_pkey_feature();
 
 	/*
-	 * Let's assume 32 pkeys on P8 bare metal, if its not defined by device
-	 * tree. We make this exception since skiboot forgot to expose this
-	 * property on power8.
+	 * Let's assume 32 pkeys on P8/P9 bare metal, if its not defined by device
+	 * tree. We make this exception since some version of skiboot forgot to
+	 * expose this property on power8/9.
 	 */
-	if (!pkeys_devtree_defined && !firmware_has_feature(FW_FEATURE_LPAR) &&
-			cpu_has_feature(CPU_FTRS_POWER8))
-		pkeys_total = 32;
+	if (!pkeys_devtree_defined && !firmware_has_feature(FW_FEATURE_LPAR)) {
+		unsigned long pvr = mfspr(SPRN_PVR);
+
+		if (PVR_VER(pvr) == PVR_POWER8 || PVR_VER(pvr) == PVR_POWER8E ||
+		    PVR_VER(pvr) == PVR_POWER8NVL || PVR_VER(pvr) == PVR_POWER9)
+			pkeys_total = 32;
+	}
 
 	/*
 	 * Adjust the upper limit, based on the number of bits supported by
@@ -361,13 +367,18 @@ static bool pkey_access_permitted(int pkey, bool write, bool execute)
 	int pkey_shift;
 	u64 amr;
 
-	pkey_shift = pkeyshift(pkey);
-	if (execute && !(read_iamr() & (IAMR_EX_BIT << pkey_shift)))
+	if (!is_pkey_enabled(pkey))
 		return true;
 
-	amr = read_amr(); /* Delay reading amr until absolutely needed */
-	return ((!write && !(amr & (AMR_RD_BIT << pkey_shift))) ||
-		(write &&  !(amr & (AMR_WR_BIT << pkey_shift))));
+	pkey_shift = pkeyshift(pkey);
+	if (execute)
+		return !(read_iamr() & (IAMR_EX_BIT << pkey_shift));
+
+	amr = read_amr();
+	if (write)
+		return !(amr & (AMR_WR_BIT << pkey_shift));
+
+	return !(amr & (AMR_RD_BIT << pkey_shift));
 }
 
 bool arch_pte_access_permitted(u64 pte, bool write, bool execute)

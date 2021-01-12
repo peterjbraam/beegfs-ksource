@@ -14,6 +14,7 @@ regulators (where voltage output is controllable) and current sinks (where
 current limit is controllable).
 
 (C) 2008  Wolfson Microelectronics PLC.
+
 Author: Liam Girdwood <lrg@slimlogic.co.uk>
 
 
@@ -22,20 +23,20 @@ Nomenclature
 
 Some terms used in this document:
 
-  - Regulator    
+  - Regulator
                  - Electronic device that supplies power to other devices.
-                   Most regulators can enable and disable their output whilst
+                   Most regulators can enable and disable their output while
                    some can control their output voltage and or current.
 
                    Input Voltage -> Regulator -> Output Voltage
 
 
-  - PMIC         
+  - PMIC
                  - Power Management IC. An IC that contains numerous
                    regulators and often contains other subsystems.
 
 
-  - Consumer     
+  - Consumer
                  - Electronic device that is supplied power by a regulator.
                    Consumers can be classified into two types:-
 

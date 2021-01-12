@@ -166,9 +166,9 @@ enum {
 	NFS_STATE_RECOVERY_FAILED,	/* OPEN stateid state recovery failed */
 	NFS_STATE_MAY_NOTIFY_LOCK,	/* server may CB_NOTIFY_LOCK */
 	NFS_STATE_CHANGE_WAIT,		/* A state changing operation is outstanding */
+#ifdef CONFIG_NFS_V4_2
 	NFS_CLNT_DST_SSC_COPY_STATE,    /* dst server open state on client*/
-	NFS_CLNT_SRC_SSC_COPY_STATE,    /* src server open state on client*/
-	NFS_SRV_SSC_COPY_STATE,		/* ssc state on the dst server */
+#endif /* CONFIG_NFS_V4_2 */
 };
 
 struct nfs4_state {
@@ -266,7 +266,7 @@ extern const struct dentry_operations nfs4_dentry_operations;
 
 /* dir.c */
 int nfs_atomic_open(struct inode *, struct dentry *, struct file *,
-		    unsigned, umode_t, int *);
+		    unsigned, umode_t);
 
 /* super.c */
 extern struct file_system_type nfs4_fs_type;
@@ -443,8 +443,6 @@ extern void nfs4_set_lease_period(struct nfs_client *clp, unsigned long lease);
 
 
 /* nfs4state.c */
-extern const nfs4_stateid current_stateid;
-
 const struct cred *nfs4_get_clid_cred(struct nfs_client *clp);
 const struct cred *nfs4_get_machine_cred(struct nfs_client *clp);
 const struct cred *nfs4_get_renew_cred(struct nfs_client *clp);
@@ -491,8 +489,6 @@ extern int nfs4_set_lock_state(struct nfs4_state *state, struct file_lock *fl);
 extern int nfs4_select_rw_stateid(struct nfs4_state *, fmode_t,
 		const struct nfs_lock_context *, nfs4_stateid *,
 		const struct cred **);
-extern bool nfs4_refresh_open_stateid(nfs4_stateid *dst,
-		struct nfs4_state *state);
 extern bool nfs4_copy_open_stateid(nfs4_stateid *dst,
 		struct nfs4_state *state);
 
@@ -574,10 +570,12 @@ static inline bool nfs4_stateid_is_newer(const nfs4_stateid *s1, const nfs4_stat
 	return (s32)(be32_to_cpu(s1->seqid) - be32_to_cpu(s2->seqid)) > 0;
 }
 
-static inline bool nfs4_stateid_match_or_older(const nfs4_stateid *dst, const nfs4_stateid *src)
+static inline bool nfs4_stateid_is_next(const nfs4_stateid *s1, const nfs4_stateid *s2)
 {
-	return nfs4_stateid_match_other(dst, src) &&
-		!(src->seqid && nfs4_stateid_is_newer(dst, src));
+	u32 seq1 = be32_to_cpu(s1->seqid);
+	u32 seq2 = be32_to_cpu(s2->seqid);
+
+	return seq2 == seq1 + 1U || (seq2 == 1U && seq1 == 0xffffffffU);
 }
 
 static inline void nfs4_stateid_seqid_inc(nfs4_stateid *s1)

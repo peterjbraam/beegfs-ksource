@@ -1,14 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright(c) 2013-2015 Intel Corporation. All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of version 2 of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
  */
 #ifndef __ND_CORE_H__
 #define __ND_CORE_H__
@@ -17,6 +9,7 @@
 #include <linux/sizes.h>
 #include <linux/mutex.h>
 #include <linux/nd.h>
+#include "nd.h"
 
 extern struct list_head nvdimm_bus_list;
 extern struct mutex nvdimm_bus_list_mutex;
@@ -121,6 +114,7 @@ struct nvdimm_bus *walk_to_nvdimm_bus(struct device *nd_dev);
 int __init nvdimm_bus_init(void);
 void nvdimm_bus_exit(void);
 void nvdimm_devs_exit(void);
+void nd_region_devs_exit(void);
 struct nd_region;
 void nd_region_advance_seeds(struct nd_region *nd_region, struct device *dev);
 void nd_region_create_ns_seed(struct nd_region *nd_region);
@@ -175,4 +169,71 @@ ssize_t nd_namespace_store(struct device *dev,
 		struct nd_namespace_common **_ndns, const char *buf,
 		size_t len);
 struct nd_pfn *to_nd_pfn_safe(struct device *dev);
+bool is_nvdimm_bus(struct device *dev);
+
+#ifdef CONFIG_PROVE_LOCKING
+extern struct class *nd_class;
+
+enum {
+	LOCK_BUS,
+	LOCK_NDCTL,
+	LOCK_REGION,
+	LOCK_DIMM = LOCK_REGION,
+	LOCK_NAMESPACE,
+	LOCK_CLAIM,
+};
+
+static inline void debug_nvdimm_lock(struct device *dev)
+{
+	if (is_nd_region(dev))
+		mutex_lock_nested(&dev->lockdep_mutex, LOCK_REGION);
+	else if (is_nvdimm(dev))
+		mutex_lock_nested(&dev->lockdep_mutex, LOCK_DIMM);
+	else if (is_nd_btt(dev) || is_nd_pfn(dev) || is_nd_dax(dev))
+		mutex_lock_nested(&dev->lockdep_mutex, LOCK_CLAIM);
+	else if (dev->parent && (is_nd_region(dev->parent)))
+		mutex_lock_nested(&dev->lockdep_mutex, LOCK_NAMESPACE);
+	else if (is_nvdimm_bus(dev))
+		mutex_lock_nested(&dev->lockdep_mutex, LOCK_BUS);
+	else if (dev->class && dev->class == nd_class)
+		mutex_lock_nested(&dev->lockdep_mutex, LOCK_NDCTL);
+	else
+		dev_WARN(dev, "unknown lock level\n");
+}
+
+static inline void debug_nvdimm_unlock(struct device *dev)
+{
+	mutex_unlock(&dev->lockdep_mutex);
+}
+
+static inline void nd_device_lock(struct device *dev)
+{
+	device_lock(dev);
+	debug_nvdimm_lock(dev);
+}
+
+static inline void nd_device_unlock(struct device *dev)
+{
+	debug_nvdimm_unlock(dev);
+	device_unlock(dev);
+}
+#else
+static inline void nd_device_lock(struct device *dev)
+{
+	device_lock(dev);
+}
+
+static inline void nd_device_unlock(struct device *dev)
+{
+	device_unlock(dev);
+}
+
+static inline void debug_nvdimm_lock(struct device *dev)
+{
+}
+
+static inline void debug_nvdimm_unlock(struct device *dev)
+{
+}
+#endif
 #endif /* __ND_CORE_H__ */

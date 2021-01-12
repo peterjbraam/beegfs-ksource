@@ -30,6 +30,8 @@
 #include <linux/console.h>
 #include <linux/tty_flip.h>
 
+#include <linux/sched/signal.h>
+
 /* Don't take this from <ctype.h>: 011-015 on the screen aren't spaces */
 #define isspace(c)	((c) == ' ')
 
@@ -86,6 +88,11 @@ void clear_selection(void)
 }
 EXPORT_SYMBOL_GPL(clear_selection);
 
+bool vc_is_sel(struct vc_data *vc)
+{
+	return vc == sel_cons;
+}
+
 /*
  * User settable table: what characters are to be considered alphabetic?
  * 128 bits. Locked by the console lock.
@@ -124,8 +131,8 @@ static inline int atedge(const int p, int size_row)
 	return (!(p % size_row)	|| !((p + 2) % size_row));
 }
 
-/* stores the char in UTF8 and returns the number of bytes used (1-3) */
-static int store_utf8(u16 c, char *p)
+/* stores the char in UTF8 and returns the number of bytes used (1-4) */
+static int store_utf8(u32 c, char *p)
 {
 	if (c < 0x80) {
 		/*  0******* */
@@ -136,13 +143,26 @@ static int store_utf8(u16 c, char *p)
 		p[0] = 0xc0 | (c >> 6);
 		p[1] = 0x80 | (c & 0x3f);
 		return 2;
-    	} else {
+	} else if (c < 0x10000) {
 		/* 1110**** 10****** 10****** */
 		p[0] = 0xe0 | (c >> 12);
 		p[1] = 0x80 | ((c >> 6) & 0x3f);
 		p[2] = 0x80 | (c & 0x3f);
 		return 3;
-    	}
+	} else if (c < 0x110000) {
+		/* 11110*** 10****** 10****** 10****** */
+		p[0] = 0xf0 | (c >> 18);
+		p[1] = 0x80 | ((c >> 12) & 0x3f);
+		p[2] = 0x80 | ((c >> 6) & 0x3f);
+		p[3] = 0x80 | (c & 0x3f);
+		return 4;
+	} else {
+		/* outside Unicode, replace with U+FFFD */
+		p[0] = 0xef;
+		p[1] = 0xbf;
+		p[2] = 0xbd;
+		return 3;
+	}
 }
 
 /**
@@ -290,7 +310,7 @@ static int __set_selection_kernel(struct tiocl_selection *v, struct tty_struct *
 	sel_end = new_sel_end;
 
 	/* Allocate a new buffer before freeing the old one ... */
-	multiplier = use_unicode ? 3 : 1;  /* chars can take up to 3 bytes */
+	multiplier = use_unicode ? 4 : 1;  /* chars can take up to 4 bytes */
 	bp = kmalloc_array((sel_end - sel_start) / 2 + 1, multiplier,
 			   GFP_KERNEL);
 	if (!bp) {
@@ -353,6 +373,7 @@ int paste_selection(struct tty_struct *tty)
 	unsigned int count;
 	struct  tty_ldisc *ld;
 	DECLARE_WAITQUEUE(wait, current);
+	int ret = 0;
 
 	console_lock();
 	poke_blanked_console();
@@ -367,6 +388,10 @@ int paste_selection(struct tty_struct *tty)
 	mutex_lock(&sel_lock);
 	while (sel_buffer && sel_buffer_lth > pasted) {
 		set_current_state(TASK_INTERRUPTIBLE);
+		if (signal_pending(current)) {
+			ret = -EINTR;
+			break;
+		}
 		if (tty_throttled(tty)) {
 			mutex_unlock(&sel_lock);
 			schedule();
@@ -385,6 +410,6 @@ int paste_selection(struct tty_struct *tty)
 
 	tty_buffer_unlock_exclusive(&vc->port);
 	tty_ldisc_deref(ld);
-	return 0;
+	return ret;
 }
 EXPORT_SYMBOL_GPL(paste_selection);

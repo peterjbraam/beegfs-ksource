@@ -91,10 +91,6 @@
  * %ETHTOOL_GSET to get the current values before making specific
  * changes and then applying them with %ETHTOOL_SSET.
  *
- * Drivers that implement set_settings() should validate all fields
- * other than @cmd that are not described as read-only or deprecated,
- * and must ignore all fields described as read-only.
- *
  * Deprecated fields should be ignored by both users and drivers.
  */
 struct ethtool_cmd {
@@ -916,7 +912,7 @@ struct ethtool_rx_flow_spec {
 	__u32		location;
 };
 
-/* How rings are layed out when accessing virtual functions or
+/* How rings are laid out when accessing virtual functions or
  * offloaded queues is device specific. To allow users to do flow
  * steering and specify these queues the ring cookie is partitioned
  * into a 32bit queue index with an 8 bit virtual function id.
@@ -925,7 +921,7 @@ struct ethtool_rx_flow_spec {
  * devices start supporting PCIe w/ARI. However at the moment I
  * do not know of any devices that support this so I do not reserve
  * space for this at this time. If a future patch consumes the next
- * byte it should be aware of this possiblity.
+ * byte it should be aware of this possibility.
  */
 #define ETHTOOL_RX_FLOW_SPEC_RING	0x00000000FFFFFFFFLL
 #define ETHTOOL_RX_FLOW_SPEC_RING_VF	0x000000FF00000000LL
@@ -933,13 +929,13 @@ struct ethtool_rx_flow_spec {
 static inline __u64 ethtool_get_flow_spec_ring(__u64 ring_cookie)
 {
 	return ETHTOOL_RX_FLOW_SPEC_RING & ring_cookie;
-};
+}
 
 static inline __u64 ethtool_get_flow_spec_ring_vf(__u64 ring_cookie)
 {
 	return (ETHTOOL_RX_FLOW_SPEC_RING_VF & ring_cookie) >>
 				ETHTOOL_RX_FLOW_SPEC_RING_VF_OFF;
-};
+}
 
 /**
  * struct ethtool_rxnfc - command to get or set RX flow classification rules
@@ -1511,30 +1507,9 @@ enum ethtool_link_mode_bit_indices {
 	ETHTOOL_LINK_MODE_200000baseCR4_Full_BIT	 = 66,
 	ETHTOOL_LINK_MODE_100baseT1_Full_BIT		 = 67,
 	ETHTOOL_LINK_MODE_1000baseT1_Full_BIT		 = 68,
-	ETHTOOL_LINK_MODE_400000baseKR8_Full_BIT	 = 69,
-	ETHTOOL_LINK_MODE_400000baseSR8_Full_BIT	 = 70,
-	ETHTOOL_LINK_MODE_400000baseLR8_ER8_FR8_Full_BIT = 71,
-	ETHTOOL_LINK_MODE_400000baseDR8_Full_BIT	 = 72,
-	ETHTOOL_LINK_MODE_400000baseCR8_Full_BIT	 = 73,
 
 	/* must be last entry */
-	__ETHTOOL_LINK_MODE_MASK_NBITS,
-
-	/* RHEL: Last known value for RHEL 8.0 needed for emulation layer
-         * for old binary drivers compiled against RHEL 8.0
-         */
-	__ETHTOOL_LINK_MODE_LAST_RH80 = ETHTOOL_LINK_MODE_FEC_BASER_BIT,
-
-#ifdef __GENKSYMS__
-	/* RHEL: Enum __ETHTOOL_LINK_MODE_LAST and its value is protected by
-	 * KABI checker.
-	 * We also need to define __ETHTOOL_LINK_MODE_MASK_NBITS as macro
-	 * for KABI checker to preserve existing checksums of several
-	 * ethtool symbols.
-	 */
-	__ETHTOOL_LINK_MODE_LAST = __ETHTOOL_LINK_MODE_LAST_RH80,
-#define __ETHTOOL_LINK_MODE_MASK_NBITS (__ETHTOOL_LINK_MODE_LAST + 1)
-#endif
+	__ETHTOOL_LINK_MODE_MASK_NBITS
 };
 
 #define __ETHTOOL_LINK_MODE_LEGACY_MASK(base_name)	\
@@ -1643,13 +1618,12 @@ enum ethtool_link_mode_bit_indices {
 #define SPEED_56000		56000
 #define SPEED_100000		100000
 #define SPEED_200000		200000
-#define SPEED_400000		400000
 
 #define SPEED_UNKNOWN		-1
 
 static inline int ethtool_validate_speed(__u32 speed)
 {
-	return speed <= INT_MAX || speed == SPEED_UNKNOWN;
+	return speed <= INT_MAX || speed == (__u32)SPEED_UNKNOWN;
 }
 
 /* Duplex, half or full. */
@@ -1874,14 +1848,9 @@ enum ethtool_reset_flags {
  * rejected.
  *
  * Deprecated %ethtool_cmd fields transceiver, maxtxpkt and maxrxpkt
- * are not available in %ethtool_link_settings. Until all drivers are
- * converted to ignore them or to the new %ethtool_link_settings API,
- * for both queries and changes, users should always try
- * %ETHTOOL_GLINKSETTINGS first, and if it fails with -ENOTSUPP stick
- * only to %ETHTOOL_GSET and %ETHTOOL_SSET consistently. If it
- * succeeds, then users should stick to %ETHTOOL_GLINKSETTINGS and
- * %ETHTOOL_SLINKSETTINGS (which would support drivers implementing
- * either %ethtool_cmd or %ethtool_link_settings).
+ * are not available in %ethtool_link_settings. These fields will be
+ * always set to zero in %ETHTOOL_GSET reply and %ETHTOOL_SSET will
+ * fail if any of them is set to non-zero value.
  *
  * Users should assume that all fields not marked read-only are
  * writable and subject to validation by the driver.  They should use

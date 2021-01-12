@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * NVIDIA Tegra DRM GEM helper functions
  *
@@ -7,14 +8,13 @@
  * Based on the GEM/CMA helpers
  *
  * Copyright (c) 2011 Samsung Electronics Co., Ltd.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/dma-buf.h>
 #include <linux/iommu.h>
+
+#include <drm/drm_drv.h>
+#include <drm/drm_prime.h>
 #include <drm/tegra_drm.h>
 
 #include "drm.h"
@@ -65,6 +65,32 @@ static void tegra_bo_munmap(struct host1x_bo *bo, void *addr)
 		vunmap(addr);
 }
 
+static void *tegra_bo_kmap(struct host1x_bo *bo, unsigned int page)
+{
+	struct tegra_bo *obj = host1x_to_tegra_bo(bo);
+
+	if (obj->vaddr)
+		return obj->vaddr + page * PAGE_SIZE;
+	else if (obj->gem.import_attach)
+		return dma_buf_kmap(obj->gem.import_attach->dmabuf, page);
+	else
+		return vmap(obj->pages + page, 1, VM_MAP,
+			    pgprot_writecombine(PAGE_KERNEL));
+}
+
+static void tegra_bo_kunmap(struct host1x_bo *bo, unsigned int page,
+			    void *addr)
+{
+	struct tegra_bo *obj = host1x_to_tegra_bo(bo);
+
+	if (obj->vaddr)
+		return;
+	else if (obj->gem.import_attach)
+		dma_buf_kunmap(obj->gem.import_attach->dmabuf, page, addr);
+	else
+		vunmap(addr);
+}
+
 static struct host1x_bo *tegra_bo_get(struct host1x_bo *bo)
 {
 	struct tegra_bo *obj = host1x_to_tegra_bo(bo);
@@ -81,6 +107,8 @@ static const struct host1x_bo_ops tegra_bo_ops = {
 	.unpin = tegra_bo_unpin,
 	.mmap = tegra_bo_mmap,
 	.munmap = tegra_bo_munmap,
+	.kmap = tegra_bo_kmap,
+	.kunmap = tegra_bo_kunmap,
 };
 
 static int tegra_bo_iommu_map(struct tegra_drm *tegra, struct tegra_bo *bo)
@@ -176,7 +204,7 @@ static void tegra_bo_free(struct drm_device *drm, struct tegra_bo *bo)
 {
 	if (bo->pages) {
 		dma_unmap_sg(drm->dev, bo->sgt->sgl, bo->sgt->nents,
-			     DMA_BIDIRECTIONAL);
+			     DMA_FROM_DEVICE);
 		drm_gem_put_pages(&bo->gem, bo->pages, true, true);
 		sg_free_table(bo->sgt);
 		kfree(bo->sgt);
@@ -202,7 +230,7 @@ static int tegra_bo_get_pages(struct drm_device *drm, struct tegra_bo *bo)
 	}
 
 	err = dma_map_sg(drm->dev, bo->sgt->sgl, bo->sgt->nents,
-			 DMA_BIDIRECTIONAL);
+			 DMA_FROM_DEVICE);
 	if (err == 0) {
 		err = -EFAULT;
 		goto free_sgt;
@@ -554,6 +582,16 @@ static int tegra_gem_prime_end_cpu_access(struct dma_buf *buf,
 	return 0;
 }
 
+static void *tegra_gem_prime_kmap(struct dma_buf *buf, unsigned long page)
+{
+	return NULL;
+}
+
+static void tegra_gem_prime_kunmap(struct dma_buf *buf, unsigned long page,
+				   void *addr)
+{
+}
+
 static int tegra_gem_prime_mmap(struct dma_buf *buf, struct vm_area_struct *vma)
 {
 	struct drm_gem_object *gem = buf->priv;
@@ -584,25 +622,26 @@ static const struct dma_buf_ops tegra_gem_prime_dmabuf_ops = {
 	.release = tegra_gem_prime_release,
 	.begin_cpu_access = tegra_gem_prime_begin_cpu_access,
 	.end_cpu_access = tegra_gem_prime_end_cpu_access,
+	.map = tegra_gem_prime_kmap,
+	.unmap = tegra_gem_prime_kunmap,
 	.mmap = tegra_gem_prime_mmap,
 	.vmap = tegra_gem_prime_vmap,
 	.vunmap = tegra_gem_prime_vunmap,
 };
 
-struct dma_buf *tegra_gem_prime_export(struct drm_device *drm,
-				       struct drm_gem_object *gem,
+struct dma_buf *tegra_gem_prime_export(struct drm_gem_object *gem,
 				       int flags)
 {
 	DEFINE_DMA_BUF_EXPORT_INFO(exp_info);
 
 	exp_info.exp_name = KBUILD_MODNAME;
-	exp_info.owner = drm->driver->fops->owner;
+	exp_info.owner = gem->dev->driver->fops->owner;
 	exp_info.ops = &tegra_gem_prime_dmabuf_ops;
 	exp_info.size = gem->size;
 	exp_info.flags = flags;
 	exp_info.priv = gem;
 
-	return drm_gem_dmabuf_export(drm, &exp_info);
+	return drm_gem_dmabuf_export(gem->dev, &exp_info);
 }
 
 struct drm_gem_object *tegra_gem_prime_import(struct drm_device *drm,

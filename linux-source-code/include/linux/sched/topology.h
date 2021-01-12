@@ -7,12 +7,6 @@
 #include <linux/sched/idle.h>
 
 /*
- * Increase resolution of cpu_capacity calculations
- */
-#define SCHED_CAPACITY_SHIFT	SCHED_FIXEDPOINT_SHIFT
-#define SCHED_CAPACITY_SCALE	(1L << SCHED_CAPACITY_SHIFT)
-
-/*
  * sched-domains (multiprocessor balancing) declarations:
  */
 #ifdef CONFIG_SMP
@@ -76,20 +70,14 @@ struct sched_domain_shared {
 
 struct sched_domain {
 	/* These fields must be setup */
-	struct sched_domain *parent;	/* top domain must be null terminated */
-	struct sched_domain *child;	/* bottom domain must be null terminated */
+	struct sched_domain __rcu *parent;	/* top domain must be null terminated */
+	struct sched_domain __rcu *child;	/* bottom domain must be null terminated */
 	struct sched_group *groups;	/* the balancing groups of the domain */
 	unsigned long min_interval;	/* Minimum balance interval ms */
 	unsigned long max_interval;	/* Maximum balance interval ms */
 	unsigned int busy_factor;	/* less balancing by factor if busy */
 	unsigned int imbalance_pct;	/* No balance until over watermark */
 	unsigned int cache_nice_tries;	/* Leave cache hot tasks for # tries */
-	RH_KABI_DEPRECATE(unsigned int, busy_idx)
-	RH_KABI_DEPRECATE(unsigned int, idle_idx)
-	RH_KABI_DEPRECATE(unsigned int, newidle_idx)
-	RH_KABI_DEPRECATE(unsigned int, wake_idx)
-	RH_KABI_DEPRECATE(unsigned int, forkexec_idx)
-	RH_KABI_DEPRECATE(unsigned int, smt_gain)
 
 	int nohz_idle;			/* NOHZ IDLE status */
 	int flags;			/* See SD_* */

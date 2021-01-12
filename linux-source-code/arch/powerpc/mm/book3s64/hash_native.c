@@ -1,13 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * native hashtable management.
  *
  * SMP scalability work:
  *    Copyright (C) 2001 Anton Blanchard <anton@au.ibm.com>, IBM
- * 
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 
 #undef DEBUG_LOW
@@ -23,13 +19,13 @@
 #include <asm/mmu.h>
 #include <asm/mmu_context.h>
 #include <asm/pgtable.h>
-#include <asm/tlbflush.h>
 #include <asm/trace.h>
 #include <asm/tlb.h>
 #include <asm/cputable.h>
 #include <asm/udbg.h>
 #include <asm/kexec.h>
 #include <asm/ppc-opcode.h>
+#include <asm/feature-fixups.h>
 
 #include <misc/cxl-base.h>
 
@@ -45,7 +41,7 @@
 #define HPTE_LOCK_BIT (56+3)
 #endif
 
-DEFINE_RAW_SPINLOCK(native_tlbie_lock);
+static DEFINE_RAW_SPINLOCK(native_tlbie_lock);
 
 static inline void tlbiel_hash_set_isa206(unsigned int set, unsigned int is)
 {
@@ -60,7 +56,7 @@ static inline void tlbiel_hash_set_isa206(unsigned int set, unsigned int is)
  * tlbiel instruction for hash, set invalidation
  * i.e., r=1 and is=01 or is=10 or is=11
  */
-static inline void tlbiel_hash_set_isa300(unsigned int set, unsigned int is,
+static __always_inline void tlbiel_hash_set_isa300(unsigned int set, unsigned int is,
 					unsigned int pid,
 					unsigned int ric, unsigned int prs)
 {
@@ -115,6 +111,8 @@ static void tlbiel_all_isa300(unsigned int num_sets, unsigned int is)
 	tlbiel_hash_set_isa300(0, is, 0, 2, 1);
 
 	asm volatile("ptesync": : :"memory");
+
+	asm volatile(PPC_ISA_3_0_INVALIDATE_ERAT "; isync" : : :"memory");
 }
 
 void hash__tlbiel_all(unsigned int action)
@@ -140,8 +138,6 @@ void hash__tlbiel_all(unsigned int action)
 		tlbiel_all_isa206(POWER7_TLB_SETS, is);
 	else
 		WARN(1, "%s called on pre-POWER7 CPU\n", __func__);
-
-	asm volatile(PPC_INVALIDATE_ERAT "; isync" : : :"memory");
 }
 
 static inline unsigned long  ___tlbie(unsigned long vpn, int psize,
@@ -446,9 +442,7 @@ static long native_hpte_updatepp(unsigned long slot, unsigned long newpp,
 	DBG_LOW("    update(vpn=%016lx, avpnv=%016lx, group=%lx, newpp=%lx)",
 		vpn, want_v & HPTE_V_AVPN, slot, newpp);
 
-	hpte_v = be64_to_cpu(hptep->v);
-	if (cpu_has_feature(CPU_FTR_ARCH_300))
-		hpte_v = hpte_new_to_old_v(hpte_v, be64_to_cpu(hptep->r));
+	hpte_v = hpte_get_old_v(hptep);
 	/*
 	 * We need to invalidate the TLB always because hpte_remove doesn't do
 	 * a tlb invalidate. If a hash bucket gets full, we "evict" a more/less
@@ -462,9 +456,7 @@ static long native_hpte_updatepp(unsigned long slot, unsigned long newpp,
 	} else {
 		native_lock_hpte(hptep);
 		/* recheck with locks held */
-		hpte_v = be64_to_cpu(hptep->v);
-		if (cpu_has_feature(CPU_FTR_ARCH_300))
-			hpte_v = hpte_new_to_old_v(hpte_v, be64_to_cpu(hptep->r));
+		hpte_v = hpte_get_old_v(hptep);
 		if (unlikely(!HPTE_V_COMPARE(hpte_v, want_v) ||
 			     !(hpte_v & HPTE_V_VALID))) {
 			ret = -1;
@@ -490,18 +482,23 @@ static long native_hpte_updatepp(unsigned long slot, unsigned long newpp,
 	return ret;
 }
 
-static long __native_hpte_find(unsigned long want_v, unsigned long slot)
+static long native_hpte_find(unsigned long vpn, int psize, int ssize)
 {
 	struct hash_pte *hptep;
-	unsigned long hpte_v;
+	unsigned long hash;
 	unsigned long i;
+	long slot;
+	unsigned long want_v, hpte_v;
 
+	hash = hpt_hash(vpn, mmu_psize_defs[psize].shift, ssize);
+	want_v = hpte_encode_avpn(vpn, psize, ssize);
+
+	/* Bolted mappings are only ever in the primary group */
+	slot = (hash & htab_hash_mask) * HPTES_PER_GROUP;
 	for (i = 0; i < HPTES_PER_GROUP; i++) {
-		hptep = htab_address + slot;
-		hpte_v = be64_to_cpu(hptep->v);
-		if (cpu_has_feature(CPU_FTR_ARCH_300))
-			hpte_v = hpte_new_to_old_v(hpte_v, be64_to_cpu(hptep->r));
 
+		hptep = htab_address + slot;
+		hpte_v = hpte_get_old_v(hptep);
 		if (HPTE_V_COMPARE(hpte_v, want_v) && (hpte_v & HPTE_V_VALID))
 			/* HPTE matches */
 			return slot;
@@ -509,33 +506,6 @@ static long __native_hpte_find(unsigned long want_v, unsigned long slot)
 	}
 
 	return -1;
-}
-
-static long native_hpte_find(unsigned long vpn, int psize, int ssize)
-{
-	unsigned long hpte_group;
-	unsigned long want_v;
-	unsigned long hash;
-	long slot;
-
-	hash = hpt_hash(vpn, mmu_psize_defs[psize].shift, ssize);
-	want_v = hpte_encode_avpn(vpn, psize, ssize);
-
-	/*
-	 * We try to keep bolted entries always in primary hash
-	 * But in some case we can find them in secondary too.
-	 */
-	hpte_group = (hash & htab_hash_mask) * HPTES_PER_GROUP;
-	slot = __native_hpte_find(want_v, hpte_group);
-	if (slot < 0) {
-		/* Try in secondary */
-		hpte_group = (~hash & htab_hash_mask) * HPTES_PER_GROUP;
-		slot = __native_hpte_find(want_v, hpte_group);
-		if (slot < 0)
-			return -1;
-	}
-
-	return slot;
 }
 
 /*
@@ -617,11 +587,19 @@ static void native_hpte_invalidate(unsigned long slot, unsigned long vpn,
 	DBG_LOW("    invalidate(vpn=%016lx, hash: %lx)\n", vpn, slot);
 
 	want_v = hpte_encode_avpn(vpn, bpsize, ssize);
-	native_lock_hpte(hptep);
-	hpte_v = be64_to_cpu(hptep->v);
-	if (cpu_has_feature(CPU_FTR_ARCH_300))
-		hpte_v = hpte_new_to_old_v(hpte_v, be64_to_cpu(hptep->r));
+	hpte_v = hpte_get_old_v(hptep);
 
+	if (HPTE_V_COMPARE(hpte_v, want_v) && (hpte_v & HPTE_V_VALID)) {
+		native_lock_hpte(hptep);
+		/* recheck with locks held */
+		hpte_v = hpte_get_old_v(hptep);
+
+		if (HPTE_V_COMPARE(hpte_v, want_v) && (hpte_v & HPTE_V_VALID))
+			/* Invalidate the hpte. NOTE: this also unlocks it */
+			hptep->v = 0;
+		else
+			native_unlock_hpte(hptep);
+	}
 	/*
 	 * We need to invalidate the TLB always because hpte_remove doesn't do
 	 * a tlb invalidate. If a hash bucket gets full, we "evict" a more/less
@@ -629,13 +607,6 @@ static void native_hpte_invalidate(unsigned long slot, unsigned long vpn,
 	 * (hpte_remove) because we assume the old translation is still
 	 * technically "valid".
 	 */
-	if (!HPTE_V_COMPARE(hpte_v, want_v) || !(hpte_v & HPTE_V_VALID))
-		native_unlock_hpte(hptep);
-	else
-		/* Invalidate the hpte. NOTE: this also unlocks it */
-		hptep->v = 0;
-
-	/* Invalidate the TLB */
 	tlbie(vpn, bpsize, apsize, ssize, local);
 
 	local_irq_restore(flags);
@@ -677,17 +648,23 @@ static void native_hugepage_invalidate(unsigned long vsid,
 
 		hptep = htab_address + slot;
 		want_v = hpte_encode_avpn(vpn, psize, ssize);
-		native_lock_hpte(hptep);
-		hpte_v = be64_to_cpu(hptep->v);
-		if (cpu_has_feature(CPU_FTR_ARCH_300))
-			hpte_v = hpte_new_to_old_v(hpte_v, be64_to_cpu(hptep->r));
+		hpte_v = hpte_get_old_v(hptep);
 
 		/* Even if we miss, we need to invalidate the TLB */
-		if (!HPTE_V_COMPARE(hpte_v, want_v) || !(hpte_v & HPTE_V_VALID))
-			native_unlock_hpte(hptep);
-		else
-			/* Invalidate the hpte. NOTE: this also unlocks it */
-			hptep->v = 0;
+		if (HPTE_V_COMPARE(hpte_v, want_v) && (hpte_v & HPTE_V_VALID)) {
+			/* recheck with locks held */
+			native_lock_hpte(hptep);
+			hpte_v = hpte_get_old_v(hptep);
+
+			if (HPTE_V_COMPARE(hpte_v, want_v) && (hpte_v & HPTE_V_VALID)) {
+				/*
+				 * Invalidate the hpte. NOTE: this also unlocks it
+				 */
+
+				hptep->v = 0;
+			} else
+				native_unlock_hpte(hptep);
+		}
 		/*
 		 * We need to do tlb invalidate for all the address, tlbie
 		 * instruction compares entry_VA in tlb with the VA specified
@@ -855,16 +832,19 @@ static void native_flush_hash_range(unsigned long number, int local)
 			slot += hidx & _PTEIDX_GROUP_IX;
 			hptep = htab_address + slot;
 			want_v = hpte_encode_avpn(vpn, psize, ssize);
+			hpte_v = hpte_get_old_v(hptep);
+
+			if (!HPTE_V_COMPARE(hpte_v, want_v) || !(hpte_v & HPTE_V_VALID))
+				continue;
+			/* lock and try again */
 			native_lock_hpte(hptep);
-			hpte_v = be64_to_cpu(hptep->v);
-			if (cpu_has_feature(CPU_FTR_ARCH_300))
-				hpte_v = hpte_new_to_old_v(hpte_v,
-						be64_to_cpu(hptep->r));
-			if (!HPTE_V_COMPARE(hpte_v, want_v) ||
-			    !(hpte_v & HPTE_V_VALID))
+			hpte_v = hpte_get_old_v(hptep);
+
+			if (!HPTE_V_COMPARE(hpte_v, want_v) || !(hpte_v & HPTE_V_VALID))
 				native_unlock_hpte(hptep);
 			else
 				hptep->v = 0;
+
 		} pte_iterate_hashed_end();
 	}
 

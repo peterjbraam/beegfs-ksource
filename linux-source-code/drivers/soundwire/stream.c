@@ -167,15 +167,13 @@ static int sdw_program_slave_port_params(struct sdw_bus *bus,
 		return ret;
 	}
 
-	if (!dpn_prop->read_only_wordlength) {
-		/* Program DPN_BlockCtrl1 register */
-		ret = sdw_write(s_rt->slave, addr2, (p_params->bps - 1));
-		if (ret < 0) {
-			dev_err(&s_rt->slave->dev,
-				"DPN_BlockCtrl1 register write failed for port %d\n",
-				t_params->port_num);
-			return ret;
-		}
+	/* Program DPN_BlockCtrl1 register */
+	ret = sdw_write(s_rt->slave, addr2, (p_params->bps - 1));
+	if (ret < 0) {
+		dev_err(&s_rt->slave->dev,
+			"DPN_BlockCtrl1 register write failed for port %d\n",
+			t_params->port_num);
+		return ret;
 	}
 
 	/* Program DPN_SampleCtrl1 register */
@@ -315,9 +313,9 @@ static int sdw_enable_disable_slave_ports(struct sdw_bus *bus,
 	 * it is safe to reset this register
 	 */
 	if (en)
-		ret = sdw_write(s_rt->slave, addr, p_rt->ch_mask);
+		ret = sdw_update(s_rt->slave, addr, 0xFF, p_rt->ch_mask);
 	else
-		ret = sdw_write(s_rt->slave, addr, 0x0);
+		ret = sdw_update(s_rt->slave, addr, 0xFF, 0x0);
 
 	if (ret < 0)
 		dev_err(&s_rt->slave->dev,
@@ -466,9 +464,10 @@ static int sdw_prep_deprep_slave_ports(struct sdw_bus *bus,
 		addr = SDW_DPN_PREPARECTRL(p_rt->num);
 
 		if (prep)
-			ret = sdw_write(s_rt->slave, addr, p_rt->ch_mask);
+			ret = sdw_update(s_rt->slave, addr,
+					 0xFF, p_rt->ch_mask);
 		else
-			ret = sdw_write(s_rt->slave, addr, 0x0);
+			ret = sdw_update(s_rt->slave, addr, 0xFF, 0x0);
 
 		if (ret < 0) {
 			dev_err(&s_rt->slave->dev,
@@ -588,11 +587,10 @@ static int sdw_notify_config(struct sdw_master_runtime *m_rt)
 
 		if (slave->ops->bus_config) {
 			ret = slave->ops->bus_config(slave, &bus->params);
-			if (ret < 0) {
+			if (ret < 0)
 				dev_err(bus->dev, "Notify Slave: %d failed\n",
 					slave->dev_num);
-				return ret;
-			}
+			return ret;
 		}
 	}
 
@@ -604,25 +602,13 @@ static int sdw_notify_config(struct sdw_master_runtime *m_rt)
  * and Slave(s)
  *
  * @bus: SDW bus instance
- * @prepare: true if sdw_program_params() is called by _prepare.
  */
-static int sdw_program_params(struct sdw_bus *bus, bool prepare)
+static int sdw_program_params(struct sdw_bus *bus)
 {
 	struct sdw_master_runtime *m_rt;
 	int ret = 0;
 
 	list_for_each_entry(m_rt, &bus->m_rt_list, bus_node) {
-
-		/*
-		 * this loop walks through all master runtimes for a
-		 * bus, but the ports can only be configured while
-		 * explicitly preparing a stream or handling an
-		 * already-prepared stream otherwise.
-		 */
-		if (!prepare &&
-		    m_rt->stream->state == SDW_STREAM_CONFIGURED)
-			continue;
-
 		ret = sdw_program_port_params(m_rt);
 		if (ret < 0) {
 			dev_err(bus->dev,
@@ -716,6 +702,7 @@ error:
 	kfree(wbuf);
 error_1:
 	kfree(wr_msg);
+	bus->defer_msg.msg = NULL;
 	return ret;
 }
 
@@ -839,9 +826,10 @@ static int do_bank_switch(struct sdw_stream_runtime *stream)
 error:
 	list_for_each_entry(m_rt, &stream->master_list, stream_node) {
 		bus = m_rt->bus;
-
-		kfree(bus->defer_msg.msg->buf);
-		kfree(bus->defer_msg.msg);
+		if (bus->defer_msg.msg) {
+			kfree(bus->defer_msg.msg->buf);
+			kfree(bus->defer_msg.msg);
+		}
 	}
 
 msg_unlock:
@@ -1474,8 +1462,7 @@ static void sdw_release_bus_lock(struct sdw_stream_runtime *stream)
 	}
 }
 
-static int _sdw_prepare_stream(struct sdw_stream_runtime *stream,
-			       bool update_params)
+static int _sdw_prepare_stream(struct sdw_stream_runtime *stream)
 {
 	struct sdw_master_runtime *m_rt;
 	struct sdw_bus *bus = NULL;
@@ -1495,9 +1482,6 @@ static int _sdw_prepare_stream(struct sdw_stream_runtime *stream,
 			return -EINVAL;
 		}
 
-		if (!update_params)
-			goto program_params;
-
 		/* Increment cumulative bus bandwidth */
 		/* TODO: Update this during Device-Device support */
 		bus->params.bandwidth += m_rt->stream->params.rate *
@@ -1513,9 +1497,8 @@ static int _sdw_prepare_stream(struct sdw_stream_runtime *stream,
 			}
 		}
 
-program_params:
 		/* Program params */
-		ret = sdw_program_params(bus, true);
+		ret = sdw_program_params(bus);
 		if (ret < 0) {
 			dev_err(bus->dev, "Program params failed: %d\n", ret);
 			goto restore_params;
@@ -1563,8 +1546,7 @@ restore_params:
  */
 int sdw_prepare_stream(struct sdw_stream_runtime *stream)
 {
-	bool update_params = true;
-	int ret;
+	int ret = 0;
 
 	if (!stream) {
 		pr_err("SoundWire: Handle not found for stream\n");
@@ -1573,32 +1555,10 @@ int sdw_prepare_stream(struct sdw_stream_runtime *stream)
 
 	sdw_acquire_bus_lock(stream);
 
-	if (stream->state == SDW_STREAM_PREPARED) {
-		ret = 0;
-		goto state_err;
-	}
+	ret = _sdw_prepare_stream(stream);
+	if (ret < 0)
+		pr_err("Prepare for stream:%s failed: %d\n", stream->name, ret);
 
-	if (stream->state != SDW_STREAM_CONFIGURED &&
-	    stream->state != SDW_STREAM_DEPREPARED &&
-	    stream->state != SDW_STREAM_DISABLED) {
-		pr_err("%s: %s: inconsistent state state %d\n",
-		       __func__, stream->name, stream->state);
-		ret = -EINVAL;
-		goto state_err;
-	}
-
-	/*
-	 * when the stream is DISABLED, this means sdw_prepare_stream()
-	 * is called as a result of an underflow or a resume operation.
-	 * In this case, the bus parameters shall not be recomputed, but
-	 * still need to be re-applied
-	 */
-	if (stream->state == SDW_STREAM_DISABLED)
-		update_params = false;
-
-	ret = _sdw_prepare_stream(stream, update_params);
-
-state_err:
 	sdw_release_bus_lock(stream);
 	return ret;
 }
@@ -1615,7 +1575,7 @@ static int _sdw_enable_stream(struct sdw_stream_runtime *stream)
 		bus = m_rt->bus;
 
 		/* Program params */
-		ret = sdw_program_params(bus, false);
+		ret = sdw_program_params(bus);
 		if (ret < 0) {
 			dev_err(bus->dev, "Program params failed: %d\n", ret);
 			return ret;
@@ -1663,17 +1623,10 @@ int sdw_enable_stream(struct sdw_stream_runtime *stream)
 
 	sdw_acquire_bus_lock(stream);
 
-	if (stream->state != SDW_STREAM_PREPARED &&
-	    stream->state != SDW_STREAM_DISABLED) {
-		pr_err("%s: %s: inconsistent state state %d\n",
-		       __func__, stream->name, stream->state);
-		ret = -EINVAL;
-		goto state_err;
-	}
-
 	ret = _sdw_enable_stream(stream);
+	if (ret < 0)
+		pr_err("Enable for stream:%s failed: %d\n", stream->name, ret);
 
-state_err:
 	sdw_release_bus_lock(stream);
 	return ret;
 }
@@ -1700,7 +1653,7 @@ static int _sdw_disable_stream(struct sdw_stream_runtime *stream)
 		struct sdw_bus *bus = m_rt->bus;
 
 		/* Program params */
-		ret = sdw_program_params(bus, false);
+		ret = sdw_program_params(bus);
 		if (ret < 0) {
 			dev_err(bus->dev, "Program params failed: %d\n", ret);
 			return ret;
@@ -1746,16 +1699,10 @@ int sdw_disable_stream(struct sdw_stream_runtime *stream)
 
 	sdw_acquire_bus_lock(stream);
 
-	if (stream->state != SDW_STREAM_ENABLED) {
-		pr_err("%s: %s: inconsistent state state %d\n",
-		       __func__, stream->name, stream->state);
-		ret = -EINVAL;
-		goto state_err;
-	}
-
 	ret = _sdw_disable_stream(stream);
+	if (ret < 0)
+		pr_err("Disable for stream:%s failed: %d\n", stream->name, ret);
 
-state_err:
 	sdw_release_bus_lock(stream);
 	return ret;
 }
@@ -1782,7 +1729,7 @@ static int _sdw_deprepare_stream(struct sdw_stream_runtime *stream)
 			m_rt->ch_count * m_rt->stream->params.bps;
 
 		/* Program params */
-		ret = sdw_program_params(bus, false);
+		ret = sdw_program_params(bus);
 		if (ret < 0) {
 			dev_err(bus->dev, "Program params failed: %d\n", ret);
 			return ret;
@@ -1810,18 +1757,10 @@ int sdw_deprepare_stream(struct sdw_stream_runtime *stream)
 	}
 
 	sdw_acquire_bus_lock(stream);
-
-	if (stream->state != SDW_STREAM_PREPARED &&
-	    stream->state != SDW_STREAM_DISABLED) {
-		pr_err("%s: %s: inconsistent state state %d\n",
-		       __func__, stream->name, stream->state);
-		ret = -EINVAL;
-		goto state_err;
-	}
-
 	ret = _sdw_deprepare_stream(stream);
+	if (ret < 0)
+		pr_err("De-prepare for stream:%d failed: %d\n", ret, ret);
 
-state_err:
 	sdw_release_bus_lock(stream);
 	return ret;
 }

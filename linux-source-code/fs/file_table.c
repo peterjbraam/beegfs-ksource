@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  linux/fs/file_table.c
  *
@@ -161,6 +162,7 @@ over:
 	}
 	return ERR_PTR(-ENFILE);
 }
+EXPORT_SYMBOL_GPL(alloc_empty_file);
 
 /*
  * Variant of alloc_empty_file() that doesn't check and modify nr_files.
@@ -184,7 +186,7 @@ struct file *alloc_empty_file_noaccount(int flags, const struct cred *cred)
  * @flags: O_... flags with which the new file will be opened
  * @fop: the 'struct file_operations' for the new file
  */
-struct file *alloc_file(const struct path *path, int flags,
+static struct file *alloc_file(const struct path *path, int flags,
 		const struct file_operations *fop)
 {
 	struct file *file;
@@ -209,7 +211,6 @@ struct file *alloc_file(const struct path *path, int flags,
 		i_readcount_inc(path->dentry->d_inode);
 	return file;
 }
-EXPORT_SYMBOL(alloc_file);
 
 struct file *alloc_file_pseudo(struct inode *inode, struct vfsmount *mnt,
 				const char *name, int flags,
@@ -238,6 +239,17 @@ struct file *alloc_file_pseudo(struct inode *inode, struct vfsmount *mnt,
 }
 EXPORT_SYMBOL(alloc_file_pseudo);
 
+struct file *alloc_file_clone(struct file *base, int flags,
+				const struct file_operations *fops)
+{
+	struct file *f = alloc_file(&base->f_path, flags, fops);
+	if (!IS_ERR(f)) {
+		path_get(&f->f_path);
+		f->f_mapping = base->f_mapping;
+	}
+	return f;
+}
+
 /* the real guts of fput() - releasing the last reference to file
  */
 static void __fput(struct file *file)
@@ -245,6 +257,7 @@ static void __fput(struct file *file)
 	struct dentry *dentry = file->f_path.dentry;
 	struct vfsmount *mnt = file->f_path.mnt;
 	struct inode *inode = file->f_inode;
+	fmode_t mode = file->f_mode;
 
 	if (unlikely(!(file->f_mode & FMODE_OPENED)))
 		goto out;
@@ -267,18 +280,20 @@ static void __fput(struct file *file)
 	if (file->f_op->release)
 		file->f_op->release(inode, file);
 	if (unlikely(S_ISCHR(inode->i_mode) && inode->i_cdev != NULL &&
-		     !(file->f_mode & FMODE_PATH))) {
+		     !(mode & FMODE_PATH))) {
 		cdev_put(inode->i_cdev);
 	}
 	fops_put(file->f_op);
 	put_pid(file->f_owner.pid);
-	if ((file->f_mode & (FMODE_READ | FMODE_WRITE)) == FMODE_READ)
+	if ((mode & (FMODE_READ | FMODE_WRITE)) == FMODE_READ)
 		i_readcount_dec(inode);
-	if (file->f_mode & FMODE_WRITER) {
+	if (mode & FMODE_WRITER) {
 		put_write_access(inode);
 		__mnt_drop_write(mnt);
 	}
 	dput(dentry);
+	if (unlikely(mode & FMODE_NEED_UNMOUNT))
+		dissolve_on_fput(mnt);
 	mntput(mnt);
 out:
 	file_free(file);
@@ -313,6 +328,7 @@ void flush_delayed_fput(void)
 {
 	delayed_fput(NULL);
 }
+EXPORT_SYMBOL_GPL(flush_delayed_fput);
 
 static DECLARE_DELAYED_WORK(delayed_fput_work, delayed_fput);
 
@@ -360,6 +376,7 @@ void __fput_sync(struct file *file)
 }
 
 EXPORT_SYMBOL(fput);
+EXPORT_SYMBOL_GPL(__fput_sync);
 
 void __init files_init(void)
 {
@@ -375,10 +392,11 @@ void __init files_init(void)
 void __init files_maxfiles_init(void)
 {
 	unsigned long n;
-	unsigned long memreserve = (totalram_pages - nr_free_pages()) * 3/2;
+	unsigned long nr_pages = totalram_pages();
+	unsigned long memreserve = (nr_pages - nr_free_pages()) * 3/2;
 
-	memreserve = min(memreserve, totalram_pages - 1);
-	n = ((totalram_pages - memreserve) * (PAGE_SIZE / 1024)) / 10;
+	memreserve = min(memreserve, nr_pages - 1);
+	n = ((nr_pages - memreserve) * (PAGE_SIZE / 1024)) / 10;
 
 	files_stat.max_files = max_t(unsigned long, n, NR_FILE);
 }

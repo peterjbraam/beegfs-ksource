@@ -8,7 +8,8 @@ Overview
 ========
 
 phylink is a mechanism to support hot-pluggable networking modules
-without needing to re-initialise the adapter on hot-plug events.
+directly connected to a MAC without needing to re-initialise the
+adapter on hot-plug events.
 
 phylink supports conventional phylib-based setups, fixed link setups
 and SFP (Small Formfactor Pluggable) modules at present.
@@ -250,8 +251,7 @@ this documentation.
 	phylink_mac_change(priv->phylink, link_is_up);
 
     where ``link_is_up`` is true if the link is currently up or false
-    otherwise. If a MAC is unable to provide these interrupts, then
-    it should set ``priv->phylink_config.pcs_poll = true;`` in step 9.
+    otherwise.
 
 11. Verify that the driver does not call::
 

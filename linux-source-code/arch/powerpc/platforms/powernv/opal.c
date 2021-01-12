@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * PowerNV OPAL high level interfaces
  *
  * Copyright 2011 IBM Corp.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 
 #define pr_fmt(fmt)	"opal: " fmt
@@ -26,7 +22,6 @@
 #include <linux/memblock.h>
 #include <linux/kthread.h>
 #include <linux/freezer.h>
-#include <linux/printk.h>
 #include <linux/kmsg_dump.h>
 #include <linux/console.h>
 #include <linux/sched/debug.h>
@@ -173,8 +168,10 @@ int __init early_init_dt_scan_recoverable_ranges(unsigned long node,
 	/*
 	 * Allocate a buffer to hold the MC recoverable ranges.
 	 */
-	mc_recoverable_range =__va(memblock_phys_alloc(size, __alignof__(u64)));
-	memset(mc_recoverable_range, 0, size);
+	mc_recoverable_range = memblock_alloc(size, __alignof__(u64));
+	if (!mc_recoverable_range)
+		panic("%s: Failed to allocate %u bytes align=0x%lx\n",
+		      __func__, size, __alignof__(u64));
 
 	for (i = 0; i < mc_recoverable_range_len; i++) {
 		mc_recoverable_range[i].start_addr =
@@ -207,16 +204,18 @@ static int __init opal_register_exception_handlers(void)
 	glue = 0x7000;
 
 	/*
-	 * Check if we are running on newer firmware that exports
-	 * OPAL_HANDLE_HMI token. If yes, then don't ask OPAL to patch
-	 * the HMI interrupt and we catch it directly in Linux.
+	 * Only ancient OPAL firmware requires this.
+	 * Specifically, firmware from FW810.00 (released June 2014)
+	 * through FW810.20 (Released October 2014).
 	 *
-	 * For older firmware (i.e currently released POWER8 System Firmware
-	 * as of today <= SV810_087), we fallback to old behavior and let OPAL
-	 * patch the HMI vector and handle it inside OPAL firmware.
+	 * Check if we are running on newer (post Oct 2014) firmware that
+	 * exports the OPAL_HANDLE_HMI token. If yes, then don't ask OPAL to
+	 * patch the HMI interrupt and we catch it directly in Linux.
 	 *
-	 * For newer firmware (in development/yet to be released) we will
-	 * start catching/handling HMI directly in Linux.
+	 * For older firmware (i.e < FW810.20), we fallback to old behavior and
+	 * let OPAL patch the HMI vector and handle it inside OPAL firmware.
+	 *
+	 * For newer firmware we catch/handle the HMI directly in Linux.
 	 */
 	if (!opal_check_token(OPAL_HANDLE_HMI)) {
 		pr_info("Old firmware detected, OPAL handles HMIs.\n");
@@ -226,6 +225,11 @@ static int __init opal_register_exception_handlers(void)
 		glue += 128;
 	}
 
+	/*
+	 * Only applicable to ancient firmware, all modern
+	 * (post March 2015/skiboot 5.0) firmware will just return
+	 * OPAL_UNSUPPORTED.
+	 */
 	opal_register_exception_handler(OPAL_SOFTPATCH_HANDLER, 0, glue);
 #endif
 
@@ -381,12 +385,8 @@ static int __opal_put_chars(uint32_t vtermno, const char *data, int total_len, b
 	olen = cpu_to_be64(total_len);
 	rc = opal_console_write(vtermno, &olen, data);
 	if (rc == OPAL_BUSY || rc == OPAL_BUSY_EVENT) {
-		if (rc == OPAL_BUSY_EVENT) {
-			mdelay(OPAL_BUSY_DELAY_MS);
+		if (rc == OPAL_BUSY_EVENT)
 			opal_poll_events(NULL);
-		} else if (rc == OPAL_BUSY_EVENT) {
-			mdelay(OPAL_BUSY_DELAY_MS);
-		}
 		written = -EAGAIN;
 		goto out;
 	}
@@ -412,15 +412,6 @@ out:
 	if (atomic)
 		spin_unlock_irqrestore(&opal_write_lock, flags);
 
-	/* In the -EAGAIN case, callers loop, so we have to flush the console
-	 * here in case they have interrupts off (and we don't want to wait
-	 * for async flushing if we can make immediate progress here). If
-	 * necessary the API could be made entirely non-flushing if the
-	 * callers had a ->flush API to use.
-	 */
-	if (written == -EAGAIN)
-		opal_flush_console(vtermno);
-
 	return written;
 }
 
@@ -440,40 +431,74 @@ int opal_put_chars_atomic(uint32_t vtermno, const char *data, int total_len)
 	return __opal_put_chars(vtermno, data, total_len, true);
 }
 
-int opal_flush_console(uint32_t vtermno)
+static s64 __opal_flush_console(uint32_t vtermno)
 {
 	s64 rc;
 
 	if (!opal_check_token(OPAL_CONSOLE_FLUSH)) {
 		__be64 evt;
 
-		WARN_ONCE(1, "opal: OPAL_CONSOLE_FLUSH missing.\n");
 		/*
 		 * If OPAL_CONSOLE_FLUSH is not implemented in the firmware,
 		 * the console can still be flushed by calling the polling
 		 * function while it has OPAL_EVENT_CONSOLE_OUTPUT events.
 		 */
-		do {
-			opal_poll_events(&evt);
-		} while (be64_to_cpu(evt) & OPAL_EVENT_CONSOLE_OUTPUT);
+		WARN_ONCE(1, "opal: OPAL_CONSOLE_FLUSH missing.\n");
 
-		return OPAL_SUCCESS;
+		opal_poll_events(&evt);
+		if (!(be64_to_cpu(evt) & OPAL_EVENT_CONSOLE_OUTPUT))
+			return OPAL_SUCCESS;
+		return OPAL_BUSY;
+
+	} else {
+		rc = opal_console_flush(vtermno);
+		if (rc == OPAL_BUSY_EVENT) {
+			opal_poll_events(NULL);
+			rc = OPAL_BUSY;
+		}
+		return rc;
 	}
 
-	do  {
-		rc = OPAL_BUSY;
-		while (rc == OPAL_BUSY || rc == OPAL_BUSY_EVENT) {
-			rc = opal_console_flush(vtermno);
-			if (rc == OPAL_BUSY_EVENT) {
-				mdelay(OPAL_BUSY_DELAY_MS);
-				opal_poll_events(NULL);
-			} else if (rc == OPAL_BUSY) {
-				mdelay(OPAL_BUSY_DELAY_MS);
-			}
-		}
-	} while (rc == OPAL_PARTIAL); /* More to flush */
+}
 
-	return opal_error_code(rc);
+/*
+ * opal_flush_console spins until the console is flushed
+ */
+int opal_flush_console(uint32_t vtermno)
+{
+	for (;;) {
+		s64 rc = __opal_flush_console(vtermno);
+
+		if (rc == OPAL_BUSY || rc == OPAL_PARTIAL) {
+			mdelay(1);
+			continue;
+		}
+
+		return opal_error_code(rc);
+	}
+}
+
+/*
+ * opal_flush_chars is an hvc interface that sleeps until the console is
+ * flushed if wait, otherwise it will return -EBUSY if the console has data,
+ * -EAGAIN if it has data and some of it was flushed.
+ */
+int opal_flush_chars(uint32_t vtermno, bool wait)
+{
+	for (;;) {
+		s64 rc = __opal_flush_console(vtermno);
+
+		if (rc == OPAL_BUSY || rc == OPAL_PARTIAL) {
+			if (wait) {
+				msleep(OPAL_BUSY_DELAY_MS);
+				continue;
+			}
+			if (rc == OPAL_PARTIAL)
+				return -EAGAIN;
+		}
+
+		return opal_error_code(rc);
+	}
 }
 
 static int opal_recover_mce(struct pt_regs *regs,
@@ -494,7 +519,7 @@ static int opal_recover_mce(struct pt_regs *regs,
 		recovered = 0;
 	}
 
-	if (!recovered && evt->severity == MCE_SEV_ERROR_SYNC) {
+	if (!recovered && evt->sync_error) {
 		/*
 		 * Try to kill processes if we get a synchronous machine check
 		 * (e.g., one caused by execution of this instruction). This
@@ -525,7 +550,7 @@ static int opal_recover_mce(struct pt_regs *regs,
 	return recovered;
 }
 
-void pnv_platform_error_reboot(struct pt_regs *regs, const char *msg)
+void __noreturn pnv_platform_error_reboot(struct pt_regs *regs, const char *msg)
 {
 	panic_flush_kmsg_start();
 
@@ -603,6 +628,27 @@ int opal_hmi_exception_early(struct pt_regs *regs)
 	return 0;
 }
 
+int opal_hmi_exception_early2(struct pt_regs *regs)
+{
+	s64 rc;
+	__be64 out_flags;
+
+	/*
+	 * call opal hmi handler.
+	 * Check 64-bit flag mask to find out if an event was generated,
+	 * and whether TB is still valid or not etc.
+	 */
+	rc = opal_handle_hmi2(&out_flags);
+	if (rc != OPAL_SUCCESS)
+		return 0;
+
+	if (be64_to_cpu(out_flags) & OPAL_HMI_FLAGS_NEW_EVENT)
+		local_paca->hmi_event_available = 1;
+	if (be64_to_cpu(out_flags) & OPAL_HMI_FLAGS_TOD_TB_FAIL)
+		tb_invalid = true;
+	return 1;
+}
+
 /* HMI exception handler called in virtual mode during check_irq_replay. */
 int opal_handle_hmi_exception(struct pt_regs *regs)
 {
@@ -670,7 +716,10 @@ static ssize_t symbol_map_read(struct file *fp, struct kobject *kobj,
 				       bin_attr->size);
 }
 
-static BIN_ATTR_RO(symbol_map, 0);
+static struct bin_attribute symbol_map_attr = {
+	.attr = {.name = "symbol_map", .mode = 0400},
+	.read = symbol_map_read
+};
 
 static void opal_export_symmap(void)
 {
@@ -687,10 +736,10 @@ static void opal_export_symmap(void)
 		return;
 
 	/* Setup attributes */
-	bin_attr_symbol_map.private = __va(be64_to_cpu(syms[0]));
-	bin_attr_symbol_map.size = be64_to_cpu(syms[1]);
+	symbol_map_attr.private = __va(be64_to_cpu(syms[0]));
+	symbol_map_attr.size = be64_to_cpu(syms[1]);
 
-	rc = sysfs_create_bin_file(opal_kobj, &bin_attr_symbol_map);
+	rc = sysfs_create_bin_file(opal_kobj, &symbol_map_attr);
 	if (rc)
 		pr_warn("Error %d creating OPAL symbols file\n", rc);
 }
@@ -867,7 +916,7 @@ static int __init opal_init(void)
 	consoles = of_find_node_by_path("/ibm,opal/consoles");
 	if (consoles) {
 		for_each_child_of_node(consoles, np) {
-			if (strcmp(np->name, "serial"))
+			if (!of_node_name_eq(np, "serial"))
 				continue;
 			of_platform_device_create(np, NULL, NULL);
 		}
@@ -994,6 +1043,7 @@ EXPORT_SYMBOL_GPL(opal_flash_read);
 EXPORT_SYMBOL_GPL(opal_flash_write);
 EXPORT_SYMBOL_GPL(opal_flash_erase);
 EXPORT_SYMBOL_GPL(opal_prd_msg);
+EXPORT_SYMBOL_GPL(opal_check_token);
 
 /* Convert a region of vmalloc memory to an opal sg list */
 struct opal_sg_list *opal_vmalloc_to_sg_list(void *vmalloc_addr,

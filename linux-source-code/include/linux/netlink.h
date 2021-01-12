@@ -180,29 +180,26 @@ netlink_skb_clone(struct sk_buff *skb, gfp_t gfp_mask)
 struct netlink_callback {
 	struct sk_buff		*skb;
 	const struct nlmsghdr	*nlh;
-	RH_KABI_DEPRECATE_FN(int, start, struct netlink_callback *)
 	int			(*dump)(struct sk_buff * skb,
 					struct netlink_callback *cb);
 	int			(*done)(struct netlink_callback *cb);
 	void			*data;
 	/* the module that dump function belong to */
 	struct module		*module;
+	struct netlink_ext_ack	*extack;
 	u16			family;
-	u16			RH_KABI_RENAME(min_dump_alloc, min_dump_alloc_rh_old);
+	u16			min_dump_alloc;
+	bool			strict_check;
+	u16			answer_flags;
 	unsigned int		prev_seq, seq;
-	RH_KABI_REPLACE(long	args[6],
-		        union {
-		                u8              ctx[48];
+	union {
+		u8		ctx[48];
 
-				/* args is deprecated. Cast a struct over ctx instead
-		                 * for proper type safety.
-		                 */
-		                long            args[6];
-		        };)
-	RH_KABI_EXTEND(struct netlink_ext_ack *extack)
-	RH_KABI_EXTEND(bool strict_check)
-	RH_KABI_EXTEND(u16 answer_flags)
-	RH_KABI_EXTEND(u32	min_dump_alloc)
+		/* args is deprecated. Cast a struct over ctx instead
+		 * for proper type safety.
+		 */
+		long		args[6];
+	};
 };
 
 struct netlink_notify {

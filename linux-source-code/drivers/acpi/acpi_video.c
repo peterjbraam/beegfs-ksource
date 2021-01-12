@@ -1,23 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  video.c - ACPI Video Driver
  *
  *  Copyright (C) 2004 Luming Yu <luming.yu@intel.com>
  *  Copyright (C) 2004 Bruno Ducrot <ducrot@poupinou.org>
  *  Copyright (C) 2006 Thomas Tuttle <linux-kernel@ttuttle.net>
- *
- * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or (at
- *  your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful, but
- *  WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  General Public License for more details.
- *
- * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  */
 
 #include <linux/kernel.h>
@@ -712,13 +699,9 @@ acpi_video_device_EDID(struct acpi_video_device *device,
  *			event notify code.
  *	lcd_flag	:
  *		0.	The system BIOS should automatically control the brightness level
- *			of the LCD when:
- *			- the power changes from AC to DC (ACPI appendix B)
- *			- a brightness hotkey gets pressed (implied by Win7/8 backlight docs)
+ *			of the LCD when the power changes from AC to DC
  *		1.	The system BIOS should NOT automatically control the brightness
- *			level of the LCD when:
- *			- the power changes from AC to DC (ACPI appendix B)
- *			- a brightness hotkey gets pressed (implied by Win7/8 backlight docs)
+ *			level of the LCD when the power changes from AC to DC.
  *  Return Value:
  *		-EINVAL	wrong arg.
  */
@@ -2200,7 +2183,7 @@ int acpi_video_register(void)
 	if (register_count) {
 		/*
 		 * if the function of acpi_video_register is already called,
-		 * don't register the acpi_video_bus again and return no error.
+		 * don't register the acpi_vide_bus again and return no error.
 		 */
 		goto leave;
 	}

@@ -760,7 +760,7 @@ int ixgbe_setup_fcoe_ddp_resources(struct ixgbe_adapter *adapter)
 		return 0;
 
 	/* Extra buffer to be shared by all DDPs for HW work around */
-	buffer = kmalloc(IXGBE_FCBUFF_MIN, GFP_ATOMIC);
+	buffer = kmalloc(IXGBE_FCBUFF_MIN, GFP_KERNEL);
 	if (!buffer)
 		return -ENOMEM;
 
@@ -968,7 +968,8 @@ int ixgbe_fcoe_get_hbainfo(struct net_device *netdev,
 {
 	struct ixgbe_adapter *adapter = netdev_priv(netdev);
 	struct ixgbe_hw *hw = &adapter->hw;
-	u64 dsn;
+	int i, pos;
+	u8 buf[8];
 
 	if (!info)
 		return -EINVAL;
@@ -984,11 +985,17 @@ int ixgbe_fcoe_get_hbainfo(struct net_device *netdev,
 	/* Serial Number */
 
 	/* Get the PCI-e Device Serial Number Capability */
-	dsn = pci_get_dsn(adapter->pdev);
-	if (dsn)
+	pos = pci_find_ext_capability(adapter->pdev, PCI_EXT_CAP_ID_DSN);
+	if (pos) {
+		pos += 4;
+		for (i = 0; i < 8; i++)
+			pci_read_config_byte(adapter->pdev, pos + i, &buf[i]);
+
 		snprintf(info->serial_number, sizeof(info->serial_number),
-			 "%016llX", dsn);
-	else
+			 "%02X%02X%02X%02X%02X%02X%02X%02X",
+			 buf[7], buf[6], buf[5], buf[4],
+			 buf[3], buf[2], buf[1], buf[0]);
+	} else
 		snprintf(info->serial_number, sizeof(info->serial_number),
 			 "Unknown");
 

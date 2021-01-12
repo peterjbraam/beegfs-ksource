@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
    md.c : Multiple Devices driver for Linux
      Copyright (C) 1998, 1999, 2000 Ingo Molnar
@@ -22,14 +23,6 @@
    - persistent bitmap code
      Copyright (C) 2003-2004, Paul Clements, SteelEye Technology, Inc.
 
-   This program is free software; you can redistribute it and/or modify
-   it under the terms of the GNU General Public License as published by
-   the Free Software Foundation; either version 2, or (at your option)
-   any later version.
-
-   You should have received a copy of the GNU General Public License
-   (for example /usr/src/linux/COPYING); if not, write to the Free
-   Software Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 
    Errors, Warnings, etc.
    Please use:
@@ -132,165 +125,74 @@ static inline int speed_max(struct mddev *mddev)
 		mddev->sync_speed_max : sysctl_speed_limit_max;
 }
 
-static void rdev_uninit_serial(struct md_rdev *rdev)
+static int rdev_init_wb(struct md_rdev *rdev)
 {
-	if (!test_and_clear_bit(CollisionCheck, &rdev->flags))
-		return;
-
-	kvfree(rdev->serial);
-	rdev->serial = NULL;
-}
-
-static void rdevs_uninit_serial(struct mddev *mddev)
-{
-	struct md_rdev *rdev;
-
-	rdev_for_each(rdev, mddev)
-		rdev_uninit_serial(rdev);
-}
-
-static int rdev_init_serial(struct md_rdev *rdev)
-{
-	/* serial_nums equals with BARRIER_BUCKETS_NR */
-	int i, serial_nums = 1 << ((PAGE_SHIFT - ilog2(sizeof(atomic_t))));
-	struct serial_in_rdev *serial = NULL;
-
-	if (test_bit(CollisionCheck, &rdev->flags))
+	if (rdev->bdev->bd_queue->nr_hw_queues == 1)
 		return 0;
 
-	serial = kvmalloc(sizeof(struct serial_in_rdev) * serial_nums,
-			  GFP_KERNEL);
-	if (!serial)
-		return -ENOMEM;
+	spin_lock_init(&rdev->wb_list_lock);
+	INIT_LIST_HEAD(&rdev->wb_list);
+	init_waitqueue_head(&rdev->wb_io_wait);
+	set_bit(WBCollisionCheck, &rdev->flags);
 
-	for (i = 0; i < serial_nums; i++) {
-		struct serial_in_rdev *serial_tmp = &serial[i];
-
-		spin_lock_init(&serial_tmp->serial_lock);
-		serial_tmp->serial_rb = RB_ROOT_CACHED;
-		init_waitqueue_head(&serial_tmp->serial_io_wait);
-	}
-
-	rdev->serial = serial;
-	set_bit(CollisionCheck, &rdev->flags);
-
-	return 0;
-}
-
-static int rdevs_init_serial(struct mddev *mddev)
-{
-	struct md_rdev *rdev;
-	int ret = 0;
-
-	rdev_for_each(rdev, mddev) {
-		ret = rdev_init_serial(rdev);
-		if (ret)
-			break;
-	}
-
-	/* Free all resources if pool is not existed */
-	if (ret && !mddev->serial_info_pool)
-		rdevs_uninit_serial(mddev);
-
-	return ret;
+	return 1;
 }
 
 /*
- * rdev needs to enable serial stuffs if it meets the conditions:
- * 1. it is multi-queue device flaged with writemostly.
- * 2. the write-behind mode is enabled.
+ * Create wb_info_pool if rdev is the first multi-queue device flaged
+ * with writemostly, also write-behind mode is enabled.
  */
-static int rdev_need_serial(struct md_rdev *rdev)
+void mddev_create_wb_pool(struct mddev *mddev, struct md_rdev *rdev,
+			  bool is_suspend)
 {
-	return (rdev && rdev->mddev->bitmap_info.max_write_behind > 0 &&
-		rdev->bdev->bd_queue->nr_hw_queues != 1 &&
-		test_bit(WriteMostly, &rdev->flags));
-}
-
-/*
- * Init resource for rdev(s), then create serial_info_pool if:
- * 1. rdev is the first device which return true from rdev_enable_serial.
- * 2. rdev is NULL, means we want to enable serialization for all rdevs.
- */
-void mddev_create_serial_pool(struct mddev *mddev, struct md_rdev *rdev,
-			      bool is_suspend)
-{
-	int ret = 0;
-
-	if (rdev && !rdev_need_serial(rdev) &&
-	    !test_bit(CollisionCheck, &rdev->flags))
+	if (mddev->bitmap_info.max_write_behind == 0)
 		return;
 
-	if (!is_suspend)
-		mddev_suspend(mddev);
+	if (!test_bit(WriteMostly, &rdev->flags) || !rdev_init_wb(rdev))
+		return;
 
-	if (!rdev)
-		ret = rdevs_init_serial(mddev);
-	else
-		ret = rdev_init_serial(rdev);
-	if (ret)
-		goto abort;
-
-	if (mddev->serial_info_pool == NULL) {
+	if (mddev->wb_info_pool == NULL) {
 		unsigned int noio_flag;
-
-		noio_flag = memalloc_noio_save();
-		mddev->serial_info_pool =
-			mempool_create_kmalloc_pool(NR_SERIAL_INFOS,
-						sizeof(struct serial_info));
-		memalloc_noio_restore(noio_flag);
-		if (!mddev->serial_info_pool) {
-			rdevs_uninit_serial(mddev);
-			pr_err("can't alloc memory pool for serialization\n");
-		}
-	}
-
-abort:
-	if (!is_suspend)
-		mddev_resume(mddev);
-}
-
-/*
- * Free resource from rdev(s), and destroy serial_info_pool under conditions:
- * 1. rdev is the last device flaged with CollisionCheck.
- * 2. when bitmap is destroyed while policy is not enabled.
- * 3. for disable policy, the pool is destroyed only when no rdev needs it.
- */
-void mddev_destroy_serial_pool(struct mddev *mddev, struct md_rdev *rdev,
-			       bool is_suspend)
-{
-	if (rdev && !test_bit(CollisionCheck, &rdev->flags))
-		return;
-
-	if (mddev->serial_info_pool) {
-		struct md_rdev *temp;
-		int num = 0; /* used to track if other rdevs need the pool */
 
 		if (!is_suspend)
 			mddev_suspend(mddev);
-		rdev_for_each(temp, mddev) {
-			if (!rdev) {
-				if (!mddev->serialize_policy ||
-				    !rdev_need_serial(temp))
-					rdev_uninit_serial(temp);
-				else
-					num++;
-			} else if (temp != rdev &&
-				   test_bit(CollisionCheck, &temp->flags))
-				num++;
-		}
-
-		if (rdev)
-			rdev_uninit_serial(rdev);
-
-		if (num)
-			pr_info("The mempool could be used by other devices\n");
-		else {
-			mempool_destroy(mddev->serial_info_pool);
-			mddev->serial_info_pool = NULL;
-		}
+		noio_flag = memalloc_noio_save();
+		mddev->wb_info_pool = mempool_create_kmalloc_pool(NR_WB_INFOS,
+							sizeof(struct wb_info));
+		memalloc_noio_restore(noio_flag);
+		if (!mddev->wb_info_pool)
+			pr_err("can't alloc memory pool for writemostly\n");
 		if (!is_suspend)
 			mddev_resume(mddev);
+	}
+}
+EXPORT_SYMBOL_GPL(mddev_create_wb_pool);
+
+/*
+ * destroy wb_info_pool if rdev is the last device flaged with WBCollisionCheck.
+ */
+static void mddev_destroy_wb_pool(struct mddev *mddev, struct md_rdev *rdev)
+{
+	if (!test_and_clear_bit(WBCollisionCheck, &rdev->flags))
+		return;
+
+	if (mddev->wb_info_pool) {
+		struct md_rdev *temp;
+		int num = 0;
+
+		/*
+		 * Check if other rdevs need wb_info_pool.
+		 */
+		rdev_for_each(temp, mddev)
+			if (temp != rdev &&
+			    test_bit(WBCollisionCheck, &temp->flags))
+				num++;
+		if (!num) {
+			mddev_suspend(rdev->mddev);
+			mempool_destroy(mddev->wb_info_pool);
+			mddev->wb_info_pool = NULL;
+			mddev_resume(rdev->mddev);
+		}
 	}
 }
 
@@ -474,6 +376,11 @@ static blk_qc_t md_make_request(struct request_queue *q, struct bio *bio)
 	struct mddev *mddev = q->queuedata;
 	unsigned int sectors;
 
+	if (mddev == NULL || mddev->pers == NULL) {
+		bio_io_error(bio);
+		return BLK_QC_T_NONE;
+	}
+
 	if (unlikely(test_bit(MD_BROKEN, &mddev->flags)) && (rw == WRITE)) {
 		bio_io_error(bio);
 		return BLK_QC_T_NONE;
@@ -481,10 +388,6 @@ static blk_qc_t md_make_request(struct request_queue *q, struct bio *bio)
 
 	blk_queue_split(q, &bio);
 
-	if (mddev == NULL || mddev->pers == NULL) {
-		bio_io_error(bio);
-		return BLK_QC_T_NONE;
-	}
 	if (mddev->ro == 1 && unlikely(rw == WRITE)) {
 		if (bio_sectors(bio) != 0)
 			bio->bi_status = BLK_STS_IOERR;
@@ -2435,7 +2338,7 @@ static int bind_rdev_to_array(struct md_rdev *rdev, struct mddev *mddev)
 	pr_debug("md: bind<%s>\n", b);
 
 	if (mddev->raid_disks)
-		mddev_create_serial_pool(mddev, rdev, false);
+		mddev_create_wb_pool(mddev, rdev, false);
 
 	if ((err = kobject_add(&rdev->kobj, &mddev->kobj, "dev-%s", b)))
 		goto fail;
@@ -2473,7 +2376,7 @@ static void unbind_rdev_from_array(struct md_rdev *rdev)
 	bd_unlink_disk_holder(rdev->bdev, rdev->mddev->gendisk);
 	list_del_rcu(&rdev->same_set);
 	pr_debug("md: unbind<%s>\n", bdevname(rdev->bdev,b));
-	mddev_destroy_serial_pool(rdev->mddev, rdev, false);
+	mddev_destroy_wb_pool(rdev->mddev, rdev);
 	rdev->mddev = NULL;
 	sysfs_remove_link(&rdev->kobj, "block");
 	sysfs_put(rdev->sysfs_state);
@@ -2986,10 +2889,10 @@ state_store(struct md_rdev *rdev, const char *buf, size_t len)
 		}
 	} else if (cmd_match(buf, "writemostly")) {
 		set_bit(WriteMostly, &rdev->flags);
-		mddev_create_serial_pool(rdev->mddev, rdev, false);
+		mddev_create_wb_pool(rdev->mddev, rdev, false);
 		err = 0;
 	} else if (cmd_match(buf, "-writemostly")) {
-		mddev_destroy_serial_pool(rdev->mddev, rdev, false);
+		mddev_destroy_wb_pool(rdev->mddev, rdev);
 		clear_bit(WriteMostly, &rdev->flags);
 		err = 0;
 	} else if (cmd_match(buf, "blocked")) {
@@ -3824,11 +3727,7 @@ int strict_strtoul_scaled(const char *cp, unsigned long *res, int scale)
 		return -EINVAL;
 	if (decimals < 0)
 		decimals = 0;
-	while (decimals < scale) {
-		result *= 10;
-		decimals ++;
-	}
-	*res = result;
+	*res = result * int_pow(10, scale - decimals);
 	return 0;
 }
 
@@ -5379,57 +5278,6 @@ static struct md_sysfs_entry md_fail_last_dev =
 __ATTR(fail_last_dev, S_IRUGO | S_IWUSR, fail_last_dev_show,
        fail_last_dev_store);
 
-static ssize_t serialize_policy_show(struct mddev *mddev, char *page)
-{
-	if (mddev->pers == NULL || (mddev->pers->level != 1))
-		return sprintf(page, "n/a\n");
-	else
-		return sprintf(page, "%d\n", mddev->serialize_policy);
-}
-
-/*
- * Setting serialize_policy to true to enforce write IO is not reordered
- * for raid1.
- */
-static ssize_t
-serialize_policy_store(struct mddev *mddev, const char *buf, size_t len)
-{
-	int err;
-	bool value;
-
-	err = kstrtobool(buf, &value);
-	if (err)
-		return err;
-
-	if (value == mddev->serialize_policy)
-		return len;
-
-	err = mddev_lock(mddev);
-	if (err)
-		return err;
-	if (mddev->pers == NULL || (mddev->pers->level != 1)) {
-		pr_err("md: serialize_policy is only effective for raid1\n");
-		err = -EINVAL;
-		goto unlock;
-	}
-
-	mddev_suspend(mddev);
-	if (value)
-		mddev_create_serial_pool(mddev, NULL, true);
-	else
-		mddev_destroy_serial_pool(mddev, NULL, true);
-	mddev->serialize_policy = value;
-	mddev_resume(mddev);
-unlock:
-	mddev_unlock(mddev);
-	return err ?: len;
-}
-
-static struct md_sysfs_entry md_serialize_policy =
-__ATTR(serialize_policy, S_IRUGO | S_IWUSR, serialize_policy_show,
-       serialize_policy_store);
-
-
 static struct attribute *md_default_attrs[] = {
 	&md_level.attr,
 	&md_layout.attr,
@@ -5447,7 +5295,6 @@ static struct attribute *md_default_attrs[] = {
 	&max_corr_read_errors.attr,
 	&md_consistency_policy.attr,
 	&md_fail_last_dev.attr,
-	&md_serialize_policy.attr,
 	NULL,
 };
 
@@ -5566,7 +5413,8 @@ int mddev_init_writes_pending(struct mddev *mddev)
 {
 	if (mddev->writes_pending.percpu_count_ptr)
 		return 0;
-	if (percpu_ref_init(&mddev->writes_pending, no_op, 0, GFP_KERNEL) < 0)
+	if (percpu_ref_init(&mddev->writes_pending, no_op,
+			    PERCPU_REF_ALLOW_REINIT, GFP_KERNEL) < 0)
 		return -ENOMEM;
 	/* We want to start with the refcount at zero */
 	percpu_ref_put(&mddev->writes_pending);
@@ -5922,18 +5770,18 @@ int md_run(struct mddev *mddev)
 		goto bitmap_abort;
 
 	if (mddev->bitmap_info.max_write_behind > 0) {
-		bool create_pool = false;
+		bool creat_pool = false;
 
 		rdev_for_each(rdev, mddev) {
 			if (test_bit(WriteMostly, &rdev->flags) &&
-			    rdev_init_serial(rdev))
-				create_pool = true;
+			    rdev_init_wb(rdev))
+				creat_pool = true;
 		}
-		if (create_pool && mddev->serial_info_pool == NULL) {
-			mddev->serial_info_pool =
-				mempool_create_kmalloc_pool(NR_SERIAL_INFOS,
-						    sizeof(struct serial_info));
-			if (!mddev->serial_info_pool) {
+		if (creat_pool && mddev->wb_info_pool == NULL) {
+			mddev->wb_info_pool =
+				mempool_create_kmalloc_pool(NR_WB_INFOS,
+						    sizeof(struct wb_info));
+			if (!mddev->wb_info_pool) {
 				err = -ENOMEM;
 				goto bitmap_abort;
 			}
@@ -6178,9 +6026,8 @@ static void __md_stop_writes(struct mddev *mddev)
 			mddev->in_sync = 1;
 		md_update_sb(mddev, 1);
 	}
-	/* disable policy to guarantee rdevs free resources for serialization */
-	mddev->serialize_policy = 0;
-	mddev_destroy_serial_pool(mddev, NULL, true);
+	mempool_destroy(mddev->wb_info_pool);
+	mddev->wb_info_pool = NULL;
 }
 
 void md_stop_writes(struct mddev *mddev)
@@ -6194,7 +6041,7 @@ EXPORT_SYMBOL_GPL(md_stop_writes);
 static void mddev_detach(struct mddev *mddev)
 {
 	md_bitmap_wait_behind_writes(mddev);
-	if (mddev->pers && mddev->pers->quiesce) {
+	if (mddev->pers && mddev->pers->quiesce && !mddev->suspended) {
 		mddev->pers->quiesce(mddev, 1);
 		mddev->pers->quiesce(mddev, 0);
 	}
@@ -7761,7 +7608,8 @@ static int md_open(struct block_device *bdev, fmode_t mode)
 		 */
 		mddev_put(mddev);
 		/* Wait until bdev->bd_disk is definitely gone */
-		flush_workqueue(md_misc_wq);
+		if (work_pending(&mddev->del_work))
+			flush_workqueue(md_misc_wq);
 		/* Then retry the open from the top */
 		return -ERESTARTSYS;
 	}

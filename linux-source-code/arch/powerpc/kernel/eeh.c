@@ -1,22 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright IBM Corporation 2001, 2005, 2006
  * Copyright Dave Engebretsen & Todd Inglett 2001
  * Copyright Linas Vepstas 2005, 2006
  * Copyright 2001-2012 IBM Corporation.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  *
  * Please address comments and feedback to Linas Vepstas <linas@austin.ibm.com>
  */
@@ -109,7 +96,14 @@ EXPORT_SYMBOL(eeh_subsystem_flags);
  * frozen count in last hour exceeds this limit, the PE will
  * be forced to be offline permanently.
  */
-int eeh_max_freezes = 5;
+u32 eeh_max_freezes = 5;
+
+/*
+ * Controls whether a recovery event should be scheduled when an
+ * isolated device is discovered. This is only really useful for
+ * debugging problems with the EEH core.
+ */
+bool eeh_debugfs_no_recover;
 
 /* Platform dependent EEH operations */
 struct eeh_ops *eeh_ops = NULL;
@@ -370,10 +364,19 @@ static inline unsigned long eeh_token_to_phys(unsigned long token)
 	ptep = find_init_mm_pte(token, &hugepage_shift);
 	if (!ptep)
 		return token;
-	WARN_ON(hugepage_shift);
-	pa = pte_pfn(*ptep) << PAGE_SHIFT;
 
-	return pa | (token & (PAGE_SIZE-1));
+	pa = pte_pfn(*ptep);
+
+	/* On radix we can do hugepage mappings for io, so handle that */
+	if (hugepage_shift) {
+		pa <<= hugepage_shift;
+		pa |= token & ((1ul << hugepage_shift) - 1);
+	} else {
+		pa <<= PAGE_SHIFT;
+		pa |= token & (PAGE_SIZE - 1);
+	}
+
+	return pa;
 }
 
 /*
@@ -500,7 +503,7 @@ int eeh_dev_check_failure(struct eeh_dev *edev)
 	rc = 1;
 	if (pe->state & EEH_PE_ISOLATED) {
 		pe->check_count++;
-		if (pe->check_count % EEH_MAX_FAILS == 0) {
+		if (pe->check_count == EEH_MAX_FAILS) {
 			dn = pci_device_to_OF_node(dev);
 			if (dn)
 				location = of_get_property(dn, "ibm,loc-code",
@@ -1208,8 +1211,55 @@ void eeh_add_device_late(struct pci_dev *dev)
 	dev->dev.archdata.edev = edev;
 
 	eeh_addr_cache_insert_dev(dev);
-	eeh_sysfs_add_device(dev);
 }
+
+/**
+ * eeh_add_device_tree_late - Perform EEH initialization for the indicated PCI bus
+ * @bus: PCI bus
+ *
+ * This routine must be used to perform EEH initialization for PCI
+ * devices which are attached to the indicated PCI bus. The PCI bus
+ * is added after system boot through hotplug or dlpar.
+ */
+void eeh_add_device_tree_late(struct pci_bus *bus)
+{
+	struct pci_dev *dev;
+
+	if (eeh_has_flag(EEH_FORCE_DISABLED))
+		return;
+	list_for_each_entry(dev, &bus->devices, bus_list) {
+		eeh_add_device_late(dev);
+		if (dev->hdr_type == PCI_HEADER_TYPE_BRIDGE) {
+			struct pci_bus *subbus = dev->subordinate;
+			if (subbus)
+				eeh_add_device_tree_late(subbus);
+		}
+	}
+}
+EXPORT_SYMBOL_GPL(eeh_add_device_tree_late);
+
+/**
+ * eeh_add_sysfs_files - Add EEH sysfs files for the indicated PCI bus
+ * @bus: PCI bus
+ *
+ * This routine must be used to add EEH sysfs files for PCI
+ * devices which are attached to the indicated PCI bus. The PCI bus
+ * is added after system boot through hotplug or dlpar.
+ */
+void eeh_add_sysfs_files(struct pci_bus *bus)
+{
+	struct pci_dev *dev;
+
+	list_for_each_entry(dev, &bus->devices, bus_list) {
+		eeh_sysfs_add_device(dev);
+		if (dev->hdr_type == PCI_HEADER_TYPE_BRIDGE) {
+			struct pci_bus *subbus = dev->subordinate;
+			if (subbus)
+				eeh_add_sysfs_files(subbus);
+		}
+	}
+}
+EXPORT_SYMBOL_GPL(eeh_add_sysfs_files);
 
 /**
  * eeh_remove_device - Undo EEH setup for the indicated pci device
@@ -1763,22 +1813,64 @@ static int eeh_enable_dbgfs_get(void *data, u64 *val)
 	return 0;
 }
 
-static int eeh_freeze_dbgfs_set(void *data, u64 val)
-{
-	eeh_max_freezes = val;
-	return 0;
-}
-
-static int eeh_freeze_dbgfs_get(void *data, u64 *val)
-{
-	*val = eeh_max_freezes;
-	return 0;
-}
-
 DEFINE_DEBUGFS_ATTRIBUTE(eeh_enable_dbgfs_ops, eeh_enable_dbgfs_get,
 			 eeh_enable_dbgfs_set, "0x%llx\n");
-DEFINE_DEBUGFS_ATTRIBUTE(eeh_freeze_dbgfs_ops, eeh_freeze_dbgfs_get,
-			 eeh_freeze_dbgfs_set, "0x%llx\n");
+
+static ssize_t eeh_force_recover_write(struct file *filp,
+				const char __user *user_buf,
+				size_t count, loff_t *ppos)
+{
+	struct pci_controller *hose;
+	uint32_t phbid, pe_no;
+	struct eeh_pe *pe;
+	char buf[20];
+	int ret;
+
+	ret = simple_write_to_buffer(buf, sizeof(buf), ppos, user_buf, count);
+	if (!ret)
+		return -EFAULT;
+
+	/*
+	 * When PE is NULL the event is a "special" event. Rather than
+	 * recovering a specific PE it forces the EEH core to scan for failed
+	 * PHBs and recovers each. This needs to be done before any device
+	 * recoveries can occur.
+	 */
+	if (!strncmp(buf, "hwcheck", 7)) {
+		__eeh_send_failure_event(NULL);
+		return count;
+	}
+
+	ret = sscanf(buf, "%x:%x", &phbid, &pe_no);
+	if (ret != 2)
+		return -EINVAL;
+
+	hose = pci_find_controller_for_domain(phbid);
+	if (!hose)
+		return -ENODEV;
+
+	/* Retrieve PE */
+	pe = eeh_pe_get(hose, pe_no, 0);
+	if (!pe)
+		return -ENODEV;
+
+	/*
+	 * We don't do any state checking here since the detection
+	 * process is async to the recovery process. The recovery
+	 * thread *should* not break even if we schedule a recovery
+	 * from an odd state (e.g. PE removed, or recovery of a
+	 * non-isolated PE)
+	 */
+	__eeh_send_failure_event(pe);
+
+	return ret < 0 ? ret : count;
+}
+
+static const struct file_operations eeh_force_recover_fops = {
+	.open	= simple_open,
+	.llseek	= no_llseek,
+	.write	= eeh_force_recover_write,
+};
 
 static ssize_t eeh_debugfs_dev_usage(struct file *filp,
 				char __user *user_buf,
@@ -1981,15 +2073,21 @@ static int __init eeh_init_proc(void)
 		debugfs_create_file_unsafe("eeh_enable", 0600,
 					   powerpc_debugfs_root, NULL,
 					   &eeh_enable_dbgfs_ops);
-		debugfs_create_file_unsafe("eeh_max_freezes", 0600,
-					   powerpc_debugfs_root, NULL,
-					   &eeh_freeze_dbgfs_ops);
+		debugfs_create_u32("eeh_max_freezes", 0600,
+				powerpc_debugfs_root, &eeh_max_freezes);
+		debugfs_create_bool("eeh_disable_recovery", 0600,
+				powerpc_debugfs_root,
+				&eeh_debugfs_no_recover);
 		debugfs_create_file_unsafe("eeh_dev_check", 0600,
 				powerpc_debugfs_root, NULL,
 				&eeh_dev_check_fops);
 		debugfs_create_file_unsafe("eeh_dev_break", 0600,
 				powerpc_debugfs_root, NULL,
 				&eeh_dev_break_fops);
+		debugfs_create_file_unsafe("eeh_force_recover", 0600,
+				powerpc_debugfs_root, NULL,
+				&eeh_force_recover_fops);
+		eeh_cache_debugfs_init();
 #endif
 	}
 

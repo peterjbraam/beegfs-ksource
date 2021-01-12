@@ -81,7 +81,6 @@ struct mt76x02_dev {
 	u8 txdone_seq;
 	DECLARE_KFIFO_PTR(txstatus_fifo, struct mt76x02_tx_status);
 	spinlock_t txstatus_fifo_lock;
-	u32 tx_airtime;
 
 	struct sk_buff *rx_head;
 
@@ -92,6 +91,8 @@ struct mt76x02_dev {
 	struct work_struct pre_tbtt_work;
 
 	const struct mt76x02_beacon_ops *beacon_ops;
+
+	u32 aggr_stats[32];
 
 	struct sk_buff *beacons[8];
 	u8 beacon_data_mask;
@@ -110,7 +111,7 @@ struct mt76x02_dev {
 
 	bool no_2ghz;
 
-	s16 coverage_class;
+	u8 coverage_class;
 	u8 slottime;
 
 	struct mt76x02_dfs_pattern_detector dfs_pd;
@@ -211,6 +212,7 @@ static inline bool is_mt76x0(struct mt76x02_dev *dev)
 static inline bool is_mt76x2(struct mt76x02_dev *dev)
 {
 	return mt76_chip(&dev->mt76) == 0x7612 ||
+	       mt76_chip(&dev->mt76) == 0x7632 ||
 	       mt76_chip(&dev->mt76) == 0x7662 ||
 	       mt76_chip(&dev->mt76) == 0x7602;
 }

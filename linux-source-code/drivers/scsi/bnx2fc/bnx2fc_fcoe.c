@@ -346,7 +346,7 @@ static int bnx2fc_xmit(struct fc_lport *lport, struct fc_frame *fp)
 			return -ENOMEM;
 		}
 		frag = &skb_shinfo(skb)->frags[skb_shinfo(skb)->nr_frags - 1];
-		cp = kmap_atomic(skb_frag_page(frag)) + frag->page_offset;
+		cp = kmap_atomic(skb_frag_page(frag)) + skb_frag_off(frag);
 	} else {
 		cp = skb_put(skb, tlen);
 	}
@@ -660,10 +660,7 @@ static int bnx2fc_percpu_io_thread(void *arg)
 
 			list_for_each_entry_safe(work, tmp, &work_list, list) {
 				list_del_init(&work->list);
-				bnx2fc_process_cq_compl(work->tgt, work->wqe,
-							work->rq_data,
-							work->num_rq,
-							work->task);
+				bnx2fc_process_cq_compl(work->tgt, work->wqe);
 				kfree(work);
 			}
 
@@ -2658,8 +2655,7 @@ static int bnx2fc_cpu_offline(unsigned int cpu)
 	/* Free all work in the list */
 	list_for_each_entry_safe(work, tmp, &p->work_list, list) {
 		list_del_init(&work->list);
-		bnx2fc_process_cq_compl(work->tgt, work->wqe, work->rq_data,
-					work->num_rq, work->task);
+		bnx2fc_process_cq_compl(work->tgt, work->wqe);
 		kfree(work);
 	}
 
@@ -2972,7 +2968,6 @@ static struct scsi_host_template bnx2fc_shost_template = {
 	.change_queue_depth	= scsi_change_queue_depth,
 	.this_id		= -1,
 	.cmd_per_lun		= 3,
-	.use_clustering		= ENABLE_CLUSTERING,
 	.sg_tablesize		= BNX2FC_MAX_BDS_PER_CMD,
 	.dma_boundary           = 0x7fff,
 	.max_sectors		= 0x3fbf,

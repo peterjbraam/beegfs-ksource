@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Common Block IO controller cgroup interface
  *
@@ -53,7 +54,7 @@ static struct blkcg_policy *blkcg_policy[BLKCG_MAX_POLS];
 
 static LIST_HEAD(all_blkcgs);		/* protected by blkcg_pol_mutex */
 
-static bool blkcg_debug_stats = false;
+bool blkcg_debug_stats = false;
 static struct workqueue_struct *blkcg_punt_bio_wq;
 
 static bool blkcg_policy_enabled(struct request_queue *q,
@@ -458,29 +459,6 @@ static void blkg_destroy_all(struct request_queue *q)
 	spin_unlock_irq(&q->queue_lock);
 }
 
-/*
- * A group is RCU protected, but having an rcu lock does not mean that one
- * can access all the fields of blkg and assume these are valid.  For
- * example, don't try to follow throtl_data and request queue links.
- *
- * Having a reference to blkg under an rcu allows accesses to only values
- * local to groups like group stats and group rate limits.
- */
-void __blkg_release_rcu(struct rcu_head *rcu_head)
-{
-	struct blkcg_gq *blkg = container_of(rcu_head, struct blkcg_gq, rcu_head);
-
-	/* release the blkcg and parent blkg refs this blkg has been holding */
-	css_put(&blkg->blkcg->css);
-	if (blkg->parent)
-		blkg_put(blkg->parent);
-
-	wb_congested_put(blkg->wb_congested);
-
-	blkg_free(blkg);
-}
-EXPORT_SYMBOL_GPL(__blkg_release_rcu);
-
 static int blkcg_reset_stats(struct cgroup_subsys_state *css,
 			     struct cftype *cftype, u64 val)
 {
@@ -517,7 +495,7 @@ const char *blkg_dev_name(struct blkcg_gq *blkg)
 {
 	/* some drivers (floppy) instantiate a queue w/o disk registered */
 	if (blkg->q->backing_dev_info->dev)
-		return bdi_dev_name(blkg->q->backing_dev_info);
+		return dev_name(blkg->q->backing_dev_info->dev);
 	return NULL;
 }
 
@@ -877,24 +855,33 @@ int blkg_conf_prep(struct blkcg *blkcg, const struct blkcg_policy *pol,
 			goto fail;
 		}
 
+		if (radix_tree_preload(GFP_KERNEL)) {
+			blkg_free(new_blkg);
+			ret = -ENOMEM;
+			goto fail;
+		}
+
 		rcu_read_lock();
 		spin_lock_irq(&q->queue_lock);
 
 		blkg = blkg_lookup_check(pos, pol, q);
 		if (IS_ERR(blkg)) {
 			ret = PTR_ERR(blkg);
-			goto fail_unlock;
+			blkg_free(new_blkg);
+			goto fail_preloaded;
 		}
 
 		if (blkg) {
 			blkg_free(new_blkg);
 		} else {
 			blkg = blkg_create(pos, q, new_blkg);
-			if (unlikely(IS_ERR(blkg))) {
+			if (IS_ERR(blkg)) {
 				ret = PTR_ERR(blkg);
-				goto fail_unlock;
+				goto fail_preloaded;
 			}
 		}
+
+		radix_tree_preload_end();
 
 		if (pos == blkcg)
 			goto success;
@@ -905,6 +892,8 @@ success:
 	ctx->body = input;
 	return 0;
 
+fail_preloaded:
+	radix_tree_preload_end();
 fail_unlock:
 	spin_unlock_irq(&q->queue_lock);
 	rcu_read_unlock();
@@ -993,10 +982,7 @@ static int blkcg_print_stat(struct seq_file *sf, void *v)
 					 dbytes, dios);
 		}
 
-		if (!blkcg_debug_stats)
-			goto next;
-
-		if (atomic_read(&blkg->use_delay)) {
+		if (blkcg_debug_stats && atomic_read(&blkg->use_delay)) {
 			has_stats = true;
 			off += scnprintf(buf+off, size-off,
 					 " use_delay=%d delay_nsec=%llu",
@@ -1016,7 +1002,7 @@ static int blkcg_print_stat(struct seq_file *sf, void *v)
 				has_stats = true;
 			off += written;
 		}
-next:
+
 		if (has_stats) {
 			if (off < size - 1) {
 				off += scnprintf(buf+off, size-off, "\n");
@@ -1244,13 +1230,15 @@ int blkcg_init_queue(struct request_queue *q)
 	if (preloaded)
 		radix_tree_preload_end();
 
-	ret = blk_iolatency_init(q);
-	if (ret)
-		goto err_destroy_all;
-
 	ret = blk_throtl_init(q);
 	if (ret)
 		goto err_destroy_all;
+
+	ret = blk_iolatency_init(q);
+	if (ret) {
+		blk_throtl_exit(q);
+		goto err_destroy_all;
+	}
 	return 0;
 
 err_destroy_all:
@@ -1262,6 +1250,26 @@ err_unlock:
 	if (preloaded)
 		radix_tree_preload_end();
 	return PTR_ERR(blkg);
+}
+
+/**
+ * blkcg_drain_queue - drain blkcg part of request_queue
+ * @q: request_queue to drain
+ *
+ * Called from blk_drain_queue().  Responsible for draining blkcg part.
+ */
+void blkcg_drain_queue(struct request_queue *q)
+{
+	lockdep_assert_held(&q->queue_lock);
+
+	/*
+	 * @q could be exiting and already have destroyed all blkgs as
+	 * indicated by NULL root_blkg.  If so, don't confuse policies.
+	 */
+	if (!q->root_blkg)
+		return;
+
+	blk_throtl_drain(q);
 }
 
 /**

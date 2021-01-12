@@ -1,10 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * aQuantia Corporation Network Driver
  * Copyright (C) 2014-2017 aQuantia Corporation. All rights reserved
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
  */
 
 /* File hw_atl_llh_internal.h: Preprocessor definitions
@@ -320,6 +317,25 @@
 #define HW_ATL_RDM_RX_DMA_DESC_CACHE_INIT_WIDTH 32
 /* default value of bitfield rdm_desc_init_i */
 #define HW_ATL_RDM_RX_DMA_DESC_CACHE_INIT_DEFAULT 0x0
+
+/* rdm_desc_init_done_i bitfield definitions
+ * preprocessor definitions for the bitfield rdm_desc_init_done_i.
+ * port="pif_rdm_desc_init_done_i"
+ */
+
+/* register address for bitfield rdm_desc_init_done_i */
+#define RDM_RX_DMA_DESC_CACHE_INIT_DONE_ADR 0x00005a10
+/* bitmask for bitfield rdm_desc_init_done_i */
+#define RDM_RX_DMA_DESC_CACHE_INIT_DONE_MSK 0x00000001U
+/* inverted bitmask for bitfield rdm_desc_init_done_i */
+#define RDM_RX_DMA_DESC_CACHE_INIT_DONE_MSKN 0xfffffffe
+/* lower bit position of bitfield  rdm_desc_init_done_i */
+#define RDM_RX_DMA_DESC_CACHE_INIT_DONE_SHIFT 0U
+/* width of bitfield rdm_desc_init_done_i */
+#define RDM_RX_DMA_DESC_CACHE_INIT_DONE_WIDTH 1
+/* default value of bitfield rdm_desc_init_done_i */
+#define RDM_RX_DMA_DESC_CACHE_INIT_DONE_DEFAULT 0x0
+
 
 /* rx int_desc_wrb_en bitfield definitions
  * preprocessor definitions for the bitfield "int_desc_wrb_en".
@@ -1385,6 +1401,24 @@
 #define HW_ATL_RPOL4CHK_EN_WIDTH 1
 /* default value of bitfield l4_chk_en */
 #define HW_ATL_RPOL4CHK_EN_DEFAULT 0x0
+
+/* RX outer_vl_ins_mode Bitfield Definitions
+ * Preprocessor definitions for the bitfield "outer_vl_ins_mode".
+ * PORT="pif_rpo_outer_vl_mode_i"
+ */
+
+/* Register address for bitfield outer_vl_ins_mode */
+#define HW_ATL_RPO_OUTER_VL_INS_MODE_ADR 0x00005580
+/* Bitmask for bitfield outer_vl_ins_mode */
+#define HW_ATL_RPO_OUTER_VL_INS_MODE_MSK 0x00000004
+/* Inverted bitmask for bitfield outer_vl_ins_mode */
+#define HW_ATL_RPO_OUTER_VL_INS_MODE_MSKN 0xFFFFFFFB
+/* Lower bit position of bitfield outer_vl_ins_mode */
+#define HW_ATL_RPO_OUTER_VL_INS_MODE_SHIFT 2
+/* Width of bitfield outer_vl_ins_mode */
+#define HW_ATL_RPO_OUTER_VL_INS_MODE_WIDTH 1
+/* Default value of bitfield outer_vl_ins_mode */
+#define HW_ATL_RPO_OUTER_VL_INS_MODE_DEFAULT 0x0
 
 /* rx reg_res_dsbl bitfield definitions
  * preprocessor definitions for the bitfield "reg_res_dsbl".
@@ -2530,7 +2564,7 @@
  */
 
  /* Register address for bitfield pif_rpf_l3_da0_i[31:0] */
-#define HW_ATL_RPF_L3_DSTA_ADR(location) (0x000053B0 + (location) * 0x4)
+#define HW_ATL_RPF_L3_DSTA_ADR(filter) (0x000053D0 + (filter) * 0x4)
 /* Bitmask for bitfield l3_da0[1F:0] */
 #define HW_ATL_RPF_L3_DSTA_MSK 0xFFFFFFFFu
 /* Inverted bitmask for bitfield l3_da0[1F:0] */
@@ -2542,6 +2576,10 @@
 /* Default value of bitfield l3_da0[1F:0] */
 #define HW_ATL_RPF_L3_DSTA_DEFAULT 0x0
 
+#define HW_ATL_MIF_RESET_TIMEOUT_ADR 0x00000348
+
 #define HW_ATL_FW_SM_RAM        0x2U
+#define HW_ATL_FW_SM_RESET1     0x3U
+#define HW_ATL_FW_SM_RESET2     0x4U
 
 #endif /* HW_ATL_LLH_INTERNAL_H */

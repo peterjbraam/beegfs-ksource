@@ -15,7 +15,6 @@
 #include <linux/audit.h>
 #include <linux/slab.h>
 #include <linux/refcount.h>
-#include <linux/rh_kabi.h>
 
 #include <net/sock.h>
 #include <net/dst.h>
@@ -31,8 +30,6 @@
 #ifdef CONFIG_XFRM_STATISTICS
 #include <net/snmp.h>
 #endif
-
-#include <linux/rh_kabi.h>
 
 #define XFRM_PROTO_ESP		50
 #define XFRM_PROTO_AH		51
@@ -126,8 +123,6 @@ struct xfrm_state_walk {
 	u8			proto;
 	u32			seq;
 	struct xfrm_address_filter *filter;
-
-	RH_KABI_RESERVE(1)
 };
 
 struct xfrm_state_offload {
@@ -135,18 +130,17 @@ struct xfrm_state_offload {
 	unsigned long		offload_handle;
 	unsigned int		num_exthdrs;
 	u8			flags;
-
-	RH_KABI_RESERVE(1)
-	RH_KABI_RESERVE(2)
-	RH_KABI_RESERVE(3)
-	RH_KABI_RESERVE(4)
 };
 
-/* This is only defined to protect KABI in xfrm_state */
-struct tasklet_hrtimer {
-	struct hrtimer          timer;
-	struct tasklet_struct   tasklet;
-	enum hrtimer_restart    (*function)(struct hrtimer *);
+struct xfrm_mode {
+	u8 encap;
+	u8 family;
+	u8 flags;
+};
+
+/* Flags for xfrm_mode. */
+enum {
+	XFRM_MODE_FLAG_TUNNEL = 1,
 };
 
 /* Full description of state of transformer. */
@@ -165,6 +159,7 @@ struct xfrm_state {
 	struct xfrm_id		id;
 	struct xfrm_selector	sel;
 	struct xfrm_mark	mark;
+	u32			if_id;
 	u32			tfcpad;
 
 	u32			genid;
@@ -184,7 +179,7 @@ struct xfrm_state {
 		int		header_len;
 		int		trailer_len;
 		u32		extra_flags;
-		u32		output_mark;
+		struct xfrm_mark	smark;
 	} props;
 
 	struct xfrm_lifetime_cfg lft;
@@ -235,7 +230,7 @@ struct xfrm_state {
 	struct xfrm_stats	stats;
 
 	struct xfrm_lifetime_cur curlft;
-	RH_KABI_REPLACE(struct tasklet_hrtimer mtimer, struct hrtimer mtimer)
+	struct hrtimer		mtimer;
 
 	struct xfrm_state_offload xso;
 
@@ -243,16 +238,16 @@ struct xfrm_state {
 	long		saved_tmo;
 
 	/* Last used time */
-	RH_KABI_REPLACE(unsigned long lastused, time64_t lastused)
+	time64_t		lastused;
 
 	struct page_frag xfrag;
 
 	/* Reference to data common to all the instances of this
 	 * transformer. */
 	const struct xfrm_type	*type;
-	RH_KABI_CONST struct xfrm_mode	*inner_mode;
-	RH_KABI_CONST struct xfrm_mode	*inner_mode_iaf;
-	RH_KABI_CONST struct xfrm_mode	*outer_mode;
+	struct xfrm_mode	inner_mode;
+	struct xfrm_mode	inner_mode_iaf;
+	struct xfrm_mode	outer_mode;
 
 	const struct xfrm_type_offload	*type_offload;
 
@@ -262,10 +257,6 @@ struct xfrm_state {
 	/* Private data of this transformer, format is opaque,
 	 * interpreted by xfrm_type methods. */
 	void			*data;
-
-	RH_KABI_EXTEND(u32	output_mark_mask)
-	RH_KABI_EXTEND(u32	if_id)
-	RH_KABI_EXTEND(struct sock __rcu	*encap_sk)
 };
 
 static inline struct net *xs_net(struct xfrm_state *x)
@@ -336,13 +327,6 @@ struct xfrm_policy_afinfo {
 					     xfrm_address_t *saddr,
 					     xfrm_address_t *daddr,
 					     u32 mark);
-	void			(*decode_session)(struct sk_buff *skb,
-						  struct flowi *fl,
-						  int reverse);
-	int			(*get_tos)(const struct flowi *fl);
-	int			(*init_path)(struct xfrm_dst *path,
-					     struct dst_entry *dst,
-					     int nfheader_len);
 	int			(*fill_dst)(struct xfrm_dst *xdst,
 					    struct net_device *dev,
 					    const struct flowi *fl);
@@ -362,23 +346,19 @@ void km_state_expired(struct xfrm_state *x, int hard, u32 portid);
 int __xfrm_state_delete(struct xfrm_state *x);
 
 struct xfrm_state_afinfo {
-	unsigned int			family;
-	unsigned int			proto;
-	__be16				eth_proto;
-	struct module			*owner;
-	const struct xfrm_type		*type_map[IPPROTO_MAX];
-	const struct xfrm_type_offload	*type_offload_map[IPPROTO_MAX];
-	RH_KABI_DEPRECATE(struct xfrm_mode *, mode_map[XFRM_MODE_MAX])
+	u8				family;
+	u8				proto;
 
-	int			(*init_flags)(struct xfrm_state *x);
-	void			(*init_tempsel)(struct xfrm_selector *sel,
-						const struct flowi *fl);
-	void			(*init_temprop)(struct xfrm_state *x,
-						const struct xfrm_tmpl *tmpl,
-						const xfrm_address_t *daddr,
-						const xfrm_address_t *saddr);
-	int			(*tmpl_sort)(struct xfrm_tmpl **dst, struct xfrm_tmpl **src, int n);
-	int			(*state_sort)(struct xfrm_state **dst, struct xfrm_state **src, int n);
+	const struct xfrm_type_offload *type_offload_esp;
+
+	const struct xfrm_type		*type_esp;
+	const struct xfrm_type		*type_ipip;
+	const struct xfrm_type		*type_ipip6;
+	const struct xfrm_type		*type_comp;
+	const struct xfrm_type		*type_ah;
+	const struct xfrm_type		*type_routing;
+	const struct xfrm_type		*type_dstopts;
+
 	int			(*output)(struct net *net, struct sock *sk, struct sk_buff *skb);
 	int			(*output_finish)(struct sock *sk, struct sk_buff *skb);
 	int			(*extract_input)(struct xfrm_state *x,
@@ -396,8 +376,7 @@ struct xfrm_state_afinfo *xfrm_state_get_afinfo(unsigned int family);
 struct xfrm_state_afinfo *xfrm_state_afinfo_get_rcu(unsigned int family);
 
 struct xfrm_input_afinfo {
-	u8			family;
-	bool			is_ipip;
+	unsigned int		family;
 	int			(*callback)(struct sk_buff *skb, u8 protocol,
 					    int err);
 };
@@ -425,12 +404,10 @@ struct xfrm_type {
 	int			(*reject)(struct xfrm_state *, struct sk_buff *,
 					  const struct flowi *);
 	int			(*hdr_offset)(struct xfrm_state *, struct sk_buff *, u8 **);
-	/* Estimate maximal size of result of transformation of a dgram */
-	u32			(*get_mtu)(struct xfrm_state *, int size);
 };
 
 int xfrm_register_type(const struct xfrm_type *type, unsigned short family);
-int xfrm_unregister_type(const struct xfrm_type *type, unsigned short family);
+void xfrm_unregister_type(const struct xfrm_type *type, unsigned short family);
 
 struct xfrm_type_offload {
 	char		*description;
@@ -442,78 +419,7 @@ struct xfrm_type_offload {
 };
 
 int xfrm_register_type_offload(const struct xfrm_type_offload *type, unsigned short family);
-int xfrm_unregister_type_offload(const struct xfrm_type_offload *type, unsigned short family);
-
-struct xfrm_mode {
-	RH_KABI_BROKEN_REMOVE_BLOCK(
-	/*
-	 * Remove encapsulation header.
-	 *
-	 * The IP header will be moved over the top of the encapsulation
-	 * header.
-	 *
-	 * On entry, the transport header shall point to where the IP header
-	 * should be and the network header shall be set to where the IP
-	 * header currently is.  skb->data shall point to the start of the
-	 * payload.
-	 */
-	int (*input2)(struct xfrm_state *x, struct sk_buff *skb);
-
-	/*
-	 * This is the actual input entry point.
-	 *
-	 * For transport mode and equivalent this would be identical to
-	 * input2 (which does not need to be set).  While tunnel mode
-	 * and equivalent would set this to the tunnel encapsulation function
-	 * xfrm4_prepare_input that would in turn call input2.
-	 */
-	int (*input)(struct xfrm_state *x, struct sk_buff *skb);
-
-	/*
-	 * Add encapsulation header.
-	 *
-	 * On exit, the transport header will be set to the start of the
-	 * encapsulation header to be filled in by x->type->output and
-	 * the mac header will be set to the nextheader (protocol for
-	 * IPv4) field of the extension header directly preceding the
-	 * encapsulation header, or in its absence, that of the top IP
-	 * header.  The value of the network header will always point
-	 * to the top IP header while skb->data will point to the payload.
-	 */
-	int (*output2)(struct xfrm_state *x,struct sk_buff *skb);
-
-	/*
-	 * This is the actual output entry point.
-	 *
-	 * For transport mode and equivalent this would be identical to
-	 * output2 (which does not need to be set).  While tunnel mode
-	 * and equivalent would set this to a tunnel encapsulation function
-	 * (xfrm4_prepare_output or xfrm6_prepare_output) that would in turn
-	 * call output2.
-	 */
-	int (*output)(struct xfrm_state *x, struct sk_buff *skb);
-
-	/*
-	 * Adjust pointers into the packet and do GSO segmentation.
-	 */
-	struct sk_buff *(*gso_segment)(struct xfrm_state *x, struct sk_buff *skb, netdev_features_t features);
-
-	/*
-	 * Adjust pointers into the packet when IPsec is done at layer2.
-	 */
-	void (*xmit)(struct xfrm_state *x, struct sk_buff *skb);
-
-	struct xfrm_state_afinfo *afinfo;
-	struct module *owner;
-	) /* RH_KABI_BROKEN_REMOVE_BLOCK */
-	RH_KABI_REPLACE_SPLIT(unsigned int encap, u8 encap, u8 family)
-	RH_KABI_REPLACE(int flags, u8 flags)
-};
-
-/* Flags for xfrm_mode. */
-enum {
-	XFRM_MODE_FLAG_TUNNEL = 1,
-};
+void xfrm_unregister_type_offload(const struct xfrm_type_offload *type, unsigned short family);
 
 static inline int xfrm_af2proto(unsigned int family)
 {
@@ -531,9 +437,9 @@ static inline const struct xfrm_mode *xfrm_ip2inner_mode(struct xfrm_state *x, i
 {
 	if ((ipproto == IPPROTO_IPIP && x->props.family == AF_INET) ||
 	    (ipproto == IPPROTO_IPV6 && x->props.family == AF_INET6))
-		return x->inner_mode;
+		return &x->inner_mode;
 	else
-		return x->inner_mode_iaf;
+		return &x->inner_mode_iaf;
 }
 
 struct xfrm_tmpl {
@@ -598,17 +504,20 @@ struct xfrm_policy {
 	/* This lock only affects elements except for entry. */
 	rwlock_t		lock;
 	refcount_t		refcnt;
+	u32			pos;
 	struct timer_list	timer;
 
 	atomic_t		genid;
 	u32			priority;
 	u32			index;
+	u32			if_id;
 	struct xfrm_mark	mark;
 	struct xfrm_selector	selector;
 	struct xfrm_lifetime_cfg lft;
 	struct xfrm_lifetime_cur curlft;
 	struct xfrm_policy_walk_entry walk;
 	struct xfrm_policy_queue polq;
+	bool                    bydst_reinsert;
 	u8			type;
 	u8			action;
 	u8			flags;
@@ -616,11 +525,8 @@ struct xfrm_policy {
 	u16			family;
 	struct xfrm_sec_ctx	*security;
 	struct xfrm_tmpl       	xfrm_vec[XFRM_MAX_DEPTH];
+	struct hlist_node	bydst_inexact_list;
 	struct rcu_head		rcu;
-	RH_KABI_EXTEND(u32	if_id)
-	RH_KABI_EXTEND(u32	pos)
-	RH_KABI_EXTEND(struct hlist_node	bydst_inexact_list)
-	RH_KABI_EXTEND(bool	bydst_reinsert)
 };
 
 static inline struct net *xp_net(const struct xfrm_policy *xp)
@@ -1122,12 +1028,6 @@ struct xfrm_offload {
 };
 
 struct sec_path {
-	/* RHEL: There is RHEL specific helper function __rh_skb_ext_put()
-	 * that assumes that this refcnt field is the 1st field in this
-	 * struct and its type is refcount_t. If you really need to break
-	 * this assumption please modify the mentioned function properly.
-	 */
-	refcount_t		refcnt;
 	int			len;
 	int			olen;
 
@@ -1135,51 +1035,13 @@ struct sec_path {
 	struct xfrm_offload	ovec[XFRM_MAX_OFFLOAD_DEPTH];
 };
 
-static_assert(offsetof(struct sec_path, refcnt) == 0,
-	      "The position of field refcnt in struct sec_path was changed. "
-	      "Please look on its declaration in " __FILE__
-	      " for more details.");
-
-static inline int secpath_exists(struct sk_buff *skb)
-{
-#ifdef CONFIG_XFRM
-	return skb->sp != NULL;
-#else
-	return 0;
-#endif
-}
-
-static inline struct sec_path *
-secpath_get(struct sec_path *sp)
-{
-	if (sp)
-		refcount_inc(&sp->refcnt);
-	return sp;
-}
-
-void __secpath_destroy(struct sec_path *sp);
-
-static inline void
-secpath_put(struct sec_path *sp)
-{
-	/* RHEL: There is function __rh_skb_ext_put() defined in header
-	 * <linux/skbuff.h> that reuses the content of this function because
-	 * it cannot call it directly. If you need to modify this function
-	 * then please modify also __rh_skb_ext_put() accordingly.
-	 */
-	if (sp && refcount_dec_and_test(&sp->refcnt))
-		__secpath_destroy(sp);
-}
-
-struct sec_path *secpath_dup(struct sec_path *src);
-int secpath_set(struct sk_buff *skb);
+struct sec_path *secpath_set(struct sk_buff *skb);
 
 static inline void
 secpath_reset(struct sk_buff *skb)
 {
 #ifdef CONFIG_XFRM
-	secpath_put(skb->sp);
-	skb->sp = NULL;
+	skb_ext_del(skb, SKB_EXT_SEC_PATH);
 #endif
 }
 
@@ -1235,7 +1097,7 @@ static inline int __xfrm_policy_check2(struct sock *sk, int dir,
 	if (sk && sk->sk_policy[XFRM_POLICY_IN])
 		return __xfrm_policy_check(sk, ndir, skb, family);
 
-	return	(!net->xfrm.policy_count[dir] && !skb->sp) ||
+	return	(!net->xfrm.policy_count[dir] && !secpath_exists(skb)) ||
 		(skb_dst(skb)->flags & DST_NOPOLICY) ||
 		__xfrm_policy_check(sk, ndir, skb, family);
 }
@@ -1544,8 +1406,6 @@ struct xfrm4_protocol {
 
 struct xfrm6_protocol {
 	int (*handler)(struct sk_buff *skb);
-	int (*input_handler)(struct sk_buff *skb, int nexthdr, __be32 spi,
-			     int encap_type);
 	int (*cb_handler)(struct sk_buff *skb, int err);
 	int (*err_handler)(struct sk_buff *skb, struct inet6_skb_parm *opt,
 			   u8 type, u8 code, int offset, __be32 info);
@@ -1557,7 +1417,6 @@ struct xfrm6_protocol {
 /* XFRM tunnel handlers.  */
 struct xfrm_tunnel {
 	int (*handler)(struct sk_buff *skb);
-	int (*cb_handler)(struct sk_buff *skb, int err);
 	int (*err_handler)(struct sk_buff *skb, u32 info);
 
 	struct xfrm_tunnel __rcu *next;
@@ -1566,7 +1425,6 @@ struct xfrm_tunnel {
 
 struct xfrm6_tunnel {
 	int (*handler)(struct sk_buff *skb);
-	int (*cb_handler)(struct sk_buff *skb, int err);
 	int (*err_handler)(struct sk_buff *skb, struct inet6_skb_parm *opt,
 			   u8 type, u8 code, int offset, __be32 info);
 	struct xfrm6_tunnel __rcu *next;
@@ -1644,21 +1502,19 @@ struct xfrm_state *xfrm_state_lookup_byaddr(struct net *net, u32 mark,
 					    u8 proto,
 					    unsigned short family);
 #ifdef CONFIG_XFRM_SUB_POLICY
-int xfrm_tmpl_sort(struct xfrm_tmpl **dst, struct xfrm_tmpl **src, int n,
-		   unsigned short family, struct net *net);
-int xfrm_state_sort(struct xfrm_state **dst, struct xfrm_state **src, int n,
+void xfrm_tmpl_sort(struct xfrm_tmpl **dst, struct xfrm_tmpl **src, int n,
 		    unsigned short family);
+void xfrm_state_sort(struct xfrm_state **dst, struct xfrm_state **src, int n,
+		     unsigned short family);
 #else
-static inline int xfrm_tmpl_sort(struct xfrm_tmpl **dst, struct xfrm_tmpl **src,
-				 int n, unsigned short family, struct net *net)
-{
-	return -ENOSYS;
-}
-
-static inline int xfrm_state_sort(struct xfrm_state **dst, struct xfrm_state **src,
+static inline void xfrm_tmpl_sort(struct xfrm_tmpl **d, struct xfrm_tmpl **s,
 				  int n, unsigned short family)
 {
-	return -ENOSYS;
+}
+
+static inline void xfrm_state_sort(struct xfrm_state **d, struct xfrm_state **s,
+				   int n, unsigned short family)
+{
 }
 #endif
 
@@ -1687,14 +1543,11 @@ void xfrm_sad_getinfo(struct net *net, struct xfrmk_sadinfo *si);
 void xfrm_spd_getinfo(struct net *net, struct xfrmk_spdinfo *si);
 u32 xfrm_replay_seqhi(struct xfrm_state *x, __be32 net_seq);
 int xfrm_init_replay(struct xfrm_state *x);
-int xfrm_state_mtu(struct xfrm_state *x, int mtu);
+u32 xfrm_state_mtu(struct xfrm_state *x, int mtu);
 int __xfrm_init_state(struct xfrm_state *x, bool init_replay, bool offload);
 int xfrm_init_state(struct xfrm_state *x);
 int xfrm_input(struct sk_buff *skb, int nexthdr, __be32 spi, int encap_type);
 int xfrm_input_resume(struct sk_buff *skb, int nexthdr);
-int xfrm_trans_queue_net(struct net *net, struct sk_buff *skb,
-			 int (*finish)(struct net *, struct sock *,
-				       struct sk_buff *));
 int xfrm_trans_queue(struct sk_buff *skb,
 		     int (*finish)(struct net *, struct sock *,
 				   struct sk_buff *));
@@ -1734,8 +1587,6 @@ int xfrm6_extract_header(struct sk_buff *skb);
 int xfrm6_extract_input(struct xfrm_state *x, struct sk_buff *skb);
 int xfrm6_rcv_spi(struct sk_buff *skb, int nexthdr, __be32 spi,
 		  struct ip6_tnl *t);
-int xfrm6_rcv_encap(struct sk_buff *skb, int nexthdr, __be32 spi,
-		    int encap_type);
 int xfrm6_transport_finish(struct sk_buff *skb, int async);
 int xfrm6_rcv_tnl(struct sk_buff *skb, struct ip6_tnl *t);
 int xfrm6_rcv(struct sk_buff *skb);
@@ -1756,13 +1607,19 @@ int xfrm6_find_1stfragopt(struct xfrm_state *x, struct sk_buff *skb,
 
 #ifdef CONFIG_XFRM
 int xfrm4_udp_encap_rcv(struct sock *sk, struct sk_buff *skb);
-int xfrm6_udp_encap_rcv(struct sock *sk, struct sk_buff *skb);
 int xfrm_user_policy(struct sock *sk, int optname,
 		     u8 __user *optval, int optlen);
 #else
 static inline int xfrm_user_policy(struct sock *sk, int optname, u8 __user *optval, int optlen)
 {
  	return -ENOPROTOOPT;
+}
+
+static inline int xfrm4_udp_encap_rcv(struct sock *sk, struct sk_buff *skb)
+{
+ 	/* should not happen */
+ 	kfree_skb(skb);
+	return 0;
 }
 #endif
 
@@ -1916,21 +1773,17 @@ static inline unsigned int xfrm_replay_state_esn_len(struct xfrm_replay_state_es
 static inline int xfrm_replay_clone(struct xfrm_state *x,
 				     struct xfrm_state *orig)
 {
-	x->replay_esn = kzalloc(xfrm_replay_state_esn_len(orig->replay_esn),
+
+	x->replay_esn = kmemdup(orig->replay_esn,
+				xfrm_replay_state_esn_len(orig->replay_esn),
 				GFP_KERNEL);
 	if (!x->replay_esn)
 		return -ENOMEM;
-
-	x->replay_esn->bmp_len = orig->replay_esn->bmp_len;
-	x->replay_esn->replay_window = orig->replay_esn->replay_window;
-
-	x->preplay_esn = kmemdup(x->replay_esn,
-				 xfrm_replay_state_esn_len(x->replay_esn),
+	x->preplay_esn = kmemdup(orig->preplay_esn,
+				 xfrm_replay_state_esn_len(orig->preplay_esn),
 				 GFP_KERNEL);
-	if (!x->preplay_esn) {
-		kfree(x->replay_esn);
+	if (!x->preplay_esn)
 		return -ENOMEM;
-	}
 
 	return 0;
 }
@@ -1969,14 +1822,16 @@ static inline void xfrm_states_delete(struct xfrm_state **states, int n)
 #ifdef CONFIG_XFRM
 static inline struct xfrm_state *xfrm_input_state(struct sk_buff *skb)
 {
-	return skb->sp->xvec[skb->sp->len - 1];
+	struct sec_path *sp = skb_sec_path(skb);
+
+	return sp->xvec[sp->len - 1];
 }
 #endif
 
 static inline struct xfrm_offload *xfrm_offload(struct sk_buff *skb)
 {
 #ifdef CONFIG_XFRM
-	struct sec_path *sp = skb->sp;
+	struct sec_path *sp = skb_sec_path(skb);
 
 	if (!sp || !sp->olen || sp->len != sp->olen)
 		return NULL;
@@ -2106,10 +1961,9 @@ static inline int xfrm_mark_put(struct sk_buff *skb, const struct xfrm_mark *m)
 
 static inline __u32 xfrm_smark_get(__u32 mark, struct xfrm_state *x)
 {
-	u32 m = x->output_mark_mask;
-	u32 v = x->props.output_mark;
+	struct xfrm_mark *m = &x->props.smark;
 
-	return (v & m) | (mark & ~m);
+	return (m->v & m->m) | (mark & ~m->m);
 }
 
 static inline int xfrm_if_id_put(struct sk_buff *skb, __u32 if_id)
@@ -2136,7 +1990,7 @@ static inline int xfrm_tunnel_check(struct sk_buff *skb, struct xfrm_state *x,
 			tunnel = true;
 		break;
 	}
-	if (tunnel && !(x->outer_mode->flags & XFRM_MODE_FLAG_TUNNEL))
+	if (tunnel && !(x->outer_mode.flags & XFRM_MODE_FLAG_TUNNEL))
 		return -EINVAL;
 
 	return 0;

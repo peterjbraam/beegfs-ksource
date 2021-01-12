@@ -1,15 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * idr-test.c: Test the IDR API
  * Copyright (c) 2016 Matthew Wilcox <willy@infradead.org>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
  */
 #include <linux/bitmap.h>
 #include <linux/idr.h>
@@ -531,8 +523,27 @@ static void *ida_random_fn(void *arg)
 	return NULL;
 }
 
+static void *ida_leak_fn(void *arg)
+{
+	struct ida *ida = arg;
+	time_t s = time(NULL);
+	int i, ret;
+
+	rcu_register_thread();
+
+	do for (i = 0; i < 1000; i++) {
+		ret = ida_alloc_range(ida, 128, 128, GFP_KERNEL);
+		if (ret >= 0)
+			ida_free(ida, 128);
+	} while (time(NULL) < s + 2);
+
+	rcu_unregister_thread();
+	return NULL;
+}
+
 void ida_thread_tests(void)
 {
+	DEFINE_IDA(ida);
 	pthread_t threads[20];
 	int i;
 
@@ -544,6 +555,16 @@ void ida_thread_tests(void)
 
 	while (i--)
 		pthread_join(threads[i], NULL);
+
+	for (i = 0; i < ARRAY_SIZE(threads); i++)
+		if (pthread_create(&threads[i], NULL, ida_leak_fn, &ida)) {
+			perror("creating ida thread");
+			exit(1);
+		}
+
+	while (i--)
+		pthread_join(threads[i], NULL);
+	assert(ida_is_empty(&ida));
 }
 
 void ida_tests(void)

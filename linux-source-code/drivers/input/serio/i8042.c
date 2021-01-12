@@ -432,6 +432,20 @@ static int i8042_start(struct serio *serio)
 {
 	struct i8042_port *port = serio->port_data;
 
+	device_set_wakeup_capable(&serio->dev, true);
+
+	/*
+	 * On platforms using suspend-to-idle, allow the keyboard to
+	 * wake up the system from sleep by enabling keyboard wakeups
+	 * by default.  This is consistent with keyboard wakeup
+	 * behavior on many platforms using suspend-to-RAM (ACPI S3)
+	 * by default.
+	 */
+	if (pm_suspend_default_s2idle() &&
+	    serio == i8042_ports[I8042_KBD_PORT_NO].serio) {
+		device_set_wakeup_enable(&serio->dev, true);
+	}
+
 	spin_lock_irq(&i8042_lock);
 	port->exists = true;
 	spin_unlock_irq(&i8042_lock);
@@ -597,7 +611,7 @@ static int i8042_enable_kbd_port(void)
 	if (i8042_command(&i8042_ctr, I8042_CMD_CTL_WCTR)) {
 		i8042_ctr &= ~I8042_CTR_KBDINT;
 		i8042_ctr |= I8042_CTR_KBDDIS;
-		pr_err("Failed to enable KBD port\n");
+		pr_info("Failed to enable KBD port\n");
 		return -EIO;
 	}
 
@@ -616,7 +630,7 @@ static int i8042_enable_aux_port(void)
 	if (i8042_command(&i8042_ctr, I8042_CMD_CTL_WCTR)) {
 		i8042_ctr &= ~I8042_CTR_AUXINT;
 		i8042_ctr |= I8042_CTR_AUXDIS;
-		pr_err("Failed to enable AUX port\n");
+		pr_info("Failed to enable AUX port\n");
 		return -EIO;
 	}
 
@@ -708,7 +722,7 @@ static int __init i8042_check_mux(void)
 	i8042_ctr &= ~I8042_CTR_AUXINT;
 
 	if (i8042_command(&i8042_ctr, I8042_CMD_CTL_WCTR)) {
-		pr_err("Failed to disable AUX port, can't use MUX\n");
+		pr_info("Failed to disable AUX port, can't use MUX\n");
 		return -EIO;
 	}
 
@@ -923,25 +937,28 @@ static int i8042_controller_selftest(void)
 {
 	unsigned char param;
 	int i = 0;
+	int ret;
 
 	/*
 	 * We try this 5 times; on some really fragile systems this does not
 	 * take the first time...
 	 */
-	do {
+	while (i++ < 5) {
 
-		if (i8042_command(&param, I8042_CMD_CTL_TEST)) {
-			pr_err("i8042 controller selftest timeout\n");
-			return -ENODEV;
-		}
-
-		if (param == I8042_RET_CTL_TEST)
+		ret = i8042_command(&param, I8042_CMD_CTL_TEST);
+		if (ret)
+			pr_info("i8042 controller selftest timeout (%d/5)\n", i);
+		else if (param == I8042_RET_CTL_TEST)
 			return 0;
+		else
+			dbg("i8042 controller selftest: %#x != %#x\n",
+			    param, I8042_RET_CTL_TEST);
 
-		dbg("i8042 controller selftest: %#x != %#x\n",
-		    param, I8042_RET_CTL_TEST);
 		msleep(50);
-	} while (i++ < 5);
+	}
+
+	if (ret)
+		return -ENODEV;
 
 #ifdef CONFIG_X86
 	/*
@@ -953,7 +970,7 @@ static int i8042_controller_selftest(void)
 	pr_info("giving up on controller selftest, continuing anyway...\n");
 	return 0;
 #else
-	pr_err("i8042 controller selftest failed\n");
+	pr_info("i8042 controller selftest failed\n");
 	return -EIO;
 #endif
 }
@@ -1397,17 +1414,6 @@ static void __init i8042_register_ports(void)
 			(unsigned long) I8042_COMMAND_REG,
 			i8042_ports[i].irq);
 		serio_register_port(serio);
-		device_set_wakeup_capable(&serio->dev, true);
-
-		/*
-		 * On platforms using suspend-to-idle, allow the keyboard to
-		 * wake up the system from sleep by enabling keyboard wakeups
-		 * by default.  This is consistent with keyboard wakeup
-		 * behavior on many platforms using suspend-to-RAM (ACPI S3)
-		 * by default.
-		 */
-		if (pm_suspend_default_s2idle() && i == I8042_KBD_PORT_NO)
-			device_set_wakeup_enable(&serio->dev, true);
 	}
 }
 

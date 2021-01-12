@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-only
 #
 # QLogic network device configuration
 #
@@ -64,15 +65,6 @@ config QLCNIC_HWMON
 	  supported by qlcnic.
 
 	  This data is available via the hwmon sysfs interface.
-
-config QLGE
-	tristate "QLogic QLGE 10Gb Ethernet Driver Support"
-	depends on PCI
-	---help---
-	  This driver supports QLogic ISP8XXX 10Gb Ethernet cards.
-
-	  To compile this driver as a module, choose M here: the module
-	  will be called qlge.
 
 config NETXEN_NIC
 	tristate "NetXen Multi port (1/10) Gigabit Ethernet NIC"

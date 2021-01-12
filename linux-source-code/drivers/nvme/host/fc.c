@@ -95,7 +95,7 @@ struct nvme_fc_fcp_op {
 
 struct nvme_fcp_op_w_sgl {
 	struct nvme_fc_fcp_op	op;
-	struct scatterlist	sgl[NVME_INLINE_SG_CNT];
+	struct scatterlist	sgl[SG_CHUNK_SIZE];
 	uint8_t			priv[0];
 };
 
@@ -126,9 +126,9 @@ struct nvme_fc_rport {
 	unsigned long			dev_loss_end;
 } __aligned(sizeof(u64));	/* alignment for other things alloc'd with */
 
-/* fc_ctrl flags values - specified as bit positions */
-#define ASSOC_ACTIVE		0
-#define FCCTRL_TERMIO		1
+enum nvme_fcctrl_flags {
+	FCCTRL_TERMIO		= (1 << 0),
+};
 
 struct nvme_fc_ctrl {
 	spinlock_t		lock;
@@ -139,6 +139,7 @@ struct nvme_fc_ctrl {
 	u32			cnum;
 
 	bool			ioq_live;
+	bool			assoc_active;
 	atomic_t		err_work_active;
 	u64			association_id;
 
@@ -151,7 +152,7 @@ struct nvme_fc_ctrl {
 	struct work_struct	err_work;
 
 	struct kref		ref;
-	unsigned long		flags;
+	u32			flags;
 	u32			iocnt;
 	wait_queue_head_t	ioabort_wait;
 
@@ -393,10 +394,7 @@ nvme_fc_register_localport(struct nvme_fc_port_info *pinfo,
 	newrec->ops = template;
 	newrec->dev = dev;
 	ida_init(&newrec->endp_cnt);
-	if (template->local_priv_sz)
-		newrec->localport.private = &newrec[1];
-	else
-		newrec->localport.private = NULL;
+	newrec->localport.private = &newrec[1];
 	newrec->localport.node_name = pinfo->node_name;
 	newrec->localport.port_name = pinfo->port_name;
 	newrec->localport.port_role = pinfo->port_role;
@@ -705,10 +703,7 @@ nvme_fc_register_remoteport(struct nvme_fc_local_port *localport,
 	newrec->remoteport.localport = &lport->localport;
 	newrec->dev = lport->dev;
 	newrec->lport = lport;
-	if (lport->ops->remote_priv_sz)
-		newrec->remoteport.private = &newrec[1];
-	else
-		newrec->remoteport.private = NULL;
+	newrec->remoteport.private = &newrec[1];
 	newrec->remoteport.port_role = pinfo->port_role;
 	newrec->remoteport.node_name = pinfo->node_name;
 	newrec->remoteport.port_name = pinfo->port_name;
@@ -1191,23 +1186,18 @@ nvme_fc_connect_admin_queue(struct nvme_fc_ctrl *ctrl,
 	int ret, fcret = 0;
 
 	lsop = kzalloc((sizeof(*lsop) +
-			 sizeof(*assoc_rqst) + sizeof(*assoc_acc) +
-			 ctrl->lport->ops->lsrqst_priv_sz), GFP_KERNEL);
+			 ctrl->lport->ops->lsrqst_priv_sz +
+			 sizeof(*assoc_rqst) + sizeof(*assoc_acc)), GFP_KERNEL);
 	if (!lsop) {
-		dev_info(ctrl->ctrl.device,
-			"NVME-FC{%d}: send Create Association failed: ENOMEM\n",
-			ctrl->cnum);
 		ret = -ENOMEM;
 		goto out_no_memory;
 	}
-
-	assoc_rqst = (struct fcnvme_ls_cr_assoc_rqst *)&lsop[1];
-	assoc_acc = (struct fcnvme_ls_cr_assoc_acc *)&assoc_rqst[1];
 	lsreq = &lsop->ls_req;
-	if (ctrl->lport->ops->lsrqst_priv_sz)
-		lsreq->private = &assoc_acc[1];
-	else
-		lsreq->private = NULL;
+
+	lsreq->private = (void *)&lsop[1];
+	assoc_rqst = (struct fcnvme_ls_cr_assoc_rqst *)
+			(lsreq->private + ctrl->lport->ops->lsrqst_priv_sz);
+	assoc_acc = (struct fcnvme_ls_cr_assoc_acc *)&assoc_rqst[1];
 
 	assoc_rqst->w0.ls_cmd = FCNVME_LS_CREATE_ASSOCIATION;
 	assoc_rqst->desc_list_len =
@@ -1305,23 +1295,18 @@ nvme_fc_connect_queue(struct nvme_fc_ctrl *ctrl, struct nvme_fc_queue *queue,
 	int ret, fcret = 0;
 
 	lsop = kzalloc((sizeof(*lsop) +
-			 sizeof(*conn_rqst) + sizeof(*conn_acc) +
-			 ctrl->lport->ops->lsrqst_priv_sz), GFP_KERNEL);
+			 ctrl->lport->ops->lsrqst_priv_sz +
+			 sizeof(*conn_rqst) + sizeof(*conn_acc)), GFP_KERNEL);
 	if (!lsop) {
-		dev_info(ctrl->ctrl.device,
-			"NVME-FC{%d}: send Create Connection failed: ENOMEM\n",
-			ctrl->cnum);
 		ret = -ENOMEM;
 		goto out_no_memory;
 	}
-
-	conn_rqst = (struct fcnvme_ls_cr_conn_rqst *)&lsop[1];
-	conn_acc = (struct fcnvme_ls_cr_conn_acc *)&conn_rqst[1];
 	lsreq = &lsop->ls_req;
-	if (ctrl->lport->ops->lsrqst_priv_sz)
-		lsreq->private = (void *)&conn_acc[1];
-	else
-		lsreq->private = NULL;
+
+	lsreq->private = (void *)&lsop[1];
+	conn_rqst = (struct fcnvme_ls_cr_conn_rqst *)
+			(lsreq->private + ctrl->lport->ops->lsrqst_priv_sz);
+	conn_acc = (struct fcnvme_ls_cr_conn_acc *)&conn_rqst[1];
 
 	conn_rqst->w0.ls_cmd = FCNVME_LS_CREATE_CONNECTION;
 	conn_rqst->desc_list_len = cpu_to_be32(
@@ -1435,23 +1420,19 @@ nvme_fc_xmt_disconnect_assoc(struct nvme_fc_ctrl *ctrl)
 	int ret;
 
 	lsop = kzalloc((sizeof(*lsop) +
-			sizeof(*discon_rqst) + sizeof(*discon_acc) +
-			ctrl->lport->ops->lsrqst_priv_sz), GFP_KERNEL);
-	if (!lsop) {
-		dev_info(ctrl->ctrl.device,
-			"NVME-FC{%d}: send Disconnect Association "
-			"failed: ENOMEM\n",
-			ctrl->cnum);
+			 ctrl->lport->ops->lsrqst_priv_sz +
+			 sizeof(*discon_rqst) + sizeof(*discon_acc)),
+			GFP_KERNEL);
+	if (!lsop)
+		/* couldn't sent it... too bad */
 		return;
-	}
 
-	discon_rqst = (struct fcnvme_ls_disconnect_assoc_rqst *)&lsop[1];
-	discon_acc = (struct fcnvme_ls_disconnect_assoc_acc *)&discon_rqst[1];
 	lsreq = &lsop->ls_req;
-	if (ctrl->lport->ops->lsrqst_priv_sz)
-		lsreq->private = (void *)&discon_acc[1];
-	else
-		lsreq->private = NULL;
+
+	lsreq->private = (void *)&lsop[1];
+	discon_rqst = (struct fcnvme_ls_disconnect_assoc_rqst *)
+			(lsreq->private + ctrl->lport->ops->lsrqst_priv_sz);
+	discon_acc = (struct fcnvme_ls_disconnect_assoc_acc *)&discon_rqst[1];
 
 	discon_rqst->w0.ls_cmd = FCNVME_LS_DISCONNECT_ASSOC;
 	discon_rqst->desc_list_len = cpu_to_be32(
@@ -1519,7 +1500,7 @@ __nvme_fc_abort_op(struct nvme_fc_ctrl *ctrl, struct nvme_fc_fcp_op *op)
 	opstate = atomic_xchg(&op->state, FCPOP_STATE_ABORTED);
 	if (opstate != FCPOP_STATE_ACTIVE)
 		atomic_set(&op->state, opstate);
-	else if (test_bit(FCCTRL_TERMIO, &ctrl->flags))
+	else if (ctrl->flags & FCCTRL_TERMIO)
 		ctrl->iocnt++;
 	spin_unlock_irqrestore(&ctrl->lock, flags);
 
@@ -1556,7 +1537,7 @@ __nvme_fc_fcpop_chk_teardowns(struct nvme_fc_ctrl *ctrl,
 
 	if (opstate == FCPOP_STATE_ABORTED) {
 		spin_lock_irqsave(&ctrl->lock, flags);
-		if (test_bit(FCCTRL_TERMIO, &ctrl->flags)) {
+		if (ctrl->flags & FCCTRL_TERMIO) {
 			if (!--ctrl->iocnt)
 				wake_up(&ctrl->ioabort_wait);
 		}
@@ -1759,7 +1740,7 @@ __nvme_fc_init_request(struct nvme_fc_ctrl *ctrl,
 	if (fc_dma_mapping_error(ctrl->lport->dev, op->fcp_req.cmddma)) {
 		dev_err(ctrl->dev,
 			"FCP Op failed - cmdiu dma mapping failed.\n");
-		ret = EFAULT;
+		ret = -EFAULT;
 		goto out_on_error;
 	}
 
@@ -1769,7 +1750,7 @@ __nvme_fc_init_request(struct nvme_fc_ctrl *ctrl,
 	if (fc_dma_mapping_error(ctrl->lport->dev, op->fcp_req.rspdma)) {
 		dev_err(ctrl->dev,
 			"FCP Op failed - rspiu dma mapping failed.\n");
-		ret = EFAULT;
+		ret = -EFAULT;
 	}
 
 	atomic_set(&op->state, FCPOP_STATE_IDLE);
@@ -1802,17 +1783,15 @@ nvme_fc_init_aen_ops(struct nvme_fc_ctrl *ctrl)
 	struct nvme_fc_fcp_op *aen_op;
 	struct nvme_fc_cmd_iu *cmdiu;
 	struct nvme_command *sqe;
-	void *private = NULL;
+	void *private;
 	int i, ret;
 
 	aen_op = ctrl->aen_ops;
 	for (i = 0; i < NVME_NR_AEN_COMMANDS; i++, aen_op++) {
-		if (ctrl->lport->ops->fcprqst_priv_sz) {
-			private = kzalloc(ctrl->lport->ops->fcprqst_priv_sz,
+		private = kzalloc(ctrl->lport->ops->fcprqst_priv_sz,
 						GFP_KERNEL);
-			if (!private)
-				return -ENOMEM;
-		}
+		if (!private)
+			return -ENOMEM;
 
 		cmdiu = &aen_op->cmd_iu;
 		sqe = &cmdiu->sqe;
@@ -1841,8 +1820,12 @@ nvme_fc_term_aen_ops(struct nvme_fc_ctrl *ctrl)
 	struct nvme_fc_fcp_op *aen_op;
 	int i;
 
+	cancel_work_sync(&ctrl->ctrl.async_event_work);
 	aen_op = ctrl->aen_ops;
 	for (i = 0; i < NVME_NR_AEN_COMMANDS; i++, aen_op++) {
+		if (!aen_op->fcp_req.private)
+			continue;
+
 		__nvme_fc_exit_request(ctrl, aen_op);
 
 		kfree(aen_op->fcp_req.private);
@@ -2159,7 +2142,7 @@ nvme_fc_map_data(struct nvme_fc_ctrl *ctrl, struct request *rq,
 	freq->sg_table.sgl = freq->first_sgl;
 	ret = sg_alloc_table_chained(&freq->sg_table,
 			blk_rq_nr_phys_segments(rq), freq->sg_table.sgl,
-			NVME_INLINE_SG_CNT);
+			SG_CHUNK_SIZE);
 	if (ret)
 		return -ENOMEM;
 
@@ -2168,7 +2151,7 @@ nvme_fc_map_data(struct nvme_fc_ctrl *ctrl, struct request *rq,
 	freq->sg_cnt = fc_dma_map_sg(ctrl->lport->dev, freq->sg_table.sgl,
 				op->nents, rq_dma_dir(rq));
 	if (unlikely(freq->sg_cnt <= 0)) {
-		sg_free_table_chained(&freq->sg_table, NVME_INLINE_SG_CNT);
+		sg_free_table_chained(&freq->sg_table, SG_CHUNK_SIZE);
 		freq->sg_cnt = 0;
 		return -EFAULT;
 	}
@@ -2191,7 +2174,9 @@ nvme_fc_unmap_data(struct nvme_fc_ctrl *ctrl, struct request *rq,
 	fc_dma_unmap_sg(ctrl->lport->dev, freq->sg_table.sgl, op->nents,
 			rq_dma_dir(rq));
 
-	sg_free_table_chained(&freq->sg_table, NVME_INLINE_SG_CNT);
+	nvme_cleanup_cmd(rq);
+
+	sg_free_table_chained(&freq->sg_table, SG_CHUNK_SIZE);
 
 	freq->sg_cnt = 0;
 }
@@ -2318,10 +2303,8 @@ nvme_fc_start_fcp_op(struct nvme_fc_ctrl *ctrl, struct nvme_fc_queue *queue,
 		opstate = atomic_xchg(&op->state, FCPOP_STATE_COMPLETE);
 		__nvme_fc_fcpop_chk_teardowns(ctrl, op, opstate);
 
-		if (!(op->flags & FCOP_FLAGS_AEN)) {
+		if (!(op->flags & FCOP_FLAGS_AEN))
 			nvme_fc_unmap_data(ctrl, op->rq, op);
-			nvme_cleanup_cmd(op->rq);
-		}
 
 		nvme_fc_ctrl_put(ctrl);
 
@@ -2385,9 +2368,16 @@ nvme_fc_submit_async_event(struct nvme_ctrl *arg)
 {
 	struct nvme_fc_ctrl *ctrl = to_fc_ctrl(arg);
 	struct nvme_fc_fcp_op *aen_op;
+	unsigned long flags;
+	bool terminating = false;
 	blk_status_t ret;
 
-	if (test_bit(FCCTRL_TERMIO, &ctrl->flags))
+	spin_lock_irqsave(&ctrl->lock, flags);
+	if (ctrl->flags & FCCTRL_TERMIO)
+		terminating = true;
+	spin_unlock_irqrestore(&ctrl->lock, flags);
+
+	if (terminating)
 		return;
 
 	aen_op = &ctrl->aen_ops[0];
@@ -2596,9 +2586,10 @@ nvme_fc_ctlr_active_on_rport(struct nvme_fc_ctrl *ctrl)
 	struct nvme_fc_rport *rport = ctrl->rport;
 	u32 cnt;
 
-	if (test_and_set_bit(ASSOC_ACTIVE, &ctrl->flags))
+	if (ctrl->assoc_active)
 		return 1;
 
+	ctrl->assoc_active = true;
 	cnt = atomic_inc_return(&rport->act_ctrl_cnt);
 	if (cnt == 1)
 		nvme_fc_rport_active_on_lport(rport);
@@ -2613,7 +2604,7 @@ nvme_fc_ctlr_inactive_on_rport(struct nvme_fc_ctrl *ctrl)
 	struct nvme_fc_lport *lport = rport->lport;
 	u32 cnt;
 
-	/* clearing of ctrl->flags ASSOC_ACTIVE bit is in association delete */
+	/* ctrl->assoc_active=false will be set independently */
 
 	cnt = atomic_dec_return(&rport->act_ctrl_cnt);
 	if (cnt == 0) {
@@ -2681,9 +2672,8 @@ nvme_fc_create_association(struct nvme_fc_ctrl *ctrl)
 	if (ret)
 		goto out_disconnect_admin_queue;
 
-	ctrl->ctrl.max_segments = ctrl->lport->ops->max_sgl_segments;
-	ctrl->ctrl.max_hw_sectors = ctrl->ctrl.max_segments <<
-						(ilog2(SZ_4K) - 9);
+	ctrl->ctrl.max_hw_sectors =
+		(ctrl->lport->ops->max_sgl_segments - 1) << (PAGE_SHIFT - 9);
 
 	blk_mq_unquiesce_queue(ctrl->ctrl.admin_q);
 
@@ -2756,7 +2746,7 @@ out_delete_hw_queue:
 	__nvme_fc_delete_hw_queue(ctrl, &ctrl->queues[0], 0);
 out_free_queue:
 	nvme_fc_free_queue(&ctrl->queues[0]);
-	clear_bit(ASSOC_ACTIVE, &ctrl->flags);
+	ctrl->assoc_active = false;
 	nvme_fc_ctlr_inactive_on_rport(ctrl);
 
 	return ret;
@@ -2773,11 +2763,12 @@ nvme_fc_delete_association(struct nvme_fc_ctrl *ctrl)
 {
 	unsigned long flags;
 
-	if (!test_and_clear_bit(ASSOC_ACTIVE, &ctrl->flags))
+	if (!ctrl->assoc_active)
 		return;
+	ctrl->assoc_active = false;
 
 	spin_lock_irqsave(&ctrl->lock, flags);
-	set_bit(FCCTRL_TERMIO, &ctrl->flags);
+	ctrl->flags |= FCCTRL_TERMIO;
 	ctrl->iocnt = 0;
 	spin_unlock_irqrestore(&ctrl->lock, flags);
 
@@ -2828,7 +2819,7 @@ nvme_fc_delete_association(struct nvme_fc_ctrl *ctrl)
 	/* wait for all io that had to be aborted */
 	spin_lock_irq(&ctrl->lock);
 	wait_event_lock_irq(ctrl->ioabort_wait, ctrl->iocnt == 0, ctrl->lock);
-	clear_bit(FCCTRL_TERMIO, &ctrl->flags);
+	ctrl->flags &= ~FCCTRL_TERMIO;
 	spin_unlock_irq(&ctrl->lock);
 
 	nvme_fc_term_aen_ops(ctrl);
@@ -2913,9 +2904,7 @@ nvme_fc_reconnect_or_delete(struct nvme_fc_ctrl *ctrl, int status)
 			dev_warn(ctrl->ctrl.device,
 				"NVME-FC{%d}: dev_loss_tmo (%d) expired "
 				"while waiting for remoteport connectivity.\n",
-				ctrl->cnum, min_t(int, portptr->dev_loss_tmo,
-					(ctrl->ctrl.opts->max_reconnects *
-					 ctrl->ctrl.opts->reconnect_delay)));
+				ctrl->cnum, portptr->dev_loss_tmo);
 		WARN_ON(nvme_delete_ctrl(&ctrl->ctrl));
 	}
 }
@@ -3102,6 +3091,7 @@ nvme_fc_init_ctrl(struct device *dev, struct nvmf_ctrl_options *opts,
 	ctrl->dev = lport->dev;
 	ctrl->cnum = idx;
 	ctrl->ioq_live = false;
+	ctrl->assoc_active = false;
 	atomic_set(&ctrl->err_work_active, 0);
 	init_waitqueue_head(&ctrl->ioabort_wait);
 
@@ -3210,6 +3200,7 @@ fail_ctrl:
 
 	/* initiate nvme ctrl ref counting teardown */
 	nvme_uninit_ctrl(&ctrl->ctrl);
+	nvme_put_ctrl(&ctrl->ctrl);
 
 	/* Remove core ctrl ref. */
 	nvme_put_ctrl(&ctrl->ctrl);
@@ -3332,12 +3323,14 @@ nvme_fc_create_ctrl(struct device *dev, struct nvmf_ctrl_options *opts)
 	spin_lock_irqsave(&nvme_fc_lock, flags);
 	list_for_each_entry(lport, &nvme_fc_lport_list, port_list) {
 		if (lport->localport.node_name != laddr.nn ||
-		    lport->localport.port_name != laddr.pn)
+		    lport->localport.port_name != laddr.pn ||
+		    lport->localport.port_state != FC_OBJSTATE_ONLINE)
 			continue;
 
 		list_for_each_entry(rport, &lport->endp_list, endp_list) {
 			if (rport->remoteport.node_name != raddr.nn ||
-			    rport->remoteport.port_name != raddr.pn)
+			    rport->remoteport.port_name != raddr.pn ||
+			    rport->remoteport.port_state != FC_OBJSTATE_ONLINE)
 				continue;
 
 			/* if fail to get reference fall through. Will error */

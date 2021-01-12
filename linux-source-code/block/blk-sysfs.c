@@ -132,10 +132,7 @@ static ssize_t queue_max_integrity_segments_show(struct request_queue *q, char *
 
 static ssize_t queue_max_segment_size_show(struct request_queue *q, char *page)
 {
-	if (blk_queue_cluster(q))
-		return queue_var_show(queue_max_segment_size(q), (page));
-
-	return queue_var_show(PAGE_SIZE, (page));
+	return queue_var_show(queue_max_segment_size(q), (page));
 }
 
 static ssize_t queue_logical_block_size_show(struct request_queue *q, char *page)
@@ -251,33 +248,6 @@ static ssize_t queue_max_hw_sectors_show(struct request_queue *q, char *page)
 	int max_hw_sectors_kb = queue_max_hw_sectors(q) >> 1;
 
 	return queue_var_show(max_hw_sectors_kb, (page));
-}
-
-static ssize_t
-queue_show_unpriv_sgio(struct request_queue *q, char *page)
-{
-	int bit;
-	bit = test_bit(QUEUE_FLAG_UNPRIV_SGIO, &q->queue_flags);
-	return queue_var_show(bit, page);
-}
-static ssize_t
-queue_store_unpriv_sgio(struct request_queue *q, const char *page, size_t count)
-{
-	unsigned long val;
-	ssize_t ret;
-
-	if (!capable(CAP_SYS_ADMIN))
-		return -EPERM;
-
-	ret = queue_var_store(&val, page, count);
-	if (ret < 0)
-		return ret;
-
-	if (val)
-		blk_queue_flag_set(QUEUE_FLAG_UNPRIV_SGIO, q);
-	else
-		blk_queue_flag_clear(QUEUE_FLAG_UNPRIV_SGIO, q);
-	return ret;
 }
 
 #define QUEUE_SYSFS_BIT_FNS(name, flag, neg)				\
@@ -659,12 +629,6 @@ static struct queue_sysfs_entry queue_discard_zeroes_data_entry = {
 	.show = queue_discard_zeroes_data_show,
 };
 
-static struct queue_sysfs_entry queue_unpriv_sgio_entry = {
-	.attr = {.name = "unpriv_sgio", .mode = S_IRUGO | S_IWUSR },
-	.show = queue_show_unpriv_sgio,
-	.store = queue_store_unpriv_sgio,
-};
-
 static struct queue_sysfs_entry queue_write_same_max_entry = {
 	.attr = {.name = "write_same_max_bytes", .mode = 0444 },
 	.show = queue_write_same_max_show,
@@ -763,7 +727,7 @@ static struct queue_sysfs_entry throtl_sample_time_entry = {
 };
 #endif
 
-static struct attribute *default_attrs[] = {
+static struct attribute *queue_attrs[] = {
 	&queue_requests_entry.attr,
 	&queue_ra_entry.attr,
 	&queue_max_hw_sectors_entry.attr,
@@ -783,7 +747,6 @@ static struct attribute *default_attrs[] = {
 	&queue_discard_max_entry.attr,
 	&queue_discard_max_hw_entry.attr,
 	&queue_discard_zeroes_data_entry.attr,
-	&queue_unpriv_sgio_entry.attr,
 	&queue_write_same_max_entry.attr,
 	&queue_write_zeroes_max_entry.attr,
 	&queue_nonrot_entry.attr,
@@ -806,6 +769,25 @@ static struct attribute *default_attrs[] = {
 	NULL,
 };
 
+static umode_t queue_attr_visible(struct kobject *kobj, struct attribute *attr,
+				int n)
+{
+	struct request_queue *q =
+		container_of(kobj, struct request_queue, kobj);
+
+	if (attr == &queue_io_timeout_entry.attr &&
+		(!q->mq_ops || !q->mq_ops->timeout))
+			return 0;
+
+	return attr->mode;
+}
+
+static struct attribute_group queue_attr_group = {
+	.attrs = queue_attrs,
+	.is_visible = queue_attr_visible,
+};
+
+
 #define to_queue(atr) container_of((atr), struct queue_sysfs_entry, attr)
 
 static ssize_t
@@ -819,6 +801,10 @@ queue_attr_show(struct kobject *kobj, struct attribute *attr, char *page)
 	if (!entry->show)
 		return -EIO;
 	mutex_lock(&q->sysfs_lock);
+	if (blk_queue_dying(q)) {
+		mutex_unlock(&q->sysfs_lock);
+		return -ENOENT;
+	}
 	res = entry->show(q, page);
 	mutex_unlock(&q->sysfs_lock);
 	return res;
@@ -837,6 +823,10 @@ queue_attr_store(struct kobject *kobj, struct attribute *attr,
 
 	q = container_of(kobj, struct request_queue, kobj);
 	mutex_lock(&q->sysfs_lock);
+	if (blk_queue_dying(q)) {
+		mutex_unlock(&q->sysfs_lock);
+		return -ENOENT;
+	}
 	res = entry->store(q, page, length);
 	mutex_unlock(&q->sysfs_lock);
 	return res;
@@ -878,32 +868,22 @@ static void blk_exit_queue(struct request_queue *q)
 	bdi_put(q->backing_dev_info);
 }
 
-/**
- * blk_release_queue - releases all allocated resources of the request_queue
- * @kobj: pointer to a kobject, whose container is a request_queue
- *
- * This function releases all allocated resources of the request queue.
- *
- * The struct request_queue refcount is incremented with blk_get_queue() and
- * decremented with blk_put_queue(). Once the refcount reaches 0 this function
- * is called.
- *
- * For drivers that have a request_queue on a gendisk and added with
- * __device_add_disk() the refcount to request_queue will reach 0 with
- * the last put_disk() called by the driver. For drivers which don't use
- * __device_add_disk() this happens with blk_cleanup_queue().
- *
- * Drivers exist which depend on the release of the request_queue to be
- * synchronous, it should not be deferred.
- *
- * Context: can sleep
- */
-static void blk_release_queue(struct kobject *kobj)
-{
-	struct request_queue *q =
-		container_of(kobj, struct request_queue, kobj);
 
-	might_sleep();
+/**
+ * __blk_release_queue - release a request queue
+ * @work: pointer to the release_work member of the request queue to be released
+ *
+ * Description:
+ *     This function is called when a block device is being unregistered. The
+ *     process of releasing a request queue starts with blk_cleanup_queue, which
+ *     set the appropriate flags and then calls blk_put_queue, that decrements
+ *     the reference counter of the request queue. Once the reference counter
+ *     of the request queue reaches zero, blk_release_queue is called to release
+ *     all allocated resources of the request queue.
+ */
+static void __blk_release_queue(struct work_struct *work)
+{
+	struct request_queue *q = container_of(work, typeof(*q), release_work);
 
 	if (test_bit(QUEUE_FLAG_POLL_STATS, &q->queue_flags))
 		blk_stat_remove_callback(q, q->poll_cb);
@@ -911,8 +891,15 @@ static void blk_release_queue(struct kobject *kobj)
 
 	blk_free_queue_stats(q->stats);
 
-	if (queue_is_mq(q))
+	if (queue_is_mq(q)) {
+		struct blk_mq_hw_ctx *hctx;
+		int i;
+
 		cancel_delayed_work_sync(&q->requeue_work);
+
+		queue_for_each_hw_ctx(q, hctx, i)
+			cancel_delayed_work_sync(&hctx->run_work);
+	}
 
 	blk_exit_queue(q);
 
@@ -932,6 +919,15 @@ static void blk_release_queue(struct kobject *kobj)
 	call_rcu(&q->rcu_head, blk_free_queue_rcu);
 }
 
+static void blk_release_queue(struct kobject *kobj)
+{
+	struct request_queue *q =
+		container_of(kobj, struct request_queue, kobj);
+
+	INIT_WORK(&q->release_work, __blk_release_queue);
+	schedule_work(&q->release_work);
+}
+
 static const struct sysfs_ops queue_sysfs_ops = {
 	.show	= queue_attr_show,
 	.store	= queue_attr_store,
@@ -939,7 +935,6 @@ static const struct sysfs_ops queue_sysfs_ops = {
 
 struct kobj_type blk_queue_ktype = {
 	.sysfs_ops	= &queue_sysfs_ops,
-	.default_attrs	= default_attrs,
 	.release	= blk_release_queue,
 };
 
@@ -984,6 +979,14 @@ int blk_register_queue(struct gendisk *disk)
 	ret = kobject_add(&q->kobj, kobject_get(&dev->kobj), "%s", "queue");
 	if (ret < 0) {
 		blk_trace_remove_sysfs(dev);
+		goto unlock;
+	}
+
+	ret = sysfs_create_group(&q->kobj, &queue_attr_group);
+	if (ret) {
+		blk_trace_remove_sysfs(dev);
+		kobject_del(&q->kobj);
+		kobject_put(&dev->kobj);
 		goto unlock;
 	}
 

@@ -1,10 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright 2007-2008 Paul Mackerras, IBM Corp.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 
 #include <linux/errno.h>
@@ -17,7 +13,6 @@
 
 #include <asm/pgtable.h>
 #include <linux/uaccess.h>
-#include <asm/tlbflush.h>
 
 /*
  * Free all pages allocated for subpage protection maps and pointers.
@@ -26,9 +21,12 @@
  */
 void subpage_prot_free(struct mm_struct *mm)
 {
-	struct subpage_prot_table *spt = &mm->context.spt;
+	struct subpage_prot_table *spt = mm_ctx_subpage_prot(&mm->context);
 	unsigned long i, j, addr;
 	u32 **p;
+
+	if (!spt)
+		return;
 
 	for (i = 0; i < 4; ++i) {
 		if (spt->low_prot[i]) {
@@ -49,13 +47,7 @@ void subpage_prot_free(struct mm_struct *mm)
 		free_page((unsigned long)p);
 	}
 	spt->maxaddr = 0;
-}
-
-void subpage_prot_init_new_context(struct mm_struct *mm)
-{
-	struct subpage_prot_table *spt = &mm->context.spt;
-
-	memset(spt, 0, sizeof(*spt));
+	kfree(spt);
 }
 
 static void hpte_flush_range(struct mm_struct *mm, unsigned long addr,
@@ -94,13 +86,18 @@ static void hpte_flush_range(struct mm_struct *mm, unsigned long addr,
 static void subpage_prot_clear(unsigned long addr, unsigned long len)
 {
 	struct mm_struct *mm = current->mm;
-	struct subpage_prot_table *spt = &mm->context.spt;
+	struct subpage_prot_table *spt;
 	u32 **spm, *spp;
 	unsigned long i;
 	size_t nw;
 	unsigned long next, limit;
 
 	down_write(&mm->mmap_sem);
+
+	spt = mm_ctx_subpage_prot(&mm->context);
+	if (!spt)
+		goto err_out;
+
 	limit = addr + len;
 	if (limit > spt->maxaddr)
 		limit = spt->maxaddr;
@@ -128,6 +125,8 @@ static void subpage_prot_clear(unsigned long addr, unsigned long len)
 		/* now flush any existing HPTEs for the range */
 		hpte_flush_range(mm, addr, nw);
 	}
+
+err_out:
 	up_write(&mm->mmap_sem);
 }
 
@@ -190,7 +189,7 @@ SYSCALL_DEFINE3(subpage_prot, unsigned long, addr,
 		unsigned long, len, u32 __user *, map)
 {
 	struct mm_struct *mm = current->mm;
-	struct subpage_prot_table *spt = &mm->context.spt;
+	struct subpage_prot_table *spt;
 	u32 **spm, *spp;
 	unsigned long i;
 	size_t nw;
@@ -219,6 +218,21 @@ SYSCALL_DEFINE3(subpage_prot, unsigned long, addr,
 		return -EFAULT;
 
 	down_write(&mm->mmap_sem);
+
+	spt = mm_ctx_subpage_prot(&mm->context);
+	if (!spt) {
+		/*
+		 * Allocate subpage prot table if not already done.
+		 * Do this with mmap_sem held
+		 */
+		spt = kzalloc(sizeof(struct subpage_prot_table), GFP_KERNEL);
+		if (!spt) {
+			err = -ENOMEM;
+			goto out;
+		}
+		mm->context.hash_context->spt = spt;
+	}
+
 	subpage_mark_vma_nohuge(mm, addr, len);
 	for (limit = addr + len; addr < limit; addr = next) {
 		next = pmd_addr_end(addr, limit);

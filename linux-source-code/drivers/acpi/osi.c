@@ -1,22 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  osi.c - _OSI implementation
  *
  *  Copyright (C) 2016 Intel Corporation
  *    Author: Lv Zheng <lv.zheng@intel.com>
- *
- * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or (at
- *  your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful, but
- *  WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  General Public License for more details.
- *
- * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  */
 
 /* Uncomment next line to get verbose printout */
@@ -481,14 +468,85 @@ static const struct dmi_system_id acpi_osi_dmi_table[] __initconst = {
 	},
 
 	/*
+	 * The following Lenovo models have a broken workaround in the
+	 * acpi_video backlight implementation to meet the Windows 8
+	 * requirement of 101 backlight levels. Reverting to pre-Win8
+	 * behavior fixes the problem.
+	 */
+	{
+	.callback = dmi_disable_osi_win8,
+	.ident = "Lenovo ThinkPad L430",
+	.matches = {
+		     DMI_MATCH(DMI_SYS_VENDOR, "LENOVO"),
+		     DMI_MATCH(DMI_PRODUCT_VERSION, "ThinkPad L430"),
+		},
+	},
+	{
+	.callback = dmi_disable_osi_win8,
+	.ident = "Lenovo ThinkPad T430",
+	.matches = {
+		     DMI_MATCH(DMI_SYS_VENDOR, "LENOVO"),
+		     DMI_MATCH(DMI_PRODUCT_VERSION, "ThinkPad T430"),
+		},
+	},
+	{
+	.callback = dmi_disable_osi_win8,
+	.ident = "Lenovo ThinkPad T430s",
+	.matches = {
+		     DMI_MATCH(DMI_SYS_VENDOR, "LENOVO"),
+		     DMI_MATCH(DMI_PRODUCT_VERSION, "ThinkPad T430s"),
+		},
+	},
+	{
+	.callback = dmi_disable_osi_win8,
+	.ident = "Lenovo ThinkPad T530",
+	.matches = {
+		     DMI_MATCH(DMI_SYS_VENDOR, "LENOVO"),
+		     DMI_MATCH(DMI_PRODUCT_VERSION, "ThinkPad T530"),
+		},
+	},
+	{
+	.callback = dmi_disable_osi_win8,
+	.ident = "Lenovo ThinkPad W530",
+	.matches = {
+		     DMI_MATCH(DMI_SYS_VENDOR, "LENOVO"),
+		     DMI_MATCH(DMI_PRODUCT_VERSION, "ThinkPad W530"),
+		},
+	},
+	{
+	.callback = dmi_disable_osi_win8,
+	.ident = "Lenovo ThinkPad X1 Carbon",
+	.matches = {
+		     DMI_MATCH(DMI_SYS_VENDOR, "LENOVO"),
+		     DMI_MATCH(DMI_PRODUCT_VERSION, "ThinkPad X1 Carbon"),
+		},
+	},
+	{
+	.callback = dmi_disable_osi_win8,
+	.ident = "Lenovo ThinkPad X230",
+	.matches = {
+		     DMI_MATCH(DMI_SYS_VENDOR, "LENOVO"),
+		     DMI_MATCH(DMI_PRODUCT_VERSION, "ThinkPad X230"),
+		},
+	},
+	{
+	.callback = dmi_disable_osi_win8,
+	.ident = "Lenovo ThinkPad Edge E330",
+	.matches = {
+		     DMI_MATCH(DMI_SYS_VENDOR, "LENOVO"),
+		     DMI_MATCH(DMI_PRODUCT_VERSION, "ThinkPad Edge E330"),
+		},
+	},
+
+	/*
 	 * BIOS invocation of _OSI(Linux) is almost always a BIOS bug.
 	 * Linux ignores it, except for the machines enumerated below.
 	 */
 
 	/*
-	 * Without this EEEpc exports a non working WMI interface, with
-	 * this it exports a working "good old" eeepc_laptop interface,
-	 * fixing both brightness control, and rfkill not working.
+	 * Without this this EEEpc exports a non working WMI interface, with
+	 * this it exports a working "good old" eeepc_laptop interface, fixing
+	 * both brightness control, and rfkill not working.
 	 */
 	{
 	.callback = dmi_enable_osi_linux,

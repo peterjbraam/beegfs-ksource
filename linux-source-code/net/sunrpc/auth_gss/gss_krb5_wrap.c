@@ -163,7 +163,7 @@ gss_wrap_kerberos_v1(struct krb5_ctx *kctx, int offset,
 					    .data = cksumdata};
 	int			blocksize = 0, plainlen;
 	unsigned char		*ptr, *msg_start;
-	time64_t		now;
+	s32			now;
 	int			headlen;
 	struct page		**tmp_pages;
 	u32			seq_send;
@@ -172,9 +172,9 @@ gss_wrap_kerberos_v1(struct krb5_ctx *kctx, int offset,
 
 	dprintk("RPC:       %s\n", __func__);
 
-	now = ktime_get_real_seconds();
+	now = get_seconds();
 
-	blocksize = crypto_skcipher_blocksize(kctx->enc);
+	blocksize = crypto_sync_skcipher_blocksize(kctx->enc);
 	gss_krb5_add_padding(buf, offset, blocksize);
 	BUG_ON((buf->len - offset) % blocksize);
 	plainlen = conflen + buf->len - offset;
@@ -237,10 +237,10 @@ gss_wrap_kerberos_v1(struct krb5_ctx *kctx, int offset,
 		return GSS_S_FAILURE;
 
 	if (kctx->enctype == ENCTYPE_ARCFOUR_HMAC) {
-		struct crypto_skcipher *cipher;
+		struct crypto_sync_skcipher *cipher;
 		int err;
-		cipher = crypto_alloc_skcipher(kctx->gk5e->encrypt_name, 0,
-					       CRYPTO_ALG_ASYNC);
+		cipher = crypto_alloc_sync_skcipher(kctx->gk5e->encrypt_name,
+						    0, 0);
 		if (IS_ERR(cipher))
 			return GSS_S_FAILURE;
 
@@ -248,7 +248,7 @@ gss_wrap_kerberos_v1(struct krb5_ctx *kctx, int offset,
 
 		err = gss_encrypt_xdr_buf(cipher, buf,
 					  offset + headlen - conflen, pages);
-		crypto_free_skcipher(cipher);
+		crypto_free_sync_skcipher(cipher);
 		if (err)
 			return GSS_S_FAILURE;
 	} else {
@@ -270,7 +270,7 @@ gss_unwrap_kerberos_v1(struct krb5_ctx *kctx, int offset, int len,
 	char			cksumdata[GSS_KRB5_MAX_CKSUM_LEN];
 	struct xdr_netobj	md5cksum = {.len = sizeof(cksumdata),
 					    .data = cksumdata};
-	time64_t		now;
+	s32			now;
 	int			direction;
 	s32			seqnum;
 	unsigned char		*ptr;
@@ -329,18 +329,18 @@ gss_unwrap_kerberos_v1(struct krb5_ctx *kctx, int offset, int len,
 
 	buf->len = len;
 	if (kctx->enctype == ENCTYPE_ARCFOUR_HMAC) {
-		struct crypto_skcipher *cipher;
+		struct crypto_sync_skcipher *cipher;
 		int err;
 
-		cipher = crypto_alloc_skcipher(kctx->gk5e->encrypt_name, 0,
-					       CRYPTO_ALG_ASYNC);
+		cipher = crypto_alloc_sync_skcipher(kctx->gk5e->encrypt_name,
+						    0, 0);
 		if (IS_ERR(cipher))
 			return GSS_S_FAILURE;
 
 		krb5_rc4_setup_enc_key(kctx, cipher, seqnum);
 
 		err = gss_decrypt_xdr_buf(cipher, buf, crypt_offset);
-		crypto_free_skcipher(cipher);
+		crypto_free_sync_skcipher(cipher);
 		if (err)
 			return GSS_S_DEFECTIVE_TOKEN;
 	} else {
@@ -363,7 +363,7 @@ gss_unwrap_kerberos_v1(struct krb5_ctx *kctx, int offset, int len,
 
 	/* it got through unscathed.  Make sure the context is unexpired */
 
-	now = ktime_get_real_seconds();
+	now = get_seconds();
 
 	if (now > kctx->endtime)
 		return GSS_S_CONTEXT_EXPIRED;
@@ -373,7 +373,7 @@ gss_unwrap_kerberos_v1(struct krb5_ctx *kctx, int offset, int len,
 	/* Copy the data back to the right position.  XXX: Would probably be
 	 * better to copy and encrypt at the same time. */
 
-	blocksize = crypto_skcipher_blocksize(kctx->enc);
+	blocksize = crypto_sync_skcipher_blocksize(kctx->enc);
 	data_start = ptr + (GSS_KRB5_TOK_HDR_LEN + kctx->gk5e->cksumlength) +
 					conflen;
 	orig_start = buf->head[0].iov_base + offset;
@@ -447,7 +447,7 @@ gss_wrap_kerberos_v2(struct krb5_ctx *kctx, u32 offset,
 		     struct xdr_buf *buf, struct page **pages)
 {
 	u8		*ptr, *plainhdr;
-	time64_t	now;
+	s32		now;
 	u8		flags = 0x00;
 	__be16		*be16ptr;
 	__be64		*be64ptr;
@@ -489,7 +489,7 @@ gss_wrap_kerberos_v2(struct krb5_ctx *kctx, u32 offset,
 	if (err)
 		return err;
 
-	now = ktime_get_real_seconds();
+	now = get_seconds();
 	return (kctx->endtime < now) ? GSS_S_CONTEXT_EXPIRED : GSS_S_COMPLETE;
 }
 
@@ -498,7 +498,7 @@ gss_unwrap_kerberos_v2(struct krb5_ctx *kctx, int offset, int len,
 		       struct xdr_buf *buf, unsigned int *slack,
 		       unsigned int *align)
 {
-	time64_t	now;
+	s32		now;
 	u8		*ptr;
 	u8		flags = 0x00;
 	u16		ec, rrc;
@@ -567,7 +567,7 @@ gss_unwrap_kerberos_v2(struct krb5_ctx *kctx, int offset, int len,
 	/* do sequencing checks */
 
 	/* it got through unscathed.  Make sure the context is unexpired */
-	now = ktime_get_real_seconds();
+	now = get_seconds();
 	if (now > kctx->endtime)
 		return GSS_S_CONTEXT_EXPIRED;
 
@@ -580,15 +580,14 @@ gss_unwrap_kerberos_v2(struct krb5_ctx *kctx, int offset, int len,
 	 */
 	movelen = min_t(unsigned int, buf->head[0].iov_len, len);
 	movelen -= offset + GSS_KRB5_TOK_HDR_LEN + headskip;
-	if (offset + GSS_KRB5_TOK_HDR_LEN + headskip + movelen >
-	    buf->head[0].iov_len)
-		return GSS_S_FAILURE;
+	BUG_ON(offset + GSS_KRB5_TOK_HDR_LEN + headskip + movelen >
+							buf->head[0].iov_len);
 	memmove(ptr, ptr + GSS_KRB5_TOK_HDR_LEN + headskip, movelen);
 	buf->head[0].iov_len -= GSS_KRB5_TOK_HDR_LEN + headskip;
-	buf->len = len - GSS_KRB5_TOK_HDR_LEN + headskip;
+	buf->len = len - (GSS_KRB5_TOK_HDR_LEN + headskip);
 
 	/* Trim off the trailing "extra count" and checksum blob */
-	buf->len -= ec + GSS_KRB5_TOK_HDR_LEN + tailskip;
+	xdr_buf_trim(buf, ec + GSS_KRB5_TOK_HDR_LEN + tailskip);
 
 	*align = XDR_QUADLEN(GSS_KRB5_TOK_HDR_LEN + headskip);
 	*slack = *align + XDR_QUADLEN(ec + GSS_KRB5_TOK_HDR_LEN + tailskip);

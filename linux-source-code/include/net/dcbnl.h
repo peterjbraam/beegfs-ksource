@@ -1,17 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (c) 2008, Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; if not, see <http://www.gnu.org/licenses/>.
  *
  * Author: Lucy Liu <lucy.liu@intel.com>
  */
@@ -20,8 +9,6 @@
 #define __NET_DCBNL_H__
 
 #include <linux/dcbnl.h>
-
-#include <linux/rh_kabi.h>
 
 struct dcb_app_type {
 	int	ifindex;
@@ -53,9 +40,6 @@ int dcbnl_ieee_notify(struct net_device *dev, int event, int cmd,
 		      u32 seq, u32 pid);
 int dcbnl_cee_notify(struct net_device *dev, int event, int cmd,
 		     u32 seq, u32 pid);
-
-struct dcbnl_rtnl_ops_extended_rh {
-};
 
 /*
  * Ops struct for the netlink callbacks.  Used by DCB-enabled drivers through
@@ -123,22 +107,6 @@ struct dcbnl_rtnl_ops {
 	/* buffer settings */
 	int (*dcbnl_getbuffer)(struct net_device *, struct dcbnl_buffer *);
 	int (*dcbnl_setbuffer)(struct net_device *, struct dcbnl_buffer *);
-
-	RH_KABI_RESERVE(1)
-	RH_KABI_RESERVE(2)
-	RH_KABI_RESERVE(3)
-	RH_KABI_RESERVE(4)
-	RH_KABI_RESERVE(5)
-	RH_KABI_RESERVE(6)
-	RH_KABI_RESERVE(8)
-	RH_KABI_RESERVE(9)
-	RH_KABI_RESERVE(10)
-	RH_KABI_RESERVE(11)
-	RH_KABI_RESERVE(12)
-	RH_KABI_RESERVE(13)
-	RH_KABI_RESERVE(14)
-	RH_KABI_RESERVE(15)
-	RH_KABI_AUX_EMBED(dcbnl_rtnl_ops_extended)
 };
 
 #endif /* __NET_DCBNL_H__ */

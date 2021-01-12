@@ -502,7 +502,7 @@ void test_flow_dissector(void)
 		struct bpf_flow_keys flow_keys = {};
 		__u32 key = (__u32)(tests[i].keys.sport) << 16 |
 			    tests[i].keys.dport;
- 
+
 		/* For skb-less case we can't pass input flags; run
 		 * only the tests that have a matching set of flags.
 		 */
@@ -523,6 +523,7 @@ void test_flow_dissector(void)
 		CHECK_ATTR(err, tests[i].name, "bpf_map_delete_elem %d\n", err);
 	}
 
+	close(tap_fd);
 	bpf_prog_detach(prog_fd, BPF_FLOW_DISSECTOR);
 	bpf_object__close(obj);
 }

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
 	Copyright (C) 2010 Willow Garage <http://www.willowgarage.com>
 	Copyright (C) 2010 Ivo van Doorn <IvDoorn@gmail.com>
@@ -13,18 +14,6 @@
 	  Copyright (C) 2009 Xose Vazquez Perez <xose.vazquez@gmail.com>
 	  <http://rt2x00.serialmonkey.com>
 
-	This program is free software; you can redistribute it and/or modify
-	it under the terms of the GNU General Public License as published by
-	the Free Software Foundation; either version 2 of the License, or
-	(at your option) any later version.
-
-	This program is distributed in the hope that it will be useful,
-	but WITHOUT ANY WARRANTY; without even the implied warranty of
-	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-	GNU General Public License for more details.
-
-	You should have received a copy of the GNU General Public License
-	along with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
 /*
@@ -1663,17 +1652,20 @@ static void rt2800_config_wcid_attr_cipher(struct rt2x00_dev *rt2x00dev,
 		rt2800_register_write(rt2x00dev, offset, reg);
 	}
 
-	if (test_bit(DEVICE_STATE_RESET, &rt2x00dev->flags))
-		return;
-
 	offset = MAC_IVEIV_ENTRY(key->hw_key_idx);
 
-	memset(&iveiv_entry, 0, sizeof(iveiv_entry));
-	if ((crypto->cipher == CIPHER_TKIP) ||
-	    (crypto->cipher == CIPHER_TKIP_NO_MIC) ||
-	    (crypto->cipher == CIPHER_AES))
-		iveiv_entry.iv[3] |= 0x20;
-	iveiv_entry.iv[3] |= key->keyidx << 6;
+	if (crypto->cmd == SET_KEY) {
+		rt2800_register_multiread(rt2x00dev, offset,
+					  &iveiv_entry, sizeof(iveiv_entry));
+		if ((crypto->cipher == CIPHER_TKIP) ||
+		    (crypto->cipher == CIPHER_TKIP_NO_MIC) ||
+		    (crypto->cipher == CIPHER_AES))
+			iveiv_entry.iv[3] |= 0x20;
+		iveiv_entry.iv[3] |= key->keyidx << 6;
+	} else {
+		memset(&iveiv_entry, 0, sizeof(iveiv_entry));
+	}
+
 	rt2800_register_multiwrite(rt2x00dev, offset,
 				   &iveiv_entry, sizeof(iveiv_entry));
 }

@@ -61,6 +61,9 @@ struct save_area * __init save_area_alloc(bool is_boot_cpu)
 	struct save_area *sa;
 
 	sa = (void *) memblock_phys_alloc(sizeof(*sa), 8);
+	if (!sa)
+		panic("Failed to allocate save area\n");
+
 	if (is_boot_cpu)
 		list_add(&sa->list, &dump_save_areas);
 	else
@@ -292,19 +295,6 @@ int remap_oldmem_pfn_range(struct vm_area_struct *vma, unsigned long from,
 						       prot);
 }
 
-/*
- * Alloc memory and panic in case of ENOMEM
- */
-static void *kzalloc_panic(int len)
-{
-	void *rc;
-
-	rc = kzalloc(len, GFP_KERNEL);
-	if (!rc)
-		panic("s390 kdump kzalloc (%d) failed", len);
-	return rc;
-}
-
 static const char *nt_name(Elf64_Word type)
 {
 	const char *name = "LINUX";
@@ -450,11 +440,15 @@ static void *get_vmcoreinfo_old(unsigned long *size)
 	if (copy_oldmem_kernel(nt_name, addr + sizeof(note),
 			       sizeof(nt_name) - 1))
 		return NULL;
-	if (strcmp(nt_name, "VMCOREINFO") != 0)
+	if (strcmp(nt_name, VMCOREINFO_NOTE_NAME) != 0)
 		return NULL;
-	vmcoreinfo = kzalloc_panic(note.n_descsz);
-	if (copy_oldmem_kernel(vmcoreinfo, addr + 24, note.n_descsz))
+	vmcoreinfo = kzalloc(note.n_descsz, GFP_KERNEL);
+	if (!vmcoreinfo)
 		return NULL;
+	if (copy_oldmem_kernel(vmcoreinfo, addr + 24, note.n_descsz)) {
+		kfree(vmcoreinfo);
+		return NULL;
+	}
 	*size = note.n_descsz;
 	return vmcoreinfo;
 }
@@ -464,15 +458,20 @@ static void *get_vmcoreinfo_old(unsigned long *size)
  */
 static void *nt_vmcoreinfo(void *ptr)
 {
+	const char *name = VMCOREINFO_NOTE_NAME;
 	unsigned long size;
 	void *vmcoreinfo;
 
 	vmcoreinfo = os_info_old_entry(OS_INFO_VMCOREINFO, &size);
-	if (!vmcoreinfo)
-		vmcoreinfo = get_vmcoreinfo_old(&size);
+	if (vmcoreinfo)
+		return nt_init_name(ptr, 0, vmcoreinfo, size, name);
+
+	vmcoreinfo = get_vmcoreinfo_old(&size);
 	if (!vmcoreinfo)
 		return ptr;
-	return nt_init_name(ptr, 0, vmcoreinfo, size, "VMCOREINFO");
+	ptr = nt_init_name(ptr, 0, vmcoreinfo, size, name);
+	kfree(vmcoreinfo);
+	return ptr;
 }
 
 static size_t nt_vmcoreinfo_size(void)
@@ -653,7 +652,15 @@ int elfcorehdr_alloc(unsigned long long *addr, unsigned long long *size)
 
 	alloc_size = get_elfcorehdr_size(mem_chunk_cnt);
 
-	hdr = kzalloc_panic(alloc_size);
+	hdr = kzalloc(alloc_size, GFP_KERNEL);
+
+	/* Without elfcorehdr /proc/vmcore cannot be created. Thus creating
+	 * a dump with this crash kernel will fail. Panic now to allow other
+	 * dump mechanisms to take over.
+	 */
+	if (!hdr)
+		panic("s390 kdump allocating elfcorehdr failed");
+
 	/* Init elf header */
 	ptr = ehdr_init(hdr, mem_chunk_cnt);
 	/* Init program headers */

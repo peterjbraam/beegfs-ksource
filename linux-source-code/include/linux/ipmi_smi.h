@@ -28,12 +28,7 @@ struct device;
  */
 
 /* Structure for the low-level drivers. */
-typedef struct ipmi_smi *ipmi_smi_t;
-
-/* RHEL extension for struct ipmi_smi_msg
- */
-struct ipmi_smi_msg_rh {
-};
+struct ipmi_smi;
 
 /*
  * Flags for set_check_watch() below.  Tells if the SMI should be
@@ -73,16 +68,6 @@ struct ipmi_smi_msg {
 	 * (presumably to free it).
 	 */
 	void (*done)(struct ipmi_smi_msg *msg);
-
-	RH_KABI_AUX_EMBED(ipmi_smi_msg)
-};
-
-/* RHEL extension to struct ipmi_smi_handlers
- * This extension must be dynamically allocated for every instance of
- * ipmi_smi_handlers, because ipmi_smi_handlers is embedded in another
- * struct.
- */
-struct ipmi_smi_handlers_rh {
 };
 
 struct ipmi_smi_handlers {
@@ -138,10 +123,7 @@ struct ipmi_smi_handlers {
 	 * timeouts for just watchdog checking or faster timeouts when
 	 * waiting for the message queue.
 	 */
-	RH_KABI_REPLACE(
-	void (*set_need_watch)(void *send_info, bool enable),
-	void (*set_need_watch)(void *send_info, unsigned int watch_mask)
-	)
+	void (*set_need_watch)(void *send_info, unsigned int watch_mask);
 
 	/*
 	 * Called when flushing all pending messages.
@@ -171,8 +153,6 @@ struct ipmi_smi_handlers {
 	 * block.
 	 */
 	void (*set_maintenance_mode)(void *send_info, bool enable);
-
-	RH_KABI_AUX_PTR(ipmi_smi_handlers)
 };
 
 struct ipmi_device_id {
@@ -244,18 +224,13 @@ static inline int ipmi_demangle_device_id(uint8_t netfn, uint8_t cmd,
  * is called, and the lower layer must get the interface from that
  * call.
  */
-int ipmi_register_smi(const struct ipmi_smi_handlers *handlers,
-		      void                     *send_info,
-		      struct device            *dev,
-		      unsigned char            slave_addr);
-
 int ipmi_add_smi(struct module            *owner,
 		 const struct ipmi_smi_handlers *handlers,
 		 void                     *send_info,
 		 struct device            *dev,
 		 unsigned char            slave_addr);
 
-#define ipmi_register_smi_mod(handlers, send_info, dev, slave_addr) \
+#define ipmi_register_smi(handlers, send_info, dev, slave_addr) \
 	ipmi_add_smi(THIS_MODULE, handlers, send_info, dev, slave_addr)
 
 /*

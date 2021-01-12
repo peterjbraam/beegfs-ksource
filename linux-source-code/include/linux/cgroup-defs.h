@@ -89,6 +89,11 @@ enum {
 	 * Enable cpuset controller in v1 cgroup to use v2 behavior.
 	 */
 	CGRP_ROOT_CPUSET_V2_MODE = (1 << 4),
+
+	/*
+	 * Enable legacy local memory.events.
+	 */
+	CGRP_ROOT_MEMORY_LOCAL_EVENTS = (1 << 5),
 };
 
 /* cftype->flags */
@@ -216,6 +221,7 @@ struct css_set {
 	 */
 	struct list_head tasks;
 	struct list_head mg_tasks;
+	struct list_head dying_tasks;
 
 	/* all css_task_iters currently walking this cset */
 	struct list_head task_iters;
@@ -268,12 +274,6 @@ struct css_set {
 
 	/* For RCU-protected deletion */
 	struct rcu_head rcu_head;
-
-	/*
-	 * RHEL8: css_set structures are dynamically allocated and
-	 *	  used by core kernel only.
-	 */
-	RH_KABI_EXTEND(struct list_head dying_tasks)
 };
 
 struct cgroup_base_stat {
@@ -451,13 +451,14 @@ struct cgroup {
 	 * specific task are charged to the dom_cgrp.
 	 */
 	struct cgroup *dom_cgrp;
+	struct cgroup *old_dom_cgrp;		/* used while enabling threaded */
 
 	/* per-cpu recursive resource statistics */
 	struct cgroup_rstat_cpu __percpu *rstat_cpu;
 	struct list_head rstat_css_list;
 
 	/* cgroup basic resource statistics */
-	struct cgroup_base_stat RH_KABI_RENAME(pending_bstat, last_bstat);
+	struct cgroup_base_stat pending_bstat;	/* pending from children */
 	struct cgroup_base_stat bstat;
 	struct prev_cputime prev_cputime;	/* for printing out cputime */
 
@@ -474,38 +475,17 @@ struct cgroup {
 	/* used to schedule release agent */
 	struct work_struct release_agent_work;
 
+	/* used to track pressure stalls */
+	struct psi_group psi;
+
 	/* used to store eBPF programs */
 	struct cgroup_bpf bpf;
 
 	/* If there is block congestion on this cgroup. */
 	atomic_t congestion_count;
 
-	/*
-	 * RHEL8:
-	 * The cgroup structures are all allocated by the core kernel
-	 * code at run time. It is also accessed only the cgroup core code
-	 * and so changes made to the cgroup structure should not affect
-	 * third-party kernel modules. However, a number of important kernel
-	 * data structures do contain pointer to a cgroup structure and so
-	 * the kABI signature has to be maintained.
-	 *
-	 * The ancestor_ids[] arrary has to be at the end of structure.
-	 */
-	RH_KABI_BROKEN_INSERT_BLOCK(
-	struct cgroup *old_dom_cgrp; /* used while enabling threaded */
-
 	/* Used to store internal freezer state */
 	struct cgroup_freezer_state freezer;
-
-	/* used to track pressure stalls */
-	struct psi_group psi;
-	) /* RH_KABI_BROKEN_INSERT_BLOCK */
-
-	/*
-	 * RHEL8:
-	 * The ancestor_ids[] should only be used by cgroup core.
-	 * External kernel modules should not used it.
-	 */
 
 	/* ids of the ancestors at each level including self */
 	int ancestor_ids[];
@@ -634,14 +614,8 @@ struct cftype {
 	ssize_t (*write)(struct kernfs_open_file *of,
 			 char *buf, size_t nbytes, loff_t off);
 
-	/*
-	 * RHEL8: Third party kernel modules are not supposed to create
-	 * new cgroup controller that use the cftype structure. They are
-	 * also not supposed to access this structure anyway. So it is
-	 * safe to extend it.
-	 */
-	RH_KABI_BROKEN_INSERT(__poll_t (*poll)(struct kernfs_open_file *of,
-					       struct poll_table_struct *pt))
+	__poll_t (*poll)(struct kernfs_open_file *of,
+			 struct poll_table_struct *pt);
 
 #ifdef CONFIG_DEBUG_LOCK_ALLOC
 	struct lock_class_key	lockdep_key;
@@ -650,7 +624,7 @@ struct cftype {
 
 /*
  * Control Group subsystem type.
- * See Documentation/cgroup-v1/cgroups.txt for details
+ * See Documentation/admin-guide/cgroup-v1/cgroups.rst for details
  */
 struct cgroup_subsys {
 	struct cgroup_subsys_state *(*css_alloc)(struct cgroup_subsys_state *parent_css);
@@ -671,7 +645,7 @@ struct cgroup_subsys {
 	void (*cancel_fork)(struct task_struct *task);
 	void (*fork)(struct task_struct *task);
 	void (*exit)(struct task_struct *task);
-	void (*RH_KABI_RENAME(free, release))(struct task_struct *task);
+	void (*release)(struct task_struct *task);
 	void (*bind)(struct cgroup_subsys_state *root_css);
 
 	bool early_init:1;
@@ -823,7 +797,9 @@ struct sock_cgroup_data {
 	union {
 #ifdef __LITTLE_ENDIAN
 		struct {
-			u8	is_data;
+			u8	is_data : 1;
+			u8	no_refcnt : 1;
+			u8	unused : 6;
 			u8	padding;
 			u16	prioidx;
 			u32	classid;
@@ -833,7 +809,9 @@ struct sock_cgroup_data {
 			u32	classid;
 			u16	prioidx;
 			u8	padding;
-			u8	is_data;
+			u8	unused : 6;
+			u8	no_refcnt : 1;
+			u8	is_data : 1;
 		} __packed;
 #endif
 		u64		val;

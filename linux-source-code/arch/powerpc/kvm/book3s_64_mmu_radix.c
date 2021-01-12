@@ -1,7 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License, version 2, as
- * published by the Free Software Foundation.
  *
  * Copyright 2016 Paul Mackerras, IBM Corp. <paulus@au1.ibm.com>
  */
@@ -21,8 +19,6 @@
 #include <asm/pgtable.h>
 #include <asm/pgalloc.h>
 #include <asm/pte-walk.h>
-#include <asm/ultravisor.h>
-#include <asm/kvm_book3s_uvmem.h>
 
 /*
  * Supported radix tree geometry.
@@ -42,7 +38,8 @@ unsigned long __kvmhv_copy_tofrom_guest_radix(int lpid, int pid,
 	/* Can't access quadrants 1 or 2 in non-HV mode, call the HV to do it */
 	if (kvmhv_on_pseries())
 		return plpar_hcall_norets(H_COPY_TOFROM_GUEST, lpid, pid, eaddr,
-					  __pa(to), __pa(from), n);
+					  (to != NULL) ? __pa(to): 0,
+					  (from != NULL) ? __pa(from): 0, n);
 
 	quadrant = 1;
 	if (!pid)
@@ -357,7 +354,13 @@ static struct kmem_cache *kvm_pmd_cache;
 
 static pte_t *kvmppc_pte_alloc(void)
 {
-	return kmem_cache_alloc(kvm_pte_cache, GFP_KERNEL);
+	pte_t *pte;
+
+	pte = kmem_cache_alloc(kvm_pte_cache, GFP_KERNEL);
+	/* pmd_populate() will only reference _pa(pte). */
+	kmemleak_ignore(pte);
+
+	return pte;
 }
 
 static void kvmppc_pte_free(pte_t *ptep)
@@ -365,15 +368,15 @@ static void kvmppc_pte_free(pte_t *ptep)
 	kmem_cache_free(kvm_pte_cache, ptep);
 }
 
-/* Like pmd_huge() and pmd_large(), but works regardless of config options */
-static inline int pmd_is_leaf(pmd_t pmd)
-{
-	return !!(pmd_val(pmd) & _PAGE_PTE);
-}
-
 static pmd_t *kvmppc_pmd_alloc(void)
 {
-	return kmem_cache_alloc(kvm_pmd_cache, GFP_KERNEL);
+	pmd_t *pmd;
+
+	pmd = kmem_cache_alloc(kvm_pmd_cache, GFP_KERNEL);
+	/* pud_populate() will only reference _pa(pmd). */
+	kmemleak_ignore(pmd);
+
+	return pmd;
 }
 
 static void kvmppc_pmd_free(pmd_t *pmdp)
@@ -427,19 +430,15 @@ void kvmppc_unmap_pte(struct kvm *kvm, pte_t *pte, unsigned long gpa,
  * Callers are responsible for flushing the PWC.
  *
  * When page tables are being unmapped/freed as part of page fault path
- * (full == false), valid ptes are generally not expected; however, there
- * is one situation where they arise, which is when dirty page logging is
- * turned off for a memslot while the VM is running.  The new memslot
- * becomes visible to page faults before the memslot commit function
- * gets to flush the memslot, which can lead to a 2MB page mapping being
- * installed for a guest physical address where there are already 64kB
- * (or 4kB) mappings (of sub-pages of the same 2MB page).
+ * (full == false), ptes are not expected. There is code to unmap them
+ * and emit a warning if encountered, but there may already be data
+ * corruption due to the unexpected mappings.
  */
 static void kvmppc_unmap_free_pte(struct kvm *kvm, pte_t *pte, bool full,
 				  unsigned int lpid)
 {
 	if (full) {
-		memset(pte, 0, sizeof(long) << RADIX_PTE_INDEX_SIZE);
+		memset(pte, 0, sizeof(long) << PTE_INDEX_SIZE);
 	} else {
 		pte_t *p = pte;
 		unsigned long it;
@@ -447,6 +446,7 @@ static void kvmppc_unmap_free_pte(struct kvm *kvm, pte_t *pte, bool full,
 		for (it = 0; it < PTRS_PER_PTE; ++it, ++p) {
 			if (pte_val(*p) == 0)
 				continue;
+			WARN_ON_ONCE(1);
 			kvmppc_unmap_pte(kvm, p,
 					 pte_pfn(*p) << PAGE_SHIFT,
 					 PAGE_SHIFT, NULL, lpid);
@@ -494,7 +494,7 @@ static void kvmppc_unmap_free_pud(struct kvm *kvm, pud_t *pud,
 	for (iu = 0; iu < PTRS_PER_PUD; ++iu, ++p) {
 		if (!pud_present(*p))
 			continue;
-		if (pud_huge(*p)) {
+		if (pud_is_leaf(*p)) {
 			pud_clear(p);
 		} else {
 			pmd_t *pmd;
@@ -593,7 +593,7 @@ int kvmppc_create_pte(struct kvm *kvm, pgd_t *pgtable, pte_t pte,
 		new_pud = pud_alloc_one(kvm->mm, gpa);
 
 	pmd = NULL;
-	if (pud && pud_present(*pud) && !pud_huge(*pud))
+	if (pud && pud_present(*pud) && !pud_is_leaf(*pud))
 		pmd = pmd_offset(pud, gpa);
 	else if (level <= 1)
 		new_pmd = kvmppc_pmd_alloc();
@@ -616,7 +616,7 @@ int kvmppc_create_pte(struct kvm *kvm, pgd_t *pgtable, pte_t pte,
 		new_pud = NULL;
 	}
 	pud = pud_offset(pgd, gpa);
-	if (pud_huge(*pud)) {
+	if (pud_is_leaf(*pud)) {
 		unsigned long hgpa = gpa & PUD_MASK;
 
 		/* Check if we raced and someone else has set the same thing */
@@ -748,7 +748,7 @@ int kvmppc_create_pte(struct kvm *kvm, pgd_t *pgtable, pte_t pte,
 	return ret;
 }
 
-bool kvmppc_hv_handle_set_rc(struct kvm *kvm, bool nested, bool writing,
+bool kvmppc_hv_handle_set_rc(struct kvm *kvm, pgd_t *pgtable, bool writing,
 			     unsigned long gpa, unsigned int lpid)
 {
 	unsigned long pgflags;
@@ -763,12 +763,12 @@ bool kvmppc_hv_handle_set_rc(struct kvm *kvm, bool nested, bool writing,
 	pgflags = _PAGE_ACCESSED;
 	if (writing)
 		pgflags |= _PAGE_DIRTY;
-
-	if (nested)
-		ptep = find_kvm_nested_guest_pte(kvm, lpid, gpa, &shift);
-	else
-		ptep = find_kvm_secondary_pte(kvm, gpa, &shift);
-
+	/*
+	 * We are walking the secondary (partition-scoped) page table here.
+	 * We can do this without disabling irq because the Linux MM
+	 * subsystem doesn't do THP splits and collapses on this tree.
+	 */
+	ptep = __find_linux_pte(pgtable, gpa, NULL, &shift);
 	if (ptep && pte_present(*ptep) && (!writing || pte_write(*ptep))) {
 		kvmppc_radix_update_pte(kvm, ptep, 0, pgflags, gpa, shift);
 		return true;
@@ -826,21 +826,20 @@ int kvmppc_book3s_instantiate_page(struct kvm_vcpu *vcpu,
 	 * Read the PTE from the process' radix tree and use that
 	 * so we get the shift and attribute bits.
 	 */
-	spin_lock(&kvm->mmu_lock);
-	ptep = find_kvm_host_pte(kvm, mmu_seq, hva, &shift);
-	pte = __pte(0);
-	if (ptep)
-		pte = READ_ONCE(*ptep);
-	spin_unlock(&kvm->mmu_lock);
+	local_irq_disable();
+	ptep = __find_linux_pte(vcpu->arch.pgdir, hva, NULL, &shift);
 	/*
 	 * If the PTE disappeared temporarily due to a THP
 	 * collapse, just return and let the guest try again.
 	 */
-	if (!pte_present(pte)) {
+	if (!ptep) {
+		local_irq_enable();
 		if (page)
 			put_page(page);
 		return RESUME_GUEST;
 	}
+	pte = *ptep;
+	local_irq_enable();
 
 	/* If we're logging dirty pages, always map single pages */
 	large_enable = !(memslot->flags & KVM_MEM_LOG_DIRTY_PAGES);
@@ -929,9 +928,6 @@ int kvmppc_book3s_radix_page_fault(struct kvm_run *run, struct kvm_vcpu *vcpu,
 	if (!(dsisr & DSISR_PRTABLE_FAULT))
 		gpa |= ea & 0xfff;
 
-	if (kvm->arch.secure_guest & KVMPPC_SECURE_INIT_DONE)
-		return kvmppc_send_page_to_uv(kvm, gfn);
-
 	/* Get the corresponding memslot */
 	memslot = gfn_to_memslot(kvm, gfn);
 
@@ -962,8 +958,8 @@ int kvmppc_book3s_radix_page_fault(struct kvm_run *run, struct kvm_vcpu *vcpu,
 	/* Failed to set the reference/change bits */
 	if (dsisr & DSISR_SET_RC) {
 		spin_lock(&kvm->mmu_lock);
-		if (kvmppc_hv_handle_set_rc(kvm, false, writing,
-					    gpa, kvm->arch.lpid))
+		if (kvmppc_hv_handle_set_rc(kvm, kvm->arch.pgtable,
+					    writing, gpa, kvm->arch.lpid))
 			dsisr &= ~DSISR_SET_RC;
 		spin_unlock(&kvm->mmu_lock);
 
@@ -989,16 +985,11 @@ int kvm_unmap_radix(struct kvm *kvm, struct kvm_memory_slot *memslot,
 	unsigned long gpa = gfn << PAGE_SHIFT;
 	unsigned int shift;
 
-	if (kvm->arch.secure_guest & KVMPPC_SECURE_INIT_DONE) {
-		uv_page_inval(kvm->arch.lpid, gpa, PAGE_SHIFT);
-		return 0;
-	}
-
-	ptep = find_kvm_secondary_pte(kvm, gpa, &shift);
+	ptep = __find_linux_pte(kvm->arch.pgtable, gpa, NULL, &shift);
 	if (ptep && pte_present(*ptep))
 		kvmppc_unmap_pte(kvm, ptep, gpa, shift, memslot,
 				 kvm->arch.lpid);
-	return 0;
+	return 0;				
 }
 
 /* Called with kvm->mmu_lock held */
@@ -1011,10 +1002,7 @@ int kvm_age_radix(struct kvm *kvm, struct kvm_memory_slot *memslot,
 	int ref = 0;
 	unsigned long old, *rmapp;
 
-	if (kvm->arch.secure_guest & KVMPPC_SECURE_INIT_DONE)
-		return ref;
-
-	ptep = find_kvm_secondary_pte(kvm, gpa, &shift);
+	ptep = __find_linux_pte(kvm->arch.pgtable, gpa, NULL, &shift);
 	if (ptep && pte_present(*ptep) && pte_young(*ptep)) {
 		old = kvmppc_radix_update_pte(kvm, ptep, _PAGE_ACCESSED, 0,
 					      gpa, shift);
@@ -1038,10 +1026,7 @@ int kvm_test_age_radix(struct kvm *kvm, struct kvm_memory_slot *memslot,
 	unsigned int shift;
 	int ref = 0;
 
-	if (kvm->arch.secure_guest & KVMPPC_SECURE_INIT_DONE)
-		return ref;
-
-	ptep = find_kvm_secondary_pte(kvm, gpa, &shift);
+	ptep = __find_linux_pte(kvm->arch.pgtable, gpa, NULL, &shift);
 	if (ptep && pte_present(*ptep) && pte_young(*ptep))
 		ref = 1;
 	return ref;
@@ -1058,10 +1043,7 @@ static int kvm_radix_test_clear_dirty(struct kvm *kvm,
 	int ret = 0;
 	unsigned long old, *rmapp;
 
-	if (kvm->arch.secure_guest & KVMPPC_SECURE_INIT_DONE)
-		return ret;
-
-	ptep = find_kvm_secondary_pte(kvm, gpa, &shift);
+	ptep = __find_linux_pte(kvm->arch.pgtable, gpa, NULL, &shift);
 	if (ptep && pte_present(*ptep) && pte_dirty(*ptep)) {
 		ret = 1;
 		if (shift)
@@ -1113,16 +1095,10 @@ void kvmppc_radix_flush_memslot(struct kvm *kvm,
 	unsigned long gpa;
 	unsigned int shift;
 
-	if (kvm->arch.secure_guest & KVMPPC_SECURE_INIT_START)
-		kvmppc_uvmem_drop_pages(memslot, kvm, true);
-
-	if (kvm->arch.secure_guest & KVMPPC_SECURE_INIT_DONE)
-		return;
-
 	gpa = memslot->base_gfn << PAGE_SHIFT;
 	spin_lock(&kvm->mmu_lock);
 	for (n = memslot->npages; n; --n) {
-		ptep = find_kvm_secondary_pte(kvm, gpa, &shift);
+		ptep = __find_linux_pte(kvm->arch.pgtable, gpa, NULL, &shift);
 		if (ptep && pte_present(*ptep))
 			kvmppc_unmap_pte(kvm, ptep, gpa, shift, memslot,
 					 kvm->arch.lpid);
@@ -1395,8 +1371,9 @@ static const struct file_operations debugfs_radix_fops = {
 
 void kvmhv_radix_debugfs_init(struct kvm *kvm)
 {
-	debugfs_create_file("radix", 0400, kvm->arch.debugfs_dir, kvm,
-			    &debugfs_radix_fops);
+	kvm->arch.radix_dentry = debugfs_create_file("radix", 0400,
+						     kvm->arch.debugfs_dir, kvm,
+						     &debugfs_radix_fops);
 }
 
 int kvmppc_radix_init(void)

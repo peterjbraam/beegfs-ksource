@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * scan.c - support for transforming the ACPI namespace into individual objects
  */
@@ -6,7 +7,6 @@
 #include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/kernel.h>
-#include <linux/gpio/consumer.h>
 #include <linux/acpi.h>
 #include <linux/acpi_iort.h>
 #include <linux/signal.h>
@@ -919,12 +919,9 @@ static void acpi_bus_init_power_state(struct acpi_device *device, int state)
 
 		if (buffer.length && package
 		    && package->type == ACPI_TYPE_PACKAGE
-		    && package->package.count) {
-			int err = acpi_extract_power_resources(package, 0,
-							       &ps->resources);
-			if (!err)
-				device->power.flags.power_resources = 1;
-		}
+		    && package->package.count)
+			acpi_extract_power_resources(package, 0, &ps->resources);
+
 		ACPI_FREE(buffer.pointer);
 	}
 
@@ -971,13 +968,26 @@ static void acpi_bus_get_power_flags(struct acpi_device *device)
 		acpi_bus_init_power_state(device, i);
 
 	INIT_LIST_HEAD(&device->power.states[ACPI_STATE_D3_COLD].resources);
-	if (!list_empty(&device->power.states[ACPI_STATE_D3_HOT].resources))
-		device->power.states[ACPI_STATE_D3_COLD].flags.valid = 1;
 
-	/* Set defaults for D0 and D3hot states (always valid) */
+	/* Set the defaults for D0 and D3hot (always supported). */
 	device->power.states[ACPI_STATE_D0].flags.valid = 1;
 	device->power.states[ACPI_STATE_D0].power = 100;
 	device->power.states[ACPI_STATE_D3_HOT].flags.valid = 1;
+
+	/*
+	 * Use power resources only if the D0 list of them is populated, because
+	 * some platforms may provide _PR3 only to indicate D3cold support and
+	 * in those cases the power resources list returned by it may be bogus.
+	 */
+	if (!list_empty(&device->power.states[ACPI_STATE_D0].resources)) {
+		device->power.flags.power_resources = 1;
+		/*
+		 * D3cold is supported if the D3hot list of power resources is
+		 * not empty.
+		 */
+		if (!list_empty(&device->power.states[ACPI_STATE_D3_HOT].resources))
+			device->power.states[ACPI_STATE_D3_COLD].flags.valid = 1;
+	}
 
 	if (acpi_bus_init_power(device))
 		device->flags.power_manageable = 0;
@@ -1561,15 +1571,6 @@ static bool acpi_device_enumeration_by_parent(struct acpi_device *device)
 
 	/* Instantiate a pdev for the i2c-multi-instantiate drv to bind to */
 	if (!acpi_match_device_ids(device, i2c_multi_instantiate_ids))
-		return false;
-
-	/*
-	 * Firmware on some arm64 X-Gene platforms will make the UART
-	 * device appear as both a UART and a slave of that UART. Just
-	 * bail out here for X-Gene UARTs.
-	 */
-	if (IS_ENABLED(CONFIG_ARM64) &&
-	    !strcmp(acpi_device_hid(device), "APMC0D08"))
 		return false;
 
 	INIT_LIST_HEAD(&resource_list);

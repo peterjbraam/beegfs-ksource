@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* Kernel thread helper functions.
  *   Copyright (C) 2004 IBM Corporation, Rusty Russell.
  *
@@ -21,6 +22,7 @@
 #include <linux/freezer.h>
 #include <linux/ptrace.h>
 #include <linux/uaccess.h>
+#include <linux/numa.h>
 #include <trace/events/sched.h>
 
 static DEFINE_SPINLOCK(kthread_create_lock);
@@ -57,33 +59,6 @@ enum KTHREAD_BITS {
 	KTHREAD_SHOULD_STOP,
 	KTHREAD_SHOULD_PARK,
 };
-
-/* RHEL kABI deviation from upstream: we define housekeeping_cpumask
- * and hk_flags directly because including linux/tick.h changes
- * vm_struct from UNKNOWN to a known symbol, breaking kthread_bind
- * and others on AArch64
- */
-
-enum hk_flags {
-	HK_FLAG_TIMER           = 1,
-	HK_FLAG_RCU             = (1 << 1),
-	HK_FLAG_MISC            = (1 << 2),
-	HK_FLAG_SCHED           = (1 << 3),
-	HK_FLAG_TICK            = (1 << 4),
-	HK_FLAG_DOMAIN          = (1 << 5),
-	HK_FLAG_WQ              = (1 << 6),
-	HK_FLAG_MANAGED_IRQ     = (1 << 7),
-	HK_FLAG_KTHREAD         = (1 << 8),
-};
-
-#ifdef CONFIG_CPU_ISOLATION
-extern const struct cpumask *housekeeping_cpumask(enum hk_flags flags);
-#else
-static inline const struct cpumask *housekeeping_cpumask(enum hk_flags flags)
-{
-	return cpu_possible_mask;
-}
-#endif
 
 static inline void set_kthread_struct(void *kthread)
 {
@@ -224,8 +199,15 @@ static void __kthread_parkme(struct kthread *self)
 		if (!test_bit(KTHREAD_SHOULD_PARK, &self->flags))
 			break;
 
-		complete_all(&self->parked);
-		schedule();
+		/*
+		 * Thread is going to call schedule(), do not preempt it,
+		 * or the caller of kthread_park() may spend more time in
+		 * wait_task_inactive().
+		 */
+		preempt_disable();
+		complete(&self->parked);
+		schedule_preempt_disabled();
+		preempt_enable();
 	}
 	__set_current_state(TASK_RUNNING);
 }
@@ -270,8 +252,14 @@ static int kthread(void *_create)
 	/* OK, tell user we're spawned, wait for stop or wakeup */
 	__set_current_state(TASK_UNINTERRUPTIBLE);
 	create->result = current;
+	/*
+	 * Thread is going to call schedule(), do not preempt it,
+	 * or the creator may spend more time in wait_task_inactive().
+	 */
+	preempt_disable();
 	complete(done);
-	schedule();
+	schedule_preempt_disabled();
+	preempt_enable();
 
 	ret = -EINTR;
 	if (!test_bit(KTHREAD_SHOULD_STOP, &self->flags)) {
@@ -343,6 +331,17 @@ struct task_struct *__kthread_create_on_node(int (*threadfn)(void *data),
 	 * new kernel thread.
 	 */
 	if (unlikely(wait_for_completion_killable(&done))) {
+		int i = 0;
+
+		/*
+		 * I got SIGKILL, but wait for 10 more seconds for completion
+		 * unless chosen by the OOM killer. This delay is there as a
+		 * workaround for boot failure caused by SIGKILL upon device
+		 * driver initialization timeout.
+		 */
+		while (i++ < 10 && !test_tsk_thread_flag(current, TIF_MEMDIE))
+			if (wait_for_completion_timeout(&done, HZ))
+				goto ready;
 		/*
 		 * If I was SIGKILLed before kthreadd (or new kernel thread)
 		 * calls complete(), leave the cleanup of this structure to
@@ -356,6 +355,7 @@ struct task_struct *__kthread_create_on_node(int (*threadfn)(void *data),
 		 */
 		wait_for_completion(&done);
 	}
+ready:
 	task = create->result;
 	if (!IS_ERR(task)) {
 		static const struct sched_param param = { .sched_priority = 0 };
@@ -372,8 +372,7 @@ struct task_struct *__kthread_create_on_node(int (*threadfn)(void *data),
 		 * The kernel thread should not inherit these properties.
 		 */
 		sched_setscheduler_nocheck(task, SCHED_NORMAL, &param);
-		set_cpus_allowed_ptr(task,
-				     housekeeping_cpumask(HK_FLAG_KTHREAD));
+		set_cpus_allowed_ptr(task, cpu_all_mask);
 	}
 	kfree(create);
 	return task;
@@ -506,7 +505,6 @@ void kthread_unpark(struct task_struct *k)
 	if (test_bit(KTHREAD_IS_PER_CPU, &kthread->flags))
 		__kthread_bind(k, kthread->cpu, TASK_PARKED);
 
-	reinit_completion(&kthread->parked);
 	clear_bit(KTHREAD_SHOULD_PARK, &kthread->flags);
 	/*
 	 * __kthread_parkme() will either see !SHOULD_PARK or get the wakeup.
@@ -533,6 +531,9 @@ int kthread_park(struct task_struct *k)
 
 	if (WARN_ON(k->flags & PF_EXITING))
 		return -ENOSYS;
+
+	if (WARN_ON_ONCE(test_bit(KTHREAD_SHOULD_PARK, &kthread->flags)))
+		return -EBUSY;
 
 	set_bit(KTHREAD_SHOULD_PARK, &kthread->flags);
 	if (k != current) {
@@ -596,7 +597,7 @@ int kthreadd(void *unused)
 	/* Setup a clean context for our children to inherit. */
 	set_task_comm(tsk, "kthreadd");
 	ignore_signals(tsk);
-	set_cpus_allowed_ptr(tsk, housekeeping_cpumask(HK_FLAG_KTHREAD));
+	set_cpus_allowed_ptr(tsk, cpu_all_mask);
 	set_mems_allowed(node_states[N_MEMORY]);
 
 	current->flags |= PF_NOFREEZE;
@@ -708,7 +709,7 @@ __kthread_create_worker(int cpu, unsigned int flags,
 {
 	struct kthread_worker *worker;
 	struct task_struct *task;
-	int node = -1;
+	int node = NUMA_NO_NODE;
 
 	worker = kzalloc(sizeof(*worker), GFP_KERNEL);
 	if (!worker)
@@ -884,15 +885,16 @@ void kthread_delayed_work_timer_fn(struct timer_list *t)
 	/* Move the work from worker->delayed_work_list. */
 	WARN_ON_ONCE(list_empty(&work->node));
 	list_del_init(&work->node);
-	kthread_insert_work(worker, work, &worker->work_list);
+	if (!work->canceling)
+		kthread_insert_work(worker, work, &worker->work_list);
 
 	raw_spin_unlock_irqrestore(&worker->lock, flags);
 }
 EXPORT_SYMBOL(kthread_delayed_work_timer_fn);
 
-void __kthread_queue_delayed_work(struct kthread_worker *worker,
-				  struct kthread_delayed_work *dwork,
-				  unsigned long delay)
+static void __kthread_queue_delayed_work(struct kthread_worker *worker,
+					 struct kthread_delayed_work *dwork,
+					 unsigned long delay)
 {
 	struct timer_list *timer = &dwork->timer;
 	struct kthread_work *work = &dwork->work;

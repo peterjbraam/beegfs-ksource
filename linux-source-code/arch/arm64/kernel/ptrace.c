@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Based on arch/arm/kernel/ptrace.c
  *
@@ -5,18 +6,6 @@
  * edited by Linus Torvalds
  * ARM modifications Copyright (C) 2000 Russell King
  * Copyright (C) 2012 ARM Ltd.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <linux/audit.h>
@@ -626,6 +615,13 @@ static int gpr_set(struct task_struct *target, const struct user_regset *regset,
 	return 0;
 }
 
+static int fpr_active(struct task_struct *target, const struct user_regset *regset)
+{
+	if (!system_supports_fpsimd())
+		return -ENODEV;
+	return regset->n;
+}
+
 /*
  * TODO: update fp accessors for lazy context switching (sync/flush hwstate)
  */
@@ -648,6 +644,9 @@ static int fpr_get(struct task_struct *target, const struct user_regset *regset,
 		   unsigned int pos, unsigned int count,
 		   void *kbuf, void __user *ubuf)
 {
+	if (!system_supports_fpsimd())
+		return -EINVAL;
+
 	if (target == current)
 		fpsimd_preserve_current_state();
 
@@ -686,6 +685,9 @@ static int fpr_set(struct task_struct *target, const struct user_regset *regset,
 		   const void *kbuf, const void __user *ubuf)
 {
 	int ret;
+
+	if (!system_supports_fpsimd())
+		return -EINVAL;
 
 	ret = __fpr_set(target, regset, pos, count, kbuf, ubuf, 0);
 	if (ret)
@@ -881,7 +883,7 @@ static int sve_set(struct task_struct *target,
 		goto out;
 
 	/*
-	 * Apart from PT_SVE_REGS_MASK, all PT_SVE_* flags are consumed by
+	 * Apart from SVE_PT_REGS_MASK, all SVE_PT_* flags are consumed by
 	 * sve_set_vector_length(), which will also validate them for us:
 	 */
 	ret = sve_set_vector_length(target, header.vl,
@@ -1145,6 +1147,7 @@ static const struct user_regset aarch64_regsets[] = {
 		 */
 		.size = sizeof(u32),
 		.align = sizeof(u32),
+		.active = fpr_active,
 		.get = fpr_get,
 		.set = fpr_set
 	},
@@ -1262,6 +1265,7 @@ static int compat_gpr_get(struct task_struct *target,
 			break;
 		case 16:
 			reg = task_pt_regs(target)->pstate;
+			reg = pstate_to_compat_psr(reg);
 			break;
 		case 17:
 			reg = task_pt_regs(target)->orig_x0;
@@ -1329,6 +1333,7 @@ static int compat_gpr_set(struct task_struct *target,
 			newregs.pc = reg;
 			break;
 		case 16:
+			reg = compat_psr_to_pstate(reg);
 			newregs.pstate = reg;
 			break;
 		case 17:
@@ -1356,6 +1361,9 @@ static int compat_vfp_get(struct task_struct *target,
 	struct user_fpsimd_state *uregs;
 	compat_ulong_t fpscr;
 	int ret, vregs_end_pos;
+
+	if (!system_supports_fpsimd())
+		return -EINVAL;
 
 	uregs = &target->thread.uw.fpsimd_state;
 
@@ -1389,6 +1397,9 @@ static int compat_vfp_set(struct task_struct *target,
 	struct user_fpsimd_state *uregs;
 	compat_ulong_t fpscr;
 	int ret, vregs_end_pos;
+
+	if (!system_supports_fpsimd())
+		return -EINVAL;
 
 	uregs = &target->thread.uw.fpsimd_state;
 
@@ -1447,6 +1458,7 @@ static const struct user_regset aarch32_regsets[] = {
 		.n = VFP_STATE_SIZE / sizeof(compat_ulong_t),
 		.size = sizeof(compat_ulong_t),
 		.align = sizeof(compat_ulong_t),
+		.active = fpr_active,
 		.get = compat_vfp_get,
 		.set = compat_vfp_set
 	},
@@ -1807,18 +1819,34 @@ static void tracehook_report_syscall(struct pt_regs *regs,
 	saved_reg = regs->regs[regno];
 	regs->regs[regno] = dir;
 
-	if (dir == PTRACE_SYSCALL_EXIT)
+	if (dir == PTRACE_SYSCALL_ENTER) {
+		if (tracehook_report_syscall_entry(regs))
+			forget_syscall(regs);
+		regs->regs[regno] = saved_reg;
+	} else if (!test_thread_flag(TIF_SINGLESTEP)) {
 		tracehook_report_syscall_exit(regs, 0);
-	else if (tracehook_report_syscall_entry(regs))
-		forget_syscall(regs);
+		regs->regs[regno] = saved_reg;
+	} else {
+		regs->regs[regno] = saved_reg;
 
-	regs->regs[regno] = saved_reg;
+		/*
+		 * Signal a pseudo-step exception since we are stepping but
+		 * tracer modifications to the registers may have rewound the
+		 * state machine.
+		 */
+		tracehook_report_syscall_exit(regs, 1);
+	}
 }
 
-asmlinkage int syscall_trace_enter(struct pt_regs *regs)
+int syscall_trace_enter(struct pt_regs *regs)
 {
-	if (test_thread_flag(TIF_SYSCALL_TRACE))
+	unsigned long flags = READ_ONCE(current_thread_info()->flags);
+
+	if (flags & (_TIF_SYSCALL_EMU | _TIF_SYSCALL_TRACE)) {
 		tracehook_report_syscall(regs, PTRACE_SYSCALL_ENTER);
+		if (!in_syscall(regs) || (flags & _TIF_SYSCALL_EMU))
+			return -1;
+	}
 
 	/* Do the secure computing after ptrace; failures should be fast. */
 	if (secure_computing(NULL) == -1)
@@ -1833,14 +1861,16 @@ asmlinkage int syscall_trace_enter(struct pt_regs *regs)
 	return regs->syscallno;
 }
 
-asmlinkage void syscall_trace_exit(struct pt_regs *regs)
+void syscall_trace_exit(struct pt_regs *regs)
 {
+	unsigned long flags = READ_ONCE(current_thread_info()->flags);
+
 	audit_syscall_exit(regs);
 
-	if (test_thread_flag(TIF_SYSCALL_TRACEPOINT))
+	if (flags & _TIF_SYSCALL_TRACEPOINT)
 		trace_sys_exit(regs, regs_return_value(regs));
 
-	if (test_thread_flag(TIF_SYSCALL_TRACE))
+	if (flags & (_TIF_SYSCALL_TRACE | _TIF_SINGLESTEP))
 		tracehook_report_syscall(regs, PTRACE_SYSCALL_EXIT);
 
 	rseq_syscall(regs);
@@ -1868,15 +1898,15 @@ static int valid_compat_regs(struct user_pt_regs *regs)
 
 	if (!system_supports_mixed_endian_el0()) {
 		if (IS_ENABLED(CONFIG_CPU_BIG_ENDIAN))
-			regs->pstate |= COMPAT_PSR_E_BIT;
+			regs->pstate |= PSR_AA32_E_BIT;
 		else
-			regs->pstate &= ~COMPAT_PSR_E_BIT;
+			regs->pstate &= ~PSR_AA32_E_BIT;
 	}
 
 	if (user_mode(regs) && (regs->pstate & PSR_MODE32_BIT) &&
-	    (regs->pstate & COMPAT_PSR_A_BIT) == 0 &&
-	    (regs->pstate & COMPAT_PSR_I_BIT) == 0 &&
-	    (regs->pstate & COMPAT_PSR_F_BIT) == 0) {
+	    (regs->pstate & PSR_AA32_A_BIT) == 0 &&
+	    (regs->pstate & PSR_AA32_I_BIT) == 0 &&
+	    (regs->pstate & PSR_AA32_F_BIT) == 0) {
 		return 1;
 	}
 
@@ -1884,11 +1914,11 @@ static int valid_compat_regs(struct user_pt_regs *regs)
 	 * Force PSR to a valid 32-bit EL0t, preserving the same bits as
 	 * arch/arm.
 	 */
-	regs->pstate &= COMPAT_PSR_N_BIT | COMPAT_PSR_Z_BIT |
-			COMPAT_PSR_C_BIT | COMPAT_PSR_V_BIT |
-			COMPAT_PSR_Q_BIT | COMPAT_PSR_IT_MASK |
-			COMPAT_PSR_GE_MASK | COMPAT_PSR_E_BIT |
-			COMPAT_PSR_T_BIT;
+	regs->pstate &= PSR_AA32_N_BIT | PSR_AA32_Z_BIT |
+			PSR_AA32_C_BIT | PSR_AA32_V_BIT |
+			PSR_AA32_Q_BIT | PSR_AA32_IT_MASK |
+			PSR_AA32_GE_MASK | PSR_AA32_E_BIT |
+			PSR_AA32_T_BIT;
 	regs->pstate |= PSR_MODE32_BIT;
 
 	return 0;
@@ -1918,8 +1948,8 @@ static int valid_native_regs(struct user_pt_regs *regs)
  */
 int valid_user_regs(struct user_pt_regs *regs, struct task_struct *task)
 {
-	if (!test_tsk_thread_flag(task, TIF_SINGLESTEP))
-		regs->pstate &= ~DBG_SPSR_SS;
+	/* https://lore.kernel.org/lkml/20191118131525.GA4180@willie-the-truck */
+	user_regs_reset_single_step(regs, task);
 
 	if (is_compat_thread(task_thread_info(task)))
 		return valid_compat_regs(regs);

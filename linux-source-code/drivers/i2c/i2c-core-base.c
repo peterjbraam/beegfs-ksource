@@ -338,8 +338,10 @@ static int i2c_device_probe(struct device *dev)
 		} else if (ACPI_COMPANION(dev)) {
 			irq = i2c_acpi_get_irq(client);
 		}
-		if (irq == -EPROBE_DEFER)
-			return irq;
+		if (irq == -EPROBE_DEFER) {
+			status = irq;
+			goto put_sync_adapter;
+		}
 
 		if (irq < 0)
 			irq = 0;
@@ -352,16 +354,20 @@ static int i2c_device_probe(struct device *dev)
 	 * or ACPI ID table is supplied for the probing device.
 	 */
 	if (!driver->id_table &&
-	    !i2c_acpi_match_device(dev->driver->acpi_match_table, client) &&
-	    !i2c_of_match_device(dev->driver->of_match_table, client))
-		return -ENODEV;
+	    !acpi_driver_match_device(dev, dev->driver) &&
+	    !i2c_of_match_device(dev->driver->of_match_table, client)) {
+		status = -ENODEV;
+		goto put_sync_adapter;
+	}
 
 	if (client->flags & I2C_CLIENT_WAKE) {
 		int wakeirq;
 
 		wakeirq = of_irq_get_byname(dev->of_node, "wakeup");
-		if (wakeirq == -EPROBE_DEFER)
-			return wakeirq;
+		if (wakeirq == -EPROBE_DEFER) {
+			status = wakeirq;
+			goto put_sync_adapter;
+		}
 
 		device_init_wakeup(&client->dev, true);
 
@@ -408,6 +414,10 @@ err_detach_pm_domain:
 err_clear_wakeup_irq:
 	dev_pm_clear_wake_irq(&client->dev);
 	device_init_wakeup(&client->dev, false);
+put_sync_adapter:
+	if (client->flags & I2C_CLIENT_HOST_NOTIFY)
+		pm_runtime_put_sync(&client->adapter->dev);
+
 	return status;
 }
 
@@ -456,15 +466,15 @@ static void i2c_client_dev_release(struct device *dev)
 }
 
 static ssize_t
-name_show(struct device *dev, struct device_attribute *attr, char *buf)
+show_name(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	return sprintf(buf, "%s\n", dev->type == &i2c_client_type ?
 		       to_i2c_client(dev)->name : to_i2c_adapter(dev)->name);
 }
-static DEVICE_ATTR_RO(name);
+static DEVICE_ATTR(name, S_IRUGO, show_name, NULL);
 
 static ssize_t
-modalias_show(struct device *dev, struct device_attribute *attr, char *buf)
+show_modalias(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct i2c_client *client = to_i2c_client(dev);
 	int len;
@@ -479,7 +489,7 @@ modalias_show(struct device *dev, struct device_attribute *attr, char *buf)
 
 	return sprintf(buf, "%s%s\n", I2C_MODULE_PREFIX, client->name);
 }
-static DEVICE_ATTR_RO(modalias);
+static DEVICE_ATTR(modalias, S_IRUGO, show_modalias, NULL);
 
 static struct attribute *i2c_dev_attrs[] = {
 	&dev_attr_name.attr,
@@ -831,8 +841,8 @@ EXPORT_SYMBOL_GPL(i2c_new_device);
 
 
 /**
- * i2c_unregister_device - reverse effect of i2c_new_*_device()
- * @client: value returned from i2c_new_*_device()
+ * i2c_unregister_device - reverse effect of i2c_new_device()
+ * @client: value returned from i2c_new_device()
  * Context: can sleep
  */
 void i2c_unregister_device(struct i2c_client *client)
@@ -902,6 +912,29 @@ struct i2c_client *i2c_new_dummy_device(struct i2c_adapter *adapter, u16 address
 	return i2c_new_client_device(adapter, &info);
 }
 EXPORT_SYMBOL_GPL(i2c_new_dummy_device);
+
+/**
+ * i2c_new_dummy - return a new i2c device bound to a dummy driver
+ * @adapter: the adapter managing the device
+ * @address: seven bit address to be used
+ * Context: can sleep
+ *
+ * This deprecated function has the same functionality as @i2c_new_dummy_device,
+ * it just returns NULL instead of an ERR_PTR in case of an error for
+ * compatibility with current I2C API. It will be removed once all users are
+ * converted.
+ *
+ * This returns the new i2c client, which should be saved for later use with
+ * i2c_unregister_device(); or NULL to indicate an error.
+ */
+struct i2c_client *i2c_new_dummy(struct i2c_adapter *adapter, u16 address)
+{
+	struct i2c_client *ret;
+
+	ret = i2c_new_dummy_device(adapter, address);
+	return IS_ERR(ret) ? NULL : ret;
+}
+EXPORT_SYMBOL_GPL(i2c_new_dummy);
 
 struct i2c_dummy_devres {
 	struct i2c_client *client;
@@ -1023,8 +1056,8 @@ EXPORT_SYMBOL_GPL(i2c_adapter_depth);
  * the user to provide incorrect parameters.
  */
 static ssize_t
-new_device_store(struct device *dev, struct device_attribute *attr,
-		 const char *buf, size_t count)
+i2c_sysfs_new_device(struct device *dev, struct device_attribute *attr,
+		     const char *buf, size_t count)
 {
 	struct i2c_adapter *adap = to_i2c_adapter(dev);
 	struct i2c_board_info info;
@@ -1079,7 +1112,7 @@ new_device_store(struct device *dev, struct device_attribute *attr,
 
 	return count;
 }
-static DEVICE_ATTR_WO(new_device);
+static DEVICE_ATTR(new_device, S_IWUSR, NULL, i2c_sysfs_new_device);
 
 /*
  * And of course let the users delete the devices they instantiated, if
@@ -1091,8 +1124,8 @@ static DEVICE_ATTR_WO(new_device);
  * the user to delete the wrong device.
  */
 static ssize_t
-delete_device_store(struct device *dev, struct device_attribute *attr,
-		    const char *buf, size_t count)
+i2c_sysfs_delete_device(struct device *dev, struct device_attribute *attr,
+			const char *buf, size_t count)
 {
 	struct i2c_adapter *adap = to_i2c_adapter(dev);
 	struct i2c_client *client, *next;
@@ -1135,7 +1168,7 @@ delete_device_store(struct device *dev, struct device_attribute *attr,
 	return res;
 }
 static DEVICE_ATTR_IGNORE_LOCKDEP(delete_device, S_IWUSR, NULL,
-				  delete_device_store);
+				   i2c_sysfs_delete_device);
 
 static struct attribute *i2c_adapter_attrs[] = {
 	&dev_attr_name.attr,
@@ -1178,8 +1211,9 @@ static void i2c_scan_static_board_info(struct i2c_adapter *adapter)
 
 	down_read(&__i2c_board_lock);
 	list_for_each_entry(devinfo, &__i2c_board_list, list) {
-		if (devinfo->busnum == adapter->nr &&
-		    IS_ERR(i2c_new_client_device(adapter, &devinfo->board_info)))
+		if (devinfo->busnum == adapter->nr
+				&& !i2c_new_device(adapter,
+						&devinfo->board_info))
 			dev_err(&adapter->dev,
 				"Can't create device at 0x%02x\n",
 				devinfo->board_info.addr);
@@ -1351,8 +1385,8 @@ static int i2c_register_adapter(struct i2c_adapter *adap)
 
 	/* create pre-declared device nodes */
 	of_i2c_register_devices(adap);
-	i2c_acpi_register_devices(adap);
 	i2c_acpi_install_space_handler(adap);
+	i2c_acpi_register_devices(adap);
 
 	if (adap->nr < __i2c_first_dynamic_bus_num)
 		i2c_scan_static_board_info(adap);
@@ -1639,12 +1673,6 @@ void i2c_parse_fw_timings(struct device *dev, struct i2c_timings *t, bool use_de
 		t->sda_fall_ns = t->scl_fall_ns;
 
 	device_property_read_u32(dev, "i2c-sda-hold-time-ns", &t->sda_hold_ns);
-
-	device_property_read_u32(dev, "i2c-digital-filter-width-ns",
-				 &t->digital_filter_width_ns);
-
-	device_property_read_u32(dev, "i2c-analog-filter-cutoff-frequency",
-				 &t->analog_filter_cutoff_freq_hz);
 }
 EXPORT_SYMBOL_GPL(i2c_parse_fw_timings);
 
@@ -1725,6 +1753,38 @@ void i2c_del_driver(struct i2c_driver *driver)
 EXPORT_SYMBOL(i2c_del_driver);
 
 /* ------------------------------------------------------------------------- */
+
+/**
+ * i2c_use_client - increments the reference count of the i2c client structure
+ * @client: the client being referenced
+ *
+ * Each live reference to a client should be refcounted. The driver model does
+ * that automatically as part of driver binding, so that most drivers don't
+ * need to do this explicitly: they hold a reference until they're unbound
+ * from the device.
+ *
+ * A pointer to the client with the incremented reference counter is returned.
+ */
+struct i2c_client *i2c_use_client(struct i2c_client *client)
+{
+	if (client && get_device(&client->dev))
+		return client;
+	return NULL;
+}
+EXPORT_SYMBOL(i2c_use_client);
+
+/**
+ * i2c_release_client - release a use of the i2c client structure
+ * @client: the client being no longer referenced
+ *
+ * Must be called when a user of a client is finished with it.
+ */
+void i2c_release_client(struct i2c_client *client)
+{
+	if (client)
+		put_device(&client->dev);
+}
+EXPORT_SYMBOL(i2c_release_client);
 
 struct i2c_cmd_arg {
 	unsigned	cmd;
@@ -2161,13 +2221,13 @@ static int i2c_detect_address(struct i2c_client *temp_client,
 			dev_warn(&adapter->dev,
 				"This adapter will soon drop class based instantiation of devices. "
 				"Please make sure client 0x%02x gets instantiated by other means. "
-				"Check 'Documentation/i2c/instantiating-devices' for details.\n",
+				"Check 'Documentation/i2c/instantiating-devices.rst' for details.\n",
 				info.addr);
 
 		dev_dbg(&adapter->dev, "Creating %s at 0x%02x\n",
 			info.type, info.addr);
-		client = i2c_new_client_device(adapter, &info);
-		if (!IS_ERR(client))
+		client = i2c_new_device(adapter, &info);
+		if (client)
 			list_add_tail(&client->detected, &driver->clients);
 		else
 			dev_err(&adapter->dev, "Failed creating %s at 0x%02x\n",
@@ -2191,7 +2251,7 @@ static int i2c_detect(struct i2c_adapter *adapter, struct i2c_driver *driver)
 	if (adapter->class == I2C_CLASS_DEPRECATED) {
 		dev_dbg(&adapter->dev,
 			"This adapter dropped support for I2C classes and won't auto-detect %s devices anymore. "
-			"If you need it, check 'Documentation/i2c/instantiating-devices' for alternatives.\n",
+			"If you need it, check 'Documentation/i2c/instantiating-devices.rst' for alternatives.\n",
 			driver->driver.name);
 		return 0;
 	}
@@ -2228,10 +2288,10 @@ int i2c_probe_func_quick_read(struct i2c_adapter *adap, unsigned short addr)
 EXPORT_SYMBOL_GPL(i2c_probe_func_quick_read);
 
 struct i2c_client *
-i2c_new_scanned_device(struct i2c_adapter *adap,
-		       struct i2c_board_info *info,
-		       unsigned short const *addr_list,
-		       int (*probe)(struct i2c_adapter *adap, unsigned short addr))
+i2c_new_probed_device(struct i2c_adapter *adap,
+		      struct i2c_board_info *info,
+		      unsigned short const *addr_list,
+		      int (*probe)(struct i2c_adapter *adap, unsigned short addr))
 {
 	int i;
 
@@ -2261,24 +2321,11 @@ i2c_new_scanned_device(struct i2c_adapter *adap,
 
 	if (addr_list[i] == I2C_CLIENT_END) {
 		dev_dbg(&adap->dev, "Probing failed, no device found\n");
-		return ERR_PTR(-ENODEV);
+		return NULL;
 	}
 
 	info->addr = addr_list[i];
-	return i2c_new_client_device(adap, info);
-}
-EXPORT_SYMBOL_GPL(i2c_new_scanned_device);
-
-struct i2c_client *
-i2c_new_probed_device(struct i2c_adapter *adap,
-		      struct i2c_board_info *info,
-		      unsigned short const *addr_list,
-		      int (*probe)(struct i2c_adapter *adap, unsigned short addr))
-{
-	struct i2c_client *client;
-
-	client = i2c_new_scanned_device(adap, info, addr_list, probe);
-	return IS_ERR(client) ? NULL : client;
+	return i2c_new_device(adap, info);
 }
 EXPORT_SYMBOL_GPL(i2c_new_probed_device);
 

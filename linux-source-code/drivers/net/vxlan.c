@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * VXLAN: Virtual eXtensible Local Area Network
  *
  * Copyright (c) 2012-2013 Vyatta Inc.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -16,6 +13,7 @@
 #include <linux/slab.h>
 #include <linux/udp.h>
 #include <linux/igmp.h>
+#include <linux/inetdevice.h>
 #include <linux/if_ether.h>
 #include <linux/ethtool.h>
 #include <net/arp.h>
@@ -92,6 +90,167 @@ static inline bool vxlan_collect_metadata(struct vxlan_sock *vs)
 {
 	return vs->flags & VXLAN_F_COLLECT_METADATA ||
 	       ip_tunnel_collect_metadata();
+}
+
+static struct ip_fan_map *vxlan_fan_find_map(struct vxlan_dev *vxlan, __be32 daddr)
+{
+	struct ip_fan_map *fan_map;
+
+	rcu_read_lock();
+	list_for_each_entry_rcu(fan_map, &vxlan->fan.fan_maps, list) {
+		if (fan_map->overlay ==
+		    (daddr & inet_make_mask(fan_map->overlay_prefix))) {
+			rcu_read_unlock();
+			return fan_map;
+		}
+	}
+	rcu_read_unlock();
+
+	return NULL;
+}
+
+static void vxlan_fan_flush_map(struct vxlan_dev *vxlan)
+{
+	struct ip_fan_map *fan_map;
+
+	list_for_each_entry_rcu(fan_map, &vxlan->fan.fan_maps, list) {
+		list_del_rcu(&fan_map->list);
+		kfree_rcu(fan_map, rcu);
+	}
+}
+
+static int vxlan_fan_del_map(struct vxlan_dev *vxlan, __be32 overlay)
+{
+	struct ip_fan_map *fan_map;
+
+	fan_map = vxlan_fan_find_map(vxlan, overlay);
+	if (!fan_map)
+		return -ENOENT;
+
+	list_del_rcu(&fan_map->list);
+	kfree_rcu(fan_map, rcu);
+
+	return 0;
+}
+
+static int vxlan_fan_add_map(struct vxlan_dev *vxlan, struct ifla_fan_map *map)
+{
+	__be32 overlay_mask, underlay_mask;
+	struct ip_fan_map *fan_map;
+
+	overlay_mask = inet_make_mask(map->overlay_prefix);
+	underlay_mask = inet_make_mask(map->underlay_prefix);
+
+	netdev_dbg(vxlan->dev, "vfam: map: o %x/%d u %x/%d om %x um %x\n",
+		   map->overlay, map->overlay_prefix,
+		   map->underlay, map->underlay_prefix,
+		   overlay_mask, underlay_mask);
+
+	if ((map->overlay & ~overlay_mask) || (map->underlay & ~underlay_mask))
+		return -EINVAL;
+
+	if (!(map->overlay & overlay_mask) && (map->underlay & underlay_mask))
+		return -EINVAL;
+
+	/* Special case: overlay 0 and underlay 0: flush all mappings */
+	if (!map->overlay && !map->underlay) {
+		vxlan_fan_flush_map(vxlan);
+		return 0;
+	}
+	
+	/* Special case: overlay set and underlay 0: clear map for overlay */
+	if (!map->underlay)
+		return vxlan_fan_del_map(vxlan, map->overlay);
+
+	if (vxlan_fan_find_map(vxlan, map->overlay))
+		return -EEXIST;
+
+	fan_map = kmalloc(sizeof(*fan_map), GFP_KERNEL);
+	fan_map->underlay = map->underlay;
+	fan_map->overlay = map->overlay;
+	fan_map->underlay_prefix = map->underlay_prefix;
+	fan_map->overlay_mask = ntohl(overlay_mask);
+	fan_map->overlay_prefix = map->overlay_prefix;
+
+	list_add_tail_rcu(&fan_map->list, &vxlan->fan.fan_maps);
+
+	return 0;
+}
+	
+static int vxlan_parse_fan_map(struct nlattr *data[], struct vxlan_dev *vxlan)
+{
+	struct ifla_fan_map *map;
+	struct nlattr *attr;
+	int rem, rv;
+
+	nla_for_each_nested(attr, data[IFLA_IPTUN_FAN_MAP], rem) {
+		map = nla_data(attr);
+		rv = vxlan_fan_add_map(vxlan, map);
+		if (rv)
+			return rv;
+	}
+
+	return 0;
+}
+
+static int vxlan_fan_build_rdst(struct vxlan_dev *vxlan, struct sk_buff *skb,
+				      struct vxlan_rdst *fan_rdst)
+{
+	struct ip_fan_map *f_map;
+	union vxlan_addr *va;
+	u32 daddr, underlay;
+	struct arphdr *arp;
+	void *arp_ptr;
+	struct ethhdr *eth;
+	struct iphdr *iph;
+
+	eth = eth_hdr(skb);
+	switch (eth->h_proto) {
+	case htons(ETH_P_IP):
+		iph = ip_hdr(skb);
+		if (!iph)
+			return -EINVAL;
+		daddr = iph->daddr;
+		break;
+	case htons(ETH_P_ARP):
+		arp = arp_hdr(skb);
+		if (!arp)
+			return -EINVAL;
+		arp_ptr = arp + 1;
+		netdev_dbg(vxlan->dev,
+			   "vfbr: arp sha %pM sip %pI4 tha %pM tip %pI4\n",
+			   arp_ptr, arp_ptr + skb->dev->addr_len,
+			   arp_ptr + skb->dev->addr_len + 4,
+			   arp_ptr + (skb->dev->addr_len * 2) + 4);
+		arp_ptr += (skb->dev->addr_len * 2) + 4;
+		memcpy(&daddr, arp_ptr, 4);
+		break;
+	default:
+		netdev_dbg(vxlan->dev, "vfbr: unknown eth p %x\n", eth->h_proto);
+		return -EINVAL;
+	}
+
+	f_map = vxlan_fan_find_map(vxlan, daddr);
+	if (!f_map)
+		return -EINVAL;
+
+	daddr = ntohl(daddr);
+	underlay = ntohl(f_map->underlay);
+	if (!underlay)
+		return -EINVAL;
+
+	memset(fan_rdst, 0, sizeof(*fan_rdst));
+	va = &fan_rdst->remote_ip;
+	va->sa.sa_family = AF_INET;
+	fan_rdst->remote_vni = vxlan->default_dst.remote_vni;
+	va->sin.sin_addr.s_addr = htonl(underlay |
+					((daddr & ~f_map->overlay_mask) >>
+					 (32 - f_map->overlay_prefix -
+					  (32 - f_map->underlay_prefix))));
+	netdev_dbg(vxlan->dev, "vfbr: daddr %x ul %x dst %x\n",
+		   daddr, underlay, va->sin.sin_addr.s_addr);
+
+	return 0;
 }
 
 #if IS_ENABLED(CONFIG_IPV6)
@@ -189,7 +348,7 @@ static inline struct vxlan_rdst *first_remote_rtnl(struct vxlan_fdb *fdb)
  * and enabled unshareable flags.
  */
 static struct vxlan_sock *vxlan_find_sock(struct net *net, sa_family_t family,
-					  __be16 port, u32 flags)
+					  __be16 port, u32 flags, int ifindex)
 {
 	struct vxlan_sock *vs;
 
@@ -198,7 +357,8 @@ static struct vxlan_sock *vxlan_find_sock(struct net *net, sa_family_t family,
 	hlist_for_each_entry_rcu(vs, vs_head(net, port), hlist) {
 		if (inet_sk(vs->sock->sk)->inet_sport == port &&
 		    vxlan_get_sk_family(vs) == family &&
-		    vs->flags == flags)
+		    vs->flags == flags &&
+		    vs->sock->sk->sk_bound_dev_if == ifindex)
 			return vs;
 	}
 	return NULL;
@@ -238,7 +398,7 @@ static struct vxlan_dev *vxlan_find_vni(struct net *net, int ifindex,
 {
 	struct vxlan_sock *vs;
 
-	vs = vxlan_find_sock(net, family, port, flags);
+	vs = vxlan_find_sock(net, family, port, flags, ifindex);
 	if (!vs)
 		return NULL;
 
@@ -470,14 +630,19 @@ static u32 eth_vni_hash(const unsigned char *addr, __be32 vni)
 	return jhash_2words(key, vni, vxlan_salt) & (FDB_HASH_SIZE - 1);
 }
 
+static u32 fdb_head_index(struct vxlan_dev *vxlan, const u8 *mac, __be32 vni)
+{
+	if (vxlan->cfg.flags & VXLAN_F_COLLECT_METADATA)
+		return eth_vni_hash(mac, vni);
+	else
+		return eth_hash(mac);
+}
+
 /* Hash chain to use given mac address */
 static inline struct hlist_head *vxlan_fdb_head(struct vxlan_dev *vxlan,
 						const u8 *mac, __be32 vni)
 {
-	if (vxlan->cfg.flags & VXLAN_F_COLLECT_METADATA)
-		return &vxlan->fdb_head[eth_vni_hash(mac, vni)];
-	else
-		return &vxlan->fdb_head[eth_hash(mac)];
+	return &vxlan->fdb_head[fdb_head_index(vxlan, mac, vni)];
 }
 
 /* Look up Ethernet address in forwarding table */
@@ -507,7 +672,7 @@ static struct vxlan_fdb *vxlan_find_mac(struct vxlan_dev *vxlan,
 	struct vxlan_fdb *f;
 
 	f = __vxlan_find_mac(vxlan, mac, vni);
-	if (f)
+	if (f && f->used != jiffies)
 		f->used = jiffies;
 
 	return f;
@@ -592,8 +757,8 @@ int vxlan_fdb_replay(const struct net_device *dev, __be32 vni,
 		return -EINVAL;
 	vxlan = netdev_priv(dev);
 
-	spin_lock_bh(&vxlan->hash_lock);
 	for (h = 0; h < FDB_HASH_SIZE; ++h) {
+		spin_lock_bh(&vxlan->hash_lock[h]);
 		hlist_for_each_entry(f, &vxlan->fdb_head[h], hlist) {
 			if (f->vni == vni) {
 				list_for_each_entry(rdst, &f->remotes, list) {
@@ -601,14 +766,16 @@ int vxlan_fdb_replay(const struct net_device *dev, __be32 vni,
 								  f, rdst,
 								  extack);
 					if (rc)
-						goto out;
+						goto unlock;
 				}
 			}
 		}
+		spin_unlock_bh(&vxlan->hash_lock[h]);
 	}
+	return 0;
 
-out:
-	spin_unlock_bh(&vxlan->hash_lock);
+unlock:
+	spin_unlock_bh(&vxlan->hash_lock[h]);
 	return rc;
 }
 EXPORT_SYMBOL_GPL(vxlan_fdb_replay);
@@ -624,14 +791,15 @@ void vxlan_fdb_clear_offload(const struct net_device *dev, __be32 vni)
 		return;
 	vxlan = netdev_priv(dev);
 
-	spin_lock_bh(&vxlan->hash_lock);
 	for (h = 0; h < FDB_HASH_SIZE; ++h) {
+		spin_lock_bh(&vxlan->hash_lock[h]);
 		hlist_for_each_entry(f, &vxlan->fdb_head[h], hlist)
 			if (f->vni == vni)
 				list_for_each_entry(rdst, &f->remotes, list)
 					rdst->offloaded = false;
+		spin_unlock_bh(&vxlan->hash_lock[h]);
 	}
-	spin_unlock_bh(&vxlan->hash_lock);
+
 }
 EXPORT_SYMBOL_GPL(vxlan_fdb_clear_offload);
 
@@ -1118,6 +1286,7 @@ static int vxlan_fdb_add(struct ndmsg *ndm, struct nlattr *tb[],
 	__be16 port;
 	__be32 src_vni, vni;
 	u32 ifindex;
+	u32 hash_index;
 	int err;
 
 	if (!(ndm->ndm_state & (NUD_PERMANENT|NUD_REACHABLE))) {
@@ -1136,12 +1305,13 @@ static int vxlan_fdb_add(struct ndmsg *ndm, struct nlattr *tb[],
 	if (vxlan->default_dst.remote_ip.sa.sa_family != ip.sa.sa_family)
 		return -EAFNOSUPPORT;
 
-	spin_lock_bh(&vxlan->hash_lock);
+	hash_index = fdb_head_index(vxlan, addr, src_vni);
+	spin_lock_bh(&vxlan->hash_lock[hash_index]);
 	err = vxlan_fdb_update(vxlan, addr, &ip, ndm->ndm_state, flags,
 			       port, src_vni, vni, ifindex,
 			       ndm->ndm_flags | NTF_VXLAN_ADDED_BY_USER,
 			       true, extack);
-	spin_unlock_bh(&vxlan->hash_lock);
+	spin_unlock_bh(&vxlan->hash_lock[hash_index]);
 
 	return err;
 }
@@ -1189,16 +1359,18 @@ static int vxlan_fdb_delete(struct ndmsg *ndm, struct nlattr *tb[],
 	__be32 src_vni, vni;
 	__be16 port;
 	u32 ifindex;
+	u32 hash_index;
 	int err;
 
 	err = vxlan_fdb_parse(tb, vxlan, &ip, &port, &src_vni, &vni, &ifindex);
 	if (err)
 		return err;
 
-	spin_lock_bh(&vxlan->hash_lock);
+	hash_index = fdb_head_index(vxlan, addr, src_vni);
+	spin_lock_bh(&vxlan->hash_lock[hash_index]);
 	err = __vxlan_fdb_delete(vxlan, addr, ip, port, src_vni, vni, ifindex,
 				 true);
-	spin_unlock_bh(&vxlan->hash_lock);
+	spin_unlock_bh(&vxlan->hash_lock[hash_index]);
 
 	return err;
 }
@@ -1215,6 +1387,7 @@ static int vxlan_fdb_dump(struct sk_buff *skb, struct netlink_callback *cb,
 	for (h = 0; h < FDB_HASH_SIZE; ++h) {
 		struct vxlan_fdb *f;
 
+		rcu_read_lock();
 		hlist_for_each_entry_rcu(f, &vxlan->fdb_head[h], hlist) {
 			struct vxlan_rdst *rd;
 
@@ -1227,12 +1400,15 @@ static int vxlan_fdb_dump(struct sk_buff *skb, struct netlink_callback *cb,
 						     cb->nlh->nlmsg_seq,
 						     RTM_NEWNEIGH,
 						     NLM_F_MULTI, rd);
-				if (err < 0)
+				if (err < 0) {
+					rcu_read_unlock();
 					goto out;
+				}
 skip:
 				*idx += 1;
 			}
 		}
+		rcu_read_unlock();
 	}
 out:
 	return err;
@@ -1310,8 +1486,10 @@ static bool vxlan_snoop(struct net_device *dev,
 		f->updated = jiffies;
 		vxlan_fdb_notify(vxlan, f, rdst, RTM_NEWNEIGH, true, NULL);
 	} else {
+		u32 hash_index = fdb_head_index(vxlan, src_mac, vni);
+
 		/* learned new entry */
-		spin_lock(&vxlan->hash_lock);
+		spin_lock(&vxlan->hash_lock[hash_index]);
 
 		/* close off race between vxlan_flush and incoming packets */
 		if (netif_running(dev))
@@ -1322,7 +1500,7 @@ static bool vxlan_snoop(struct net_device *dev,
 					 vni,
 					 vxlan->default_dst.remote_vni,
 					 ifindex, NTF_SELF, true, NULL);
-		spin_unlock(&vxlan->hash_lock);
+		spin_unlock(&vxlan->hash_lock[hash_index]);
 	}
 
 	return false;
@@ -2236,7 +2414,7 @@ static struct rtable *vxlan_get_route(struct vxlan_dev *vxlan, struct net_device
 	fl4.fl4_sport = sport;
 
 	rt = ip_route_output_key(vxlan->net, &fl4);
-	if (likely(!IS_ERR(rt))) {
+	if (!IS_ERR(rt)) {
 		if (rt->dst.dev == dev) {
 			netdev_dbg(dev, "circular route to %pI4\n", &daddr);
 			ip_rt_put(rt);
@@ -2496,6 +2674,9 @@ static void vxlan_xmit_one(struct sk_buff *skb, struct net_device *dev,
 		struct rtable *rt;
 		__be16 df = 0;
 
+		if (!ifindex)
+			ifindex = sock4->sock->sk->sk_bound_dev_if;
+
 		rt = vxlan_get_route(vxlan, dev, sock4, skb, ifindex, tos,
 				     dst->sin.sin_addr.s_addr,
 				     &local_ip.sin.sin_addr.s_addr,
@@ -2504,6 +2685,13 @@ static void vxlan_xmit_one(struct sk_buff *skb, struct net_device *dev,
 		if (IS_ERR(rt)) {
 			err = PTR_ERR(rt);
 			goto tx_error;
+		}
+
+		if (fan_has_map(&vxlan->fan) && rt->rt_flags & RTCF_LOCAL) {
+			netdev_dbg(dev, "discard fan to localhost %pI4\n",
+				   &dst->sin.sin_addr.s_addr);
+			ip_rt_put(rt);
+			goto tx_free;
 		}
 
 		if (!info) {
@@ -2544,6 +2732,9 @@ static void vxlan_xmit_one(struct sk_buff *skb, struct net_device *dev,
 #if IS_ENABLED(CONFIG_IPV6)
 	} else {
 		struct vxlan_sock *sock6 = rcu_dereference(vxlan->vn6_sock);
+
+		if (!ifindex)
+			ifindex = sock6->sock->sk->sk_bound_dev_if;
 
 		ndst = vxlan6_get_route(vxlan, dev, sock6, skb, ifindex, tos,
 					label, &dst->sin6.sin6_addr,
@@ -2599,6 +2790,7 @@ tx_error:
 		dev->stats.tx_carrier_errors++;
 	dst_release(ndst);
 	dev->stats.tx_errors++;
+tx_free:
 	kfree_skb(skb);
 }
 
@@ -2651,6 +2843,20 @@ static netdev_tx_t vxlan_xmit(struct sk_buff *skb, struct net_device *dev)
 				return neigh_reduce(dev, skb, vni);
 		}
 #endif
+	}
+
+	if (fan_has_map(&vxlan->fan)) {
+		struct vxlan_rdst fan_rdst;
+
+		netdev_dbg(vxlan->dev, "vxlan_xmit p %x d %pM\n",
+			   eth->h_proto, eth->h_dest);
+		if (vxlan_fan_build_rdst(vxlan, skb, &fan_rdst)) {
+			dev->stats.tx_dropped++;
+			kfree_skb(skb);
+			return NETDEV_TX_OK;
+		}
+		vxlan_xmit_one(skb, dev, vni, &fan_rdst, 0);
+		return NETDEV_TX_OK;
 	}
 
 	eth = eth_hdr(skb);
@@ -2710,7 +2916,7 @@ static void vxlan_cleanup(struct timer_list *t)
 	for (h = 0; h < FDB_HASH_SIZE; ++h) {
 		struct hlist_node *p, *n;
 
-		spin_lock_bh(&vxlan->hash_lock);
+		spin_lock(&vxlan->hash_lock[h]);
 		hlist_for_each_safe(p, n, &vxlan->fdb_head[h]) {
 			struct vxlan_fdb *f
 				= container_of(p, struct vxlan_fdb, hlist);
@@ -2732,7 +2938,7 @@ static void vxlan_cleanup(struct timer_list *t)
 			} else if (time_before(timeout, next_timer))
 				next_timer = timeout;
 		}
-		spin_unlock_bh(&vxlan->hash_lock);
+		spin_unlock(&vxlan->hash_lock[h]);
 	}
 
 	mod_timer(&vxlan->age_timer, next_timer);
@@ -2784,12 +2990,13 @@ static int vxlan_init(struct net_device *dev)
 static void vxlan_fdb_delete_default(struct vxlan_dev *vxlan, __be32 vni)
 {
 	struct vxlan_fdb *f;
+	u32 hash_index = fdb_head_index(vxlan, all_zeros_mac, vni);
 
-	spin_lock_bh(&vxlan->hash_lock);
+	spin_lock_bh(&vxlan->hash_lock[hash_index]);
 	f = __vxlan_find_mac(vxlan, all_zeros_mac, vni);
 	if (f)
 		vxlan_fdb_destroy(vxlan, f, true, true);
-	spin_unlock_bh(&vxlan->hash_lock);
+	spin_unlock_bh(&vxlan->hash_lock[hash_index]);
 }
 
 static void vxlan_uninit(struct net_device *dev)
@@ -2834,20 +3041,23 @@ static void vxlan_flush(struct vxlan_dev *vxlan, bool do_all)
 {
 	unsigned int h;
 
-	spin_lock_bh(&vxlan->hash_lock);
 	for (h = 0; h < FDB_HASH_SIZE; ++h) {
 		struct hlist_node *p, *n;
+
+		spin_lock_bh(&vxlan->hash_lock[h]);
 		hlist_for_each_safe(p, n, &vxlan->fdb_head[h]) {
 			struct vxlan_fdb *f
 				= container_of(p, struct vxlan_fdb, hlist);
 			if (!do_all && (f->state & (NUD_PERMANENT | NUD_NOARP)))
 				continue;
 			/* the all_zeros_mac entry is deleted at vxlan_uninit */
-			if (!is_zero_ether_addr(f->eth_addr))
-				vxlan_fdb_destroy(vxlan, f, true, true);
+			if (is_zero_ether_addr(f->eth_addr) &&
+			    f->vni == vxlan->cfg.vni)
+				continue;
+			vxlan_fdb_destroy(vxlan, f, true, true);
 		}
+		spin_unlock_bh(&vxlan->hash_lock[h]);
 	}
-	spin_unlock_bh(&vxlan->hash_lock);
 }
 
 /* Cleanup timer and forwarding table on shutdown */
@@ -2954,6 +3164,7 @@ static const struct net_device_ops vxlan_netdev_ether_ops = {
 	.ndo_fdb_dump		= vxlan_fdb_dump,
 	.ndo_fdb_get		= vxlan_fdb_get,
 	.ndo_fill_metadata_dst	= vxlan_fill_metadata_dst,
+	.ndo_change_proto_down  = dev_change_proto_down_generic,
 };
 
 static const struct net_device_ops vxlan_netdev_raw_ops = {
@@ -3030,14 +3241,17 @@ static void vxlan_setup(struct net_device *dev)
 	dev->max_mtu = ETH_MAX_MTU;
 
 	INIT_LIST_HEAD(&vxlan->next);
-	spin_lock_init(&vxlan->hash_lock);
 
 	timer_setup(&vxlan->age_timer, vxlan_cleanup, TIMER_DEFERRABLE);
 
 	vxlan->dev = dev;
 
-	for (h = 0; h < FDB_HASH_SIZE; ++h)
+	for (h = 0; h < FDB_HASH_SIZE; ++h) {
+		spin_lock_init(&vxlan->hash_lock[h]);
 		INIT_HLIST_HEAD(&vxlan->fdb_head[h]);
+	}
+
+	INIT_LIST_HEAD(&vxlan->fan.fan_maps);
 }
 
 static void vxlan_ether_setup(struct net_device *dev)
@@ -3163,33 +3377,13 @@ static void vxlan_get_drvinfo(struct net_device *netdev,
 	strlcpy(drvinfo->driver, "vxlan", sizeof(drvinfo->driver));
 }
 
-static int vxlan_get_link_ksettings(struct net_device *dev,
-				    struct ethtool_link_ksettings *cmd)
-{
-	struct vxlan_dev *vxlan = netdev_priv(dev);
-	struct vxlan_rdst *dst = &vxlan->default_dst;
-	struct net_device *lowerdev = __dev_get_by_index(vxlan->net,
-							 dst->remote_ifindex);
-
-	if (!lowerdev) {
-		cmd->base.duplex = DUPLEX_UNKNOWN;
-		cmd->base.port = PORT_OTHER;
-		cmd->base.speed = SPEED_UNKNOWN;
-
-		return 0;
-	}
-
-	return __ethtool_get_link_ksettings(lowerdev, cmd);
-}
-
 static const struct ethtool_ops vxlan_ethtool_ops = {
-	.get_drvinfo		= vxlan_get_drvinfo,
-	.get_link		= ethtool_op_get_link,
-	.get_link_ksettings	= vxlan_get_link_ksettings,
+	.get_drvinfo	= vxlan_get_drvinfo,
+	.get_link	= ethtool_op_get_link,
 };
 
 static struct socket *vxlan_create_sock(struct net *net, bool ipv6,
-					__be16 port, u32 flags)
+					__be16 port, u32 flags, int ifindex)
 {
 	struct socket *sock;
 	struct udp_port_cfg udp_conf;
@@ -3207,6 +3401,7 @@ static struct socket *vxlan_create_sock(struct net *net, bool ipv6,
 	}
 
 	udp_conf.local_udp_port = port;
+	udp_conf.bind_ifindex = ifindex;
 
 	/* Open UDP socket */
 	err = udp_sock_create(net, &udp_conf, &sock);
@@ -3218,7 +3413,8 @@ static struct socket *vxlan_create_sock(struct net *net, bool ipv6,
 
 /* Create new listen socket if needed */
 static struct vxlan_sock *vxlan_socket_create(struct net *net, bool ipv6,
-					      __be16 port, u32 flags)
+					      __be16 port, u32 flags,
+					      int ifindex)
 {
 	struct vxlan_net *vn = net_generic(net, vxlan_net_id);
 	struct vxlan_sock *vs;
@@ -3233,7 +3429,7 @@ static struct vxlan_sock *vxlan_socket_create(struct net *net, bool ipv6,
 	for (h = 0; h < VNI_HASH_SIZE; ++h)
 		INIT_HLIST_HEAD(&vs->vni_list[h]);
 
-	sock = vxlan_create_sock(net, ipv6, port, flags);
+	sock = vxlan_create_sock(net, ipv6, port, flags, ifindex);
 	if (IS_ERR(sock)) {
 		kfree(vs);
 		return ERR_CAST(sock);
@@ -3271,11 +3467,17 @@ static int __vxlan_sock_add(struct vxlan_dev *vxlan, bool ipv6)
 	struct vxlan_net *vn = net_generic(vxlan->net, vxlan_net_id);
 	struct vxlan_sock *vs = NULL;
 	struct vxlan_dev_node *node;
+	int l3mdev_index = 0;
+
+	if (vxlan->cfg.remote_ifindex)
+		l3mdev_index = l3mdev_master_upper_ifindex_by_index(
+			vxlan->net, vxlan->cfg.remote_ifindex);
 
 	if (!vxlan->cfg.no_share) {
 		spin_lock(&vn->sock_lock);
 		vs = vxlan_find_sock(vxlan->net, ipv6 ? AF_INET6 : AF_INET,
-				     vxlan->cfg.dst_port, vxlan->cfg.flags);
+				     vxlan->cfg.dst_port, vxlan->cfg.flags,
+				     l3mdev_index);
 		if (vs && !refcount_inc_not_zero(&vs->refcnt)) {
 			spin_unlock(&vn->sock_lock);
 			return -EBUSY;
@@ -3284,7 +3486,8 @@ static int __vxlan_sock_add(struct vxlan_dev *vxlan, bool ipv6)
 	}
 	if (!vs)
 		vs = vxlan_socket_create(vxlan->net, ipv6,
-					 vxlan->cfg.dst_port, vxlan->cfg.flags);
+					 vxlan->cfg.dst_port, vxlan->cfg.flags,
+					 l3mdev_index);
 	if (IS_ERR(vs))
 		return PTR_ERR(vs);
 #if IS_ENABLED(CONFIG_IPV6)
@@ -3646,11 +3849,40 @@ unregister:
 	return err;
 }
 
+/* Set/clear flags based on attribute */
+static int vxlan_nl2flag(struct vxlan_config *conf, struct nlattr *tb[],
+			  int attrtype, unsigned long mask, bool changelink,
+			  bool changelink_supported,
+			  struct netlink_ext_ack *extack)
+{
+	unsigned long flags;
+
+	if (!tb[attrtype])
+		return 0;
+
+	if (changelink && !changelink_supported) {
+		vxlan_flag_attr_error(attrtype, extack);
+		return -EOPNOTSUPP;
+	}
+
+	if (vxlan_policy[attrtype].type == NLA_FLAG)
+		flags = conf->flags | mask;
+	else if (nla_get_u8(tb[attrtype]))
+		flags = conf->flags | mask;
+	else
+		flags = conf->flags & ~mask;
+
+	conf->flags = flags;
+
+	return 0;
+}
+
 static int vxlan_nl2conf(struct nlattr *tb[], struct nlattr *data[],
 			 struct net_device *dev, struct vxlan_config *conf,
-			 bool changelink)
+			 bool changelink, struct netlink_ext_ack *extack)
 {
 	struct vxlan_dev *vxlan = netdev_priv(dev);
+	int err = 0;
 
 	memset(conf, 0, sizeof(*conf));
 
@@ -3661,40 +3893,60 @@ static int vxlan_nl2conf(struct nlattr *tb[], struct nlattr *data[],
 	if (data[IFLA_VXLAN_ID]) {
 		__be32 vni = cpu_to_be32(nla_get_u32(data[IFLA_VXLAN_ID]));
 
-		if (changelink && (vni != conf->vni))
+		if (changelink && (vni != conf->vni)) {
+			NL_SET_ERR_MSG_ATTR(extack, tb[IFLA_VXLAN_ID], "Cannot change VNI");
 			return -EOPNOTSUPP;
+		}
 		conf->vni = cpu_to_be32(nla_get_u32(data[IFLA_VXLAN_ID]));
 	}
 
 	if (data[IFLA_VXLAN_GROUP]) {
-		if (changelink && (conf->remote_ip.sa.sa_family != AF_INET))
+		if (changelink && (conf->remote_ip.sa.sa_family != AF_INET)) {
+			NL_SET_ERR_MSG_ATTR(extack, tb[IFLA_VXLAN_GROUP], "New group address family does not match old group");
 			return -EOPNOTSUPP;
+		}
 
 		conf->remote_ip.sin.sin_addr.s_addr = nla_get_in_addr(data[IFLA_VXLAN_GROUP]);
 		conf->remote_ip.sa.sa_family = AF_INET;
 	} else if (data[IFLA_VXLAN_GROUP6]) {
-		if (!IS_ENABLED(CONFIG_IPV6))
+		if (!IS_ENABLED(CONFIG_IPV6)) {
+			NL_SET_ERR_MSG_ATTR(extack, tb[IFLA_VXLAN_GROUP6], "IPv6 support not enabled in the kernel");
 			return -EPFNOSUPPORT;
+		}
 
-		if (changelink && (conf->remote_ip.sa.sa_family != AF_INET6))
+		if (changelink && (conf->remote_ip.sa.sa_family != AF_INET6)) {
+			NL_SET_ERR_MSG_ATTR(extack, tb[IFLA_VXLAN_GROUP6], "New group address family does not match old group");
 			return -EOPNOTSUPP;
+		}
 
 		conf->remote_ip.sin6.sin6_addr = nla_get_in6_addr(data[IFLA_VXLAN_GROUP6]);
 		conf->remote_ip.sa.sa_family = AF_INET6;
 	}
 
+	if (data[IFLA_VXLAN_FAN_MAP]) {
+		err = vxlan_parse_fan_map(data, vxlan);
+		if (err)
+			return err;
+	}
+
 	if (data[IFLA_VXLAN_LOCAL]) {
-		if (changelink && (conf->saddr.sa.sa_family != AF_INET))
+		if (changelink && (conf->saddr.sa.sa_family != AF_INET)) {
+			NL_SET_ERR_MSG_ATTR(extack, tb[IFLA_VXLAN_LOCAL], "New local address family does not match old");
 			return -EOPNOTSUPP;
+		}
 
 		conf->saddr.sin.sin_addr.s_addr = nla_get_in_addr(data[IFLA_VXLAN_LOCAL]);
 		conf->saddr.sa.sa_family = AF_INET;
 	} else if (data[IFLA_VXLAN_LOCAL6]) {
-		if (!IS_ENABLED(CONFIG_IPV6))
+		if (!IS_ENABLED(CONFIG_IPV6)) {
+			NL_SET_ERR_MSG_ATTR(extack, tb[IFLA_VXLAN_LOCAL6], "IPv6 support not enabled in the kernel");
 			return -EPFNOSUPPORT;
+		}
 
-		if (changelink && (conf->saddr.sa.sa_family != AF_INET6))
+		if (changelink && (conf->saddr.sa.sa_family != AF_INET6)) {
+			NL_SET_ERR_MSG_ATTR(extack, tb[IFLA_VXLAN_LOCAL6], "New local address family does not match old");
 			return -EOPNOTSUPP;
+		}
 
 		/* TODO: respect scope id */
 		conf->saddr.sin6.sin6_addr = nla_get_in6_addr(data[IFLA_VXLAN_LOCAL6]);
@@ -3711,9 +3963,12 @@ static int vxlan_nl2conf(struct nlattr *tb[], struct nlattr *data[],
 		conf->ttl = nla_get_u8(data[IFLA_VXLAN_TTL]);
 
 	if (data[IFLA_VXLAN_TTL_INHERIT]) {
-		if (changelink)
-			return -EOPNOTSUPP;
-		conf->flags |= VXLAN_F_TTL_INHERIT;
+		err = vxlan_nl2flag(conf, data, IFLA_VXLAN_TTL_INHERIT,
+				    VXLAN_F_TTL_INHERIT, changelink, false,
+				    extack);
+		if (err)
+			return err;
+
 	}
 
 	if (data[IFLA_VXLAN_LABEL])
@@ -3721,10 +3976,11 @@ static int vxlan_nl2conf(struct nlattr *tb[], struct nlattr *data[],
 			     IPV6_FLOWLABEL_MASK;
 
 	if (data[IFLA_VXLAN_LEARNING]) {
-		if (nla_get_u8(data[IFLA_VXLAN_LEARNING]))
-			conf->flags |= VXLAN_F_LEARN;
-		else
-			conf->flags &= ~VXLAN_F_LEARN;
+		err = vxlan_nl2flag(conf, data, IFLA_VXLAN_LEARNING,
+				    VXLAN_F_LEARN, changelink, true,
+				    extack);
+		if (err)
+			return err;
 	} else if (!changelink) {
 		/* default to learn on a new device */
 		conf->flags |= VXLAN_F_LEARN;
@@ -3734,44 +3990,52 @@ static int vxlan_nl2conf(struct nlattr *tb[], struct nlattr *data[],
 		conf->age_interval = nla_get_u32(data[IFLA_VXLAN_AGEING]);
 
 	if (data[IFLA_VXLAN_PROXY]) {
-		if (changelink)
-			return -EOPNOTSUPP;
-		if (nla_get_u8(data[IFLA_VXLAN_PROXY]))
-			conf->flags |= VXLAN_F_PROXY;
+		err = vxlan_nl2flag(conf, data, IFLA_VXLAN_PROXY,
+				    VXLAN_F_PROXY, changelink, false,
+				    extack);
+		if (err)
+			return err;
 	}
 
 	if (data[IFLA_VXLAN_RSC]) {
-		if (changelink)
-			return -EOPNOTSUPP;
-		if (nla_get_u8(data[IFLA_VXLAN_RSC]))
-			conf->flags |= VXLAN_F_RSC;
+		err = vxlan_nl2flag(conf, data, IFLA_VXLAN_RSC,
+				    VXLAN_F_RSC, changelink, false,
+				    extack);
+		if (err)
+			return err;
 	}
 
 	if (data[IFLA_VXLAN_L2MISS]) {
-		if (changelink)
-			return -EOPNOTSUPP;
-		if (nla_get_u8(data[IFLA_VXLAN_L2MISS]))
-			conf->flags |= VXLAN_F_L2MISS;
+		err = vxlan_nl2flag(conf, data, IFLA_VXLAN_L2MISS,
+				    VXLAN_F_L2MISS, changelink, false,
+				    extack);
+		if (err)
+			return err;
 	}
 
 	if (data[IFLA_VXLAN_L3MISS]) {
-		if (changelink)
-			return -EOPNOTSUPP;
-		if (nla_get_u8(data[IFLA_VXLAN_L3MISS]))
-			conf->flags |= VXLAN_F_L3MISS;
+		err = vxlan_nl2flag(conf, data, IFLA_VXLAN_L3MISS,
+				    VXLAN_F_L3MISS, changelink, false,
+				    extack);
+		if (err)
+			return err;
 	}
 
 	if (data[IFLA_VXLAN_LIMIT]) {
-		if (changelink)
+		if (changelink) {
+			NL_SET_ERR_MSG_ATTR(extack, tb[IFLA_VXLAN_LIMIT],
+					    "Cannot change limit");
 			return -EOPNOTSUPP;
+		}
 		conf->addrmax = nla_get_u32(data[IFLA_VXLAN_LIMIT]);
 	}
 
 	if (data[IFLA_VXLAN_COLLECT_METADATA]) {
-		if (changelink)
-			return -EOPNOTSUPP;
-		if (nla_get_u8(data[IFLA_VXLAN_COLLECT_METADATA]))
-			conf->flags |= VXLAN_F_COLLECT_METADATA;
+		err = vxlan_nl2flag(conf, data, IFLA_VXLAN_COLLECT_METADATA,
+				    VXLAN_F_COLLECT_METADATA, changelink, false,
+				    extack);
+		if (err)
+			return err;
 	}
 
 	if (data[IFLA_VXLAN_PORT_RANGE]) {
@@ -3781,72 +4045,92 @@ static int vxlan_nl2conf(struct nlattr *tb[], struct nlattr *data[],
 			conf->port_min = ntohs(p->low);
 			conf->port_max = ntohs(p->high);
 		} else {
+			NL_SET_ERR_MSG_ATTR(extack, tb[IFLA_VXLAN_PORT_RANGE],
+					    "Cannot change port range");
 			return -EOPNOTSUPP;
 		}
 	}
 
 	if (data[IFLA_VXLAN_PORT]) {
-		if (changelink)
+		if (changelink) {
+			NL_SET_ERR_MSG_ATTR(extack, tb[IFLA_VXLAN_PORT],
+					    "Cannot change port");
 			return -EOPNOTSUPP;
+		}
 		conf->dst_port = nla_get_be16(data[IFLA_VXLAN_PORT]);
 	}
 
 	if (data[IFLA_VXLAN_UDP_CSUM]) {
-		if (changelink)
+		if (changelink) {
+			NL_SET_ERR_MSG_ATTR(extack, tb[IFLA_VXLAN_UDP_CSUM],
+					    "Cannot change UDP_CSUM flag");
 			return -EOPNOTSUPP;
+		}
 		if (!nla_get_u8(data[IFLA_VXLAN_UDP_CSUM]))
 			conf->flags |= VXLAN_F_UDP_ZERO_CSUM_TX;
 	}
 
 	if (data[IFLA_VXLAN_UDP_ZERO_CSUM6_TX]) {
-		if (changelink)
-			return -EOPNOTSUPP;
-		if (nla_get_u8(data[IFLA_VXLAN_UDP_ZERO_CSUM6_TX]))
-			conf->flags |= VXLAN_F_UDP_ZERO_CSUM6_TX;
+		err = vxlan_nl2flag(conf, data, IFLA_VXLAN_UDP_ZERO_CSUM6_TX,
+				    VXLAN_F_UDP_ZERO_CSUM6_TX, changelink,
+				    false, extack);
+		if (err)
+			return err;
 	}
 
 	if (data[IFLA_VXLAN_UDP_ZERO_CSUM6_RX]) {
-		if (changelink)
-			return -EOPNOTSUPP;
-		if (nla_get_u8(data[IFLA_VXLAN_UDP_ZERO_CSUM6_RX]))
-			conf->flags |= VXLAN_F_UDP_ZERO_CSUM6_RX;
+		err = vxlan_nl2flag(conf, data, IFLA_VXLAN_UDP_ZERO_CSUM6_RX,
+				    VXLAN_F_UDP_ZERO_CSUM6_RX, changelink,
+				    false, extack);
+		if (err)
+			return err;
 	}
 
 	if (data[IFLA_VXLAN_REMCSUM_TX]) {
-		if (changelink)
-			return -EOPNOTSUPP;
-		if (nla_get_u8(data[IFLA_VXLAN_REMCSUM_TX]))
-			conf->flags |= VXLAN_F_REMCSUM_TX;
+		err = vxlan_nl2flag(conf, data, IFLA_VXLAN_REMCSUM_TX,
+				    VXLAN_F_REMCSUM_TX, changelink, false,
+				    extack);
+		if (err)
+			return err;
 	}
 
 	if (data[IFLA_VXLAN_REMCSUM_RX]) {
-		if (changelink)
-			return -EOPNOTSUPP;
-		if (nla_get_u8(data[IFLA_VXLAN_REMCSUM_RX]))
-			conf->flags |= VXLAN_F_REMCSUM_RX;
+		err = vxlan_nl2flag(conf, data, IFLA_VXLAN_REMCSUM_RX,
+				    VXLAN_F_REMCSUM_RX, changelink, false,
+				    extack);
+		if (err)
+			return err;
 	}
 
 	if (data[IFLA_VXLAN_GBP]) {
-		if (changelink)
-			return -EOPNOTSUPP;
-		conf->flags |= VXLAN_F_GBP;
+		err = vxlan_nl2flag(conf, data, IFLA_VXLAN_GBP,
+				    VXLAN_F_GBP, changelink, false, extack);
+		if (err)
+			return err;
 	}
 
 	if (data[IFLA_VXLAN_GPE]) {
-		if (changelink)
-			return -EOPNOTSUPP;
-		conf->flags |= VXLAN_F_GPE;
+		err = vxlan_nl2flag(conf, data, IFLA_VXLAN_GPE,
+				    VXLAN_F_GPE, changelink, false,
+				    extack);
+		if (err)
+			return err;
 	}
 
 	if (data[IFLA_VXLAN_REMCSUM_NOPARTIAL]) {
-		if (changelink)
-			return -EOPNOTSUPP;
-		conf->flags |= VXLAN_F_REMCSUM_NOPARTIAL;
+		err = vxlan_nl2flag(conf, data, IFLA_VXLAN_REMCSUM_NOPARTIAL,
+				    VXLAN_F_REMCSUM_NOPARTIAL, changelink,
+				    false, extack);
+		if (err)
+			return err;
 	}
 
 	if (tb[IFLA_MTU]) {
-		if (changelink)
+		if (changelink) {
+			NL_SET_ERR_MSG_ATTR(extack, tb[IFLA_MTU],
+					    "Cannot change mtu");
 			return -EOPNOTSUPP;
+		}
 		conf->mtu = nla_get_u32(tb[IFLA_MTU]);
 	}
 
@@ -3863,7 +4147,7 @@ static int vxlan_newlink(struct net *src_net, struct net_device *dev,
 	struct vxlan_config conf;
 	int err;
 
-	err = vxlan_nl2conf(tb, data, dev, &conf, false);
+	err = vxlan_nl2conf(tb, data, dev, &conf, false, extack);
 	if (err)
 		return err;
 
@@ -3881,8 +4165,7 @@ static int vxlan_changelink(struct net_device *dev, struct nlattr *tb[],
 	int err;
 
 	dst = &vxlan->default_dst;
-	err = vxlan_nl2conf(tb, data,
-			    dev, &conf, true);
+	err = vxlan_nl2conf(tb, data, dev, &conf, true, extack);
 	if (err)
 		return err;
 
@@ -3901,7 +4184,9 @@ static int vxlan_changelink(struct net_device *dev, struct nlattr *tb[],
 
 	/* handle default dst entry */
 	if (!vxlan_addr_equal(&conf.remote_ip, &dst->remote_ip)) {
-		spin_lock_bh(&vxlan->hash_lock);
+		u32 hash_index = fdb_head_index(vxlan, all_zeros_mac, conf.vni);
+
+		spin_lock_bh(&vxlan->hash_lock[hash_index]);
 		if (!vxlan_addr_any(&conf.remote_ip)) {
 			err = vxlan_fdb_update(vxlan, all_zeros_mac,
 					       &conf.remote_ip,
@@ -3912,7 +4197,7 @@ static int vxlan_changelink(struct net_device *dev, struct nlattr *tb[],
 					       conf.remote_ifindex,
 					       NTF_SELF, true, extack);
 			if (err) {
-				spin_unlock_bh(&vxlan->hash_lock);
+				spin_unlock_bh(&vxlan->hash_lock[hash_index]);
 				netdev_adjacent_change_abort(dst->remote_dev,
 							     lowerdev, dev);
 				return err;
@@ -3926,7 +4211,7 @@ static int vxlan_changelink(struct net_device *dev, struct nlattr *tb[],
 					   dst->remote_vni,
 					   dst->remote_ifindex,
 					   true);
-		spin_unlock_bh(&vxlan->hash_lock);
+		spin_unlock_bh(&vxlan->hash_lock[hash_index]);
 	}
 
 	if (conf.age_interval != vxlan->cfg.age_interval)
@@ -3980,6 +4265,7 @@ static size_t vxlan_get_size(const struct net_device *dev)
 		nla_total_size(sizeof(__u8)) + /* IFLA_VXLAN_UDP_ZERO_CSUM6_RX */
 		nla_total_size(sizeof(__u8)) + /* IFLA_VXLAN_REMCSUM_TX */
 		nla_total_size(sizeof(__u8)) + /* IFLA_VXLAN_REMCSUM_RX */
+		nla_total_size(sizeof(struct ip_fan_map) * 256) +
 		0;
 }
 
@@ -4024,6 +4310,26 @@ static int vxlan_fill_info(struct sk_buff *skb, const struct net_device *dev)
 				goto nla_put_failure;
 #endif
 		}
+	}
+
+	if (fan_has_map(&vxlan->fan)) {
+		struct nlattr *fan_nest;
+		struct ip_fan_map *fan_map;
+
+		fan_nest = nla_nest_start(skb, IFLA_VXLAN_FAN_MAP);
+		if (!fan_nest)
+			goto nla_put_failure;
+		list_for_each_entry_rcu(fan_map, &vxlan->fan.fan_maps, list) {
+			struct ifla_fan_map map;
+
+			map.underlay = fan_map->underlay;
+			map.underlay_prefix = fan_map->underlay_prefix;
+			map.overlay = fan_map->overlay;
+			map.overlay_prefix = fan_map->overlay_prefix;
+			if (nla_put(skb, IFLA_FAN_MAPPING, sizeof(map), &map))
+				goto nla_put_failure;
+		}
+		nla_nest_end(skb, fan_nest);
 	}
 
 	if (nla_put_u8(skb, IFLA_VXLAN_TTL, vxlan->cfg.ttl) ||
@@ -4188,8 +4494,11 @@ vxlan_fdb_offloaded_set(struct net_device *dev,
 	struct vxlan_dev *vxlan = netdev_priv(dev);
 	struct vxlan_rdst *rdst;
 	struct vxlan_fdb *f;
+	u32 hash_index;
 
-	spin_lock_bh(&vxlan->hash_lock);
+	hash_index = fdb_head_index(vxlan, fdb_info->eth_addr, fdb_info->vni);
+
+	spin_lock_bh(&vxlan->hash_lock[hash_index]);
 
 	f = vxlan_find_mac(vxlan, fdb_info->eth_addr, fdb_info->vni);
 	if (!f)
@@ -4205,7 +4514,7 @@ vxlan_fdb_offloaded_set(struct net_device *dev,
 	rdst->offloaded = fdb_info->offloaded;
 
 out:
-	spin_unlock_bh(&vxlan->hash_lock);
+	spin_unlock_bh(&vxlan->hash_lock[hash_index]);
 }
 
 static int
@@ -4214,11 +4523,13 @@ vxlan_fdb_external_learn_add(struct net_device *dev,
 {
 	struct vxlan_dev *vxlan = netdev_priv(dev);
 	struct netlink_ext_ack *extack;
+	u32 hash_index;
 	int err;
 
+	hash_index = fdb_head_index(vxlan, fdb_info->eth_addr, fdb_info->vni);
 	extack = switchdev_notifier_info_to_extack(&fdb_info->info);
 
-	spin_lock_bh(&vxlan->hash_lock);
+	spin_lock_bh(&vxlan->hash_lock[hash_index]);
 	err = vxlan_fdb_update(vxlan, fdb_info->eth_addr, &fdb_info->remote_ip,
 			       NUD_REACHABLE,
 			       NLM_F_CREATE | NLM_F_REPLACE,
@@ -4228,7 +4539,7 @@ vxlan_fdb_external_learn_add(struct net_device *dev,
 			       fdb_info->remote_ifindex,
 			       NTF_USE | NTF_SELF | NTF_EXT_LEARNED,
 			       false, extack);
-	spin_unlock_bh(&vxlan->hash_lock);
+	spin_unlock_bh(&vxlan->hash_lock[hash_index]);
 
 	return err;
 }
@@ -4239,9 +4550,11 @@ vxlan_fdb_external_learn_del(struct net_device *dev,
 {
 	struct vxlan_dev *vxlan = netdev_priv(dev);
 	struct vxlan_fdb *f;
+	u32 hash_index;
 	int err = 0;
 
-	spin_lock_bh(&vxlan->hash_lock);
+	hash_index = fdb_head_index(vxlan, fdb_info->eth_addr, fdb_info->vni);
+	spin_lock_bh(&vxlan->hash_lock[hash_index]);
 
 	f = vxlan_find_mac(vxlan, fdb_info->eth_addr, fdb_info->vni);
 	if (!f)
@@ -4255,7 +4568,7 @@ vxlan_fdb_external_learn_del(struct net_device *dev,
 					 fdb_info->remote_ifindex,
 					 false);
 
-	spin_unlock_bh(&vxlan->hash_lock);
+	spin_unlock_bh(&vxlan->hash_lock[hash_index]);
 
 	return err;
 }
@@ -4313,6 +4626,22 @@ static __net_init int vxlan_init_net(struct net *net)
 
 	return 0;
 }
+
+#ifdef CONFIG_SYSCTL
+static struct ctl_table_header *vxlan_fan_header;
+static unsigned int vxlan_fan_version = 4;
+
+static struct ctl_table vxlan_fan_sysctls[] = {
+	{
+		.procname	= "vxlan",
+		.data		= &vxlan_fan_version,
+		.maxlen		= sizeof(vxlan_fan_version),
+		.mode		= 0444,
+		.proc_handler	= proc_dointvec,
+	},
+	{},
+};
+#endif /* CONFIG_SYSCTL */
 
 static void vxlan_destroy_tunnels(struct net *net, struct list_head *head)
 {
@@ -4379,7 +4708,20 @@ static int __init vxlan_init_module(void)
 	if (rc)
 		goto out4;
 
+#ifdef CONFIG_SYSCTL
+	vxlan_fan_header = register_net_sysctl(&init_net, "net/fan",
+					      vxlan_fan_sysctls);
+	if (!vxlan_fan_header) {
+		rc = -ENOMEM;
+		goto sysctl_failed;
+	}
+#endif /* CONFIG_SYSCTL */
+
 	return 0;
+#ifdef CONFIG_SYSCTL
+sysctl_failed:
+	rtnl_link_unregister(&vxlan_link_ops);
+#endif /* CONFIG_SYSCTL */
 out4:
 	unregister_switchdev_notifier(&vxlan_switchdev_notifier_block);
 out3:
@@ -4393,6 +4735,9 @@ late_initcall(vxlan_init_module);
 
 static void __exit vxlan_cleanup_module(void)
 {
+#ifdef CONFIG_SYSCTL
+	unregister_net_sysctl_table(vxlan_fan_header);
+#endif /* CONFIG_SYSCTL */
 	rtnl_link_unregister(&vxlan_link_ops);
 	unregister_switchdev_notifier(&vxlan_switchdev_notifier_block);
 	unregister_netdevice_notifier(&vxlan_notifier_block);

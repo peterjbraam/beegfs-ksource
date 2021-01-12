@@ -1,6 +1,6 @@
+# SPDX-License-Identifier: GPL-2.0-only
 config INTEL_POWERCLAMP
 	tristate "Intel PowerClamp idle injection driver"
-	depends on THERMAL
 	depends on X86
 	depends on CPU_SUP_INTEL
 	help
@@ -55,7 +55,7 @@ config INTEL_QUARK_DTS_THERMAL
 	  underlying BIOS/Firmware.
 
 menu "ACPI INT340X thermal drivers"
-source drivers/thermal/intel/int340x_thermal/Kconfig
+source "drivers/thermal/intel/int340x_thermal/Kconfig"
 endmenu
 
 config INTEL_BXT_PMIC_THERMAL

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 
 #include <linux/ceph/ceph_debug.h>
 
@@ -168,8 +169,6 @@ enum {
 	Opt_noquotadf,
 	Opt_copyfrom,
 	Opt_nocopyfrom,
-	Opt_wsync,
-	Opt_nowsync,
 };
 
 static match_table_t fsopt_tokens = {
@@ -212,10 +211,28 @@ static match_table_t fsopt_tokens = {
 	{Opt_noquotadf, "noquotadf"},
 	{Opt_copyfrom, "copyfrom"},
 	{Opt_nocopyfrom, "nocopyfrom"},
-	{Opt_wsync, "wsync"},
-	{Opt_nowsync, "nowsync"},
 	{-1, NULL}
 };
+
+/*
+ * Remove adjacent slashes and then the trailing slash, unless it is
+ * the only remaining character.
+ *
+ * E.g. "//dir1////dir2///" --> "/dir1/dir2", "///" --> "/".
+ */
+static void canonicalize_path(char *path)
+{
+	int i, j = 0;
+
+	for (i = 0; path[i] != '\0'; i++) {
+		if (path[i] != '/' || j < 1 || path[j - 1] != '/')
+			path[j++] = path[i];
+	}
+
+	if (j > 1 && path[j - 1] == '/')
+		j--;
+	path[j] = '\0';
+}
 
 static int parse_fsopt_token(char *c, void *private)
 {
@@ -405,11 +422,6 @@ static int parse_fsopt_token(char *c, void *private)
 	case Opt_noacl:
 		fsopt->sb_flags &= ~SB_POSIXACL;
 		break;
-	case Opt_wsync:
-		fsopt->flags &= ~CEPH_MOUNT_OPT_ASYNC_DIROPS;
-		break;
-	case Opt_nowsync:
-		fsopt->flags |= CEPH_MOUNT_OPT_ASYNC_DIROPS;
 	default:
 		BUG_ON(token);
 	}
@@ -469,26 +481,6 @@ static int compare_mount_options(struct ceph_mount_options *new_fsopt,
 	return ceph_compare_options(new_opt, fsc->client);
 }
 
-/*
- * Remove adjacent slashes and then the trailing slash, unless it is
- * the only remaining character.
- *
- * E.g. "//dir1////dir2///" --> "/dir1/dir2", "///" --> "/".
- */
-static void canonicalize_path(char *path)
-{
-	int i, j = 0;
-
-	for (i = 0; path[i] != '\0'; i++) {
-		if (path[i] != '/' || j < 1 || path[j - 1] != '/')
-			path[j++] = path[i];
-	}
-
-	if (j > 1 && path[j - 1] == '/')
-		j--;
-	path[j] = '\0';
-}
-
 static int parse_mount_options(struct ceph_mount_options **pfsopt,
 			       struct ceph_options **popt,
 			       int flags, char *options,
@@ -537,8 +529,6 @@ static int parse_mount_options(struct ceph_mount_options **pfsopt,
 	 */
 	dev_name_end = strchr(dev_name, '/');
 	if (dev_name_end) {
-		kfree(fsopt->server_path);
-
 		/*
 		 * The server_path will include the whole chars from userland
 		 * including the leading '/'.
@@ -638,9 +628,6 @@ static int ceph_show_options(struct seq_file *m, struct dentry *root)
 	if (fsopt->flags & CEPH_MOUNT_OPT_CLEANRECOVER)
 		seq_show_option(m, "recover_session", "clean");
 
-	if (fsopt->flags & CEPH_MOUNT_OPT_ASYNC_DIROPS)
-		seq_puts(m, ",nowsync");
-
 	if (fsopt->wsize != CEPH_MAX_WRITE_SIZE)
 		seq_printf(m, ",wsize=%d", fsopt->wsize);
 	if (fsopt->rsize != CEPH_MAX_READ_SIZE)
@@ -730,7 +717,6 @@ static struct ceph_fs_client *create_fs_client(struct ceph_mount_options *fsopt,
 	fsc->sb = NULL;
 	fsc->mount_state = CEPH_MOUNT_MOUNTING;
 	fsc->filp_gen = 1;
-	fsc->have_copy_from2 = true;
 
 	atomic_long_set(&fsc->writeback_count, 0);
 
@@ -803,7 +789,6 @@ struct kmem_cache *ceph_cap_flush_cachep;
 struct kmem_cache *ceph_dentry_cachep;
 struct kmem_cache *ceph_file_cachep;
 struct kmem_cache *ceph_dir_file_cachep;
-struct kmem_cache *ceph_mds_request_cachep;
 
 static void ceph_inode_init_once(void *foo)
 {
@@ -844,10 +829,6 @@ static int __init init_caches(void)
 	if (!ceph_dir_file_cachep)
 		goto bad_dir_file;
 
-	ceph_mds_request_cachep = KMEM_CACHE(ceph_mds_request, SLAB_MEM_SPREAD);
-	if (!ceph_mds_request_cachep)
-		goto bad_mds_req;
-
 	error = ceph_fscache_register();
 	if (error)
 		goto bad_fscache;
@@ -855,8 +836,6 @@ static int __init init_caches(void)
 	return 0;
 
 bad_fscache:
-	kmem_cache_destroy(ceph_mds_request_cachep);
-bad_mds_req:
 	kmem_cache_destroy(ceph_dir_file_cachep);
 bad_dir_file:
 	kmem_cache_destroy(ceph_file_cachep);
@@ -885,7 +864,6 @@ static void destroy_caches(void)
 	kmem_cache_destroy(ceph_dentry_cachep);
 	kmem_cache_destroy(ceph_file_cachep);
 	kmem_cache_destroy(ceph_dir_file_cachep);
-	kmem_cache_destroy(ceph_mds_request_cachep);
 
 	ceph_fscache_unregister();
 }
@@ -915,9 +893,9 @@ static int ceph_remount(struct super_block *sb, int *flags, char *data)
 
 static const struct super_operations ceph_super_ops = {
 	.alloc_inode	= ceph_alloc_inode,
-	.destroy_inode	= ceph_destroy_inode,
+	.free_inode	= ceph_free_inode,
 	.write_inode    = ceph_write_inode,
-	.drop_inode	= ceph_drop_inode,
+	.drop_inode	= generic_delete_inode,
 	.evict_inode	= ceph_evict_inode,
 	.sync_fs        = ceph_sync_fs,
 	.put_super	= ceph_put_super,

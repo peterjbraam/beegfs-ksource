@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef RQ_QOS_H
 #define RQ_QOS_H
 
@@ -6,18 +7,15 @@
 #include <linux/blk_types.h>
 #include <linux/atomic.h>
 #include <linux/wait.h>
-#include RH_KABI_HIDE_INCLUDE("blk-mq-debugfs.h")
+
+#include "blk-mq-debugfs.h"
 
 struct blk_mq_debugfs_attr;
 
 enum rq_qos_id {
 	RQ_QOS_WBT,
-#ifdef __GENKSYMS__
-	RQ_QOS_CGROUP,
-#else
 	RQ_QOS_LATENCY,
 	RQ_QOS_COST,
-#endif
 };
 
 struct rq_wait {
@@ -30,21 +28,23 @@ struct rq_qos {
 	struct request_queue *q;
 	enum rq_qos_id id;
 	struct rq_qos *next;
-	RH_KABI_EXTEND(struct dentry *debugfs_dir)
+#ifdef CONFIG_BLK_DEBUG_FS
+	struct dentry *debugfs_dir;
+#endif
 };
 
 struct rq_qos_ops {
 	void (*throttle)(struct rq_qos *, struct bio *);
 	void (*track)(struct rq_qos *, struct request *, struct bio *);
+	void (*merge)(struct rq_qos *, struct request *, struct bio *);
 	void (*issue)(struct rq_qos *, struct request *);
 	void (*requeue)(struct rq_qos *, struct request *);
 	void (*done)(struct rq_qos *, struct request *);
 	void (*done_bio)(struct rq_qos *, struct bio *);
 	void (*cleanup)(struct rq_qos *, struct bio *);
+	void (*queue_depth_changed)(struct rq_qos *);
 	void (*exit)(struct rq_qos *);
-	RH_KABI_EXTEND(const struct blk_mq_debugfs_attr *debugfs_attrs)
-	RH_KABI_EXTEND(void (*merge)(struct rq_qos *, struct request *, struct bio *))
-	RH_KABI_EXTEND(void (*queue_depth_changed)(struct rq_qos *))
+	const struct blk_mq_debugfs_attr *debugfs_attrs;
 };
 
 struct rq_depth {

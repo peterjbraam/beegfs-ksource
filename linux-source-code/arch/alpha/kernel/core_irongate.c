@@ -240,8 +240,7 @@ albacore_init_arch(void)
 				       size / 1024);
 		}
 #endif
-		reserve_bootmem_node(NODE_DATA(0), pci_mem, memtop -
-				pci_mem, BOOTMEM_DEFAULT);
+		memblock_reserve(pci_mem, memtop - pci_mem);
 		printk("irongate_init_arch: temporarily reserving "
 			"region %08lx-%08lx for PCI\n", pci_mem, memtop - 1);
 	}

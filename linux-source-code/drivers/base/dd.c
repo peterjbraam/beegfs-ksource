@@ -54,8 +54,12 @@ static DEFINE_MUTEX(deferred_probe_mutex);
 static LIST_HEAD(deferred_probe_pending_list);
 static LIST_HEAD(deferred_probe_active_list);
 static atomic_t deferred_trigger_count = ATOMIC_INIT(0);
-static bool initcalls_done;
 static struct dentry *deferred_devices;
+static bool initcalls_done;
+
+/* Save the async probe drivers' name from kernel cmdline */
+#define ASYNC_DRV_NAMES_MAX_LEN	256
+static char async_probe_drv_names[ASYNC_DRV_NAMES_MAX_LEN];
 
 /*
  * In some cases, like suspend to RAM or hibernation, It might be reasonable
@@ -63,26 +67,6 @@ static struct dentry *deferred_devices;
  * Once defer_all_probes is true all drivers probes will be forcibly deferred.
  */
 static bool defer_all_probes;
-
-/*
- * For initcall_debug, show the deferred probes executed in late_initcall
- * processing.
- */
-static void deferred_probe_debug(struct device *dev)
-{
-	ktime_t calltime, delta, rettime;
-	unsigned long long duration;
-
-	printk(KERN_DEBUG "deferred probe %s @ %i\n", dev_name(dev),
-	       task_pid_nr(current));
-	calltime = ktime_get();
-	bus_probe_device(dev);
-	rettime = ktime_get();
-	delta = ktime_sub(rettime, calltime);
-	duration = (unsigned long long) ktime_to_ns(delta) >> 10;
-	printk(KERN_DEBUG "deferred probe %s returned after %lld usecs\n",
-	       dev_name(dev), duration);
-}
 
 /*
  * deferred_probe_work_func() - Retry probing devices in the active list.
@@ -127,11 +111,7 @@ static void deferred_probe_work_func(struct work_struct *work)
 		device_pm_move_to_tail(dev);
 
 		dev_dbg(dev, "Retrying from deferred list\n");
-		if (initcall_debug && !initcalls_done)
-			deferred_probe_debug(dev);
-		else
-			bus_probe_device(dev);
-
+		bus_probe_device(dev);
 		mutex_lock(&deferred_probe_mutex);
 
 		put_device(dev);
@@ -140,7 +120,7 @@ static void deferred_probe_work_func(struct work_struct *work)
 }
 static DECLARE_WORK(deferred_probe_work, deferred_probe_work_func);
 
-static void driver_deferred_probe_add(struct device *dev)
+void driver_deferred_probe_add(struct device *dev)
 {
 	mutex_lock(&deferred_probe_mutex);
 	if (list_empty(&dev->p->deferred_probe)) {
@@ -203,7 +183,7 @@ static void driver_deferred_probe_trigger(void)
 }
 
 /**
- * device_block_probing() - Block/defere device's probes
+ * device_block_probing() - Block/defer device's probes
  *
  *	It will disable probing of devices and defer their probes instead.
  */
@@ -247,7 +227,10 @@ DEFINE_SHOW_ATTRIBUTE(deferred_devs);
 static int deferred_probe_timeout = -1;
 static int __init deferred_probe_timeout_setup(char *str)
 {
-	deferred_probe_timeout = simple_strtol(str, NULL, 10);
+	int timeout;
+
+	if (!kstrtoint(str, 10, &timeout))
+		deferred_probe_timeout = timeout;
 	return 1;
 }
 __setup("deferred_probe_timeout=", deferred_probe_timeout_setup);
@@ -516,7 +499,7 @@ static int really_probe(struct device *dev, struct device_driver *drv)
 	if (defer_all_probes) {
 		/*
 		 * Value of defer_all_probes can be set only by
-		 * device_defer_all_probes_enable() which, in turn, will call
+		 * device_block_probing() which, in turn, will call
 		 * wait_for_device_probe() right after that to avoid any races.
 		 */
 		dev_dbg(dev, "Driver %s force probe deferral\n", drv->name);
@@ -533,7 +516,11 @@ static int really_probe(struct device *dev, struct device_driver *drv)
 	atomic_inc(&probe_count);
 	pr_debug("bus: '%s': %s: probing driver %s with device %s\n",
 		 drv->bus->name, __func__, drv->name, dev_name(dev));
-	WARN_ON(!list_empty(&dev->devres_head));
+	if (!list_empty(&dev->devres_head)) {
+		dev_crit(dev, "Resources present before probing\n");
+		ret = -EBUSY;
+		goto done;
+	}
 
 re_probe:
 	dev->driver = drv;
@@ -546,7 +533,7 @@ re_probe:
 	if (dev->bus->dma_configure) {
 		ret = dev->bus->dma_configure(dev);
 		if (ret)
-			goto dma_failed;
+			goto probe_failed;
 	}
 
 	if (driver_sysfs_add(dev)) {
@@ -614,14 +601,13 @@ dev_groups_failed:
 	else if (drv->remove)
 		drv->remove(dev);
 probe_failed:
-	arch_teardown_dma_ops(dev);
-dma_failed:
 	if (dev->bus)
 		blocking_notifier_call_chain(&dev->bus->p->bus_notifier,
 					     BUS_NOTIFY_DRIVER_NOT_BOUND, dev);
 pinctrl_bind_failed:
 	device_links_no_driver(dev);
 	devres_release_all(dev);
+	arch_teardown_dma_ops(dev);
 	driver_sysfs_remove(dev);
 	dev->driver = NULL;
 	dev_set_drvdata(dev, NULL);
@@ -654,7 +640,24 @@ pinctrl_bind_failed:
 	ret = 0;
 done:
 	atomic_dec(&probe_count);
-	wake_up(&probe_waitqueue);
+	wake_up_all(&probe_waitqueue);
+	return ret;
+}
+
+/*
+ * For initcall_debug, show the driver probe time.
+ */
+static int really_probe_debug(struct device *dev, struct device_driver *drv)
+{
+	ktime_t calltime, delta, rettime;
+	int ret;
+
+	calltime = ktime_get();
+	ret = really_probe(dev, drv);
+	rettime = ktime_get();
+	delta = ktime_sub(rettime, calltime);
+	printk(KERN_DEBUG "probe of %s returned %d after %lld usecs\n",
+	       dev_name(dev), ret, (s64) ktime_to_us(delta));
 	return ret;
 }
 
@@ -716,7 +719,10 @@ int driver_probe_device(struct device_driver *drv, struct device *dev)
 		pm_runtime_get_sync(dev->parent);
 
 	pm_runtime_barrier(dev);
-	ret = really_probe(dev, drv);
+	if (initcall_debug)
+		ret = really_probe_debug(dev, drv);
+	else
+		ret = really_probe(dev, drv);
 	pm_request_idle(dev);
 
 	if (dev->parent)
@@ -725,6 +731,23 @@ int driver_probe_device(struct device_driver *drv, struct device *dev)
 	pm_runtime_put_suppliers(dev);
 	return ret;
 }
+
+static inline bool cmdline_requested_async_probing(const char *drv_name)
+{
+	return parse_option_str(async_probe_drv_names, drv_name);
+}
+
+/* The option format is "driver_async_probe=drv_name1,drv_name2,..." */
+static int __init save_async_options(char *buf)
+{
+	if (strlen(buf) >= ASYNC_DRV_NAMES_MAX_LEN)
+		printk(KERN_WARNING
+			"Too long list of driver names for 'driver_async_probe'!\n");
+
+	strlcpy(async_probe_drv_names, buf, ASYNC_DRV_NAMES_MAX_LEN);
+	return 0;
+}
+__setup("driver_async_probe=", save_async_options);
 
 bool driver_allows_async_probing(struct device_driver *drv)
 {
@@ -736,6 +759,9 @@ bool driver_allows_async_probing(struct device_driver *drv)
 		return false;
 
 	default:
+		if (cmdline_requested_async_probing(drv->name))
+			return true;
+
 		if (module_requested_async_probing(drv->owner))
 			return true;
 
@@ -847,7 +873,9 @@ static int __device_attach(struct device *dev, bool allow_async)
 	int ret = 0;
 
 	device_lock(dev);
-	if (dev->driver) {
+	if (dev->p->dead) {
+		goto out_unlock;
+	} else if (dev->driver) {
 		if (device_is_bound(dev)) {
 			ret = 1;
 			goto out_unlock;
@@ -1077,6 +1105,8 @@ static void __device_release_driver(struct device *dev, struct device *parent)
 
 	drv = dev->driver;
 	if (drv) {
+		pm_runtime_get_sync(dev);
+
 		while (device_links_busy(dev)) {
 			__device_driver_unlock(dev, parent);
 
@@ -1088,12 +1118,11 @@ static void __device_release_driver(struct device *dev, struct device *parent)
 			 * have released the driver successfully while this one
 			 * was waiting, so check for that.
 			 */
-			if (dev->driver != drv)
+			if (dev->driver != drv) {
+				pm_runtime_put(dev);
 				return;
+			}
 		}
-
-		pm_runtime_get_sync(dev);
-		pm_runtime_clean_up_links(dev);
 
 		driver_sysfs_remove(dev);
 
@@ -1110,6 +1139,13 @@ static void __device_release_driver(struct device *dev, struct device *parent)
 			dev->bus->remove(dev);
 		else if (drv->remove)
 			drv->remove(dev);
+		/*
+		 * A concurrent invocation of the same function might
+		 * have released the driver successfully while this one
+		 * was waiting, so check for that.
+		 */
+		if (dev->driver != drv)
+			return;
 
 		device_links_driver_cleanup(dev);
 

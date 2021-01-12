@@ -39,16 +39,6 @@
 #include <linux/llist.h>
 #include <steering/fs_dr.h>
 
-#define FDB_TC_MAX_CHAIN 3
-#define FDB_FT_CHAIN (FDB_TC_MAX_CHAIN + 1)
-#define FDB_TC_SLOW_PATH_CHAIN (FDB_FT_CHAIN + 1)
-
-/* The index of the last real chain (FT) + 1 as chain zero is valid as well */
-#define FDB_NUM_CHAINS (FDB_FT_CHAIN + 1)
-
-#define FDB_TC_MAX_PRIO 16
-#define FDB_TC_LEVELS_PER_PRIO 2
-
 struct mlx5_modify_hdr {
 	enum mlx5_flow_namespace_type ns_type;
 	union {
@@ -174,7 +164,6 @@ struct mlx5_flow_table {
 		unsigned int		required_groups;
 		unsigned int		group_size;
 		unsigned int		num_groups;
-		unsigned int		max_fte;
 	} autogroup;
 	/* Protect fwd_rules */
 	struct mutex			lock;

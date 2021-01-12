@@ -32,7 +32,7 @@ tap_prefix()
 tap_timeout()
 {
 	# Make sure tests will time out if utility is available.
-	if [ -x /usr/bin/timeout ] ; then
+	if [ -x /usr/bin/timeout ] && [ $kselftest_timeout -gt 0 ] ; then
 		/usr/bin/timeout --foreground "$kselftest_timeout" "$1"
 	else
 		"$1"
@@ -53,10 +53,6 @@ run_one()
 	settings="$BASE_DIR/$DIR/settings"
 	if [ -r "$settings" ] ; then
 		while read line ; do
-			# Skip comments.
-			if echo "$line" | grep -q '^#'; then
-				continue
-			fi
 			field=$(echo "$line" | cut -d= -f1)
 			value=$(echo "$line" | cut -d= -f2-)
 			eval "kselftest_$field"="$value"
@@ -65,13 +61,6 @@ run_one()
 
 	TEST_HDR_MSG="selftests: $DIR: $BASENAME_TEST"
 	echo "# $TEST_HDR_MSG"
-	rharch=$(uname -m)
-	for rhskipped in $kselftest_rhskip; do
-		if [ $rhskipped = $BASENAME_TEST -o $rhskipped = $BASENAME_TEST:$rharch ]; then
-			echo "ok $test_num $TEST_HDR_MSG # skipped in RHEL"
-			return 0
-		fi
-	done
 	if [ ! -x "$TEST" ]; then
 		echo -n "# Warning: file $TEST is "
 		if [ ! -e "$TEST" ]; then
@@ -88,10 +77,10 @@ run_one()
 		echo "ok $test_num $TEST_HDR_MSG") ||
 		(rc=$?;	\
 		if [ $rc -eq $skip_rc ]; then	\
-			echo "ok $test_num $TEST_HDR_MSG # SKIP"
+			echo "not ok $test_num $TEST_HDR_MSG # SKIP"
 		elif [ $rc -eq $timeout_rc ]; then \
 			echo "#"
-			echo "not ok $test_num $TEST_HDR_MSG # TIMEOUT $kselftest_timeout seconds"
+			echo "not ok $test_num $TEST_HDR_MSG # TIMEOUT"
 		else
 			echo "not ok $test_num $TEST_HDR_MSG # exit=$rc"
 		fi)

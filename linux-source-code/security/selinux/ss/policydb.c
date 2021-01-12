@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Implementation of the policy database.
  *
@@ -25,9 +26,6 @@
  * Copyright (C) 2007 Hewlett-Packard Development Company, L.P.
  * Copyright (C) 2004-2005 Trusted Computer Solutions, Inc.
  * Copyright (C) 2003 - 2004 Tresys Technology, LLC
- *	This program is free software; you can redistribute it and/or modify
- *	it under the terms of the GNU General Public License as published by
- *	the Free Software Foundation, version 2.
  */
 
 #include <linux/kernel.h>
@@ -159,11 +157,6 @@ static struct policydb_compat_info policydb_compat[] = {
 	},
 	{
 		.version	= POLICYDB_VERSION_INFINIBAND,
-		.sym_num	= SYM_NUM,
-		.ocon_num	= OCON_NUM,
-	},
-	{
-		.version	= POLICYDB_VERSION_GLBLUB,
 		.sym_num	= SYM_NUM,
 		.ocon_num	= OCON_NUM,
 	},
@@ -877,11 +870,6 @@ int policydb_load_isids(struct policydb *p, struct sidtab *s)
 		if (c->sid[0] == SECSID_NULL || c->sid[0] > SECINITSID_NUM) {
 			pr_err("SELinux:  Initial SID %s out of range.\n",
 				c->u.name);
-			sidtab_destroy(s);
-			goto out;
-		}
-		rc = context_add_hash(p, &c->context[0]);
-		if (rc) {
 			sidtab_destroy(s);
 			goto out;
 		}
@@ -2508,6 +2496,7 @@ int policydb_read(struct policydb *p, void *fp)
 	if (rc)
 		goto bad;
 
+	rc = -ENOMEM;
 	p->type_attr_map_array = kvcalloc(p->p_types.nprim,
 					  sizeof(*p->type_attr_map_array),
 					  GFP_KERNEL);
@@ -2661,7 +2650,7 @@ static int role_trans_write(struct policydb *p, void *fp)
 {
 	struct role_trans *r = p->role_tr;
 	struct role_trans *tr;
-	__le32 buf[3];
+	u32 buf[3];
 	size_t nel;
 	int rc;
 
@@ -2693,7 +2682,7 @@ static int role_trans_write(struct policydb *p, void *fp)
 static int role_allow_write(struct role_allow *r, void *fp)
 {
 	struct role_allow *ra;
-	__le32 buf[2];
+	u32 buf[2];
 	size_t nel;
 	int rc;
 

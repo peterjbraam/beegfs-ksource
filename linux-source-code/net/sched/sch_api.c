@@ -1,10 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * net/sched/sch_api.c	Packet scheduler API.
- *
- *		This program is free software; you can redistribute it and/or
- *		modify it under the terms of the GNU General Public License
- *		as published by the Free Software Foundation; either version
- *		2 of the License, or (at your option) any later version.
  *
  * Authors:	Alexey Kuznetsov, <kuznet@ms2.inr.ac.ru>
  *
@@ -622,28 +618,21 @@ void qdisc_watchdog_init(struct qdisc_watchdog *wd, struct Qdisc *qdisc)
 }
 EXPORT_SYMBOL(qdisc_watchdog_init);
 
-void qdisc_watchdog_schedule_range_ns(struct qdisc_watchdog *wd, u64 expires,
-				      u64 delta_ns)
+void qdisc_watchdog_schedule_ns(struct qdisc_watchdog *wd, u64 expires)
 {
 	if (test_bit(__QDISC_STATE_DEACTIVATED,
 		     &qdisc_root_sleeping(wd->qdisc)->state))
 		return;
 
-	if (hrtimer_is_queued(&wd->timer)) {
-		/* If timer is already set in [expires, expires + delta_ns],
-		 * do not reprogram it.
-		 */
-		if (wd->last_expires - expires <= delta_ns)
-			return;
-	}
+	if (wd->last_expires == expires)
+		return;
 
 	wd->last_expires = expires;
-	hrtimer_start_range_ns(&wd->timer,
-			       ns_to_ktime(expires),
-			       delta_ns,
-			       HRTIMER_MODE_ABS_PINNED);
+	hrtimer_start(&wd->timer,
+		      ns_to_ktime(expires),
+		      HRTIMER_MODE_ABS_PINNED);
 }
-EXPORT_SYMBOL(qdisc_watchdog_schedule_range_ns);
+EXPORT_SYMBOL(qdisc_watchdog_schedule_ns);
 
 void qdisc_watchdog_cancel(struct qdisc_watchdog *wd)
 {

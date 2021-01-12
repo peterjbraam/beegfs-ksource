@@ -153,7 +153,7 @@ void intel_connector_attach_encoder(struct intel_connector *connector,
 bool intel_connector_get_hw_state(struct intel_connector *connector)
 {
 	enum pipe pipe = 0;
-	struct intel_encoder *encoder = intel_attached_encoder(connector);
+	struct intel_encoder *encoder = connector->encoder;
 
 	return encoder->get_hw_state(encoder, &pipe);
 }
@@ -277,22 +277,7 @@ intel_attach_aspect_ratio_property(struct drm_connector *connector)
 void
 intel_attach_colorspace_property(struct drm_connector *connector)
 {
-	switch (connector->connector_type) {
-	case DRM_MODE_CONNECTOR_HDMIA:
-	case DRM_MODE_CONNECTOR_HDMIB:
-		if (drm_mode_create_hdmi_colorspace_property(connector))
-			return;
-		break;
-	case DRM_MODE_CONNECTOR_DisplayPort:
-	case DRM_MODE_CONNECTOR_eDP:
-		if (drm_mode_create_dp_colorspace_property(connector))
-			return;
-		break;
-	default:
-		DRM_DEBUG_KMS("Colorspace property not supported\n");
-		return;
-	}
-
-	drm_object_attach_property(&connector->base,
-				   connector->colorspace_property, 0);
+	if (!drm_mode_create_colorspace_property(connector))
+		drm_object_attach_property(&connector->base,
+					   connector->colorspace_property, 0);
 }

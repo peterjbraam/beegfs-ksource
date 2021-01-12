@@ -1,15 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Performance event support - powerpc architecture code
  *
  * Copyright 2008-2009 Paul Mackerras, IBM Corporation.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 #include <linux/kernel.h>
 #include <linux/sched.h>
+#include <linux/sched/clock.h>
 #include <linux/perf_event.h>
 #include <linux/percpu.h>
 #include <linux/hardirq.h>
@@ -529,7 +526,6 @@ static void power_pmu_bhrb_read(struct cpu_hw_events *cpuhw)
 		}
 	}
 	cpuhw->bhrb_stack.nr = u_index;
-	cpuhw->bhrb_stack.hw_idx = -1ULL;
 	return;
 }
 
@@ -877,6 +873,8 @@ static int power_check_constraints(struct cpu_hw_events *cpuhw,
 	int i, j;
 	unsigned long addf = ppmu->add_fields;
 	unsigned long tadd = ppmu->test_adder;
+	unsigned long grp_mask = ppmu->group_constraint_mask;
+	unsigned long grp_val = ppmu->group_constraint_val;
 
 	if (n_ev > ppmu->n_counter)
 		return -1;
@@ -897,15 +895,23 @@ static int power_check_constraints(struct cpu_hw_events *cpuhw,
 	for (i = 0; i < n_ev; ++i) {
 		nv = (value | cpuhw->avalues[i][0]) +
 			(value & cpuhw->avalues[i][0] & addf);
-		if ((((nv + tadd) ^ value) & mask) != 0 ||
-		    (((nv + tadd) ^ cpuhw->avalues[i][0]) &
-		     cpuhw->amasks[i][0]) != 0)
+
+		if (((((nv + tadd) ^ value) & mask) & (~grp_mask)) != 0)
 			break;
+
+		if (((((nv + tadd) ^ cpuhw->avalues[i][0]) & cpuhw->amasks[i][0])
+			& (~grp_mask)) != 0)
+			break;
+
 		value = nv;
 		mask |= cpuhw->amasks[i][0];
 	}
-	if (i == n_ev)
-		return 0;	/* all OK */
+	if (i == n_ev) {
+		if ((value & mask & grp_mask) != (mask & grp_val))
+			return -1;
+		else
+			return 0;	/* all OK */
+	}
 
 	/* doesn't work, gather alternatives... */
 	if (!ppmu->get_alternatives)
@@ -1516,9 +1522,16 @@ nocheck:
 	ret = 0;
  out:
 	if (has_branch_stack(event)) {
-		power_pmu_bhrb_enable(event);
-		cpuhw->bhrb_filter = ppmu->bhrb_filter_map(
-					event->attr.branch_sample_type);
+		u64 bhrb_filter = -1;
+
+		if (ppmu->bhrb_filter_map)
+			bhrb_filter = ppmu->bhrb_filter_map(
+				event->attr.branch_sample_type);
+
+		if (bhrb_filter != -1) {
+			cpuhw->bhrb_filter = bhrb_filter;
+			power_pmu_bhrb_enable(event);
+		}
 	}
 
 	perf_pmu_enable(event->pmu);
@@ -1945,13 +1958,17 @@ static int power_pmu_event_init(struct perf_event *event)
 	err = power_check_constraints(cpuhw, events, cflags, n + 1);
 
 	if (has_branch_stack(event)) {
-		cpuhw->bhrb_filter = ppmu->bhrb_filter_map(
+		u64 bhrb_filter = -1;
+
+		if (ppmu->bhrb_filter_map)
+			bhrb_filter = ppmu->bhrb_filter_map(
 					event->attr.branch_sample_type);
 
-		if (cpuhw->bhrb_filter == -1) {
+		if (bhrb_filter == -1) {
 			put_cpu_var(cpu_hw_events);
 			return -EOPNOTSUPP;
 		}
+		cpuhw->bhrb_filter = bhrb_filter;
 	}
 
 	put_cpu_var(cpu_hw_events);
@@ -2098,6 +2115,10 @@ static void record_and_restart(struct perf_event *event, unsigned long val,
 
 		if (perf_event_overflow(event, &data, regs))
 			power_pmu_stop(event, 0);
+	} else if (period) {
+		/* Account for interrupt in case of invalid SIAR */
+		if (perf_event_account_interrupt(event))
+			power_pmu_stop(event, 0);
 	}
 }
 
@@ -2161,7 +2182,7 @@ static bool pmc_overflow(unsigned long val)
 /*
  * Performance monitor interrupt stuff
  */
-static void perf_event_interrupt(struct pt_regs *regs)
+static void __perf_event_interrupt(struct pt_regs *regs)
 {
 	int i, j;
 	struct cpu_hw_events *cpuhw = this_cpu_ptr(&cpu_hw_events);
@@ -2243,6 +2264,14 @@ static void perf_event_interrupt(struct pt_regs *regs)
 		nmi_exit();
 	else
 		irq_exit();
+}
+
+static void perf_event_interrupt(struct pt_regs *regs)
+{
+	u64 start_clock = sched_clock();
+
+	__perf_event_interrupt(regs);
+	perf_sample_event_took(sched_clock() - start_clock);
 }
 
 static int power_pmu_prepare_cpu(unsigned int cpu)

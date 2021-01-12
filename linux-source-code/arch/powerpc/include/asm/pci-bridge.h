@@ -1,15 +1,13 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef _ASM_POWERPC_PCI_BRIDGE_H
 #define _ASM_POWERPC_PCI_BRIDGE_H
 #ifdef __KERNEL__
 /*
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 #include <linux/pci.h>
 #include <linux/list.h>
 #include <linux/ioport.h>
+#include <linux/numa.h>
 
 struct device_node;
 
@@ -19,6 +17,8 @@ struct device_node;
 struct pci_controller_ops {
 	void		(*dma_dev_setup)(struct pci_dev *pdev);
 	void		(*dma_bus_setup)(struct pci_bus *bus);
+	bool		(*iommu_bypass_supported)(struct pci_dev *pdev,
+				u64 mask);
 
 	int		(*probe_mode)(struct pci_bus *bus);
 
@@ -42,12 +42,6 @@ struct pci_controller_ops {
 					  int nvec, int type);
 	void		(*teardown_msi_irqs)(struct pci_dev *pdev);
 #endif
-
-	RH_KABI_DEPRECATE_FN(int, dma_set_mask, struct pci_dev *pdev,
-			     u64 dma_mask)
-	RH_KABI_REPLACE(u64 (*dma_get_required_mask)(struct pci_dev *pdev),
-			bool (*iommu_bypass_supported)(struct pci_dev *pdev,
-				u64 mask))
 
 	void		(*shutdown)(struct pci_controller *hose);
 };
@@ -132,7 +126,7 @@ struct pci_controller {
 #endif	/* CONFIG_PPC64 */
 
 	void *private_data;
-	RH_KABI_EXTEND(struct npu *npu)
+	struct npu *npu;
 };
 
 /* These are used for config access before all the PCI probing
@@ -269,7 +263,7 @@ extern int pcibios_map_io_space(struct pci_bus *bus);
 #ifdef CONFIG_NUMA
 #define PHB_SET_NODE(PHB, NODE)		((PHB)->node = (NODE))
 #else
-#define PHB_SET_NODE(PHB, NODE)		((PHB)->node = -1)
+#define PHB_SET_NODE(PHB, NODE)		((PHB)->node = NUMA_NO_NODE)
 #endif
 
 #endif	/* CONFIG_PPC64 */

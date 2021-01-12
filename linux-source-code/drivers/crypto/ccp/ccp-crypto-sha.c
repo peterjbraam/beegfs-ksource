@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * AMD Cryptographic Coprocessor (CCP) SHA crypto API support
  *
@@ -293,8 +293,10 @@ static int ccp_sha_setkey(struct crypto_ahash *tfm, const u8 *key,
 
 		ret = crypto_shash_digest(sdesc, key, key_len,
 					  ctx->u.sha.key);
-		if (ret)
+		if (ret) {
+			crypto_ahash_set_flags(tfm, CRYPTO_TFM_RES_BAD_KEY_LEN);
 			return -EINVAL;
+		}
 
 		key_len = digest_size;
 	} else {
@@ -490,13 +492,12 @@ static int ccp_register_sha_alg(struct list_head *head,
 	snprintf(base->cra_name, CRYPTO_MAX_ALG_NAME, "%s", def->name);
 	snprintf(base->cra_driver_name, CRYPTO_MAX_ALG_NAME, "%s",
 		 def->drv_name);
-	base->cra_flags = CRYPTO_ALG_TYPE_AHASH | CRYPTO_ALG_ASYNC |
+	base->cra_flags = CRYPTO_ALG_ASYNC |
 			  CRYPTO_ALG_KERN_DRIVER_ONLY |
 			  CRYPTO_ALG_NEED_FALLBACK;
 	base->cra_blocksize = def->block_size;
 	base->cra_ctxsize = sizeof(struct ccp_ctx);
 	base->cra_priority = CCP_CRA_PRIORITY;
-	base->cra_type = &crypto_ahash_type;
 	base->cra_init = ccp_sha_cra_init;
 	base->cra_exit = ccp_sha_cra_exit;
 	base->cra_module = THIS_MODULE;

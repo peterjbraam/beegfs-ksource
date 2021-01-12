@@ -1,19 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * arch/arm64/include/asm/arch_gicv3.h
  *
  * Copyright (C) 2015 ARM Ltd.
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 #ifndef __ASM_ARCH_GICV3_H
 #define __ASM_ARCH_GICV3_H
@@ -43,7 +32,7 @@ static inline void gic_write_eoir(u32 irq)
 	isb();
 }
 
-static __always_inline void gic_write_dir(u32 irq)
+static inline void gic_write_dir(u32 irq)
 {
 	write_sysreg_s(irq, SYS_ICC_DIR_EL1);
 	isb();
@@ -151,11 +140,10 @@ static inline u32 gic_read_rpr(void)
 #define gicr_write_pendbaser(v, c)	writeq_relaxed(v, c)
 #define gicr_read_pendbaser(c)		readq_relaxed(c)
 
-#define gicr_write_vpropbaser(v, c)	writeq_relaxed(v, c)
-#define gicr_read_vpropbaser(c)		readq_relaxed(c)
+#define gits_write_vpropbaser(v, c)	writeq_relaxed(v, c)
 
-#define gicr_write_vpendbaser(v, c)	writeq_relaxed(v, c)
-#define gicr_read_vpendbaser(c)		readq_relaxed(c)
+#define gits_write_vpendbaser(v, c)	writeq_relaxed(v, c)
+#define gits_read_vpendbaser(c)		readq_relaxed(c)
 
 static inline bool gic_prio_masking_enabled(void)
 {

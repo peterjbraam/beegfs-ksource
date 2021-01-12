@@ -1,21 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  *  Bluetooth supports for Qualcomm Atheros ROME chips
  *
  *  Copyright (c) 2015 The Linux Foundation. All rights reserved.
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License version 2
- *  as published by the Free Software Foundation
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
- *
  */
 
 #define EDL_PATCH_CMD_OPCODE		(0xFC00)
@@ -69,36 +56,36 @@ enum qca_baudrate {
 	QCA_BAUDRATE_RESERVED
 };
 
-enum qca_tlv_dnld_mode {
-	QCA_SKIP_EVT_NONE,
-	QCA_SKIP_EVT_VSE,
-	QCA_SKIP_EVT_CC,
-	QCA_SKIP_EVT_VSE_CC
+enum rome_tlv_dnld_mode {
+	ROME_SKIP_EVT_NONE,
+	ROME_SKIP_EVT_VSE,
+	ROME_SKIP_EVT_CC,
+	ROME_SKIP_EVT_VSE_CC
 };
 
-enum qca_tlv_type {
+enum rome_tlv_type {
 	TLV_TYPE_PATCH = 1,
 	TLV_TYPE_NVM
 };
 
-struct qca_fw_config {
+struct rome_config {
 	u8 type;
 	char fwname[64];
 	uint8_t user_baud_rate;
-	enum qca_tlv_dnld_mode dnld_mode;
-	enum qca_tlv_dnld_mode dnld_type;
+	enum rome_tlv_dnld_mode dnld_mode;
+	enum rome_tlv_dnld_mode dnld_type;
 };
 
 struct edl_event_hdr {
 	__u8 cresp;
 	__u8 rtype;
-	__u8 data[];
+	__u8 data[0];
 } __packed;
 
-struct qca_btsoc_version {
+struct rome_version {
 	__le32 product_id;
 	__le16 patch_ver;
-	__le16 rom_ver;
+	__le16 rome_ver;
 	__le32 soc_id;
 } __packed;
 
@@ -125,12 +112,12 @@ struct tlv_type_nvm {
 	__le16 tag_len;
 	__le32 reserve1;
 	__le32 reserve2;
-	__u8   data[];
+	__u8   data[0];
 } __packed;
 
 struct tlv_type_hdr {
 	__le32 type_len;
-	__u8   data[];
+	__u8   data[0];
 } __packed;
 
 enum qca_btsoc_type {

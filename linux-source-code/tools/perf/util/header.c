@@ -850,7 +850,7 @@ int __weak strcmp_cpuid_str(const char *mapcpuid, const char *cpuid)
  */
 int __weak get_cpuid(char *buffer __maybe_unused, size_t sz __maybe_unused)
 {
-	return ENOSYS; /* Not implemented */
+	return -1;
 }
 
 static int write_cpuid(struct feat_fd *ff,
@@ -1590,40 +1590,6 @@ static void free_event_desc(struct evsel *events)
 	free(events);
 }
 
-static bool perf_attr_check(struct perf_event_attr *attr)
-{
-	if (attr->__reserved_1 || attr->__reserved_2 || attr->__reserved_3) {
-		pr_warning("Reserved bits are set unexpectedly. "
-			   "Please update perf tool.\n");
-		return false;
-	}
-
-	if (attr->sample_type & ~(PERF_SAMPLE_MAX-1)) {
-		pr_warning("Unknown sample type (0x%llx) is detected. "
-			   "Please update perf tool.\n",
-			   attr->sample_type);
-		return false;
-	}
-
-	if (attr->read_format & ~(PERF_FORMAT_MAX-1)) {
-		pr_warning("Unknown read format (0x%llx) is detected. "
-			   "Please update perf tool.\n",
-			   attr->read_format);
-		return false;
-	}
-
-	if ((attr->sample_type & PERF_SAMPLE_BRANCH_STACK) &&
-	    (attr->branch_sample_type & ~(PERF_SAMPLE_BRANCH_MAX-1))) {
-		pr_warning("Unknown branch sample type (0x%llx) is detected. "
-			   "Please update perf tool.\n",
-			   attr->branch_sample_type);
-
-		return false;
-	}
-
-	return true;
-}
-
 static struct evsel *read_event_desc(struct feat_fd *ff)
 {
 	struct evsel *evsel, *events = NULL;
@@ -1667,9 +1633,6 @@ static struct evsel *read_event_desc(struct feat_fd *ff)
 			perf_event__attr_swap(buf);
 
 		memcpy(&evsel->core.attr, buf, msz);
-
-		if (!perf_attr_check(&evsel->core.attr))
-			goto error;
 
 		if (do_read_u32(ff, &nr))
 			goto error;
@@ -2959,7 +2922,7 @@ int perf_header__fprintf_info(struct perf_session *session, FILE *fp, bool full)
 	if (ret == -1)
 		return -1;
 
-	stctime = st.st_mtime;
+	stctime = st.st_ctime;
 	fprintf(fp, "# captured on    : %s", ctime(&stctime));
 
 	fprintf(fp, "# header version : %u\n", header->version);

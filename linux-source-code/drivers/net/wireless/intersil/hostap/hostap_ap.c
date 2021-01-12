@@ -66,7 +66,7 @@ static void prism2_send_mgmt(struct net_device *dev,
 #endif /* PRISM2_NO_KERNEL_IEEE80211_MGMT */
 
 
-#ifndef PRISM2_NO_PROCFS_DEBUG
+#if !defined(PRISM2_NO_PROCFS_DEBUG) && defined(CONFIG_PROC_FS)
 static int ap_debug_proc_show(struct seq_file *m, void *v)
 {
 	struct ap_data *ap = PDE_DATA(file_inode(m->file));
@@ -81,8 +81,7 @@ static int ap_debug_proc_show(struct seq_file *m, void *v)
 	seq_printf(m, "tx_drop_nonassoc=%u\n", ap->tx_drop_nonassoc);
 	return 0;
 }
-#endif /* PRISM2_NO_PROCFS_DEBUG */
-
+#endif
 
 static void ap_sta_hash_add(struct ap_data *ap, struct sta_info *sta)
 {
@@ -990,7 +989,7 @@ static void prism2_send_mgmt(struct net_device *dev,
 }
 #endif /* PRISM2_NO_KERNEL_IEEE80211_MGMT */
 
-
+#ifdef CONFIG_PROC_FS
 static int prism2_sta_proc_show(struct seq_file *m, void *v)
 {
 	struct sta_info *sta = m->private;
@@ -1059,6 +1058,7 @@ static int prism2_sta_proc_show(struct seq_file *m, void *v)
 
 	return 0;
 }
+#endif
 
 static void handle_add_proc_queue(struct work_struct *work)
 {
@@ -2508,7 +2508,7 @@ static int prism2_hostapd_add_sta(struct ap_data *ap,
 		sta->supported_rates[0] = 2;
 	if (sta->tx_supp_rates & WLAN_RATE_2M)
 		sta->supported_rates[1] = 4;
- 	if (sta->tx_supp_rates & WLAN_RATE_5M5)
+	if (sta->tx_supp_rates & WLAN_RATE_5M5)
 		sta->supported_rates[2] = 11;
 	if (sta->tx_supp_rates & WLAN_RATE_11M)
 		sta->supported_rates[3] = 22;

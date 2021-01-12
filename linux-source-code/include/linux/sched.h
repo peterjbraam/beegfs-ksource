@@ -31,13 +31,13 @@
 #include <linux/task_io_accounting.h>
 #include <linux/posix-timers.h>
 #include <linux/rseq.h>
-#include <linux/rh_kabi.h>
 
 /* task_struct member predeclarations (sorted alphabetically): */
 struct audit_context;
 struct backing_dev_info;
 struct bio_list;
 struct blk_plug;
+struct capture_control;
 struct cfs_rq;
 struct fs_struct;
 struct futex_pi_state;
@@ -51,6 +51,7 @@ struct pipe_inode_info;
 struct rcu_node;
 struct reclaim_state;
 struct robust_list_head;
+struct root_domain;
 struct rq;
 struct sched_attr;
 struct sched_param;
@@ -111,6 +112,10 @@ struct task_group;
 #define task_is_stopped(task)		((task->state & __TASK_STOPPED) != 0)
 
 #define task_is_stopped_or_traced(task)	((task->state & (__TASK_STOPPED | __TASK_TRACED)) != 0)
+
+#define task_contributes_to_load(task)	((task->state & TASK_UNINTERRUPTIBLE) != 0 && \
+					 (task->flags & PF_FROZEN) == 0 && \
+					 (task->state & TASK_NOLOAD) == 0)
 
 #ifdef CONFIG_DEBUG_ATOMIC_SLEEP
 
@@ -176,7 +181,7 @@ struct task_group;
  * TASK_RUNNING store which can collide with __set_current_state(TASK_RUNNING).
  *
  * However, with slightly different timing the wakeup TASK_RUNNING store can
- * also collide with the TASK_UNINTERRUPTIBLE store. Loosing that store is not
+ * also collide with the TASK_UNINTERRUPTIBLE store. Losing that store is not
  * a problem either because that will result in one extra go around the loop
  * and our @cond test will save the day.
  *
@@ -218,6 +223,7 @@ extern long schedule_timeout_uninterruptible(long timeout);
 extern long schedule_timeout_idle(long timeout);
 asmlinkage void schedule(void);
 extern void schedule_preempt_disabled(void);
+asmlinkage void preempt_schedule_irq(void);
 
 extern int __must_check io_schedule_prepare(void);
 extern void io_schedule_finish(int token);
@@ -254,10 +260,21 @@ struct vtime {
 	seqcount_t		seqcount;
 	unsigned long long	starttime;
 	enum vtime_state	state;
-	/* cpu is defined in struct task_struct->task_struct_rh->vtime_cpu */
 	u64			utime;
 	u64			stime;
 	u64			gtime;
+};
+
+/*
+ * Utilization clamp constraints.
+ * @UCLAMP_MIN:	Minimum utilization
+ * @UCLAMP_MAX:	Maximum utilization
+ * @UCLAMP_CNT:	Utilization clamp constraints count
+ */
+enum uclamp_id {
+	UCLAMP_MIN = 0,
+	UCLAMP_MAX,
+	UCLAMP_CNT
 };
 
 #ifdef CONFIG_SMP
@@ -295,6 +312,10 @@ struct sched_info {
  */
 # define SCHED_FIXEDPOINT_SHIFT		10
 # define SCHED_FIXEDPOINT_SCALE		(1L << SCHED_FIXEDPOINT_SHIFT)
+
+/* Increase resolution of cpu_capacity calculations */
+# define SCHED_CAPACITY_SHIFT		SCHED_FIXEDPOINT_SHIFT
+# define SCHED_CAPACITY_SCALE		(1L << SCHED_CAPACITY_SHIFT)
 
 struct load_weight {
 	unsigned long			weight;
@@ -455,11 +476,6 @@ struct sched_entity {
 	 */
 	struct sched_avg		avg;
 #endif
-
-	RH_KABI_RESERVE(1)
-	RH_KABI_RESERVE(2)
-	RH_KABI_RESERVE(3)
-	RH_KABI_RESERVE(4)
 };
 
 struct sched_rt_entity {
@@ -496,7 +512,7 @@ struct sched_dl_entity {
 
 	/*
 	 * Actual scheduling parameters. Initialized with the values above,
-	 * they are continously updated during task execution. Note that
+	 * they are continuously updated during task execution. Note that
 	 * the remaining runtime could be < 0 in case we are in overrun.
 	 */
 	s64				runtime;	/* Remaining runtime for this instance	*/
@@ -549,6 +565,41 @@ struct sched_dl_entity {
 	struct hrtimer inactive_timer;
 };
 
+#ifdef CONFIG_UCLAMP_TASK
+/* Number of utilization clamp buckets (shorter alias) */
+#define UCLAMP_BUCKETS CONFIG_UCLAMP_BUCKETS_COUNT
+
+/*
+ * Utilization clamp for a scheduling entity
+ * @value:		clamp value "assigned" to a se
+ * @bucket_id:		bucket index corresponding to the "assigned" value
+ * @active:		the se is currently refcounted in a rq's bucket
+ * @user_defined:	the requested clamp value comes from user-space
+ *
+ * The bucket_id is the index of the clamp bucket matching the clamp value
+ * which is pre-computed and stored to avoid expensive integer divisions from
+ * the fast path.
+ *
+ * The active bit is set whenever a task has got an "effective" value assigned,
+ * which can be different from the clamp value "requested" from user-space.
+ * This allows to know a task is refcounted in the rq's bucket corresponding
+ * to the "effective" bucket_id.
+ *
+ * The user_defined bit is set whenever a task has got a task-specific clamp
+ * value requested from userspace, i.e. the system defaults apply to this task
+ * just as a restriction. This allows to relax default clamps when a less
+ * restrictive task-specific value has been requested, thus allowing to
+ * implement a "nice" semantic. For example, a task running with a 20%
+ * default boost can still drop its own boosting to 0%.
+ */
+struct uclamp_se {
+	unsigned int value		: bits_per(SCHED_CAPACITY_SCALE);
+	unsigned int bucket_id		: bits_per(UCLAMP_BUCKETS);
+	unsigned int active		: 1;
+	unsigned int user_defined	: 1;
+};
+#endif /* CONFIG_UCLAMP_TASK */
+
 union rcu_special {
 	struct {
 		u8			blocked;
@@ -570,15 +621,6 @@ struct wake_q_node {
 	struct wake_q_node *next;
 };
 
-struct task_struct_rh {
-	/* Empty if CONFIG_POSIX_CPUTIMERS=n */
-	struct posix_cputimers posix_cputimers;
-	/* struct vtime->cpu */
-	unsigned int vtime_cpu;
-	u64				parent_exec_id;
-	u64				self_exec_id;
-};
-
 struct task_struct {
 #ifdef CONFIG_THREAD_INFO_IN_TASK
 	/*
@@ -597,7 +639,7 @@ struct task_struct {
 	randomized_struct_fields_start
 
 	void				*stack;
-	RH_KABI_REPLACE(atomic_t usage, refcount_t usage)
+	refcount_t			usage;
 	/* Per task flags (PF_*), defined further below: */
 	unsigned int			flags;
 	unsigned int			ptrace;
@@ -638,6 +680,13 @@ struct task_struct {
 #endif
 	struct sched_dl_entity		dl;
 
+#ifdef CONFIG_UCLAMP_TASK
+	/* Clamp values requested for a scheduling entity */
+	struct uclamp_se		uclamp_req[UCLAMP_CNT];
+	/* Effective clamp values used for a scheduling entity */
+	struct uclamp_se		uclamp[UCLAMP_CNT];
+#endif
+
 #ifdef CONFIG_PREEMPT_NOTIFIERS
 	/* List of struct preempt_notifier: */
 	struct hlist_head		preempt_notifiers;
@@ -649,7 +698,8 @@ struct task_struct {
 
 	unsigned int			policy;
 	int				nr_cpus_allowed;
-	RH_KABI_RENAME(cpumask_t cpus_allowed, cpumask_t cpus_mask);
+	const cpumask_t			*cpus_ptr;
+	cpumask_t			cpus_mask;
 
 #ifdef CONFIG_PREEMPT_RCU
 	int				rcu_read_lock_nesting;
@@ -700,7 +750,7 @@ struct task_struct {
 	unsigned			sched_migrated:1;
 	unsigned			sched_remote_wakeup:1;
 #ifdef CONFIG_PSI
-	RH_KABI_FILL_HOLE(unsigned	sched_psi_wake_requeue:1)
+	unsigned			sched_psi_wake_requeue:1;
 #endif
 
 	/* Force alignment to the next boundary: */
@@ -715,10 +765,7 @@ struct task_struct {
 	unsigned			restore_sigmask:1;
 #endif
 #ifdef CONFIG_MEMCG
-	unsigned	 RH_KABI_RENAME(memcg_may_oom, in_user_fault):1;
-#ifdef CONFIG_MEMCG_KMEM
-	RH_KABI_DEPRECATE(unsigned,	memcg_kmem_skip_account:1)
-#endif
+	unsigned			in_user_fault:1;
 #endif
 #ifdef CONFIG_COMPAT_BRK
 	unsigned			brk_randomized:1;
@@ -726,14 +773,12 @@ struct task_struct {
 #ifdef CONFIG_CGROUPS
 	/* disallow userland-initiated cgroup migration */
 	unsigned			no_cgroup_migration:1;
+	/* task is frozen/stopped (used by the cgroup freezer) */
+	unsigned			frozen:1;
 #endif
 #ifdef CONFIG_BLK_CGROUP
 	/* to be used once the psi infrastructure lands upstream. */
 	unsigned			use_memdelay:1;
-#endif
-#ifdef CONFIG_CGROUPS
-	/* task is frozen/stopped (used by the cgroup freezer) */
-	RH_KABI_FILL_HOLE(unsigned	frozen:1)
 #endif
 
 	unsigned long			atomic_flags; /* Flags requiring atomic access. */
@@ -743,7 +788,7 @@ struct task_struct {
 	pid_t				pid;
 	pid_t				tgid;
 
-#if defined(CONFIG_STACKPROTECTOR) && !defined(CONFIG_PPC64)
+#ifdef CONFIG_STACKPROTECTOR
 	/* Canary value for the -fstack-protector GCC feature: */
 	unsigned long			stack_canary;
 #endif
@@ -776,32 +821,8 @@ struct task_struct {
 	struct list_head		ptrace_entry;
 
 	/* PID/PID hash table linkage. */
-#ifdef __GENKSYMS__
-	struct pid_link			pids[PIDTYPE_MAX];
-#else
-	/*
-	 * RHEL8: For backward compatibility, we need to maintain the pid
-	 * pointers in pid_link. The new thread_pid field is equivalent to
-	 * pids[PIDTYPE_PID].pid and so is put at the same offset. The
-	 * hlist_node in pid_link can be reused as they are not used by
-	 * others.
-	 */
-	/* Used by memcontrol for targeted memcg charge: */
-	struct mem_cgroup		*active_memcg;
-#if defined(CONFIG_STACKPROTECTOR) && defined(CONFIG_PPC64)
-	/* powerpc canary value for the -fstack-protector GCC feature: */
-	RH_KABI_USE(2, unsigned long stack_canary)
-#else
-	long				rh_reserved2;
-#endif
 	struct pid			*thread_pid;
-	RH_KABI_USE(3, const cpumask_t  *cpus_ptr)
-	struct task_struct_rh		*task_struct_rh;
-	struct pid			*rh_pgid;
-	long				rh_reserved5;
-	long				rh_reserved6;
-	struct pid			*rh_sid;
-#endif
+	struct hlist_node		pid_links[PIDTYPE_MAX];
 	struct list_head		thread_group;
 	struct list_head		thread_node;
 
@@ -842,12 +863,8 @@ struct task_struct {
 	unsigned long			min_flt;
 	unsigned long			maj_flt;
 
-	RH_KABI_DEPRECATE(struct task_cputime, cputime_expires)
-#ifdef CONFIG_FUTEX
-	RH_KABI_REPLACE_SPLIT(struct list_head	cpu_timers[3],
-			      struct mutex	futex_exit_mutex,
-			      unsigned int	futex_state)
-#endif
+	/* Empty if CONFIG_POSIX_CPUTIMERS=n */
+	struct posix_cputimers		posix_cputimers;
 
 	/* Process credentials: */
 
@@ -859,6 +876,11 @@ struct task_struct {
 
 	/* Effective (overridable) subjective task credentials (COW): */
 	const struct cred __rcu		*cred;
+
+#ifdef CONFIG_KEYS
+	/* Cached requested key. */
+	struct key			*cached_requested_key;
+#endif
 
 	/*
 	 * executable name, excluding path.
@@ -877,6 +899,7 @@ struct task_struct {
 #endif
 #ifdef CONFIG_DETECT_HUNG_TASK
 	unsigned long			last_switch_count;
+	unsigned long			last_switch_time;
 #endif
 	/* Filesystem information: */
 	struct fs_struct		*fs;
@@ -911,8 +934,8 @@ struct task_struct {
 	struct seccomp			seccomp;
 
 	/* Thread group tracking: */
-	RH_KABI_DEPRECATE(u32, parent_exec_id)
-	RH_KABI_DEPRECATE(u32, self_exec_id)
+	u64				parent_exec_id;
+	u64				self_exec_id;
 
 	/* Protection against (de-)allocation: mm, files, fs, tty, keyrings, mems_allowed, mempolicy: */
 	spinlock_t			alloc_lock;
@@ -934,6 +957,10 @@ struct task_struct {
 #ifdef CONFIG_DEBUG_MUTEXES
 	/* Mutex deadlock detection: */
 	struct mutex_waiter		*blocked_on;
+#endif
+
+#ifdef CONFIG_DEBUG_ATOMIC_SLEEP
+	int				non_block_count;
 #endif
 
 #ifdef CONFIG_TRACE_IRQFLAGS
@@ -982,12 +1009,18 @@ struct task_struct {
 
 	struct io_context		*io_context;
 
+#ifdef CONFIG_COMPACTION
+	struct capture_control		*capture_control;
+#endif
 	/* Ptrace state: */
 	unsigned long			ptrace_message;
-	RH_KABI_REPLACE(siginfo_t	*last_siginfo,
-		 kernel_siginfo_t	*last_siginfo)
+	kernel_siginfo_t		*last_siginfo;
 
 	struct task_io_accounting	ioac;
+#ifdef CONFIG_PSI
+	/* Pressure stall state */
+	unsigned int			psi_flags;
+#endif
 #ifdef CONFIG_TASK_XACCT
 	/* Accumulated RSS usage: */
 	u64				acct_rss_mem1;
@@ -1003,10 +1036,6 @@ struct task_struct {
 	seqcount_t			mems_allowed_seq;
 	int				cpuset_mem_spread_rotor;
 	int				cpuset_slab_spread_rotor;
-#endif
-#ifdef CONFIG_PSI
-	/* Pressure stall state */
-	RH_KABI_FILL_HOLE(unsigned int	psi_flags)
 #endif
 #ifdef CONFIG_CGROUPS
 	/* Control Group info protected by css_set_lock: */
@@ -1025,6 +1054,8 @@ struct task_struct {
 #endif
 	struct list_head		pi_state_list;
 	struct futex_pi_state		*pi_state_cache;
+	struct mutex			futex_exit_mutex;
+	unsigned int			futex_state;
 #endif
 #ifdef CONFIG_PERF_EVENTS
 	struct perf_event_context	*perf_event_ctxp[perf_nr_task_contexts];
@@ -1052,7 +1083,6 @@ struct task_struct {
 	u64				last_sum_exec_runtime;
 	struct callback_head		numa_work;
 
-	struct list_head		numa_entry;
 	/*
 	 * This pointer is only modified for current in syscall and
 	 * pagefault context (and for tasks being destroyed), so it can be read
@@ -1093,7 +1123,6 @@ struct task_struct {
 
 #ifdef CONFIG_RSEQ
 	struct rseq __user *rseq;
-	u32 rseq_len;
 	u32 rseq_sig;
 	/*
 	 * RmW on rseq_event_mask must be performed atomically
@@ -1104,10 +1133,10 @@ struct task_struct {
 
 	struct tlbflush_unmap_batch	tlb_ubc;
 
-	RH_KABI_REPLACE(struct rcu_head rcu, union {
+	union {
 		refcount_t		rcu_users;
 		struct rcu_head		rcu;
-	})
+	};
 
 	/* Cache last used pipe for splice(): */
 	struct pipe_inode_info		*splice_pipe;
@@ -1149,6 +1178,7 @@ struct task_struct {
 #ifdef CONFIG_FUNCTION_GRAPH_TRACER
 	/* Index of current stored address in ret_stack: */
 	int				curr_ret_stack;
+	int				curr_ret_depth;
 
 	/* Stack of return addresses for return function tracing: */
 	struct ftrace_ret_stack		*ret_stack;
@@ -1195,6 +1225,9 @@ struct task_struct {
 
 	/* Number of pages to reclaim on returning to userland: */
 	unsigned int			memcg_nr_pages_over_high;
+
+	/* Used by memcontrol for targeted memcg charge: */
+	struct mem_cgroup		*active_memcg;
 #endif
 
 #ifdef CONFIG_BLK_CGROUP
@@ -1220,7 +1253,7 @@ struct task_struct {
 #endif
 #ifdef CONFIG_THREAD_INFO_IN_TASK
 	/* A live task holds one reference: */
-	atomic_t			stack_refcount;
+	refcount_t			stack_refcount;
 #endif
 #ifdef CONFIG_LIVEPATCH
 	int patch_state;
@@ -1230,19 +1263,16 @@ struct task_struct {
 	void				*security;
 #endif
 
+#ifdef CONFIG_GCC_PLUGIN_STACKLEAK
+	unsigned long			lowest_stack;
+	unsigned long			prev_lowest_stack;
+#endif
+
 	/*
 	 * New fields for task_struct should be added above here, so that
 	 * they are included in the randomized portion of task_struct.
 	 */
 	randomized_struct_fields_end
-
-	/*
-	 * RHEL8: With PIDTYPE_MAX equals 4, the following fields will
-	 * occupy 8 long's. There are some rh_reserved* fields up near
-	 * the pid_link structure that can be reused for other purpose.
-	 */
-	/* PID/PID hash table linkage. */
-	RH_KABI_USE(1, 2, 3, 4, 5, 6, 7, 8, struct hlist_node pid_links[PIDTYPE_MAX])
 
 	/* CPU-specific state of this task: */
 	struct thread_struct		thread;
@@ -1252,12 +1282,6 @@ struct task_struct {
 	 * structure.  It *MUST* be at the end of 'task_struct'.
 	 *
 	 * Do not put anything below here!
-	 */
-
-	/*
-	 * RHEL: There is a task_struct_rh that can be safely used to add
-	 * elements to.  task_struct, and task_struct_rh are only allocated
-	 * within the kernel.
 	 */
 };
 
@@ -1445,8 +1469,6 @@ extern struct pid *cad_pid;
 #define PF_NO_SETAFFINITY	0x04000000	/* Userland is not allowed to meddle with cpus_mask */
 #define PF_MCE_EARLY		0x08000000      /* Early kill for mce process policy */
 #define PF_MEMALLOC_NOCMA	0x10000000	/* All allocation request will have _GFP_MOVABLE cleared */
-#define PF_IO_WORKER		0x20000000	/* Task is an IO worker */
-#define PF_MUTEX_TESTER		0x20000000	/* Thread belongs to the rt mutex tester */
 #define PF_FREEZER_SKIP		0x40000000	/* Freezer should not count it as freezable */
 #define PF_SUSPEND_TASK		0x80000000      /* This thread called freeze_processes() and should not be frozen */
 
@@ -1561,10 +1583,6 @@ static inline int set_cpus_allowed_ptr(struct task_struct *p, const struct cpuma
 		return -EINVAL;
 	return 0;
 }
-#endif
-
-#ifndef cpu_relax_yield
-#define cpu_relax_yield() cpu_relax()
 #endif
 
 extern int yield_to(struct task_struct *p, bool preempt);
@@ -1897,18 +1915,16 @@ static inline void rseq_migrate(struct task_struct *t)
 
 /*
  * If parent process has a registered restartable sequences area, the
- * child inherits. Only applies when forking a process, not a thread.
+ * child inherits. Unregister rseq for a clone with CLONE_VM set.
  */
 static inline void rseq_fork(struct task_struct *t, unsigned long clone_flags)
 {
-	if (clone_flags & CLONE_THREAD) {
+	if (clone_flags & CLONE_VM) {
 		t->rseq = NULL;
-		t->rseq_len = 0;
 		t->rseq_sig = 0;
 		t->rseq_event_mask = 0;
 	} else {
 		t->rseq = current->rseq;
-		t->rseq_len = current->rseq_len;
 		t->rseq_sig = current->rseq_sig;
 		t->rseq_event_mask = current->rseq_event_mask;
 	}
@@ -1917,7 +1933,6 @@ static inline void rseq_fork(struct task_struct *t, unsigned long clone_flags)
 static inline void rseq_execve(struct task_struct *t)
 {
 	t->rseq = NULL;
-	t->rseq_len = 0;
 	t->rseq_sig = 0;
 	t->rseq_event_mask = 0;
 }
@@ -1969,5 +1984,17 @@ static inline void rseq_syscall(struct pt_regs *regs)
 }
 
 #endif
+
+const struct sched_avg *sched_trace_cfs_rq_avg(struct cfs_rq *cfs_rq);
+char *sched_trace_cfs_rq_path(struct cfs_rq *cfs_rq, char *str, int len);
+int sched_trace_cfs_rq_cpu(struct cfs_rq *cfs_rq);
+
+const struct sched_avg *sched_trace_rq_avg_rt(struct rq *rq);
+const struct sched_avg *sched_trace_rq_avg_dl(struct rq *rq);
+const struct sched_avg *sched_trace_rq_avg_irq(struct rq *rq);
+
+int sched_trace_rq_cpu(struct rq *rq);
+
+const struct cpumask *sched_trace_rd_span(struct root_domain *rd);
 
 #endif

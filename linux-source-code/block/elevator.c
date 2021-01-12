@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  Block device elevator/IO-scheduler.
  *
@@ -157,21 +158,6 @@ static struct elevator_type *elevator_get(struct request_queue *q,
 	spin_unlock(&elv_list_lock);
 	return e;
 }
-
-static char chosen_elevator[ELV_NAME_MAX];
-
-static int __init elevator_setup(char *str)
-{
-	pr_err("NOTE: The elevator= kernel parameter is deprecated.\n");
-	/*
-	 * Be backwards-compatible with previous kernels, so users
-	 * won't get the wrong elevator.
-	 */
-	strncpy(chosen_elevator, str, sizeof(chosen_elevator) - 1);
-	return 1;
-}
-
-__setup("elevator=", elevator_setup);
 
 static struct kobj_type elv_ktype;
 
@@ -543,8 +529,6 @@ void elv_unregister_queue(struct request_queue *q)
 
 int elv_register(struct elevator_type *e)
 {
-	char *def = "";
-
 	/* create icq_cache if requested */
 	if (e->icq_size) {
 		if (WARN_ON(e->icq_size < sizeof(struct io_cq)) ||
@@ -563,15 +547,14 @@ int elv_register(struct elevator_type *e)
 	spin_lock(&elv_list_lock);
 	if (elevator_find(e->elevator_name, 0)) {
 		spin_unlock(&elv_list_lock);
-		if (e->icq_cache)
-			kmem_cache_destroy(e->icq_cache);
+		kmem_cache_destroy(e->icq_cache);
 		return -EBUSY;
 	}
 	list_add_tail(&e->list, &elv_list);
 	spin_unlock(&elv_list_lock);
 
-	printk(KERN_INFO "io scheduler %s registered%s\n", e->elevator_name,
-								def);
+	printk(KERN_INFO "io scheduler %s registered\n", e->elevator_name);
+
 	return 0;
 }
 EXPORT_SYMBOL_GPL(elv_register);

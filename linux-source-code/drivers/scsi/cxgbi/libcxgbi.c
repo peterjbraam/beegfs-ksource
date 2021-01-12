@@ -121,7 +121,8 @@ static inline void cxgbi_device_destroy(struct cxgbi_device *cdev)
 		"cdev 0x%p, p# %u.\n", cdev, cdev->nports);
 	cxgbi_hbas_remove(cdev);
 	cxgbi_device_portmap_cleanup(cdev);
-	cxgbi_ppm_release(cdev->cdev2ppm(cdev));
+	if (cdev->cdev2ppm)
+		cxgbi_ppm_release(cdev->cdev2ppm(cdev));
 	if (cdev->pmap.max_connect)
 		cxgbi_free_big_mem(cdev->pmap.port_csk);
 	kfree(cdev);
@@ -639,6 +640,10 @@ cxgbi_check_route(struct sockaddr *dst_addr, int ifindex)
 
 	if (ndev->flags & IFF_LOOPBACK) {
 		ndev = ip_dev_find(&init_net, daddr->sin_addr.s_addr);
+		if (!ndev) {
+			err = -ENETUNREACH;
+			goto rel_neigh;
+		}
 		mtu = ndev->mtu;
 		pr_info("rt dev %s, loopback -> %s, mtu %u.\n",
 			n->dev->name, ndev->name, mtu);
@@ -785,7 +790,8 @@ cxgbi_check_route6(struct sockaddr *dst_addr, int ifindex)
 	csk->mtu = mtu;
 	csk->dst = dst;
 
-	if (ipv6_addr_any(&rt->rt6i_prefsrc.addr)) {
+	rt6_get_prefsrc(rt, &pref_saddr);
+	if (ipv6_addr_any(&pref_saddr)) {
 		struct inet6_dev *idev = ip6_dst_idev((struct dst_entry *)rt);
 
 		err = ipv6_dev_get_saddr(&init_net, idev ? idev->dev : NULL,
@@ -795,8 +801,6 @@ cxgbi_check_route6(struct sockaddr *dst_addr, int ifindex)
 				&daddr6->sin6_addr);
 			goto rel_rt;
 		}
-	} else {
-		pref_saddr = rt->rt6i_prefsrc.addr;
 	}
 
 	csk->csk_family = AF_INET6;

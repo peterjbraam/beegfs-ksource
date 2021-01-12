@@ -30,6 +30,10 @@ module_param(use_dma_mrpc, bool, 0644);
 MODULE_PARM_DESC(use_dma_mrpc,
 		 "Enable the use of the DMA MRPC feature");
 
+static int nirqs = 32;
+module_param(nirqs, int, 0644);
+MODULE_PARM_DESC(nirqs, "number of interrupts to allocate (more may be useful for NTB applications)");
+
 static dev_t switchtec_devt;
 static DEFINE_IDA(switchtec_minor_ida);
 
@@ -171,7 +175,7 @@ static int mrpc_queue_cmd(struct switchtec_user *stuser)
 	kref_get(&stuser->kref);
 	stuser->read_len = sizeof(stuser->data);
 	stuser_set_state(stuser, MRPC_QUEUED);
-	init_completion(&stuser->comp);
+	reinit_completion(&stuser->comp);
 	list_add_tail(&stuser->list, &stdev->mrpc_queue);
 
 	mrpc_cmd_submit(stdev);
@@ -390,7 +394,7 @@ static int switchtec_dev_open(struct inode *inode, struct file *filp)
 		return PTR_ERR(stuser);
 
 	filp->private_data = stuser;
-	nonseekable_open(inode, filp);
+	stream_open(inode, filp);
 
 	dev_dbg(&stdev->dev, "%s: %p\n", __func__, stuser);
 
@@ -1021,7 +1025,7 @@ static const struct file_operations switchtec_fops = {
 	.read = switchtec_dev_read,
 	.poll = switchtec_dev_poll,
 	.unlocked_ioctl = switchtec_dev_ioctl,
-	.compat_ioctl = compat_ptr_ioctl,
+	.compat_ioctl = switchtec_dev_ioctl,
 };
 
 static void link_event_work(struct work_struct *work)
@@ -1263,12 +1267,16 @@ static int switchtec_init_isr(struct switchtec_dev *stdev)
 	int dma_mrpc_irq;
 	int rc;
 
-	nvecs = pci_alloc_irq_vectors(stdev->pdev, 1, 4,
-				      PCI_IRQ_MSIX | PCI_IRQ_MSI);
+	if (nirqs < 4)
+		nirqs = 4;
+
+	nvecs = pci_alloc_irq_vectors(stdev->pdev, 1, nirqs,
+				      PCI_IRQ_MSIX | PCI_IRQ_MSI |
+				      PCI_IRQ_VIRTUAL);
 	if (nvecs < 0)
 		return nvecs;
 
-	event_irq = ioread32(&stdev->mmio_part_cfg->vep_vector_number);
+	event_irq = ioread16(&stdev->mmio_part_cfg->vep_vector_number);
 	if (event_irq < 0 || event_irq >= nvecs)
 		return -EFAULT;
 
@@ -1341,7 +1349,7 @@ static int switchtec_init_pci(struct switchtec_dev *stdev,
 	if (rc)
 		return rc;
 
-	rc = dma_set_coherent_mask(&pdev->dev, DMA_BIT_MASK(64));
+	rc = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
 	if (rc)
 		return rc;
 
@@ -1389,10 +1397,10 @@ static int switchtec_init_pci(struct switchtec_dev *stdev,
 	if (ioread32(&stdev->mmio_mrpc->dma_ver) == 0)
 		return 0;
 
-	stdev->dma_mrpc = dma_zalloc_coherent(&stdev->pdev->dev,
-					      sizeof(*stdev->dma_mrpc),
-					      &stdev->dma_mrpc_dma_addr,
-					      GFP_KERNEL);
+	stdev->dma_mrpc = dma_alloc_coherent(&stdev->pdev->dev,
+					     sizeof(*stdev->dma_mrpc),
+					     &stdev->dma_mrpc_dma_addr,
+					     GFP_KERNEL);
 	if (stdev->dma_mrpc == NULL)
 		return -ENOMEM;
 

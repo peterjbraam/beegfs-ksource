@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * kernel/stacktrace.c
  *
@@ -31,12 +32,6 @@ void stack_trace_print(const unsigned long *entries, unsigned int nr_entries,
 		printk("%*c%pS\n", 1 + spaces, ' ', (void *)entries[i]);
 }
 EXPORT_SYMBOL_GPL(stack_trace_print);
-
-void print_stack_trace(struct stack_trace *trace, int spaces)
-{
-	stack_trace_print(trace->entries, trace->nr_entries, spaces);
-}
-EXPORT_SYMBOL_GPL(print_stack_trace);
 
 /**
  * stack_trace_snprint - Print the entries in the stack trace into a buffer
@@ -264,14 +259,6 @@ __weak void
 save_stack_trace_regs(struct pt_regs *regs, struct stack_trace *trace)
 {
 	WARN_ONCE(1, KERN_INFO "save_stack_trace_regs() not implemented yet.\n");
-}
-
-__weak int
-save_stack_trace_tsk_reliable(struct task_struct *tsk,
-			      struct stack_trace *trace)
-{
-	WARN_ONCE(1, KERN_INFO "save_stack_tsk_reliable() not implemented yet.\n");
-	return -ENOSYS;
 }
 
 /**

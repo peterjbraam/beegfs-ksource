@@ -1,20 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (C) 2001 Jens Axboe <axboe@suse.de>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- *
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public Licens
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-
- *
  */
 #include <linux/kernel.h>
 #include <linux/errno.h>
@@ -207,13 +193,12 @@ static void blk_set_cmd_filter_defaults(struct blk_cmd_filter *filter)
 	__set_bit(GPCMD_SET_READ_AHEAD, filter->write_ok);
 }
 
-int blk_verify_command(struct request_queue *q, unsigned char *cmd,
-		       fmode_t mode)
+int blk_verify_command(unsigned char *cmd, fmode_t mode)
 {
 	struct blk_cmd_filter *filter = &blk_default_cmd_filter;
 
 	/* root can do any command. */
-	if (capable(CAP_SYS_RAWIO) || blk_queue_unpriv_sgio(q))
+	if (capable(CAP_SYS_RAWIO))
 		return 0;
 
 	/* Anybody who can open the device can do a read-safe command */
@@ -235,7 +220,7 @@ static int blk_fill_sghdr_rq(struct request_queue *q, struct request *rq,
 
 	if (copy_from_user(req->cmd, hdr->cmdp, hdr->cmd_len))
 		return -EFAULT;
-	if (blk_verify_command(q, req->cmd, mode))
+	if (blk_verify_command(req->cmd, mode))
 		return -EPERM;
 
 	/*
@@ -469,7 +454,7 @@ int sg_scsi_ioctl(struct request_queue *q, struct gendisk *disk, fmode_t mode,
 	if (in_len && copy_from_user(buffer, sic->data + cmdlen, in_len))
 		goto error;
 
-	err = blk_verify_command(q, req->cmd, mode);
+	err = blk_verify_command(req->cmd, mode);
 	if (err)
 		goto error;
 

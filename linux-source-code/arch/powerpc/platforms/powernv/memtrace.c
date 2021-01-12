@@ -1,11 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright (C) IBM Corporation, 2014, 2017
  * Anton Blanchard, Rashmica Gupta.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  */
 
 #define pr_fmt(fmt) "memtrace: " fmt
@@ -20,6 +16,7 @@
 #include <linux/slab.h>
 #include <linux/memory.h>
 #include <linux/memory_hotplug.h>
+#include <linux/numa.h>
 #include <asm/machdep.h>
 #include <asm/debugfs.h>
 
@@ -223,7 +220,7 @@ static int memtrace_online(void)
 		ent = &memtrace_array[i];
 
 		/* We have onlined this chunk previously */
-		if (ent->nid == -1)
+		if (ent->nid == NUMA_NO_NODE)
 			continue;
 
 		/* Remove from io mappings */
@@ -239,10 +236,16 @@ static int memtrace_online(void)
 			continue;
 		}
 
-		lock_device_hotplug();
-		walk_memory_blocks(ent->start, ent->size, NULL,
-				   online_mem_block);
-		unlock_device_hotplug();
+		/*
+		 * If kernel isn't compiled with the auto online option
+		 * we need to online the memory ourselves.
+		 */
+		if (!memhp_auto_online) {
+			lock_device_hotplug();
+			walk_memory_blocks(ent->start, ent->size, NULL,
+					   online_mem_block);
+			unlock_device_hotplug();
+		}
 
 		/*
 		 * Memory was added successfully so clean up references to it
@@ -250,7 +253,7 @@ static int memtrace_online(void)
 		 */
 		debugfs_remove_recursive(ent->dir);
 		pr_info("Added trace memory back to node %d\n", ent->nid);
-		ent->size = ent->start = ent->nid = -1;
+		ent->size = ent->start = ent->nid = NUMA_NO_NODE;
 	}
 	if (ret)
 		return ret;

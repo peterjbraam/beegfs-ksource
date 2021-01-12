@@ -1423,9 +1423,6 @@ static int storvsc_device_configure(struct scsi_device *sdevice)
 {
 	blk_queue_rq_timeout(sdevice->request_queue, (storvsc_timeout * HZ));
 
-	/* Ensure there are no gaps in presented sgls */
-	blk_queue_virt_boundary(sdevice->request_queue, PAGE_SIZE - 1);
-
 	sdevice->no_write_same = 1;
 
 	/*
@@ -1696,9 +1693,10 @@ static struct scsi_host_template scsi_driver = {
 	.slave_configure =	storvsc_device_configure,
 	.cmd_per_lun =		2048,
 	.this_id =		-1,
-	.use_clustering =	ENABLE_CLUSTERING,
 	/* Make sure we dont get a sg segment crosses a page boundary */
 	.dma_boundary =		PAGE_SIZE-1,
+	/* Ensure there are no gaps in presented sgls */
+	.virt_boundary_mask =	PAGE_SIZE-1,
 	.no_write_same =	1,
 	.track_queue_depth =	1,
 	.change_queue_depth =	storvsc_change_queue_depth,
@@ -1728,13 +1726,6 @@ static const struct hv_vmbus_device_id id_table[] = {
 };
 
 MODULE_DEVICE_TABLE(vmbus, id_table);
-
-static const struct { guid_t guid; } fc_guid = { HV_SYNTHFC_GUID };
-
-static bool hv_dev_is_fc(struct hv_device *hv_dev)
-{
-	return guid_equal(&fc_guid.guid, &hv_dev->dev_type);
-}
 
 static int storvsc_probe(struct hv_device *device,
 			const struct hv_vmbus_device_id *dev_id)
@@ -1843,6 +1834,12 @@ static int storvsc_probe(struct hv_device *device,
 	 * from the host.
 	 */
 	host->sg_tablesize = (stor_device->max_transfer_bytes >> PAGE_SHIFT);
+#if defined(CONFIG_X86_32)
+	dev_warn(&device->device, "adjusting sg_tablesize 0x%x -> 0x%x",
+			host->sg_tablesize, MAX_MULTIPAGE_BUFFER_COUNT);
+	host->sg_tablesize = MAX_MULTIPAGE_BUFFER_COUNT;
+#endif
+
 	/*
 	 * For non-IDE disks, the host supports multiple channels.
 	 * Set the number of HW queues we are supporting.
@@ -1945,45 +1942,11 @@ static int storvsc_remove(struct hv_device *dev)
 	return 0;
 }
 
-static int storvsc_suspend(struct hv_device *hv_dev)
-{
-	struct storvsc_device *stor_device = hv_get_drvdata(hv_dev);
-	struct Scsi_Host *host = stor_device->host;
-	struct hv_host_device *host_dev = shost_priv(host);
-
-	storvsc_wait_to_drain(stor_device);
-
-	drain_workqueue(host_dev->handle_error_wq);
-
-	vmbus_close(hv_dev->channel);
-
-	memset(stor_device->stor_chns, 0,
-	       num_possible_cpus() * sizeof(void *));
-
-	kfree(stor_device->stor_chns);
-	stor_device->stor_chns = NULL;
-
-	cpumask_clear(&stor_device->alloced_cpus);
-
-	return 0;
-}
-
-static int storvsc_resume(struct hv_device *hv_dev)
-{
-	int ret;
-
-	ret = storvsc_connect_to_vsp(hv_dev, storvsc_ringbuffer_size,
-				     hv_dev_is_fc(hv_dev));
-	return ret;
-}
-
 static struct hv_driver storvsc_drv = {
 	.name = KBUILD_MODNAME,
 	.id_table = id_table,
 	.probe = storvsc_probe,
 	.remove = storvsc_remove,
-	.suspend = storvsc_suspend,
-	.resume = storvsc_resume,
 	.driver = {
 		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 	},

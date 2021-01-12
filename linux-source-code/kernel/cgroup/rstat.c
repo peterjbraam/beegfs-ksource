@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 #include "cgroup-internal.h"
 
 #include <linux/sched/cputime.h>
@@ -32,12 +33,9 @@ void cgroup_rstat_updated(struct cgroup *cgrp, int cpu)
 		return;
 
 	/*
-	 * Paired with the one in cgroup_rstat_cpu_pop_updated().  Either we
-	 * see NULL updated_next or they see our updated stat.
-	 */
-	smp_mb();
-
-	/*
+	 * Speculative already-on-list test. This may race leading to
+	 * temporary inaccuracies, which is fine.
+	 *
 	 * Because @parent's updated_children is terminated with @parent
 	 * instead of NULL, we can tell whether @cgrp is on the list by
 	 * testing the next pointer for NULL.
@@ -87,7 +85,6 @@ static struct cgroup *cgroup_rstat_cpu_pop_updated(struct cgroup *pos,
 						   struct cgroup *root, int cpu)
 {
 	struct cgroup_rstat_cpu *rstatc;
-	struct cgroup *parent;
 
 	if (pos == root)
 		return NULL;
@@ -115,8 +112,8 @@ static struct cgroup *cgroup_rstat_cpu_pop_updated(struct cgroup *pos,
 	 * However, due to the way we traverse, @pos will be the first
 	 * child in most cases. The only exception is @root.
 	 */
-	parent = cgroup_parent(pos);
-	if (parent && rstatc->updated_next) {
+	if (rstatc->updated_next) {
+		struct cgroup *parent = cgroup_parent(pos);
 		struct cgroup_rstat_cpu *prstatc = cgroup_rstat_cpu(parent, cpu);
 		struct cgroup_rstat_cpu *nrstatc;
 		struct cgroup **nextp;
@@ -134,15 +131,11 @@ static struct cgroup *cgroup_rstat_cpu_pop_updated(struct cgroup *pos,
 		*nextp = rstatc->updated_next;
 		rstatc->updated_next = NULL;
 
-		/*
-		 * Paired with the one in cgroup_rstat_cpu_updated().
-		 * Either they see NULL updated_next or we see their
-		 * updated stat.
-		 */
-		smp_mb();
+		return pos;
 	}
 
-	return pos;
+	/* only happens for @root */
+	return NULL;
 }
 
 /* see cgroup_rstat_flush() */
@@ -301,48 +294,44 @@ void __init cgroup_rstat_boot(void)
  * Functions for cgroup basic resource statistics implemented on top of
  * rstat.
  */
-static void cgroup_base_stat_add(struct cgroup_base_stat *dst_bstat,
-				 struct cgroup_base_stat *src_bstat)
+static void cgroup_base_stat_accumulate(struct cgroup_base_stat *dst_bstat,
+					struct cgroup_base_stat *src_bstat)
 {
 	dst_bstat->cputime.utime += src_bstat->cputime.utime;
 	dst_bstat->cputime.stime += src_bstat->cputime.stime;
 	dst_bstat->cputime.sum_exec_runtime += src_bstat->cputime.sum_exec_runtime;
 }
 
-static void cgroup_base_stat_sub(struct cgroup_base_stat *dst_bstat,
-				 struct cgroup_base_stat *src_bstat)
-{
-	dst_bstat->cputime.utime -= src_bstat->cputime.utime;
-	dst_bstat->cputime.stime -= src_bstat->cputime.stime;
-	dst_bstat->cputime.sum_exec_runtime -= src_bstat->cputime.sum_exec_runtime;
-}
-
 static void cgroup_base_stat_flush(struct cgroup *cgrp, int cpu)
 {
 	struct cgroup *parent = cgroup_parent(cgrp);
 	struct cgroup_rstat_cpu *rstatc = cgroup_rstat_cpu(cgrp, cpu);
-	struct cgroup_base_stat cur, delta;
+	struct task_cputime *last_cputime = &rstatc->last_bstat.cputime;
+	struct task_cputime cputime;
+	struct cgroup_base_stat delta;
 	unsigned seq;
 
 	/* fetch the current per-cpu values */
 	do {
 		seq = __u64_stats_fetch_begin(&rstatc->bsync);
-		cur.cputime = rstatc->bstat.cputime;
+		cputime = rstatc->bstat.cputime;
 	} while (__u64_stats_fetch_retry(&rstatc->bsync, seq));
 
-	/* propagate percpu delta to global */
-	delta = cur;
-	cgroup_base_stat_sub(&delta, &rstatc->last_bstat);
-	cgroup_base_stat_add(&cgrp->bstat, &delta);
-	cgroup_base_stat_add(&rstatc->last_bstat, &delta);
+	/* calculate the delta to propgate */
+	delta.cputime.utime = cputime.utime - last_cputime->utime;
+	delta.cputime.stime = cputime.stime - last_cputime->stime;
+	delta.cputime.sum_exec_runtime = cputime.sum_exec_runtime -
+					 last_cputime->sum_exec_runtime;
+	*last_cputime = cputime;
 
-	/* propagate global delta to parent */
-	if (parent) {
-		delta = cgrp->bstat;
-		cgroup_base_stat_sub(&delta, &cgrp->last_bstat);
-		cgroup_base_stat_add(&parent->bstat, &delta);
-		cgroup_base_stat_add(&cgrp->last_bstat, &delta);
-	}
+	/* transfer the pending stat into delta */
+	cgroup_base_stat_accumulate(&delta, &cgrp->pending_bstat);
+	memset(&cgrp->pending_bstat, 0, sizeof(cgrp->pending_bstat));
+
+	/* propagate delta into the global stat and the parent's pending */
+	cgroup_base_stat_accumulate(&cgrp->bstat, &delta);
+	if (parent)
+		cgroup_base_stat_accumulate(&parent->pending_bstat, &delta);
 }
 
 static struct cgroup_rstat_cpu *

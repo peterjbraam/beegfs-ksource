@@ -158,11 +158,11 @@ static inline pud_t pudp_huge_get_and_clear(struct mm_struct *mm,
 
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 #ifndef __HAVE_ARCH_PMDP_HUGE_GET_AND_CLEAR_FULL
-static inline pmd_t pmdp_huge_get_and_clear_full(struct vm_area_struct *vma,
+static inline pmd_t pmdp_huge_get_and_clear_full(struct mm_struct *mm,
 					    unsigned long address, pmd_t *pmdp,
 					    int full)
 {
-	return pmdp_huge_get_and_clear(vma->vm_mm, address, pmdp);
+	return pmdp_huge_get_and_clear(mm, address, pmdp);
 }
 #endif
 
@@ -795,7 +795,7 @@ static inline pmd_t pmd_swp_clear_soft_dirty(pmd_t pmd)
 /*
  * Interfaces that can be used by architecture code to keep track of
  * memory type of pfn mappings specified by the remap_pfn_range,
- * vm_insert_pfn.
+ * vmf_insert_pfn.
  */
 
 /*
@@ -811,7 +811,7 @@ static inline int track_pfn_remap(struct vm_area_struct *vma, pgprot_t *prot,
 
 /*
  * track_pfn_insert is called when a _new_ single pfn is established
- * by vm_insert_pfn().
+ * by vmf_insert_pfn().
  */
 static inline void track_pfn_insert(struct vm_area_struct *vma, pgprot_t *prot,
 				    pfn_t pfn)
@@ -903,21 +903,6 @@ static inline int pud_write(pud_t pud)
 }
 #endif /* pud_write */
 
-#if !defined(__HAVE_ARCH_PTE_DEVMAP) || !defined(CONFIG_TRANSPARENT_HUGEPAGE)
-static inline int pmd_devmap(pmd_t pmd)
-{
-	return 0;
-}
-static inline int pud_devmap(pud_t pud)
-{
-	return 0;
-}
-static inline int pgd_devmap(pgd_t pgd)
-{
-	return 0;
-}
-#endif
-
 #if !defined(CONFIG_TRANSPARENT_HUGEPAGE) || \
 	(defined(CONFIG_TRANSPARENT_HUGEPAGE) && \
 	 !defined(CONFIG_HAVE_ARCH_TRANSPARENT_HUGEPAGE_PUD))
@@ -926,31 +911,6 @@ static inline int pud_trans_huge(pud_t pud)
 	return 0;
 }
 #endif
-
-/* See pmd_none_or_trans_huge_or_clear_bad for discussion. */
-static inline int pud_none_or_trans_huge_or_dev_or_clear_bad(pud_t *pud)
-{
-	pud_t pudval = READ_ONCE(*pud);
-
-	if (pud_none(pudval) || pud_trans_huge(pudval) || pud_devmap(pudval))
-		return 1;
-	if (unlikely(pud_bad(pudval))) {
-		pud_clear_bad(pud);
-		return 1;
-	}
-	return 0;
-}
-
-/* See pmd_trans_unstable for discussion. */
-static inline int pud_trans_unstable(pud_t *pud)
-{
-#if defined(CONFIG_TRANSPARENT_HUGEPAGE) &&			\
-	defined(CONFIG_HAVE_ARCH_TRANSPARENT_HUGEPAGE_PUD)
-	return pud_none_or_trans_huge_or_dev_or_clear_bad(pud);
-#else
-	return 0;
-#endif
-}
 
 #ifndef pmd_read_atomic
 static inline pmd_t pmd_read_atomic(pmd_t *pmdp)
@@ -1042,9 +1002,8 @@ static inline int pmd_none_or_trans_huge_or_clear_bad(pmd_t *pmd)
  * need this). If THP is not enabled, the pmd can't go away under the
  * code even if MADV_DONTNEED runs, but if THP is enabled we need to
  * run a pmd_trans_unstable before walking the ptes after
- * split_huge_page_pmd returns (because it may have run when the pmd
- * become null, but then a page fault can map in a THP and not a
- * regular page).
+ * split_huge_pmd returns (because it may have run when the pmd become
+ * null, but then a page fault can map in a THP and not a regular page).
  */
 static inline int pmd_trans_unstable(pmd_t *pmd)
 {
@@ -1097,6 +1056,7 @@ int pud_set_huge(pud_t *pud, phys_addr_t addr, pgprot_t prot);
 int pmd_set_huge(pmd_t *pmd, phys_addr_t addr, pgprot_t prot);
 int pud_clear_huge(pud_t *pud);
 int pmd_clear_huge(pmd_t *pmd);
+int p4d_free_pud_page(p4d_t *p4d, unsigned long addr);
 int pud_free_pmd_page(pud_t *pud, unsigned long addr);
 int pmd_free_pte_page(pmd_t *pmd, unsigned long addr);
 #else	/* !CONFIG_HAVE_ARCH_HUGE_VMAP */
@@ -1121,6 +1081,10 @@ static inline int pud_clear_huge(pud_t *pud)
 	return 0;
 }
 static inline int pmd_clear_huge(pmd_t *pmd)
+{
+	return 0;
+}
+static inline int p4d_free_pud_page(p4d_t *p4d, unsigned long addr)
 {
 	return 0;
 }
@@ -1161,6 +1125,8 @@ int phys_mem_access_prot_allowed(struct file *file, unsigned long pfn,
 static inline void init_espfix_bsp(void) { }
 #endif
 
+extern void __init pgtable_cache_init(void);
+
 #ifndef __HAVE_ARCH_PFN_MODIFY_ALLOWED
 static inline bool pfn_modify_allowed(unsigned long pfn, pgprot_t prot)
 {
@@ -1173,11 +1139,25 @@ static inline bool arch_has_pfn_modify_check(void)
 }
 #endif /* !_HAVE_ARCH_PFN_MODIFY_ALLOWED */
 
-#endif /* !__ASSEMBLY__ */
+/*
+ * Architecture PAGE_KERNEL_* fallbacks
+ *
+ * Some architectures don't define certain PAGE_KERNEL_* flags. This is either
+ * because they really don't support them, or the port needs to be updated to
+ * reflect the required functionality. Below are a set of relatively safe
+ * fallbacks, as best effort, which we can count on in lieu of the architectures
+ * not defining them on their own yet.
+ */
 
-#ifndef io_remap_pfn_range
-#define io_remap_pfn_range remap_pfn_range
+#ifndef PAGE_KERNEL_RO
+# define PAGE_KERNEL_RO PAGE_KERNEL
 #endif
+
+#ifndef PAGE_KERNEL_EXEC
+# define PAGE_KERNEL_EXEC PAGE_KERNEL
+#endif
+
+#endif /* !__ASSEMBLY__ */
 
 #ifndef has_transparent_hugepage
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
@@ -1185,6 +1165,16 @@ static inline bool arch_has_pfn_modify_check(void)
 #else
 #define has_transparent_hugepage() 0
 #endif
+#endif
+
+#ifndef p4d_offset_lockless
+#define p4d_offset_lockless(pgdp, pgd, address) p4d_offset(&(pgd), address)
+#endif
+#ifndef pud_offset_lockless
+#define pud_offset_lockless(p4dp, p4d, address) pud_offset(&(p4d), address)
+#endif
+#ifndef pmd_offset_lockless
+#define pmd_offset_lockless(pudp, pud, address) pmd_offset(&(pud), address)
 #endif
 
 /*

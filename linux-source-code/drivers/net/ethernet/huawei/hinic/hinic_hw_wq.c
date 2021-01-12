@@ -1,16 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Huawei HiNIC PCI Express Linux driver
  * Copyright(c) 2017 Huawei Technologies Co., Ltd
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
- * for more details.
- *
  */
 
 #include <linux/kernel.h>
@@ -114,8 +105,8 @@ static int queue_alloc_page(struct hinic_hwif *hwif, u64 **vaddr, u64 *paddr,
 	struct pci_dev *pdev = hwif->pdev;
 	dma_addr_t dma_addr;
 
-	*vaddr = dma_zalloc_coherent(&pdev->dev, page_sz, &dma_addr,
-				     GFP_KERNEL);
+	*vaddr = dma_alloc_coherent(&pdev->dev, page_sz, &dma_addr,
+				    GFP_KERNEL);
 	if (!*vaddr) {
 		dev_err(&pdev->dev, "Failed to allocate dma for wqs page\n");
 		return -ENOMEM;
@@ -482,8 +473,8 @@ static int alloc_wq_pages(struct hinic_wq *wq, struct hinic_hwif *hwif,
 		u64 *paddr = &wq->block_vaddr[i];
 		dma_addr_t dma_addr;
 
-		*vaddr = dma_zalloc_coherent(&pdev->dev, wq->wq_page_size,
-					     &dma_addr, GFP_KERNEL);
+		*vaddr = dma_alloc_coherent(&pdev->dev, wq->wq_page_size,
+					    &dma_addr, GFP_KERNEL);
 		if (!*vaddr) {
 			dev_err(&pdev->dev, "Failed to allocate wq page\n");
 			goto err_alloc_wq_pages;

@@ -8,40 +8,18 @@
 
 #include "i915_drv.h" /* for_each_engine() */
 #include "i915_request.h"
-#include "intel_engine_heartbeat.h"
 #include "intel_gt.h"
 #include "intel_gt_pm.h"
 #include "intel_gt_requests.h"
 #include "intel_timeline.h"
 
-static bool retire_requests(struct intel_timeline *tl)
+static void retire_requests(struct intel_timeline *tl)
 {
 	struct i915_request *rq, *rn;
 
 	list_for_each_entry_safe(rq, rn, &tl->requests, link)
 		if (!i915_request_retire(rq))
-			return false;
-
-	/* And check nothing new was submitted */
-	return !i915_active_fence_isset(&tl->last_request);
-}
-
-static bool flush_submission(struct intel_gt *gt)
-{
-	struct intel_engine_cs *engine;
-	enum intel_engine_id id;
-	bool active = false;
-
-	if (!intel_gt_pm_is_awake(gt))
-		return false;
-
-	for_each_engine(engine, gt, id) {
-		intel_engine_flush_submission(engine);
-		active |= flush_work(&engine->retire_work);
-		active |= flush_work(&engine->wakeref.work);
-	}
-
-	return active;
+			break;
 }
 
 static void engine_retire(struct work_struct *work)
@@ -50,6 +28,7 @@ static void engine_retire(struct work_struct *work)
 		container_of(work, typeof(*engine), retire_work);
 	struct intel_timeline *tl = xchg(&engine->retire, NULL);
 
+	mutex_lock(&engine->i915->drm.struct_mutex);
 	do {
 		struct intel_timeline *next = xchg(&tl->retire, NULL);
 
@@ -70,21 +49,25 @@ static void engine_retire(struct work_struct *work)
 		GEM_BUG_ON(!next);
 		tl = ptr_mask_bits(next, 1);
 	} while (tl);
+	mutex_unlock(&engine->i915->drm.struct_mutex);
 }
 
 static bool add_retire(struct intel_engine_cs *engine,
 		       struct intel_timeline *tl)
 {
-#define STUB ((struct intel_timeline *)1)
 	struct intel_timeline *first;
 
 	/*
 	 * We open-code a llist here to include the additional tag [BIT(0)]
 	 * so that we know when the timeline is already on a
 	 * retirement queue: either this engine or another.
+	 *
+	 * However, we rely on that a timeline can only be active on a single
+	 * engine at any one time and that add_retire() is called before the
+	 * engine releases the timeline and transferred to another to retire.
 	 */
 
-	if (cmpxchg(&tl->retire, NULL, STUB)) /* already queued */
+	if (READ_ONCE(tl->retire)) /* already queued */
 		return false;
 
 	intel_timeline_get(tl);
@@ -99,9 +82,6 @@ static bool add_retire(struct intel_engine_cs *engine,
 void intel_engine_add_retire(struct intel_engine_cs *engine,
 			     struct intel_timeline *tl)
 {
-	/* We don't deal well with the engine disappearing beneath us */
-	GEM_BUG_ON(intel_engine_is_virtual(engine));
-
 	if (add_retire(engine, tl))
 		schedule_work(&engine->retire_work);
 }
@@ -115,122 +95,4 @@ void intel_engine_fini_retire(struct intel_engine_cs *engine)
 {
 	flush_work(&engine->retire_work);
 	GEM_BUG_ON(engine->retire);
-}
-
-long intel_gt_retire_requests_timeout(struct intel_gt *gt, long timeout)
-{
-	struct intel_gt_timelines *timelines = &gt->timelines;
-	struct intel_timeline *tl, *tn;
-	unsigned long active_count = 0;
-	bool interruptible;
-	LIST_HEAD(free);
-
-	interruptible = true;
-	if (unlikely(timeout < 0))
-		timeout = -timeout, interruptible = false;
-
-	flush_submission(gt); /* kick the ksoftirqd tasklets */
-	spin_lock(&timelines->lock);
-	list_for_each_entry_safe(tl, tn, &timelines->active_list, link) {
-		if (!mutex_trylock(&tl->mutex)) {
-			active_count++; /* report busy to caller, try again? */
-			continue;
-		}
-
-		intel_timeline_get(tl);
-		GEM_BUG_ON(!atomic_read(&tl->active_count));
-		atomic_inc(&tl->active_count); /* pin the list element */
-		spin_unlock(&timelines->lock);
-
-		if (timeout > 0) {
-			struct dma_fence *fence;
-
-			fence = i915_active_fence_get(&tl->last_request);
-			if (fence) {
-				mutex_unlock(&tl->mutex);
-
-				timeout = dma_fence_wait_timeout(fence,
-								 interruptible,
-								 timeout);
-				dma_fence_put(fence);
-
-				/* Retirement is best effort */
-				if (!mutex_trylock(&tl->mutex)) {
-					active_count++;
-					goto out_active;
-				}
-			}
-		}
-
-		if (!retire_requests(tl) || flush_submission(gt))
-			active_count++;
-		mutex_unlock(&tl->mutex);
-
-out_active:	spin_lock(&timelines->lock);
-
-		/* Resume list iteration after reacquiring spinlock */
-		list_safe_reset_next(tl, tn, link);
-		if (atomic_dec_and_test(&tl->active_count))
-			list_del(&tl->link);
-
-
-		/* Defer the final release to after the spinlock */
-		if (refcount_dec_and_test(&tl->kref.refcount)) {
-			GEM_BUG_ON(atomic_read(&tl->active_count));
-			list_add(&tl->link, &free);
-		}
-	}
-	spin_unlock(&timelines->lock);
-
-	list_for_each_entry_safe(tl, tn, &free, link)
-		__intel_timeline_free(&tl->kref);
-
-	return active_count ? timeout : 0;
-}
-
-int intel_gt_wait_for_idle(struct intel_gt *gt, long timeout)
-{
-	/* If the device is asleep, we have no requests outstanding */
-	if (!intel_gt_pm_is_awake(gt))
-		return 0;
-
-	while ((timeout = intel_gt_retire_requests_timeout(gt, timeout)) > 0) {
-		cond_resched();
-		if (signal_pending(current))
-			return -EINTR;
-	}
-
-	return timeout;
-}
-
-static void retire_work_handler(struct work_struct *work)
-{
-	struct intel_gt *gt =
-		container_of(work, typeof(*gt), requests.retire_work.work);
-
-	schedule_delayed_work(&gt->requests.retire_work,
-			      round_jiffies_up_relative(HZ));
-	intel_gt_retire_requests(gt);
-}
-
-void intel_gt_init_requests(struct intel_gt *gt)
-{
-	INIT_DELAYED_WORK(&gt->requests.retire_work, retire_work_handler);
-}
-
-void intel_gt_park_requests(struct intel_gt *gt)
-{
-	cancel_delayed_work(&gt->requests.retire_work);
-}
-
-void intel_gt_unpark_requests(struct intel_gt *gt)
-{
-	schedule_delayed_work(&gt->requests.retire_work,
-			      round_jiffies_up_relative(HZ));
-}
-
-void intel_gt_fini_requests(struct intel_gt *gt)
-{
-	/* Wait until the work is marked as finished before unloading! */
-	cancel_delayed_work_sync(&gt->requests.retire_work);
 }

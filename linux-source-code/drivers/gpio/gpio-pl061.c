@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2008, 2009 Provigent Ltd.
  *
  * Author: Baruch Siach <baruch@tkos.co.il>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  * Driver for the ARM PrimeCell(tm) General Purpose Input/Output (PL061)
  *
@@ -349,7 +346,7 @@ static int pl061_probe(struct amba_device *adev, const struct amba_id *id)
 		return ret;
 
 	amba_set_drvdata(adev, pl061);
-	dev_info(dev, "PL061 GPIO chip %s registered\n", dev_name(dev));
+	dev_info(dev, "PL061 GPIO chip registered\n");
 
 	return 0;
 }

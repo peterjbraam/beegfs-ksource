@@ -1,14 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * AppArmor security module
  *
  * This file contains AppArmor policy loading interface function definitions.
  *
  * Copyright 2013 Canonical Ltd.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation, version 2 of the
- * License.
  *
  * Fns to provide a checksum of policy that has been loaded this can be
  * compared to userspace policy compiles to check loaded policy is what
@@ -29,6 +25,25 @@ unsigned int aa_hash_size(void)
 	return apparmor_hash_size;
 }
 
+void aa_snprint_hashstr(char *out, unsigned char *hash, unsigned int hsize)
+{
+       unsigned int i;
+
+       for (i = 0; i < hsize; i++)
+               sprintf(out + i*2, "%.2x", hash[i]);
+       out[hsize*2] = 0;
+}
+
+char *aa_asprint_hashstr(unsigned char *hash, unsigned int hsize, gfp_t gfp)
+{
+	char *buffer = kmalloc(hsize*2 + 1, gfp);
+	if (!buffer)
+		return NULL;
+	aa_snprint_hashstr(buffer, hash, hsize);
+
+	return buffer;
+}
+
 char *aa_calc_hash(void *data, size_t len)
 {
 	SHASH_DESC_ON_STACK(desc, apparmor_tfm);
@@ -43,7 +58,6 @@ char *aa_calc_hash(void *data, size_t len)
 		goto fail;
 
 	desc->tfm = apparmor_tfm;
-	desc->flags = 0;
 
 	error = crypto_shash_init(desc);
 	if (error)
@@ -81,7 +95,6 @@ int aa_calc_profile_hash(struct aa_profile *profile, u32 version, void *start,
 		goto fail;
 
 	desc->tfm = apparmor_tfm;
-	desc->flags = 0;
 
 	error = crypto_shash_init(desc);
 	if (error)

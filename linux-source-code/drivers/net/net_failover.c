@@ -19,7 +19,6 @@
 #include <linux/ethtool.h>
 #include <linux/module.h>
 #include <linux/slab.h>
-#include <linux/netdevice.h>
 #include <linux/netpoll.h>
 #include <linux/rtnetlink.h>
 #include <linux/if_vlan.h>
@@ -62,7 +61,8 @@ static int net_failover_open(struct net_device *dev)
 	return 0;
 
 err_standby_open:
-	dev_close(primary_dev);
+	if (primary_dev)
+		dev_close(primary_dev);
 err_primary_open:
 	netif_tx_disable(dev);
 	return err;
@@ -116,8 +116,7 @@ static netdev_tx_t net_failover_start_xmit(struct sk_buff *skb,
 
 static u16 net_failover_select_queue(struct net_device *dev,
 				     struct sk_buff *skb,
-				     struct net_device *sb_dev,
-				     select_queue_fallback_t fallback)
+				     struct net_device *sb_dev)
 {
 	struct net_failover_info *nfo_info = netdev_priv(dev);
 	struct net_device *primary_dev;
@@ -128,10 +127,9 @@ static u16 net_failover_select_queue(struct net_device *dev,
 		const struct net_device_ops *ops = primary_dev->netdev_ops;
 
 		if (ops->ndo_select_queue)
-			txq = ops->ndo_select_queue(primary_dev, skb,
-						    sb_dev, fallback);
+			txq = ops->ndo_select_queue(primary_dev, skb, sb_dev);
 		else
-			txq = fallback(primary_dev, skb, NULL);
+			txq = netdev_pick_tx(primary_dev, skb, NULL);
 
 		qdisc_skb_cb(skb)->slave_dev_queue_mapping = skb->queue_mapping;
 
@@ -603,6 +601,9 @@ static int net_failover_slave_unregister(struct net_device *slave_dev,
 	primary_dev = rtnl_dereference(nfo_info->primary_dev);
 	standby_dev = rtnl_dereference(nfo_info->standby_dev);
 
+	if (WARN_ON_ONCE(slave_dev != primary_dev && slave_dev != standby_dev))
+		return -ENODEV;
+
 	vlan_vids_del_by_dev(slave_dev, failover_dev);
 	dev_uc_unsync(slave_dev, failover_dev);
 	dev_mc_unsync(slave_dev, failover_dev);
@@ -762,8 +763,10 @@ struct failover *net_failover_create(struct net_device *standby_dev)
 	netif_carrier_off(failover_dev);
 
 	failover = failover_register(failover_dev, &net_failover_ops);
-	if (IS_ERR(failover))
+	if (IS_ERR(failover)) {
+		err = PTR_ERR(failover);
 		goto err_failover_register;
+	}
 
 	return failover;
 

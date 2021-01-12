@@ -11,8 +11,7 @@
 #include <linux/flex_proportions.h>
 #include <linux/backing-dev-defs.h>
 #include <linux/blk_types.h>
-#include <linux/rh_kabi.h>
-#include RH_KABI_HIDE_INCLUDE(<linux/blk-cgroup.h>)
+#include <linux/blk-cgroup.h>
 
 struct bio;
 
@@ -77,8 +76,9 @@ struct writeback_control {
 	 * cgroup ownership arbitration to avoid confusion.  Later stages
 	 * can set the following flag to disable the accounting.
 	 */
-	RH_KABI_FILL_HOLE(unsigned no_cgroup_owner:1)
-	RH_KABI_FILL_HOLE(unsigned punt_to_cgroup:1)	/* cgrp punting, see __REQ_CGROUP_PUNT */
+	unsigned no_cgroup_owner:1;
+
+	unsigned punt_to_cgroup:1;	/* cgrp punting, see __REQ_CGROUP_PUNT */
 
 #ifdef CONFIG_CGROUP_WRITEBACK
 	struct bdi_writeback *wb;	/* wb this writeback is issued under */
@@ -92,9 +92,6 @@ struct writeback_control {
 	size_t wb_lcand_bytes;		/* bytes written by last candidate */
 	size_t wb_tcand_bytes;		/* bytes written by this candidate */
 #endif
-
-	RH_KABI_RESERVE(1)
-	RH_KABI_RESERVE(2)
 };
 
 static inline int wbc_to_write_flags(struct writeback_control *wbc)
@@ -200,7 +197,6 @@ void wakeup_flusher_threads(enum wb_reason reason);
 void wakeup_flusher_threads_bdi(struct backing_dev_info *bdi,
 				enum wb_reason reason);
 void inode_wait_for_writeback(struct inode *inode);
-void inode_io_list_del(struct inode *inode);
 
 /* writeback.h requires fs.h; it, too, is not included from here. */
 static inline void wait_on_inode(struct inode *inode)
@@ -221,6 +217,8 @@ void wbc_attach_and_unlock_inode(struct writeback_control *wbc,
 void wbc_detach_inode(struct writeback_control *wbc);
 void wbc_account_cgroup_owner(struct writeback_control *wbc, struct page *page,
 			      size_t bytes);
+int cgroup_writeback_by_id(u64 bdi_id, int memcg_id, unsigned long nr_pages,
+			   enum wb_reason reason, struct wb_completion *done);
 void cgroup_writeback_umount(void);
 
 /**

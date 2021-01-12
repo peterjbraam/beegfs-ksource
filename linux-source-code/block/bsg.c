@@ -1,13 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * bsg.c - block layer implementation of the sg v4 interface
- *
- * Copyright (C) 2004 Jens Axboe <axboe@suse.de> SUSE Labs
- * Copyright (C) 2004 Peter M. Jones <pjones@redhat.com>
- *
- *  This file is subject to the terms and conditions of the GNU General Public
- *  License version 2.  See the file "COPYING" in the main directory of this
- *  archive for more details.
- *
  */
 #include <linux/module.h>
 #include <linux/init.h>
@@ -37,7 +30,7 @@ struct bsg_device {
 	struct request_queue *queue;
 	spinlock_t lock;
 	struct hlist_node dev_list;
-	atomic_t ref_count;
+	refcount_t ref_count;
 	char name[20];
 	int max_queue;
 };
@@ -88,7 +81,7 @@ static int bsg_scsi_fill_hdr(struct request *rq, struct sg_io_v4 *hdr,
 
 	if (copy_from_user(sreq->cmd, uptr64(hdr->request), sreq->cmd_len))
 		return -EFAULT;
-	if (blk_verify_command(rq->q, sreq->cmd, mode))
+	if (blk_verify_command(sreq->cmd, mode))
 		return -EPERM;
 	return 0;
 }
@@ -220,7 +213,7 @@ static int bsg_put_device(struct bsg_device *bd)
 
 	mutex_lock(&bsg_mutex);
 
-	if (!atomic_dec_and_test(&bd->ref_count)) {
+	if (!refcount_dec_and_test(&bd->ref_count)) {
 		mutex_unlock(&bsg_mutex);
 		return 0;
 	}
@@ -258,7 +251,7 @@ static struct bsg_device *bsg_add_device(struct inode *inode,
 
 	bd->queue = rq;
 
-	atomic_set(&bd->ref_count, 1);
+	refcount_set(&bd->ref_count, 1);
 	hlist_add_head(&bd->dev_list, bsg_dev_idx_hash(iminor(inode)));
 
 	strncpy(bd->name, dev_name(rq->bsg_dev.class_dev), sizeof(bd->name) - 1);
@@ -276,7 +269,7 @@ static struct bsg_device *__bsg_get_device(int minor, struct request_queue *q)
 
 	hlist_for_each_entry(bd, bsg_dev_idx_hash(minor), dev_list) {
 		if (bd->queue == q) {
-			atomic_inc(&bd->ref_count);
+			refcount_inc(&bd->ref_count);
 			goto found;
 		}
 	}

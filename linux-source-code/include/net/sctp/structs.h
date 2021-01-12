@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* SCTP kernel implementation
  * (C) Copyright IBM Corp. 2001, 2004
  * Copyright (c) 1999-2000 Cisco, Inc.
@@ -5,22 +6,6 @@
  * Copyright (c) 2001 Intel Corp.
  *
  * This file is part of the SCTP kernel implementation
- *
- * This SCTP implementation is free software;
- * you can redistribute it and/or modify it under the terms of
- * the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This SCTP implementation is distributed in the hope that it
- * will be useful, but WITHOUT ANY WARRANTY; without even the implied
- *		   ************************
- * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
- * See the GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with GNU CC; see the file COPYING.  If not, see
- * <http://www.gnu.org/licenses/>.
  *
  * Please send any bug reports or fixes you make to the
  * email addresses:
@@ -48,6 +33,7 @@
 #define __sctp_structs_h__
 
 #include <linux/ktime.h>
+#include <linux/generic-radix-tree.h>
 #include <linux/rhashtable-types.h>
 #include <linux/socket.h>	/* linux/in.h needs this!!    */
 #include <linux/in.h>		/* We get struct sockaddr_in. */
@@ -238,12 +224,14 @@ struct sctp_sock {
 		data_ready_signalled:1;
 
 	atomic_t pd_mode;
+
+	/* Fields after this point will be skipped on copies, like on accept
+	 * and peeloff operations
+	 */
+
 	/* Receive to here while partial delivery is in effect. */
 	struct sk_buff_head pd_lobby;
 
-	/* These must be the last fields, as they will skipped on copies,
-	 * like on accept and peeloff operations
-	 */
 	struct list_head auto_asconf_list;
 	int do_auto_asconf;
 };
@@ -1453,8 +1441,9 @@ struct sctp_stream_in {
 };
 
 struct sctp_stream {
-	struct sctp_stream_out *out;
-	struct sctp_stream_in *in;
+	GENRADIX(struct sctp_stream_out) out;
+	GENRADIX(struct sctp_stream_in)	in;
+
 	__u16 outcnt;
 	__u16 incnt;
 	/* Current stream being sent, if any */
@@ -1477,17 +1466,17 @@ struct sctp_stream {
 };
 
 static inline struct sctp_stream_out *sctp_stream_out(
-	const struct sctp_stream *stream,
+	struct sctp_stream *stream,
 	__u16 sid)
 {
-	return ((struct sctp_stream_out *)(stream->out)) + sid;
+	return genradix_ptr(&stream->out, sid);
 }
 
 static inline struct sctp_stream_in *sctp_stream_in(
-	const struct sctp_stream *stream,
+	struct sctp_stream *stream,
 	__u16 sid)
 {
-	return ((struct sctp_stream_in *)(stream->in)) + sid;
+	return genradix_ptr(&stream->in, sid);
 }
 
 #define SCTP_SO(s, i) sctp_stream_out((s), (i))

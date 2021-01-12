@@ -1,13 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Mediated device Core Driver
  *
  * Copyright (c) 2016, NVIDIA CORPORATION. All rights reserved.
  *     Author: Neo Jia <cjia@nvidia.com>
  *             Kirti Wankhede <kwankhede@nvidia.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/module.h>
@@ -60,17 +57,11 @@ struct mdev_device *mdev_from_dev(struct device *dev)
 }
 EXPORT_SYMBOL(mdev_from_dev);
 
-uuid_le mdev_uuid(struct mdev_device *mdev)
-{
-	return mdev->uuid;
-}
-EXPORT_SYMBOL(mdev_uuid);
-
-const uuid_le *mdev_uuid_p(struct mdev_device *mdev)
+const guid_t *mdev_uuid(struct mdev_device *mdev)
 {
 	return &mdev->uuid;
 }
-EXPORT_SYMBOL(mdev_uuid_p);
+EXPORT_SYMBOL(mdev_uuid);
 
 /* Should be called holding parent_list_lock */
 static struct mdev_parent *__find_parent_device(struct device *dev)
@@ -278,7 +269,8 @@ static void mdev_device_release(struct device *dev)
 	mdev_device_free(mdev);
 }
 
-int mdev_device_create(struct kobject *kobj, struct device *dev, uuid_le uuid)
+int mdev_device_create(struct kobject *kobj,
+		       struct device *dev, const guid_t *uuid)
 {
 	int ret;
 	struct mdev_device *mdev, *tmp;
@@ -293,7 +285,7 @@ int mdev_device_create(struct kobject *kobj, struct device *dev, uuid_le uuid)
 
 	/* Check for duplicate */
 	list_for_each_entry(tmp, &mdev_list, next) {
-		if (!uuid_le_cmp(tmp->uuid, uuid)) {
+		if (guid_equal(&tmp->uuid, uuid)) {
 			mutex_unlock(&mdev_list_lock);
 			ret = -EEXIST;
 			goto mdev_fail;
@@ -307,7 +299,7 @@ int mdev_device_create(struct kobject *kobj, struct device *dev, uuid_le uuid)
 		goto mdev_fail;
 	}
 
-	memcpy(&mdev->uuid, &uuid, sizeof(uuid_le));
+	guid_copy(&mdev->uuid, uuid);
 	list_add(&mdev->next, &mdev_list);
 	mutex_unlock(&mdev_list_lock);
 
@@ -324,7 +316,7 @@ int mdev_device_create(struct kobject *kobj, struct device *dev, uuid_le uuid)
 	mdev->dev.parent  = dev;
 	mdev->dev.bus     = &mdev_bus_type;
 	mdev->dev.release = mdev_device_release;
-	dev_set_name(&mdev->dev, "%pUl", uuid.b);
+	dev_set_name(&mdev->dev, "%pUl", uuid);
 	mdev->dev.groups = parent->ops->mdev_attr_groups;
 	mdev->type_kobj = kobj;
 

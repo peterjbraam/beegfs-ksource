@@ -283,8 +283,6 @@ To summarize::
   gpiod_set_value(desc, 1);          default (active high)  high
   gpiod_set_value(desc, 0);          active low             high
   gpiod_set_value(desc, 1);          active low             low
-  gpiod_set_value(desc, 0);          default (active high)  low
-  gpiod_set_value(desc, 1);          default (active high)  high
   gpiod_set_value(desc, 0);          open drain             low
   gpiod_set_value(desc, 1);          open drain             high impedance
   gpiod_set_value(desc, 0);          open source            high impedance
@@ -344,18 +342,18 @@ The following functions get or set the values of an array of GPIOs::
 				  struct gpio_desc **desc_array,
 				  struct gpio_array *array_info,
 				  unsigned long *value_bitmap)
-	void gpiod_set_raw_array_value(unsigned int array_size,
-				       struct gpio_desc **desc_array,
-				       struct gpio_array *array_info,
-				       unsigned long *value_bitmap)
+	int gpiod_set_raw_array_value(unsigned int array_size,
+				      struct gpio_desc **desc_array,
+				      struct gpio_array *array_info,
+				      unsigned long *value_bitmap)
 	int gpiod_set_array_value_cansleep(unsigned int array_size,
 					   struct gpio_desc **desc_array,
 					   struct gpio_array *array_info,
 					   unsigned long *value_bitmap)
-	void gpiod_set_raw_array_value_cansleep(unsigned int array_size,
-						struct gpio_desc **desc_array,
-						struct gpio_array *array_info,
-						unsigned long *value_bitmap)
+	int gpiod_set_raw_array_value_cansleep(unsigned int array_size,
+					       struct gpio_desc **desc_array,
+					       struct gpio_array *array_info,
+					       unsigned long *value_bitmap)
 
 The array can be an arbitrary set of GPIOs. The functions will try to access
 GPIOs belonging to the same bank or chip simultaneously if supported by the
@@ -437,7 +435,7 @@ case, it will be handled by the GPIO subsystem automatically.  However, if the
 _DSD is not present, the mappings between GpioIo()/GpioInt() resources and GPIO
 connection IDs need to be provided by device drivers.
 
-For details refer to Documentation/acpi/gpio-properties.txt
+For details refer to Documentation/firmware-guide/acpi/gpio-properties.rst
 
 
 Interacting With the Legacy GPIO Subsystem

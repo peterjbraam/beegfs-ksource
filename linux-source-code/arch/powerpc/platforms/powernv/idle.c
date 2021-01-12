@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * PowerNV cpuidle code
  *
  * Copyright 2015 IBM Corp.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 
 #include <linux/types.h>
@@ -721,7 +717,7 @@ static unsigned long power9_idle_stop(unsigned long psscr, bool mmu_on)
 		 * to reload MMCR0 (see mmcr0 comment above).
 		 */
 		if (!cpu_has_feature(CPU_FTR_POWER9_DD2_1)) {
-			asm volatile(PPC_INVALIDATE_ERAT);
+			asm volatile(PPC_ISA_3_0_INVALIDATE_ERAT);
 			mtspr(SPRN_MMCR0, mmcr0);
 		}
 
@@ -1317,7 +1313,7 @@ static int pnv_parse_cpuidle_dt(void)
 		goto out;
 	}
 	for (i = 0; i < nr_idle_states; i++)
-		strncpy(pnv_idle_states[i].name, temp_string[i],
+		strlcpy(pnv_idle_states[i].name, temp_string[i],
 			PNV_IDLE_NAME_LEN);
 	nr_pnv_idle_states = nr_idle_states;
 	rc = 0;

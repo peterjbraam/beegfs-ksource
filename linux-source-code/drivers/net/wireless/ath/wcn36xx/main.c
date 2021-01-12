@@ -163,7 +163,7 @@ static struct ieee80211_supported_band wcn_band_5ghz = {
 		.ampdu_density = IEEE80211_HT_MPDU_DENSITY_16,
 		.mcs = {
 			.rx_mask = { 0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, },
-			.rx_highest = cpu_to_le16(72),
+			.rx_highest = cpu_to_le16(150),
 			.tx_params = IEEE80211_HT_MCS_TX_DEFINED,
 		}
 	}
@@ -493,7 +493,7 @@ static int wcn36xx_set_key(struct ieee80211_hw *hw, enum set_key_cmd cmd,
 {
 	struct wcn36xx *wcn = hw->priv;
 	struct wcn36xx_vif *vif_priv = wcn36xx_vif_to_priv(vif);
-	struct wcn36xx_sta *sta_priv = wcn36xx_sta_to_priv(sta);
+	struct wcn36xx_sta *sta_priv = sta ? wcn36xx_sta_to_priv(sta) : NULL;
 	int ret = 0;
 	u8 key[WLAN_MAX_KEY_LEN];
 
@@ -512,7 +512,7 @@ static int wcn36xx_set_key(struct ieee80211_hw *hw, enum set_key_cmd cmd,
 		vif_priv->encrypt_type = WCN36XX_HAL_ED_WEP40;
 		break;
 	case WLAN_CIPHER_SUITE_WEP104:
-		vif_priv->encrypt_type = WCN36XX_HAL_ED_WEP40;
+		vif_priv->encrypt_type = WCN36XX_HAL_ED_WEP104;
 		break;
 	case WLAN_CIPHER_SUITE_CCMP:
 		vif_priv->encrypt_type = WCN36XX_HAL_ED_CCMP;
@@ -567,15 +567,19 @@ static int wcn36xx_set_key(struct ieee80211_hw *hw, enum set_key_cmd cmd,
 				key_conf->keyidx,
 				key_conf->keylen,
 				key);
+
 			if ((WLAN_CIPHER_SUITE_WEP40 == key_conf->cipher) ||
 			    (WLAN_CIPHER_SUITE_WEP104 == key_conf->cipher)) {
-				sta_priv->is_data_encrypted = true;
-				wcn36xx_smd_set_stakey(wcn,
-					vif_priv->encrypt_type,
-					key_conf->keyidx,
-					key_conf->keylen,
-					key,
-					get_sta_index(vif, sta_priv));
+				list_for_each_entry(sta_priv,
+						    &vif_priv->sta_list, list) {
+					sta_priv->is_data_encrypted = true;
+					wcn36xx_smd_set_stakey(wcn,
+						vif_priv->encrypt_type,
+						key_conf->keyidx,
+						key_conf->keylen,
+						key,
+						get_sta_index(vif, sta_priv));
+				}
 			}
 		}
 		break;
@@ -984,6 +988,7 @@ static int wcn36xx_add_interface(struct ieee80211_hw *hw,
 	mutex_lock(&wcn->conf_mutex);
 
 	vif_priv->bss_index = WCN36XX_HAL_BSS_INVALID_IDX;
+	INIT_LIST_HEAD(&vif_priv->sta_list);
 	list_add(&vif_priv->list, &wcn->vif_list);
 	wcn36xx_smd_add_sta_self(wcn, vif);
 
@@ -1005,6 +1010,8 @@ static int wcn36xx_sta_add(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 
 	spin_lock_init(&sta_priv->ampdu_lock);
 	sta_priv->vif = vif_priv;
+	list_add(&sta_priv->list, &vif_priv->sta_list);
+
 	/*
 	 * For STA mode HW will be configured on BSS_CHANGED_ASSOC because
 	 * at this stage AID is not available yet.
@@ -1032,6 +1039,7 @@ static int wcn36xx_sta_remove(struct ieee80211_hw *hw,
 
 	mutex_lock(&wcn->conf_mutex);
 
+	list_del(&sta_priv->list);
 	wcn36xx_smd_delete_sta(wcn, sta_priv->sta_index);
 	sta_priv->vif = NULL;
 
@@ -1154,8 +1162,6 @@ static const struct ieee80211_ops wcn36xx_ops = {
 
 static int wcn36xx_init_ieee80211(struct wcn36xx *wcn)
 {
-	int ret = 0;
-
 	static const u32 cipher_suites[] = {
 		WLAN_CIPHER_SUITE_WEP40,
 		WLAN_CIPHER_SUITE_WEP104,
@@ -1202,7 +1208,7 @@ static int wcn36xx_init_ieee80211(struct wcn36xx *wcn)
 	wiphy_ext_feature_set(wcn->hw->wiphy,
 			      NL80211_EXT_FEATURE_CQM_RSSI_LIST);
 
-	return ret;
+	return 0;
 }
 
 static int wcn36xx_platform_get_resources(struct wcn36xx *wcn,
@@ -1297,6 +1303,14 @@ static int wcn36xx_probe(struct platform_device *pdev)
 	void *wcnss;
 	int ret;
 	const u8 *addr;
+#ifdef	CONFIG_WCN36XX_SNAPDRAGON_HACKS
+	int status;
+	const struct firmware *addr_file = NULL;
+	u8 tmp[18], _addr[ETH_ALEN];
+	static const u8 qcom_oui[3] = {0x00, 0x0A, 0xF5};
+	static const char *files = {"wlan/macaddr0"};
+#endif
+
 
 	wcn36xx_dbg(WCN36XX_DBG_MAC, "platform probe\n");
 
@@ -1336,15 +1350,43 @@ static int wcn36xx_probe(struct platform_device *pdev)
 	if (addr && ret != ETH_ALEN) {
 		wcn36xx_err("invalid local-mac-address\n");
 		ret = -EINVAL;
-		goto out_wq;
-	} else if (addr) {
+		goto out_destroy_ept;
+	}
+#ifdef	CONFIG_WCN36XX_SNAPDRAGON_HACKS
+	else if (addr == NULL) {
+		addr = _addr;
+		status = request_firmware(&addr_file, files, &pdev->dev);
+
+		if (status < 0) {
+			/* Assign a random mac with Qualcomm oui */
+			dev_err(&pdev->dev, "Failed (%d) to read macaddress"
+			"file %s, using a random address instead", status, files);
+			memcpy(addr, qcom_oui, 3);
+			get_random_bytes(addr + 3, 3);
+		} else {
+			memset(tmp, 0, sizeof(tmp));
+			memcpy(tmp, addr_file->data, sizeof(tmp) - 1);
+			sscanf(tmp, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
+			&addr[0],
+			&addr[1],
+			&addr[2],
+			&addr[3],
+			&addr[4],
+			&addr[5]);
+
+			release_firmware(addr_file);
+		}
+	}
+#endif
+
+	if (addr) {
 		wcn36xx_info("mac address: %pM\n", addr);
 		SET_IEEE80211_PERM_ADDR(wcn->hw, addr);
 	}
 
 	ret = wcn36xx_platform_get_resources(wcn, pdev);
 	if (ret)
-		goto out_wq;
+		goto out_destroy_ept;
 
 	wcn36xx_init_ieee80211(wcn);
 	ret = ieee80211_register_hw(wcn->hw);
@@ -1356,6 +1398,8 @@ static int wcn36xx_probe(struct platform_device *pdev)
 out_unmap:
 	iounmap(wcn->ccu_base);
 	iounmap(wcn->dxe_base);
+out_destroy_ept:
+	rpmsg_destroy_ept(wcn->smd_channel);
 out_wq:
 	ieee80211_free_hw(hw);
 out_err:

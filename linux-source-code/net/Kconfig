@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-only
 #
 # Network configuration
 #
@@ -12,7 +13,7 @@ menuconfig NET
 	  The reason is that some programs need kernel networking support even
 	  when running on a stand-alone machine that isn't connected to any
 	  other computer.
-	  
+
 	  If you are upgrading from an older kernel, you
 	  should consider updating your networking tools too because changes
 	  in the kernel and the tools often go hand in hand. The tools are
@@ -69,8 +70,6 @@ source "net/xdp/Kconfig"
 
 config INET
 	bool "TCP/IP networking"
-	select CRYPTO
-	select CRYPTO_AES
 	---help---
 	  These are the protocols used on the Internet and on most local
 	  Ethernets. It is highly recommended to say Y here (this will enlarge
@@ -95,7 +94,6 @@ if INET
 source "net/ipv4/Kconfig"
 source "net/ipv6/Kconfig"
 source "net/netlabel/Kconfig"
-source "net/mptcp/Kconfig"
 
 endif # if INET
 
@@ -113,10 +111,9 @@ config NETWORK_PHY_TIMESTAMPING
 	bool "Timestamping in PHY devices"
 	select NET_PTP_CLASSIFY
 	help
-	  This allows timestamping of network packets by PHYs (or
-	  other MII bus snooping devices) with hardware timestamping
-	  capabilities. This option adds some overhead in the transmit
-	  and receive paths.
+	  This allows timestamping of network packets by PHYs with
+	  hardware timestamping capabilities. This option adds some
+	  overhead in the transmit and receive paths.
 
 	  If you are unsure how to answer this question, answer N.
 
@@ -192,6 +189,7 @@ config BRIDGE_NETFILTER
 	depends on NETFILTER && INET
 	depends on NETFILTER_ADVANCED
 	select NETFILTER_FAMILY_BRIDGE
+	select SKB_EXTENSIONS
 	default m
 	---help---
 	  Enabling this option will let arptables resp. iptables see bridged

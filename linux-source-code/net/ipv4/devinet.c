@@ -1,10 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *	NET3	IP device support routines.
- *
- *		This program is free software; you can redistribute it and/or
- *		modify it under the terms of the GNU General Public License
- *		as published by the Free Software Foundation; either version
- *		2 of the License, or (at your option) any later version.
  *
  *	Derived from the IP parts of dev.c 1.0.19
  * 		Authors:	Ross Biro
@@ -65,6 +61,11 @@
 #include <net/rtnetlink.h>
 #include <net/net_namespace.h>
 #include <net/addrconf.h>
+
+#define IPV6ONLY_FLAGS	\
+		(IFA_F_NODAD | IFA_F_OPTIMISTIC | IFA_F_DADFAILED | \
+		 IFA_F_HOMEADDRESS | IFA_F_TENTATIVE | \
+		 IFA_F_MANAGETEMPADDR | IFA_F_STABLE_PRIVACY)
 
 static struct ipv4_devconf ipv4_devconf = {
 	.data = {
@@ -487,6 +488,9 @@ static int __inet_insert_ifa(struct in_ifaddr *ifa, struct nlmsghdr *nlh,
 	ifa->ifa_flags &= ~IFA_F_SECONDARY;
 	last_primary = &in_dev->ifa_list;
 
+	/* Don't set IPv6 only flags to IPv4 addresses */
+	ifa->ifa_flags &= ~IPV6ONLY_FLAGS;
+
 	ifap = &in_dev->ifa_list;
 	ifa1 = rtnl_dereference(*ifap);
 
@@ -611,12 +615,15 @@ struct in_ifaddr *inet_ifa_byprefix(struct in_device *in_dev, __be32 prefix,
 	return NULL;
 }
 
-static int ip_mc_config(struct sock *sk, bool join, const struct in_ifaddr *ifa)
+static int ip_mc_autojoin_config(struct net *net, bool join,
+				 const struct in_ifaddr *ifa)
 {
+#if defined(CONFIG_IP_MULTICAST)
 	struct ip_mreqn mreq = {
 		.imr_multiaddr.s_addr = ifa->ifa_address,
 		.imr_ifindex = ifa->ifa_dev->dev->ifindex,
 	};
+	struct sock *sk = net->ipv4.mc_autojoin_sk;
 	int ret;
 
 	ASSERT_RTNL();
@@ -629,6 +636,9 @@ static int ip_mc_config(struct sock *sk, bool join, const struct in_ifaddr *ifa)
 	release_sock(sk);
 
 	return ret;
+#else
+	return -EOPNOTSUPP;
+#endif
 }
 
 static int inet_rtm_deladdr(struct sk_buff *skb, struct nlmsghdr *nlh,
@@ -672,7 +682,7 @@ static int inet_rtm_deladdr(struct sk_buff *skb, struct nlmsghdr *nlh,
 			continue;
 
 		if (ipv4_is_multicast(ifa->ifa_address))
-			ip_mc_config(net->ipv4.mc_autojoin_sk, false, ifa);
+			ip_mc_autojoin_config(net, false, ifa);
 		__inet_del_ifa(in_dev, ifap, 1, nlh, NETLINK_CB(skb).portid);
 		return 0;
 	}
@@ -937,8 +947,7 @@ static int inet_rtm_newaddr(struct sk_buff *skb, struct nlmsghdr *nlh,
 		 */
 		set_ifa_lifetime(ifa, valid_lft, prefered_lft);
 		if (ifa->ifa_flags & IFA_F_MCAUTOJOIN) {
-			int ret = ip_mc_config(net->ipv4.mc_autojoin_sk,
-					       true, ifa);
+			int ret = ip_mc_autojoin_config(net, true, ifa);
 
 			if (ret < 0) {
 				inet_free_ifa(ifa);
@@ -979,17 +988,18 @@ static int inet_abc_len(__be32 addr)
 {
 	int rc = -1;	/* Something else, probably a multicast. */
 
-	if (ipv4_is_zeronet(addr))
+	if (ipv4_is_zeronet(addr) || ipv4_is_lbcast(addr))
 		rc = 0;
 	else {
 		__u32 haddr = ntohl(addr);
-
 		if (IN_CLASSA(haddr))
 			rc = 8;
 		else if (IN_CLASSB(haddr))
 			rc = 16;
 		else if (IN_CLASSC(haddr))
 			rc = 24;
+		else if (IN_CLASSE(haddr))
+			rc = 32;
 	}
 
 	return rc;
@@ -1292,6 +1302,7 @@ __be32 inet_select_addr(const struct net_device *dev, __be32 dst, int scope)
 {
 	const struct in_ifaddr *ifa;
 	__be32 addr = 0;
+	unsigned char localnet_scope = RT_SCOPE_HOST;
 	struct in_device *in_dev;
 	struct net *net = dev_net(dev);
 	int master_idx;
@@ -1301,10 +1312,13 @@ __be32 inet_select_addr(const struct net_device *dev, __be32 dst, int scope)
 	if (!in_dev)
 		goto no_in_dev;
 
+	if (unlikely(IN_DEV_ROUTE_LOCALNET(in_dev)))
+		localnet_scope = RT_SCOPE_LINK;
+
 	in_dev_for_each_ifa_rcu(ifa, in_dev) {
 		if (ifa->ifa_flags & IFA_F_SECONDARY)
 			continue;
-		if (ifa->ifa_scope > scope)
+		if (min(ifa->ifa_scope, localnet_scope) > scope)
 			continue;
 		if (!dst || inet_ifa_match(dst, ifa)) {
 			addr = ifa->ifa_local;
@@ -1357,14 +1371,20 @@ EXPORT_SYMBOL(inet_select_addr);
 static __be32 confirm_addr_indev(struct in_device *in_dev, __be32 dst,
 			      __be32 local, int scope)
 {
+	unsigned char localnet_scope = RT_SCOPE_HOST;
 	const struct in_ifaddr *ifa;
 	__be32 addr = 0;
 	int same = 0;
 
+	if (unlikely(IN_DEV_ROUTE_LOCALNET(in_dev)))
+		localnet_scope = RT_SCOPE_LINK;
+
 	in_dev_for_each_ifa_rcu(ifa, in_dev) {
+		unsigned char min_scope = min(ifa->ifa_scope, localnet_scope);
+
 		if (!addr &&
 		    (local == ifa->ifa_local || !local) &&
-		    ifa->ifa_scope <= scope) {
+		    min_scope <= scope) {
 			addr = ifa->ifa_local;
 			if (same)
 				break;
@@ -1379,7 +1399,7 @@ static __be32 confirm_addr_indev(struct in_device *in_dev, __be32 dst,
 				if (inet_ifa_match(addr, ifa))
 					break;
 				/* No, then can we use new local src? */
-				if (ifa->ifa_scope <= scope) {
+				if (min_scope <= scope) {
 					addr = ifa->ifa_local;
 					break;
 				}
@@ -2627,32 +2647,34 @@ static __net_init int devinet_init_net(struct net *net)
 	int err;
 	struct ipv4_devconf *all, *dflt;
 #ifdef CONFIG_SYSCTL
-	struct ctl_table *tbl = ctl_forward_entry;
+	struct ctl_table *tbl;
 	struct ctl_table_header *forw_hdr;
 #endif
 
 	err = -ENOMEM;
-	all = &ipv4_devconf;
-	dflt = &ipv4_devconf_dflt;
+	all = kmemdup(&ipv4_devconf, sizeof(ipv4_devconf), GFP_KERNEL);
+	if (!all)
+		goto err_alloc_all;
 
-	if (!net_eq(net, &init_net)) {
-		all = kmemdup(all, sizeof(ipv4_devconf), GFP_KERNEL);
-		if (!all)
-			goto err_alloc_all;
-
-		dflt = kmemdup(dflt, sizeof(ipv4_devconf_dflt), GFP_KERNEL);
-		if (!dflt)
-			goto err_alloc_dflt;
+	dflt = kmemdup(&ipv4_devconf_dflt, sizeof(ipv4_devconf_dflt), GFP_KERNEL);
+	if (!dflt)
+		goto err_alloc_dflt;
 
 #ifdef CONFIG_SYSCTL
-		tbl = kmemdup(tbl, sizeof(ctl_forward_entry), GFP_KERNEL);
-		if (!tbl)
-			goto err_alloc_ctl;
+	tbl = kmemdup(ctl_forward_entry, sizeof(ctl_forward_entry), GFP_KERNEL);
+	if (!tbl)
+		goto err_alloc_ctl;
 
-		tbl[0].data = &all->data[IPV4_DEVCONF_FORWARDING - 1];
-		tbl[0].extra1 = all;
-		tbl[0].extra2 = net;
+	tbl[0].data = &all->data[IPV4_DEVCONF_FORWARDING - 1];
+	tbl[0].extra1 = all;
+	tbl[0].extra2 = net;
 #endif
+
+	if ((!IS_ENABLED(CONFIG_SYSCTL) ||
+	     sysctl_devconf_inherit_init_net != 2) &&
+	    !net_eq(net, &init_net)) {
+		memcpy(all, init_net.ipv4.devconf_all, sizeof(ipv4_devconf));
+		memcpy(dflt, init_net.ipv4.devconf_dflt, sizeof(ipv4_devconf_dflt));
 	}
 
 #ifdef CONFIG_SYSCTL
@@ -2682,15 +2704,12 @@ err_reg_ctl:
 err_reg_dflt:
 	__devinet_sysctl_unregister(net, all, NETCONFA_IFINDEX_ALL);
 err_reg_all:
-	if (tbl != ctl_forward_entry)
-		kfree(tbl);
+	kfree(tbl);
 err_alloc_ctl:
 #endif
-	if (dflt != &ipv4_devconf_dflt)
-		kfree(dflt);
+	kfree(dflt);
 err_alloc_dflt:
-	if (all != &ipv4_devconf)
-		kfree(all);
+	kfree(all);
 err_alloc_all:
 	return err;
 }
@@ -2728,8 +2747,6 @@ static struct rtnl_af_ops inet_af_ops __read_mostly = {
 void __init devinet_init(void)
 {
 	int i;
-
-	BUILD_BUG_ON(__IPV4_DEVCONF_MAX > RH_KABI_IPV4_DEVCONF_STORAGE);
 
 	for (i = 0; i < IN4_ADDR_HSIZE; i++)
 		INIT_HLIST_HEAD(&inet_addr_lst[i]);

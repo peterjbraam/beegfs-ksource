@@ -128,14 +128,17 @@ module_param_named(netns_mode, ib_devices_shared_netns, bool, 0444);
 MODULE_PARM_DESC(netns_mode,
 		 "Share device among net namespaces; default=1 (shared)");
 /**
- * rdma_dev_access_netns() - Return whether an rdma device can be accessed
+ * rdma_dev_access_netns() - Return whether a rdma device can be accessed
  *			     from a specified net namespace or not.
- * @dev:	Pointer to rdma device which needs to be checked
+ * @device:	Pointer to rdma device which needs to be checked
  * @net:	Pointer to net namesapce for which access to be checked
  *
- * When the rdma device is in shared mode, it ignores the net namespace.
- * When the rdma device is exclusive to a net namespace, rdma device net
- * namespace is checked against the specified one.
+ * rdma_dev_access_netns() - Return whether a rdma device can be accessed
+ *			     from a specified net namespace or not. When
+ *			     rdma device is in shared mode, it ignores the
+ *			     net namespace. When rdma device is exclusive
+ *			     to a net namespace, rdma device net namespace is
+ *			     checked against the specified one.
  */
 bool rdma_dev_access_netns(const struct ib_device *dev, const struct net *net)
 {
@@ -587,7 +590,7 @@ struct ib_device *_ib_alloc_device(size_t size)
 	rdma_init_coredev(&device->coredev, device, &init_net);
 
 	INIT_LIST_HEAD(&device->event_handler_list);
-	spin_lock_init(&device->qp_open_list_lock);
+	spin_lock_init(&device->event_handler_lock);
 	init_rwsem(&device->event_handler_rwsem);
 	mutex_init(&device->unregistration_lock);
 	/*
@@ -1327,11 +1330,13 @@ out:
 	return ret;
 }
 
+static void prevent_dealloc_device(struct ib_device *ib_dev)
+{
+}
+
 /**
  * ib_register_device - Register an IB device with IB core
- * @device: Device to register
- * @name: unique string device name. This may include a '%' which will
- * cause a unique index to be added to the passed device name.
+ * @device:Device to register
  *
  * Low-level drivers use ib_register_device() to register their
  * devices with the IB core.  All registered clients will receive a
@@ -1396,11 +1401,11 @@ int ib_register_device(struct ib_device *device, const char *name)
 		 * possibility for a parallel unregistration along with this
 		 * error flow. Since we have a refcount here we know any
 		 * parallel flow is stopped in disable_device and will see the
-		 * NULL pointers, causing the responsibility to
+		 * special dealloc_driver pointer, causing the responsibility to
 		 * ib_dealloc_device() to revert back to this thread.
 		 */
 		dealloc_fn = device->ops.dealloc_driver;
-		device->ops.dealloc_driver = NULL;
+		device->ops.dealloc_driver = prevent_dealloc_device;
 		ib_device_put(device);
 		__ib_unregister_device(device);
 		device->ops.dealloc_driver = dealloc_fn;
@@ -1448,7 +1453,8 @@ static void __ib_unregister_device(struct ib_device *ib_dev)
 	 * Drivers using the new flow may not call ib_dealloc_device except
 	 * in error unwind prior to registration success.
 	 */
-	if (ib_dev->ops.dealloc_driver) {
+	if (ib_dev->ops.dealloc_driver &&
+	    ib_dev->ops.dealloc_driver != prevent_dealloc_device) {
 		WARN_ON(kref_read(&ib_dev->dev.kobj.kref) <= 1);
 		ib_dealloc_device(ib_dev);
 	}
@@ -1458,7 +1464,7 @@ out:
 
 /**
  * ib_unregister_device - Unregister an IB device
- * @ib_dev: The device to unregister
+ * @device: The device to unregister
  *
  * Unregister an IB device.  All clients will receive a remove callback.
  *
@@ -1480,7 +1486,7 @@ EXPORT_SYMBOL(ib_unregister_device);
 
 /**
  * ib_unregister_device_and_put - Unregister a device while holding a 'get'
- * @ib_dev: The device to unregister
+ * device: The device to unregister
  *
  * This is the same as ib_unregister_device(), except it includes an internal
  * ib_device_put() that should match a 'get' obtained by the caller.
@@ -1550,7 +1556,7 @@ static void ib_unregister_work(struct work_struct *work)
 
 /**
  * ib_unregister_device_queued - Unregister a device using a work queue
- * @ib_dev: The device to unregister
+ * device: The device to unregister
  *
  * This schedules an asynchronous unregistration using a WQ for the device. A
  * driver should use this to avoid holding locks while doing unregistration,
@@ -1979,6 +1985,7 @@ static int iw_query_port(struct ib_device *device,
 {
 	struct in_device *inetdev;
 	struct net_device *netdev;
+	int err;
 
 	memset(port_attr, 0, sizeof(*port_attr));
 
@@ -2009,7 +2016,11 @@ static int iw_query_port(struct ib_device *device,
 	}
 
 	dev_put(netdev);
-	return device->ops.query_port(device, port_num, port_attr);
+	err = device->ops.query_port(device, port_num, port_attr);
+	if (err)
+		return err;
+
+	return 0;
 }
 
 static int __ib_query_port(struct ib_device *device,
@@ -2361,7 +2372,7 @@ int ib_modify_device(struct ib_device *device,
 		     struct ib_device_modify *device_modify)
 {
 	if (!device->ops.modify_device)
-		return -EOPNOTSUPP;
+		return -ENOSYS;
 
 	return device->ops.modify_device(device, device_modify_mask,
 					 device_modify);
@@ -2606,7 +2617,6 @@ void ib_set_device_ops(struct ib_device *dev, const struct ib_device_ops *ops)
 	SET_DEVICE_OP(dev_ops, drain_sq);
 	SET_DEVICE_OP(dev_ops, enable_driver);
 	SET_DEVICE_OP(dev_ops, fill_res_entry);
-	SET_DEVICE_OP(dev_ops, fill_stat_entry);
 	SET_DEVICE_OP(dev_ops, get_dev_fw_str);
 	SET_DEVICE_OP(dev_ops, get_dma_mr);
 	SET_DEVICE_OP(dev_ops, get_hw_stats);
@@ -2615,7 +2625,6 @@ void ib_set_device_ops(struct ib_device *dev, const struct ib_device_ops *ops)
 	SET_DEVICE_OP(dev_ops, get_port_immutable);
 	SET_DEVICE_OP(dev_ops, get_vector_affinity);
 	SET_DEVICE_OP(dev_ops, get_vf_config);
-	SET_DEVICE_OP(dev_ops, get_vf_guid);
 	SET_DEVICE_OP(dev_ops, get_vf_stats);
 	SET_DEVICE_OP(dev_ops, init_port);
 	SET_DEVICE_OP(dev_ops, invalidate_range);
@@ -2738,7 +2747,7 @@ static int __init ib_core_init(void)
 		goto err_mad;
 	}
 
-	ret = register_lsm_notifier(&ibdev_lsm_nb);
+	ret = register_blocking_lsm_notifier(&ibdev_lsm_nb);
 	if (ret) {
 		pr_warn("Couldn't register LSM notifier. ret %d\n", ret);
 		goto err_sa;
@@ -2757,7 +2766,7 @@ static int __init ib_core_init(void)
 	return 0;
 
 err_compat:
-	unregister_lsm_notifier(&ibdev_lsm_nb);
+	unregister_blocking_lsm_notifier(&ibdev_lsm_nb);
 err_sa:
 	ib_sa_cleanup();
 err_mad:
@@ -2781,7 +2790,7 @@ static void __exit ib_core_cleanup(void)
 	nldev_exit();
 	rdma_nl_unregister(RDMA_NL_LS);
 	unregister_pernet_device(&rdma_dev_net_ops);
-	unregister_lsm_notifier(&ibdev_lsm_nb);
+	unregister_blocking_lsm_notifier(&ibdev_lsm_nb);
 	ib_sa_cleanup();
 	ib_mad_cleanup();
 	addr_cleanup();

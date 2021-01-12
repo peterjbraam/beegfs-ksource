@@ -2,9 +2,7 @@
 #ifndef _BPF_CGROUP_H
 #define _BPF_CGROUP_H
 
-#include <linux/rh_kabi.h>
-
-#include RH_KABI_HIDE_INCLUDE(<linux/bpf.h>)
+#include <linux/bpf.h>
 #include <linux/errno.h>
 #include <linux/jump_label.h>
 #include <linux/percpu.h>
@@ -38,7 +36,7 @@ struct bpf_cgroup_storage_map;
 
 struct bpf_storage_buffer {
 	struct rcu_head rcu;
-	char data[];
+	char data[0];
 };
 
 struct bpf_cgroup_storage {
@@ -53,95 +51,51 @@ struct bpf_cgroup_storage {
 	struct rcu_head rcu;
 };
 
-struct bpf_cgroup_link {
-	struct bpf_link link;
-	struct cgroup *cgroup;
-	enum bpf_attach_type type;
-};
-
-extern const struct bpf_link_ops bpf_cgroup_link_lops;
-
 struct bpf_prog_list {
 	struct list_head node;
 	struct bpf_prog *prog;
-	struct bpf_cgroup_link *link;
 	struct bpf_cgroup_storage *storage[MAX_BPF_CGROUP_STORAGE_TYPE];
 };
 
 struct bpf_prog_array;
 
-#define RH_MAX_BPF_ATTACH_TYPE	64
-
 struct cgroup_bpf {
-	/* RHEL kABI: Beware, this struct is embedded in struct cgroup,
-	 * which in turn is embedded in struct cgroup_root. Any changes here
-	 * need to be done with a great caution. We grew the size of the
-	 * struct once but should not do that again. */
-
 	/* array of effective progs in this cgroup */
-	RH_KABI_BROKEN_REPLACE(
-		struct bpf_prog_array __rcu *effective[MAX_BPF_ATTACH_TYPE],
-		struct bpf_prog_array __rcu *effective[RH_MAX_BPF_ATTACH_TYPE]
-	)
+	struct bpf_prog_array __rcu *effective[MAX_BPF_ATTACH_TYPE];
 
 	/* attached progs to this cgroup and attach flags
 	 * when flags == 0 or BPF_F_ALLOW_OVERRIDE the progs list will
 	 * have either zero or one element
 	 * when BPF_F_ALLOW_MULTI the list can have up to BPF_CGROUP_MAX_PROGS
 	 */
-	RH_KABI_BROKEN_REPLACE(
-		struct list_head progs[MAX_BPF_ATTACH_TYPE],
-		struct list_head progs[RH_MAX_BPF_ATTACH_TYPE]
-	)
-	RH_KABI_BROKEN_REPLACE(
-		u32 flags[MAX_BPF_ATTACH_TYPE],
-		u32 flags[RH_MAX_BPF_ATTACH_TYPE]
-	)
+	struct list_head progs[MAX_BPF_ATTACH_TYPE];
+	u32 flags[MAX_BPF_ATTACH_TYPE];
 
 	/* temp storage for effective prog array used by prog_attach/detach */
 	struct bpf_prog_array *inactive;
 
-	RH_KABI_EXTEND(struct percpu_ref refcnt)
-	RH_KABI_EXTEND(struct work_struct release_work)
+	/* reference counter used to detach bpf programs after cgroup removal */
+	struct percpu_ref refcnt;
 
-	RH_KABI_EXTEND(unsigned long rh_reserved1)
-	RH_KABI_EXTEND(unsigned long rh_reserved2)
-	RH_KABI_EXTEND(unsigned long rh_reserved3)
-	RH_KABI_EXTEND(unsigned long rh_reserved4)
-	RH_KABI_EXTEND(unsigned long rh_reserved5)
-	RH_KABI_EXTEND(unsigned long rh_reserved6)
-	RH_KABI_EXTEND(unsigned long rh_reserved7)
-	RH_KABI_EXTEND(unsigned long rh_reserved8)
-	RH_KABI_EXTEND(unsigned long rh_reserved9)
-	RH_KABI_EXTEND(unsigned long rh_reserved10)
-	RH_KABI_EXTEND(unsigned long rh_reserved11)
-	RH_KABI_EXTEND(unsigned long rh_reserved12)
-	RH_KABI_EXTEND(unsigned long rh_reserved13)
-	RH_KABI_EXTEND(unsigned long rh_reserved14)
-	RH_KABI_EXTEND(unsigned long rh_reserved15)
-	RH_KABI_EXTEND(unsigned long rh_reserved16)
+	/* cgroup_bpf is released using a work queue */
+	struct work_struct release_work;
 };
 
 int cgroup_bpf_inherit(struct cgroup *cgrp);
 void cgroup_bpf_offline(struct cgroup *cgrp);
 
-int __cgroup_bpf_attach(struct cgroup *cgrp,
-			struct bpf_prog *prog, struct bpf_prog *replace_prog,
-			struct bpf_cgroup_link *link,
+int __cgroup_bpf_attach(struct cgroup *cgrp, struct bpf_prog *prog,
 			enum bpf_attach_type type, u32 flags);
 int __cgroup_bpf_detach(struct cgroup *cgrp, struct bpf_prog *prog,
-			struct bpf_cgroup_link *link,
 			enum bpf_attach_type type);
 int __cgroup_bpf_query(struct cgroup *cgrp, const union bpf_attr *attr,
 		       union bpf_attr __user *uattr);
 
 /* Wrapper for __cgroup_bpf_*() protected by cgroup_mutex */
-int cgroup_bpf_attach(struct cgroup *cgrp,
-		      struct bpf_prog *prog, struct bpf_prog *replace_prog,
-		      struct bpf_cgroup_link *link, enum bpf_attach_type type,
-		      u32 flags);
+int cgroup_bpf_attach(struct cgroup *cgrp, struct bpf_prog *prog,
+		      enum bpf_attach_type type, u32 flags);
 int cgroup_bpf_detach(struct cgroup *cgrp, struct bpf_prog *prog,
-		      enum bpf_attach_type type);
+		      enum bpf_attach_type type, u32 flags);
 int cgroup_bpf_query(struct cgroup *cgrp, const union bpf_attr *attr,
 		     union bpf_attr __user *uattr);
 
@@ -203,8 +157,8 @@ void bpf_cgroup_storage_link(struct bpf_cgroup_storage *storage,
 			     struct cgroup *cgroup,
 			     enum bpf_attach_type type);
 void bpf_cgroup_storage_unlink(struct bpf_cgroup_storage *storage);
-int bpf_cgroup_storage_assign(struct bpf_prog_aux *aux, struct bpf_map *map);
-void bpf_cgroup_storage_release(struct bpf_prog_aux *aux, struct bpf_map *map);
+int bpf_cgroup_storage_assign(struct bpf_prog *prog, struct bpf_map *map);
+void bpf_cgroup_storage_release(struct bpf_prog *prog, struct bpf_map *map);
 
 int bpf_percpu_cgroup_storage_copy(struct bpf_map *map, void *key, void *value);
 int bpf_percpu_cgroup_storage_update(struct bpf_map *map, void *key,
@@ -376,7 +330,6 @@ int cgroup_bpf_prog_attach(const union bpf_attr *attr,
 			   enum bpf_prog_type ptype, struct bpf_prog *prog);
 int cgroup_bpf_prog_detach(const union bpf_attr *attr,
 			   enum bpf_prog_type ptype);
-int cgroup_bpf_link_attach(const union bpf_attr *attr, struct bpf_prog *prog);
 int cgroup_bpf_prog_query(const union bpf_attr *attr,
 			  union bpf_attr __user *uattr);
 #else
@@ -399,12 +352,6 @@ static inline int cgroup_bpf_prog_detach(const union bpf_attr *attr,
 	return -EINVAL;
 }
 
-static inline int cgroup_bpf_link_attach(const union bpf_attr *attr,
-					 struct bpf_prog *prog)
-{
-	return -EINVAL;
-}
-
 static inline int cgroup_bpf_prog_query(const union bpf_attr *attr,
 					union bpf_attr __user *uattr)
 {
@@ -413,9 +360,9 @@ static inline int cgroup_bpf_prog_query(const union bpf_attr *attr,
 
 static inline void bpf_cgroup_storage_set(
 	struct bpf_cgroup_storage *storage[MAX_BPF_CGROUP_STORAGE_TYPE]) {}
-static inline int bpf_cgroup_storage_assign(struct bpf_prog_aux *aux,
+static inline int bpf_cgroup_storage_assign(struct bpf_prog *prog,
 					    struct bpf_map *map) { return 0; }
-static inline void bpf_cgroup_storage_release(struct bpf_prog_aux *aux,
+static inline void bpf_cgroup_storage_release(struct bpf_prog *prog,
 					      struct bpf_map *map) {}
 static inline struct bpf_cgroup_storage *bpf_cgroup_storage_alloc(
 	struct bpf_prog *prog, enum bpf_cgroup_storage_type stype) { return NULL; }

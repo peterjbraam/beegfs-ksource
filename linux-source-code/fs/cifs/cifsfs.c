@@ -275,7 +275,7 @@ cifs_statfs(struct dentry *dentry, struct kstatfs *buf)
 	buf->f_ffree = 0;	/* unlimited */
 
 	if (server->ops->queryfs)
-		rc = server->ops->queryfs(xid, tcon, cifs_sb, buf);
+		rc = server->ops->queryfs(xid, tcon, buf);
 
 	free_xid(xid);
 	return 0;
@@ -354,16 +354,10 @@ cifs_alloc_inode(struct super_block *sb)
 	return &cifs_inode->vfs_inode;
 }
 
-static void cifs_i_callback(struct rcu_head *head)
-{
-	struct inode *inode = container_of(head, struct inode, i_rcu);
-	kmem_cache_free(cifs_inode_cachep, CIFS_I(inode));
-}
-
 static void
-cifs_destroy_inode(struct inode *inode)
+cifs_free_inode(struct inode *inode)
 {
-	call_rcu(&inode->i_rcu, cifs_i_callback);
+	kmem_cache_free(cifs_inode_cachep, CIFS_I(inode));
 }
 
 static void
@@ -626,10 +620,6 @@ cifs_show_options(struct seq_file *s, struct dentry *root)
 	/* convert actimeo and display it in seconds */
 	seq_printf(s, ",actimeo=%lu", cifs_sb->actimeo / HZ);
 
-	if (tcon->ses->chan_max > 1)
-		seq_printf(s, ",multichannel,max_channel=%zu",
-			   tcon->ses->chan_max);
-
 	return 0;
 }
 
@@ -696,7 +686,7 @@ static int cifs_drop_inode(struct inode *inode)
 static const struct super_operations cifs_super_ops = {
 	.statfs = cifs_statfs,
 	.alloc_inode = cifs_alloc_inode,
-	.destroy_inode = cifs_destroy_inode,
+	.free_inode = cifs_free_inode,
 	.drop_inode	= cifs_drop_inode,
 	.evict_inode	= cifs_evict_inode,
 /*	.delete_inode	= cifs_delete_inode,  */  /* Do not need above
@@ -742,6 +732,11 @@ cifs_get_root(struct smb_vol *vol, struct super_block *sb)
 		struct inode *dir = d_inode(dentry);
 		struct dentry *child;
 
+		if (!dir) {
+			dput(dentry);
+			dentry = ERR_PTR(-ENOENT);
+			break;
+		}
 		if (!S_ISDIR(dir->i_mode)) {
 			dput(dentry);
 			dentry = ERR_PTR(-ENOTDIR);
@@ -758,7 +753,7 @@ cifs_get_root(struct smb_vol *vol, struct super_block *sb)
 		while (*s && *s != sep)
 			s++;
 
-		child = lookup_positive_unlocked(p, dentry, s - p);
+		child = lookup_one_len_unlocked(p, dentry, s - p);
 		dput(dentry);
 		dentry = child;
 	} while (!IS_ERR(dentry));
@@ -1231,7 +1226,6 @@ const struct file_operations cifs_file_ops = {
 	.open = cifs_open,
 	.release = cifs_close,
 	.lock = cifs_lock,
-	.flock = cifs_flock,
 	.fsync = cifs_fsync,
 	.flush = cifs_flush,
 	.mmap  = cifs_file_mmap,
@@ -1251,7 +1245,6 @@ const struct file_operations cifs_file_strict_ops = {
 	.open = cifs_open,
 	.release = cifs_close,
 	.lock = cifs_lock,
-	.flock = cifs_flock,
 	.fsync = cifs_strict_fsync,
 	.flush = cifs_flush,
 	.mmap = cifs_file_strict_mmap,
@@ -1271,7 +1264,6 @@ const struct file_operations cifs_file_direct_ops = {
 	.open = cifs_open,
 	.release = cifs_close,
 	.lock = cifs_lock,
-	.flock = cifs_flock,
 	.fsync = cifs_fsync,
 	.flush = cifs_flush,
 	.mmap = cifs_file_mmap,
@@ -1688,18 +1680,17 @@ MODULE_DESCRIPTION
 	("VFS to access SMB3 servers e.g. Samba, Macs, Azure and Windows (and "
 	"also older servers complying with the SNIA CIFS Specification)");
 MODULE_VERSION(CIFS_VERSION);
-MODULE_SOFTDEP("pre: des");
-MODULE_SOFTDEP("ecb");
-MODULE_SOFTDEP("hmac");
-MODULE_SOFTDEP("md4");
-MODULE_SOFTDEP("md5");
-MODULE_SOFTDEP("nls");
-MODULE_SOFTDEP("aes");
-MODULE_SOFTDEP("cmac");
-MODULE_SOFTDEP("sha256");
-MODULE_SOFTDEP("sha512");
-MODULE_SOFTDEP("aead2");
-MODULE_SOFTDEP("ccm");
-MODULE_SOFTDEP("gcm");
+MODULE_SOFTDEP("pre: ecb");
+MODULE_SOFTDEP("pre: hmac");
+MODULE_SOFTDEP("pre: md4");
+MODULE_SOFTDEP("pre: md5");
+MODULE_SOFTDEP("pre: nls");
+MODULE_SOFTDEP("pre: aes");
+MODULE_SOFTDEP("pre: cmac");
+MODULE_SOFTDEP("pre: sha256");
+MODULE_SOFTDEP("pre: sha512");
+MODULE_SOFTDEP("pre: aead2");
+MODULE_SOFTDEP("pre: ccm");
+MODULE_SOFTDEP("pre: gcm");
 module_init(init_cifs)
 module_exit(exit_cifs)

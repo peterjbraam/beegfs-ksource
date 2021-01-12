@@ -6,6 +6,7 @@
  */
 
 #include <linux/module.h>
+#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <media/v4l2-event.h>
@@ -565,6 +566,7 @@ static int hva_qbuf(struct file *file, void *priv, struct v4l2_buffer *buf)
 		 */
 		struct vb2_queue *vq;
 		struct hva_stream *stream;
+		struct vb2_buffer *vb2_buf;
 
 		vq = v4l2_m2m_get_vq(ctx->fh.m2m_ctx, buf->type);
 
@@ -574,7 +576,8 @@ static int hva_qbuf(struct file *file, void *priv, struct v4l2_buffer *buf)
 			return -EINVAL;
 		}
 
-		stream = (struct hva_stream *)vq->bufs[buf->index];
+		vb2_buf = vb2_get_buffer(vq, buf->index);
+		stream = to_hva_stream(to_vb2_v4l2_buffer(vb2_buf));
 		stream->bytesused = buf->bytesused;
 	}
 

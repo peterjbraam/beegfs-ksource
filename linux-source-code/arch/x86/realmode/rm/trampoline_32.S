@@ -23,6 +23,7 @@
 #include <linux/linkage.h>
 #include <asm/segment.h>
 #include <asm/page_types.h>
+#include <asm/nospec-branch.h>
 #include "realmode.h"
 
 	.text
@@ -41,9 +42,6 @@ ENTRY(trampoline_start)
 
 	movl	tr_start, %eax	# where we need to go
 
-	movl	$0xA5A5A5A5, trampoline_status
-				# write marker for master knows we're running
-
 	/*
 	 * GDT tables in non default location kernel can be beyond 16MB and
 	 * lgdt will not be able to load the address as in real mode default
@@ -61,6 +59,7 @@ ENTRY(trampoline_start)
 	.section ".text32","ax"
 	.code32
 ENTRY(startup_32)			# note: also used from wakeup_asm.S
+	ANNOTATE_RETPOLINE_SAFE
 	jmp	*%eax
 
 	.bss

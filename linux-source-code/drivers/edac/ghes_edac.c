@@ -1,8 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * GHES/EDAC Linux driver
- *
- * This file may be distributed under the terms of the GNU General Public
- * License version 2.
  *
  * Copyright (c) 2013 by Mauro Carvalho Chehab
  *
@@ -79,7 +77,7 @@ struct memdev_dmi_entry {
 
 struct ghes_edac_dimm_fill {
 	struct mem_ctl_info *mci;
-	unsigned count;
+	unsigned int count;
 };
 
 static void ghes_edac_count_dimms(const struct dmi_header *dh, void *arg)
@@ -99,19 +97,6 @@ static int get_dimm_smbios_index(struct mem_ctl_info *mci, u16 handle)
 			return i;
 	}
 	return -1;
-}
-
-static void dimm_setup_label(struct dimm_info *dimm, u16 handle)
-{
-	const char *bank = NULL, *device = NULL;
-
-	dmi_memdev_name(handle, &bank, &device);
-
-	/* both strings must be non-zero */
-	if (bank && *bank && device && *device) {
-		snprintf(dimm->label, sizeof(dimm->label),
-			"%s %s", bank, device);
-	}
 }
 
 static void ghes_edac_dmidecode(const struct dmi_header *dh, void *arg)
@@ -196,7 +181,9 @@ static void ghes_edac_dmidecode(const struct dmi_header *dh, void *arg)
 		dimm->dtype = DEV_UNKNOWN;
 		dimm->grain = 128;		/* Likely, worse case */
 
-		dimm_setup_label(dimm, entry->handle);
+		/*
+		 * FIXME: It shouldn't be hard to also fill the DIMM labels
+		 */
 
 		if (dimm->nr_pages) {
 			edac_dbg(1, "DIMM%i: %s size = %d MB%s\n",
@@ -244,6 +231,8 @@ void ghes_edac_report_mem_error(int sev, struct cper_sec_mem_err *mem_err)
 	/* Cleans the error report buffer */
 	memset(e, 0, sizeof (*e));
 	e->error_count = 1;
+	e->grain = 1;
+	strcpy(e->label, "unknown label");
 	e->msg = pvt->msg;
 	e->other_detail = pvt->other_detail;
 	e->top_layer = -1;
@@ -338,7 +327,7 @@ void ghes_edac_report_mem_error(int sev, struct cper_sec_mem_err *mem_err)
 
 	/* Error grain */
 	if (mem_err->validation_bits & CPER_MEM_VALID_PA_MASK)
-		e->grain = ~(mem_err->physical_addr_mask & ~PAGE_MASK);
+		e->grain = ~mem_err->physical_addr_mask + 1;
 
 	/* Memory error location, mapped on e->location */
 	p = e->location;
@@ -369,22 +358,15 @@ void ghes_edac_report_mem_error(int sev, struct cper_sec_mem_err *mem_err)
 			p += sprintf(p, "DIMM DMI handle: 0x%.4x ",
 				     mem_err->mem_dev_handle);
 
-		/*
-		 * kabi compatibility: There is no dimm->idx, so keep
-		 * using get_dimm_smbios_index().
-		 */
 		index = get_dimm_smbios_index(mci, mem_err->mem_dev_handle);
 		if (index >= 0) {
 			e->top_layer = index;
 			e->enable_per_layer_report = true;
-			strcpy(e->label, mci->dimms[index]->label);
 		}
+
 	}
 	if (p > e->location)
 		*(p - 1) = '\0';
-
-	if (!*e->label)
-		strcpy(e->label, "unknown memory");
 
 	/* All other fields are mapped on e->other_detail */
 	p = pvt->other_detail;
@@ -461,8 +443,13 @@ void ghes_edac_report_mem_error(int sev, struct cper_sec_mem_err *mem_err)
 	if (p > pvt->other_detail)
 		*(p - 1) = '\0';
 
+	/* Sanity-check driver-supplied grain value. */
+	if (WARN_ON_ONCE(!e->grain))
+		e->grain = 1;
+
+	grain_bits = fls_long(e->grain - 1);
+
 	/* Generate the trace event */
-	grain_bits = fls_long(e->grain);
 	snprintf(pvt->detail_location, sizeof(pvt->detail_location),
 		 "APEI location: %s %s", e->location, e->other_detail);
 	trace_mc_event(type, e->msg, e->label, e->error_count,
@@ -501,6 +488,7 @@ int ghes_edac_register(struct ghes *ghes, struct device *dev)
 		if (!force_load && idx < 0)
 			return -ENODEV;
 	} else {
+		force_load = true;
 		idx = 0;
 	}
 
@@ -598,6 +586,9 @@ void ghes_edac_unregister(struct ghes *ghes)
 {
 	struct mem_ctl_info *mci;
 	unsigned long flags;
+
+	if (!force_load)
+		return;
 
 	mutex_lock(&ghes_reg_mutex);
 

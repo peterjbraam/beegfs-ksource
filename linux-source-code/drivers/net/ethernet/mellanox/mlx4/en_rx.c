@@ -31,7 +31,6 @@
  *
  */
 
-#include <net/busy_poll.h>
 #include <linux/bpf.h>
 #include <linux/bpf_trace.h>
 #include <linux/mlx4/cq.h>
@@ -942,6 +941,9 @@ int mlx4_en_poll_rx_cq(struct napi_struct *napi, int budget)
 	struct mlx4_en_cq *xdp_tx_cq = NULL;
 	bool clean_complete = true;
 	int done;
+
+	if (!budget)
+		return 0;
 
 	if (priv->tx_ring_num[TX_XDP]) {
 		xdp_tx_cq = priv->tx_cq[TX_XDP][cq->ring];

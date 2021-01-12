@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * xfrm_device.c - IPsec device offloading code.
  *
@@ -5,11 +6,6 @@
  *
  * Author:
  * Steffen Klassert <steffen.klassert@secunet.com>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 
 #include <linux/errno.h>
@@ -48,55 +44,29 @@ static void __xfrm_mode_tunnel_prep(struct xfrm_state *x, struct sk_buff *skb,
 	pskb_pull(skb, skb->mac_len + x->props.header_len);
 }
 
-static void __xfrm_mode_beet_prep(struct xfrm_state *x, struct sk_buff *skb,
-				  unsigned int hsize)
-{
-	struct xfrm_offload *xo = xfrm_offload(skb);
-	int phlen = 0;
-
-	if (xo->flags & XFRM_GSO_SEGMENT)
-		skb->transport_header = skb->network_header + hsize;
-
-	skb_reset_mac_len(skb);
-	if (x->sel.family != AF_INET6) {
-		phlen = IPV4_BEET_PHMAXLEN;
-		if (x->outer_mode->family == AF_INET6)
-			phlen += sizeof(struct ipv6hdr) - sizeof(struct iphdr);
-	}
-
-	pskb_pull(skb, skb->mac_len + hsize + (x->props.header_len - phlen));
-}
-
 /* Adjust pointers into the packet when IPsec is done at layer2 */
 static void xfrm_outer_mode_prep(struct xfrm_state *x, struct sk_buff *skb)
 {
-	switch (x->outer_mode->encap) {
+	switch (x->outer_mode.encap) {
 	case XFRM_MODE_TUNNEL:
-		if (x->outer_mode->family == AF_INET)
+		if (x->outer_mode.family == AF_INET)
 			return __xfrm_mode_tunnel_prep(x, skb,
 						       sizeof(struct iphdr));
-		if (x->outer_mode->family == AF_INET6)
+		if (x->outer_mode.family == AF_INET6)
 			return __xfrm_mode_tunnel_prep(x, skb,
 						       sizeof(struct ipv6hdr));
 		break;
 	case XFRM_MODE_TRANSPORT:
-		if (x->outer_mode->family == AF_INET)
+		if (x->outer_mode.family == AF_INET)
 			return __xfrm_transport_prep(x, skb,
 						     sizeof(struct iphdr));
-		if (x->outer_mode->family == AF_INET6)
+		if (x->outer_mode.family == AF_INET6)
 			return __xfrm_transport_prep(x, skb,
-						     sizeof(struct ipv6hdr));
-		break;
-	case XFRM_MODE_BEET:
-		if (x->outer_mode->family == AF_INET)
-			return __xfrm_mode_beet_prep(x, skb,
-						     sizeof(struct iphdr));
-		if (x->outer_mode->family == AF_INET6)
-			return __xfrm_mode_beet_prep(x, skb,
 						     sizeof(struct ipv6hdr));
 		break;
 	case XFRM_MODE_ROUTEOPTIMIZATION:
 	case XFRM_MODE_IN_TRIGGER:
+	case XFRM_MODE_BEET:
 		break;
 	}
 }
@@ -106,10 +76,11 @@ struct sk_buff *validate_xmit_xfrm(struct sk_buff *skb, netdev_features_t featur
 	int err;
 	unsigned long flags;
 	struct xfrm_state *x;
+	struct sk_buff *skb2;
 	struct softnet_data *sd;
-	struct sk_buff *skb2, *pskb = NULL;
 	netdev_features_t esp_features = features;
 	struct xfrm_offload *xo = xfrm_offload(skb);
+	struct sec_path *sp;
 
 	if (!xo || (xo->flags & XFRM_XMIT))
 		return skb;
@@ -117,7 +88,8 @@ struct sk_buff *validate_xmit_xfrm(struct sk_buff *skb, netdev_features_t featur
 	if (!(features & NETIF_F_HW_ESP))
 		esp_features = features & ~(NETIF_F_SG | NETIF_F_CSUM_MASK);
 
-	x = skb->sp->xvec[skb->sp->len - 1];
+	sp = skb_sec_path(skb);
+	x = sp->xvec[sp->len - 1];
 	if (xo->flags & XFRM_GRO || x->xso.flags & XFRM_OFFLOAD_INBOUND)
 		return skb;
 
@@ -200,14 +172,14 @@ struct sk_buff *validate_xmit_xfrm(struct sk_buff *skb, netdev_features_t featur
 		} else {
 			if (skb == skb2)
 				skb = nskb;
-			else
-				pskb->next = nskb;
+
+			if (!skb)
+				return NULL;
 
 			goto skip_push;
 		}
 
 		skb_push(skb2, skb2->data - skb_mac_header(skb2));
-		pskb = skb2;
 
 skip_push:
 		skb2 = nskb;
@@ -299,9 +271,8 @@ bool xfrm_dev_offload_ok(struct sk_buff *skb, struct xfrm_state *x)
 		return false;
 
 	if ((!dev || (dev == xfrm_dst_path(dst)->dev)) &&
-	    (!xdst->child->xfrm && x->type->get_mtu)) {
-		mtu = x->type->get_mtu(x, xdst->child_mtu_cached);
-
+	    (!xdst->child->xfrm)) {
+		mtu = xfrm_state_mtu(x, xdst->child_mtu_cached);
 		if (skb->len <= mtu)
 			goto ok;
 
@@ -328,7 +299,7 @@ void xfrm_dev_resume(struct sk_buff *skb)
 	unsigned long flags;
 
 	rcu_read_lock();
-	txq = netdev_pick_tx(dev, skb, NULL);
+	txq = netdev_core_pick_tx(dev, skb, NULL);
 
 	HARD_TX_LOCK(dev, txq, smp_processor_id());
 	if (!netif_xmit_frozen_or_stopped(txq))

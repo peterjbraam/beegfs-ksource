@@ -11,6 +11,15 @@
 #include <asm/msr-index.h>
 
 /*
+ * This should be used immediately before a retpoline alternative. It tells
+ * objtool where the retpolines are so that it can make sense of the control
+ * flow by just reading the original instruction(s) and ignoring the
+ * alternatives.
+ */
+#define ANNOTATE_NOSPEC_ALTERNATIVE \
+	ANNOTATE_IGNORE_ALTERNATIVE
+
+/*
  * Fill the CPU return stack buffer.
  *
  * Each entry in the RSB, if used for a speculative 'ret', contains an
@@ -55,19 +64,6 @@
 	add	$(BITS_PER_LONG/8) * nr, sp;
 
 #ifdef __ASSEMBLY__
-
-/*
- * This should be used immediately before a retpoline alternative.  It tells
- * objtool where the retpolines are so that it can make sense of the control
- * flow by just reading the original instruction(s) and ignoring the
- * alternatives.
- */
-.macro ANNOTATE_NOSPEC_ALTERNATIVE
-	.Lannotate_\@:
-	.pushsection .discard.nospec
-	.long .Lannotate_\@ - .
-	.popsection
-.endm
 
 /*
  * This should be used immediately before an indirect jump/call. It tells
@@ -152,12 +148,6 @@
 
 #else /* __ASSEMBLY__ */
 
-#define ANNOTATE_NOSPEC_ALTERNATIVE				\
-	"999:\n\t"						\
-	".pushsection .discard.nospec\n\t"			\
-	".long 999b - .\n\t"					\
-	".popsection\n\t"
-
 #define ANNOTATE_RETPOLINE_SAFE					\
 	"999:\n\t"						\
 	".pushsection .discard.retpoline_safe\n\t"		\
@@ -202,7 +192,7 @@
 	"    	lfence;\n"					\
 	"       jmp    902b;\n"					\
 	"       .align 16\n"					\
-	"903:	addl   $4, %%esp;\n"				\
+	"903:	lea    4(%%esp), %%esp;\n"			\
 	"       pushl  %[thunk_target];\n"			\
 	"       ret;\n"						\
 	"       .align 16\n"					\
@@ -226,9 +216,6 @@ enum spectre_v2_mitigation {
 	SPECTRE_V2_RETPOLINE_GENERIC,
 	SPECTRE_V2_RETPOLINE_AMD,
 	SPECTRE_V2_IBRS_ENHANCED,
-	SPECTRE_V2_IBRS,
-	SPECTRE_V2_RETPOLINE_IBRS_USER,
-	SPECTRE_V2_IBRS_ALWAYS,
 };
 
 /* The indirect branch speculation control variants */
@@ -250,6 +237,27 @@ enum ssb_mitigation {
 
 extern char __indirect_thunk_start[];
 extern char __indirect_thunk_end[];
+
+/*
+ * On VMEXIT we must ensure that no RSB predictions learned in the guest
+ * can be followed in the host, by overwriting the RSB completely. Both
+ * retpoline and IBRS mitigations for Spectre v2 need this; only on future
+ * CPUs with IBRS_ALL *might* it be avoided.
+ */
+static inline void vmexit_fill_RSB(void)
+{
+#ifdef CONFIG_RETPOLINE
+	unsigned long loops;
+
+	asm volatile (ANNOTATE_NOSPEC_ALTERNATIVE
+		      ALTERNATIVE("jmp 910f",
+				  __stringify(__FILL_RETURN_BUFFER(%0, RSB_CLEAR_LOOPS, %1)),
+				  X86_FEATURE_RETPOLINE)
+		      "910:"
+		      : "=r" (loops), ASM_CALL_CONSTRAINT
+		      : : "memory" );
+#endif
+}
 
 static __always_inline
 void alternative_msr_write(unsigned int msr, u64 val, unsigned int feature)

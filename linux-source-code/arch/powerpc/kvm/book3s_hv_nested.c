@@ -398,7 +398,7 @@ static void kvmhv_flush_lpid(unsigned int lpid)
 	long rc;
 
 	if (!kvmhv_on_pseries()) {
-		radix__flush_tlb_lpid(lpid);
+		radix__flush_all_lpid(lpid);
 		return;
 	}
 
@@ -411,7 +411,7 @@ static void kvmhv_flush_lpid(unsigned int lpid)
 void kvmhv_set_ptbl_entry(unsigned int lpid, u64 dw0, u64 dw1)
 {
 	if (!kvmhv_on_pseries()) {
-		mmu_partition_table_set_entry(lpid, dw0, dw1);
+		mmu_partition_table_set_entry(lpid, dw0, dw1, true);
 		return;
 	}
 
@@ -750,23 +750,6 @@ static struct kvm_nested_guest *kvmhv_find_nested(struct kvm *kvm, int lpid)
 	return kvm->arch.nested_guests[lpid];
 }
 
-pte_t *find_kvm_nested_guest_pte(struct kvm *kvm, unsigned long lpid,
-				 unsigned long ea, unsigned *hshift)
-{
-	struct kvm_nested_guest *gp;
-	pte_t *pte;
-
-	gp = kvmhv_find_nested(kvm, lpid);
-	if (!gp)
-		return NULL;
-
-	VM_WARN(!spin_is_locked(&kvm->mmu_lock),
-		"%s called with kvm mmu_lock not held \n", __func__);
-	pte = __find_linux_pte(gp->shadow_pgtable, ea, NULL, hshift);
-
-	return pte;
-}
-
 static inline bool kvmhv_n_rmap_is_equal(u64 rmap_1, u64 rmap_2)
 {
 	return !((rmap_1 ^ rmap_2) & (RMAP_NESTED_LPID_MASK |
@@ -809,15 +792,19 @@ static void kvmhv_update_nest_rmap_rc(struct kvm *kvm, u64 n_rmap,
 				      unsigned long clr, unsigned long set,
 				      unsigned long hpa, unsigned long mask)
 {
+	struct kvm_nested_guest *gp;
 	unsigned long gpa;
 	unsigned int shift, lpid;
 	pte_t *ptep;
 
 	gpa = n_rmap & RMAP_NESTED_GPA_MASK;
 	lpid = (n_rmap & RMAP_NESTED_LPID_MASK) >> RMAP_NESTED_LPID_SHIFT;
+	gp = kvmhv_find_nested(kvm, lpid);
+	if (!gp)
+		return;
 
 	/* Find the pte */
-	ptep = find_kvm_nested_guest_pte(kvm, lpid, gpa, &shift);
+	ptep = __find_linux_pte(gp->shadow_pgtable, gpa, NULL, &shift);
 	/*
 	 * If the pte is present and the pfn is still the same, update the pte.
 	 * If the pfn has changed then this is a stale rmap entry, the nested
@@ -867,7 +854,7 @@ static void kvmhv_remove_nest_rmap(struct kvm *kvm, u64 n_rmap,
 		return;
 
 	/* Find and invalidate the pte */
-	ptep = find_kvm_nested_guest_pte(kvm, lpid, gpa, &shift);
+	ptep = __find_linux_pte(gp->shadow_pgtable, gpa, NULL, &shift);
 	/* Don't spuriously invalidate ptes if the pfn has changed */
 	if (ptep && pte_present(*ptep) && ((pte_val(*ptep) & mask) == hpa))
 		kvmppc_unmap_pte(kvm, ptep, gpa, shift, NULL, gp->shadow_lpid);
@@ -934,7 +921,7 @@ static bool kvmhv_invalidate_shadow_pte(struct kvm_vcpu *vcpu,
 	int shift;
 
 	spin_lock(&kvm->mmu_lock);
-	ptep = find_kvm_nested_guest_pte(kvm, gp->l1_lpid, gpa, &shift);
+	ptep = __find_linux_pte(gp->shadow_pgtable, gpa, NULL, &shift);
 	if (!shift)
 		shift = PAGE_SHIFT;
 	if (ptep && pte_present(*ptep)) {
@@ -1199,7 +1186,7 @@ static int kvmhv_translate_addr_nested(struct kvm_vcpu *vcpu,
 forward_to_l1:
 	vcpu->arch.fault_dsisr = flags;
 	if (vcpu->arch.trap == BOOK3S_INTERRUPT_H_INST_STORAGE) {
-		vcpu->arch.shregs.msr &= SRR1_MSR_BITS;
+		vcpu->arch.shregs.msr &= ~0x783f0000ul;
 		vcpu->arch.shregs.msr |= flags;
 	}
 	return RESUME_HOST;
@@ -1225,16 +1212,16 @@ static long kvmhv_handle_nested_set_rc(struct kvm_vcpu *vcpu,
 
 	spin_lock(&kvm->mmu_lock);
 	/* Set the rc bit in the pte of our (L0) pgtable for the L1 guest */
-	ret = kvmppc_hv_handle_set_rc(kvm, false, writing,
-				      gpte.raddr, kvm->arch.lpid);
+	ret = kvmppc_hv_handle_set_rc(kvm, kvm->arch.pgtable, writing,
+				     gpte.raddr, kvm->arch.lpid);
 	if (!ret) {
 		ret = -EINVAL;
 		goto out_unlock;
 	}
 
 	/* Set the rc bit in the pte of the shadow_pgtable for the nest guest */
-	ret = kvmppc_hv_handle_set_rc(kvm, true, writing,
-				      n_gpa, gp->l1_lpid);
+	ret = kvmppc_hv_handle_set_rc(kvm, gp->shadow_pgtable, writing, n_gpa,
+				      gp->shadow_lpid);
 	if (!ret)
 		ret = -EINVAL;
 	else
@@ -1375,7 +1362,7 @@ static long int __kvmhv_nested_page_fault(struct kvm_run *run,
 	/* See if can find translation in our partition scoped tables for L1 */
 	pte = __pte(0);
 	spin_lock(&kvm->mmu_lock);
-	pte_p = find_kvm_secondary_pte(kvm, gpa, &shift);
+	pte_p = __find_linux_pte(kvm->arch.pgtable, gpa, NULL, &shift);
 	if (!shift)
 		shift = PAGE_SHIFT;
 	if (pte_p)

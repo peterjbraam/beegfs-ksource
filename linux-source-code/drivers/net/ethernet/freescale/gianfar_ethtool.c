@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  drivers/net/ethernet/freescale/gianfar_ethtool.c
  *
@@ -10,10 +11,6 @@
  *  Modifier: Sandeep Gopalpet <sandeep.kumar@freescale.com>
  *
  *  Copyright 2003-2006, 2008-2009, 2011 Freescale Semiconductor, Inc.
- *
- *  This software may be used and distributed according to
- *  the terms of the GNU Public License, Version 2, incorporated herein
- *  by reference.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -48,19 +45,6 @@
 
 #define GFAR_MAX_COAL_USECS 0xffff
 #define GFAR_MAX_COAL_FRAMES 0xff
-static void gfar_fill_stats(struct net_device *dev, struct ethtool_stats *dummy,
-			    u64 *buf);
-static void gfar_gstrings(struct net_device *dev, u32 stringset, u8 * buf);
-static int gfar_gcoalesce(struct net_device *dev,
-			  struct ethtool_coalesce *cvals);
-static int gfar_scoalesce(struct net_device *dev,
-			  struct ethtool_coalesce *cvals);
-static void gfar_gringparam(struct net_device *dev,
-			    struct ethtool_ringparam *rvals);
-static int gfar_sringparam(struct net_device *dev,
-			   struct ethtool_ringparam *rvals);
-static void gfar_gdrvinfo(struct net_device *dev,
-			  struct ethtool_drvinfo *drvinfo);
 
 static const char stat_gstrings[][ETH_GSTRING_LEN] = {
 	/* extra stats */
@@ -230,7 +214,7 @@ static unsigned int gfar_usecs2ticks(struct gfar_private *priv,
 
 	/* Make sure we return a number greater than 0
 	 * if usecs > 0 */
-	return (usecs * 1000 + count - 1) / count;
+	return DIV_ROUND_UP(usecs * 1000, count);
 }
 
 /* Convert ethernet clock ticks to microseconds */
@@ -719,7 +703,6 @@ static void ethflow_to_filer_rules (struct gfar_private *priv, u64 ethflow)
 static int gfar_ethflow_to_filer_table(struct gfar_private *priv, u64 ethflow,
 				       u64 class)
 {
-	unsigned int last_rule_idx = priv->cur_filer_idx;
 	unsigned int cmp_rqfpr;
 	unsigned int *local_rqfpr;
 	unsigned int *local_rqfcr;
@@ -798,7 +781,6 @@ static int gfar_ethflow_to_filer_table(struct gfar_private *priv, u64 ethflow,
 	}
 
 	priv->cur_filer_idx = l - 1;
-	last_rule_idx = l;
 
 	/* hash rules */
 	ethflow_to_filer_rules(priv, ethflow);
@@ -1136,11 +1118,9 @@ static int gfar_convert_to_filer(struct ethtool_rx_flow_spec *rule,
 		prio = vlan_tci_prio(rule);
 		prio_mask = vlan_tci_priom(rule);
 
-		if (cfi == VLAN_TAG_PRESENT && cfi_mask == VLAN_TAG_PRESENT) {
-			vlan |= RQFPR_CFI;
-			vlan_mask |= RQFPR_CFI;
-		} else if (cfi != VLAN_TAG_PRESENT &&
-			   cfi_mask == VLAN_TAG_PRESENT) {
+		if (cfi_mask) {
+			if (cfi)
+				vlan |= RQFPR_CFI;
 			vlan_mask |= RQFPR_CFI;
 		}
 	}
@@ -1496,7 +1476,7 @@ static int gfar_get_ts_info(struct net_device *dev,
 	struct gfar_private *priv = netdev_priv(dev);
 	struct platform_device *ptp_dev;
 	struct device_node *ptp_node;
-	struct qoriq_ptp *ptp = NULL;
+	struct ptp_qoriq *ptp = NULL;
 
 	info->phc_index = -1;
 

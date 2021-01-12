@@ -32,7 +32,7 @@
 
 #define SETFL_MASK (O_APPEND | O_NONBLOCK | O_NDELAY | O_DIRECT | O_NOATIME)
 
-static int setfl(int fd, struct file * filp, unsigned long arg)
+int setfl(int fd, struct file *filp, unsigned long arg)
 {
 	struct inode * inode = file_inode(filp);
 	int error = 0;
@@ -63,6 +63,8 @@ static int setfl(int fd, struct file * filp, unsigned long arg)
 
 	if (filp->f_op->check_flags)
 		error = filp->f_op->check_flags(arg);
+	if (!error && filp->f_op->setfl)
+		error = filp->f_op->setfl(filp, arg);
 	if (error)
 		return error;
 
@@ -83,6 +85,7 @@ static int setfl(int fd, struct file * filp, unsigned long arg)
  out:
 	return error;
 }
+EXPORT_SYMBOL_GPL(setfl);
 
 static void f_modown(struct file *filp, struct pid *pid, enum pid_type type,
                      int force)
@@ -261,7 +264,7 @@ static int f_getowner_uids(struct file *filp, unsigned long arg)
 static bool rw_hint_valid(enum rw_hint hint)
 {
 	switch (hint) {
-	case RWH_WRITE_LIFE_NOT_SET:
+	case RWF_WRITE_LIFE_NOT_SET:
 	case RWH_WRITE_LIFE_NONE:
 	case RWH_WRITE_LIFE_SHORT:
 	case RWH_WRITE_LIFE_MEDIUM:
@@ -788,7 +791,7 @@ void send_sigio(struct fown_struct *fown, int fd, int band)
 	if (!pid)
 		goto out_unlock_fown;
 
-	if ((type == PIDTYPE_PID) || (type == PIDTYPE_TGID)) {
+	if (type <= PIDTYPE_TGID) {
 		rcu_read_lock();
 		p = pid_task(pid, PIDTYPE_PID);
 		if (p)
@@ -828,7 +831,7 @@ int send_sigurg(struct fown_struct *fown)
 
 	ret = 1;
 
-	if ((type == PIDTYPE_PID) || (type == PIDTYPE_TGID)) {
+	if (type <= PIDTYPE_TGID) {
 		rcu_read_lock();
 		p = pid_task(pid, PIDTYPE_PID);
 		if (p)

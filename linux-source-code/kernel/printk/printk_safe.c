@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+/*
+ * printk_safe.c - Safe printk for printk-deadlock-prone contexts
+ */
 
 #include <linux/preempt.h>
 #include <linux/spinlock.h>

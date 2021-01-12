@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  64-bit pSeries and RS/6000 setup code.
  *
@@ -5,11 +6,6 @@
  *  Adapted from 'alpha' version by Gary Thomas
  *  Modified by Cort Dougan (cort@cs.nmt.edu)
  *  Modified by PPC64 Team, IBM Corp
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 
 /*
@@ -71,7 +67,7 @@
 #include <asm/kexec.h>
 #include <asm/isa-bridge.h>
 #include <asm/security_features.h>
-#include <asm/idle.h>
+#include <asm/asm-const.h>
 #include <asm/swiotlb.h>
 #include <asm/svm.h>
 
@@ -136,20 +132,32 @@ static void __init fwnmi_init(void)
 	 * It will be used in real mode mce handler, hence it needs to be
 	 * below RMA.
 	 */
-	mce_data_buf = __va(memblock_alloc_base(RTAS_ERROR_LOG_MAX * nr_cpus,
-					RTAS_ERROR_LOG_MAX, ppc64_rma_size));
+	mce_data_buf = memblock_alloc_try_nid_raw(RTAS_ERROR_LOG_MAX * nr_cpus,
+					RTAS_ERROR_LOG_MAX, MEMBLOCK_LOW_LIMIT,
+					ppc64_rma_size, NUMA_NO_NODE);
+	if (!mce_data_buf)
+		panic("Failed to allocate %d bytes below %pa for MCE buffer\n",
+		      RTAS_ERROR_LOG_MAX * nr_cpus, &ppc64_rma_size);
+
 	for_each_possible_cpu(i) {
 		paca_ptrs[i]->mce_data_buf = mce_data_buf +
 						(RTAS_ERROR_LOG_MAX * i);
 	}
 
 #ifdef CONFIG_PPC_BOOK3S_64
-	/* Allocate per cpu slb area to save old slb contents during MCE */
-	size = sizeof(struct slb_entry) * mmu_slb_size * nr_cpus;
-	slb_ptr = __va(memblock_alloc_base(size, sizeof(struct slb_entry),
-					   ppc64_rma_size));
-	for_each_possible_cpu(i)
-		paca_ptrs[i]->mce_faulty_slbs = slb_ptr + (mmu_slb_size * i);
+	if (!radix_enabled()) {
+		/* Allocate per cpu area to save old slb contents during MCE */
+		size = sizeof(struct slb_entry) * mmu_slb_size * nr_cpus;
+		slb_ptr = memblock_alloc_try_nid_raw(size,
+				sizeof(struct slb_entry), MEMBLOCK_LOW_LIMIT,
+				ppc64_rma_size, NUMA_NO_NODE);
+		if (!slb_ptr)
+			panic("Failed to allocate %zu bytes below %pa for slb area\n",
+			      size, &ppc64_rma_size);
+
+		for_each_possible_cpu(i)
+			paca_ptrs[i]->mce_faulty_slbs = slb_ptr + (mmu_slb_size * i);
+	}
 #endif
 }
 
@@ -196,7 +204,7 @@ static void __init pseries_setup_i8259_cascade(void)
 		of_node_put(old);
 		if (np == NULL)
 			break;
-		if (strcmp(np->name, "pci") != 0)
+		if (!of_node_name_eq(np, "pci"))
 			continue;
 		addrp = of_get_property(np, "8259-interrupt-acknowledge", NULL);
 		if (addrp == NULL)
@@ -309,9 +317,6 @@ static int alloc_dispatch_log_kmem_cache(void)
 }
 machine_early_initcall(pseries, alloc_dispatch_log_kmem_cache);
 
-DEFINE_PER_CPU(u64, idle_spurr_cycles);
-DEFINE_PER_CPU(u64, idle_entry_purr_snap);
-DEFINE_PER_CPU(u64, idle_entry_spurr_snap);
 static void pseries_lpar_idle(void)
 {
 	/*
@@ -323,7 +328,7 @@ static void pseries_lpar_idle(void)
 		return;
 
 	/* Indicate to hypervisor that we are idle. */
-	pseries_idle_prolog();
+	get_lppaca()->idle = 1;
 
 	/*
 	 * Yield the processor to the hypervisor.  We return if
@@ -334,7 +339,7 @@ static void pseries_lpar_idle(void)
 	 */
 	cede_processor();
 
-	pseries_idle_epilog();
+	get_lppaca()->idle = 0;
 }
 
 /*
@@ -453,8 +458,8 @@ static void __init find_and_init_phbs(void)
 	struct device_node *root = of_find_node_by_path("/");
 
 	for_each_child_of_node(root, node) {
-		if (node->type == NULL || (strcmp(node->type, "pci") != 0 &&
-					   strcmp(node->type, "pciex") != 0))
+		if (!of_node_is_type(node, "pci") &&
+		    !of_node_is_type(node, "pciex"))
 			continue;
 
 		phb = pcibios_alloc_controller(node);
@@ -556,6 +561,14 @@ void pseries_setup_rfi_flush(void)
 
 	setup_rfi_flush(types, enable);
 	setup_count_cache_flush();
+
+	enable = security_ftr_enabled(SEC_FTR_FAVOUR_SECURITY) &&
+		 security_ftr_enabled(SEC_FTR_L1D_FLUSH_ENTRY);
+	setup_entry_flush(enable);
+
+	enable = security_ftr_enabled(SEC_FTR_FAVOUR_SECURITY) &&
+		 security_ftr_enabled(SEC_FTR_L1D_FLUSH_UACCESS);
+	setup_uaccess_flush(enable);
 }
 
 #ifdef CONFIG_PCI_IOV
@@ -742,6 +755,7 @@ static void __init pSeries_setup_arch(void)
 
 	pseries_setup_rfi_flush();
 	setup_stf_barrier();
+	pseries_lpar_read_hblkrm_characteristics();
 
 	/* By default, only probe PCI (can be overridden by rtas_pci) */
 	pci_add_flags(PCI_PROBE_ONLY);
@@ -969,11 +983,7 @@ static void pseries_power_off(void)
 
 static int __init pSeries_probe(void)
 {
-	const char *dtype = of_get_property(of_root, "device_type", NULL);
-
- 	if (dtype == NULL)
- 		return 0;
- 	if (strcmp(dtype, "chrp"))
+	if (!of_node_is_type(of_root, "chrp"))
 		return 0;
 
 	/* Cell blades firmware claims to be chrp while it's not. Until this

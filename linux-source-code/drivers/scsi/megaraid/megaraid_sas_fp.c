@@ -1,22 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Linux MegaRAID driver for SAS based RAID controllers
  *
  *  Copyright (c) 2009-2013  LSI Corporation
  *  Copyright (c) 2013-2016  Avago Technologies
  *  Copyright (c) 2016-2018  Broadcom Inc.
- *
- *  This program is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU General Public License
- *  as published by the Free Software Foundation; either version 2
- *  of the License, or (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
  *  FILE: megaraid_sas_fp.c
  *
@@ -97,7 +85,7 @@ u32 mega_mod64(u64 dividend, u32 divisor)
  *
  * @return quotient
  **/
-static u64 mega_div64_32(uint64_t dividend, uint32_t divisor)
+u64 mega_div64_32(uint64_t dividend, uint32_t divisor)
 {
 	u32 remainder;
 	u64 d;
@@ -379,7 +367,7 @@ u8 MR_ValidateMapInfo(struct megasas_instance *instance, u64 map_id)
 	return 1;
 }
 
-static u32 MR_GetSpanBlock(u32 ld, u64 row, u64 *span_blk,
+u32 MR_GetSpanBlock(u32 ld, u64 row, u64 *span_blk,
 		    struct MR_DRV_RAID_MAP_ALL *map)
 {
 	struct MR_SPAN_BLOCK_INFO *pSpanBlock = MR_LdSpanInfoGet(ld, map);
@@ -429,7 +417,7 @@ static u32 MR_GetSpanBlock(u32 ld, u64 row, u64 *span_blk,
 *    div_error	   - Devide error code.
 */
 
-static u32 mr_spanset_get_span_block(struct megasas_instance *instance,
+u32 mr_spanset_get_span_block(struct megasas_instance *instance,
 		u32 ld, u64 row, u64 *span_blk, struct MR_DRV_RAID_MAP_ALL *map)
 {
 	struct fusion_context *fusion = instance->ctrl_context;
@@ -654,7 +642,7 @@ static u32 get_arm_from_strip(struct megasas_instance *instance,
 }
 
 /* This Function will return Phys arm */
-static u8 get_arm(struct megasas_instance *instance, u32 ld, u8 span, u64 stripe,
+u8 get_arm(struct megasas_instance *instance, u32 ld, u8 span, u64 stripe,
 		struct MR_DRV_RAID_MAP_ALL *map)
 {
 	struct MR_LD_RAID  *raid = MR_LdRaidGet(ld, map);
@@ -797,7 +785,7 @@ static u8 mr_spanset_get_phy_params(struct megasas_instance *instance, u32 ld,
 *    span          - Span number
 *    block         - Absolute Block number in the physical disk
 */
-static u8 MR_GetPhyParams(struct megasas_instance *instance, u32 ld, u64 stripRow,
+u8 MR_GetPhyParams(struct megasas_instance *instance, u32 ld, u64 stripRow,
 		u16 stripRef, struct IO_REQUEST_INFO *io_info,
 		struct RAID_CONTEXT *pRAID_Context,
 		struct MR_DRV_RAID_MAP_ALL *map)
@@ -1354,7 +1342,7 @@ void mr_update_load_balance_params(struct MR_DRV_RAID_MAP_ALL *drv_map,
 	}
 }
 
-static u8 megasas_get_best_arm_pd(struct megasas_instance *instance,
+u8 megasas_get_best_arm_pd(struct megasas_instance *instance,
 			   struct LD_LOAD_BALANCE_INFO *lbInfo,
 			   struct IO_REQUEST_INFO *io_info,
 			   struct MR_DRV_RAID_MAP_ALL *drv_map)

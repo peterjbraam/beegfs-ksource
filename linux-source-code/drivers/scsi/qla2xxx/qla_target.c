@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  qla_target.c SCSI LLD infrastructure for QLogic 22xx/23xx/24xx/25xx
  *
@@ -11,16 +12,6 @@
  *  Forward port and refactoring to modern qla2xxx and target/configfs
  *
  *  Copyright (C) 2010-2013 Nicholas A. Bellinger <nab@kernel.org>
- *
- *  This program is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU General Public License
- *  as published by the Free Software Foundation, version 2
- *  of the License.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- *  GNU General Public License for more details.
  */
 
 #include <linux/module.h>
@@ -605,8 +596,7 @@ static void qla2x00_async_nack_sp_done(srb_t *sp, int res)
 			spin_lock_irqsave(&vha->hw->tgt.sess_lock, flags);
 		} else {
 			sp->fcport->login_retry = 0;
-			qla2x00_set_fcport_disc_state(sp->fcport,
-			    DSC_LOGIN_COMPLETE);
+			sp->fcport->disc_state = DSC_LOGIN_COMPLETE;
 			sp->fcport->deleted = 0;
 			sp->fcport->logout_on_delete = 1;
 		}
@@ -976,7 +966,7 @@ void qlt_free_session_done(struct work_struct *work)
 		sess->send_els_logo);
 
 	if (!IS_SW_RESV_ADDR(sess->d_id)) {
-		qla2x00_mark_device_lost(vha, sess, 0);
+		qla2x00_mark_device_lost(vha, sess, 0, 0);
 
 		if (sess->send_els_logo) {
 			qlt_port_logo_t logo;
@@ -1066,7 +1056,7 @@ void qlt_free_session_done(struct work_struct *work)
 			tgt->sess_count--;
 	}
 
-	qla2x00_set_fcport_disc_state(sess, DSC_DELETED);
+	sess->disc_state = DSC_DELETED;
 	sess->fw_login_state = DSC_LS_PORT_UNAVAIL;
 	sess->deleted = QLA_SESS_DELETED;
 
@@ -1176,7 +1166,7 @@ void qlt_unreg_sess(struct fc_port *sess)
 		vha->hw->tgt.tgt_ops->clear_nacl_from_fcport_map(sess);
 
 	sess->deleted = QLA_SESS_DELETION_IN_PROGRESS;
-	qla2x00_set_fcport_disc_state(sess, DSC_DELETE_PEND);
+	sess->disc_state = DSC_DELETE_PEND;
 	sess->last_rscn_gen = sess->rscn_gen;
 	sess->last_login_gen = sess->login_gen;
 
@@ -1240,14 +1230,15 @@ void qlt_schedule_sess_for_deletion(struct fc_port *sess)
 	case DSC_DELETE_PEND:
 		return;
 	case DSC_DELETED:
-		if (tgt && tgt->tgt_stop && (tgt->sess_count == 0))
-			wake_up_all(&tgt->waitQ);
-		if (sess->vha->fcport_count == 0)
-			wake_up_all(&sess->vha->fcport_waitQ);
-
 		if (!sess->plogi_link[QLT_PLOGI_LINK_SAME_WWN] &&
-			!sess->plogi_link[QLT_PLOGI_LINK_CONFLICT])
+			!sess->plogi_link[QLT_PLOGI_LINK_CONFLICT]) {
+			if (tgt && tgt->tgt_stop && tgt->sess_count == 0)
+				wake_up_all(&tgt->waitQ);
+
+			if (sess->vha->fcport_count == 0)
+				wake_up_all(&sess->vha->fcport_waitQ);
 			return;
+		}
 		break;
 	case DSC_UPD_FCPORT:
 		/*
@@ -1277,7 +1268,7 @@ void qlt_schedule_sess_for_deletion(struct fc_port *sess)
 	spin_unlock_irqrestore(&sess->vha->work_lock, flags);
 
 	sess->prli_pend_timer = 0;
-	qla2x00_set_fcport_disc_state(sess, DSC_DELETE_PEND);
+	sess->disc_state = DSC_DELETE_PEND;
 
 	qla24xx_chk_fcp_state(sess);
 
@@ -3466,13 +3457,13 @@ qlt_handle_dif_error(struct qla_qpair *qpair, struct qla_tgt_cmd *cmd,
 
 	cmd->trc_flags |= TRC_DIF_ERR;
 
-	cmd->a_guard   = get_unaligned_be16(ap + 0);
-	cmd->a_app_tag = get_unaligned_be16(ap + 2);
-	cmd->a_ref_tag = get_unaligned_be32(ap + 4);
+	cmd->a_guard   = be16_to_cpu(*(uint16_t *)(ap + 0));
+	cmd->a_app_tag = be16_to_cpu(*(uint16_t *)(ap + 2));
+	cmd->a_ref_tag = be32_to_cpu(*(uint32_t *)(ap + 4));
 
-	cmd->e_guard   = get_unaligned_be16(ep + 0);
-	cmd->e_app_tag = get_unaligned_be16(ep + 2);
-	cmd->e_ref_tag = get_unaligned_be32(ep + 4);
+	cmd->e_guard   = be16_to_cpu(*(uint16_t *)(ep + 0));
+	cmd->e_app_tag = be16_to_cpu(*(uint16_t *)(ep + 2));
+	cmd->e_ref_tag = be32_to_cpu(*(uint32_t *)(ep + 4));
 
 	ql_dbg(ql_dbg_tgt_dif, vha, 0xf075,
 	    "%s: aborted %d state %d\n", __func__, cmd->aborted, cmd->state);
@@ -4756,11 +4747,11 @@ static int qlt_handle_login(struct scsi_qla_host *vha,
 			qla24xx_post_newsess_work(vha, &port_id,
 			    iocb->u.isp24.port_name,
 			    iocb->u.isp24.u.plogi.node_name,
-			    pla, 0);
+			    pla, FC4_TYPE_UNKNOWN);
 		else
 			qla24xx_post_newsess_work(vha, &port_id,
 			    iocb->u.isp24.port_name, NULL,
-			    pla, 0);
+			    pla, FC4_TYPE_UNKNOWN);
 
 		goto out;
 	}
@@ -5687,7 +5678,7 @@ static int qlt_chk_unresolv_exchg(struct scsi_qla_host *vha,
 		/* found existing exchange */
 		qpair->retry_term_cnt++;
 		if (qpair->retry_term_cnt >= 5) {
-			rc = EIO;
+			rc = -EIO;
 			qpair->retry_term_cnt = 0;
 			ql_log(ql_log_warn, vha, 0xffff,
 			    "Unable to send ABTS Respond. Dumping firmware.\n");
@@ -6073,7 +6064,7 @@ static fc_port_t *qlt_get_port_database(struct scsi_qla_host *vha,
 		if (!IS_SW_RESV_ADDR(fcport->d_id))
 		   vha->fcport_count++;
 		fcport->login_gen++;
-		qla2x00_set_fcport_disc_state(fcport, DSC_LOGIN_COMPLETE);
+		fcport->disc_state = DSC_LOGIN_COMPLETE;
 		fcport->login_succ = 1;
 		newfcport = 1;
 	}

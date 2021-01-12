@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Testsuite for eBPF maps
  *
  * Copyright (c) 2014 PLUMgrid, http://plumgrid.com
  * Copyright (c) 2016 Facebook
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of version 2 of the GNU General Public
- * License as published by the Free Software Foundation.
  */
 
 #include <stdio.h>
@@ -759,7 +756,11 @@ static void test_sockmap(unsigned int tasks, void *data)
 	/* Test update without programs */
 	for (i = 0; i < 6; i++) {
 		err = bpf_map_update_elem(fd, &i, &sfd[i], BPF_ANY);
-		if (err) {
+		if (i < 2 && !err) {
+			printf("Allowed update sockmap '%i:%i' not in ESTABLISHED\n",
+			       i, sfd[i]);
+			goto out_sockmap;
+		} else if (i >= 2 && err) {
 			printf("Failed noprog update sockmap '%i:%i'\n",
 			       i, sfd[i]);
 			goto out_sockmap;
@@ -792,19 +793,19 @@ static void test_sockmap(unsigned int tasks, void *data)
 	}
 
 	err = bpf_prog_detach(fd, BPF_SK_SKB_STREAM_PARSER);
-	if (err) {
+	if (!err) {
 		printf("Failed empty parser prog detach\n");
 		goto out_sockmap;
 	}
 
 	err = bpf_prog_detach(fd, BPF_SK_SKB_STREAM_VERDICT);
-	if (err) {
+	if (!err) {
 		printf("Failed empty verdict prog detach\n");
 		goto out_sockmap;
 	}
 
 	err = bpf_prog_detach(fd, BPF_SK_MSG_VERDICT);
-	if (err) {
+	if (!err) {
 		printf("Failed empty msg verdict prog detach\n");
 		goto out_sockmap;
 	}
@@ -1093,19 +1094,19 @@ static void test_sockmap(unsigned int tasks, void *data)
 		assert(status == 0);
 	}
 
-	err = bpf_prog_detach(map_fd_rx, __MAX_BPF_ATTACH_TYPE);
+	err = bpf_prog_detach2(parse_prog, map_fd_rx, __MAX_BPF_ATTACH_TYPE);
 	if (!err) {
 		printf("Detached an invalid prog type.\n");
 		goto out_sockmap;
 	}
 
-	err = bpf_prog_detach(map_fd_rx, BPF_SK_SKB_STREAM_PARSER);
+	err = bpf_prog_detach2(parse_prog, map_fd_rx, BPF_SK_SKB_STREAM_PARSER);
 	if (err) {
 		printf("Failed parser prog detach\n");
 		goto out_sockmap;
 	}
 
-	err = bpf_prog_detach(map_fd_rx, BPF_SK_SKB_STREAM_VERDICT);
+	err = bpf_prog_detach2(verdict_prog, map_fd_rx, BPF_SK_SKB_STREAM_VERDICT);
 	if (err) {
 		printf("Failed parser prog detach\n");
 		goto out_sockmap;
@@ -1141,6 +1142,7 @@ out_sockmap:
 #define MAPINMAP_PROG "./test_map_in_map.o"
 static void test_map_in_map(void)
 {
+	struct bpf_program *prog;
 	struct bpf_object *obj;
 	struct bpf_map *map;
 	int mim_fd, fd, err;
@@ -1177,6 +1179,9 @@ static void test_map_in_map(void)
 		goto out_map_in_map;
 	}
 
+	bpf_object__for_each_program(prog, obj) {
+		bpf_program__set_xdp(prog);
+	}
 	bpf_object__load(obj);
 
 	map = bpf_object__find_map_by_name(obj, "mim_array");
@@ -1276,6 +1281,8 @@ static void __run_parallel(unsigned int tasks,
 {
 	pid_t pid[tasks];
 	int i;
+
+	fflush(stdout);
 
 	for (i = 0; i < tasks; i++) {
 		pid[i] = fork();
@@ -1712,9 +1719,9 @@ static void run_all_tests(void)
 	test_map_in_map();
 }
 
-#define DEFINE_TEST(name) extern void test_##name(void);
+#define DECLARE
 #include <map_tests/tests.h>
-#undef DEFINE_TEST
+#undef DECLARE
 
 int main(void)
 {
@@ -1726,9 +1733,9 @@ int main(void)
 	map_flags = BPF_F_NO_PREALLOC;
 	run_all_tests();
 
-#define DEFINE_TEST(name) test_##name();
+#define CALL
 #include <map_tests/tests.h>
-#undef DEFINE_TEST
+#undef CALL
 
 	printf("test_maps: OK, %d SKIPPED\n", skips);
 	return 0;

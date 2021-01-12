@@ -51,7 +51,6 @@
 #include <asm/traps.h>
 #include <asm/desc.h>
 #include <asm/fpu/internal.h>
-#include <asm/cpu.h>
 #include <asm/cpu_entry_area.h>
 #include <asm/mce.h>
 #include <asm/fixmap.h>
@@ -205,7 +204,7 @@ do_trap_no_signal(struct task_struct *tsk, int trapnr, const char *str,
 				return 0;
 		}
 	} else if (!user_mode(regs)) {
-		if (fixup_exception(regs, trapnr))
+		if (fixup_exception(regs, trapnr, error_code, 0))
 			return 0;
 
 		tsk->thread.error_code = error_code;
@@ -248,15 +247,16 @@ do_trap(int trapnr, int signr, char *str, struct pt_regs *regs,
 {
 	struct task_struct *tsk = current;
 
+
 	if (!do_trap_no_signal(tsk, trapnr, str, regs, error_code))
 		return;
 
 	show_signal(tsk, signr, "trap ", str, regs, error_code);
 
 	if (!sicode)
-		force_sig(signr, tsk);
+		force_sig(signr);
 	else
-		force_sig_fault(signr, sicode, addr, tsk);
+		force_sig_fault(signr, sicode, addr);
 }
 NOKPROBE_SYMBOL(do_trap);
 
@@ -293,30 +293,8 @@ DO_ERROR(X86_TRAP_OLD_MF, SIGFPE,           0, NULL, "coprocessor segment overru
 DO_ERROR(X86_TRAP_TS,     SIGSEGV,          0, NULL, "invalid TSS",         invalid_TSS)
 DO_ERROR(X86_TRAP_NP,     SIGBUS,           0, NULL, "segment not present", segment_not_present)
 DO_ERROR(X86_TRAP_SS,     SIGBUS,           0, NULL, "stack segment",       stack_segment)
+DO_ERROR(X86_TRAP_AC,     SIGBUS,  BUS_ADRALN, NULL, "alignment check",     alignment_check)
 #undef IP
-
-dotraplinkage void do_alignment_check(struct pt_regs *regs, long error_code)
-{
-	char *str = "alignment check";
-
-	RCU_LOCKDEP_WARN(!rcu_is_watching(), "entry code didn't wake RCU");
-
-	if (notify_die(DIE_TRAP, str, regs, error_code, X86_TRAP_AC, SIGBUS) == NOTIFY_STOP)
-		return;
-
-	local_irq_enable();
-
-	if (!user_mode(regs)) {
-		handle_kernel_split_lock(regs, error_code);
-		return;
-	}
-
-	if (handle_user_split_lock(regs, error_code))
-		return;
-
-	do_trap(X86_TRAP_AC, SIGBUS, "alignment check", regs,
-		error_code, BUS_ADRALN, NULL);
-}
 
 #ifdef CONFIG_VMAP_STACK
 __visible void __noreturn handle_stack_overflow(const char *message,
@@ -329,19 +307,16 @@ __visible void __noreturn handle_stack_overflow(const char *message,
 	die(message, regs, 0);
 
 	/* Be absolutely certain we don't return. */
-	panic(message);
+	panic("%s", message);
 }
 #endif
 
 #ifdef CONFIG_X86_64
 /* Runs on IST stack */
-dotraplinkage void do_double_fault(struct pt_regs *regs, long error_code)
+dotraplinkage void do_double_fault(struct pt_regs *regs, long error_code, unsigned long cr2)
 {
 	static const char str[] = "double fault";
 	struct task_struct *tsk = current;
-#ifdef CONFIG_VMAP_STACK
-	unsigned long cr2;
-#endif
 
 #ifdef CONFIG_X86_ESPFIX64
 	extern unsigned char native_irq_return_iret[];
@@ -437,7 +412,6 @@ dotraplinkage void do_double_fault(struct pt_regs *regs, long error_code)
 	 * stack even if the actual trigger for the double fault was
 	 * something else.
 	 */
-	cr2 = read_cr2();
 	if ((unsigned long)task_stack_page(tsk) - 1 - cr2 < PAGE_SIZE)
 		handle_stack_overflow("kernel stack overflow (double-fault)", regs, cr2);
 #endif
@@ -562,11 +536,21 @@ do_general_protection(struct pt_regs *regs, long error_code)
 
 	tsk = current;
 	if (!user_mode(regs)) {
-		if (fixup_exception(regs, X86_TRAP_GP))
+		if (fixup_exception(regs, X86_TRAP_GP, error_code, 0))
 			return;
 
 		tsk->thread.error_code = error_code;
 		tsk->thread.trap_nr = X86_TRAP_GP;
+
+		/*
+		 * To be potentially processing a kprobe fault and to
+		 * trust the result from kprobe_running(), we have to
+		 * be non-preemptible.
+		 */
+		if (!preemptible() && kprobe_running() &&
+		    kprobe_fault_handler(regs, X86_TRAP_GP))
+			return;
+
 		if (notify_die(DIE_GPF, desc, regs, error_code,
 			       X86_TRAP_GP, SIGSEGV) != NOTIFY_STOP)
 			die(desc, regs, error_code);
@@ -578,7 +562,7 @@ do_general_protection(struct pt_regs *regs, long error_code)
 
 	show_signal(tsk, SIGSEGV, "", desc, regs, error_code);
 
-	force_sig(SIGSEGV, tsk);
+	force_sig(SIGSEGV);
 }
 NOKPROBE_SYMBOL(do_general_protection);
 
@@ -817,7 +801,7 @@ dotraplinkage void do_debug(struct pt_regs *regs, long error_code)
 	}
 	si_code = get_si_code(tsk->thread.debugreg6);
 	if (tsk->thread.debugreg6 & (DR_STEP | DR_TRAP_BITS) || user_icebp)
-		send_sigtrap(tsk, regs, error_code, si_code);
+		send_sigtrap(regs, error_code, si_code);
 	cond_local_irq_disable(regs);
 	debug_stack_usage_dec();
 
@@ -842,7 +826,7 @@ static void math_error(struct pt_regs *regs, int error_code, int trapnr)
 	cond_local_irq_enable(regs);
 
 	if (!user_mode(regs)) {
-		if (fixup_exception(regs, trapnr))
+		if (fixup_exception(regs, trapnr, error_code, 0))
 			return;
 
 		task->thread.error_code = error_code;
@@ -868,7 +852,7 @@ static void math_error(struct pt_regs *regs, int error_code, int trapnr)
 		return;
 
 	force_sig_fault(SIGFPE, si_code,
-			(void __user *)uprobe_get_trap_addr(regs), task);
+			(void __user *)uprobe_get_trap_addr(regs));
 }
 
 dotraplinkage void do_coprocessor_error(struct pt_regs *regs, long error_code)
@@ -893,12 +877,12 @@ do_spurious_interrupt_bug(struct pt_regs *regs, long error_code)
 dotraplinkage void
 do_device_not_available(struct pt_regs *regs, long error_code)
 {
-	unsigned long cr0;
+	unsigned long cr0 = read_cr0();
 
 	RCU_LOCKDEP_WARN(!rcu_is_watching(), "entry code didn't wake RCU");
 
 #ifdef CONFIG_MATH_EMULATION
-	if (!boot_cpu_has(X86_FEATURE_FPU) && (read_cr0() & X86_CR0_EM)) {
+	if (!boot_cpu_has(X86_FEATURE_FPU) && (cr0 & X86_CR0_EM)) {
 		struct math_emu_info info = { };
 
 		cond_local_irq_enable(regs);
@@ -910,7 +894,6 @@ do_device_not_available(struct pt_regs *regs, long error_code)
 #endif
 
 	/* This should not happen. */
-	cr0 = read_cr0();
 	if (WARN(cr0 & X86_CR0_TS, "CR0.TS was set")) {
 		/* Try to fix it up and carry on. */
 		write_cr0(cr0 & ~X86_CR0_TS);

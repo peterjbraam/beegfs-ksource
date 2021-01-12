@@ -15,6 +15,7 @@
 #include <linux/printk.h>
 #include <linux/build_bug.h>
 #include <asm/byteorder.h>
+#include <asm/div64.h>
 #include <uapi/linux/kernel.h>
 #include <asm/div64.h>
 
@@ -47,8 +48,8 @@
 
 #define u64_to_user_ptr(x) (		\
 {					\
-	typecheck(u64, x);		\
-	(void __user *)(uintptr_t)x;	\
+	typecheck(u64, (x));		\
+	(void __user *)(uintptr_t)(x);	\
 }					\
 )
 
@@ -59,7 +60,23 @@
  * arguments just once each.
  */
 #define __round_mask(x, y) ((__typeof__(x))((y)-1))
+/**
+ * round_up - round up to next specified power of 2
+ * @x: the value to round
+ * @y: multiple to round up to (must be a power of 2)
+ *
+ * Rounds @x up to next multiple of @y (which must be a power of 2).
+ * To perform arbitrary rounding up, use roundup() below.
+ */
 #define round_up(x, y) ((((x)-1) | __round_mask(x, y))+1)
+/**
+ * round_down - round down to next specified power of 2
+ * @x: the value to round
+ * @y: multiple to round down to (must be a power of 2)
+ *
+ * Rounds @x down to next multiple of @y (which must be a power of 2).
+ * To perform arbitrary rounding down, use rounddown() below.
+ */
 #define round_down(x, y) ((x) & ~__round_mask(x, y))
 
 /**
@@ -71,12 +88,15 @@
  */
 #define FIELD_SIZEOF(t, f) (sizeof(((t*)0)->f))
 
+#define typeof_member(T, m)	typeof(((T*)0)->m)
+
 #define DIV_ROUND_UP __KERNEL_DIV_ROUND_UP
 
 #define DIV_ROUND_DOWN_ULL(ll, d) \
 	({ unsigned long long _tmp = (ll); do_div(_tmp, d); _tmp; })
 
-#define DIV_ROUND_UP_ULL(ll, d)		DIV_ROUND_DOWN_ULL((ll) + (d) - 1, (d))
+#define DIV_ROUND_UP_ULL(ll, d) \
+	DIV_ROUND_DOWN_ULL((unsigned long long)(ll) + (d) - 1, (d))
 
 #if BITS_PER_LONG == 32
 # define DIV_ROUND_UP_SECTOR_T(ll,d) DIV_ROUND_UP_ULL(ll, d)
@@ -84,13 +104,28 @@
 # define DIV_ROUND_UP_SECTOR_T(ll,d) DIV_ROUND_UP(ll,d)
 #endif
 
-/* The `const' in roundup() prevents gcc-3.3 from calling __divdi3 */
+/**
+ * roundup - round up to the next specified multiple
+ * @x: the value to up
+ * @y: multiple to round up to
+ *
+ * Rounds @x up to next multiple of @y. If @y will always be a power
+ * of 2, consider using the faster round_up().
+ */
 #define roundup(x, y) (					\
 {							\
-	const typeof(y) __y = y;			\
+	typeof(y) __y = y;				\
 	(((x) + (__y - 1)) / __y) * __y;		\
 }							\
 )
+/**
+ * rounddown - round down to next specified multiple
+ * @x: the value to round
+ * @y: multiple to round down to
+ *
+ * Rounds @x down to next multiple of @y. If @y will always be a power
+ * of 2, consider using the faster round_down().
+ */
 #define rounddown(x, y) (				\
 {							\
 	typeof(x) __x = (x);				\
@@ -144,7 +179,7 @@
 #define _RET_IP_		(unsigned long)__builtin_return_address(0)
 #define _THIS_IP_  ({ __label__ __here; __here: (unsigned long)&&__here; })
 
-# define sector_div(a, b) do_div(a, b)
+#define sector_div(a, b) do_div(a, b)
 
 /**
  * upper_32_bits - return bits 32-63 of a number
@@ -182,7 +217,9 @@ extern void __cant_sleep(const char *file, int line, int preempt_offset);
  * might_sleep - annotation for functions that can sleep
  *
  * this macro will print a stack trace if it is executed in an atomic
- * context (spinlock, irq-handler, ...).
+ * context (spinlock, irq-handler, ...). Additional sections where blocking is
+ * not allowed can be annotated with non_block_start() and non_block_end()
+ * pairs.
  *
  * This is a useful debugging help to be able to catch problems early and not
  * be bitten later when the calling function happens to sleep when it is not
@@ -198,6 +235,23 @@ extern void __cant_sleep(const char *file, int line, int preempt_offset);
 # define cant_sleep() \
 	do { __cant_sleep(__FILE__, __LINE__, 0); } while (0)
 # define sched_annotate_sleep()	(current->task_state_change = 0)
+/**
+ * non_block_start - annotate the start of section where sleeping is prohibited
+ *
+ * This is on behalf of the oom reaper, specifically when it is calling the mmu
+ * notifiers. The problem is that if the notifier were to block on, for example,
+ * mutex_lock() and if the process which holds that mutex were to perform a
+ * sleeping memory allocation, the oom reaper is now blocked on completion of
+ * that memory allocation. Other blocking calls like wait_event() pose similar
+ * issues.
+ */
+# define non_block_start() (current->non_block_count++)
+/**
+ * non_block_end - annotate the end of section where sleeping is prohibited
+ *
+ * Closes a section opened by non_block_start().
+ */
+# define non_block_end() WARN_ON(current->non_block_count-- == 0)
 #else
   static inline void ___might_sleep(const char *file, int line,
 				   int preempt_offset) { }
@@ -206,16 +260,11 @@ extern void __cant_sleep(const char *file, int line, int preempt_offset);
 # define might_sleep() do { might_resched(); } while (0)
 # define cant_sleep() do { } while (0)
 # define sched_annotate_sleep() do { } while (0)
+# define non_block_start() do { } while (0)
+# define non_block_end() do { } while (0)
 #endif
 
 #define might_sleep_if(cond) do { if (cond) might_sleep(); } while (0)
-
-#ifndef CONFIG_PREEMPT_RT
-# define cant_migrate()		cant_sleep()
-#else
-  /* Placeholder for now */
-# define cant_migrate()		do { } while (0)
-#endif
 
 /**
  * abs - return absolute value of an argument
@@ -284,38 +333,6 @@ void refcount_error_report(struct pt_regs *regs, const char *err);
 #else
 static inline void refcount_error_report(struct pt_regs *regs, const char *err)
 { }
-#endif
-
-#ifdef CONFIG_LOCK_DOWN_KERNEL
-extern void __init init_lockdown(void);
-extern bool __kernel_is_locked_down(const char *what, bool first);
-
-#ifndef CONFIG_LOCK_DOWN_MANDATORY
-#define kernel_is_locked_down(what)					\
-	({								\
-		static bool message_given;				\
-		bool locked_down = __kernel_is_locked_down(what, !message_given); \
-		message_given = true;					\
-		locked_down;						\
-	})
-#else
-#define kernel_is_locked_down(what)					\
-	({								\
-		static bool message_given;				\
-		__kernel_is_locked_down(what, !message_given);		\
-		message_given = true;					\
-		true;							\
-	})
-#endif
-#else
-static inline void __init init_lockdown(void)
-{
-}
-static inline bool __kernel_is_locked_down(const char *what, bool first)
-{
-	return false;
-}
-#define kernel_is_locked_down(what) ({ false; })
 #endif
 
 /* Internal, do not use. */
@@ -491,6 +508,7 @@ extern int __kernel_text_address(unsigned long addr);
 extern int kernel_text_address(unsigned long addr);
 extern int func_ptr_is_kernel_text(void *ptr);
 
+u64 int_pow(u64 base, unsigned int exp);
 unsigned long int_sqrt(unsigned long);
 
 #if BITS_PER_LONG < 64
@@ -510,8 +528,6 @@ extern int panic_on_oops;
 extern int panic_on_unrecovered_nmi;
 extern int panic_on_io_nmi;
 extern int panic_on_warn;
-extern unsigned long panic_on_taint;
-extern bool panic_on_taint_nousertaint;
 extern int sysctl_panic_on_rcu_stall;
 extern int sysctl_panic_on_stackoverflow;
 
@@ -579,24 +595,7 @@ extern enum system_states {
 #define TAINT_LIVEPATCH			15
 #define TAINT_AUX			16
 #define TAINT_RANDSTRUCT		17
-#define TAINT_18			18
-#define TAINT_19			19
-#define TAINT_20			20
-#define TAINT_21			21
-#define TAINT_22			22
-#define TAINT_23			23
-#define TAINT_24			24
-#define TAINT_25			25
-#define TAINT_26			26
-/* Start of Red Hat-specific taint flags */
-#define TAINT_SUPPORT_REMOVED		27
-#define TAINT_28			28
-#define TAINT_TECH_PREVIEW		29
-#define TAINT_UNPRIVILEGED_BPF		30
-#define TAINT_31			31
-/* End of Red Hat-specific taint flags */
-#define TAINT_FLAGS_COUNT		32
-#define TAINT_FLAGS_MAX			((1UL << TAINT_FLAGS_COUNT) - 1)
+#define TAINT_FLAGS_COUNT		18
 
 struct taint_flag {
 	char c_true;	/* character printed when tainted */
@@ -1030,13 +1029,4 @@ static inline void ftrace_dump(enum ftrace_dump_mode oops_dump_mode) { }
 	 /* OTHER_WRITABLE?  Generally considered a bad idea. */		\
 	 BUILD_BUG_ON_ZERO((perms) & 2) +					\
 	 (perms))
-
-struct module;
-
-void mark_hardware_unsupported(const char *msg);
-void mark_hardware_deprecated(const char *msg);
-void mark_tech_preview(const char *msg, struct module *mod);
-void mark_driver_unsupported(const char *name);
-void mark_hardware_removed(const char *name);
-
 #endif

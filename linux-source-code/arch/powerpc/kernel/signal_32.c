@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Signal handling for 32bit PPC and 32bit tasks on 64bit PPC
  *
@@ -10,11 +11,6 @@
  *  Derived from "arch/i386/kernel/signal.c"
  *    Copyright (C) 1991, 1992 Linus Torvalds
  *    1997-11-28  Modified for POSIX.1b signals by Richard Henderson
- *
- *  This program is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU General Public License
- *  as published by the Free Software Foundation; either version
- *  2 of the License, or (at your option) any later version.
  */
 
 #include <linux/sched.h>
@@ -470,9 +466,9 @@ static int save_user_regs(struct pt_regs *regs, struct mcontext __user *frame,
 		return 1;
 
 	if (sigret) {
-		/* Set up the sigreturn trampoline: li r0,sigret; sc */
-		if (__put_user(0x38000000UL + sigret, &frame->tramp[0])
-		    || __put_user(0x44000002UL, &frame->tramp[1]))
+		/* Set up the sigreturn trampoline: li 0,sigret; sc */
+		if (__put_user(PPC_INST_ADDI + sigret, &frame->tramp[0])
+		    || __put_user(PPC_INST_SC, &frame->tramp[1]))
 			return 1;
 		flush_icache_range((unsigned long) &frame->tramp[0],
 				   (unsigned long) &frame->tramp[2]);
@@ -611,9 +607,9 @@ static int save_tm_user_regs(struct pt_regs *regs,
 	if (__put_user(msr, &frame->mc_gregs[PT_MSR]))
 		return 1;
 	if (sigret) {
-		/* Set up the sigreturn trampoline: li r0,sigret; sc */
-		if (__put_user(0x38000000UL + sigret, &frame->tramp[0])
-		    || __put_user(0x44000002UL, &frame->tramp[1]))
+		/* Set up the sigreturn trampoline: li 0,sigret; sc */
+		if (__put_user(PPC_INST_ADDI + sigret, &frame->tramp[0])
+		    || __put_user(PPC_INST_SC, &frame->tramp[1]))
 			return 1;
 		flush_icache_range((unsigned long) &frame->tramp[0],
 				   (unsigned long) &frame->tramp[2]);
@@ -1248,7 +1244,7 @@ SYSCALL_DEFINE0(rt_sigreturn)
 				   current->comm, current->pid,
 				   rt_sf, regs->nip, regs->link);
 
-	force_sig(SIGSEGV, current);
+	force_sig(SIGSEGV);
 	return 0;
 }
 
@@ -1337,7 +1333,7 @@ SYSCALL_DEFINE3(debug_setcontext, struct ucontext __user *, ctx,
 					   current->comm, current->pid,
 					   ctx, regs->nip, regs->link);
 
-		force_sig(SIGSEGV, current);
+		force_sig(SIGSEGV);
 		goto out;
 	}
 
@@ -1519,6 +1515,6 @@ badframe:
 				   current->comm, current->pid,
 				   addr, regs->nip, regs->link);
 
-	force_sig(SIGSEGV, current);
+	force_sig(SIGSEGV);
 	return 0;
 }

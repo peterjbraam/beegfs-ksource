@@ -2106,8 +2106,6 @@ static void max98090_pll_det_disable_work(struct work_struct *work)
 static void max98090_pll_work(struct max98090_priv *max98090)
 {
 	struct snd_soc_component *component = max98090->component;
-	unsigned int pll;
-	int i;
 
 	if (!snd_soc_component_is_active(component))
 		return;
@@ -2127,16 +2125,8 @@ static void max98090_pll_work(struct max98090_priv *max98090)
 	snd_soc_component_update_bits(component, M98090_REG_DEVICE_SHUTDOWN,
 			    M98090_SHDNN_MASK, M98090_SHDNN_MASK);
 
-	for (i = 0; i < 10; ++i) {
-		/* Give PLL time to lock */
-		usleep_range(1000, 1200);
-
-		/* Check lock status */
-		pll = snd_soc_component_read32(
-				component, M98090_REG_DEVICE_STATUS);
-		if (!(pll & M98090_ULK_MASK))
-			break;
-	}
+	/* Give PLL time to lock */
+	msleep(10);
 }
 
 static void max98090_jack_work(struct work_struct *work)
@@ -2651,12 +2641,17 @@ static int max98090_resume(struct device *dev)
 
 	return 0;
 }
+
+static int max98090_suspend(struct device *dev)
+{
+	return 0;
+}
 #endif
 
 static const struct dev_pm_ops max98090_pm = {
 	SET_RUNTIME_PM_OPS(max98090_runtime_suspend,
 		max98090_runtime_resume, NULL)
-	SET_SYSTEM_SLEEP_PM_OPS(NULL, max98090_resume)
+	SET_SYSTEM_SLEEP_PM_OPS(max98090_suspend, max98090_resume)
 };
 
 static const struct i2c_device_id max98090_i2c_id[] = {

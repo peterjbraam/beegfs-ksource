@@ -43,7 +43,7 @@ struct dfw_binrec {
 	u8 command;
 	u32 length:24;
 	u32 address;
-	uint8_t data[];
+	uint8_t data[0];
 } __packed;
 
 struct dfw_inforec {

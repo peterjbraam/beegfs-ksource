@@ -5,8 +5,6 @@
 #include <linux/cpumask.h>
 #include <linux/errno.h>
 
-#include <linux/rh_kabi.h>
-
 typedef struct {
 	spinlock_t lock;
 	cpumask_t cpu_attach_mask;
@@ -18,6 +16,8 @@ typedef struct {
 	unsigned long asce;
 	unsigned long asce_limit;
 	unsigned long vdso_base;
+	/* The mmu context belongs to a secure guest. */
+	atomic_t is_protected;
 	/*
 	 * The following bitfields need a down_write on the mm
 	 * semaphore when they are written to. As they are only
@@ -34,10 +34,8 @@ typedef struct {
 	unsigned int uses_cmm:1;
 	/* The gmaps associated with this context are allowed to use huge pages. */
 	unsigned int allow_gmap_hpage_1m:1;
-
-	/* The mmu context belongs to a secure guest. */
-	RH_KABI_USE(1, atomic_t is_protected)
-	RH_KABI_RESERVE(2)
+	/* The mmu context is for compat task */
+	unsigned int compat_mm:1;
 } mm_context_t;
 
 #define INIT_MM_CONTEXT(name)						   \

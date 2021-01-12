@@ -57,16 +57,15 @@ static void set_aux_backlight_enable(struct intel_dp *intel_dp, bool enable)
  */
 static u32 intel_dp_aux_get_backlight(struct intel_connector *connector)
 {
-	struct intel_dp *intel_dp = enc_to_intel_dp(intel_attached_encoder(connector));
+	struct intel_dp *intel_dp = enc_to_intel_dp(&connector->encoder->base);
 	u8 read_val[2] = { 0x0 };
-	u8 mode_reg;
+	u8 control_reg;
 	u16 level = 0;
 
-	if (drm_dp_dpcd_readb(&intel_dp->aux,
-			      DP_EDP_BACKLIGHT_MODE_SET_REGISTER,
-			      &mode_reg) != 1) {
+	if (drm_dp_dpcd_readb(&intel_dp->aux, DP_EDP_DISPLAY_CONTROL_REGISTER,
+			      &control_reg) != 1) {
 		DRM_DEBUG_KMS("Failed to read the DPCD register 0x%x\n",
-			      DP_EDP_BACKLIGHT_MODE_SET_REGISTER);
+			      DP_EDP_DISPLAY_CONTROL_REGISTER);
 		return 0;
 	}
 
@@ -74,8 +73,7 @@ static u32 intel_dp_aux_get_backlight(struct intel_connector *connector)
 	 * If we're not in DPCD control mode yet, the programmed brightness
 	 * value is meaningless and we should assume max brightness
 	 */
-	if ((mode_reg & DP_EDP_BACKLIGHT_CONTROL_MODE_MASK) !=
-	    DP_EDP_BACKLIGHT_CONTROL_MODE_DPCD)
+	if (!(control_reg & DP_EDP_BACKLIGHT_CONTROL_MODE_DPCD))
 		return connector->panel.backlight.max;
 
 	if (drm_dp_dpcd_read(&intel_dp->aux, DP_EDP_BACKLIGHT_BRIGHTNESS_MSB,
@@ -99,7 +97,7 @@ static void
 intel_dp_aux_set_backlight(const struct drm_connector_state *conn_state, u32 level)
 {
 	struct intel_connector *connector = to_intel_connector(conn_state->connector);
-	struct intel_dp *intel_dp = enc_to_intel_dp(intel_attached_encoder(connector));
+	struct intel_dp *intel_dp = enc_to_intel_dp(&connector->encoder->base);
 	u8 vals[2] = { 0x0 };
 
 	vals[0] = level;
@@ -127,7 +125,7 @@ intel_dp_aux_set_backlight(const struct drm_connector_state *conn_state, u32 lev
 static bool intel_dp_aux_set_pwm_freq(struct intel_connector *connector)
 {
 	struct drm_i915_private *dev_priv = to_i915(connector->base.dev);
-	struct intel_dp *intel_dp = enc_to_intel_dp(intel_attached_encoder(connector));
+	struct intel_dp *intel_dp = enc_to_intel_dp(&connector->encoder->base);
 	const u8 pn = connector->panel.backlight.pwmgen_bit_count;
 	int freq, fxp, f, fxp_actual, fxp_min, fxp_max;
 
@@ -162,8 +160,8 @@ static void intel_dp_aux_enable_backlight(const struct intel_crtc_state *crtc_st
 					  const struct drm_connector_state *conn_state)
 {
 	struct intel_connector *connector = to_intel_connector(conn_state->connector);
-	struct intel_dp *intel_dp = enc_to_intel_dp(intel_attached_encoder(connector));
 	struct intel_panel *panel = &connector->panel;
+	struct intel_dp *intel_dp = enc_to_intel_dp(&connector->encoder->base);
 	u8 dpcd_buf, new_dpcd_buf, edp_backlight_mode;
 
 	if (drm_dp_dpcd_readb(&intel_dp->aux,
@@ -214,20 +212,19 @@ static void intel_dp_aux_enable_backlight(const struct intel_crtc_state *crtc_st
 
 static void intel_dp_aux_disable_backlight(const struct drm_connector_state *old_conn_state)
 {
-	set_aux_backlight_enable(enc_to_intel_dp(to_intel_encoder(old_conn_state->best_encoder)),
-				 false);
+	set_aux_backlight_enable(enc_to_intel_dp(old_conn_state->best_encoder), false);
 }
 
 static u32 intel_dp_aux_calc_max_backlight(struct intel_connector *connector)
 {
-	struct drm_i915_private *i915 = to_i915(connector->base.dev);
-	struct intel_dp *intel_dp = enc_to_intel_dp(connector->encoder);
+	struct drm_i915_private *dev_priv = to_i915(connector->base.dev);
+	struct intel_dp *intel_dp = enc_to_intel_dp(&connector->encoder->base);
 	struct intel_panel *panel = &connector->panel;
 	u32 max_backlight = 0;
 	int freq, fxp, fxp_min, fxp_max, fxp_actual, f = 1;
 	u8 pn, pn_min, pn_max;
 
-	if (drm_dp_dpcd_readb(&intel_dp->aux, DP_EDP_PWMGEN_BIT_COUNT, &pn) == 1) {
+	if (drm_dp_dpcd_readb(&intel_dp->aux, DP_EDP_PWMGEN_BIT_COUNT, &pn)) {
 		pn &= DP_EDP_PWMGEN_BIT_COUNT_MASK;
 		max_backlight = (1 << pn) - 1;
 	}
@@ -236,7 +233,7 @@ static u32 intel_dp_aux_calc_max_backlight(struct intel_connector *connector)
 	 * Note that, if F x P is out of supported range, the maximum value or
 	 * minimum value will applied automatically. So no need to check that.
 	 */
-	freq = i915->vbt.backlight.pwm_freq_hz;
+	freq = dev_priv->vbt.backlight.pwm_freq_hz;
 	DRM_DEBUG_KMS("VBT defined backlight frequency %u Hz\n", freq);
 	if (!freq) {
 		DRM_DEBUG_KMS("Use panel default backlight frequency\n");
@@ -311,7 +308,7 @@ static int intel_dp_aux_setup_backlight(struct intel_connector *connector,
 static bool
 intel_dp_aux_display_control_capable(struct intel_connector *connector)
 {
-	struct intel_dp *intel_dp = enc_to_intel_dp(intel_attached_encoder(connector));
+	struct intel_dp *intel_dp = enc_to_intel_dp(&connector->encoder->base);
 
 	/* Check the eDP Display control capabilities registers to determine if
 	 * the panel can support backlight control over the aux channel
@@ -328,12 +325,16 @@ intel_dp_aux_display_control_capable(struct intel_connector *connector)
 int intel_dp_aux_init_backlight_funcs(struct intel_connector *intel_connector)
 {
 	struct intel_panel *panel = &intel_connector->panel;
-	struct intel_dp *intel_dp = enc_to_intel_dp(intel_connector->encoder);
+	struct intel_dp *intel_dp = enc_to_intel_dp(&intel_connector->encoder->base);
 	struct drm_device *dev = intel_connector->base.dev;
 	struct drm_i915_private *dev_priv = to_i915(dev);
+	bool force_dpcd;
+
+	force_dpcd = drm_dp_has_quirk(&intel_dp->desc, intel_dp->edid_quirks,
+				      DP_QUIRK_FORCE_DPCD_BACKLIGHT);
 
 	if (i915_modparams.enable_dpcd_backlight == 0 ||
-	    !intel_dp_aux_display_control_capable(intel_connector))
+	    (!force_dpcd && !intel_dp_aux_display_control_capable(intel_connector)))
 		return -ENODEV;
 
 	/*
@@ -342,16 +343,15 @@ int intel_dp_aux_init_backlight_funcs(struct intel_connector *intel_connector)
 	 */
 	if (dev_priv->vbt.backlight.type !=
 	    INTEL_BACKLIGHT_VESA_EDP_AUX_INTERFACE &&
-	    i915_modparams.enable_dpcd_backlight != 1 &&
-	    !drm_dp_has_quirk(&intel_dp->desc, intel_dp->edid_quirks,
-			      DP_QUIRK_FORCE_DPCD_BACKLIGHT)) {
+	    i915_modparams.enable_dpcd_backlight != 1 && !force_dpcd) {
 		DRM_DEV_INFO(dev->dev,
 			     "Panel advertises DPCD backlight support, but "
 			     "VBT disagrees. If your backlight controls "
 			     "don't work try booting with "
 			     "i915.enable_dpcd_backlight=1. If your machine "
 			     "needs this, please file a _new_ bug report on "
-			     "drm/i915, see " FDO_BUG_URL " for details.\n");
+			     "bugs.freedesktop.org against DRI -> "
+			     "DRM/Intel\n");
 		return -ENODEV;
 	}
 

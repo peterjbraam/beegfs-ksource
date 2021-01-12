@@ -40,6 +40,7 @@
 
 struct mlx5_vxlan {
 	struct mlx5_core_dev		*mdev;
+	spinlock_t			lock; /* protect vxlan table */
 	/* max_num_ports is usuallly 4, 16 buckets is more than enough */
 	DECLARE_HASHTABLE(htable, 4);
 	int				num_ports;
@@ -79,46 +80,45 @@ static int mlx5_vxlan_core_del_port_cmd(struct mlx5_core_dev *mdev, u16 port)
 	return mlx5_cmd_exec(mdev, in, sizeof(in), out, sizeof(out));
 }
 
+static struct mlx5_vxlan_port*
+mlx5_vxlan_lookup_port_locked(struct mlx5_vxlan *vxlan, u16 port)
+{
+	struct mlx5_vxlan_port *vxlanp;
+
+	hash_for_each_possible(vxlan->htable, vxlanp, hlist, port) {
+		if (vxlanp->udp_port == port)
+			return vxlanp;
+	}
+
+	return NULL;
+}
+
 struct mlx5_vxlan_port *mlx5_vxlan_lookup_port(struct mlx5_vxlan *vxlan, u16 port)
 {
-	struct mlx5_vxlan_port *retptr = NULL, *vxlanp;
+	struct mlx5_vxlan_port *vxlanp;
 
 	if (!mlx5_vxlan_allowed(vxlan))
 		return NULL;
 
-	rcu_read_lock();
-	hash_for_each_possible_rcu(vxlan->htable, vxlanp, hlist, port)
-		if (vxlanp->udp_port == port) {
-			retptr = vxlanp;
-			break;
-		}
-	rcu_read_unlock();
+	spin_lock_bh(&vxlan->lock);
+	vxlanp = mlx5_vxlan_lookup_port_locked(vxlan, port);
+	spin_unlock_bh(&vxlan->lock);
 
-	return retptr;
-}
-
-static struct mlx5_vxlan_port *vxlan_lookup_port(struct mlx5_vxlan *vxlan, u16 port)
-{
-	struct mlx5_vxlan_port *vxlanp;
-
-	hash_for_each_possible(vxlan->htable, vxlanp, hlist, port)
-		if (vxlanp->udp_port == port)
-			return vxlanp;
-	return NULL;
+	return vxlanp;
 }
 
 int mlx5_vxlan_add_port(struct mlx5_vxlan *vxlan, u16 port)
 {
 	struct mlx5_vxlan_port *vxlanp;
-	int ret = 0;
+	int ret = -ENOSPC;
 
-	mutex_lock(&vxlan->sync_lock);
-	vxlanp = vxlan_lookup_port(vxlan, port);
+	vxlanp = mlx5_vxlan_lookup_port(vxlan, port);
 	if (vxlanp) {
 		refcount_inc(&vxlanp->refcount);
-		goto unlock;
+		return 0;
 	}
 
+	mutex_lock(&vxlan->sync_lock);
 	if (vxlan->num_ports >= mlx5_vxlan_max_udp_ports(vxlan->mdev)) {
 		mlx5_core_info(vxlan->mdev,
 			       "UDP port (%d) not offloaded, max number of UDP ports (%d) are already offloaded\n",
@@ -140,7 +140,9 @@ int mlx5_vxlan_add_port(struct mlx5_vxlan *vxlan, u16 port)
 	vxlanp->udp_port = port;
 	refcount_set(&vxlanp->refcount, 1);
 
-	hash_add_rcu(vxlan->htable, &vxlanp->hlist, port);
+	spin_lock_bh(&vxlan->lock);
+	hash_add(vxlan->htable, &vxlanp->hlist, port);
+	spin_unlock_bh(&vxlan->lock);
 
 	vxlan->num_ports++;
 	mutex_unlock(&vxlan->sync_lock);
@@ -157,26 +159,34 @@ unlock:
 int mlx5_vxlan_del_port(struct mlx5_vxlan *vxlan, u16 port)
 {
 	struct mlx5_vxlan_port *vxlanp;
+	bool remove = false;
 	int ret = 0;
 
 	mutex_lock(&vxlan->sync_lock);
 
-	vxlanp = vxlan_lookup_port(vxlan, port);
+	spin_lock_bh(&vxlan->lock);
+	vxlanp = mlx5_vxlan_lookup_port_locked(vxlan, port);
 	if (!vxlanp) {
 		ret = -ENOENT;
 		goto out_unlock;
 	}
 
 	if (refcount_dec_and_test(&vxlanp->refcount)) {
-		hash_del_rcu(&vxlanp->hlist);
-		synchronize_rcu();
+		hash_del(&vxlanp->hlist);
+		remove = true;
+	}
+
+out_unlock:
+	spin_unlock_bh(&vxlan->lock);
+
+	if (remove) {
 		mlx5_vxlan_core_del_port_cmd(vxlan->mdev, port);
 		kfree(vxlanp);
 		vxlan->num_ports--;
 	}
 
-out_unlock:
 	mutex_unlock(&vxlan->sync_lock);
+
 	return ret;
 }
 
@@ -193,6 +203,7 @@ struct mlx5_vxlan *mlx5_vxlan_create(struct mlx5_core_dev *mdev)
 
 	vxlan->mdev = mdev;
 	mutex_init(&vxlan->sync_lock);
+	spin_lock_init(&vxlan->lock);
 	hash_init(vxlan->htable);
 
 	/* Hardware adds 4789 (IANA_VXLAN_UDP_PORT) by default */

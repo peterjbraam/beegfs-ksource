@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-only
 #
 # XFRM configuration
 #
@@ -5,6 +6,7 @@ config XFRM
        bool
        depends on INET
        select GRO_CELLS
+       select SKB_EXTENSIONS
 
 config XFRM_OFFLOAD
        bool
@@ -13,6 +15,8 @@ config XFRM_ALGO
 	tristate
 	select XFRM
 	select CRYPTO
+	select CRYPTO_HASH
+	select CRYPTO_BLKCIPHER
 
 if INET
 config XFRM_USER
@@ -94,8 +98,5 @@ config NET_KEY_MIGRATE
 	  <draft-sugimoto-mip6-pfkey-migrate>.
 
 	  If unsure, say N.
-
-config XFRM_ESPINTCP
-	bool
 
 endif # INET

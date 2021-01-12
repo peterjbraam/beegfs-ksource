@@ -166,22 +166,24 @@ static void *vcpu_worker(void *data)
 			pages_count += TEST_PAGES_PER_LOOP;
 			generate_random_array(guest_array, TEST_PAGES_PER_LOOP);
 		} else {
-			TEST_FAIL("Invalid guest sync status: "
-				  "exit_reason=%s\n",
-				  exit_reason_str(run->exit_reason));
+			TEST_ASSERT(false,
+				    "Invalid guest sync status: "
+				    "exit_reason=%s\n",
+				    exit_reason_str(run->exit_reason));
 		}
 	}
 
-	pr_info("Dirtied %"PRIu64" pages\n", pages_count);
+	DEBUG("Dirtied %"PRIu64" pages\n", pages_count);
 
 	return NULL;
 }
 
-static void vm_dirty_log_verify(enum vm_guest_mode mode, unsigned long *bmap)
+static void vm_dirty_log_verify(unsigned long *bmap)
 {
-	uint64_t step = vm_num_host_pages(mode, 1);
 	uint64_t page;
 	uint64_t *value_ptr;
+	uint64_t step = host_page_size >= guest_page_size ? 1 :
+				guest_page_size / host_page_size;
 
 	for (page = 0; page < host_num_pages; page += step) {
 		value_ptr = host_test_mem + page * host_page_size;
@@ -250,8 +252,6 @@ static struct kvm_vm *create_vm(enum vm_guest_mode mode, uint32_t vcpuid,
 	struct kvm_vm *vm;
 	uint64_t extra_pg_pages = extra_mem_pages / 512 * 2;
 
-	pr_info("Testing guest mode: %s\n", vm_guest_mode_string(mode));
-
 	vm = _vm_create(mode, DEFAULT_GUEST_PHY_PAGES + extra_pg_pages, O_RDWR);
 	kvm_vm_elf_load(vm, program_invocation_name, 0, 0);
 #ifdef __x86_64__
@@ -263,10 +263,6 @@ static struct kvm_vm *create_vm(enum vm_guest_mode mode, uint32_t vcpuid,
 
 #define DIRTY_MEM_BITS 30 /* 1G */
 #define PAGE_SHIFT_4K  12
-
-#ifdef USE_CLEAR_DIRTY_LOG
-static u64 dirty_log_manual_caps;
-#endif
 
 static void run_test(enum vm_guest_mode mode, unsigned long iterations,
 		     unsigned long interval, uint64_t phys_offset)
@@ -293,11 +289,14 @@ static void run_test(enum vm_guest_mode mode, unsigned long iterations,
 	 * case where the size is not aligned to 64 pages.
 	 */
 	guest_num_pages = (1ul << (DIRTY_MEM_BITS -
-				   vm_get_page_shift(vm))) + 3;
-	guest_num_pages = vm_adjust_num_guest_pages(mode, guest_num_pages);
-
+				   vm_get_page_shift(vm))) + 16;
+#ifdef __s390x__
+	/* Round up to multiple of 1M (segment size) */
+	guest_num_pages = (guest_num_pages + 0xff) & ~0xffUL;
+#endif
 	host_page_size = getpagesize();
-	host_num_pages = vm_num_host_pages(mode, guest_num_pages);
+	host_num_pages = (guest_num_pages * guest_page_size) / host_page_size +
+			 !!((guest_num_pages * guest_page_size) % host_page_size);
 
 	if (!phys_offset) {
 		guest_test_phys_mem = (vm_get_max_gfn(vm) -
@@ -312,7 +311,7 @@ static void run_test(enum vm_guest_mode mode, unsigned long iterations,
 	guest_test_phys_mem &= ~((1 << 20) - 1);
 #endif
 
-	pr_info("guest physical test memory offset: 0x%lx\n", guest_test_phys_mem);
+	DEBUG("guest physical test memory offset: 0x%lx\n", guest_test_phys_mem);
 
 	bmap = bitmap_alloc(host_num_pages);
 	host_bmap_track = bitmap_alloc(host_num_pages);
@@ -321,7 +320,7 @@ static void run_test(enum vm_guest_mode mode, unsigned long iterations,
 	struct kvm_enable_cap cap = {};
 
 	cap.cap = KVM_CAP_MANUAL_DIRTY_LOG_PROTECT2;
-	cap.args[0] = dirty_log_manual_caps;
+	cap.args[0] = 1;
 	vm_enable_cap(vm, &cap);
 #endif
 
@@ -333,7 +332,8 @@ static void run_test(enum vm_guest_mode mode, unsigned long iterations,
 				    KVM_MEM_LOG_DIRTY_PAGES);
 
 	/* Do mapping for the dirty track memory slot */
-	virt_map(vm, guest_test_virt_mem, guest_test_phys_mem, guest_num_pages, 0);
+	virt_map(vm, guest_test_virt_mem, guest_test_phys_mem,
+		 guest_num_pages * guest_page_size, 0);
 
 	/* Cache the HVA pointer of the region */
 	host_test_mem = addr_gpa2hva(vm, (vm_paddr_t)guest_test_phys_mem);
@@ -341,7 +341,9 @@ static void run_test(enum vm_guest_mode mode, unsigned long iterations,
 #ifdef __x86_64__
 	vcpu_set_cpuid(vm, VCPU_ID, kvm_get_supported_cpuid());
 #endif
+#ifdef __aarch64__
 	ucall_init(vm, NULL);
+#endif
 
 	/* Export the shared variables to the guest */
 	sync_global_to_guest(vm, host_page_size);
@@ -367,7 +369,7 @@ static void run_test(enum vm_guest_mode mode, unsigned long iterations,
 		kvm_vm_clear_dirty_log(vm, TEST_MEM_SLOT_INDEX, bmap, 0,
 				       host_num_pages);
 #endif
-		vm_dirty_log_verify(mode, bmap);
+		vm_dirty_log_verify(bmap);
 		iteration++;
 		sync_global_to_guest(vm, iteration);
 	}
@@ -376,9 +378,9 @@ static void run_test(enum vm_guest_mode mode, unsigned long iterations,
 	host_quit = true;
 	pthread_join(vcpu_thread, NULL);
 
-	pr_info("Total bits checked: dirty (%"PRIu64"), clear (%"PRIu64"), "
-		"track_next (%"PRIu64")\n", host_dirty_count, host_clear_count,
-		host_track_next_count);
+	DEBUG("Total bits checked: dirty (%"PRIu64"), clear (%"PRIu64"), "
+	      "track_next (%"PRIu64")\n", host_dirty_count, host_clear_count,
+	      host_track_next_count);
 
 	free(bmap);
 	free(host_bmap_track);
@@ -386,14 +388,15 @@ static void run_test(enum vm_guest_mode mode, unsigned long iterations,
 	kvm_vm_free(vm);
 }
 
-struct guest_mode {
+struct vm_guest_mode_params {
 	bool supported;
 	bool enabled;
 };
-static struct guest_mode guest_modes[NUM_VM_MODES];
+struct vm_guest_mode_params vm_guest_mode_params[NUM_VM_MODES];
 
-#define guest_mode_init(mode, supported, enabled) ({ \
-	guest_modes[mode] = (struct guest_mode){ supported, enabled }; \
+#define vm_guest_mode_params_init(mode, supported, enabled)					\
+({												\
+	vm_guest_mode_params[mode] = (struct vm_guest_mode_params){ supported, enabled };	\
 })
 
 static void help(char *name)
@@ -416,7 +419,7 @@ static void help(char *name)
 	       "     Guest mode IDs:\n");
 	for (i = 0; i < NUM_VM_MODES; ++i) {
 		printf("         %d:    %s%s\n", i, vm_guest_mode_string(i),
-		       guest_modes[i].supported ? " (supported)" : "");
+		       vm_guest_mode_params[i].supported ? " (supported)" : "");
 	}
 	puts("");
 	exit(0);
@@ -430,38 +433,34 @@ int main(int argc, char *argv[])
 	uint64_t phys_offset = 0;
 	unsigned int mode;
 	int opt, i;
+#ifdef __aarch64__
+	unsigned int host_ipa_limit;
+#endif
 
 #ifdef USE_CLEAR_DIRTY_LOG
-	dirty_log_manual_caps =
-		kvm_check_cap(KVM_CAP_MANUAL_DIRTY_LOG_PROTECT2);
-	if (!dirty_log_manual_caps) {
-		print_skip("KVM_CLEAR_DIRTY_LOG not available");
+	if (!kvm_check_cap(KVM_CAP_MANUAL_DIRTY_LOG_PROTECT2)) {
+		fprintf(stderr, "KVM_CLEAR_DIRTY_LOG not available, skipping tests\n");
 		exit(KSFT_SKIP);
 	}
-	dirty_log_manual_caps &= (KVM_DIRTY_LOG_MANUAL_PROTECT_ENABLE |
-				  KVM_DIRTY_LOG_INITIALLY_SET);
 #endif
 
 #ifdef __x86_64__
-	guest_mode_init(VM_MODE_PXXV48_4K, true, true);
+	vm_guest_mode_params_init(VM_MODE_PXXV48_4K, true, true);
 #endif
 #ifdef __aarch64__
-	guest_mode_init(VM_MODE_P40V48_4K, true, true);
-	guest_mode_init(VM_MODE_P40V48_64K, true, true);
+	vm_guest_mode_params_init(VM_MODE_P40V48_4K, true, true);
+	vm_guest_mode_params_init(VM_MODE_P40V48_64K, true, true);
 
-	{
-		unsigned int limit = kvm_check_cap(KVM_CAP_ARM_VM_IPA_SIZE);
-
-		if (limit >= 52)
-			guest_mode_init(VM_MODE_P52V48_64K, true, true);
-		if (limit >= 48) {
-			guest_mode_init(VM_MODE_P48V48_4K, true, true);
-			guest_mode_init(VM_MODE_P48V48_64K, true, true);
-		}
+	host_ipa_limit = kvm_check_cap(KVM_CAP_ARM_VM_IPA_SIZE);
+	if (host_ipa_limit >= 52)
+		vm_guest_mode_params_init(VM_MODE_P52V48_64K, true, true);
+	if (host_ipa_limit >= 48) {
+		vm_guest_mode_params_init(VM_MODE_P48V48_4K, true, true);
+		vm_guest_mode_params_init(VM_MODE_P48V48_64K, true, true);
 	}
 #endif
 #ifdef __s390x__
-	guest_mode_init(VM_MODE_P40V48_4K, true, true);
+	vm_guest_mode_params_init(VM_MODE_P40V48_4K, true, true);
 #endif
 
 	while ((opt = getopt(argc, argv, "hi:I:p:m:")) != -1) {
@@ -478,13 +477,13 @@ int main(int argc, char *argv[])
 		case 'm':
 			if (!mode_selected) {
 				for (i = 0; i < NUM_VM_MODES; ++i)
-					guest_modes[i].enabled = false;
+					vm_guest_mode_params[i].enabled = false;
 				mode_selected = true;
 			}
 			mode = strtoul(optarg, NULL, 10);
 			TEST_ASSERT(mode < NUM_VM_MODES,
 				    "Guest mode ID %d too big", mode);
-			guest_modes[mode].enabled = true;
+			vm_guest_mode_params[mode].enabled = true;
 			break;
 		case 'h':
 		default:
@@ -496,15 +495,15 @@ int main(int argc, char *argv[])
 	TEST_ASSERT(iterations > 2, "Iterations must be greater than two");
 	TEST_ASSERT(interval > 0, "Interval must be greater than zero");
 
-	pr_info("Test iterations: %"PRIu64", interval: %"PRIu64" (ms)\n",
-		iterations, interval);
+	DEBUG("Test iterations: %"PRIu64", interval: %"PRIu64" (ms)\n",
+	      iterations, interval);
 
 	srandom(time(0));
 
 	for (i = 0; i < NUM_VM_MODES; ++i) {
-		if (!guest_modes[i].enabled)
+		if (!vm_guest_mode_params[i].enabled)
 			continue;
-		TEST_ASSERT(guest_modes[i].supported,
+		TEST_ASSERT(vm_guest_mode_params[i].supported,
 			    "Guest mode ID %d (%s) not supported.",
 			    i, vm_guest_mode_string(i));
 		run_test(i, iterations, interval, phys_offset);

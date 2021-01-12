@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  gendisk handling
  */
@@ -270,12 +271,11 @@ static inline int sector_in_part(struct hd_struct *part, sector_t sector)
  * primarily used for stats accounting.
  *
  * CONTEXT:
- * RCU read locked.  The returned partition pointer is always valid
- * because its refcount is grabbed.
+ * RCU read locked.  The returned partition pointer is valid only
+ * while preemption is disabled.
  *
  * RETURNS:
  * Found partition on success, part0 is returned if no partition matches
- * or the matched partition is being deleted.
  */
 struct hd_struct *disk_map_sector_rcu(struct gendisk *disk, sector_t sector)
 {
@@ -286,64 +286,20 @@ struct hd_struct *disk_map_sector_rcu(struct gendisk *disk, sector_t sector)
 	ptbl = rcu_dereference(disk->part_tbl);
 
 	part = rcu_dereference(ptbl->last_lookup);
-	if (part && sector_in_part(part, sector) && hd_struct_try_get(part))
+	if (part && sector_in_part(part, sector))
 		return part;
 
 	for (i = 1; i < ptbl->len; i++) {
 		part = rcu_dereference(ptbl->part[i]);
 
 		if (part && sector_in_part(part, sector)) {
-			/*
-			 * only live partition can be cached for lookup,
-			 * so use-after-free on cached & deleting partition
-			 * can be avoided
-			 */
-			if (!hd_struct_try_get(part))
-				break;
 			rcu_assign_pointer(ptbl->last_lookup, part);
 			return part;
 		}
 	}
-	hd_struct_get(&disk->part0);
 	return &disk->part0;
 }
 EXPORT_SYMBOL_GPL(disk_map_sector_rcu);
-
-/**
- * disk_has_partitions
- * @disk: gendisk of interest
- *
- * Walk through the partition table and check if valid partition exists.
- *
- * CONTEXT:
- * Don't care.
- *
- * RETURNS:
- * True if the gendisk has at least one valid non-zero size partition.
- * Otherwise false.
- */
-bool disk_has_partitions(struct gendisk *disk)
-{
-	struct disk_part_tbl *ptbl;
-	int i;
-	bool ret = false;
-
-	rcu_read_lock();
-	ptbl = rcu_dereference(disk->part_tbl);
-
-	/* Iterate partitions skipping the whole device at index 0 */
-	for (i = 1; i < ptbl->len; i++) {
-		if (rcu_dereference(ptbl->part[i])) {
-			ret = true;
-			break;
-		}
-	}
-
-	rcu_read_unlock();
-
-	return ret;
-}
-EXPORT_SYMBOL_GPL(disk_has_partitions);
 
 /*
  * Can be deleted altogether. Later.
@@ -576,8 +532,8 @@ void blk_free_devt(dev_t devt)
 	}
 }
 
-/**
- *	We invalidate devt by assigning NULL pointer for devt in idr.
+/*
+ * We invalidate devt by assigning NULL pointer for devt in idr.
  */
 void blk_invalidate_devt(dev_t devt)
 {
@@ -814,31 +770,10 @@ void device_add_disk_no_queue_reg(struct device *parent, struct gendisk *disk)
 }
 EXPORT_SYMBOL(device_add_disk_no_queue_reg);
 
-/**
- * del_gendisk - remove the gendisk
- * @disk: the struct gendisk to remove
- *
- * Removes the gendisk and all its associated resources. This deletes the
- * partitions associated with the gendisk, and unregisters the associated
- * request_queue.
- *
- * This is the counter to the respective __device_add_disk() call.
- *
- * The final removal of the struct gendisk happens when its refcount reaches 0
- * with put_disk(), which should be called after del_gendisk(), if
- * __device_add_disk() was used.
- *
- * Drivers exist which depend on the release of the gendisk to be synchronous,
- * it should not be deferred.
- *
- * Context: can sleep
- */
 void del_gendisk(struct gendisk *disk)
 {
 	struct disk_part_iter piter;
 	struct hd_struct *part;
-
-	might_sleep();
 
 	blk_integrity_del(disk);
 	disk_del_events(disk);
@@ -932,14 +867,10 @@ static ssize_t disk_badblocks_store(struct device *dev,
  *
  * This function gets the structure containing partitioning
  * information for the given device @devt.
- *
- * Context: can sleep
  */
 struct gendisk *get_gendisk(dev_t devt, int *partno)
 {
 	struct gendisk *disk = NULL;
-
-	might_sleep();
 
 	if (MAJOR(devt) != BLOCK_EXT_MAJOR) {
 		struct kobject *kobj;
@@ -1389,30 +1320,9 @@ int disk_expand_part_tbl(struct gendisk *disk, int partno)
 	return 0;
 }
 
-/**
- * disk_release - releases all allocated resources of the gendisk
- * @dev: the device representing this disk
- *
- * This function releases all allocated resources of the gendisk.
- *
- * The struct gendisk refcount is incremented with get_gendisk() or
- * get_disk_and_module(), and its refcount is decremented with
- * put_disk_and_module() or put_disk(). Once the refcount reaches 0 this
- * function is called.
- *
- * Drivers which used __device_add_disk() have a gendisk with a request_queue
- * assigned. Since the request_queue sits on top of the gendisk for these
- * drivers we also call blk_put_queue() for them, and we expect the
- * request_queue refcount to reach 0 at this point, and so the request_queue
- * will also be freed prior to the disk.
- *
- * Context: can sleep
- */
 static void disk_release(struct device *dev)
 {
 	struct gendisk *disk = dev_to_disk(dev);
-
-	might_sleep();
 
 	blk_free_devt(dev->devt);
 	disk_release_events(disk);
@@ -1605,15 +1515,6 @@ struct gendisk *__alloc_disk_node(int minors, int node_id)
 }
 EXPORT_SYMBOL(__alloc_disk_node);
 
-/**
- * get_disk_and_module - increments the gendisk and gendisk fops module refcount
- * @disk: the struct gendisk to to increment the refcount for
- *
- * This increments the refcount for the struct gendisk, and the gendisk's
- * fops module owner.
- *
- * Context: Any context.
- */
 struct kobject *get_disk_and_module(struct gendisk *disk)
 {
 	struct module *owner;
@@ -1634,16 +1535,6 @@ struct kobject *get_disk_and_module(struct gendisk *disk)
 }
 EXPORT_SYMBOL(get_disk_and_module);
 
-/**
- * put_disk - decrements the gendisk refcount
- * @disk: the struct gendisk to to decrement the refcount for
- *
- * This decrements the refcount for the struct gendisk. When this reaches 0
- * we'll have disk_release() called.
- *
- * Context: Any context, but the last reference must not be dropped from
- *          atomic context.
- */
 void put_disk(struct gendisk *disk)
 {
 	if (disk)
@@ -1651,15 +1542,9 @@ void put_disk(struct gendisk *disk)
 }
 EXPORT_SYMBOL(put_disk);
 
-/**
- * put_disk_and_module - decrements the module and gendisk refcount
- * @disk: the struct gendisk to to decrement the refcount for
- *
+/*
  * This is a counterpart of get_disk_and_module() and thus also of
  * get_gendisk().
- *
- * Context: Any context, but the last reference must not be dropped from
- *          atomic context.
  */
 void put_disk_and_module(struct gendisk *disk)
 {
@@ -1771,12 +1656,11 @@ static unsigned long disk_events_poll_jiffies(struct gendisk *disk)
 
 	/*
 	 * If device-specific poll interval is set, always use it.  If
-	 * the default is being used, poll iff there are events which
-	 * can't be monitored asynchronously.
+	 * the default is being used, poll if the POLL flag is set.
 	 */
 	if (ev->poll_msecs >= 0)
 		intv_msecs = ev->poll_msecs;
-	else if (disk->events & ~disk->async_events)
+	else if (disk->event_flags & DISK_EVENT_FLAG_POLL)
 		intv_msecs = disk_events_dfl_poll_msecs;
 
 	return msecs_to_jiffies(intv_msecs);
@@ -1986,11 +1870,13 @@ static void disk_check_events(struct disk_events *ev,
 
 	/*
 	 * Tell userland about new events.  Only the events listed in
-	 * @disk->events are reported.  Unlisted events are processed the
-	 * same internally but never get reported to userland.
+	 * @disk->events are reported, and only if DISK_EVENT_FLAG_UEVENT
+	 * is set. Otherwise, events are processed internally but never
+	 * get reported to userland.
 	 */
 	for (i = 0; i < ARRAY_SIZE(disk_uevents); i++)
-		if (events & disk->events & (1 << i))
+		if ((events & disk->events & (1 << i)) &&
+		    (disk->event_flags & DISK_EVENT_FLAG_UEVENT))
 			envp[nr_events++] = disk_uevents[i];
 
 	if (nr_events)
@@ -2003,6 +1889,7 @@ static void disk_check_events(struct disk_events *ev,
  *
  * events		: list of all supported events
  * events_async		: list of events which can be detected w/o polling
+ *			  (always empty, only for backwards compatibility)
  * events_poll_msecs	: polling interval, 0: disable, -1: system default
  */
 static ssize_t __disk_events_show(unsigned int events, char *buf)
@@ -2027,15 +1914,16 @@ static ssize_t disk_events_show(struct device *dev,
 {
 	struct gendisk *disk = dev_to_disk(dev);
 
+	if (!(disk->event_flags & DISK_EVENT_FLAG_UEVENT))
+		return 0;
+
 	return __disk_events_show(disk->events, buf);
 }
 
 static ssize_t disk_events_async_show(struct device *dev,
 				      struct device_attribute *attr, char *buf)
 {
-	struct gendisk *disk = dev_to_disk(dev);
-
-	return __disk_events_show(disk->async_events, buf);
+	return 0;
 }
 
 static ssize_t disk_events_poll_msecs_show(struct device *dev,
@@ -2043,6 +1931,9 @@ static ssize_t disk_events_poll_msecs_show(struct device *dev,
 					   char *buf)
 {
 	struct gendisk *disk = dev_to_disk(dev);
+
+	if (!disk->ev)
+		return sprintf(buf, "-1\n");
 
 	return sprintf(buf, "%ld\n", disk->ev->poll_msecs);
 }
@@ -2059,6 +1950,9 @@ static ssize_t disk_events_poll_msecs_store(struct device *dev,
 
 	if (intv < 0 && intv != -1)
 		return -EINVAL;
+
+	if (!disk->ev)
+		return -ENODEV;
 
 	disk_block_events(disk);
 	disk->ev->poll_msecs = intv;
@@ -2124,7 +2018,7 @@ static void disk_alloc_events(struct gendisk *disk)
 {
 	struct disk_events *ev;
 
-	if (!disk->fops->check_events)
+	if (!disk->fops->check_events || !disk->events)
 		return;
 
 	ev = kzalloc(sizeof(*ev), GFP_KERNEL);
@@ -2146,13 +2040,13 @@ static void disk_alloc_events(struct gendisk *disk)
 
 static void disk_add_events(struct gendisk *disk)
 {
-	if (!disk->ev)
-		return;
-
 	/* FIXME: error handling */
 	if (sysfs_create_files(&disk_to_dev(disk)->kobj, disk_events_attrs) < 0)
 		pr_warn("%s: failed to create sysfs files for events\n",
 			disk->disk_name);
+
+	if (!disk->ev)
+		return;
 
 	mutex_lock(&disk_events_mutex);
 	list_add_tail(&disk->ev->node, &disk_events);
@@ -2167,14 +2061,13 @@ static void disk_add_events(struct gendisk *disk)
 
 static void disk_del_events(struct gendisk *disk)
 {
-	if (!disk->ev)
-		return;
+	if (disk->ev) {
+		disk_block_events(disk);
 
-	disk_block_events(disk);
-
-	mutex_lock(&disk_events_mutex);
-	list_del_init(&disk->ev->node);
-	mutex_unlock(&disk_events_mutex);
+		mutex_lock(&disk_events_mutex);
+		list_del_init(&disk->ev->node);
+		mutex_unlock(&disk_events_mutex);
+	}
 
 	sysfs_remove_files(&disk_to_dev(disk)->kobj, disk_events_attrs);
 }

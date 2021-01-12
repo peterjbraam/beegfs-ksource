@@ -171,8 +171,7 @@ static inline struct chcr_context *h_ctx(struct crypto_ahash *tfm)
 }
 
 struct ablk_ctx {
-	struct crypto_skcipher *sw_cipher;
-	struct crypto_cipher *aes_generic;
+	struct crypto_sync_skcipher *sw_cipher;
 	__be32 key_ctx_hdr;
 	unsigned int enckey_len;
 	unsigned char ciph_mode;
@@ -188,8 +187,6 @@ struct chcr_aead_reqctx {
 	unsigned int op;
 	u16 imm;
 	u16 verify;
-	u16 txqidx;
-	u16 rxqidx;
 	u8 iv[CHCR_MAX_CRYPTO_IV_LEN + MAX_SCRATCH_PAD_SIZE];
 	u8 *scratch_pad;
 };
@@ -253,11 +250,10 @@ struct __crypto_ctx {
 
 struct chcr_context {
 	struct chcr_dev *dev;
-	unsigned char rxq_perchan;
-	unsigned char txq_perchan;
-	unsigned int  ntxq;
-	unsigned int  nrxq;
-	struct completion cbc_aes_aio_done;
+	unsigned char tx_qidx;
+	unsigned char rx_qidx;
+	unsigned char tx_chan_id;
+	unsigned char pci_chan_id;
 	struct __crypto_ctx crypto_ctx[0];
 };
 
@@ -283,8 +279,6 @@ struct chcr_ahash_req_ctx {
 	u8 *skbfr;
 	/* SKB which is being sent to the hardware for processing */
 	u64 data_len;  /* Data len till time */
-	u16 txqidx;
-	u16 rxqidx;
 	u8 reqlen;
 	u8 partial_hash[CHCR_HASH_MAX_DIGEST_SIZE];
 	u8 bfr1[CHCR_HASH_MAX_BLOCK_SIZE_128];
@@ -296,15 +290,12 @@ struct chcr_blkcipher_req_ctx {
 	struct scatterlist *dstsg;
 	unsigned int processed;
 	unsigned int last_req_len;
-	unsigned int partial_req;
 	struct scatterlist *srcsg;
 	unsigned int src_ofst;
 	unsigned int dst_ofst;
 	unsigned int op;
 	u16 imm;
 	u8 iv[CHCR_MAX_CRYPTO_IV_LEN];
-	u16 txqidx;
-	u16 rxqidx;
 };
 
 struct chcr_alg_template {

@@ -728,8 +728,10 @@ static int mwifiex_init_hw_fw(struct mwifiex_adapter *adapter,
 static int
 mwifiex_open(struct net_device *dev)
 {
-	netif_carrier_off(dev);
+	struct mwifiex_private *priv = mwifiex_netdev_get_priv(dev);
 
+	netif_carrier_off(dev);
+	mwifiex_set_led(priv->adapter, MWIFIEX_LED_ON);
 	return 0;
 }
 
@@ -760,6 +762,7 @@ mwifiex_close(struct net_device *dev)
 		cfg80211_sched_scan_stopped(priv->wdev.wiphy, 0);
 	}
 
+	mwifiex_set_led(priv->adapter, MWIFIEX_LED_OFF);
 	return 0;
 }
 
@@ -1020,7 +1023,7 @@ static void mwifiex_set_multicast_list(struct net_device *dev)
  * CFG802.11 network device handler for transmission timeout.
  */
 static void
-mwifiex_tx_timeout(struct net_device *dev, unsigned int txqueue)
+mwifiex_tx_timeout(struct net_device *dev)
 {
 	struct mwifiex_private *priv = mwifiex_netdev_get_priv(dev);
 
@@ -1279,8 +1282,7 @@ static struct net_device_stats *mwifiex_get_stats(struct net_device *dev)
 
 static u16
 mwifiex_netdev_select_wmm_queue(struct net_device *dev, struct sk_buff *skb,
-				struct net_device *sb_dev,
-				select_queue_fallback_t fallback)
+				struct net_device *sb_dev)
 {
 	skb->priority = cfg80211_classify8021d(skb, NULL);
 	return mwifiex_1d_to_wmm_queue[skb->priority];

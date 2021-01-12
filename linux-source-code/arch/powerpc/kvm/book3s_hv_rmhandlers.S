@@ -1,12 +1,5 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License, version 2, as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  *
  * Copyright 2011 Paul Mackerras, IBM Corp. <paulus@au1.ibm.com>
  *
@@ -34,6 +27,8 @@
 #include <asm/opal.h>
 #include <asm/xive-regs.h>
 #include <asm/thread_info.h>
+#include <asm/asm-compat.h>
+#include <asm/feature-fixups.h>
 #include <asm/cpuidle.h>
 #include <asm/ultravisor-api.h>
 
@@ -798,18 +793,21 @@ END_FTR_SECTION_IFCLR(CPU_FTR_ARCH_207S)
 	mtspr	SPRN_IAMR, r5
 	mtspr	SPRN_PSPB, r6
 	mtspr	SPRN_FSCR, r7
-	ld	r5, VCPU_DAWR(r4)
-	ld	r6, VCPU_DAWRX(r4)
-	ld	r7, VCPU_CIABR(r4)
-	ld	r8, VCPU_TAR(r4)
 	/*
 	 * Handle broken DAWR case by not writing it. This means we
 	 * can still store the DAWR register for migration.
 	 */
-BEGIN_FTR_SECTION
+	LOAD_REG_ADDR(r5, dawr_force_enable)
+	lbz	r5, 0(r5)
+	cmpdi	r5, 0
+	beq	1f
+	ld	r5, VCPU_DAWR(r4)
+	ld	r6, VCPU_DAWRX(r4)
 	mtspr	SPRN_DAWR, r5
 	mtspr	SPRN_DAWRX, r6
-END_FTR_SECTION_IFSET(CPU_FTR_DAWR)
+1:
+	ld	r7, VCPU_CIABR(r4)
+	ld	r8, VCPU_TAR(r4)
 	mtspr	SPRN_CIABR, r7
 	mtspr	SPRN_TAR, r8
 	ld	r5, VCPU_IC(r4)
@@ -1803,7 +1801,6 @@ END_FTR_SECTION_IFSET(CPU_FTR_ARCH_300)
 	tlbsync
 	ptesync
 
-BEGIN_FTR_SECTION
 	/* Radix: Handle the case where the guest used an illegal PID */
 	LOAD_REG_ADDR(r4, mmu_base_pid)
 	lwz	r3, VCPU_GUEST_PID(r9)
@@ -1833,7 +1830,6 @@ BEGIN_FTR_SECTION
 	addi	r7,r7,0x1000
 	bdnz	1b
 	ptesync
-END_FTR_SECTION_IFSET(CPU_FTR_P9_RADIX_PREFETCH_BUG)
 
 2:
 #endif /* CONFIG_PPC_RADIX_MMU */
@@ -2563,11 +2559,13 @@ END_FTR_SECTION_IFSET(CPU_FTR_ARCH_207S)
 	blr
 
 2:
-BEGIN_FTR_SECTION
-	/* POWER9 with disabled DAWR */
+	LOAD_REG_ADDR(r11, dawr_force_enable)
+	lbz	r11, 0(r11)
+	cmpdi	r11, 0
+	bne	3f
 	li	r3, H_HARDWARE
 	blr
-END_FTR_SECTION_IFCLR(CPU_FTR_DAWR)
+3:
 	/* Emulate H_SET_DABR/X on P8 for the sake of compat mode guests */
 	rlwimi	r5, r4, 5, DAWRX_DR | DAWRX_DW
 	rlwimi	r5, r4, 2, DAWRX_WT

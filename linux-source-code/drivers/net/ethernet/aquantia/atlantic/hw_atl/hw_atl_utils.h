@@ -1,10 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * aQuantia Corporation Network Driver
  * Copyright (C) 2014-2017 aQuantia Corporation. All rights reserved
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
  */
 
 /* File hw_atl_utils.h: Declaration of common functions for Atlantic hardware
@@ -469,7 +466,7 @@ int hw_atl_utils_hw_set_power(struct aq_hw_s *self,
 
 int hw_atl_utils_hw_deinit(struct aq_hw_s *self);
 
-int hw_atl_utils_get_fw_version(struct aq_hw_s *self, u32 *fw_version);
+u32 hw_atl_utils_get_fw_version(struct aq_hw_s *self);
 
 int hw_atl_utils_update_stats(struct aq_hw_s *self);
 
@@ -484,6 +481,8 @@ int hw_atl_utils_fw_rpc_call(struct aq_hw_s *self, unsigned int rpc_size);
 
 int hw_atl_utils_fw_rpc_wait(struct aq_hw_s *self,
 			     struct hw_atl_utils_fw_rpc **rpc);
+
+bool hw_atl_utils_ver_match(u32 ver_expected, u32 ver_actual);
 
 extern const struct aq_fw_ops aq_fw_1x_ops;
 extern const struct aq_fw_ops aq_fw_2x_ops;

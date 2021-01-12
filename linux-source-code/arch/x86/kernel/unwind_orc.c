@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 #include <linux/module.h>
 #include <linux/sort.h>
 #include <asm/ptrace.h>
@@ -7,25 +8,19 @@
 #include <asm/orc_lookup.h>
 
 #define orc_warn(fmt, ...) \
-	printk_deferred_once(KERN_WARNING "WARNING: " fmt, ##__VA_ARGS__)
-
-#define orc_warn_current(args...)					\
-({									\
-	if (state->task == current)					\
-		orc_warn(args);						\
-})
+	printk_deferred_once(KERN_WARNING pr_fmt("WARNING: " fmt), ##__VA_ARGS__)
 
 extern int __start_orc_unwind_ip[];
 extern int __stop_orc_unwind_ip[];
 extern struct orc_entry __start_orc_unwind[];
 extern struct orc_entry __stop_orc_unwind[];
 
-static bool orc_init __ro_after_init;
-static unsigned int lookup_num_blocks __ro_after_init;
-
 static DEFINE_MUTEX(sort_mutex);
-static int *cur_orc_ip_table = __start_orc_unwind_ip;
-static struct orc_entry *cur_orc_table = __start_orc_unwind;
+int *cur_orc_ip_table = __start_orc_unwind_ip;
+struct orc_entry *cur_orc_table = __start_orc_unwind;
+
+unsigned int lookup_num_blocks;
+bool orc_init;
 
 static inline unsigned long orc_ip(const int *ip)
 {
@@ -316,18 +311,11 @@ EXPORT_SYMBOL_GPL(unwind_get_return_address);
 
 unsigned long *unwind_get_return_address_ptr(struct unwind_state *state)
 {
-	struct task_struct *task = state->task;
-
 	if (unwind_done(state))
 		return NULL;
 
 	if (state->regs)
 		return &state->regs->ip;
-
-	if (task != current && state->sp == task->thread.sp) {
-		struct inactive_task_frame *frame = (void *)task->thread.sp;
-		return &frame->ret_addr;
-	}
 
 	if (state->sp)
 		return (unsigned long *)state->sp - 1;
@@ -436,8 +424,11 @@ bool unwind_next_frame(struct unwind_state *state)
 	/*
 	 * Find the orc_entry associated with the text address.
 	 *
-	 * Decrement call return addresses by one so they work for sibling
-	 * calls and calls to noreturn functions.
+	 * For a call frame (as opposed to a signal frame), state->ip points to
+	 * the instruction after the call.  That instruction's stack layout
+	 * could be different from the call instruction's layout, for example
+	 * if the call was to a noreturn function.  So get the ORC data for the
+	 * call instruction itself.
 	 */
 	orc = orc_find(state->signal ? state->ip : state->ip - 1);
 	if (!orc) {
@@ -481,38 +472,38 @@ bool unwind_next_frame(struct unwind_state *state)
 
 	case ORC_REG_R10:
 		if (!get_reg(state, offsetof(struct pt_regs, r10), &sp)) {
-			orc_warn_current("missing R10 value at %pB\n",
-					 (void *)state->ip);
+			orc_warn("missing regs for base reg R10 at ip %pB\n",
+				 (void *)state->ip);
 			goto err;
 		}
 		break;
 
 	case ORC_REG_R13:
 		if (!get_reg(state, offsetof(struct pt_regs, r13), &sp)) {
-			orc_warn_current("missing R13 value at %pB\n",
-					 (void *)state->ip);
+			orc_warn("missing regs for base reg R13 at ip %pB\n",
+				 (void *)state->ip);
 			goto err;
 		}
 		break;
 
 	case ORC_REG_DI:
 		if (!get_reg(state, offsetof(struct pt_regs, di), &sp)) {
-			orc_warn_current("missing RDI value at %pB\n",
-					 (void *)state->ip);
+			orc_warn("missing regs for base reg DI at ip %pB\n",
+				 (void *)state->ip);
 			goto err;
 		}
 		break;
 
 	case ORC_REG_DX:
 		if (!get_reg(state, offsetof(struct pt_regs, dx), &sp)) {
-			orc_warn_current("missing DX value at %pB\n",
-					 (void *)state->ip);
+			orc_warn("missing regs for base reg DX at ip %pB\n",
+				 (void *)state->ip);
 			goto err;
 		}
 		break;
 
 	default:
-		orc_warn("unknown SP base reg %d at %pB\n",
+		orc_warn("unknown SP base reg %d for ip %pB\n",
 			 orc->sp_reg, (void *)state->ip);
 		goto err;
 	}
@@ -541,8 +532,8 @@ bool unwind_next_frame(struct unwind_state *state)
 
 	case ORC_TYPE_REGS:
 		if (!deref_stack_regs(state, sp, &state->ip, &state->sp)) {
-			orc_warn_current("can't access registers at %pB\n",
-					 (void *)orig_ip);
+			orc_warn("can't dereference registers at %p for ip %pB\n",
+				 (void *)sp, (void *)orig_ip);
 			goto err;
 		}
 
@@ -554,8 +545,8 @@ bool unwind_next_frame(struct unwind_state *state)
 
 	case ORC_TYPE_REGS_IRET:
 		if (!deref_stack_iret_regs(state, sp, &state->ip, &state->sp)) {
-			orc_warn_current("can't access iret registers at %pB\n",
-					 (void *)orig_ip);
+			orc_warn("can't dereference iret registers at %p for ip %pB\n",
+				 (void *)sp, (void *)orig_ip);
 			goto err;
 		}
 
@@ -567,7 +558,7 @@ bool unwind_next_frame(struct unwind_state *state)
 		break;
 
 	default:
-		orc_warn("unknown .orc_unwind entry type %d at %pB\n",
+		orc_warn("unknown .orc_unwind entry type %d for ip %pB\n",
 			 orc->type, (void *)orig_ip);
 		goto err;
 	}
@@ -599,8 +590,8 @@ bool unwind_next_frame(struct unwind_state *state)
 	if (state->stack_info.type == prev_type &&
 	    on_stack(&state->stack_info, (void *)state->sp, sizeof(long)) &&
 	    state->sp <= prev_sp) {
-		orc_warn_current("stack going in the wrong direction? at %pB\n",
-				 (void *)orig_ip);
+		orc_warn("stack going in the wrong direction? ip=%pB\n",
+			 (void *)orig_ip);
 		goto err;
 	}
 
@@ -639,7 +630,7 @@ void __unwind_start(struct unwind_state *state, struct task_struct *task,
 			goto the_end;
 
 		state->ip = regs->ip;
-		state->sp = kernel_stack_pointer(regs);
+		state->sp = regs->sp;
 		state->bp = regs->bp;
 		state->regs = regs;
 		state->full_regs = true;
@@ -655,9 +646,10 @@ void __unwind_start(struct unwind_state *state, struct task_struct *task,
 	} else {
 		struct inactive_task_frame *frame = (void *)task->thread.sp;
 
-		state->sp = task->thread.sp;
+		state->sp = task->thread.sp + sizeof(*frame);
 		state->bp = READ_ONCE_NOCHECK(frame->bp);
 		state->ip = READ_ONCE_NOCHECK(frame->ret_addr);
+		state->signal = (void *)state->ip == ret_from_fork;
 	}
 
 	if (get_stack_info((unsigned long *)state->sp, state->task,

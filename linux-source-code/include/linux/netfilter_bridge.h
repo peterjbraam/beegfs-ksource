@@ -5,15 +5,11 @@
 #include <uapi/linux/netfilter_bridge.h>
 #include <linux/skbuff.h>
 
-enum nf_br_hook_priorities {
-	NF_BR_PRI_FIRST = INT_MIN,
-	NF_BR_PRI_NAT_DST_BRIDGED = -300,
-	NF_BR_PRI_FILTER_BRIDGED = -200,
-	NF_BR_PRI_BRNF = 0,
-	NF_BR_PRI_NAT_DST_OTHER = 100,
-	NF_BR_PRI_FILTER_OTHER = 200,
-	NF_BR_PRI_NAT_SRC = 300,
-	NF_BR_PRI_LAST = INT_MAX,
+struct nf_bridge_frag_data {
+	char    mac[ETH_HLEN];
+	bool    vlan_present;
+	u16     vlan_tci;
+	__be16  vlan_proto;
 };
 
 #if IS_ENABLED(CONFIG_BRIDGE_NETFILTER)
@@ -31,12 +27,12 @@ static inline void br_drop_fake_rtable(struct sk_buff *skb)
 static inline struct nf_bridge_info *
 nf_bridge_info_get(const struct sk_buff *skb)
 {
-	return skb->nf_bridge;
+	return skb_ext_find(skb, SKB_EXT_BRIDGE_NF);
 }
 
 static inline bool nf_bridge_info_exists(const struct sk_buff *skb)
 {
-	return skb->nf_bridge != NULL;
+	return skb_ext_exist(skb, SKB_EXT_BRIDGE_NF);
 }
 
 static inline int nf_bridge_get_physinif(const struct sk_buff *skb)

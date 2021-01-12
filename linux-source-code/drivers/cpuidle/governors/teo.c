@@ -131,7 +131,7 @@ static void teo_update(struct cpuidle_driver *drv, struct cpuidle_device *dev)
 	} else {
 		unsigned int lat;
 
-		lat = drv->states[dev->rh_cpuidle_dev.last_state_idx].exit_latency;
+		lat = drv->states[dev->last_state_idx].exit_latency;
 
 		measured_us = ktime_to_us(cpu_data->time_span_ns);
 		/*
@@ -194,7 +194,7 @@ static void teo_update(struct cpuidle_driver *drv, struct cpuidle_device *dev)
 	 * pattern detection.
 	 */
 	cpu_data->intervals[cpu_data->interval_idx++] = measured_us;
-	if (cpu_data->interval_idx > INTERVALS)
+	if (cpu_data->interval_idx >= INTERVALS)
 		cpu_data->interval_idx = 0;
 }
 
@@ -237,9 +237,9 @@ static int teo_select(struct cpuidle_driver *drv, struct cpuidle_device *dev,
 	int max_early_idx, prev_max_early_idx, constraint_idx, idx, i;
 	ktime_t delta_tick;
 
-	if (dev->rh_cpuidle_dev.last_state_idx >= 0) {
+	if (dev->last_state_idx >= 0) {
 		teo_update(drv, dev);
-		dev->rh_cpuidle_dev.last_state_idx = -1;
+		dev->last_state_idx = -1;
 	}
 
 	cpu_data->time_span_ns = local_clock();
@@ -356,7 +356,7 @@ static int teo_select(struct cpuidle_driver *drv, struct cpuidle_device *dev,
 
 		if (max_early_idx >= 0) {
 			idx = max_early_idx;
-			duration_us = drv->states[idx].target_residency_ns;
+			duration_us = drv->states[idx].target_residency;
 		}
 	}
 
@@ -439,7 +439,7 @@ static void teo_reflect(struct cpuidle_device *dev, int state)
 {
 	struct teo_cpu *cpu_data = per_cpu_ptr(&teo_cpus, dev->cpu);
 
-	dev->rh_cpuidle_dev.last_state_idx = state;
+	dev->last_state_idx = state;
 	/*
 	 * If the wakeup was not "natural", but triggered by one of the safety
 	 * nets, assume that the CPU might have been idle for the entire sleep

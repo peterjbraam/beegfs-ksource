@@ -1,9 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C)2003,2004 USAGI/WIDE Project
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  * Author:
  *	Yasuyuki Kozakai @USAGI <yasuyuki.kozakai@toshiba.co.jp>
@@ -25,7 +22,6 @@
 #include <net/netfilter/nf_conntrack_core.h>
 #include <net/netfilter/nf_conntrack_timeout.h>
 #include <net/netfilter/nf_conntrack_zones.h>
-#include <net/netfilter/ipv6/nf_conntrack_icmpv6.h>
 #include <net/netfilter/nf_log.h>
 
 static const unsigned int nf_ct_icmpv6_timeout = 30*HZ;
@@ -123,51 +119,6 @@ int nf_conntrack_icmpv6_packet(struct nf_conn *ct,
 	return NF_ACCEPT;
 }
 
-static int
-icmpv6_error_message(struct net *net, struct nf_conn *tmpl,
-		     struct sk_buff *skb,
-		     unsigned int icmp6off)
-{
-	struct nf_conntrack_tuple intuple, origtuple;
-	const struct nf_conntrack_tuple_hash *h;
-	enum ip_conntrack_info ctinfo;
-	struct nf_conntrack_zone tmp;
-
-	WARN_ON(skb_nfct(skb));
-
-	/* Are they talking about one of our connections? */
-	if (!nf_ct_get_tuplepr(skb,
-			       skb_network_offset(skb)
-				+ sizeof(struct ipv6hdr)
-				+ sizeof(struct icmp6hdr),
-			       PF_INET6, net, &origtuple)) {
-		pr_debug("icmpv6_error: Can't get tuple\n");
-		return -NF_ACCEPT;
-	}
-
-	/* Ordinarily, we'd expect the inverted tupleproto, but it's
-	   been preserved inside the ICMP. */
-	if (!nf_ct_invert_tuple(&intuple, &origtuple)) {
-		pr_debug("icmpv6_error: Can't invert tuple\n");
-		return -NF_ACCEPT;
-	}
-
-	ctinfo = IP_CT_RELATED;
-
-	h = nf_conntrack_find_get(net, nf_ct_zone_tmpl(tmpl, skb, &tmp),
-				  &intuple);
-	if (!h) {
-		pr_debug("icmpv6_error: no match\n");
-		return -NF_ACCEPT;
-	} else {
-		if (NF_CT_DIRECTION(h) == IP_CT_DIR_REPLY)
-			ctinfo += IP_CT_IS_REPLY;
-	}
-
-	/* Update skb to refer to this connection */
-	nf_ct_set(skb, nf_ct_tuplehash_to_ctrack(h), ctinfo);
-	return NF_ACCEPT;
-}
 
 static void icmpv6_error_log(const struct sk_buff *skb,
 			     const struct nf_hook_state *state,
@@ -182,6 +133,7 @@ int nf_conntrack_icmpv6_error(struct nf_conn *tmpl,
 			      unsigned int dataoff,
 			      const struct nf_hook_state *state)
 {
+	union nf_inet_addr outer_daddr;
 	const struct icmp6hdr *icmp6h;
 	struct icmp6hdr _ih;
 	int type;
@@ -210,7 +162,11 @@ int nf_conntrack_icmpv6_error(struct nf_conn *tmpl,
 	if (icmp6h->icmp6_type >= 128)
 		return NF_ACCEPT;
 
-	return icmpv6_error_message(state->net, tmpl, skb, dataoff);
+	memcpy(&outer_daddr.ip6, &ipv6_hdr(skb)->daddr,
+	       sizeof(outer_daddr.ip6));
+	dataoff += sizeof(*icmp6h);
+	return nf_conntrack_inet_error(tmpl, skb, dataoff, state,
+				       IPPROTO_ICMPV6, &outer_daddr);
 }
 
 #if IS_ENABLED(CONFIG_NF_CT_NETLINK)
@@ -309,46 +265,11 @@ icmpv6_timeout_nla_policy[CTA_TIMEOUT_ICMPV6_MAX+1] = {
 };
 #endif /* CONFIG_NF_CONNTRACK_TIMEOUT */
 
-#ifdef CONFIG_SYSCTL
-static struct ctl_table icmpv6_sysctl_table[] = {
-	{
-		.procname	= "nf_conntrack_icmpv6_timeout",
-		.maxlen		= sizeof(unsigned int),
-		.mode		= 0644,
-		.proc_handler	= proc_dointvec_jiffies,
-	},
-	{ }
-};
-#endif /* CONFIG_SYSCTL */
-
-static int icmpv6_kmemdup_sysctl_table(struct nf_proto_net *pn,
-				       struct nf_icmp_net *in)
-{
-#ifdef CONFIG_SYSCTL
-	pn->ctl_table = kmemdup(icmpv6_sysctl_table,
-				sizeof(icmpv6_sysctl_table),
-				GFP_KERNEL);
-	if (!pn->ctl_table)
-		return -ENOMEM;
-
-	pn->ctl_table[0].data = &in->timeout;
-#endif
-	return 0;
-}
-
-static int icmpv6_init_net(struct net *net)
+void nf_conntrack_icmpv6_init_net(struct net *net)
 {
 	struct nf_icmp_net *in = nf_icmpv6_pernet(net);
-	struct nf_proto_net *pn = &in->pn;
 
 	in->timeout = nf_ct_icmpv6_timeout;
-
-	return icmpv6_kmemdup_sysctl_table(pn, in);
-}
-
-static struct nf_proto_net *icmpv6_get_net_proto(struct net *net)
-{
-	return &net->ct.nf_ct_proto.icmpv6.pn;
 }
 
 const struct nf_conntrack_l4proto nf_conntrack_l4proto_icmpv6 =
@@ -369,6 +290,4 @@ const struct nf_conntrack_l4proto nf_conntrack_l4proto_icmpv6 =
 		.nla_policy	= icmpv6_timeout_nla_policy,
 	},
 #endif /* CONFIG_NF_CONNTRACK_TIMEOUT */
-	.init_net		= icmpv6_init_net,
-	.get_net_proto		= icmpv6_get_net_proto,
 };

@@ -183,7 +183,7 @@ The target is named "raid" and it accepts the following parameters::
         [data_offset <sectors>]
 		This option value defines the offset into each data device
 		where the data starts. This is used to provide out-of-place
-		reshaping space to avoid writing over data whilst
+		reshaping space to avoid writing over data while
 		changing the layout of stripes, hence an interruption/crash
 		may happen at any time without the risk of losing data.
 		E.g. when adding devices to an existing raid set during
@@ -417,7 +417,3 @@ Version History
 	deadlock/potential data corruption.  Update superblock when
 	specific devices are requested via rebuild.  Fix RAID leg
 	rebuild errors.
- 1.15.0 Fix size extensions not being synchronized in case of new MD bitmap
-        pages allocated;  also fix those not occuring after previous reductions
- 1.15.1 Fix argument count and arguments for rebuild/write_mostly/journal_(dev|mode)
-        on the status line.

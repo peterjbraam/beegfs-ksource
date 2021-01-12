@@ -1,10 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* Intel Sandy Bridge -EN/-EP/-EX Memory Controller kernel module
  *
  * This driver supports the memory controllers found on the Intel
  * processor family Sandy Bridge.
- *
- * This file may be distributed under the terms of the
- * GNU General Public License version 2 only.
  *
  * Copyright (c) 2011 by:
  *	 Mauro Carvalho Chehab
@@ -256,18 +254,20 @@ static const u32 rir_offset[MAX_RIR_RANGES][MAX_RIR_WAY] = {
  * FIXME: Implement the error count reads directly
  */
 
-static const u32 correrrcnt[] = {
-	0x104, 0x108, 0x10c, 0x110,
-};
-
 #define RANK_ODD_OV(reg)		GET_BITFIELD(reg, 31, 31)
 #define RANK_ODD_ERR_CNT(reg)		GET_BITFIELD(reg, 16, 30)
 #define RANK_EVEN_OV(reg)		GET_BITFIELD(reg, 15, 15)
 #define RANK_EVEN_ERR_CNT(reg)		GET_BITFIELD(reg,  0, 14)
 
+#if 0 /* Currently unused*/
+static const u32 correrrcnt[] = {
+	0x104, 0x108, 0x10c, 0x110,
+};
+
 static const u32 correrrthrsld[] = {
 	0x11c, 0x120, 0x124, 0x128,
 };
+#endif
 
 #define RANK_ODD_ERR_THRSLD(reg)	GET_BITFIELD(reg, 16, 30)
 #define RANK_EVEN_ERR_THRSLD(reg)	GET_BITFIELD(reg,  0, 14)
@@ -1342,7 +1342,7 @@ static void knl_show_mc_route(u32 reg, char *s)
  */
 static int knl_get_dimm_capacity(struct sbridge_pvt *pvt, u64 *mc_sizes)
 {
-	u64 sad_base, sad_size, sad_limit = 0;
+	u64 sad_base, sad_limit = 0;
 	u64 tad_base, tad_size, tad_limit, tad_deadspace, tad_livespace;
 	int sad_rule = 0;
 	int tad_rule = 0;
@@ -1429,7 +1429,6 @@ static int knl_get_dimm_capacity(struct sbridge_pvt *pvt, u64 *mc_sizes)
 		edram_only = KNL_EDRAM_ONLY(dram_rule);
 
 		sad_limit = pvt->info.sad_limit(dram_rule)+1;
-		sad_size = sad_limit - sad_base;
 
 		pci_read_config_dword(pvt->pci_sad0,
 			pvt->info.interleave_list[sad_rule], &interleave_reg);
@@ -1513,7 +1512,6 @@ static int knl_get_dimm_capacity(struct sbridge_pvt *pvt, u64 *mc_sizes)
 						sad_actual_size[mc] += tad_size;
 					}
 				}
-				tad_base = tad_limit+1;
 			}
 		}
 
@@ -2955,7 +2953,7 @@ static void sbridge_mce_output_error(struct mem_ctl_info *mci,
 	struct mem_ctl_info *new_mci;
 	struct sbridge_pvt *pvt = mci->pvt_info;
 	enum hw_event_mc_err_type tp_event;
-	char *type, *optype, msg[256];
+	char *optype, msg[256];
 	bool ripv = GET_BITFIELD(m->mcgstatus, 0, 0);
 	bool overflow = GET_BITFIELD(m->status, 62, 62);
 	bool uncorrected_error = GET_BITFIELD(m->status, 61, 61);
@@ -2984,14 +2982,11 @@ static void sbridge_mce_output_error(struct mem_ctl_info *mci,
 	if (uncorrected_error) {
 		core_err_cnt = 1;
 		if (ripv) {
-			type = "FATAL";
-			tp_event = HW_EVENT_ERR_FATAL;
-		} else {
-			type = "NON_FATAL";
 			tp_event = HW_EVENT_ERR_UNCORRECTED;
+		} else {
+			tp_event = HW_EVENT_ERR_FATAL;
 		}
 	} else {
-		type = "CORRECTED";
 		tp_event = HW_EVENT_ERR_CORRECTED;
 	}
 
@@ -3006,34 +3001,26 @@ static void sbridge_mce_output_error(struct mem_ctl_info *mci,
 	 *	cccc = channel
 	 * If the mask doesn't match, report an error to the parsing logic
 	 */
-	if (! ((errcode & 0xef80) == 0x80)) {
-		optype = "Can't parse: it is not a mem";
-	} else {
-		switch (optypenum) {
-		case 0:
-			optype = "generic undef request error";
-			break;
-		case 1:
-			optype = "memory read error";
-			break;
-		case 2:
-			optype = "memory write error";
-			break;
-		case 3:
-			optype = "addr/cmd error";
-			break;
-		case 4:
-			optype = "memory scrubbing error";
-			break;
-		default:
-			optype = "reserved";
-			break;
-		}
+	switch (optypenum) {
+	case 0:
+		optype = "generic undef request error";
+		break;
+	case 1:
+		optype = "memory read error";
+		break;
+	case 2:
+		optype = "memory write error";
+		break;
+	case 3:
+		optype = "addr/cmd error";
+		break;
+	case 4:
+		optype = "memory scrubbing error";
+		break;
+	default:
+		optype = "reserved";
+		break;
 	}
-
-	/* Only decode errors with an valid address (ADDRV) */
-	if (!GET_BITFIELD(m->status, 58, 58))
-		return;
 
 	if (pvt->info.type == KNIGHTS_LANDING) {
 		if (channel == 14) {
@@ -3145,16 +3132,10 @@ static int sbridge_mce_check_error(struct notifier_block *nb, unsigned long val,
 {
 	struct mce *mce = (struct mce *)data;
 	struct mem_ctl_info *mci;
-	struct sbridge_pvt *pvt;
 	char *type;
 
 	if (edac_get_report_status() == EDAC_REPORTING_DISABLED)
 		return NOTIFY_DONE;
-
-	mci = get_mci_for_node_id(mce->socketid, IMC0);
-	if (!mci)
-		return NOTIFY_DONE;
-	pvt = mci->pvt_info;
 
 	/*
 	 * Just let mcelog handle it if the error is
@@ -3163,6 +3144,22 @@ static int sbridge_mce_check_error(struct notifier_block *nb, unsigned long val,
 	 * bit 12 has an special meaning.
 	 */
 	if ((mce->status & 0xefff) >> 7 != 1)
+		return NOTIFY_DONE;
+
+	/* Check ADDRV bit in STATUS */
+	if (!GET_BITFIELD(mce->status, 58, 58))
+		return NOTIFY_DONE;
+
+	/* Check MISCV bit in STATUS */
+	if (!GET_BITFIELD(mce->status, 59, 59))
+		return NOTIFY_DONE;
+
+	/* Check address type in MISC (physical address only) */
+	if (GET_BITFIELD(mce->misc, 6, 8) != 2)
+		return NOTIFY_DONE;
+
+	mci = get_mci_for_node_id(mce->socketid, IMC0);
+	if (!mci)
 		return NOTIFY_DONE;
 
 	if (mce->mcgstatus & MCG_STATUS_MCIP)
@@ -3201,7 +3198,6 @@ static struct notifier_block sbridge_mce_dec = {
 static void sbridge_unregister_mci(struct sbridge_dev *sbridge_dev)
 {
 	struct mem_ctl_info *mci = sbridge_dev->mci;
-	struct sbridge_pvt *pvt;
 
 	if (unlikely(!mci || !mci->pvt_info)) {
 		edac_dbg(0, "MC: dev = %p\n", &sbridge_dev->pdev[0]->dev);
@@ -3209,8 +3205,6 @@ static void sbridge_unregister_mci(struct sbridge_dev *sbridge_dev)
 		sbridge_printk(KERN_ERR, "Couldn't find mci handler\n");
 		return;
 	}
-
-	pvt = mci->pvt_info;
 
 	edac_dbg(0, "MC: mci = %p, dev = %p\n",
 		 mci, &sbridge_dev->pdev[0]->dev);
@@ -3426,14 +3420,14 @@ fail0:
 }
 
 static const struct x86_cpu_id sbridge_cpuids[] = {
-	X86_MATCH_INTEL_FAM6_MODEL(SANDYBRIDGE_X, &pci_dev_descr_sbridge_table),
-	X86_MATCH_INTEL_FAM6_MODEL(IVYBRIDGE_X,	  &pci_dev_descr_ibridge_table),
-	X86_MATCH_INTEL_FAM6_MODEL(HASWELL_X,	  &pci_dev_descr_haswell_table),
-	X86_MATCH_INTEL_FAM6_MODEL(BROADWELL_X,	  &pci_dev_descr_broadwell_table),
-	X86_MATCH_INTEL_FAM6_MODEL(BROADWELL_D,	  &pci_dev_descr_broadwell_table),
-	X86_MATCH_INTEL_FAM6_MODEL(XEON_PHI_KNL,  &pci_dev_descr_knl_table),
-	X86_MATCH_INTEL_FAM6_MODEL(XEON_PHI_KNM,  &pci_dev_descr_knl_table),
-	{}
+	INTEL_CPU_FAM6(SANDYBRIDGE_X,	  pci_dev_descr_sbridge_table),
+	INTEL_CPU_FAM6(IVYBRIDGE_X,	  pci_dev_descr_ibridge_table),
+	INTEL_CPU_FAM6(HASWELL_X,	  pci_dev_descr_haswell_table),
+	INTEL_CPU_FAM6(BROADWELL_X,	  pci_dev_descr_broadwell_table),
+	INTEL_CPU_FAM6(BROADWELL_D,	  pci_dev_descr_broadwell_table),
+	INTEL_CPU_FAM6(XEON_PHI_KNL,	  pci_dev_descr_knl_table),
+	INTEL_CPU_FAM6(XEON_PHI_KNM,	  pci_dev_descr_knl_table),
+	{ }
 };
 MODULE_DEVICE_TABLE(x86cpu, sbridge_cpuids);
 

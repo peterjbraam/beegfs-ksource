@@ -60,6 +60,9 @@ static ssize_t qeth_l3_dev_route4_show(struct device *dev,
 {
 	struct qeth_card *card = dev_get_drvdata(dev);
 
+	if (!card)
+		return -EINVAL;
+
 	return qeth_l3_dev_route_show(card, &card->options.route4, buf);
 }
 
@@ -106,6 +109,9 @@ static ssize_t qeth_l3_dev_route4_store(struct device *dev,
 {
 	struct qeth_card *card = dev_get_drvdata(dev);
 
+	if (!card)
+		return -EINVAL;
+
 	return qeth_l3_dev_route_store(card, &card->options.route4,
 				QETH_PROT_IPV4, buf, count);
 }
@@ -118,6 +124,9 @@ static ssize_t qeth_l3_dev_route6_show(struct device *dev,
 {
 	struct qeth_card *card = dev_get_drvdata(dev);
 
+	if (!card)
+		return -EINVAL;
+
 	return qeth_l3_dev_route_show(card, &card->options.route6, buf);
 }
 
@@ -125,6 +134,9 @@ static ssize_t qeth_l3_dev_route6_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t count)
 {
 	struct qeth_card *card = dev_get_drvdata(dev);
+
+	if (!card)
+		return -EINVAL;
 
 	return qeth_l3_dev_route_store(card, &card->options.route6,
 				QETH_PROT_IPV6, buf, count);
@@ -138,6 +150,9 @@ static ssize_t qeth_l3_dev_fake_broadcast_show(struct device *dev,
 {
 	struct qeth_card *card = dev_get_drvdata(dev);
 
+	if (!card)
+		return -EINVAL;
+
 	return sprintf(buf, "%i\n", card->options.fake_broadcast? 1:0);
 }
 
@@ -147,6 +162,9 @@ static ssize_t qeth_l3_dev_fake_broadcast_store(struct device *dev,
 	struct qeth_card *card = dev_get_drvdata(dev);
 	char *tmp;
 	int i, rc = 0;
+
+	if (!card)
+		return -EINVAL;
 
 	mutex_lock(&card->conf_mutex);
 	if (card->state != CARD_STATE_DOWN) {
@@ -172,6 +190,9 @@ static ssize_t qeth_l3_dev_sniffer_show(struct device *dev,
 {
 	struct qeth_card *card = dev_get_drvdata(dev);
 
+	if (!card)
+		return -EINVAL;
+
 	return sprintf(buf, "%i\n", card->options.sniffer ? 1 : 0);
 }
 
@@ -181,6 +202,9 @@ static ssize_t qeth_l3_dev_sniffer_store(struct device *dev,
 	struct qeth_card *card = dev_get_drvdata(dev);
 	int rc = 0;
 	unsigned long i;
+
+	if (!card)
+		return -EINVAL;
 
 	if (!IS_IQD(card))
 		return -EPERM;
@@ -204,13 +228,14 @@ static ssize_t qeth_l3_dev_sniffer_store(struct device *dev,
 		break;
 	case 1:
 		qdio_get_ssqd_desc(CARD_DDEV(card), &card->ssqd);
-		if (card->ssqd.qdioac2 & CHSC_AC2_SNIFFER_AVAILABLE) {
+		if (card->ssqd.qdioac2 & QETH_SNIFF_AVAIL) {
 			card->options.sniffer = i;
-			qeth_resize_buffer_pool(card, QETH_IN_BUF_COUNT_MAX);
-		} else {
+			if (card->qdio.init_pool.buf_count !=
+					QETH_IN_BUF_COUNT_MAX)
+				qeth_realloc_buffer_pool(card,
+					QETH_IN_BUF_COUNT_MAX);
+		} else
 			rc = -EPERM;
-		}
-
 		break;
 	default:
 		rc = -EINVAL;
@@ -223,11 +248,15 @@ out:
 static DEVICE_ATTR(sniffer, 0644, qeth_l3_dev_sniffer_show,
 		qeth_l3_dev_sniffer_store);
 
+
 static ssize_t qeth_l3_dev_hsuid_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
 	struct qeth_card *card = dev_get_drvdata(dev);
 	char tmp_hsuid[9];
+
+	if (!card)
+		return -EINVAL;
 
 	if (!IS_IQD(card))
 		return -EPERM;
@@ -243,6 +272,9 @@ static ssize_t qeth_l3_dev_hsuid_store(struct device *dev,
 	struct qeth_card *card = dev_get_drvdata(dev);
 	int rc = 0;
 	char *tmp;
+
+	if (!card)
+		return -EINVAL;
 
 	if (!IS_IQD(card))
 		return -EPERM;
@@ -320,6 +352,9 @@ static ssize_t qeth_l3_dev_ipato_enable_show(struct device *dev,
 {
 	struct qeth_card *card = dev_get_drvdata(dev);
 
+	if (!card)
+		return -EINVAL;
+
 	return sprintf(buf, "%i\n", card->ipato.enabled? 1:0);
 }
 
@@ -329,6 +364,9 @@ static ssize_t qeth_l3_dev_ipato_enable_store(struct device *dev,
 	struct qeth_card *card = dev_get_drvdata(dev);
 	bool enable;
 	int rc = 0;
+
+	if (!card)
+		return -EINVAL;
 
 	mutex_lock(&card->conf_mutex);
 	if (card->state != CARD_STATE_DOWN) {
@@ -363,6 +401,9 @@ static ssize_t qeth_l3_dev_ipato_invert4_show(struct device *dev,
 {
 	struct qeth_card *card = dev_get_drvdata(dev);
 
+	if (!card)
+		return -EINVAL;
+
 	return sprintf(buf, "%i\n", card->ipato.invert4? 1:0);
 }
 
@@ -373,6 +414,9 @@ static ssize_t qeth_l3_dev_ipato_invert4_store(struct device *dev,
 	struct qeth_card *card = dev_get_drvdata(dev);
 	bool invert;
 	int rc = 0;
+
+	if (!card)
+		return -EINVAL;
 
 	mutex_lock(&card->conf_mutex);
 	if (sysfs_streq(buf, "toggle")) {
@@ -431,6 +475,9 @@ static ssize_t qeth_l3_dev_ipato_add4_show(struct device *dev,
 				struct device_attribute *attr, char *buf)
 {
 	struct qeth_card *card = dev_get_drvdata(dev);
+
+	if (!card)
+		return -EINVAL;
 
 	return qeth_l3_dev_ipato_add_show(buf, card, QETH_PROT_IPV4);
 }
@@ -497,6 +544,9 @@ static ssize_t qeth_l3_dev_ipato_add4_store(struct device *dev,
 {
 	struct qeth_card *card = dev_get_drvdata(dev);
 
+	if (!card)
+		return -EINVAL;
+
 	return qeth_l3_dev_ipato_add_store(buf, count, card, QETH_PROT_IPV4);
 }
 
@@ -524,6 +574,9 @@ static ssize_t qeth_l3_dev_ipato_del4_store(struct device *dev,
 {
 	struct qeth_card *card = dev_get_drvdata(dev);
 
+	if (!card)
+		return -EINVAL;
+
 	return qeth_l3_dev_ipato_del_store(buf, count, card, QETH_PROT_IPV4);
 }
 
@@ -535,6 +588,9 @@ static ssize_t qeth_l3_dev_ipato_invert6_show(struct device *dev,
 {
 	struct qeth_card *card = dev_get_drvdata(dev);
 
+	if (!card)
+		return -EINVAL;
+
 	return sprintf(buf, "%i\n", card->ipato.invert6? 1:0);
 }
 
@@ -544,6 +600,9 @@ static ssize_t qeth_l3_dev_ipato_invert6_store(struct device *dev,
 	struct qeth_card *card = dev_get_drvdata(dev);
 	bool invert;
 	int rc = 0;
+
+	if (!card)
+		return -EINVAL;
 
 	mutex_lock(&card->conf_mutex);
 	if (sysfs_streq(buf, "toggle")) {
@@ -574,6 +633,9 @@ static ssize_t qeth_l3_dev_ipato_add6_show(struct device *dev,
 {
 	struct qeth_card *card = dev_get_drvdata(dev);
 
+	if (!card)
+		return -EINVAL;
+
 	return qeth_l3_dev_ipato_add_show(buf, card, QETH_PROT_IPV6);
 }
 
@@ -581,6 +643,9 @@ static ssize_t qeth_l3_dev_ipato_add6_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t count)
 {
 	struct qeth_card *card = dev_get_drvdata(dev);
+
+	if (!card)
+		return -EINVAL;
 
 	return qeth_l3_dev_ipato_add_store(buf, count, card, QETH_PROT_IPV6);
 }
@@ -593,6 +658,9 @@ static ssize_t qeth_l3_dev_ipato_del6_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t count)
 {
 	struct qeth_card *card = dev_get_drvdata(dev);
+
+	if (!card)
+		return -EINVAL;
 
 	return qeth_l3_dev_ipato_del_store(buf, count, card, QETH_PROT_IPV6);
 }
@@ -626,6 +694,9 @@ static ssize_t qeth_l3_dev_ip_add_show(struct device *dev, char *buf,
 	int str_len = 0;
 	int entry_len; /* length of 1 entry string, differs between v4 and v6 */
 	int i;
+
+	if (!card)
+		return -EINVAL;
 
 	entry_len = (proto == QETH_PROT_IPV4)? 12 : 40;
 	entry_len += 2; /* \n + terminator */
@@ -686,6 +757,9 @@ static ssize_t qeth_l3_dev_vipa_add4_store(struct device *dev,
 {
 	struct qeth_card *card = dev_get_drvdata(dev);
 
+	if (!card)
+		return -EINVAL;
+
 	return qeth_l3_dev_vipa_add_store(buf, count, card, QETH_PROT_IPV4);
 }
 
@@ -713,6 +787,9 @@ static ssize_t qeth_l3_dev_vipa_del4_store(struct device *dev,
 {
 	struct qeth_card *card = dev_get_drvdata(dev);
 
+	if (!card)
+		return -EINVAL;
+
 	return qeth_l3_dev_vipa_del_store(buf, count, card, QETH_PROT_IPV4);
 }
 
@@ -732,6 +809,9 @@ static ssize_t qeth_l3_dev_vipa_add6_store(struct device *dev,
 {
 	struct qeth_card *card = dev_get_drvdata(dev);
 
+	if (!card)
+		return -EINVAL;
+
 	return qeth_l3_dev_vipa_add_store(buf, count, card, QETH_PROT_IPV6);
 }
 
@@ -743,6 +823,9 @@ static ssize_t qeth_l3_dev_vipa_del6_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t count)
 {
 	struct qeth_card *card = dev_get_drvdata(dev);
+
+	if (!card)
+		return -EINVAL;
 
 	return qeth_l3_dev_vipa_del_store(buf, count, card, QETH_PROT_IPV6);
 }
@@ -817,6 +900,9 @@ static ssize_t qeth_l3_dev_rxip_add4_store(struct device *dev,
 {
 	struct qeth_card *card = dev_get_drvdata(dev);
 
+	if (!card)
+		return -EINVAL;
+
 	return qeth_l3_dev_rxip_add_store(buf, count, card, QETH_PROT_IPV4);
 }
 
@@ -844,6 +930,9 @@ static ssize_t qeth_l3_dev_rxip_del4_store(struct device *dev,
 {
 	struct qeth_card *card = dev_get_drvdata(dev);
 
+	if (!card)
+		return -EINVAL;
+
 	return qeth_l3_dev_rxip_del_store(buf, count, card, QETH_PROT_IPV4);
 }
 
@@ -863,6 +952,9 @@ static ssize_t qeth_l3_dev_rxip_add6_store(struct device *dev,
 {
 	struct qeth_card *card = dev_get_drvdata(dev);
 
+	if (!card)
+		return -EINVAL;
+
 	return qeth_l3_dev_rxip_add_store(buf, count, card, QETH_PROT_IPV6);
 }
 
@@ -874,6 +966,9 @@ static ssize_t qeth_l3_dev_rxip_del6_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t count)
 {
 	struct qeth_card *card = dev_get_drvdata(dev);
+
+	if (!card)
+		return -EINVAL;
 
 	return qeth_l3_dev_rxip_del_store(buf, count, card, QETH_PROT_IPV6);
 }

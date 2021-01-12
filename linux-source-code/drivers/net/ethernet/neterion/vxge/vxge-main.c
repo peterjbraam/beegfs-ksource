@@ -114,7 +114,7 @@ static inline void VXGE_COMPLETE_VPATH_TX(struct vxge_fifo *fifo)
 
 		/* free SKBs */
 		for (temp = completed; temp != skb_ptr; temp++)
-			dev_kfree_skb_irq(*temp);
+			dev_consume_skb_irq(*temp);
 	} while (more);
 }
 
@@ -2548,7 +2548,7 @@ static int vxge_add_isr(struct vxgedev *vdev)
 			vxge_debug_init(VXGE_ERR,
 				"%s: Defaulting to INTA",
 				vdev->ndev->name);
-				goto INTA_MODE;
+			goto INTA_MODE;
 		}
 
 		msix_idx = (vdev->vpaths[0].handle->vpath->vp_id *
@@ -3273,7 +3273,7 @@ static int vxge_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
  * This function is triggered if the Tx Queue is stopped
  * for a pre-defined amount of time when the Interface is still up.
  */
-static void vxge_tx_watchdog(struct net_device *dev, unsigned int txqueue)
+static void vxge_tx_watchdog(struct net_device *dev)
 {
 	struct vxgedev *vdev;
 
@@ -4197,6 +4197,9 @@ out:
 	return ret;
 }
 
+#define VXGE_PXE_FIRMWARE "vxge/X3fw-pxe.ncf"
+#define VXGE_FIRMWARE "vxge/X3fw.ncf"
+
 static int vxge_probe_fw_update(struct vxgedev *vdev)
 {
 	u32 maj, min, bld;
@@ -4239,9 +4242,9 @@ static int vxge_probe_fw_update(struct vxgedev *vdev)
 			}
 	}
 	if (gpxe)
-		fw_name = "vxge/X3fw-pxe.ncf";
+		fw_name = VXGE_PXE_FIRMWARE;
 	else
-		fw_name = "vxge/X3fw.ncf";
+		fw_name = VXGE_FIRMWARE;
 
 	ret = vxge_fw_upgrade(vdev, fw_name, 0);
 	/* -EINVAL and -ENOENT are not fatal errors for flashing firmware on
@@ -4846,3 +4849,5 @@ vxge_closer(void)
 }
 module_init(vxge_starter);
 module_exit(vxge_closer);
+MODULE_FIRMWARE(VXGE_PXE_FIRMWARE);
+MODULE_FIRMWARE(VXGE_FIRMWARE);

@@ -1,13 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2011 Intel Corporation
  *
  * Author:
  * Dmitry Kasatkin <dmitry.kasatkin@intel.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, version 2 of the License.
- *
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -183,7 +179,7 @@ int __init integrity_load_x509(const unsigned int id, const char *path)
 	rc = kernel_read_file_from_path(path, &data, &size, 0,
 					READING_X509_CERTIFICATE);
 	if (rc < 0) {
-		pr_err("Unable to open file: %s (%d)", path, rc);
+		pr_warn("Unable to open file: %s (%d)", path, rc);
 		return rc;
 	}
 

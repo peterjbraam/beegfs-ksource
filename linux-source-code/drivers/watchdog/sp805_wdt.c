@@ -137,9 +137,13 @@ wdt_restart(struct watchdog_device *wdd, unsigned long mode, void *cmd)
 {
 	struct sp805_wdt *wdt = watchdog_get_drvdata(wdd);
 
+	writel_relaxed(UNLOCK, wdt->base + WDTLOCK);
 	writel_relaxed(0, wdt->base + WDTCONTROL);
 	writel_relaxed(0, wdt->base + WDTLOAD);
 	writel_relaxed(INT_ENABLE | RESET_ENABLE, wdt->base + WDTCONTROL);
+
+	/* Flush posted writes. */
+	readl_relaxed(wdt->base + WDTLOCK);
 
 	return 0;
 }
@@ -269,7 +273,14 @@ sp805_wdt_probe(struct amba_device *adev, const struct amba_id *id)
 	watchdog_set_nowayout(&wdt->wdd, nowayout);
 	watchdog_set_drvdata(&wdt->wdd, wdt);
 	watchdog_set_restart_priority(&wdt->wdd, 128);
-	wdt_setload(&wdt->wdd, DEFAULT_TIMEOUT);
+
+	/*
+	 * If 'timeout-sec' devicetree property is specified, use that.
+	 * Otherwise, use DEFAULT_TIMEOUT
+	 */
+	wdt->wdd.timeout = DEFAULT_TIMEOUT;
+	watchdog_init_timeout(&wdt->wdd, 0, &adev->dev);
+	wdt_setload(&wdt->wdd, wdt->wdd.timeout);
 
 	/*
 	 * If HW is already running, enable/reset the wdt and set the running
@@ -281,11 +292,8 @@ sp805_wdt_probe(struct amba_device *adev, const struct amba_id *id)
 	}
 
 	ret = watchdog_register_device(&wdt->wdd);
-	if (ret) {
-		dev_err(&adev->dev, "watchdog_register_device() failed: %d\n",
-				ret);
+	if (ret)
 		goto err;
-	}
 	amba_set_drvdata(adev, wdt);
 
 	dev_info(&adev->dev, "registration successful\n");

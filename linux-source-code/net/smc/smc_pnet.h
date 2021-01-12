@@ -19,7 +19,6 @@
 struct smc_ib_device;
 struct smcd_dev;
 struct smc_init_info;
-struct smc_link_group;
 
 /**
  * struct smc_pnettable - SMC PNET table anchor
@@ -47,9 +46,5 @@ void smc_pnet_exit(void);
 void smc_pnet_net_exit(struct net *net);
 void smc_pnet_find_roce_resource(struct sock *sk, struct smc_init_info *ini);
 void smc_pnet_find_ism_resource(struct sock *sk, struct smc_init_info *ini);
-int smc_pnetid_by_table_ib(struct smc_ib_device *smcibdev, u8 ib_port);
-int smc_pnetid_by_table_smcd(struct smcd_dev *smcd);
-void smc_pnet_find_alt_roce(struct smc_link_group *lgr,
-			    struct smc_init_info *ini,
-			    struct smc_ib_device *known_dev);
+
 #endif

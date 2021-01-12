@@ -1,9 +1,10 @@
+# SPDX-License-Identifier: GPL-2.0-only
 #
 # Generic thermal sysfs drivers configuration
 #
 
 menuconfig THERMAL
-	tristate "Generic Thermal sysfs driver"
+	bool "Generic Thermal sysfs driver"
 	help
 	  Generic Thermal Sysfs driver offers a generic mechanism for
 	  thermal management. Usually it's made up of one or more thermal
@@ -11,7 +12,7 @@ menuconfig THERMAL
 	  Each thermal zone contains its own temperature, trip points,
 	  cooling devices.
 	  All platforms with ACPI thermal support can use this driver.
-	  If you want this support, you should say Y or M here.
+	  If you want this support, you should say Y here.
 
 if THERMAL
 
@@ -24,7 +25,6 @@ config THERMAL_STATISTICS
 
 config THERMAL_EMERGENCY_POWEROFF_DELAY_MS
 	int "Emergency poweroff delay in milli-seconds"
-	depends on THERMAL
 	default 0
 	help
 	  Thermal subsystem will issue a graceful shutdown when
@@ -149,10 +149,9 @@ config THERMAL_GOV_POWER_ALLOCATOR
 	  allocating and limiting power to devices.
 
 config CPU_THERMAL
-	bool "generic cpu cooling support"
+	bool "Generic cpu cooling support"
 	depends on CPU_FREQ
 	depends on THERMAL_OF
-	depends on THERMAL=y
 	help
 	  This implements the generic cpu cooling mechanism through frequency
 	  reduction. An ACPI version of this already exists
@@ -200,6 +199,17 @@ config THERMAL_EMULATION
 	  because userland can easily disable the thermal policy by simply
 	  flooding this sysfs node with low temperature values.
 
+config THERMAL_MMIO
+	tristate "Generic Thermal MMIO driver"
+	depends on OF || COMPILE_TEST
+	depends on HAS_IOMEM
+	help
+	  This option enables the generic thermal MMIO driver that will use
+	  memory-mapped reads to get the temperature.  Any HW/System that
+	  allows temperature reading by a single memory-mapped reading, be it
+	  register or shared memory, is a potential candidate to work with this
+	  driver.
+
 config HISI_THERMAL
 	tristate "Hisilicon thermal driver"
 	depends on ARCH_HISI || COMPILE_TEST
@@ -213,7 +223,7 @@ config HISI_THERMAL
 
 config IMX_THERMAL
 	tristate "Temperature sensor driver for Freescale i.MX SoCs"
-	depends on (ARCH_MXC && CPU_THERMAL) || COMPILE_TEST
+	depends on ARCH_MXC || COMPILE_TEST
 	depends on NVMEM || !NVMEM
 	depends on MFD_SYSCON
 	depends on OF
@@ -300,7 +310,7 @@ config DOVE_THERMAL
 
 config DB8500_THERMAL
 	tristate "DB8500 thermal management"
-	depends on MFD_DB8500_PRCMU
+	depends on MFD_DB8500_PRCMU && OF
 	default y
 	help
 	  Adds DB8500 thermal management implementation according to the thermal
@@ -361,7 +371,7 @@ source "drivers/thermal/samsung/Kconfig"
 endmenu
 
 menu "STMicroelectronics thermal drivers"
-depends on ARCH_STI && OF
+depends on (ARCH_STI || ARCH_STM32) && OF
 source "drivers/thermal/st/Kconfig"
 endmenu
 
@@ -375,17 +385,6 @@ config TANGO_THERMAL
 	  the die temperature exceeds a programmable threshold.
 
 source "drivers/thermal/tegra/Kconfig"
-
-config QCOM_SPMI_TEMP_ALARM
-	tristate "Qualcomm SPMI PMIC Temperature Alarm"
-	depends on OF && SPMI && IIO
-	select REGMAP_SPMI
-	help
-	  This enables a thermal sysfs driver for Qualcomm plug-and-play (QPNP)
-	  PMIC devices. It shows up in sysfs as a thermal sensor with multiple
-	  trip points. The temperature reported by the thermal sensor reflects the
-	  real time die temperature if an ADC is present or an estimate of the
-	  temperature based upon the over temperature stage value.
 
 config GENERIC_ADC_THERMAL
 	tristate "Generic ADC based thermal sensor"

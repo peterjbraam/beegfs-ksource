@@ -1,22 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  Copyright (C) 2017 Chelsio Communications.  All rights reserved.
- *
- *  This program is free software; you can redistribute it and/or modify it
- *  under the terms and conditions of the GNU General Public License,
- *  version 2, as published by the Free Software Foundation.
- *
- *  This program is distributed in the hope it will be useful, but WITHOUT
- *  ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- *  FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- *  more details.
- *
- *  The full GNU General Public License is included in this distribution in
- *  the file called "COPYING".
- *
  */
 
 #include <linux/sort.h>
-#include <linux/string.h>
 
 #include "t4_regs.h"
 #include "cxgb4.h"
@@ -789,18 +776,24 @@ static int cudbg_get_mem_region(struct adapter *padap,
 				struct cudbg_mem_desc *mem_desc)
 {
 	u8 mc, found = 0;
-	u32 idx = 0;
-	int rc, i;
+	u32 i, idx = 0;
+	int rc;
 
 	rc = cudbg_meminfo_get_mem_index(padap, meminfo, mem_type, &mc);
 	if (rc)
 		return rc;
 
-	i = match_string(cudbg_region, ARRAY_SIZE(cudbg_region), region_name);
-	if (i < 0)
+	for (i = 0; i < ARRAY_SIZE(cudbg_region); i++) {
+		if (!strcmp(cudbg_region[i], region_name)) {
+			found = 1;
+			idx = i;
+			break;
+		}
+	}
+	if (!found)
 		return -EINVAL;
 
-	idx = i;
+	found = 0;
 	for (i = 0; i < meminfo->mem_c; i++) {
 		if (meminfo->mem[i].idx >= ARRAY_SIZE(cudbg_region))
 			continue; /* Skip holes */
@@ -1987,7 +1980,6 @@ int cudbg_collect_dump_context(struct cudbg_init *pdbg_init,
 	u8 mem_type[CTXT_INGRESS + 1] = { 0 };
 	struct cudbg_buffer temp_buff = { 0 };
 	struct cudbg_ch_cntxt *buff;
-	u64 *dst_off, *src_off;
 	u8 *ctx_buf;
 	u8 i, k;
 	int rc;
@@ -2056,8 +2048,11 @@ int cudbg_collect_dump_context(struct cudbg_init *pdbg_init,
 		}
 
 		for (j = 0; j < max_ctx_qid; j++) {
+			__be64 *dst_off;
+			u64 *src_off;
+
 			src_off = (u64 *)(ctx_buf + j * SGE_CTXT_SIZE);
-			dst_off = (u64 *)buff->data;
+			dst_off = (__be64 *)buff->data;
 
 			/* The data is stored in 64-bit cpu order.  Convert it
 			 * to big endian before parsing.
@@ -2950,10 +2945,6 @@ void cudbg_fill_qdesc_num_and_size(const struct adapter *padap,
 	tot_size += CXGB4_ULD_MAX * MAX_ULD_QSETS * SGE_MAX_IQ_SIZE *
 		    MAX_RXQ_DESC_SIZE;
 
-	/* ETHOFLD TXQ, RXQ, and FLQ */
-	tot_entries += MAX_OFLD_QSETS * 3;
-	tot_size += MAX_OFLD_QSETS * MAX_TXQ_ENTRIES * MAX_TXQ_DESC_SIZE;
-
 	tot_size += sizeof(struct cudbg_ver_hdr) +
 		    sizeof(struct cudbg_qdesc_info) +
 		    sizeof(struct cudbg_qdesc_entry) * tot_entries;
@@ -3109,23 +3100,6 @@ int cudbg_collect_qdesc(struct cudbg_init *pdbg_init,
 					      cudbg_uld_ciq_to_qtype(j),
 					      out_unlock);
 		}
-	}
-
-	/* ETHOFLD TXQ */
-	if (s->eohw_txq)
-		for (i = 0; i < s->eoqsets; i++)
-			QDESC_GET_TXQ(&s->eohw_txq[i].q,
-				      CUDBG_QTYPE_ETHOFLD_TXQ, out);
-
-	/* ETHOFLD RXQ and FLQ */
-	if (s->eohw_rxq) {
-		for (i = 0; i < s->eoqsets; i++)
-			QDESC_GET_RXQ(&s->eohw_rxq[i].rspq,
-				      CUDBG_QTYPE_ETHOFLD_RXQ, out);
-
-		for (i = 0; i < s->eoqsets; i++)
-			QDESC_GET_FLQ(&s->eohw_rxq[i].fl,
-				      CUDBG_QTYPE_ETHOFLD_FLQ, out);
 	}
 
 out_unlock:

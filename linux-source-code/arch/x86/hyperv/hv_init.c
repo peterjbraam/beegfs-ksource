@@ -1,23 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * X86 specific Hyper-V initialization code.
  *
  * Copyright (C) 2016, Microsoft, Inc.
  *
  * Author : K. Y. Srinivasan <kys@microsoft.com>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published
- * by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE, GOOD TITLE or
- * NON INFRINGEMENT.  See the GNU General Public License for more
- * details.
- *
  */
 
-#include <linux/acpi.h>
 #include <linux/efi.h>
 #include <linux/types.h>
 #include <asm/apic.h>
@@ -32,14 +21,18 @@
 #include <linux/slab.h>
 #include <linux/kernel.h>
 #include <linux/cpuhotplug.h>
-#include <linux/syscore_ops.h>
 #include <clocksource/hyperv_timer.h>
+
+#ifndef PKG_ABI
+/*
+ * Preserve the ability to 'make deb-pkg' since PKG_ABI is provided
+ * by the Ubuntu build rules.
+ */
+#define PKG_ABI 0
+#endif
 
 void *hv_hypercall_pg;
 EXPORT_SYMBOL_GPL(hv_hypercall_pg);
-
-/* Storage to save the hypercall page temporarily for hibernation */
-static void *hv_hypercall_pg_saved;
 
 u32 *hv_vp_index;
 EXPORT_SYMBOL_GPL(hv_vp_index);
@@ -61,14 +54,6 @@ void *hv_alloc_hyperv_page(void)
 }
 EXPORT_SYMBOL_GPL(hv_alloc_hyperv_page);
 
-void *hv_alloc_hyperv_zeroed_page(void)
-{
-        BUILD_BUG_ON(PAGE_SIZE != HV_HYP_PAGE_SIZE);
-
-        return (void *)__get_free_page(GFP_KERNEL | __GFP_ZERO);
-}
-EXPORT_SYMBOL_GPL(hv_alloc_hyperv_zeroed_page);
-
 void hv_free_hyperv_page(unsigned long addr)
 {
 	free_page(addr);
@@ -83,8 +68,7 @@ static int hv_cpu_init(unsigned int cpu)
 	struct page *pg;
 
 	input_arg = (void **)this_cpu_ptr(hyperv_pcpu_input_arg);
-	/* hv_cpu_init() can be called with IRQs disabled from hv_resume() */
-	pg = alloc_page(irqs_disabled() ? GFP_ATOMIC : GFP_KERNEL);
+	pg = alloc_page(GFP_KERNEL);
 	if (unlikely(!pg))
 		return -ENOMEM;
 	*input_arg = page_address(pg);
@@ -236,18 +220,10 @@ static int hv_cpu_die(unsigned int cpu)
 
 	rdmsrl(HV_X64_MSR_REENLIGHTENMENT_CONTROL, *((u64 *)&re_ctrl));
 	if (re_ctrl.target_vp == hv_vp_index[cpu]) {
-		/*
-		 * Reassign reenlightenment notifications to some other online
-		 * CPU or just disable the feature if there are no online CPUs
-		 * left (happens on hibernation).
-		 */
+		/* Reassign to some other online CPU */
 		new_cpu = cpumask_any_but(cpu_online_mask, cpu);
 
-		if (new_cpu < nr_cpu_ids)
-			re_ctrl.target_vp = hv_vp_index[new_cpu];
-		else
-			re_ctrl.enabled = 0;
-
+		re_ctrl.target_vp = hv_vp_index[new_cpu];
 		wrmsrl(HV_X64_MSR_REENLIGHTENMENT_CONTROL, *((u64 *)&re_ctrl));
 	}
 
@@ -269,62 +245,6 @@ static int __init hv_pci_init(void)
 	/* For Generation-1 VM, we'll proceed in pci_arch_init().  */
 	return 1;
 }
-
-static int hv_suspend(void)
-{
-	union hv_x64_msr_hypercall_contents hypercall_msr;
-	int ret;
-
-	/*
-	 * Reset the hypercall page as it is going to be invalidated
-	 * accross hibernation. Setting hv_hypercall_pg to NULL ensures
-	 * that any subsequent hypercall operation fails safely instead of
-	 * crashing due to an access of an invalid page. The hypercall page
-	 * pointer is restored on resume.
-	 */
-	hv_hypercall_pg_saved = hv_hypercall_pg;
-	hv_hypercall_pg = NULL;
-
-	/* Disable the hypercall page in the hypervisor */
-	rdmsrl(HV_X64_MSR_HYPERCALL, hypercall_msr.as_uint64);
-	hypercall_msr.enable = 0;
-	wrmsrl(HV_X64_MSR_HYPERCALL, hypercall_msr.as_uint64);
-
-	ret = hv_cpu_die(0);
-	return ret;
-}
-
-static void hv_resume(void)
-{
-	union hv_x64_msr_hypercall_contents hypercall_msr;
-	int ret;
-
-	ret = hv_cpu_init(0);
-	WARN_ON(ret);
-
-	/* Re-enable the hypercall page */
-	rdmsrl(HV_X64_MSR_HYPERCALL, hypercall_msr.as_uint64);
-	hypercall_msr.enable = 1;
-	hypercall_msr.guest_physical_address =
-		vmalloc_to_pfn(hv_hypercall_pg_saved);
-	wrmsrl(HV_X64_MSR_HYPERCALL, hypercall_msr.as_uint64);
-
-	hv_hypercall_pg = hv_hypercall_pg_saved;
-	hv_hypercall_pg_saved = NULL;
-
-	/*
-	 * Reenlightenment notifications are disabled by hv_cpu_die(0),
-	 * reenable them here if hv_reenlightenment_cb was previously set.
-	 */
-	if (hv_reenlightenment_cb)
-		set_hv_tscchange_cb(hv_reenlightenment_cb);
-}
-
-/* Note: when the ops are called, only CPU0 is online and IRQs are disabled. */
-static struct syscore_ops hv_syscore_ops = {
-	.suspend	= hv_suspend,
-	.resume		= hv_resume,
-};
 
 /*
  * This function is to be invoked early in the boot sequence after the
@@ -386,7 +306,7 @@ void __init hyperv_init(void)
 	 * 1. Register the guest ID
 	 * 2. Enable the hypercall and register the hypercall page
 	 */
-	guest_id = generate_guest_id(0, LINUX_VERSION_CODE, 0);
+	guest_id = generate_guest_id(0x80 /*Canonical*/, LINUX_VERSION_CODE, PKG_ABI);
 	wrmsrl(HV_X64_MSR_GUEST_OS_ID, guest_id);
 
 	hv_hypercall_pg  = __vmalloc(PAGE_SIZE, GFP_KERNEL, PAGE_KERNEL_RX);
@@ -400,17 +320,9 @@ void __init hyperv_init(void)
 	hypercall_msr.guest_physical_address = vmalloc_to_pfn(hv_hypercall_pg);
 	wrmsrl(HV_X64_MSR_HYPERCALL, hypercall_msr.as_uint64);
 
-	/*
-	 * Ignore any errors in setting up stimer clockevents
-	 * as we can run with the LAPIC timer as a fallback.
-	 */
-	(void)hv_stimer_alloc();
-
 	hv_apic_init();
 
 	x86_init.pci.arch_init = hv_pci_init;
-
-	register_syscore_ops(&hv_syscore_ops);
 
 	return;
 
@@ -430,8 +342,6 @@ free_vp_index:
 void hyperv_cleanup(void)
 {
 	union hv_x64_msr_hypercall_contents hypercall_msr;
-
-	unregister_syscore_ops(&hv_syscore_ops);
 
 	/* Reset our OS id */
 	wrmsrl(HV_X64_MSR_GUEST_OS_ID, 0);
@@ -533,9 +443,3 @@ bool hv_is_hyperv_initialized(void)
 	return hypercall_msr.enable;
 }
 EXPORT_SYMBOL_GPL(hv_is_hyperv_initialized);
-
-bool hv_is_hibernation_supported(void)
-{
-	return acpi_sleep_state_supported(ACPI_STATE_S4);
-}
-EXPORT_SYMBOL_GPL(hv_is_hibernation_supported);

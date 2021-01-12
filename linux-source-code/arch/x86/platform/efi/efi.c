@@ -59,9 +59,34 @@ static efi_system_table_t efi_systab __initdata;
 
 static efi_config_table_type_t arch_tables[] __initdata = {
 #ifdef CONFIG_X86_UV
-	{UV_SYSTEM_TABLE_GUID, "UVsystab", &efi.uv_systab},
+	{UV_SYSTEM_TABLE_GUID, "UVsystab", &uv_systab_phys},
 #endif
 	{NULL_GUID, NULL, NULL},
+};
+
+static const unsigned long * const efi_tables[] = {
+	&efi.mps,
+	&efi.acpi,
+	&efi.acpi20,
+	&efi.smbios,
+	&efi.smbios3,
+	&efi.boot_info,
+	&efi.hcdp,
+	&efi.uga,
+#ifdef CONFIG_X86_UV
+	&uv_systab_phys,
+#endif
+	&efi.fw_vendor,
+	&efi.runtime,
+	&efi.config_table,
+	&efi.esrt,
+	&efi.properties_table,
+	&efi.mem_attr_table,
+#ifdef CONFIG_EFI_RCI2_TABLE
+	&rci2_table_phys,
+#endif
+	&efi.tpm_log,
+	&efi.tpm_final_log,
 };
 
 u64 efi_setup;		/* efi setup_data physical address */
@@ -85,6 +110,8 @@ static efi_status_t __init phys_efi_set_virtual_address_map(
 	pgd_t *save_pgd;
 
 	save_pgd = efi_call_phys_prolog();
+	if (!save_pgd)
+		return EFI_ABORTED;
 
 	/* Disable interrupts around EFI calls: */
 	local_irq_save(flags);
@@ -120,17 +147,13 @@ void __init efi_find_mirror(void)
 
 /*
  * Tell the kernel about the EFI memory map.  This might include
- * more than the max 128 entries that can fit in the passed in e820
- * legacy (zeropage) memory map, but the kernel's e820 table can hold
- * E820_MAX_ENTRIES.
+ * more than the max 128 entries that can fit in the e820 legacy
+ * (zeropage) memory map.
  */
 
 static void __init do_add_efi_memmap(void)
 {
 	efi_memory_desc_t *md;
-
-	if (!efi_enabled(EFI_MEMMAP))
-		return;
 
 	for_each_efi_memory_desc(md) {
 		unsigned long long start = md->phys_addr;
@@ -143,10 +166,7 @@ static void __init do_add_efi_memmap(void)
 		case EFI_BOOT_SERVICES_CODE:
 		case EFI_BOOT_SERVICES_DATA:
 		case EFI_CONVENTIONAL_MEMORY:
-			if (efi_soft_reserve_enabled()
-			    && (md->attribute & EFI_MEMORY_SP))
-				e820_type = E820_TYPE_SOFT_RESERVED;
-			else if (md->attribute & EFI_MEMORY_WB)
+			if (md->attribute & EFI_MEMORY_WB)
 				e820_type = E820_TYPE_RAM;
 			else
 				e820_type = E820_TYPE_RESERVED;
@@ -172,34 +192,9 @@ static void __init do_add_efi_memmap(void)
 			e820_type = E820_TYPE_RESERVED;
 			break;
 		}
-
 		e820__range_add(start, size, e820_type);
 	}
 	e820__update_table(e820_table);
-}
-
-/*
- * Given add_efi_memmap defaults to 0 and there there is no alternative
- * e820 mechanism for soft-reserved memory, import the full EFI memory
- * map if soft reservations are present and enabled. Otherwise, the
- * mechanism to disable the kernel's consideration of EFI_MEMORY_SP is
- * the efi=nosoftreserve option.
- */
-static bool do_efi_soft_reserve(void)
-{
-	efi_memory_desc_t *md;
-
-	if (!efi_enabled(EFI_MEMMAP))
-		return false;
-
-	if (!efi_soft_reserve_enabled())
-		return false;
-
-	for_each_efi_memory_desc(md)
-		if (md->type == EFI_CONVENTIONAL_MEMORY &&
-		    (md->attribute & EFI_MEMORY_SP))
-			return true;
-	return false;
 }
 
 int __init efi_memblock_x86_reserve_range(void)
@@ -231,7 +226,7 @@ int __init efi_memblock_x86_reserve_range(void)
 	if (rv)
 		return rv;
 
-	if (add_efi_memmap || do_efi_soft_reserve())
+	if (add_efi_memmap)
 		do_add_efi_memmap();
 
 	WARN(efi.memmap.desc_version != 1,
@@ -511,7 +506,6 @@ void __init efi_init(void)
 	efi_char16_t *c16;
 	char vendor[100] = "unknown";
 	int i = 0;
-	void *tmp;
 
 #ifdef CONFIG_X86_32
 	if (boot_params.efi_info.efi_systab_hi ||
@@ -536,14 +530,16 @@ void __init efi_init(void)
 	/*
 	 * Show what we know for posterity
 	 */
-	c16 = tmp = early_memremap(efi.systab->fw_vendor, 2);
+	c16 = early_memremap_ro(efi.systab->fw_vendor,
+				sizeof(vendor) * sizeof(efi_char16_t));
 	if (c16) {
-		for (i = 0; i < sizeof(vendor) - 1 && *c16; ++i)
-			vendor[i] = *c16++;
+		for (i = 0; i < sizeof(vendor) - 1 && c16[i]; ++i)
+			vendor[i] = c16[i];
 		vendor[i] = '\0';
-	} else
+		early_memunmap(c16, sizeof(vendor) * sizeof(efi_char16_t));
+	} else {
 		pr_err("Could not map the firmware vendor!\n");
-	early_memunmap(tmp, 2);
+	}
 
 	pr_info("EFI v%u.%.02u by %s\n",
 		efi.systab->hdr.revision >> 16,
@@ -786,15 +782,6 @@ static bool should_map_region(efi_memory_desc_t *md)
 		return false;
 
 	/*
-	 * EFI specific purpose memory may be reserved by default
-	 * depending on kernel config and boot options.
-	 */
-	if (md->type == EFI_CONVENTIONAL_MEMORY &&
-	    efi_soft_reserve_enabled() &&
-	    (md->attribute & EFI_MEMORY_SP))
-		return false;
-
-	/*
 	 * Map all of RAM so that we can access arguments in the 1:1
 	 * mapping when making EFI runtime calls.
 	 */
@@ -969,16 +956,14 @@ static void __init __efi_enter_virtual_mode(void)
 
 	if (efi_alloc_page_tables()) {
 		pr_err("Failed to allocate EFI page tables\n");
-		clear_bit(EFI_RUNTIME_SERVICES, &efi.flags);
-		return;
+		goto err;
 	}
 
 	efi_merge_regions();
 	new_memmap = efi_map_regions(&count, &pg_shift);
 	if (!new_memmap) {
 		pr_err("Error reallocating memory, EFI runtime non-functional!\n");
-		clear_bit(EFI_RUNTIME_SERVICES, &efi.flags);
-		return;
+		goto err;
 	}
 
 	pa = __pa(new_memmap);
@@ -992,8 +977,7 @@ static void __init __efi_enter_virtual_mode(void)
 
 	if (efi_memmap_init_late(pa, efi.memmap.desc_size * count)) {
 		pr_err("Failed to remap late EFI memory map\n");
-		clear_bit(EFI_RUNTIME_SERVICES, &efi.flags);
-		return;
+		goto err;
 	}
 
 	if (efi_enabled(EFI_DBG)) {
@@ -1001,12 +985,11 @@ static void __init __efi_enter_virtual_mode(void)
 		efi_print_memmap();
 	}
 
-	BUG_ON(!efi.systab);
+	if (WARN_ON(!efi.systab))
+		goto err;
 
-	if (efi_setup_page_tables(pa, 1 << pg_shift)) {
-		clear_bit(EFI_RUNTIME_SERVICES, &efi.flags);
-		return;
-	}
+	if (efi_setup_page_tables(pa, 1 << pg_shift))
+		goto err;
 
 	efi_sync_low_kernel_mappings();
 
@@ -1026,10 +1009,12 @@ static void __init __efi_enter_virtual_mode(void)
 	}
 
 	if (status != EFI_SUCCESS) {
-		pr_alert("Unable to switch EFI into virtual mode (status=%lx)!\n",
-			 status);
-		panic("EFI call to SetVirtualAddressMap() failed!");
+		pr_err("Unable to switch EFI into virtual mode (status=%lx)!\n",
+		       status);
+		goto err;
 	}
+
+	efi_free_boot_services();
 
 	/*
 	 * Now that EFI is in virtual mode, update the function
@@ -1055,6 +1040,10 @@ static void __init __efi_enter_virtual_mode(void)
 
 	/* clean DUMMY object */
 	efi_delete_dummy_variable();
+	return;
+
+err:
+	clear_bit(EFI_RUNTIME_SERVICES, &efi.flags);
 }
 
 void __init efi_enter_virtual_mode(void)
@@ -1083,3 +1072,17 @@ static int __init arch_parse_efi_cmdline(char *str)
 	return 0;
 }
 early_param("efi", arch_parse_efi_cmdline);
+
+bool efi_is_table_address(unsigned long phys_addr)
+{
+	unsigned int i;
+
+	if (phys_addr == EFI_INVALID_TABLE_ADDR)
+		return false;
+
+	for (i = 0; i < ARRAY_SIZE(efi_tables); i++)
+		if (*(efi_tables[i]) == phys_addr)
+			return true;
+
+	return false;
+}

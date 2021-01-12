@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * linux/drivers/net/ethernet/ethoc.c
  *
  * Copyright (C) 2007-2008 Avionic Design Development GmbH
  * Copyright (C) 2008-2009 Avionic Design GmbH
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  * Written by Thierry Reding <thierry.reding@avionic-design.de>
  */
@@ -872,7 +869,7 @@ static int ethoc_change_mtu(struct net_device *dev, int new_mtu)
 	return -ENOSYS;
 }
 
-static void ethoc_tx_timeout(struct net_device *dev, unsigned int txqueue)
+static void ethoc_tx_timeout(struct net_device *dev)
 {
 	struct ethoc *priv = netdev_priv(dev);
 	u32 pending = ethoc_read(priv, INT_SOURCE);
@@ -1032,8 +1029,6 @@ static int ethoc_probe(struct platform_device *pdev)
 	struct ethoc_platform_data *pdata = dev_get_platdata(&pdev->dev);
 	u32 eth_clkfreq = pdata ? pdata->eth_clkfreq : 0;
 
-	mark_hardware_unsupported("OpenCores Ethernet MAC driver");
-
 	/* allocate networking device */
 	netdev = alloc_etherdev(sizeof(struct ethoc));
 	if (!netdev) {
@@ -1155,7 +1150,7 @@ static int ethoc_probe(struct platform_device *pdev)
 		const void *mac;
 
 		mac = of_get_mac_address(pdev->dev.of_node);
-		if (mac)
+		if (!IS_ERR(mac))
 			ether_addr_copy(netdev->dev_addr, mac);
 		priv->phy_id = -1;
 	}

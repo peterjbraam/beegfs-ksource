@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  ec.c - ACPI Embedded Controller Driver (v3)
  *
@@ -9,20 +10,6 @@
  *            2001, 2002 Andy Grover <andrew.grover@intel.com>
  *            2001, 2002 Paul Diefenbaugh <paul.s.diefenbaugh@intel.com>
  *  Copyright (C) 2008      Alexey Starikovskiy <astarikovskiy@suse.de>
- *
- * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or (at
- *  your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful, but
- *  WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  General Public License for more details.
- *
- * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  */
 
 /* Uncomment next line to get verbose printout */
@@ -1440,57 +1427,45 @@ ec_parse_device(acpi_handle handle, u32 Level, void *context, void **retval)
 	return AE_CTRL_TERMINATE;
 }
 
-static void install_gpe_event_handler(struct acpi_ec *ec)
+static bool install_gpe_event_handler(struct acpi_ec *ec)
 {
-	acpi_status status =
-		acpi_install_gpe_raw_handler(NULL, ec->gpe,
-					     ACPI_GPE_EDGE_TRIGGERED,
-					     &acpi_ec_gpe_handler,
-					     ec);
-	if (ACPI_SUCCESS(status)) {
-		/* This is not fatal as we can poll EC events */
-		set_bit(EC_FLAGS_EVENT_HANDLER_INSTALLED, &ec->flags);
-		acpi_ec_leave_noirq(ec);
-		if (test_bit(EC_FLAGS_STARTED, &ec->flags) &&
-		    ec->reference_count >= 1)
-			acpi_ec_enable_gpe(ec, true);
-	}
+	acpi_status status;
+
+	status = acpi_install_gpe_raw_handler(NULL, ec->gpe,
+					      ACPI_GPE_EDGE_TRIGGERED,
+					      &acpi_ec_gpe_handler, ec);
+	if (ACPI_FAILURE(status))
+		return false;
+
+	if (test_bit(EC_FLAGS_STARTED, &ec->flags) && ec->reference_count >= 1)
+		acpi_ec_enable_gpe(ec, true);
+
+	return true;
 }
 
-/* ACPI reduced hardware platforms use a GpioInt specified in _CRS. */
-static int install_gpio_irq_event_handler(struct acpi_ec *ec,
-					  struct acpi_device *device)
+static bool install_gpio_irq_event_handler(struct acpi_ec *ec)
 {
-	int irq = acpi_dev_gpio_irq_get(device, 0);
-	int ret;
-
-	if (irq < 0)
-		return irq;
-
-	ret = request_irq(irq, acpi_ec_irq_handler, IRQF_SHARED,
-			  "ACPI EC", ec);
-
-	/*
-	 * Unlike the GPE case, we treat errors here as fatal, we'll only
-	 * implement GPIO polling if we find a case that needs it.
-	 */
-	if (ret < 0)
-		return ret;
-
-	ec->irq = irq;
-	set_bit(EC_FLAGS_EVENT_HANDLER_INSTALLED, &ec->flags);
-	acpi_ec_leave_noirq(ec);
-
-	return 0;
+	return request_irq(ec->irq, acpi_ec_irq_handler, IRQF_SHARED,
+			   "ACPI EC", ec) >= 0;
 }
 
-/*
- * Note: This function returns an error code only when the address space
- *       handler is not installed, which means "not able to handle
- *       transactions".
+/**
+ * ec_install_handlers - Install service callbacks and register query methods.
+ * @ec: Target EC.
+ * @device: ACPI device object corresponding to @ec.
+ *
+ * Install a handler for the EC address space type unless it has been installed
+ * already.  If @device is not NULL, also look for EC query methods in the
+ * namespace and register them, and install an event (either GPE or GPIO IRQ)
+ * handler for the EC, if possible.
+ *
+ * Return:
+ * -ENODEV if the address space handler cannot be installed, which means
+ *  "unable to handle transactions",
+ * -EPROBE_DEFER if GPIO IRQ acquisition needs to be deferred,
+ * or 0 (success) otherwise.
  */
-static int ec_install_handlers(struct acpi_ec *ec, struct acpi_device *device,
-			       bool handle_events)
+static int ec_install_handlers(struct acpi_ec *ec, struct acpi_device *device)
 {
 	acpi_status status;
 
@@ -1520,8 +1495,21 @@ static int ec_install_handlers(struct acpi_ec *ec, struct acpi_device *device,
 		set_bit(EC_FLAGS_EC_HANDLER_INSTALLED, &ec->flags);
 	}
 
-	if (!handle_events)
+	if (!device)
 		return 0;
+
+	if (ec->gpe < 0) {
+		/* ACPI reduced hardware platforms use a GpioInt from _CRS. */
+		int irq = acpi_dev_gpio_irq_get(device, 0);
+		/*
+		 * Bail out right away for deferred probing or complete the
+		 * initialization regardless of any other errors.
+		 */
+		if (irq == -EPROBE_DEFER)
+			return -EPROBE_DEFER;
+		else if (irq >= 0)
+			ec->irq = irq;
+	}
 
 	if (!test_bit(EC_FLAGS_QUERY_METHODS_INSTALLED, &ec->flags)) {
 		/* Find and register all query methods */
@@ -1531,16 +1519,21 @@ static int ec_install_handlers(struct acpi_ec *ec, struct acpi_device *device,
 		set_bit(EC_FLAGS_QUERY_METHODS_INSTALLED, &ec->flags);
 	}
 	if (!test_bit(EC_FLAGS_EVENT_HANDLER_INSTALLED, &ec->flags)) {
-		if (ec->gpe >= 0) {
-			install_gpe_event_handler(ec);
-		} else if (device) {
-			int ret = install_gpio_irq_event_handler(ec, device);
+		bool ready = false;
 
-			if (ret)
-				return ret;
-		} else { /* No GPE and no GpioInt? */
-			return -ENODEV;
+		if (ec->gpe >= 0)
+			ready = install_gpe_event_handler(ec);
+		else if (ec->irq >= 0)
+			ready = install_gpio_irq_event_handler(ec);
+
+		if (ready) {
+			set_bit(EC_FLAGS_EVENT_HANDLER_INSTALLED, &ec->flags);
+			acpi_ec_leave_noirq(ec);
 		}
+		/*
+		 * Failures to install an event handler are not fatal, because
+		 * the EC can be polled for events.
+		 */
 	}
 	/* EC is fully operational, allow queries */
 	acpi_ec_enable_event(ec);
@@ -1587,29 +1580,23 @@ static void ec_remove_handlers(struct acpi_ec *ec)
 	}
 }
 
-static int acpi_ec_setup(struct acpi_ec *ec, struct acpi_device *device,
-			 bool handle_events)
+static int acpi_ec_setup(struct acpi_ec *ec, struct acpi_device *device)
 {
 	int ret;
 
-	ret = ec_install_handlers(ec, device, handle_events);
+	ret = ec_install_handlers(ec, device);
 	if (ret)
 		return ret;
 
 	/* First EC capable of handling transactions */
-	if (!first_ec)
+	if (!first_ec) {
 		first_ec = ec;
-
-	pr_info("EC_CMD/EC_SC=0x%lx, EC_DATA=0x%lx\n", ec->command_addr,
-		ec->data_addr);
-
-	if (test_bit(EC_FLAGS_EVENT_HANDLER_INSTALLED, &ec->flags)) {
-		if (ec->gpe >= 0)
-			pr_info("GPE=0x%x\n", ec->gpe);
-		else
-			pr_info("IRQ=%d\n", ec->irq);
+		acpi_handle_info(first_ec->handle, "Used as first EC\n");
 	}
 
+	acpi_handle_info(ec->handle,
+			 "GPE=0x%x, IRQ=%d, EC_CMD/EC_SC=0x%lx, EC_DATA=0x%lx\n",
+			 ec->gpe, ec->irq, ec->command_addr, ec->data_addr);
 	return ret;
 }
 
@@ -1654,7 +1641,7 @@ static int acpi_ec_add(struct acpi_device *device)
 		status = ec_parse_device(device->handle, 0, ec, NULL);
 		if (status != AE_CTRL_TERMINATE) {
 			ret = -EINVAL;
-			goto err_alloc;
+			goto err;
 		}
 
 		if (boot_ec && ec->command_addr == boot_ec->command_addr &&
@@ -1673,9 +1660,9 @@ static int acpi_ec_add(struct acpi_device *device)
 		}
 	}
 
-	ret = acpi_ec_setup(ec, device, true);
+	ret = acpi_ec_setup(ec, device);
 	if (ret)
-		goto err_query;
+		goto err;
 
 	if (ec == boot_ec)
 		acpi_handle_info(boot_ec->handle,
@@ -1696,12 +1683,10 @@ static int acpi_ec_add(struct acpi_device *device)
 	acpi_handle_debug(ec->handle, "enumerated.\n");
 	return 0;
 
-err_query:
-	if (ec != boot_ec)
-		acpi_ec_remove_query_handlers(ec, true, 0);
-err_alloc:
+err:
 	if (ec != boot_ec)
 		acpi_ec_free(ec);
+
 	return ret;
 }
 
@@ -1793,7 +1778,7 @@ void __init acpi_ec_dsdt_probe(void)
 	 * At this point, the GPE is not fully initialized, so do not to
 	 * handle the events.
 	 */
-	ret = acpi_ec_setup(ec, NULL, false);
+	ret = acpi_ec_setup(ec, NULL);
 	if (ret) {
 		acpi_ec_free(ec);
 		return;
@@ -1980,7 +1965,7 @@ void __init acpi_ec_ecdt_probe(void)
 	 * At this point, the namespace is not initialized, so do not find
 	 * the namespace objects, or handle the events.
 	 */
-	ret = acpi_ec_setup(ec, NULL, false);
+	ret = acpi_ec_setup(ec, NULL);
 	if (ret) {
 		acpi_ec_free(ec);
 		return;
@@ -2069,20 +2054,16 @@ bool acpi_ec_dispatch_gpe(void)
 	if (acpi_any_gpe_status_set(first_ec->gpe))
 		return true;
 
-	if (ec_no_wakeup)
-		return false;
-
 	/*
 	 * Dispatch the EC GPE in-band, but do not report wakeup in any case
 	 * to allow the caller to process events properly after that.
 	 */
 	ret = acpi_dispatch_gpe(NULL, first_ec->gpe);
-	if (ret == ACPI_INTERRUPT_HANDLED) {
+	if (ret == ACPI_INTERRUPT_HANDLED)
 		pm_pr_dbg("EC GPE dispatched\n");
 
-		/* Flush the event and query workqueues. */
-		acpi_ec_flush_work();
-	}
+	/* Flush the event and query workqueues. */
+	acpi_ec_flush_work();
 
 	return false;
 }

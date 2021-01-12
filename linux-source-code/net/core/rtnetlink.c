@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * INET		An implementation of the TCP/IP protocol suite for the LINUX
  *		operating system.  INET is implemented using the  BSD Socket
@@ -6,11 +7,6 @@
  *		Routing netlink socket interface: protocol independent part.
  *
  * Authors:	Alexey Kuznetsov, <kuznet@ms2.inr.ac.ru>
- *
- *		This program is free software; you can redistribute it and/or
- *		modify it under the terms of the GNU General Public License
- *		as published by the Free Software Foundation; either version
- *		2 of the License, or (at your option) any later version.
  *
  *	Fixes:
  *	Vitaly E. Lavrov		RTA_OK arithmetics was wrong.
@@ -58,7 +54,7 @@
 #include <net/rtnetlink.h>
 #include <net/net_namespace.h>
 
-#define RTNL_MAX_TYPE		49
+#define RTNL_MAX_TYPE		50
 #define RTNL_SLAVE_MAX_TYPE	36
 
 struct rtnl_link {
@@ -1166,19 +1162,6 @@ static int rtnl_phys_switch_id_fill(struct sk_buff *skb, struct net_device *dev)
 	return 0;
 }
 
-/* RHEL: remove the extra reserved fields at the end of rtnl_link_stats64.
- * We assume the fields are 64bit aligned. */
-static void trim_reserved_stats(struct sk_buff *skb, struct nlattr *attr)
-{
-	size_t extra;
-
-	extra = sizeof(struct rtnl_link_stats64) - sizeof_rtnl_link_stats64;
-	attr->nla_len -= extra;
-
-	/* We can subtract 'extra' here due to proper structure alignment */
-	__skb_trim(skb, skb->len - extra);
-}
-
 static noinline_for_stack int rtnl_fill_stats(struct sk_buff *skb,
 					      struct net_device *dev)
 {
@@ -1193,10 +1176,8 @@ static noinline_for_stack int rtnl_fill_stats(struct sk_buff *skb,
 	sp = nla_data(attr);
 	dev_get_stats(dev, sp);
 
-	trim_reserved_stats(skb, attr);
-
 	attr = nla_reserve(skb, IFLA_STATS,
-			   sizeof_rtnl_link_stats);
+			   sizeof(struct rtnl_link_stats));
 	if (!attr)
 		return -EMSGSIZE;
 
@@ -1223,8 +1204,6 @@ static noinline_for_stack int rtnl_fill_vfinfo(struct sk_buff *skb,
 	struct ifla_vf_mac vf_mac;
 	struct ifla_vf_broadcast vf_broadcast;
 	struct ifla_vf_info ivi;
-	struct ifla_vf_guid node_guid;
-	struct ifla_vf_guid port_guid;
 
 	memset(&ivi, 0, sizeof(ivi));
 
@@ -1246,8 +1225,6 @@ static noinline_for_stack int rtnl_fill_vfinfo(struct sk_buff *skb,
 		return 0;
 
 	memset(&vf_vlan_info, 0, sizeof(vf_vlan_info));
-	memset(&node_guid, 0, sizeof(node_guid));
-	memset(&port_guid, 0, sizeof(port_guid));
 
 	vf_mac.vf =
 		vf_vlan.vf =
@@ -1257,9 +1234,7 @@ static noinline_for_stack int rtnl_fill_vfinfo(struct sk_buff *skb,
 		vf_spoofchk.vf =
 		vf_linkstate.vf =
 		vf_rss_query_en.vf =
-		vf_trust.vf =
-		node_guid.vf =
-		port_guid.vf = ivi.vf;
+		vf_trust.vf = ivi.vf;
 
 	memcpy(vf_mac.mac, ivi.mac, sizeof(ivi.mac));
 	memcpy(vf_broadcast.broadcast, dev->broadcast, dev->addr_len);
@@ -1295,16 +1270,6 @@ static noinline_for_stack int rtnl_fill_vfinfo(struct sk_buff *skb,
 	    nla_put(skb, IFLA_VF_TRUST,
 		    sizeof(vf_trust), &vf_trust))
 		goto nla_put_vf_failure;
-
-	if (dev->netdev_ops->ndo_get_vf_guid &&
-	    !dev->netdev_ops->ndo_get_vf_guid(dev, vfs_num, &node_guid,
-					      &port_guid)) {
-		if (nla_put(skb, IFLA_VF_IB_NODE_GUID, sizeof(node_guid),
-			    &node_guid) ||
-		    nla_put(skb, IFLA_VF_IB_PORT_GUID, sizeof(port_guid),
-			    &port_guid))
-			goto nla_put_vf_failure;
-	}
 	vfvlanlist = nla_nest_start_noflag(skb, IFLA_VF_VLAN_LIST);
 	if (!vfvlanlist)
 		goto nla_put_vf_failure;
@@ -1830,9 +1795,7 @@ static const struct nla_policy ifla_port_policy[IFLA_PORT_MAX+1] = {
 };
 
 static const struct nla_policy ifla_xdp_policy[IFLA_XDP_MAX + 1] = {
-	[IFLA_XDP_UNSPEC]	= { .strict_start_type = IFLA_XDP_EXPECTED_FD },
 	[IFLA_XDP_FD]		= { .type = NLA_S32 },
-	[IFLA_XDP_EXPECTED_FD]	= { .type = NLA_S32 },
 	[IFLA_XDP_ATTACHED]	= { .type = NLA_U8 },
 	[IFLA_XDP_FLAGS]	= { .type = NLA_U32 },
 	[IFLA_XDP_PROG_ID]	= { .type = NLA_U32 },
@@ -2759,20 +2722,8 @@ static int do_setlink(const struct sk_buff *skb,
 		}
 
 		if (xdp[IFLA_XDP_FD]) {
-			int expected_fd = -1;
-
-			if (xdp_flags & XDP_FLAGS_REPLACE) {
-				if (!xdp[IFLA_XDP_EXPECTED_FD]) {
-					err = -EINVAL;
-					goto errout;
-				}
-				expected_fd =
-					nla_get_s32(xdp[IFLA_XDP_EXPECTED_FD]);
-			}
-
 			err = dev_change_xdp_fd(dev, extack,
 						nla_get_s32(xdp[IFLA_XDP_FD]),
-						expected_fd,
 						xdp_flags);
 			if (err)
 				goto errout;
@@ -3280,7 +3231,8 @@ replay:
 		 */
 		if (err < 0) {
 			/* If device is not registered at all, free it now */
-			if (dev->reg_state == NETREG_UNINITIALIZED)
+			if (dev->reg_state == NETREG_UNINITIALIZED ||
+			    dev->reg_state == NETREG_UNREGISTERED)
 				free_netdev(dev);
 			goto out;
 		}
@@ -4760,7 +4712,7 @@ static int rtnl_get_offload_stats_attr_size(int attr_id)
 {
 	switch (attr_id) {
 	case IFLA_OFFLOAD_XSTATS_CPU_HIT:
-		return sizeof_rtnl_link_stats64;
+		return sizeof(struct rtnl_link_stats64);
 	}
 
 	return 0;
@@ -4875,8 +4827,6 @@ static int rtnl_fill_statsinfo(struct sk_buff *skb, struct net_device *dev,
 
 		sp = nla_data(attr);
 		dev_get_stats(dev, sp);
-
-		trim_reserved_stats(skb, attr);
 	}
 
 	if (stats_attr_valid(filter_mask, IFLA_STATS_LINK_XSTATS, *idxattr)) {

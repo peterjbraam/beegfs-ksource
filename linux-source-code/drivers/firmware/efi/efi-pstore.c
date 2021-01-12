@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0+
+
 #include <linux/efi.h>
 #include <linux/module.h>
 #include <linux/pstore.h>
@@ -159,7 +161,7 @@ static int efi_pstore_scan_sysfs_exit(struct efivar_entry *pos,
  *
  * @record: pstore record to pass to callback
  *
- * You MUST call efivar_entry_iter_begin() before this function, and
+ * You MUST call efivar_enter_iter_begin() before this function, and
  * efivar_entry_iter_end() afterwards.
  *
  */

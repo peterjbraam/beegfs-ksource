@@ -37,9 +37,9 @@ SECTIONS
 	* .dma section for code, data, ex_table that need to stay below 2 GB,
 	* even when the kernel is relocate: above 2 GB.
 	*/
+	. = ALIGN(PAGE_SIZE);
 	_sdma = .;
 	.dma.text : {
-		. = ALIGN(PAGE_SIZE);
 		_stext_dma = .;
 		*(.dma.text)
 		. = ALIGN(PAGE_SIZE);
@@ -52,6 +52,7 @@ SECTIONS
 		_stop_dma_ex_table = .;
 	}
 	.dma.data : { *(.dma.data) }
+	. = ALIGN(PAGE_SIZE);
 	_edma = .;
 
 	BOOT_DATA
@@ -77,6 +78,8 @@ SECTIONS
 		_compressed_start = .;
 		*(.vmlinux.bin.compressed)
 		_compressed_end = .;
+		FILL(0xff);
+		. = ALIGN(4096);
 	}
 	. = ALIGN(256);
 	.bss : {
