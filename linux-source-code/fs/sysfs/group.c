@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * fs/sysfs/group.c - Operations for adding/removing multiple files at once.
  *
@@ -5,9 +6,6 @@
  * Copyright (c) 2003 Open Source Development Lab
  * Copyright (c) 2013 Greg Kroah-Hartman
  * Copyright (c) 2013 The Linux Foundation
- *
- * This file is released undert the GPL v2.
- *
  */
 
 #include <linux/kobject.h>
@@ -55,6 +53,12 @@ static int create_files(struct kernfs_node *parent, struct kobject *kobj,
 				if (!mode)
 					continue;
 			}
+
+			WARN(mode & ~(SYSFS_PREALLOC | 0664),
+			     "Attribute %s: Invalid permissions 0%o\n",
+			     (*attr)->name, mode);
+
+			mode &= SYSFS_PREALLOC | 0664;
 			error = sysfs_add_file_mode_ns(parent, *attr, false,
 						       mode, NULL);
 			if (unlikely(error))
@@ -67,13 +71,26 @@ static int create_files(struct kernfs_node *parent, struct kobject *kobj,
 	}
 
 	if (grp->bin_attrs) {
-		for (bin_attr = grp->bin_attrs; *bin_attr; bin_attr++) {
+		for (i = 0, bin_attr = grp->bin_attrs; *bin_attr; i++, bin_attr++) {
+			umode_t mode = (*bin_attr)->attr.mode;
+
 			if (update)
 				kernfs_remove_by_name(parent,
 						(*bin_attr)->attr.name);
+			if (grp->is_bin_visible) {
+				mode = grp->is_bin_visible(kobj, *bin_attr, i);
+				if (!mode)
+					continue;
+			}
+
+			WARN(mode & ~(SYSFS_PREALLOC | 0664),
+			     "Attribute %s: Invalid permissions 0%o\n",
+			     (*bin_attr)->attr.name, mode);
+
+			mode &= SYSFS_PREALLOC | 0664;
 			error = sysfs_add_file_mode_ns(parent,
 					&(*bin_attr)->attr, true,
-					(*bin_attr)->attr.mode, NULL);
+					mode, NULL);
 			if (error)
 				break;
 		}
@@ -129,7 +146,7 @@ static int internal_create_group(struct kobject *kobj, int update,
  * This function creates a group for the first time.  It will explicitly
  * warn and error if any of the attribute files being created already exist.
  *
- * Returns 0 on success or error.
+ * Returns 0 on success or error code on failure.
  */
 int sysfs_create_group(struct kobject *kobj,
 		       const struct attribute_group *grp)
@@ -149,7 +166,7 @@ EXPORT_SYMBOL_GPL(sysfs_create_group);
  * It will explicitly warn and error if any of the attribute files being
  * created already exist.
  *
- * Returns 0 on success or error code from sysfs_create_group on error.
+ * Returns 0 on success or error code from sysfs_create_group on failure.
  */
 int sysfs_create_groups(struct kobject *kobj,
 			const struct attribute_group **groups)
@@ -187,7 +204,7 @@ EXPORT_SYMBOL_GPL(sysfs_create_groups);
  * The primary use for this function is to call it after making a change
  * that affects group visibility.
  *
- * Returns 0 on success or error.
+ * Returns 0 on success or error code on failure.
  */
 int sysfs_update_group(struct kobject *kobj,
 		       const struct attribute_group *grp)
@@ -213,10 +230,9 @@ void sysfs_remove_group(struct kobject *kobj,
 	if (grp->name) {
 		kn = kernfs_find_and_get(parent, grp->name);
 		if (!kn) {
-			WARN(atomic_read(&parent->active) != KN_DEACTIVATED_BIAS,
-			     KERN_WARNING
-			     "sysfs group %p not found for kobject '%s'\n",
-			     grp, kobject_name(kobj));
+			WARN(!kn, KERN_WARNING
+			     "sysfs group '%s' not found for kobject '%s'\n",
+			     grp->name, kobject_name(kobj));
 			return;
 		}
 	} else {
@@ -388,6 +404,6 @@ int __compat_only_sysfs_link_entry_to_kobj(struct kobject *kobj,
 
 	kernfs_put(entry);
 	kernfs_put(target);
-	return IS_ERR(link) ? PTR_ERR(link) : 0;
+	return PTR_ERR_OR_ZERO(link);
 }
 EXPORT_SYMBOL_GPL(__compat_only_sysfs_link_entry_to_kobj);

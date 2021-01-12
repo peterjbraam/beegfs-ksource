@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Percpu refcounts:
  * (C) 2012 Google, Inc.
@@ -107,6 +108,7 @@ void percpu_ref_switch_to_atomic_sync(struct percpu_ref *ref);
 void percpu_ref_switch_to_percpu(struct percpu_ref *ref);
 void percpu_ref_kill_and_confirm(struct percpu_ref *ref,
 				 percpu_ref_func_t *confirm_kill);
+void percpu_ref_resurrect(struct percpu_ref *ref);
 void percpu_ref_reinit(struct percpu_ref *ref);
 
 /**
@@ -123,7 +125,7 @@ void percpu_ref_reinit(struct percpu_ref *ref);
  */
 static inline void percpu_ref_kill(struct percpu_ref *ref)
 {
-	return percpu_ref_kill_and_confirm(ref, NULL);
+	percpu_ref_kill_and_confirm(ref, NULL);
 }
 
 /*
@@ -164,6 +166,29 @@ static inline bool __ref_is_percpu(struct percpu_ref *ref,
 }
 
 /**
+ * percpu_ref_get_many - increment a percpu refcount
+ * @ref: percpu_ref to get
+ * @nr: number of references to get
+ *
+ * Analogous to atomic_long_add().
+ *
+ * This function is safe to call as long as @ref is between init and exit.
+ */
+static inline void percpu_ref_get_many(struct percpu_ref *ref, unsigned long nr)
+{
+	unsigned long __percpu *percpu_count;
+
+	rcu_read_lock_sched();
+
+	if (__ref_is_percpu(ref, &percpu_count))
+		this_cpu_add(*percpu_count, nr);
+	else
+		atomic_long_add(nr, &ref->count);
+
+	rcu_read_unlock_sched();
+}
+
+/**
  * percpu_ref_get - increment a percpu refcount
  * @ref: percpu_ref to get
  *
@@ -173,16 +198,7 @@ static inline bool __ref_is_percpu(struct percpu_ref *ref,
  */
 static inline void percpu_ref_get(struct percpu_ref *ref)
 {
-	unsigned long __percpu *percpu_count;
-
-	rcu_read_lock_sched();
-
-	if (__ref_is_percpu(ref, &percpu_count))
-		this_cpu_inc(*percpu_count);
-	else
-		atomic_long_inc(&ref->count);
-
-	rcu_read_unlock_sched();
+	percpu_ref_get_many(ref, 1);
 }
 
 /**
@@ -248,6 +264,30 @@ static inline bool percpu_ref_tryget_live(struct percpu_ref *ref)
 }
 
 /**
+ * percpu_ref_put_many - decrement a percpu refcount
+ * @ref: percpu_ref to put
+ * @nr: number of references to put
+ *
+ * Decrement the refcount, and if 0, call the release function (which was passed
+ * to percpu_ref_init())
+ *
+ * This function is safe to call as long as @ref is between init and exit.
+ */
+static inline void percpu_ref_put_many(struct percpu_ref *ref, unsigned long nr)
+{
+	unsigned long __percpu *percpu_count;
+
+	rcu_read_lock_sched();
+
+	if (__ref_is_percpu(ref, &percpu_count))
+		this_cpu_sub(*percpu_count, nr);
+	else if (unlikely(atomic_long_sub_and_test(nr, &ref->count)))
+		ref->release(ref);
+
+	rcu_read_unlock_sched();
+}
+
+/**
  * percpu_ref_put - decrement a percpu refcount
  * @ref: percpu_ref to put
  *
@@ -258,16 +298,7 @@ static inline bool percpu_ref_tryget_live(struct percpu_ref *ref)
  */
 static inline void percpu_ref_put(struct percpu_ref *ref)
 {
-	unsigned long __percpu *percpu_count;
-
-	rcu_read_lock_sched();
-
-	if (__ref_is_percpu(ref, &percpu_count))
-		this_cpu_dec(*percpu_count);
-	else if (unlikely(atomic_long_dec_and_test(&ref->count)))
-		ref->release(ref);
-
-	rcu_read_unlock_sched();
+	percpu_ref_put_many(ref, 1);
 }
 
 /**

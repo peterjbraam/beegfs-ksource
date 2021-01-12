@@ -47,7 +47,6 @@ enum {
 enum {
 	MLX5_FLOW_TABLE_TUNNEL_EN_REFORMAT = BIT(0),
 	MLX5_FLOW_TABLE_TUNNEL_EN_DECAP = BIT(1),
-	MLX5_FLOW_TABLE_TERMINATION = BIT(2),
 };
 
 #define LEFTOVERS_RULE_NUM	 2
@@ -74,11 +73,6 @@ enum mlx5_flow_namespace_type {
 	MLX5_FLOW_NAMESPACE_SNIFFER_RX,
 	MLX5_FLOW_NAMESPACE_SNIFFER_TX,
 	MLX5_FLOW_NAMESPACE_EGRESS,
-};
-
-enum {
-	FDB_FAST_PATH,
-	FDB_SLOW_PATH,
 };
 
 struct mlx5_flow_table;
@@ -198,7 +192,7 @@ struct mlx5_flow_act {
  */
 struct mlx5_flow_handle *
 mlx5_add_flow_rules(struct mlx5_flow_table *ft,
-		    const struct mlx5_flow_spec *spec,
+		    struct mlx5_flow_spec *spec,
 		    struct mlx5_flow_act *flow_act,
 		    struct mlx5_flow_destination *dest,
 		    int num_dest);
@@ -210,7 +204,6 @@ int mlx5_modify_rule_destination(struct mlx5_flow_handle *handler,
 
 struct mlx5_fc *mlx5_fc_create(struct mlx5_core_dev *dev, bool aging);
 void mlx5_fc_destroy(struct mlx5_core_dev *dev, struct mlx5_fc *counter);
-u64 mlx5_fc_query_lastuse(struct mlx5_fc *counter);
 void mlx5_fc_query_cached(struct mlx5_fc *counter,
 			  u64 *bytes, u64 *packets, u64 *lastuse);
 int mlx5_fc_query(struct mlx5_core_dev *dev, struct mlx5_fc *counter,

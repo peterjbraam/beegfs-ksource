@@ -16,9 +16,7 @@
 #include <linux/aer.h>
 #include <linux/log2.h>
 #include <linux/pci.h>
-#ifdef CONFIG_QLCNIC_VXLAN
 #include <net/vxlan.h>
-#endif
 
 #include "qlcnic.h"
 #include "qlcnic_sriov.h"
@@ -82,7 +80,6 @@ static void qlcnic_dev_set_npar_ready(struct qlcnic_adapter *);
 static int qlcnicvf_start_firmware(struct qlcnic_adapter *);
 static int qlcnic_vlan_rx_add(struct net_device *, __be16, u16);
 static int qlcnic_vlan_rx_del(struct net_device *, __be16, u16);
-
 
 static int qlcnic_82xx_setup_intr(struct qlcnic_adapter *);
 static void qlcnic_82xx_dev_request_reset(struct qlcnic_adapter *, u32);
@@ -330,7 +327,7 @@ static void qlcnic_delete_adapter_mac(struct qlcnic_adapter *adapter)
 
 	list_for_each(head, &adapter->mac_list) {
 		cur = list_entry(head, struct qlcnic_mac_vlan_list, list);
-		if (!memcmp(adapter->mac_addr, cur->mac_addr, ETH_ALEN)) {
+		if (ether_addr_equal_unaligned(adapter->mac_addr, cur->mac_addr)) {
 			qlcnic_sre_macaddr_change(adapter, cur->mac_addr,
 						  0, QLCNIC_MAC_DEL);
 			list_del(&cur->list);
@@ -354,8 +351,8 @@ static int qlcnic_set_mac(struct net_device *netdev, void *p)
 	if (!is_valid_ether_addr(addr->sa_data))
 		return -EINVAL;
 
-	if (!memcmp(adapter->mac_addr, addr->sa_data, ETH_ALEN) &&
-	    !memcmp(netdev->dev_addr, addr->sa_data, ETH_ALEN))
+	if (ether_addr_equal_unaligned(adapter->mac_addr, addr->sa_data) &&
+	    ether_addr_equal_unaligned(netdev->dev_addr, addr->sa_data))
 		return 0;
 
 	if (test_bit(__QLCNIC_DEV_UP, &adapter->state)) {
@@ -402,7 +399,8 @@ static int qlcnic_fdb_del(struct ndmsg *ndm, struct nlattr *tb[],
 
 static int qlcnic_fdb_add(struct ndmsg *ndm, struct nlattr *tb[],
 			struct net_device *netdev,
-			const unsigned char *addr, u16 vid, u16 flags)
+			const unsigned char *addr, u16 vid, u16 flags,
+			struct netlink_ext_ack *extack)
 {
 	struct qlcnic_adapter *adapter = netdev_priv(netdev);
 	int err = 0;
@@ -476,12 +474,14 @@ static int qlcnic_get_phys_port_id(struct net_device *netdev,
 	return 0;
 }
 
-#ifdef CONFIG_QLCNIC_VXLAN
 static void qlcnic_add_vxlan_port(struct net_device *netdev,
-				  sa_family_t sa_family, __be16 port)
+				  struct udp_tunnel_info *ti)
 {
 	struct qlcnic_adapter *adapter = netdev_priv(netdev);
 	struct qlcnic_hardware_context *ahw = adapter->ahw;
+
+	if (ti->type != UDP_TUNNEL_TYPE_VXLAN)
+		return;
 
 	/* Adapter supports only one VXLAN port. Use very first port
 	 * for enabling offload
@@ -490,23 +490,26 @@ static void qlcnic_add_vxlan_port(struct net_device *netdev,
 		return;
 	if (!ahw->vxlan_port_count) {
 		ahw->vxlan_port_count = 1;
-		ahw->vxlan_port = ntohs(port);
+		ahw->vxlan_port = ntohs(ti->port);
 		adapter->flags |= QLCNIC_ADD_VXLAN_PORT;
 		return;
 	}
-	if (ahw->vxlan_port == ntohs(port))
+	if (ahw->vxlan_port == ntohs(ti->port))
 		ahw->vxlan_port_count++;
 
 }
 
 static void qlcnic_del_vxlan_port(struct net_device *netdev,
-				  sa_family_t sa_family, __be16 port)
+				  struct udp_tunnel_info *ti)
 {
 	struct qlcnic_adapter *adapter = netdev_priv(netdev);
 	struct qlcnic_hardware_context *ahw = adapter->ahw;
 
+	if (ti->type != UDP_TUNNEL_TYPE_VXLAN)
+		return;
+
 	if (!qlcnic_encap_rx_offload(adapter) || !ahw->vxlan_port_count ||
-	    (ahw->vxlan_port != ntohs(port)))
+	    (ahw->vxlan_port != ntohs(ti->port)))
 		return;
 
 	ahw->vxlan_port_count--;
@@ -521,10 +524,8 @@ static netdev_features_t qlcnic_features_check(struct sk_buff *skb,
 	features = vlan_features_check(skb, features);
 	return vxlan_features_check(skb, features);
 }
-#endif
 
 static const struct net_device_ops qlcnic_netdev_ops = {
-	.ndo_size	   = sizeof(struct net_device_ops),
 	.ndo_open	   = qlcnic_open,
 	.ndo_stop	   = qlcnic_close,
 	.ndo_start_xmit    = qlcnic_xmit_frame,
@@ -532,7 +533,7 @@ static const struct net_device_ops qlcnic_netdev_ops = {
 	.ndo_validate_addr = eth_validate_addr,
 	.ndo_set_rx_mode   = qlcnic_set_multi,
 	.ndo_set_mac_address    = qlcnic_set_mac,
-	.extended.ndo_change_mtu = qlcnic_change_mtu,
+	.ndo_change_mtu	   = qlcnic_change_mtu,
 	.ndo_fix_features  = qlcnic_fix_features,
 	.ndo_set_features  = qlcnic_set_features,
 	.ndo_tx_timeout	   = qlcnic_tx_timeout,
@@ -540,13 +541,11 @@ static const struct net_device_ops qlcnic_netdev_ops = {
 	.ndo_vlan_rx_kill_vid	= qlcnic_vlan_rx_del,
 	.ndo_fdb_add		= qlcnic_fdb_add,
 	.ndo_fdb_del		= qlcnic_fdb_del,
-	.extended.ndo_fdb_dump	= qlcnic_fdb_dump,
+	.ndo_fdb_dump		= qlcnic_fdb_dump,
 	.ndo_get_phys_port_id	= qlcnic_get_phys_port_id,
-#ifdef CONFIG_QLCNIC_VXLAN
-	.ndo_add_vxlan_port	= qlcnic_add_vxlan_port,
-	.ndo_del_vxlan_port	= qlcnic_del_vxlan_port,
+	.ndo_udp_tunnel_add	= qlcnic_add_vxlan_port,
+	.ndo_udp_tunnel_del	= qlcnic_del_vxlan_port,
 	.ndo_features_check	= qlcnic_features_check,
-#endif
 #ifdef CONFIG_NET_POLL_CONTROLLER
 	.ndo_poll_controller = qlcnic_poll_controller,
 #endif
@@ -554,7 +553,7 @@ static const struct net_device_ops qlcnic_netdev_ops = {
 	.ndo_set_vf_mac		= qlcnic_sriov_set_vf_mac,
 	.ndo_set_vf_rate	= qlcnic_sriov_set_vf_tx_rate,
 	.ndo_get_vf_config	= qlcnic_sriov_get_vf_config,
-	.extended.ndo_set_vf_vlan	= qlcnic_sriov_set_vf_vlan,
+	.ndo_set_vf_vlan	= qlcnic_sriov_set_vf_vlan,
 	.ndo_set_vf_spoofchk	= qlcnic_sriov_set_vf_spoofchk,
 #endif
 };
@@ -722,10 +721,10 @@ int qlcnic_setup_tss_rss_intr(struct qlcnic_adapter *adapter)
 		adapter->msix_entries[vector].entry = vector;
 
 restore:
-	err = pci_enable_msix(pdev, adapter->msix_entries, num_msix);
-	if (err > 0) {
+	err = pci_enable_msix_exact(pdev, adapter->msix_entries, num_msix);
+	if (err == -ENOSPC) {
 		if (!adapter->drv_tss_rings && !adapter->drv_rss_rings)
-			return -ENOSPC;
+			return err;
 
 		netdev_info(adapter->netdev,
 			    "Unable to allocate %d MSI-X vectors, Available vectors %d\n",
@@ -780,13 +779,17 @@ enable_msix:
 		for (vector = 0; vector < num_msix; vector++)
 			adapter->msix_entries[vector].entry = vector;
 
-		err = pci_enable_msix(pdev, adapter->msix_entries, num_msix);
-		if (err == 0) {
+		err = pci_enable_msix_range(pdev,
+					    adapter->msix_entries, 1, num_msix);
+
+		if (err == num_msix) {
 			adapter->flags |= QLCNIC_MSIX_ENABLED;
 			adapter->ahw->num_msix = num_msix;
 			dev_info(&pdev->dev, "using msi-x interrupts\n");
 			return 0;
 		} else if (err > 0) {
+			pci_disable_msix(pdev);
+
 			dev_info(&pdev->dev,
 				 "Unable to allocate %d MSI-X vectors, Available vectors %d\n",
 				 num_msix, err);
@@ -914,8 +917,9 @@ int qlcnic_82xx_mq_intrpt(struct qlcnic_adapter *adapter, int op_type)
 	if (qlcnic_check_multi_tx(adapter) &&
 	    !ahw->diag_test &&
 	    (adapter->flags & QLCNIC_MSIX_ENABLED)) {
-		ahw->intr_tbl = vzalloc(ahw->num_msix *
-					sizeof(struct qlcnic_intrpt_config));
+		ahw->intr_tbl =
+			vzalloc(array_size(sizeof(struct qlcnic_intrpt_config),
+					   ahw->num_msix));
 		if (!ahw->intr_tbl)
 			return -ENOMEM;
 
@@ -1023,15 +1027,17 @@ int qlcnic_init_pci_info(struct qlcnic_adapter *adapter)
 
 	act_pci_func = ahw->total_nic_func;
 
-	adapter->npars = kzalloc(sizeof(struct qlcnic_npar_info) *
-				 act_pci_func, GFP_KERNEL);
+	adapter->npars = kcalloc(act_pci_func,
+				 sizeof(struct qlcnic_npar_info),
+				 GFP_KERNEL);
 	if (!adapter->npars) {
 		ret = -ENOMEM;
 		goto err_pci_info;
 	}
 
-	adapter->eswitch = kzalloc(sizeof(struct qlcnic_eswitch) *
-				QLCNIC_NIU_MAX_XG_PORTS, GFP_KERNEL);
+	adapter->eswitch = kcalloc(QLCNIC_NIU_MAX_XG_PORTS,
+				   sizeof(struct qlcnic_eswitch),
+				   GFP_KERNEL);
 	if (!adapter->eswitch) {
 		ret = -ENOMEM;
 		goto err_npars;
@@ -2016,10 +2022,8 @@ qlcnic_attach(struct qlcnic_adapter *adapter)
 
 	qlcnic_create_sysfs_entries(adapter);
 
-#ifdef CONFIG_QLCNIC_VXLAN
 	if (qlcnic_encap_rx_offload(adapter))
-		vxlan_get_rx_port(netdev);
-#endif
+		udp_tunnel_get_rx_info(netdev);
 
 	adapter->is_up = QLCNIC_ADAPTER_UP_MAGIC;
 	return 0;
@@ -2345,8 +2349,8 @@ qlcnic_setup_netdev(struct qlcnic_adapter *adapter, struct net_device *netdev,
 	netdev->irq = adapter->msix_entries[0].vector;
 
 	/* MTU range: 68 - 9600 */
-	netdev->extended->min_mtu = P3P_MIN_MTU;
-	netdev->extended->max_mtu = P3P_MAX_MTU;
+	netdev->min_mtu = P3P_MIN_MTU;
+	netdev->max_mtu = P3P_MAX_MTU;
 
 	err = qlcnic_set_real_num_queues(adapter, adapter->drv_tx_rings,
 					 adapter->drv_sds_rings);
@@ -3972,7 +3976,6 @@ static void qlcnic_82xx_io_resume(struct pci_dev *pdev)
 	u32 state;
 	struct qlcnic_adapter *adapter = pci_get_drvdata(pdev);
 
-	pci_cleanup_aer_uncorrect_error_status(pdev);
 	state = QLC_SHARED_REG_RD32(adapter, QLCNIC_CRB_DEV_STATE);
 	if (state == QLCNIC_DEV_READY && test_and_clear_bit(__QLCNIC_AER,
 							    &adapter->state))
@@ -4332,7 +4335,7 @@ static int __init qlcnic_init_module(void)
 	printk(KERN_INFO "%s\n", qlcnic_driver_string);
 
 #ifdef CONFIG_INET
-	register_netdevice_notifier_rh(&qlcnic_netdev_cb);
+	register_netdevice_notifier(&qlcnic_netdev_cb);
 	register_inetaddr_notifier(&qlcnic_inetaddr_cb);
 #endif
 
@@ -4340,7 +4343,7 @@ static int __init qlcnic_init_module(void)
 	if (ret) {
 #ifdef CONFIG_INET
 		unregister_inetaddr_notifier(&qlcnic_inetaddr_cb);
-		unregister_netdevice_notifier_rh(&qlcnic_netdev_cb);
+		unregister_netdevice_notifier(&qlcnic_netdev_cb);
 #endif
 	}
 
@@ -4355,7 +4358,7 @@ static void __exit qlcnic_exit_module(void)
 
 #ifdef CONFIG_INET
 	unregister_inetaddr_notifier(&qlcnic_inetaddr_cb);
-	unregister_netdevice_notifier_rh(&qlcnic_netdev_cb);
+	unregister_netdevice_notifier(&qlcnic_netdev_cb);
 #endif
 }
 

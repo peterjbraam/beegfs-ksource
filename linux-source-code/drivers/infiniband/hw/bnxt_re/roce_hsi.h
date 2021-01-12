@@ -39,9 +39,6 @@
 #ifndef __BNXT_RE_HSI_H__
 #define __BNXT_RE_HSI_H__
 
-/* RHEL-only include */
-#include <linux/sched.h>
-
 /* include bnxt_hsi.h from bnxt_en driver */
 #include "bnxt_hsi.h"
 

@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <stdio.h>
 #include <sys/epoll.h>
 #include <sys/types.h>
@@ -8,6 +9,7 @@
 #include <util/evlist.h>
 #include <linux/bpf.h>
 #include <linux/filter.h>
+#include <linux/kernel.h>
 #include <api/fs/fs.h>
 #include <bpf/bpf.h>
 #include "tests.h"
@@ -118,16 +120,16 @@ static int do_test(struct bpf_object *obj, int (*func)(void),
 	struct perf_evlist *evlist;
 	int i, ret = TEST_FAIL, err = 0, count = 0;
 
-	struct parse_events_state parse_evlist;
+	struct parse_events_state parse_state;
 	struct parse_events_error parse_error;
 
 	bzero(&parse_error, sizeof(parse_error));
-	bzero(&parse_evlist, sizeof(parse_evlist));
-	parse_evlist.error = &parse_error;
-	INIT_LIST_HEAD(&parse_evlist.list);
+	bzero(&parse_state, sizeof(parse_state));
+	parse_state.error = &parse_error;
+	INIT_LIST_HEAD(&parse_state.list);
 
-	err = parse_events_load_bpf_obj(&parse_evlist, &parse_evlist.list, obj, NULL);
-	if (err || list_empty(&parse_evlist.list)) {
+	err = parse_events_load_bpf_obj(&parse_state, &parse_state.list, obj, NULL);
+	if (err || list_empty(&parse_state.list)) {
 		pr_debug("Failed to add events selected by BPF\n");
 		return TEST_FAIL;
 	}
@@ -139,7 +141,7 @@ static int do_test(struct bpf_object *obj, int (*func)(void),
 	/* Instead of perf_evlist__new_default, don't add default events */
 	evlist = perf_evlist__new();
 	if (!evlist) {
-		pr_debug("No ehough memory to create evlist\n");
+		pr_debug("Not enough memory to create evlist\n");
 		return TEST_FAIL;
 	}
 
@@ -149,22 +151,22 @@ static int do_test(struct bpf_object *obj, int (*func)(void),
 		goto out_delete_evlist;
 	}
 
-	perf_evlist__splice_list_tail(evlist, &parse_evlist.list);
-	evlist->nr_groups = parse_evlist.nr_groups;
+	perf_evlist__splice_list_tail(evlist, &parse_state.list);
+	evlist->nr_groups = parse_state.nr_groups;
 
 	perf_evlist__config(evlist, &opts, NULL);
 
 	err = perf_evlist__open(evlist);
 	if (err < 0) {
 		pr_debug("perf_evlist__open: %s\n",
-			 strerror_r(errno, sbuf, sizeof(sbuf)));
+			 str_error_r(errno, sbuf, sizeof(sbuf)));
 		goto out_delete_evlist;
 	}
 
 	err = perf_evlist__mmap(evlist, opts.mmap_pages);
 	if (err < 0) {
 		pr_debug("perf_evlist__mmap: %s\n",
-			 strerror_r(errno, sbuf, sizeof(sbuf)));
+			 str_error_r(errno, sbuf, sizeof(sbuf)));
 		goto out_delete_evlist;
 	}
 

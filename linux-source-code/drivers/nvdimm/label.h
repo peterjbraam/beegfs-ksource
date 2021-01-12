@@ -106,8 +106,8 @@ struct nd_namespace_label {
 	 */
 	u8 align;
 	u8 reserved[3];
-	uuid_le type_guid;
-	uuid_le abstraction_guid;
+	guid_t type_guid;
+	guid_t abstraction_guid;
 	u8 reserved2[88];
 	__le64 checksum;
 };

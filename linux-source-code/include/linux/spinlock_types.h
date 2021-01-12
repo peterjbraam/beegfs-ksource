@@ -19,9 +19,6 @@
 
 typedef struct raw_spinlock {
 	arch_spinlock_t raw_lock;
-#ifdef CONFIG_GENERIC_LOCKBREAK
-	unsigned int break_lock;
-#endif
 #ifdef CONFIG_DEBUG_SPINLOCK
 	unsigned int magic, owner_cpu;
 	void *owner;
@@ -84,9 +81,5 @@ typedef struct spinlock {
 #define DEFINE_SPINLOCK(x)	spinlock_t x = __SPIN_LOCK_UNLOCKED(x)
 
 #include <linux/rwlock_types.h>
-
-#ifdef CONFIG_QUEUED_RWLOCKS
-#include <generated/qrwlock_types.h>
-#endif
 
 #endif /* __LINUX_SPINLOCK_TYPES_H */

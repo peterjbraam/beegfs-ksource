@@ -1,7 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _LINUX_MEMREMAP_H_
 #define _LINUX_MEMREMAP_H_
 #include <linux/ioport.h>
 #include <linux/percpu-refcount.h>
+
+#include <asm/pgtable.h>
 
 struct resource;
 struct device;
@@ -26,14 +29,22 @@ struct vmem_altmap {
  * Specialize ZONE_DEVICE memory into multiple types each having differents
  * usage.
  *
- * MEMORY_HMM:
+ * MEMORY_DEVICE_PRIVATE:
  * Device memory that is not directly addressable by the CPU: CPU can neither
- * read nor write _UNADDRESSABLE memory. In this case, we do still have struct
- * pages backing the device memory. Doing so simplifies the implementation, but
- * it is important to remember that there are certain points at which the struct
- * page must be treated as an opaque object, rather than a "normal" struct page.
+ * read nor write private memory. In this case, we do still have struct pages
+ * backing the device memory. Doing so simplifies the implementation, but it is
+ * important to remember that there are certain points at which the struct page
+ * must be treated as an opaque object, rather than a "normal" struct page.
+ *
  * A more complete discussion of unaddressable memory may be found in
- * include/linux/hmm.h and Documentation/vm/hmm.txt.
+ * include/linux/hmm.h and Documentation/vm/hmm.rst.
+ *
+ * MEMORY_DEVICE_PUBLIC:
+ * Device memory that is cache coherent from device and CPU point of view. This
+ * is use on platform that have an advance system bus (like CAPI or CCIX). A
+ * driver can hotplug the device memory using ZONE_DEVICE and with that memory
+ * type. Any page of a process can be migrated to such memory. However no one
+ * should be allow to pin such memory so that it can always be evicted.
  *
  * MEMORY_DEVICE_FS_DAX:
  * Host memory that has similar access semantics as System RAM i.e. DMA
@@ -42,20 +53,26 @@ struct vmem_altmap {
  * wakeup event whenever a page is unpinned and becomes idle. This
  * wakeup is used to coordinate physical address space management (ex:
  * fs truncate/hole punch) vs pinned pages (ex: device dma).
+ *
+ * MEMORY_DEVICE_PCI_P2PDMA:
+ * Device memory residing in a PCI BAR intended for use with Peer-to-Peer
+ * transactions.
  */
 enum memory_type {
-	MEMORY_HMM = 1,
+	MEMORY_DEVICE_PRIVATE = 1,
+	MEMORY_DEVICE_PUBLIC,
 	MEMORY_DEVICE_FS_DAX,
-	MEMORY_DEVICE_DEV_DAX,
+	MEMORY_DEVICE_PCI_P2PDMA,
 };
 
 /*
- * For MEMORY_HMM we use ZONE_DEVICE and extend it with two callbacks:
+ * For MEMORY_DEVICE_PRIVATE we use ZONE_DEVICE and extend it with two
+ * callbacks:
  *   page_fault()
  *   page_free()
  *
  * Additional notes about MEMORY_DEVICE_PRIVATE may be found in
- * include/linux/hmm.h and Documentation/vm/hmm.txt. There is also a brief
+ * include/linux/hmm.h and Documentation/vm/hmm.rst. There is also a brief
  * explanation in include/linux/memory_hotplug.h.
  *
  * The page_fault() callback must migrate page back, from device memory to
@@ -77,24 +94,27 @@ enum memory_type {
  * The page_free() callback is called once the page refcount reaches 1
  * (ZONE_DEVICE pages never reach 0 refcount unless there is a refcount bug.
  * This allows the device driver to implement its own memory management.)
+ *
+ * For MEMORY_DEVICE_PUBLIC only the page_free() callback matter.
  */
 typedef int (*dev_page_fault_t)(struct vm_area_struct *vma,
 				unsigned long addr,
-				struct page *page,
+				const struct page *page,
 				unsigned int flags,
 				pmd_t *pmdp);
 typedef void (*dev_page_free_t)(struct page *page, void *data);
 
 /**
  * struct dev_pagemap - metadata for ZONE_DEVICE mappings
+ * @page_fault: callback when CPU fault on an unaddressable device page
+ * @page_free: free page callback when page refcount reaches 1
  * @altmap: pre-allocated/reserved memory for vmemmap allocations
- * @page_fault: callback when CPU fault on an un-addressable device page
- * @page_free: free page callback when page refcount reach 1
  * @res: physical address range covered by @ref
  * @ref: reference count that pins the devm_memremap_pages() mapping
+ * @kill: callback to transition @ref to the dead state
  * @dev: host device of the mapping for debug
- * @data: privata data pointer for page_free
- * @type: memory type: see MEMORY_* above
+ * @data: private data pointer for page_free()
+ * @type: memory type: see MEMORY_* in memory_hotplug.h
  */
 struct dev_pagemap {
 	dev_page_fault_t page_fault;
@@ -106,6 +126,8 @@ struct dev_pagemap {
 	struct device *dev;
 	void *data;
 	enum memory_type type;
+	u64 pci_p2pdma_bus_offset;
+	RH_KABI_EXTEND(void (*kill)(struct percpu_ref *ref))
 };
 
 #ifdef CONFIG_ZONE_DEVICE
@@ -147,9 +169,7 @@ static inline void vmem_altmap_free(struct vmem_altmap *altmap,
 
 static inline void put_dev_pagemap(struct dev_pagemap *pgmap)
 {
-	if (pgmap) {
-		WARN_ON(percpu_ref_is_zero(pgmap->ref));
+	if (pgmap)
 		percpu_ref_put(pgmap->ref);
-	}
 }
 #endif /* _LINUX_MEMREMAP_H_ */

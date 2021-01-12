@@ -41,7 +41,6 @@
 #include <linux/delay.h>
 #include <linux/pci.h>
 #include <linux/ioport.h>
-#include <linux/init.h>
 #include <linux/i2c.h>
 #include <linux/acpi.h>
 #include <linux/io.h>

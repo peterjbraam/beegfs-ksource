@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 #include "symbol.h"
 #include <errno.h>
 #include <inttypes.h>
@@ -16,7 +17,9 @@
 #include "machine.h"
 #include <linux/string.h>
 #include "srcline.h"
+#include "namespaces.h"
 #include "unwind.h"
+#include "srccode.h"
 
 static void __maps__insert(struct maps *maps, struct map *map);
 static void __maps__insert_name(struct maps *maps, struct map *map);
@@ -139,11 +142,13 @@ void map__init(struct map *map, u64 start, u64 end, u64 pgoff, struct dso *dso)
 }
 
 struct map *map__new(struct machine *machine, u64 start, u64 len,
-		     u64 pgoff, u32 pid, u32 d_maj, u32 d_min, u64 ino,
+		     u64 pgoff, u32 d_maj, u32 d_min, u64 ino,
 		     u64 ino_gen, u32 prot, u32 flags, char *filename,
 		     struct thread *thread)
 {
 	struct map *map = malloc(sizeof(*map));
+	struct nsinfo *nsi = NULL;
+	struct nsinfo *nnsi;
 
 	if (map != NULL) {
 		char newfilename[PATH_MAX];
@@ -161,9 +166,11 @@ struct map *map__new(struct machine *machine, u64 start, u64 len,
 		map->ino_generation = ino_gen;
 		map->prot = prot;
 		map->flags = flags;
+		nsi = nsinfo__get(thread->nsinfo);
 
-		if ((anon || no_dso) && (prot & PROT_EXEC)) {
-			snprintf(newfilename, sizeof(newfilename), "/tmp/perf-%d.map", pid);
+		if ((anon || no_dso) && nsi && (prot & PROT_EXEC)) {
+			snprintf(newfilename, sizeof(newfilename),
+				 "/tmp/perf-%d.map", nsi->pid);
 			filename = newfilename;
 		}
 
@@ -173,6 +180,16 @@ struct map *map__new(struct machine *machine, u64 start, u64 len,
 		}
 
 		if (vdso) {
+			/* The vdso maps are always on the host and not the
+			 * container.  Ensure that we don't use setns to look
+			 * them up.
+			 */
+			nnsi = nsinfo__copy(nsi);
+			if (nnsi) {
+				nsinfo__put(nsi);
+				nnsi->need_setns = false;
+				nsi = nnsi;
+			}
 			pgoff = 0;
 			dso = machine__findnew_vdso(machine, thread);
 		} else
@@ -194,10 +211,12 @@ struct map *map__new(struct machine *machine, u64 start, u64 len,
 			if (!(prot & PROT_EXEC))
 				dso__set_loaded(dso);
 		}
+		dso->nsinfo = nsi;
 		dso__put(dso);
 	}
 	return map;
 out_delete:
+	nsinfo__put(nsi);
 	free(map);
 	return NULL;
 }
@@ -362,20 +381,6 @@ struct map *map__clone(struct map *from)
 	return map;
 }
 
-int map__overlap(struct map *l, struct map *r)
-{
-	if (l->start > r->start) {
-		struct map *t = l;
-		l = r;
-		r = t;
-	}
-
-	if (l->end > r->start)
-		return 1;
-
-	return 0;
-}
-
 size_t map__fprintf(struct map *map, FILE *fp)
 {
 	return fprintf(fp, " %" PRIx64 "-%" PRIx64 " %" PRIx64 " %s\n",
@@ -415,6 +420,54 @@ int map__fprintf_srcline(struct map *map, u64 addr, const char *prefix,
 		free_srcline(srcline);
 	}
 	return ret;
+}
+
+int map__fprintf_srccode(struct map *map, u64 addr,
+			 FILE *fp,
+			 struct srccode_state *state)
+{
+	char *srcfile;
+	int ret = 0;
+	unsigned line;
+	int len;
+	char *srccode;
+
+	if (!map || !map->dso)
+		return 0;
+	srcfile = get_srcline_split(map->dso,
+				    map__rip_2objdump(map, addr),
+				    &line);
+	if (!srcfile)
+		return 0;
+
+	/* Avoid redundant printing */
+	if (state &&
+	    state->srcfile &&
+	    !strcmp(state->srcfile, srcfile) &&
+	    state->line == line) {
+		free(srcfile);
+		return 0;
+	}
+
+	srccode = find_sourceline(srcfile, line, &len);
+	if (!srccode)
+		goto out_free_line;
+
+	ret = fprintf(fp, "|%-8d %.*s", line, len, srccode);
+	state->srcfile = srcfile;
+	state->line = line;
+	return ret;
+
+out_free_line:
+	free(srcfile);
+	return ret;
+}
+
+
+void srccode_state_free(struct srccode_state *state)
+{
+	zfree(&state->srcfile);
+	state->line = 0;
 }
 
 /**
@@ -669,20 +722,42 @@ static void __map_groups__insert(struct map_groups *mg, struct map *map)
 static int maps__fixup_overlappings(struct maps *maps, struct map *map, FILE *fp)
 {
 	struct rb_root *root;
-	struct rb_node *next;
+	struct rb_node *next, *first;
 	int err = 0;
 
 	down_write(&maps->lock);
 
 	root = &maps->entries;
-	next = rb_first(root);
 
+	/*
+	 * Find first map where end > map->start.
+	 * Same as find_vma() in kernel.
+	 */
+	next = root->rb_node;
+	first = NULL;
+	while (next) {
+		struct map *pos = rb_entry(next, struct map, rb_node);
+
+		if (pos->end > map->start) {
+			first = next;
+			if (pos->start <= map->start)
+				break;
+			next = next->rb_left;
+		} else
+			next = next->rb_right;
+	}
+
+	next = first;
 	while (next) {
 		struct map *pos = rb_entry(next, struct map, rb_node);
 		next = rb_next(&pos->rb_node);
 
-		if (!map__overlap(pos, map))
-			continue;
+		/*
+		 * Stop if current map starts after map->end.
+		 * Maps are ordered by start: next will not overlap for sure.
+		 */
+		if (pos->start >= map->end)
+			break;
 
 		if (verbose >= 2) {
 
@@ -847,19 +922,18 @@ void maps__remove(struct maps *maps, struct map *map)
 
 struct map *maps__find(struct maps *maps, u64 ip)
 {
-	struct rb_node **p, *parent = NULL;
+	struct rb_node *p;
 	struct map *m;
 
 	down_read(&maps->lock);
 
-	p = &maps->entries.rb_node;
-	while (*p != NULL) {
-		parent = *p;
-		m = rb_entry(parent, struct map, rb_node);
+	p = maps->entries.rb_node;
+	while (p != NULL) {
+		m = rb_entry(p, struct map, rb_node);
 		if (ip < m->start)
-			p = &(*p)->rb_left;
+			p = p->rb_left;
 		else if (ip >= m->end)
-			p = &(*p)->rb_right;
+			p = p->rb_right;
 		else
 			goto out;
 	}

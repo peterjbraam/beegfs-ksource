@@ -306,8 +306,8 @@ __printf(4, 5)
 void __snd_printk(unsigned int level, const char *file, int line,
 		  const char *format, ...);
 #else
-#define __snd_printk(level, file, line, format, args...) \
-	printk(format, ##args)
+#define __snd_printk(level, file, line, format, ...) \
+	printk(format, ##__VA_ARGS__)
 #endif
 
 /**
@@ -317,8 +317,8 @@ void __snd_printk(unsigned int level, const char *file, int line,
  * Works like printk() but prints the file and the line of the caller
  * when configured with CONFIG_SND_VERBOSE_PRINTK.
  */
-#define snd_printk(fmt, args...) \
-	__snd_printk(0, __FILE__, __LINE__, fmt, ##args)
+#define snd_printk(fmt, ...) \
+	__snd_printk(0, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
 
 #ifdef CONFIG_SND_DEBUG
 /**
@@ -328,10 +328,10 @@ void __snd_printk(unsigned int level, const char *file, int line,
  * Works like snd_printk() for debugging purposes.
  * Ignored when CONFIG_SND_DEBUG is not set.
  */
-#define snd_printd(fmt, args...) \
-	__snd_printk(1, __FILE__, __LINE__, fmt, ##args)
-#define _snd_printd(level, fmt, args...) \
-	__snd_printk(level, __FILE__, __LINE__, fmt, ##args)
+#define snd_printd(fmt, ...) \
+	__snd_printk(1, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
+#define _snd_printd(level, fmt, ...) \
+	__snd_printk(level, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
 
 /**
  * snd_BUG - give a BUG warning message and stack trace
@@ -381,8 +381,8 @@ static inline bool snd_printd_ratelimit(void) { return false; }
  * Works like snd_printk() for debugging purposes.
  * Ignored when CONFIG_SND_DEBUG_VERBOSE is not set.
  */
-#define snd_printdd(format, args...) \
-	__snd_printk(2, __FILE__, __LINE__, format, ##args)
+#define snd_printdd(format, ...) \
+	__snd_printk(2, __FILE__, __LINE__, format, ##__VA_ARGS__)
 #else
 __printf(1, 2)
 static inline void snd_printdd(const char *format, ...) {}
@@ -398,7 +398,6 @@ static inline void snd_printdd(const char *format, ...) {}
 #define gameport_get_port_data(gp) (gp)->port_data
 #endif
 
-#ifdef CONFIG_PCI
 /* PCI quirk list helper */
 struct snd_pci_quirk {
 	unsigned short subvendor;	/* PCI subvendor ID */
@@ -434,12 +433,26 @@ struct snd_pci_quirk {
 #define snd_pci_quirk_name(q)	""
 #endif
 
+#ifdef CONFIG_PCI
 const struct snd_pci_quirk *
 snd_pci_quirk_lookup(struct pci_dev *pci, const struct snd_pci_quirk *list);
 
 const struct snd_pci_quirk *
 snd_pci_quirk_lookup_id(u16 vendor, u16 device,
 			const struct snd_pci_quirk *list);
+#else
+static inline const struct snd_pci_quirk *
+snd_pci_quirk_lookup(struct pci_dev *pci, const struct snd_pci_quirk *list)
+{
+	return NULL;
+}
+
+static inline const struct snd_pci_quirk *
+snd_pci_quirk_lookup_id(u16 vendor, u16 device,
+			const struct snd_pci_quirk *list)
+{
+	return NULL;
+}
 #endif
 
 #endif /* __SOUND_CORE_H */

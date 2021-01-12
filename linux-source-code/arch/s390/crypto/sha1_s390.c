@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * Cryptographic API.
  *
@@ -16,16 +17,11 @@
  *   Copyright (c) Alan Smithee.
  *   Copyright (c) Andrew McDonald <andrew@mcdonald.org.uk>
  *   Copyright (c) Jean-Francois Dive <jef@linuxbe.org>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option)
- * any later version.
- *
  */
 #include <crypto/internal/hash.h>
 #include <linux/init.h>
 #include <linux/module.h>
+#include <linux/cpufeature.h>
 #include <crypto/sha.h>
 #include <asm/cpacf.h>
 
@@ -100,7 +96,7 @@ static void __exit sha1_s390_fini(void)
 	crypto_unregister_shash(&alg);
 }
 
-module_init(sha1_s390_init);
+module_cpu_feature_match(MSA, sha1_s390_init);
 module_exit(sha1_s390_fini);
 
 MODULE_ALIAS_CRYPTO("sha1");

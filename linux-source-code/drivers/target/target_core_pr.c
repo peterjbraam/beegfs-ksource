@@ -29,8 +29,9 @@
 #include <linux/list.h>
 #include <linux/vmalloc.h>
 #include <linux/file.h>
-#include <scsi/scsi.h>
-#include <scsi/scsi_cmnd.h>
+#include <linux/fcntl.h>
+#include <linux/fs.h>
+#include <scsi/scsi_proto.h>
 #include <asm/unaligned.h>
 
 #include <target/target_core_base.h>
@@ -791,7 +792,7 @@ static struct t10_pr_registration *__core_scsi3_alloc_registration(
 			 * __core_scsi3_add_registration()
 			 */
 			dest_lun = rcu_dereference_check(deve_tmp->se_lun,
-				atomic_read(&deve_tmp->pr_kref.refcount) != 0);
+				kref_read(&deve_tmp->pr_kref) != 0);
 
 			pr_reg_atp = __core_scsi3_do_alloc_registration(dev,
 						nacl_tmp, dest_lun, deve_tmp,
@@ -1289,14 +1290,13 @@ static int core_scsi3_check_implicit_release(
 	return ret;
 }
 
-/*
- * Called with struct t10_reservation->registration_lock held.
- */
 static void __core_scsi3_free_registration(
 	struct se_device *dev,
 	struct t10_pr_registration *pr_reg,
 	struct list_head *preempt_and_abort_list,
 	int dec_holders)
+	__releases(&pr_tmpl->registration_lock)
+	__acquires(&pr_tmpl->registration_lock)
 {
 	const struct target_core_fabric_ops *tfo =
 			pr_reg->pr_reg_nacl->se_tpg->se_tpg_tfo;
@@ -1304,6 +1304,8 @@ static void __core_scsi3_free_registration(
 	struct se_node_acl *nacl = pr_reg->pr_reg_nacl;
 	struct se_dev_entry *deve;
 	char i_buf[PR_REG_ISID_ID_LEN];
+
+	lockdep_assert_held(&pr_tmpl->registration_lock);
 
 	memset(i_buf, 0, PR_REG_ISID_ID_LEN);
 	core_pr_dump_initiator_port(pr_reg, i_buf, PR_REG_ISID_ID_LEN);
@@ -1464,7 +1466,7 @@ static int core_scsi3_lunacl_depend_item(struct se_dev_entry *se_deve)
 	 * For nacl->dynamic_node_acl=1
 	 */
 	lun_acl = rcu_dereference_check(se_deve->se_lun_acl,
-				atomic_read(&se_deve->pr_kref.refcount) != 0);
+				kref_read(&se_deve->pr_kref) != 0);
 	if (!lun_acl)
 		return 0;
 
@@ -1479,7 +1481,7 @@ static void core_scsi3_lunacl_undepend_item(struct se_dev_entry *se_deve)
 	 * For nacl->dynamic_node_acl=1
 	 */
 	lun_acl = rcu_dereference_check(se_deve->se_lun_acl,
-				atomic_read(&se_deve->pr_kref.refcount) != 0);
+				kref_read(&se_deve->pr_kref) != 0);
 	if (!lun_acl) {
 		kref_put(&se_deve->pr_kref, target_pr_kref_release);
 		return;
@@ -1598,7 +1600,7 @@ core_scsi3_decode_spec_i_port(
 			dest_rtpi = tmp_lun->lun_rtpi;
 
 			i_str = target_parse_pr_out_transport_id(tmp_tpg,
-					(const char *)ptr, &tid_len, &iport_ptr);
+					ptr, &tid_len, &iport_ptr);
 			if (!i_str)
 				continue;
 
@@ -1757,7 +1759,7 @@ core_scsi3_decode_spec_i_port(
 		 * 2nd loop which will never fail.
 		 */
 		dest_lun = rcu_dereference_check(dest_se_deve->se_lun,
-				atomic_read(&dest_se_deve->pr_kref.refcount) != 0);
+				kref_read(&dest_se_deve->pr_kref) != 0);
 
 		dest_pr_reg = __core_scsi3_alloc_registration(cmd->se_dev,
 					dest_node_acl, dest_lun, dest_se_deve,
@@ -1972,33 +1974,32 @@ static int __core_scsi3_write_aptpl_to_file(
 	struct t10_wwn *wwn = &dev->t10_wwn;
 	struct file *file;
 	int flags = O_RDWR | O_CREAT | O_TRUNC;
-	char path[512];
+	char *path;
 	u32 pr_aptpl_buf_len;
 	int ret;
+	loff_t pos = 0;
 
-	memset(path, 0, 512);
+	path = kasprintf(GFP_KERNEL, "%s/pr/aptpl_%s", db_root,
+			&wwn->unit_serial[0]);
+	if (!path)
+		return -ENOMEM;
 
-	if (strlen(&wwn->unit_serial[0]) >= 512) {
-		pr_err("WWN value for struct se_device does not fit"
-			" into path buffer\n");
-		return -EMSGSIZE;
-	}
-
-	snprintf(path, 512, "/var/target/pr/aptpl_%s", &wwn->unit_serial[0]);
 	file = filp_open(path, flags, 0600);
 	if (IS_ERR(file)) {
 		pr_err("filp_open(%s) for APTPL metadata"
 			" failed\n", path);
+		kfree(path);
 		return PTR_ERR(file);
 	}
 
 	pr_aptpl_buf_len = (strlen(buf) + 1); /* Add extra for NULL */
 
-	ret = kernel_write(file, buf, pr_aptpl_buf_len, 0);
+	ret = kernel_write(file, buf, pr_aptpl_buf_len, &pos);
 
 	if (ret < 0)
 		pr_debug("Error writing APTPL metadata file: %s\n", path);
 	fput(file);
+	kfree(path);
 
 	return (ret < 0) ? -EIO : 0;
 }
@@ -2448,9 +2449,6 @@ core_scsi3_emulate_pro_reserve(struct se_cmd *cmd, int type, int scope,
 	}
 }
 
-/*
- * Called with struct se_device->dev_reservation_lock held.
- */
 static void __core_scsi3_complete_pro_release(
 	struct se_device *dev,
 	struct se_node_acl *se_nacl,
@@ -2461,6 +2459,8 @@ static void __core_scsi3_complete_pro_release(
 	const struct target_core_fabric_ops *tfo = se_nacl->se_tpg->se_tpg_tfo;
 	char i_buf[PR_REG_ISID_ID_LEN];
 	int pr_res_type = 0, pr_res_scope = 0;
+
+	lockdep_assert_held(&dev->dev_reservation_lock);
 
 	memset(i_buf, 0, PR_REG_ISID_ID_LEN);
 	core_pr_dump_initiator_port(pr_reg, i_buf, PR_REG_ISID_ID_LEN);
@@ -2758,9 +2758,6 @@ core_scsi3_emulate_pro_clear(struct se_cmd *cmd, u64 res_key)
 	return 0;
 }
 
-/*
- * Called with struct se_device->dev_reservation_lock held.
- */
 static void __core_scsi3_complete_pro_preempt(
 	struct se_device *dev,
 	struct t10_pr_registration *pr_reg,
@@ -2772,6 +2769,8 @@ static void __core_scsi3_complete_pro_preempt(
 	struct se_node_acl *nacl = pr_reg->pr_reg_nacl;
 	const struct target_core_fabric_ops *tfo = nacl->se_tpg->se_tpg_tfo;
 	char i_buf[PR_REG_ISID_ID_LEN];
+
+	lockdep_assert_held(&dev->dev_reservation_lock);
 
 	memset(i_buf, 0, PR_REG_ISID_ID_LEN);
 	core_pr_dump_initiator_port(pr_reg, i_buf, PR_REG_ISID_ID_LEN);
@@ -3285,7 +3284,7 @@ core_scsi3_emulate_pro_register_and_move(struct se_cmd *cmd, u64 res_key,
 		goto out;
 	}
 	initiator_str = target_parse_pr_out_transport_id(dest_se_tpg,
-			(const char *)&buf[24], &tmp_tid_len, &iport_ptr);
+			&buf[24], &tmp_tid_len, &iport_ptr);
 	if (!initiator_str) {
 		pr_err("SPC-3 PR REGISTER_AND_MOVE: Unable to locate"
 			" initiator_str from Transport ID\n");
@@ -3460,7 +3459,7 @@ after_iport_check:
 					iport_ptr);
 	if (!dest_pr_reg) {
 		struct se_lun *dest_lun = rcu_dereference_check(dest_se_deve->se_lun,
-				atomic_read(&dest_se_deve->pr_kref.refcount) != 0);
+				kref_read(&dest_se_deve->pr_kref) != 0);
 
 		spin_unlock(&dev->dev_reservation_lock);
 		if (core_scsi3_alloc_registration(cmd->se_dev, dest_node_acl,
@@ -3725,11 +3724,16 @@ core_scsi3_pri_read_keys(struct se_cmd *cmd)
 		 * Check for overflow of 8byte PRI READ_KEYS payload and
 		 * next reservation key list descriptor.
 		 */
-		if ((add_len + 8) > (cmd->data_length - 8))
-			break;
-
-		put_unaligned_be64(pr_reg->pr_res_key, &buf[off]);
-		off += 8;
+		if (off + 8 <= cmd->data_length) {
+			put_unaligned_be64(pr_reg->pr_res_key, &buf[off]);
+			off += 8;
+		}
+		/*
+		 * SPC5r17: 6.16.2 READ KEYS service action
+		 * The ADDITIONAL LENGTH field indicates the number of bytes in
+		 * the Reservation key list. The contents of the ADDITIONAL
+		 * LENGTH field are not altered based on the allocation length
+		 */
 		add_len += 8;
 	}
 	spin_unlock(&dev->t10_pr.registration_lock);

@@ -1,20 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (c) 2000-2005 Silicon Graphics, Inc.
  * Copyright (c) 2013 Red Hat, Inc.
  * All Rights Reserved.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it would be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write the Free Software Foundation,
- * Inc.,  51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
 #include "xfs.h"
 #include "xfs_fs.h"
@@ -254,8 +242,9 @@ xfs_attr3_leaf_verify(
 	struct xfs_attr3_icleaf_hdr	ichdr;
 	struct xfs_mount		*mp = bp->b_target->bt_mount;
 	struct xfs_attr_leafblock	*leaf = bp->b_addr;
-	struct xfs_perag		*pag = bp->b_pag;
 	struct xfs_attr_leaf_entry	*entries;
+	uint32_t			end;	/* must be 32bit - see below */
+	int				i;
 
 	xfs_attr3_leaf_hdr_from_disk(mp->m_attr_geo, &ichdr, leaf);
 
@@ -280,7 +269,7 @@ xfs_attr3_leaf_verify(
 	 * because we may have transitioned an empty shortform attr to a leaf
 	 * if the attr didn't fit in shortform.
 	 */
-	if (pag && pag->pagf_init && ichdr.count == 0)
+	if (!xfs_log_in_recovery(mp) && ichdr.count == 0)
 		return __this_address;
 
 	/*
@@ -301,6 +290,33 @@ xfs_attr3_leaf_verify(
 	/* XXX: need to range check rest of attr header values */
 	/* XXX: hash order check? */
 
+	/*
+	 * Quickly check the freemap information.  Attribute data has to be
+	 * aligned to 4-byte boundaries, and likewise for the free space.
+	 *
+	 * Note that for 64k block size filesystems, the freemap entries cannot
+	 * overflow as they are only be16 fields. However, when checking end
+	 * pointer of the freemap, we have to be careful to detect overflows and
+	 * so use uint32_t for those checks.
+	 */
+	for (i = 0; i < XFS_ATTR_LEAF_MAPSIZE; i++) {
+		if (ichdr.freemap[i].base > mp->m_attr_geo->blksize)
+			return __this_address;
+		if (ichdr.freemap[i].base & 0x3)
+			return __this_address;
+		if (ichdr.freemap[i].size > mp->m_attr_geo->blksize)
+			return __this_address;
+		if (ichdr.freemap[i].size & 0x3)
+			return __this_address;
+
+		/* be care of 16 bit overflows here */
+		end = (uint32_t)ichdr.freemap[i].base + ichdr.freemap[i].size;
+		if (end < ichdr.freemap[i].base)
+			return __this_address;
+		if (end > mp->m_attr_geo->blksize)
+			return __this_address;
+	}
+
 	return NULL;
 }
 
@@ -309,7 +325,7 @@ xfs_attr3_leaf_write_verify(
 	struct xfs_buf	*bp)
 {
 	struct xfs_mount	*mp = bp->b_target->bt_mount;
-	struct xfs_buf_log_item	*bip = bp->b_fspriv;
+	struct xfs_buf_log_item	*bip = bp->b_log_item;
 	struct xfs_attr3_leaf_hdr *hdr3 = bp->b_addr;
 	xfs_failaddr_t		fa;
 
@@ -477,7 +493,7 @@ xfs_attr_shortform_bytesfit(xfs_inode_t *dp, int bytes)
 	 * A data fork btree root must have space for at least
 	 * MINDBTPTRS key/ptr pairs if the data fork is small or empty.
 	 */
-	minforkoff = MAX(dsize, XFS_BMDR_SPACE_CALC(MINDBTPTRS));
+	minforkoff = max(dsize, XFS_BMDR_SPACE_CALC(MINDBTPTRS));
 	minforkoff = roundup(minforkoff, 8) >> 3;
 
 	/* attr fork btree root can have at least this many key/ptr pairs */
@@ -518,7 +534,7 @@ xfs_attr_shortform_create(xfs_da_args_t *args)
 {
 	xfs_attr_sf_hdr_t *hdr;
 	xfs_inode_t *dp;
-	xfs_ifork_t *ifp;
+	struct xfs_ifork *ifp;
 
 	trace_xfs_attr_sf_create(args);
 
@@ -553,7 +569,7 @@ xfs_attr_shortform_add(xfs_da_args_t *args, int forkoff)
 	int i, offset, size;
 	xfs_mount_t *mp;
 	xfs_inode_t *dp;
-	xfs_ifork_t *ifp;
+	struct xfs_ifork *ifp;
 
 	trace_xfs_attr_sf_add(args);
 
@@ -694,7 +710,7 @@ xfs_attr_shortform_lookup(xfs_da_args_t *args)
 	xfs_attr_shortform_t *sf;
 	xfs_attr_sf_entry_t *sfe;
 	int i;
-	xfs_ifork_t *ifp;
+	struct xfs_ifork *ifp;
 
 	trace_xfs_attr_sf_lookup(args);
 
@@ -759,18 +775,18 @@ xfs_attr_shortform_getvalue(xfs_da_args_t *args)
  */
 int
 xfs_attr_shortform_to_leaf(
-	struct xfs_da_args	*args,
-	struct xfs_buf		**leaf_bp)
+	struct xfs_da_args		*args,
+	struct xfs_buf			**leaf_bp)
 {
-	xfs_inode_t *dp;
-	xfs_attr_shortform_t *sf;
-	xfs_attr_sf_entry_t *sfe;
-	xfs_da_args_t nargs;
-	char *tmpbuffer;
-	int error, i, size;
-	xfs_dablk_t blkno;
-	struct xfs_buf *bp;
-	xfs_ifork_t *ifp;
+	struct xfs_inode		*dp;
+	struct xfs_attr_shortform	*sf;
+	struct xfs_attr_sf_entry	*sfe;
+	struct xfs_da_args		nargs;
+	char				*tmpbuffer;
+	int				error, i, size;
+	xfs_dablk_t			blkno;
+	struct xfs_buf			*bp;
+	struct xfs_ifork		*ifp;
 
 	trace_xfs_attr_sf_to_leaf(args);
 
@@ -814,8 +830,6 @@ xfs_attr_shortform_to_leaf(
 	memset((char *)&nargs, 0, sizeof(nargs));
 	nargs.dp = dp;
 	nargs.geo = args->geo;
-	nargs.firstblock = args->firstblock;
-	nargs.dfops = args->dfops;
 	nargs.total = args->total;
 	nargs.whichfork = XFS_ATTR_FORK;
 	nargs.trans = args->trans;
@@ -1018,8 +1032,6 @@ xfs_attr3_leaf_to_shortform(
 	memset((char *)&nargs, 0, sizeof(nargs));
 	nargs.geo = args->geo;
 	nargs.dp = dp;
-	nargs.firstblock = args->firstblock;
-	nargs.dfops = args->dfops;
 	nargs.total = args->total;
 	nargs.whichfork = XFS_ATTR_FORK;
 	nargs.trans = args->trans;
@@ -1263,11 +1275,9 @@ xfs_attr3_leaf_add(
 					+ xfs_attr3_leaf_hdr_size(leaf);
 	for (sum = 0, i = XFS_ATTR_LEAF_MAPSIZE - 1; i >= 0; i--) {
 		if (tablesize > ichdr.firstused) {
-			gmb();
 			sum += ichdr.freemap[i].size;
 			continue;
 		}
-		gmb();
 		if (!ichdr.freemap[i].size)
 			continue;	/* no space in this map */
 		tmp = entsize;
@@ -1584,17 +1594,10 @@ xfs_attr3_leaf_rebalance(
 	 */
 	swap = 0;
 	if (xfs_attr3_leaf_order(blk1->bp, &ichdr1, blk2->bp, &ichdr2)) {
-		struct xfs_da_state_blk	*tmp_blk;
-		struct xfs_attr3_icleaf_hdr tmp_ichdr;
+		swap(blk1, blk2);
 
-		tmp_blk = blk1;
-		blk1 = blk2;
-		blk2 = tmp_blk;
-
-		/* struct copies to swap them rather than reconverting */
-		tmp_ichdr = ichdr1;
-		ichdr1 = ichdr2;
-		ichdr2 = tmp_ichdr;
+		/* swap structures rather than reconverting them */
+		swap(ichdr1, ichdr2);
 
 		leaf1 = blk1->bp->b_addr;
 		leaf2 = blk2->bp->b_addr;
@@ -1619,7 +1622,6 @@ xfs_attr3_leaf_rebalance(
 	 * Move any entries required from leaf to leaf:
 	 */
 	if (count < ichdr1.count) {
-		gmb();
 		/*
 		 * Figure the total bytes to be added to the destination leaf.
 		 */
@@ -1643,7 +1645,6 @@ xfs_attr3_leaf_rebalance(
 				ichdr1.count - count, leaf2, &ichdr2, 0, count);
 
 	} else if (count > ichdr1.count) {
-		gmb();
 		/*
 		 * I assert that since all callers pass in an empty
 		 * second buffer, this code should never execute.

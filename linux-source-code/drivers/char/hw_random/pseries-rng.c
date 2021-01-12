@@ -17,23 +17,28 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
+#include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/hw_random.h>
 #include <asm/vio.h>
 
-#define MODULE_NAME "pseries-rng"
 
 static int pseries_rng_read(struct hwrng *rng, void *data, size_t max, bool wait)
 {
 	u64 buffer[PLPAR_HCALL_BUFSIZE];
-	size_t size = max < 8 ? max : 8;
+	int rc;
 
-	if (plpar_hcall(H_RANDOM, (unsigned long *)buffer) != H_SUCCESS) {
-		printk(KERN_ERR "pseries rng hcall error\n");
-		return 0;
+	rc = plpar_hcall(H_RANDOM, (unsigned long *)buffer);
+	if (rc != H_SUCCESS) {
+		pr_err_ratelimited("H_RANDOM call failed %d\n", rc);
+		return -EIO;
 	}
-	memcpy(data, buffer, size);
-	return size;
+	memcpy(data, buffer, 8);
+
+	/* The hypervisor interface returns 64 bits */
+	return 8;
 }
 
 /**
@@ -51,7 +56,7 @@ static unsigned long pseries_rng_get_desired_dma(struct vio_dev *vdev)
 };
 
 static struct hwrng pseries_rng = {
-	.name		= MODULE_NAME,
+	.name		= KBUILD_MODNAME,
 	.read		= pseries_rng_read,
 };
 
@@ -67,14 +72,14 @@ static int pseries_rng_remove(struct vio_dev *dev)
 	return 0;
 }
 
-static struct vio_device_id pseries_rng_driver_ids[] = {
+static const struct vio_device_id pseries_rng_driver_ids[] = {
 	{ "ibm,random-v1", "ibm,random"},
 	{ "", "" }
 };
 MODULE_DEVICE_TABLE(vio, pseries_rng_driver_ids);
 
 static struct vio_driver pseries_rng_driver = {
-	.name = MODULE_NAME,
+	.name = KBUILD_MODNAME,
 	.probe = pseries_rng_probe,
 	.remove = pseries_rng_remove,
 	.get_desired_dma = pseries_rng_get_desired_dma,
@@ -83,7 +88,7 @@ static struct vio_driver pseries_rng_driver = {
 
 static int __init rng_init(void)
 {
-	printk(KERN_INFO "Registering IBM pSeries RNG driver\n");
+	pr_info("Registering IBM pSeries RNG driver\n");
 	return vio_register_driver(&pseries_rng_driver);
 }
 

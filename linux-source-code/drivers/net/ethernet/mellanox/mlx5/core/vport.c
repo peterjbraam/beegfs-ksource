@@ -171,12 +171,9 @@ int mlx5_query_nic_vport_mac_address(struct mlx5_core_dev *mdev,
 				nic_vport_context.permanent_address);
 
 	err = mlx5_query_nic_vport_context(mdev, vport, out, outlen);
-	if (err)
-		goto out;
+	if (!err)
+		ether_addr_copy(addr, &out_addr[2]);
 
-	ether_addr_copy(addr, &out_addr[2]);
-
-out:
 	kvfree(out);
 	return err;
 }
@@ -215,7 +212,7 @@ int mlx5_modify_nic_vport_mac_address(struct mlx5_core_dev *mdev,
 
 	return err;
 }
-EXPORT_SYMBOL(mlx5_modify_nic_vport_mac_address);
+EXPORT_SYMBOL_GPL(mlx5_modify_nic_vport_mac_address);
 
 int mlx5_query_nic_vport_mtu(struct mlx5_core_dev *mdev, u16 *mtu)
 {

@@ -27,19 +27,16 @@ static int lowpan_nhc_insert(struct lowpan_nhc *nhc)
 
 	/* Figure out where to put new node */
 	while (*new) {
-		struct lowpan_nhc *this = container_of(*new, struct lowpan_nhc,
-						       node);
+		struct lowpan_nhc *this = rb_entry(*new, struct lowpan_nhc,
+						   node);
 		int result, len_dif, len;
 
 		len_dif = nhc->idlen - this->idlen;
 
-		if (nhc->idlen < this->idlen) {
-			gmb();
+		if (nhc->idlen < this->idlen)
 			len = nhc->idlen;
-		} else {
-			gmb();
+		else
 			len = this->idlen;
-		}
 
 		result = memcmp(nhc->id, this->id, len);
 		if (!result)
@@ -72,8 +69,8 @@ static struct lowpan_nhc *lowpan_nhc_by_nhcid(const struct sk_buff *skb)
 	const u8 *nhcid_skb_ptr = skb->data;
 
 	while (node) {
-		struct lowpan_nhc *nhc = container_of(node, struct lowpan_nhc,
-						      node);
+		struct lowpan_nhc *nhc = rb_entry(node, struct lowpan_nhc,
+						  node);
 		u8 nhcid_skb_ptr_masked[LOWPAN_NHC_MAX_ID_LEN];
 		int result, i;
 

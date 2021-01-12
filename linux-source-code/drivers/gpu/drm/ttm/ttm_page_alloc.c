@@ -692,7 +692,7 @@ out:
 			gfp_flags |= __GFP_ZERO;
 
 		if (ttm_flags & TTM_PAGE_FLAG_NO_RETRY)
-			gfp_flags |= __GFP_REPEAT;
+			gfp_flags |= __GFP_RETRY_MAYFAIL;
 
 		/* ttm_alloc_new_pages doesn't reference pool so we can run
 		 * multiple requests in parallel.
@@ -732,8 +732,8 @@ static void ttm_put_pages(struct page **pages, unsigned npages, int flags,
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 			if (!(flags & TTM_PAGE_FLAG_DMA32) &&
 			    (npages - i) >= HPAGE_PMD_NR) {
-				for (j = 0; j < HPAGE_PMD_NR; ++j)
-					if (p++ != pages[i + j])
+				for (j = 1; j < HPAGE_PMD_NR; ++j)
+					if (++p != pages[i + j])
 					    break;
 
 				if (j == HPAGE_PMD_NR)
@@ -767,8 +767,8 @@ static void ttm_put_pages(struct page **pages, unsigned npages, int flags,
 			if (!p)
 				break;
 
-			for (j = 0; j < HPAGE_PMD_NR; ++j)
-				if (p++ != pages[i + j])
+			for (j = 1; j < HPAGE_PMD_NR; ++j)
+				if (++p != pages[i + j])
 				    break;
 
 			if (j != HPAGE_PMD_NR)
@@ -848,7 +848,7 @@ static int ttm_get_pages(struct page **pages, unsigned npages, int flags,
 			gfp_flags |= __GFP_ZERO;
 
 		if (flags & TTM_PAGE_FLAG_NO_RETRY)
-			gfp_flags |= __GFP_REPEAT;
+			gfp_flags |= __GFP_RETRY_MAYFAIL;
 
 		if (flags & TTM_PAGE_FLAG_DMA32)
 			gfp_flags |= GFP_DMA32;
@@ -861,7 +861,8 @@ static int ttm_get_pages(struct page **pages, unsigned npages, int flags,
 			while (npages >= HPAGE_PMD_NR) {
 				gfp_t huge_flags = gfp_flags;
 
-				huge_flags |= GFP_TRANSHUGE;
+				huge_flags |= GFP_TRANSHUGE_LIGHT | __GFP_NORETRY |
+					__GFP_KSWAPD_RECLAIM;
 				huge_flags &= ~__GFP_MOVABLE;
 				huge_flags &= ~__GFP_COMP;
 				p = alloc_pages(huge_flags, HPAGE_PMD_ORDER);
@@ -978,11 +979,15 @@ int ttm_page_alloc_init(struct ttm_mem_global *glob, unsigned max_pages)
 				  GFP_USER | GFP_DMA32, "uc dma", 0);
 
 	ttm_page_pool_init_locked(&_manager->wc_pool_huge,
-				  GFP_TRANSHUGE	& ~(__GFP_MOVABLE | __GFP_COMP),
+				  (GFP_TRANSHUGE_LIGHT | __GFP_NORETRY |
+				   __GFP_KSWAPD_RECLAIM) &
+				  ~(__GFP_MOVABLE | __GFP_COMP),
 				  "wc huge", order);
 
 	ttm_page_pool_init_locked(&_manager->uc_pool_huge,
-				  GFP_TRANSHUGE	& ~(__GFP_MOVABLE | __GFP_COMP)
+				  (GFP_TRANSHUGE_LIGHT | __GFP_NORETRY |
+				   __GFP_KSWAPD_RECLAIM) &
+				  ~(__GFP_MOVABLE | __GFP_COMP)
 				  , "uc huge", order);
 
 	_manager->options.max_size = max_pages;

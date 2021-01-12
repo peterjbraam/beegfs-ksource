@@ -110,15 +110,16 @@ static inline int mlx5e_get_dscp_up(struct mlx5e_priv *priv, struct sk_buff *skb
 #endif
 
 u16 mlx5e_select_queue(struct net_device *dev, struct sk_buff *skb,
-		       void *accel_priv, select_queue_fallback_t fallback)
+		       struct net_device *sb_dev,
+		       select_queue_fallback_t fallback)
 {
 	struct mlx5e_priv *priv = netdev_priv(dev);
-	int txq_ix = fallback(dev, skb);
+	int channel_ix = fallback(dev, skb, NULL);
 	u16 num_channels;
 	int up = 0;
 
 	if (!netdev_get_num_tc(dev))
-		return txq_ix;
+		return channel_ix;
 
 #ifdef CONFIG_MLX5_CORE_EN_DCB
 	if (priv->dcbx_dp.trust_state == MLX5_QPTS_TRUST_DSCP)
@@ -126,16 +127,16 @@ u16 mlx5e_select_queue(struct net_device *dev, struct sk_buff *skb,
 	else
 #endif
 		if (skb_vlan_tag_present(skb))
-			up = skb->vlan_tci >> VLAN_PRIO_SHIFT;
+			up = skb_vlan_tag_get_prio(skb);
 
-	/* txq_ix can be larger than num_channels since
+	/* channel_ix can be larger than num_channels since
 	 * dev->num_real_tx_queues = num_channels * num_tc
 	 */
 	num_channels = priv->channels.params.num_channels;
-	if (txq_ix >= num_channels)
-		txq_ix = priv->txq2sq[txq_ix]->ch_ix;
+	if (channel_ix >= num_channels)
+		channel_ix = reciprocal_scale(channel_ix, num_channels);
 
-	return priv->channel_tc2txq[txq_ix][up];
+	return priv->channel_tc2txq[channel_ix][up];
 }
 
 static inline int mlx5e_skb_l2_header_offset(struct sk_buff *skb)
@@ -464,9 +465,10 @@ static void mlx5e_dump_error_cqe(struct mlx5e_txqsq *sq,
 	u32 ci = mlx5_cqwq_get_ci(&sq->cq.wq);
 
 	netdev_err(sq->channel->netdev,
-		   "Error cqe on cqn 0x%x, ci 0x%x, sqn 0x%x, syndrome 0x%x, vendor syndrome 0x%x\n",
-		   sq->cq.mcq.cqn, ci, sq->sqn, err_cqe->syndrome,
-		   err_cqe->vendor_err_synd);
+		   "Error cqe on cqn 0x%x, ci 0x%x, sqn 0x%x, opcode 0x%x, syndrome 0x%x, vendor syndrome 0x%x\n",
+		   sq->cq.mcq.cqn, ci, sq->sqn,
+		   get_cqe_opcode((struct mlx5_cqe64 *)err_cqe),
+		   err_cqe->syndrome, err_cqe->vendor_err_synd);
 	mlx5_dump_err_cqe(sq->cq.mdev, err_cqe);
 }
 
@@ -512,7 +514,7 @@ bool mlx5e_poll_tx_cq(struct mlx5e_cq *cq, int napi_budget)
 
 		wqe_counter = be16_to_cpu(cqe->wqe_counter);
 
-		if (unlikely(cqe->op_own >> 4 == MLX5_CQE_REQ_ERR)) {
+		if (unlikely(get_cqe_opcode(cqe) == MLX5_CQE_REQ_ERR)) {
 			if (!test_and_set_bit(MLX5E_SQ_STATE_RECOVERING,
 					      &sq->state)) {
 				mlx5e_dump_error_cqe(sq,

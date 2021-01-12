@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * drivers/watchdog/ar7_wdt.c
  *
@@ -8,19 +9,6 @@
  * National Semiconductor SCx200 Watchdog support
  * Copyright (c) 2001,2002 Christer Weinigel <wingel@nano-system.com>
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -28,7 +16,6 @@
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/errno.h>
-#include <linux/init.h>
 #include <linux/miscdevice.h>
 #include <linux/platform_device.h>
 #include <linux/watchdog.h>
@@ -46,7 +33,6 @@
 MODULE_AUTHOR("Nicolas Thill <nico@openwrt.org>");
 MODULE_DESCRIPTION(LONGNAME);
 MODULE_LICENSE("GPL");
-MODULE_ALIAS_MISCDEV(WATCHDOG_MINOR);
 
 static int margin = 60;
 module_param(margin, int, 0);
@@ -280,11 +266,6 @@ static int ar7_wdt_probe(struct platform_device *pdev)
 
 	ar7_regs_wdt =
 		platform_get_resource_byname(pdev, IORESOURCE_MEM, "regs");
-	if (!ar7_regs_wdt) {
-		pr_err("could not get registers resource\n");
-		return -ENODEV;
-	}
-
 	ar7_wdt = devm_ioremap_resource(&pdev->dev, ar7_regs_wdt);
 	if (IS_ERR(ar7_wdt))
 		return PTR_ERR(ar7_wdt);
@@ -331,7 +312,6 @@ static struct platform_driver ar7_wdt_driver = {
 	.remove = ar7_wdt_remove,
 	.shutdown = ar7_wdt_shutdown,
 	.driver = {
-		.owner = THIS_MODULE,
 		.name = "ar7_wdt",
 	},
 };

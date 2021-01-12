@@ -8,7 +8,36 @@
  */
 
 #include <linux/of.h>
+#include <linux/of_platform.h>
 #include <linux/usb/of.h>
+
+/**
+ * usb_of_get_device_node() - get a USB device node
+ * @hub: hub to which device is connected
+ * @port1: one-based index of port
+ *
+ * Look up the node of a USB device given its parent hub device and one-based
+ * port number.
+ *
+ * Return: A pointer to the node with incremented refcount if found, or
+ * %NULL otherwise.
+ */
+struct device_node *usb_of_get_device_node(struct usb_device *hub, int port1)
+{
+	struct device_node *node;
+	u32 reg;
+
+	for_each_child_of_node(hub->dev.of_node, node) {
+		if (of_property_read_u32(node, "reg", &reg))
+			continue;
+
+		if (reg == port1)
+			return node;
+	}
+
+	return NULL;
+}
+EXPORT_SYMBOL_GPL(usb_of_get_device_node);
 
 /**
  * usb_of_has_combined_node() - determine whether a device has a combined node
@@ -78,30 +107,27 @@ usb_of_get_interface_node(struct usb_device *udev, u8 config, u8 ifnum)
 EXPORT_SYMBOL_GPL(usb_of_get_interface_node);
 
 /**
- * usb_of_get_device_node() - get a USB device node
- * @hub: hub to which device is connected
- * @port1: one-based index of port
+ * usb_of_get_companion_dev - Find the companion device
+ * @dev: the device pointer to find a companion
  *
- * Look up the node of a USB device given its parent hub device and one-based
- * port number.
+ * Find the companion device from platform bus.
  *
- * Return: A pointer to the node with incremented refcount if found, or
- * %NULL otherwise.
+ * Takes a reference to the returned struct device which needs to be dropped
+ * after use.
+ *
+ * Return: On success, a pointer to the companion device, %NULL on failure.
  */
-struct device_node *usb_of_get_device_node(struct usb_device *hub, int port1)
+struct device *usb_of_get_companion_dev(struct device *dev)
 {
 	struct device_node *node;
-	u32 reg;
+	struct platform_device *pdev = NULL;
 
-	for_each_child_of_node(hub->dev.of_node, node) {
-		if (of_property_read_u32(node, "reg", &reg))
-			continue;
+	node = of_parse_phandle(dev->of_node, "companion", 0);
+	if (node)
+		pdev = of_find_device_by_node(node);
 
-		if (reg == port1)
-			return node;
-	}
+	of_node_put(node);
 
-	return NULL;
+	return pdev ? &pdev->dev : NULL;
 }
-EXPORT_SYMBOL_GPL(usb_of_get_device_node);
-
+EXPORT_SYMBOL_GPL(usb_of_get_companion_dev);

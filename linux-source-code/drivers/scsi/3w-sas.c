@@ -1,7 +1,7 @@
 /*
    3w-sas.c -- LSI 3ware SAS/SATA-RAID Controller device driver for Linux.
 
-   Written By: Adam Radford <linuxraid@lsi.com>
+   Written By: Adam Radford <aradford@gmail.com>
 
    Copyright (C) 2009 LSI Corporation.
 
@@ -43,10 +43,7 @@
    LSI 3ware 9750 6Gb/s SAS/SATA-RAID
 
    Bugs/Comments/Suggestions should be mailed to:
-   linuxraid@lsi.com
-
-   For more information, goto:
-   http://www.lsi.com
+   aradford@gmail.com
 
    History
    -------
@@ -67,7 +64,7 @@
 #include <linux/slab.h>
 #include <asm/io.h>
 #include <asm/irq.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <scsi/scsi.h>
 #include <scsi/scsi_host.h>
 #include <scsi/scsi_tcq.h>
@@ -191,19 +188,6 @@ static ssize_t twl_show_stats(struct device *dev,
 	return len;
 } /* End twl_show_stats() */
 
-/* This function will set a devices queue depth */
-static int twl_change_queue_depth(struct scsi_device *sdev, int queue_depth,
-				  int reason)
-{
-	if (reason != SCSI_QDEPTH_DEFAULT)
-		return -EOPNOTSUPP;
-
-	if (queue_depth > TW_Q_LENGTH-2)
-		queue_depth = TW_Q_LENGTH-2;
-	scsi_adjust_queue_depth(sdev, MSG_ORDERED_TAG, queue_depth);
-	return queue_depth;
-} /* End twl_change_queue_depth() */
-
 /* stats sysfs attribute initializer */
 static struct device_attribute twl_host_stats_attr = {
 	.attr = {
@@ -237,7 +221,6 @@ out:
 static void twl_aen_queue_event(TW_Device_Extension *tw_dev, TW_Command_Apache_Header *header)
 {
 	u32 local_time;
-	struct timeval time;
 	TW_Event *event;
 	unsigned short aen;
 	char host[16];
@@ -256,8 +239,8 @@ static void twl_aen_queue_event(TW_Device_Extension *tw_dev, TW_Command_Apache_H
 	memset(event, 0, sizeof(TW_Event));
 
 	event->severity = TW_SEV_OUT(header->status_block.severity__reserved);
-	do_gettimeofday(&time);
-	local_time = (u32)(time.tv_sec - (sys_tz.tz_minuteswest * 60));
+	/* event->time_stamp_sec overflows in y2106 */
+	local_time = (u32)(ktime_get_real_seconds() - (sys_tz.tz_minuteswest * 60));
 	event->time_stamp_sec = local_time;
 	event->aen_code = aen;
 	event->retrieved = TW_AEN_NOT_RETRIEVED;
@@ -424,11 +407,10 @@ out:
 static void twl_aen_sync_time(TW_Device_Extension *tw_dev, int request_id)
 {
 	u32 schedulertime;
-	struct timeval utc;
 	TW_Command_Full *full_command_packet;
 	TW_Command *command_packet;
 	TW_Param_Apache *param;
-	u32 local_time;
+	time64_t local_time;
 
 	/* Fill out the command packet */
 	full_command_packet = tw_dev->command_packet_virt[request_id];
@@ -450,10 +432,9 @@ static void twl_aen_sync_time(TW_Device_Extension *tw_dev, int request_id)
 
 	/* Convert system time in UTC to local time seconds since last 
            Sunday 12:00AM */
-	do_gettimeofday(&utc);
-	local_time = (u32)(utc.tv_sec - (sys_tz.tz_minuteswest * 60));
-	schedulertime = local_time - (3 * 86400);
-	schedulertime = cpu_to_le32(schedulertime % 604800);
+	local_time = (ktime_get_real_seconds() - (sys_tz.tz_minuteswest * 60));
+	div_u64_rem(local_time - (3 * 86400), 604800, &schedulertime);
+	schedulertime = cpu_to_le32(schedulertime);
 
 	memcpy(param->data, &schedulertime, sizeof(u32));
 
@@ -663,13 +644,12 @@ static int twl_allocate_memory(TW_Device_Extension *tw_dev, int size, int which)
 	unsigned long *cpu_addr;
 	int retval = 1;
 
-	cpu_addr = pci_alloc_consistent(tw_dev->tw_pci_dev, size*TW_Q_LENGTH, &dma_handle);
+	cpu_addr = pci_zalloc_consistent(tw_dev->tw_pci_dev, size * TW_Q_LENGTH,
+					 &dma_handle);
 	if (!cpu_addr) {
 		TW_PRINTK(tw_dev->host, TW_DRIVER, 0x5, "Memory allocation failed");
 		goto out;
 	}
-
-	memset(cpu_addr, 0, size*TW_Q_LENGTH);
 
 	for (i = 0; i < TW_Q_LENGTH; i++) {
 		switch(which) {
@@ -1561,7 +1541,7 @@ static struct scsi_host_template driver_template = {
 	.queuecommand		= twl_scsi_queue,
 	.eh_host_reset_handler	= twl_scsi_eh_reset,
 	.bios_param		= twl_scsi_biosparam,
-	.change_queue_depth	= twl_change_queue_depth,
+	.change_queue_depth	= scsi_change_queue_depth,
 	.can_queue		= TW_Q_LENGTH-2,
 	.slave_configure	= twl_slave_configure,
 	.this_id		= -1,

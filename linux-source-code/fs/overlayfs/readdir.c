@@ -253,10 +253,10 @@ static void ovl_cache_put(struct ovl_dir_file *od, struct dentry *dentry)
 	}
 }
 
-static int ovl_fill_merge(void *buf, const char *name, int namelen,
-			  loff_t offset, u64 ino, unsigned int d_type)
+static int ovl_fill_merge(struct dir_context *ctx, const char *name,
+			  int namelen, loff_t offset, u64 ino,
+			  unsigned int d_type)
 {
-	struct dir_context *ctx = buf;
 	struct ovl_readdir_data *rdd =
 		container_of(ctx, struct ovl_readdir_data, ctx);
 
@@ -276,7 +276,7 @@ static int ovl_check_whiteouts(struct dentry *dir, struct ovl_readdir_data *rdd)
 
 	old_cred = ovl_override_creds(rdd->dentry->d_sb);
 
-	err = mutex_lock_killable(&dir->d_inode->i_mutex);
+	err = down_write_killable(&dir->d_inode->i_rwsem);
 	if (!err) {
 		while (rdd->first_maybe_whiteout) {
 			p = rdd->first_maybe_whiteout;
@@ -503,7 +503,7 @@ get:
 		struct path statpath = *path;
 
 		statpath.dentry = this;
-		err = vfs_getattr(&statpath, &stat);
+		err = vfs_getattr(&statpath, &stat, STATX_INO, 0);
 		if (err)
 			goto fail;
 
@@ -526,11 +526,10 @@ fail:
 	goto out;
 }
 
-static int ovl_fill_plain(void *buf, const char *name,
+static int ovl_fill_plain(struct dir_context *ctx, const char *name,
 			  int namelen, loff_t offset, u64 ino,
 			  unsigned int d_type)
 {
-	struct dir_context *ctx = buf;
 	struct ovl_cache_entry *p;
 	struct ovl_readdir_data *rdd =
 		container_of(ctx, struct ovl_readdir_data, ctx);
@@ -645,11 +644,10 @@ struct ovl_readdir_translate {
 	int xinobits;
 };
 
-static int ovl_fill_real(void *buf, const char *name,
+static int ovl_fill_real(struct dir_context *ctx, const char *name,
 			   int namelen, loff_t offset, u64 ino,
 			   unsigned int d_type)
 {
-	struct dir_context *ctx = buf;
 	struct ovl_readdir_translate *rdt =
 		container_of(ctx, struct ovl_readdir_translate, ctx);
 	struct dir_context *orig_ctx = rdt->orig_ctx;
@@ -705,7 +703,7 @@ static int ovl_iterate_real(struct file *file, struct dir_context *ctx)
 		struct path statpath = file->f_path;
 
 		statpath.dentry = dir->d_parent;
-		err = vfs_getattr(&statpath, &stat);
+		err = vfs_getattr(&statpath, &stat, STATX_INO, 0);
 		if (err)
 			return err;
 
@@ -836,7 +834,7 @@ static int ovl_dir_fsync(struct file *file, loff_t start, loff_t end,
 	if (!od->is_upper) {
 		struct inode *inode = file_inode(file);
 
-		realfile = lockless_dereference(od->upperfile);
+		realfile = READ_ONCE(od->upperfile);
 		if (!realfile) {
 			struct path upperpath;
 
@@ -901,7 +899,6 @@ static int ovl_dir_open(struct inode *inode, struct file *file)
 	od->is_real = ovl_dir_is_real(file->f_path.dentry);
 	od->is_upper = OVL_TYPE_UPPER(type);
 	file->private_data = od;
-	file->f_mode |= FMODE_KABI_ITERATE;
 
 	return 0;
 }
@@ -983,11 +980,10 @@ void ovl_cleanup_whiteouts(struct dentry *upper, struct list_head *list)
 	inode_unlock(upper->d_inode);
 }
 
-static int ovl_check_d_type(void *buf, const char *name,
+static int ovl_check_d_type(struct dir_context *ctx, const char *name,
 			  int namelen, loff_t offset, u64 ino,
 			  unsigned int d_type)
 {
-	struct dir_context *ctx = buf;
 	struct ovl_readdir_data *rdd =
 		container_of(ctx, struct ovl_readdir_data, ctx);
 

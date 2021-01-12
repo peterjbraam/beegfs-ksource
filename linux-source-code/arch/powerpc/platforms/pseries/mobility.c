@@ -12,6 +12,7 @@
 #include <linux/cpu.h>
 #include <linux/kernel.h>
 #include <linux/kobject.h>
+#include <linux/sched.h>
 #include <linux/smp.h>
 #include <linux/stat.h>
 #include <linux/completion.h>
@@ -19,6 +20,7 @@
 #include <linux/delay.h>
 #include <linux/slab.h>
 
+#include <asm/machdep.h>
 #include <asm/rtas.h>
 #include "pseries.h"
 #include "../../kernel/cacheinfo.h"
@@ -40,6 +42,7 @@ struct update_props_workarea {
 #define ADD_DT_NODE	0x03000000
 
 #define MIGRATION_SCOPE	(1)
+#define PRRN_SCOPE -2
 
 static int mobility_rtas_call(int token, char *buf, s32 scope)
 {
@@ -192,8 +195,8 @@ static int update_dt_node(__be32 phandle, s32 scope)
 				break;
 
 			case 0x80000000:
-				prop = of_find_property(dn, prop_name, NULL);
-				of_remove_property(dn, prop);
+				of_remove_property(dn, of_find_property(dn,
+							prop_name, NULL));
 				prop = NULL;
 				break;
 
@@ -207,7 +210,11 @@ static int update_dt_node(__be32 phandle, s32 scope)
 
 				prop_data += vd;
 			}
+
+			cond_resched();
 		}
+
+		cond_resched();
 	} while (rtas_rc == 1);
 
 	of_node_put(dn);
@@ -237,6 +244,29 @@ static int add_dt_node(__be32 parent_phandle, __be32 drc_index)
 
 	of_node_put(parent_dn);
 	return rc;
+}
+
+static void prrn_update_node(__be32 phandle)
+{
+	struct pseries_hp_errorlog hp_elog;
+	struct device_node *dn;
+
+	/*
+	 * If a node is found from a the given phandle, the phandle does not
+	 * represent the drc index of an LMB and we can ignore.
+	 */
+	dn = of_find_node_by_phandle(be32_to_cpu(phandle));
+	if (dn) {
+		of_node_put(dn);
+		return;
+	}
+
+	hp_elog.resource = PSERIES_HP_ELOG_RESOURCE_MEM;
+	hp_elog.action = PSERIES_HP_ELOG_ACTION_READD;
+	hp_elog.id_type = PSERIES_HP_ELOG_ID_DRC_INDEX;
+	hp_elog._drc_u.drc_index = phandle;
+
+	handle_dlpar_errorlog(&hp_elog);
 }
 
 int pseries_devicetree_update(s32 scope)
@@ -277,14 +307,22 @@ int pseries_devicetree_update(s32 scope)
 					break;
 				case UPDATE_DT_NODE:
 					update_dt_node(phandle, scope);
+
+					if (scope == PRRN_SCOPE)
+						prrn_update_node(phandle);
+
 					break;
 				case ADD_DT_NODE:
 					drc_index = *data++;
 					add_dt_node(phandle, drc_index);
 					break;
 				}
+
+				cond_resched();
 			}
 		}
+
+		cond_resched();
 	} while (rc == 1);
 
 	kfree(rtas_buf);
@@ -314,7 +352,7 @@ void post_mobility_fixup(void)
 	 * We don't want CPUs to go online/offline while the device
 	 * tree is being updated.
 	 */
-	cpu_hotplug_disable();
+	cpus_read_lock();
 
 	/*
 	 * It's common for the destination firmware to replace cache
@@ -330,7 +368,7 @@ void post_mobility_fixup(void)
 
 	cacheinfo_rebuild();
 
-	cpu_hotplug_enable();
+	cpus_read_unlock();
 
 	/* Possibly switch to a new RFI flush type */
 	pseries_setup_rfi_flush();
@@ -338,8 +376,9 @@ void post_mobility_fixup(void)
 	return;
 }
 
-static ssize_t migrate_store(struct class *class, struct class_attribute *attr,
-			     const char *buf, size_t count)
+static ssize_t migration_store(struct class *class,
+			       struct class_attribute *attr, const char *buf,
+			       size_t count)
 {
 	u64 streamid;
 	int rc;
@@ -374,8 +413,8 @@ static ssize_t migrate_store(struct class *class, struct class_attribute *attr,
  */
 #define MIGRATION_API_VERSION	1
 
-static CLASS_ATTR(migration, S_IWUSR, NULL, migrate_store);
-static CLASS_ATTR_STRING(api_version, S_IRUGO, __stringify(MIGRATION_API_VERSION));
+static CLASS_ATTR_WO(migration);
+static CLASS_ATTR_STRING(api_version, 0444, __stringify(MIGRATION_API_VERSION));
 
 static int __init mobility_sysfs_init(void)
 {
@@ -395,4 +434,4 @@ static int __init mobility_sysfs_init(void)
 
 	return 0;
 }
-device_initcall(mobility_sysfs_init);
+machine_device_initcall(pseries, mobility_sysfs_init);

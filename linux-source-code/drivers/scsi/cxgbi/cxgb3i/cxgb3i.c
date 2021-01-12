@@ -57,7 +57,7 @@ MODULE_PARM_DESC(cxgb3i_snd_win, "TCP send window in bytes (default=128KB)");
 
 static int cxgb3i_rx_credit_thres = 10 * 1024;
 module_param(cxgb3i_rx_credit_thres, int, 0644);
-MODULE_PARM_DESC(rx_credit_thres,
+MODULE_PARM_DESC(cxgb3i_rx_credit_thres,
 		 "RX credits return threshold in bytes (default=10KB)");
 
 static unsigned int cxgb3i_max_connect = 8 * 1024;
@@ -86,16 +86,18 @@ static struct scsi_host_template cxgb3i_host_template = {
 	.proc_name	= DRV_MODULE_NAME,
 	.can_queue	= CXGB3I_SCSI_HOST_QDEPTH,
 	.queuecommand	= iscsi_queuecommand,
-	.change_queue_depth = iscsi_change_queue_depth,
+	.change_queue_depth = scsi_change_queue_depth,
 	.sg_tablesize	= SG_ALL,
 	.max_sectors	= 0xFFFF,
 	.cmd_per_lun	= ISCSI_DEF_CMD_PER_LUN,
+	.eh_timed_out	= iscsi_eh_cmd_timed_out,
 	.eh_abort_handler = iscsi_eh_abort,
 	.eh_device_reset_handler = iscsi_eh_device_reset,
 	.eh_target_reset_handler = iscsi_eh_recover_target,
 	.target_alloc	= iscsi_target_alloc,
 	.use_clustering	= DISABLE_CLUSTERING,
 	.this_id	= -1,
+	.track_queue_depth = 1,
 };
 
 static struct iscsi_transport cxgb3i_iscsi_transport = {
@@ -352,7 +354,7 @@ static inline void make_tx_data_wr(struct cxgbi_sock *csk, struct sk_buff *skb,
 	struct l2t_entry *l2t = csk->l2t;
 
 	skb_reset_transport_header(skb);
-	req = (struct tx_data_wr *)__skb_push(skb, sizeof(*req));
+	req = __skb_push(skb, sizeof(*req));
 	req->wr_hi = htonl(V_WR_OP(FW_WROPCODE_OFLD_TX_DATA) |
 			(req_completion ? F_WR_COMPL : 0));
 	req->wr_lo = htonl(V_WR_TID(csk->tid));
@@ -584,8 +586,8 @@ static int do_act_open_rpl(struct t3cdev *tdev, struct sk_buff *skb, void *ctx)
 	cxgbi_sock_get(csk);
 	spin_lock_bh(&csk->lock);
 	if (rpl->status == CPL_ERR_CONN_EXIST &&
-	    csk->retry_timer.function != (TIMER_FUNC_TYPE)act_open_retry_timer) {
-		csk->retry_timer.function = (TIMER_FUNC_TYPE)act_open_retry_timer;
+	    csk->retry_timer.function != act_open_retry_timer) {
+		csk->retry_timer.function = act_open_retry_timer;
 		mod_timer(&csk->retry_timer, jiffies + HZ / 2);
 	} else
 		cxgbi_sock_fail_act_open(csk,
@@ -977,14 +979,17 @@ static int init_act_open(struct cxgbi_sock *csk)
 	csk->atid = cxgb3_alloc_atid(t3dev, &t3_client, csk);
 	if (csk->atid < 0) {
 		pr_err("NO atid available.\n");
-		goto rel_resource;
+		return -EINVAL;
 	}
 	cxgbi_sock_set_flag(csk, CTPF_HAS_ATID);
 	cxgbi_sock_get(csk);
 
 	skb = alloc_wr(sizeof(struct cpl_act_open_req), 0, GFP_KERNEL);
-	if (!skb)
-		goto rel_resource;
+	if (!skb) {
+		cxgb3_free_atid(t3dev, csk->atid);
+		cxgbi_sock_put(csk);
+		return -ENOMEM;
+	}
 	skb->sk = (struct sock *)csk;
 	set_arp_failure_handler(skb, act_open_arp_failure);
 	csk->snd_win = cxgb3i_snd_win;
@@ -1005,11 +1010,6 @@ static int init_act_open(struct cxgbi_sock *csk)
 	cxgbi_sock_set_state(csk, CTP_ACTIVE_OPEN);
 	send_act_open_req(csk, skb, csk->l2t);
 	return 0;
-
-rel_resource:
-	if (skb)
-		__kfree_skb(skb);
-	return -EINVAL;
 }
 
 cxgb3_cpl_handler_func cxgb3i_cpl_handlers[NUM_CPL_CMDS] = {

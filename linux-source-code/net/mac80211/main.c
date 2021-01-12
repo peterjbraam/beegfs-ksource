@@ -351,11 +351,11 @@ static int ieee80211_ifa_changed(struct notifier_block *nb,
 	sdata_lock(sdata);
 
 	/* Copy the addresses to the bss_conf list */
-	ifa = rtnl_dereference(idev->ifa_list);
+	ifa = idev->ifa_list;
 	while (ifa) {
 		if (c < IEEE80211_BSS_ARP_ADDR_LIST_LEN)
 			bss_conf->arp_addr_list[c] = ifa->ifa_address;
-		ifa = rtnl_dereference(ifa->ifa_next);
+		ifa = ifa->ifa_next;
 		c++;
 	}
 
@@ -1048,6 +1048,17 @@ int ieee80211_register_hw(struct ieee80211_hw *hw)
 		}
 	}
 
+#if 0  /* Not in RHEL */
+	/* Enable Extended Key IDs when driver allowed it, or when it
+	 * supports neither HW crypto nor A-MPDUs
+	 */
+	if ((!local->ops->set_key &&
+	     !ieee80211_hw_check(hw, AMPDU_AGGREGATION)) ||
+	    ieee80211_hw_check(&local->hw, EXT_KEY_ID_NATIVE))
+		wiphy_ext_feature_set(local->hw.wiphy,
+				      NL80211_EXT_FEATURE_EXT_KEY_ID);
+#endif
+
 	/* Mac80211 and therefore all cards only using SW crypto are able to
 	 * handle PTK rekeys correctly
 	 */
@@ -1249,7 +1260,7 @@ int ieee80211_register_hw(struct ieee80211_hw *hw)
 	    !ieee80211_hw_check(hw, NO_AUTO_VIF)) {
 		struct vif_params params = {0};
 
-		result = ieee80211_if_add(local, "wlan%d", 1, NULL,
+		result = ieee80211_if_add(local, "wlan%d", NET_NAME_ENUM, NULL,
 					  NL80211_IFTYPE_STATION, &params);
 		if (result)
 			wiphy_warn(local->hw.wiphy,

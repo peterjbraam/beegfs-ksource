@@ -45,7 +45,7 @@ static int linear_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	}
 
 	ret = -EINVAL;
-	if (sscanf(argv[1], "%llu%c", &tmp, &dummy) != 1) {
+	if (sscanf(argv[1], "%llu%c", &tmp, &dummy) != 1 || tmp != (sector_t)tmp) {
 		ti->error = "Invalid device sector";
 		goto bad;
 	}
@@ -59,7 +59,9 @@ static int linear_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 
 	ti->num_flush_bios = 1;
 	ti->num_discard_bios = 1;
+	ti->num_secure_erase_bios = 1;
 	ti->num_write_same_bios = 1;
+	ti->num_write_zeroes_bios = 1;
 	ti->private = lc;
 	return 0;
 
@@ -87,9 +89,10 @@ static void linear_map_bio(struct dm_target *ti, struct bio *bio)
 {
 	struct linear_c *lc = ti->private;
 
-	bio->bi_bdev = lc->dev->bdev;
-	if (bio_sectors(bio))
-		bio->bi_sector = linear_map_sector(ti, bio->bi_sector);
+	bio_set_dev(bio, lc->dev->bdev);
+	if (bio_sectors(bio) || bio_op(bio) == REQ_OP_ZONE_RESET)
+		bio->bi_iter.bi_sector =
+			linear_map_sector(ti, bio->bi_iter.bi_sector);
 }
 
 static int linear_map(struct dm_target *ti, struct bio *bio)
@@ -132,20 +135,25 @@ static int linear_prepare_ioctl(struct dm_target *ti, struct block_device **bdev
 	return 0;
 }
 
-static int linear_merge(struct dm_target *ti, struct bvec_merge_data *bvm,
-			struct bio_vec *biovec, int max_size)
+#ifdef CONFIG_BLK_DEV_ZONED
+static int linear_report_zones(struct dm_target *ti, sector_t sector,
+			       struct blk_zone *zones, unsigned int *nr_zones,
+			       gfp_t gfp_mask)
 {
-	struct linear_c *lc = ti->private;
-	struct request_queue *q = bdev_get_queue(lc->dev->bdev);
+	struct linear_c *lc = (struct linear_c *) ti->private;
+	int ret;
 
-	if (!q->merge_bvec_fn)
-		return max_size;
+	/* Do report and remap it */
+	ret = blkdev_report_zones(lc->dev->bdev, linear_map_sector(ti, sector),
+				  zones, nr_zones, gfp_mask);
+	if (ret != 0)
+		return ret;
 
-	bvm->bi_bdev = lc->dev->bdev;
-	bvm->bi_sector = linear_map_sector(ti, bvm->bi_sector);
-
-	return min(max_size, q->merge_bvec_fn(q, bvm, biovec));
+	if (*nr_zones)
+		dm_remap_zone_report(ti, lc->start, zones, nr_zones);
+	return 0;
 }
+#endif
 
 static int linear_iterate_devices(struct dm_target *ti,
 				  iterate_devices_callout_fn fn, void *data)
@@ -172,9 +180,8 @@ static long linear_dax_direct_access(struct dm_target *ti, pgoff_t pgoff,
 	return dax_direct_access(dax_dev, pgoff, nr_pages, kaddr, pfn);
 }
 
-static int linear_dax_memcpy_fromiovecend(struct dm_target *ti, pgoff_t pgoff,
-					  void *addr, const struct iovec *iov,
-					  int offset, int len)
+static size_t linear_dax_copy_from_iter(struct dm_target *ti, pgoff_t pgoff,
+		void *addr, size_t bytes, struct iov_iter *i)
 {
 	struct linear_c *lc = ti->private;
 	struct block_device *bdev = lc->dev->bdev;
@@ -182,13 +189,13 @@ static int linear_dax_memcpy_fromiovecend(struct dm_target *ti, pgoff_t pgoff,
 	sector_t dev_sector, sector = pgoff * PAGE_SECTORS;
 
 	dev_sector = linear_map_sector(ti, sector);
-	if (bdev_dax_pgoff(bdev, dev_sector, ALIGN(len, PAGE_SIZE), &pgoff))
+	if (bdev_dax_pgoff(bdev, dev_sector, ALIGN(bytes, PAGE_SIZE), &pgoff))
 		return 0;
-	return dax_memcpy_fromiovecend(dax_dev, pgoff, addr, iov, offset, len);
+	return dax_copy_from_iter(dax_dev, pgoff, addr, bytes, i);
 }
 
-static int linear_dax_memcpy_toiovecend(struct dm_target *ti, pgoff_t pgoff,
-		const struct iovec *iov, void *addr, int offset, int len)
+static size_t linear_dax_copy_to_iter(struct dm_target *ti, pgoff_t pgoff,
+		void *addr, size_t bytes, struct iov_iter *i)
 {
 	struct linear_c *lc = ti->private;
 	struct block_device *bdev = lc->dev->bdev;
@@ -196,31 +203,36 @@ static int linear_dax_memcpy_toiovecend(struct dm_target *ti, pgoff_t pgoff,
 	sector_t dev_sector, sector = pgoff * PAGE_SECTORS;
 
 	dev_sector = linear_map_sector(ti, sector);
-	if (bdev_dax_pgoff(bdev, dev_sector, ALIGN(len, PAGE_SIZE), &pgoff))
+	if (bdev_dax_pgoff(bdev, dev_sector, ALIGN(bytes, PAGE_SIZE), &pgoff))
 		return 0;
-	return dax_memcpy_toiovecend(dax_dev, pgoff, iov, addr, offset, len);
+	return dax_copy_to_iter(dax_dev, pgoff, addr, bytes, i);
 }
 
 #else
 #define linear_dax_direct_access NULL
-#define linear_dax_memcpy_fromiovecend NULL
-#define linear_dax_memcpy_toiovecend NULL
+#define linear_dax_copy_from_iter NULL
+#define linear_dax_copy_to_iter NULL
 #endif
 
 static struct target_type linear_target = {
 	.name   = "linear",
-	.version = {1, 3, 0},
+	.version = {1, 4, 0},
+#ifdef CONFIG_BLK_DEV_ZONED
+	.features = DM_TARGET_PASSES_INTEGRITY | DM_TARGET_ZONED_HM,
+	.report_zones = linear_report_zones,
+#else
+	.features = DM_TARGET_PASSES_INTEGRITY,
+#endif
 	.module = THIS_MODULE,
 	.ctr    = linear_ctr,
 	.dtr    = linear_dtr,
 	.map    = linear_map,
 	.status = linear_status,
 	.prepare_ioctl = linear_prepare_ioctl,
-	.merge  = linear_merge,
 	.iterate_devices = linear_iterate_devices,
 	.direct_access = linear_dax_direct_access,
-	.dax_memcpy_fromiovecend = linear_dax_memcpy_fromiovecend,
-	.dax_memcpy_toiovecend = linear_dax_memcpy_toiovecend,
+	.dax_copy_from_iter = linear_dax_copy_from_iter,
+	.dax_copy_to_iter = linear_dax_copy_to_iter,
 };
 
 int __init dm_linear_init(void)

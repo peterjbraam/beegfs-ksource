@@ -1,56 +1,31 @@
 /*
-        Added support for the AMD Geode LX RNG
-	(c) Copyright 2004-2005 Advanced Micro Devices, Inc.
-
-	derived from
-
- 	Hardware driver for the Intel/AMD/VIA Random Number Generators (RNG)
-	(c) Copyright 2003 Red Hat Inc <jgarzik@redhat.com>
-
- 	derived from
-
-        Hardware driver for the AMD 768 Random Number Generator (RNG)
-        (c) Copyright 2001 Red Hat Inc <alan@redhat.com>
-
- 	derived from
-
-	Hardware driver for Intel i810 Random Number Generator (RNG)
-	Copyright 2000,2001 Jeff Garzik <jgarzik@pobox.com>
-	Copyright 2000,2001 Philipp Rumpf <prumpf@mandrakesoft.com>
-
-	Added generic RNG API
-	Copyright 2006 Michael Buesch <m@bues.ch>
-	Copyright 2005 (c) MontaVista Software, Inc.
-
-	Please read Documentation/hw_random.txt for details on use.
-
-	----------------------------------------------------------
-	This software may be used and distributed according to the terms
-        of the GNU General Public License, incorporated herein by reference.
-
+ * hw_random/core.c: HWRNG core API
+ *
+ * Copyright 2006 Michael Buesch <m@bues.ch>
+ * Copyright 2005 (c) MontaVista Software, Inc.
+ *
+ * Please read Documentation/hw_random.txt for details on use.
+ *
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  */
 
-
-#include <linux/device.h>
-#include <linux/hw_random.h>
-#include <linux/module.h>
-#include <linux/kernel.h>
-#include <linux/fs.h>
-#include <linux/sched.h>
-#include <linux/init.h>
-#include <linux/miscdevice.h>
-#include <linux/kthread.h>
 #include <linux/delay.h>
-#include <linux/slab.h>
-#include <linux/random.h>
+#include <linux/device.h>
 #include <linux/err.h>
-#include <asm/uaccess.h>
-
+#include <linux/fs.h>
+#include <linux/hw_random.h>
+#include <linux/kernel.h>
+#include <linux/kthread.h>
+#include <linux/sched/signal.h>
+#include <linux/miscdevice.h>
+#include <linux/module.h>
+#include <linux/random.h>
+#include <linux/sched.h>
+#include <linux/slab.h>
+#include <linux/uaccess.h>
 
 #define RNG_MODULE_NAME		"hw_random"
-#define PFX			RNG_MODULE_NAME ": "
-#define RNG_MISCDEV_MINOR	183 /* official */
-
 
 static struct hwrng *current_rng;
 /* the current rng has been explicitly chosen by user via sysfs */
@@ -88,14 +63,14 @@ static size_t rng_buffer_size(void)
 
 static void add_early_randomness(struct hwrng *rng)
 {
-	unsigned char bytes[16];
 	int bytes_read;
+	size_t size = min_t(size_t, 16, rng_buffer_size());
 
 	mutex_lock(&reading_mutex);
-	bytes_read = rng_get_data(rng, bytes, sizeof(bytes), 1);
+	bytes_read = rng_get_data(rng, rng_buffer, size, 1);
 	mutex_unlock(&reading_mutex);
 	if (bytes_read > 0)
-		add_device_randomness(bytes, bytes_read);
+		add_device_randomness(rng_buffer, bytes_read);
 }
 
 static inline void cleanup_rng(struct kref *kref)
@@ -183,7 +158,8 @@ skip_init:
 	add_early_randomness(rng);
 
 	current_quality = rng->quality ? : default_quality;
-	current_quality &= 1023;
+	if (current_quality > 1024)
+		current_quality = 1024;
 
 	if (current_quality == 0 && hwrng_fill)
 		kthread_stop(hwrng_fill);
@@ -299,7 +275,6 @@ out_put:
 	goto out;
 }
 
-
 static const struct file_operations rng_chrdev_ops = {
 	.owner		= THIS_MODULE,
 	.open		= rng_dev_open,
@@ -307,34 +282,62 @@ static const struct file_operations rng_chrdev_ops = {
 	.llseek		= noop_llseek,
 };
 
+static const struct attribute_group *rng_dev_groups[];
+
 static struct miscdevice rng_miscdev = {
-	.minor		= RNG_MISCDEV_MINOR,
+	.minor		= HWRNG_MINOR,
 	.name		= RNG_MODULE_NAME,
 	.nodename	= "hwrng",
 	.fops		= &rng_chrdev_ops,
+	.groups		= rng_dev_groups,
 };
 
+static int enable_best_rng(void)
+{
+	int ret = -ENODEV;
+
+	BUG_ON(!mutex_is_locked(&rng_mutex));
+
+	/* rng_list is sorted by quality, use the best (=first) one */
+	if (!list_empty(&rng_list)) {
+		struct hwrng *new_rng;
+
+		new_rng = list_entry(rng_list.next, struct hwrng, list);
+		ret = ((new_rng == current_rng) ? 0 : set_current_rng(new_rng));
+		if (!ret)
+			cur_rng_set_by_user = 0;
+	} else {
+		drop_current_rng();
+		cur_rng_set_by_user = 0;
+		ret = 0;
+	}
+
+	return ret;
+}
 
 static ssize_t hwrng_attr_current_store(struct device *dev,
 					struct device_attribute *attr,
 					const char *buf, size_t len)
 {
-	int err;
+	int err = -ENODEV;
 	struct hwrng *rng;
 
 	err = mutex_lock_interruptible(&rng_mutex);
 	if (err)
 		return -ERESTARTSYS;
-	err = -ENODEV;
-	list_for_each_entry(rng, &rng_list, list) {
-		if (strcmp(rng->name, buf) == 0) {
-			err = 0;
-			cur_rng_set_by_user = 1;
-			if (rng != current_rng)
+
+	if (sysfs_streq(buf, "")) {
+		err = enable_best_rng();
+	} else {
+		list_for_each_entry(rng, &rng_list, list) {
+			if (sysfs_streq(rng->name, buf)) {
+				cur_rng_set_by_user = 1;
 				err = set_current_rng(rng);
-			break;
+				break;
+			}
 		}
 	}
+
 	mutex_unlock(&rng_mutex);
 
 	return err ? : len;
@@ -362,7 +365,6 @@ static ssize_t hwrng_attr_available_show(struct device *dev,
 					 char *buf)
 {
 	int err;
-	ssize_t ret = 0;
 	struct hwrng *rng;
 
 	err = mutex_lock_interruptible(&rng_mutex);
@@ -370,16 +372,13 @@ static ssize_t hwrng_attr_available_show(struct device *dev,
 		return -ERESTARTSYS;
 	buf[0] = '\0';
 	list_for_each_entry(rng, &rng_list, list) {
-		strncat(buf, rng->name, PAGE_SIZE - ret - 1);
-		ret += strlen(rng->name);
-		strncat(buf, " ", PAGE_SIZE - ret - 1);
-		ret++;
+		strlcat(buf, rng->name, PAGE_SIZE);
+		strlcat(buf, " ", PAGE_SIZE);
 	}
-	strncat(buf, "\n", PAGE_SIZE - ret - 1);
-	ret++;
+	strlcat(buf, "\n", PAGE_SIZE);
 	mutex_unlock(&rng_mutex);
 
-	return ret;
+	return strlen(buf);
 }
 
 static ssize_t hwrng_attr_selected_show(struct device *dev,
@@ -399,44 +398,23 @@ static DEVICE_ATTR(rng_selected, S_IRUGO,
 		   hwrng_attr_selected_show,
 		   NULL);
 
+static struct attribute *rng_dev_attrs[] = {
+	&dev_attr_rng_current.attr,
+	&dev_attr_rng_available.attr,
+	&dev_attr_rng_selected.attr,
+	NULL
+};
+
+ATTRIBUTE_GROUPS(rng_dev);
 
 static void __exit unregister_miscdev(void)
 {
-	device_remove_file(rng_miscdev.this_device, &dev_attr_rng_selected);
-	device_remove_file(rng_miscdev.this_device, &dev_attr_rng_available);
-	device_remove_file(rng_miscdev.this_device, &dev_attr_rng_current);
 	misc_deregister(&rng_miscdev);
 }
 
 static int __init register_miscdev(void)
 {
-	int err;
-
-	err = misc_register(&rng_miscdev);
-	if (err)
-		goto out;
-	err = device_create_file(rng_miscdev.this_device,
-				 &dev_attr_rng_current);
-	if (err)
-		goto err_misc_dereg;
-	err = device_create_file(rng_miscdev.this_device,
-				 &dev_attr_rng_available);
-	if (err)
-		goto err_remove_current;
-	err = device_create_file(rng_miscdev.this_device,
-				 &dev_attr_rng_selected);
-	if (err)
-		goto err_remove_available;
-out:
-	return err;
-
-err_remove_available:
-	device_remove_file(rng_miscdev.this_device, &dev_attr_rng_available);
-err_remove_current:
-	device_remove_file(rng_miscdev.this_device, &dev_attr_rng_current);
-err_misc_dereg:
-	misc_deregister(&rng_miscdev);
-	goto out;
+	return misc_register(&rng_miscdev);
 }
 
 static int hwrng_fillfn(void *unused)
@@ -471,7 +449,7 @@ static void start_khwrngd(void)
 {
 	hwrng_fill = kthread_run(hwrng_fillfn, NULL, "hwrng");
 	if (IS_ERR(hwrng_fill)) {
-		pr_err("hwrng_fill thread creation failed");
+		pr_err("hwrng_fill thread creation failed\n");
 		hwrng_fill = NULL;
 	}
 }
@@ -482,27 +460,10 @@ int hwrng_register(struct hwrng *rng)
 	struct hwrng *old_rng, *tmp;
 	struct list_head *rng_list_ptr;
 
-	if (rng->name == NULL ||
-	    (rng->data_read == NULL && rng->read == NULL))
+	if (!rng->name || (!rng->data_read && !rng->read))
 		goto out;
 
 	mutex_lock(&rng_mutex);
-
-	/* kmalloc makes this safe for virt_to_page() in virtio_rng.c */
-	err = -ENOMEM;
-	if (!rng_buffer) {
-		rng_buffer = kmalloc(rng_buffer_size(), GFP_KERNEL);
-		if (!rng_buffer)
-			goto out_unlock;
-	}
-	if (!rng_fillbuf) {
-		rng_fillbuf = kmalloc(rng_buffer_size(), GFP_KERNEL);
-		if (!rng_fillbuf) {
-			kfree(rng_buffer);
-			goto out_unlock;
-		}
-	}
-
 	/* Must not register two RNGs with the same name. */
 	err = -EEXIST;
 	list_for_each_entry(tmp, &rng_list, list) {
@@ -555,18 +516,16 @@ EXPORT_SYMBOL_GPL(hwrng_register);
 
 void hwrng_unregister(struct hwrng *rng)
 {
+	int err;
+
 	mutex_lock(&rng_mutex);
 
 	list_del(&rng->list);
 	if (current_rng == rng) {
-		drop_current_rng();
-		cur_rng_set_by_user = 0;
-		/* rng_list is sorted by quality, use the best (=first) one */
-		if (!list_empty(&rng_list)) {
-			struct hwrng *new_rng;
-
-			new_rng = list_entry(rng_list.next, struct hwrng, list);
-			set_current_rng(new_rng);
+		err = enable_best_rng();
+		if (err) {
+			drop_current_rng();
+			cur_rng_set_by_user = 0;
 		}
 	}
 
@@ -581,9 +540,70 @@ void hwrng_unregister(struct hwrng *rng)
 }
 EXPORT_SYMBOL_GPL(hwrng_unregister);
 
+static void devm_hwrng_release(struct device *dev, void *res)
+{
+	hwrng_unregister(*(struct hwrng **)res);
+}
+
+static int devm_hwrng_match(struct device *dev, void *res, void *data)
+{
+	struct hwrng **r = res;
+
+	if (WARN_ON(!r || !*r))
+		return 0;
+
+	return *r == data;
+}
+
+int devm_hwrng_register(struct device *dev, struct hwrng *rng)
+{
+	struct hwrng **ptr;
+	int error;
+
+	ptr = devres_alloc(devm_hwrng_release, sizeof(*ptr), GFP_KERNEL);
+	if (!ptr)
+		return -ENOMEM;
+
+	error = hwrng_register(rng);
+	if (error) {
+		devres_free(ptr);
+		return error;
+	}
+
+	*ptr = rng;
+	devres_add(dev, ptr);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(devm_hwrng_register);
+
+void devm_hwrng_unregister(struct device *dev, struct hwrng *rng)
+{
+	devres_release(dev, devm_hwrng_release, devm_hwrng_match, rng);
+}
+EXPORT_SYMBOL_GPL(devm_hwrng_unregister);
+
 static int __init hwrng_modinit(void)
 {
-	return register_miscdev();
+	int ret = -ENOMEM;
+
+	/* kmalloc makes this safe for virt_to_page() in virtio_rng.c */
+	rng_buffer = kmalloc(rng_buffer_size(), GFP_KERNEL);
+	if (!rng_buffer)
+		return -ENOMEM;
+
+	rng_fillbuf = kmalloc(rng_buffer_size(), GFP_KERNEL);
+	if (!rng_fillbuf) {
+		kfree(rng_buffer);
+		return -ENOMEM;
+	}
+
+	ret = register_miscdev();
+	if (ret) {
+		kfree(rng_fillbuf);
+		kfree(rng_buffer);
+	}
+
+	return ret;
 }
 
 static void __exit hwrng_modexit(void)

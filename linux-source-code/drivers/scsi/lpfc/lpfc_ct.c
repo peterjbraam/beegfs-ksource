@@ -1,7 +1,7 @@
 /*******************************************************************
  * This file is part of the Emulex Linux Device Driver for         *
  * Fibre Channel Host Bus Adapters.                                *
- * Copyright (C) 2017-2018 Broadcom. All Rights Reserved. The term *
+ * Copyright (C) 2017-2019 Broadcom. All Rights Reserved. The term *
  * “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.     *
  * Copyright (C) 2004-2016 Emulex.  All rights reserved.           *
  * EMULEX and SLI are trademarks of Emulex.                        *
@@ -886,7 +886,7 @@ lpfc_cmpl_ct_cmd_gid_pt(struct lpfc_hba *phba, struct lpfc_iocbq *cmdiocb,
 	}
 	if (lpfc_error_lost_link(irsp)) {
 		lpfc_printf_vlog(vport, KERN_INFO, LOG_DISCOVERY,
-				 "4101 NS query failed due to link event\n");
+				 "4166 NS query failed due to link event\n");
 		if (vport->fc_flag & FC_RSCN_MODE)
 			lpfc_els_flush_rscn(vport);
 		goto out;
@@ -907,7 +907,7 @@ lpfc_cmpl_ct_cmd_gid_pt(struct lpfc_hba *phba, struct lpfc_iocbq *cmdiocb,
 		 * Re-issue the NS cmd
 		 */
 		lpfc_printf_vlog(vport, KERN_INFO, LOG_ELS,
-				 "4102 Process Deferred RSCN Data: x%x x%x\n",
+				 "4167 Process Deferred RSCN Data: x%x x%x\n",
 				 vport->fc_flag, vport->fc_rscn_id_cnt);
 		lpfc_els_handle_rscn(vport);
 
@@ -1210,13 +1210,18 @@ lpfc_cmpl_ct_cmd_gft_id(struct lpfc_hba *phba, struct lpfc_iocbq *cmdiocb,
 				ndlp->nlp_fc4_type |= NLP_FC4_NVME;
 			lpfc_printf_vlog(vport, KERN_INFO, LOG_DISCOVERY,
 					 "3064 Setting ndlp %p, DID x%06x with "
-					 "FC4 x%08x, Data: x%08x x%08x\n",
+					 "FC4 x%08x, Data: x%08x x%08x %d\n",
 					 ndlp, did, ndlp->nlp_fc4_type,
-					 FC_TYPE_FCP, FC_TYPE_NVME);
-			ndlp->nlp_prev_state = NLP_STE_REG_LOGIN_ISSUE;
+					 FC_TYPE_FCP, FC_TYPE_NVME,
+					 ndlp->nlp_state);
 
-			lpfc_nlp_set_state(vport, ndlp, NLP_STE_PRLI_ISSUE);
-			lpfc_issue_els_prli(vport, ndlp, 0);
+			if (ndlp->nlp_state == NLP_STE_REG_LOGIN_ISSUE) {
+				ndlp->nlp_prev_state = NLP_STE_REG_LOGIN_ISSUE;
+
+				lpfc_nlp_set_state(vport, ndlp,
+						   NLP_STE_PRLI_ISSUE);
+				lpfc_issue_els_prli(vport, ndlp, 0);
+			}
 		}
 	} else
 		lpfc_printf_vlog(vport, KERN_ERR, LOG_DISCOVERY,
@@ -1656,16 +1661,16 @@ lpfc_ns_cmd(struct lpfc_vport *vport, int cmdcode,
 		CtReq->un.rft.PortId = cpu_to_be32(vport->fc_myDID);
 
 		/* Register FC4 FCP type if enabled.  */
-		if ((phba->cfg_enable_fc4_type == LPFC_ENABLE_BOTH) ||
-		    (phba->cfg_enable_fc4_type == LPFC_ENABLE_FCP))
+		if (vport->cfg_enable_fc4_type == LPFC_ENABLE_BOTH ||
+		    vport->cfg_enable_fc4_type == LPFC_ENABLE_FCP)
 			CtReq->un.rft.fcpReg = 1;
 
 		/* Register NVME type if enabled.  Defined LE and swapped.
 		 * rsvd[0] is used as word1 because of the hard-coded
 		 * word0 usage in the ct_request data structure.
 		 */
-		if ((phba->cfg_enable_fc4_type == LPFC_ENABLE_BOTH) ||
-		    (phba->cfg_enable_fc4_type == LPFC_ENABLE_NVME))
+		if (vport->cfg_enable_fc4_type == LPFC_ENABLE_BOTH ||
+		    vport->cfg_enable_fc4_type == LPFC_ENABLE_NVME)
 			CtReq->un.rft.rsvd[0] =
 				cpu_to_be32(LPFC_FC4_TYPE_BITMASK);
 
@@ -1732,8 +1737,8 @@ lpfc_ns_cmd(struct lpfc_vport *vport, int cmdcode,
 		 * caller can specify NVME (type x28) as well.  But only
 		 * these that FC4 type is supported.
 		 */
-		if (((phba->cfg_enable_fc4_type == LPFC_ENABLE_BOTH) ||
-		     (phba->cfg_enable_fc4_type == LPFC_ENABLE_NVME)) &&
+		if (((vport->cfg_enable_fc4_type == LPFC_ENABLE_BOTH) ||
+		     (vport->cfg_enable_fc4_type == LPFC_ENABLE_NVME)) &&
 		    (context == FC_TYPE_NVME)) {
 			if ((vport == phba->pport) && phba->nvmet_support) {
 				CtReq->un.rff.fbits = (FC4_FEATURE_TARGET |
@@ -1744,8 +1749,8 @@ lpfc_ns_cmd(struct lpfc_vport *vport, int cmdcode,
 			}
 			CtReq->un.rff.type_code = context;
 
-		} else if (((phba->cfg_enable_fc4_type == LPFC_ENABLE_BOTH) ||
-			    (phba->cfg_enable_fc4_type == LPFC_ENABLE_FCP)) &&
+		} else if (((vport->cfg_enable_fc4_type == LPFC_ENABLE_BOTH) ||
+			    (vport->cfg_enable_fc4_type == LPFC_ENABLE_FCP)) &&
 			   (context == FC_TYPE_FCP))
 			CtReq->un.rff.type_code = context;
 
@@ -3183,9 +3188,9 @@ fdmi_cmd_exit:
  * the worker thread.
  **/
 void
-lpfc_delayed_disc_tmo(unsigned long ptr)
+lpfc_delayed_disc_tmo(struct timer_list *t)
 {
-	struct lpfc_vport *vport = (struct lpfc_vport *)ptr;
+	struct lpfc_vport *vport = from_timer(vport, t, delayed_disc_tmo);
 	struct lpfc_hba   *phba = vport->phba;
 	uint32_t tmo_posted;
 	unsigned long iflag;

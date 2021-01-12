@@ -10,6 +10,7 @@
 
 #include <linux/slab.h>
 #include <linux/kernel.h>
+#include <linux/kmemleak.h>
 #include <linux/bitmap.h>
 #include <linux/bootmem.h>
 #include <asm/msi_bitmap.h>
@@ -86,13 +87,13 @@ int msi_bitmap_reserve_dt_hwirqs(struct msi_bitmap *bmp)
 	p = of_get_property(bmp->of_node, "msi-available-ranges", &len);
 	if (!p) {
 		pr_debug("msi_bitmap: no msi-available-ranges property " \
-			 "found on %s\n", bmp->of_node->full_name);
+			 "found on %pOF\n", bmp->of_node);
 		return 1;
 	}
 
 	if (len % (2 * sizeof(u32)) != 0) {
 		printk(KERN_WARNING "msi_bitmap: Malformed msi-available-ranges"
-		       " property on %s\n", bmp->of_node->full_name);
+		       " property on %pOF\n", bmp->of_node);
 		return -EINVAL;
 	}
 
@@ -112,7 +113,7 @@ int msi_bitmap_reserve_dt_hwirqs(struct msi_bitmap *bmp)
 	return 0;
 }
 
-int msi_bitmap_alloc(struct msi_bitmap *bmp, unsigned int irq_count,
+int __ref msi_bitmap_alloc(struct msi_bitmap *bmp, unsigned int irq_count,
 		     struct device_node *of_node)
 {
 	int size;
@@ -155,7 +156,7 @@ void msi_bitmap_free(struct msi_bitmap *bmp)
 
 #ifdef CONFIG_MSI_BITMAP_SELFTEST
 
-void __init test_basics(void)
+static void __init test_basics(void)
 {
 	struct msi_bitmap bmp;
 	int rc, i, size = 512;
@@ -215,7 +216,7 @@ void __init test_basics(void)
 	WARN_ON(bmp.bitmap != NULL);
 }
 
-void __init test_of_node(void)
+static void __init test_of_node(void)
 {
 	u32 prop_data[] = { 10, 10, 25, 3, 40, 1, 100, 100, 200, 20 };
 	const char *expected_str = "0-9,20-24,28-39,41-99,220-255";
@@ -262,7 +263,7 @@ void __init test_of_node(void)
 	kfree(bmp.bitmap);
 }
 
-int __init msi_bitmap_selftest(void)
+static int __init msi_bitmap_selftest(void)
 {
 	printk(KERN_DEBUG "Running MSI bitmap self-tests ...\n");
 

@@ -369,7 +369,7 @@ static void update_link_status(struct net_device *netdev,
 			dev_info(&oct->pci_dev->dev,
 				 "Max MTU Changed from %d to %d\n",
 				 current_max_mtu, lio->linfo.link.s.mtu);
-			netdev->extended->max_mtu = lio->linfo.link.s.mtu;
+			netdev->max_mtu = lio->linfo.link.s.mtu;
 		}
 
 		if (lio->linfo.link.s.mtu < netdev->mtu) {
@@ -430,8 +430,6 @@ liquidio_vf_probe(struct pci_dev *pdev,
  */
 static void octeon_pci_flr(struct octeon_device *oct)
 {
-	u16 status;
-
 	pci_save_state(oct->pci_dev);
 
 	pci_cfg_access_lock(oct->pci_dev);
@@ -440,20 +438,7 @@ static void octeon_pci_flr(struct octeon_device *oct)
 	pci_write_config_word(oct->pci_dev, PCI_COMMAND,
 			      PCI_COMMAND_INTX_DISABLE);
 
-	/* Wait for Transaction Pending bit clean */
-	msleep(100);
-	pcie_capability_read_word(oct->pci_dev, PCI_EXP_DEVSTA, &status);
-	if (status & PCI_EXP_DEVSTA_TRPND) {
-		dev_info(&oct->pci_dev->dev, "Function reset incomplete after 100ms, sleeping for 5 seconds\n");
-		ssleep(5);
-		pcie_capability_read_word(oct->pci_dev, PCI_EXP_DEVSTA,
-					  &status);
-		if (status & PCI_EXP_DEVSTA_TRPND)
-			dev_info(&oct->pci_dev->dev, "Function reset still incomplete after 5s, reset anyway\n");
-	}
-	pcie_capability_set_word(oct->pci_dev, PCI_EXP_DEVCTL,
-				 PCI_EXP_DEVCTL_BCR_FLR);
-	mdelay(100);
+	pcie_flr(oct->pci_dev);
 
 	pci_cfg_access_unlock(oct->pci_dev);
 
@@ -1876,7 +1861,6 @@ static void liquidio_del_vxlan_port(struct net_device *netdev,
 }
 
 static const struct net_device_ops lionetdevops = {
-	.ndo_size		= sizeof(struct net_device_ops),
 	.ndo_open		= liquidio_open,
 	.ndo_stop		= liquidio_stop,
 	.ndo_start_xmit		= liquidio_xmit,
@@ -1886,12 +1870,12 @@ static const struct net_device_ops lionetdevops = {
 	.ndo_tx_timeout		= liquidio_tx_timeout,
 	.ndo_vlan_rx_add_vid    = liquidio_vlan_rx_add_vid,
 	.ndo_vlan_rx_kill_vid   = liquidio_vlan_rx_kill_vid,
-	.extended.ndo_change_mtu	= liquidio_change_mtu,
+	.ndo_change_mtu		= liquidio_change_mtu,
 	.ndo_do_ioctl		= liquidio_ioctl,
 	.ndo_fix_features	= liquidio_fix_features,
 	.ndo_set_features	= liquidio_set_features,
-	.extended.ndo_udp_tunnel_add     = liquidio_add_vxlan_port,
-	.extended.ndo_udp_tunnel_del     = liquidio_del_vxlan_port,
+	.ndo_udp_tunnel_add     = liquidio_add_vxlan_port,
+	.ndo_udp_tunnel_del     = liquidio_del_vxlan_port,
 };
 
 static int lio_nic_info(struct octeon_recv_info *recv_info, void *buf)
@@ -2122,8 +2106,8 @@ static int setup_nic_devices(struct octeon_device *octeon_dev)
 		netdev->hw_features &= ~NETIF_F_HW_VLAN_CTAG_RX;
 
 		/* MTU range: 68 - 16000 */
-		netdev->extended->min_mtu = LIO_MIN_MTU_SIZE;
-		netdev->extended->max_mtu = LIO_MAX_MTU_SIZE;
+		netdev->min_mtu = LIO_MIN_MTU_SIZE;
+		netdev->max_mtu = LIO_MAX_MTU_SIZE;
 
 		/* Point to the  properties for octeon device to which this
 		 * interface belongs.

@@ -1,11 +1,14 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _LINUX_MIGRATE_H
 #define _LINUX_MIGRATE_H
 
 #include <linux/mm.h>
 #include <linux/mempolicy.h>
 #include <linux/migrate_mode.h>
+#include <linux/hugetlb.h>
 
-typedef struct page *new_page_t(struct page *, unsigned long private, int **);
+typedef struct page *new_page_t(struct page *page, unsigned long private);
+typedef void free_page_t(struct page *page, unsigned long private);
 
 /*
  * Return values from addresss_space_operations.migratepage():
@@ -21,28 +24,56 @@ enum migrate_reason {
 	MR_SYSCALL,		/* also applies to cpusets */
 	MR_MEMPOLICY_MBIND,
 	MR_NUMA_MISPLACED,
-	MR_CMA
+	MR_CONTIG_RANGE,
+	MR_TYPES
 };
+
+/* In mm/debug.c; also keep sync with include/trace/events/migrate.h */
+extern char *migrate_reason_names[MR_TYPES];
+
+static inline struct page *new_page_nodemask(struct page *page,
+				int preferred_nid, nodemask_t *nodemask)
+{
+	gfp_t gfp_mask = GFP_USER | __GFP_MOVABLE | __GFP_RETRY_MAYFAIL;
+	unsigned int order = 0;
+	struct page *new_page = NULL;
+
+	if (PageHuge(page))
+		return alloc_huge_page_nodemask(page_hstate(compound_head(page)),
+				preferred_nid, nodemask);
+
+	if (PageTransHuge(page)) {
+		gfp_mask |= GFP_TRANSHUGE;
+		order = HPAGE_PMD_ORDER;
+	}
+
+	if (PageHighMem(page) || (zone_idx(page_zone(page)) == ZONE_MOVABLE))
+		gfp_mask |= __GFP_HIGHMEM;
+
+	new_page = __alloc_pages_nodemask(gfp_mask, order,
+				preferred_nid, nodemask);
+
+	if (new_page && PageTransHuge(new_page))
+		prep_transhuge_page(new_page);
+
+	return new_page;
+}
 
 #ifdef CONFIG_MIGRATION
 
-extern void putback_lru_pages(struct list_head *l);
 extern void putback_movable_pages(struct list_head *l);
-extern int migrate_page(struct address_space *,
-			struct page *, struct page *, enum migrate_mode);
-extern int migrate_pages(struct list_head *l, new_page_t x,
+extern int migrate_page(struct address_space *mapping,
+			struct page *newpage, struct page *page,
+			enum migrate_mode mode);
+extern int migrate_pages(struct list_head *l, new_page_t new, free_page_t free,
 		unsigned long private, enum migrate_mode mode, int reason);
-
-extern int fail_migrate_page(struct address_space *,
-			struct page *, struct page *);
+extern int isolate_movable_page(struct page *page, isolate_mode_t mode);
+extern void putback_movable_page(struct page *page);
 
 extern int migrate_prep(void);
 extern int migrate_prep_local(void);
-extern int migrate_vmas(struct mm_struct *mm,
-		const nodemask_t *from, const nodemask_t *to,
-		unsigned long flags);
-extern void migrate_page_copy(struct page *newpage, struct page *page);
 extern void migrate_page_states(struct page *newpage, struct page *page);
+extern void migrate_page_copy(struct page *newpage, struct page *page);
 extern int migrate_huge_page_move_mapping(struct address_space *mapping,
 				  struct page *newpage, struct page *page);
 extern int migrate_page_move_mapping(struct address_space *mapping,
@@ -51,28 +82,23 @@ extern int migrate_page_move_mapping(struct address_space *mapping,
 		int extra_count);
 #else
 
-static inline void putback_lru_pages(struct list_head *l) {}
 static inline void putback_movable_pages(struct list_head *l) {}
-static inline int migrate_pages(struct list_head *l, new_page_t x,
-		unsigned long private, enum migrate_mode mode, int reason)
+static inline int migrate_pages(struct list_head *l, new_page_t new,
+		free_page_t free, unsigned long private, enum migrate_mode mode,
+		int reason)
 	{ return -ENOSYS; }
+static inline int isolate_movable_page(struct page *page, isolate_mode_t mode)
+	{ return -EBUSY; }
 
 static inline int migrate_prep(void) { return -ENOSYS; }
 static inline int migrate_prep_local(void) { return -ENOSYS; }
 
-static inline int migrate_vmas(struct mm_struct *mm,
-		const nodemask_t *from, const nodemask_t *to,
-		unsigned long flags)
+static inline void migrate_page_states(struct page *newpage, struct page *page)
 {
-	return -ENOSYS;
 }
 
 static inline void migrate_page_copy(struct page *newpage,
 				     struct page *page) {}
-
-static inline void migrate_page_states(struct page *newpage, struct page *page)
-{
-}
 
 static inline int migrate_huge_page_move_mapping(struct address_space *mapping,
 				  struct page *newpage, struct page *page)
@@ -80,17 +106,27 @@ static inline int migrate_huge_page_move_mapping(struct address_space *mapping,
 	return -ENOSYS;
 }
 
-/* Possible settings for the migrate_page() method in address_operations */
-#define migrate_page NULL
-#define fail_migrate_page NULL
-
 #endif /* CONFIG_MIGRATION */
+
+#ifdef CONFIG_COMPACTION
+extern int PageMovable(struct page *page);
+extern void __SetPageMovable(struct page *page, struct address_space *mapping);
+extern void __ClearPageMovable(struct page *page);
+#else
+static inline int PageMovable(struct page *page) { return 0; };
+static inline void __SetPageMovable(struct page *page,
+				struct address_space *mapping)
+{
+}
+static inline void __ClearPageMovable(struct page *page)
+{
+}
+#endif
 
 #ifdef CONFIG_NUMA_BALANCING
 extern bool pmd_trans_migrating(pmd_t pmd);
 extern int migrate_misplaced_page(struct page *page,
 				  struct vm_area_struct *vma, int node);
-extern bool migrate_ratelimited(int node);
 #else
 static inline bool pmd_trans_migrating(pmd_t pmd)
 {
@@ -100,10 +136,6 @@ static inline int migrate_misplaced_page(struct page *page,
 					 struct vm_area_struct *vma, int node)
 {
 	return -EAGAIN; /* can't migrate now */
-}
-static inline bool migrate_ratelimited(int node)
-{
-	return false;
 }
 #endif /* CONFIG_NUMA_BALANCING */
 
@@ -123,6 +155,7 @@ static inline int migrate_misplaced_transhuge_page(struct mm_struct *mm,
 	return -EAGAIN;
 }
 #endif /* CONFIG_NUMA_BALANCING && CONFIG_TRANSPARENT_HUGEPAGE*/
+
 
 #ifdef CONFIG_MIGRATION
 
@@ -185,6 +218,15 @@ static inline unsigned long migrate_pfn(unsigned long pfn)
  * driver should avoid setting MIGRATE_PFN_ERROR unless it is really in an
  * unrecoverable state.
  *
+ * For empty entry inside CPU page table (pte_none() or pmd_none() is true) we
+ * do set MIGRATE_PFN_MIGRATE flag inside the corresponding source array thus
+ * allowing device driver to allocate device memory for those unback virtual
+ * address. For this the device driver simply have to allocate device memory
+ * and properly set the destination entry like for regular migration. Note that
+ * this can still fails and thus inside the device driver must check if the
+ * migration was successful for those entry inside the finalize_and_map()
+ * callback just like for regular migration.
+ *
  * THE alloc_and_copy() CALLBACK MUST NOT CHANGE ANY OF THE SRC ARRAY ENTRIES
  * OR BAD THINGS WILL HAPPEN !
  *
@@ -223,6 +265,7 @@ struct migrate_vma_ops {
 				 void *private);
 };
 
+#if defined(CONFIG_MIGRATE_VMA_HELPER)
 int migrate_vma(const struct migrate_vma_ops *ops,
 		struct vm_area_struct *vma,
 		unsigned long start,
@@ -230,6 +273,18 @@ int migrate_vma(const struct migrate_vma_ops *ops,
 		unsigned long *src,
 		unsigned long *dst,
 		void *private);
+#else
+static inline int migrate_vma(const struct migrate_vma_ops *ops,
+			      struct vm_area_struct *vma,
+			      unsigned long start,
+			      unsigned long end,
+			      unsigned long *src,
+			      unsigned long *dst,
+			      void *private)
+{
+	return -EINVAL;
+}
+#endif /* IS_ENABLED(CONFIG_MIGRATE_VMA_HELPER) */
 
 #endif /* CONFIG_MIGRATION */
 

@@ -1,5 +1,6 @@
 #include <linux/export.h>
-#include <linux/sched.h>
+#include <linux/sched/signal.h>
+#include <linux/sched/task.h>
 #include <linux/fs.h>
 #include <linux/path.h>
 #include <linux/slab.h>
@@ -59,7 +60,7 @@ void chroot_fs_refs(const struct path *old_root, const struct path *new_root)
 	struct fs_struct *fs;
 	int count = 0;
 
-	qread_lock(&tasklist_lock);
+	read_lock(&tasklist_lock);
 	do_each_thread(g, p) {
 		task_lock(p);
 		fs = p->fs;
@@ -78,7 +79,7 @@ void chroot_fs_refs(const struct path *old_root, const struct path *new_root)
 		}
 		task_unlock(p);
 	} while_each_thread(g, p);
-	qread_unlock(&tasklist_lock);
+	read_unlock(&tasklist_lock);
 	while (count--)
 		path_put(old_root);
 }

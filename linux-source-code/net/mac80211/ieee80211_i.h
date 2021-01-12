@@ -429,11 +429,7 @@ struct ieee80211_sta_tx_tspec {
 	bool downgraded;
 };
 
-#if 0 /* Different semantic on RHEL */
 DECLARE_EWMA(beacon_signal, 4, 4)
-#else
-DECLARE_EWMA(beacon_signal, 16, 4)
-#endif
 
 struct ieee80211_if_managed {
 	struct timer_list timer;
@@ -1270,7 +1266,7 @@ struct ieee80211_local {
 
 	/*
 	 * Key mutex, protects sdata's key_list and sta_info's
-	 * key pointers (write access, they're RCU.)
+	 * key pointers and ptk_idx (write access, they're RCU.)
 	 */
 	struct mutex key_mtx;
 

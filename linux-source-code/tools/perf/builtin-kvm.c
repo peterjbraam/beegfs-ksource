@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 #include "builtin.h"
 #include "perf.h"
 
@@ -111,7 +112,7 @@ void exit_event_decode_key(struct perf_kvm_stat *kvm,
 			   struct event_key *key,
 			   char *decode)
 {
-	const char *exit_reason = get_exit_reason(kvm, kvm->exit_reasons,
+	const char *exit_reason = get_exit_reason(kvm, key->exit_reasons,
 						  key->key);
 
 	scnprintf(decode, decode_str_len, "%s", exit_reason);
@@ -284,6 +285,43 @@ static bool update_kvm_event(struct kvm_event *event, int vcpu_id,
 	return true;
 }
 
+static bool is_child_event(struct perf_kvm_stat *kvm,
+			   struct perf_evsel *evsel,
+			   struct perf_sample *sample,
+			   struct event_key *key)
+{
+	struct child_event_ops *child_ops;
+
+	child_ops = kvm->events_ops->child_ops;
+
+	if (!child_ops)
+		return false;
+
+	for (; child_ops->name; child_ops++) {
+		if (!strcmp(evsel->name, child_ops->name)) {
+			child_ops->get_key(evsel, sample, key);
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static bool handle_child_event(struct perf_kvm_stat *kvm,
+			       struct vcpu_event_record *vcpu_record,
+			       struct event_key *key,
+			       struct perf_sample *sample __maybe_unused)
+{
+	struct kvm_event *event = NULL;
+
+	if (key->key != INVALID_KEY)
+		event = find_create_kvm_event(kvm, key);
+
+	vcpu_record->last_event = event;
+
+	return true;
+}
+
 static bool skip_event(const char *event)
 {
 	const char * const *skip_events;
@@ -385,7 +423,8 @@ static bool handle_kvm_event(struct perf_kvm_stat *kvm,
 			     struct perf_sample *sample)
 {
 	struct vcpu_event_record *vcpu_record;
-	struct event_key key = {.key = INVALID_KEY};
+	struct event_key key = { .key = INVALID_KEY,
+				 .exit_reasons = kvm->exit_reasons };
 
 	vcpu_record = per_vcpu_record(thread, evsel, sample);
 	if (!vcpu_record)
@@ -398,6 +437,9 @@ static bool handle_kvm_event(struct perf_kvm_stat *kvm,
 
 	if (kvm->events_ops->is_begin_event(evsel, sample, &key))
 		return handle_begin_event(kvm, vcpu_record, &key, sample->time);
+
+	if (is_child_event(kvm, evsel, sample, &key))
+		return handle_child_event(kvm, vcpu_record, &key, sample);
 
 	if (kvm->events_ops->is_end_event(evsel, sample, &key))
 		return handle_end_event(kvm, vcpu_record, &key, sample);
@@ -1034,6 +1076,7 @@ static int read_events(struct perf_kvm_stat *kvm)
 	struct perf_tool eops = {
 		.sample			= process_sample_event,
 		.comm			= perf_event__process_comm,
+		.namespaces		= perf_event__process_namespaces,
 		.ordered_events		= true,
 	};
 	struct perf_data file = {
@@ -1208,7 +1251,8 @@ kvm_events_report(struct perf_kvm_stat *kvm, int argc, const char **argv)
 {
 	const struct option kvm_events_report_options[] = {
 		OPT_STRING(0, "event", &kvm->report_event, "report event",
-			    "event for reporting: vmexit, mmio, ioport"),
+			   "event for reporting: vmexit, "
+			   "mmio (x86 only), ioport (x86 only)"),
 		OPT_INTEGER(0, "vcpu", &kvm->trace_vcpu,
 			    "vcpu id to report"),
 		OPT_STRING('k', "key", &kvm->sort_key, "sort-key",
@@ -1317,8 +1361,10 @@ static int kvm_events_live(struct perf_kvm_stat *kvm,
 			"key for sorting: sample(sort by samples number)"
 			" time (sort by avg time)"),
 		OPT_U64(0, "duration", &kvm->duration,
-		    "show events other than HALT that take longer than duration usecs"),
-		OPT_UINTEGER(0, "proc-map-timeout", &kvm->opts.proc_map_timeout,
+			"show events other than"
+			" HLT (x86 only) or Wait state (s390 only)"
+			" that take longer than duration usecs"),
+		OPT_UINTEGER(0, "proc-map-timeout", &proc_map_timeout,
 				"per thread proc mmap processing timeout in ms"),
 		OPT_END()
 	};
@@ -1337,6 +1383,7 @@ static int kvm_events_live(struct perf_kvm_stat *kvm,
 	kvm->tool.exit   = perf_event__process_exit;
 	kvm->tool.fork   = perf_event__process_fork;
 	kvm->tool.lost   = process_lost_event;
+	kvm->tool.namespaces  = perf_event__process_namespaces;
 	kvm->tool.ordered_events = true;
 	perf_tool__fill_defaults(&kvm->tool);
 
@@ -1347,7 +1394,6 @@ static int kvm_events_live(struct perf_kvm_stat *kvm,
 	kvm->opts.target.uses_mmap = false;
 	kvm->opts.target.uid_str = NULL;
 	kvm->opts.target.uid = UINT_MAX;
-	kvm->opts.proc_map_timeout = 500;
 
 	symbol__init(NULL);
 	disable_buildid_cache();
@@ -1406,8 +1452,7 @@ static int kvm_events_live(struct perf_kvm_stat *kvm,
 	perf_session__set_id_hdr_size(kvm->session);
 	ordered_events__set_copy_on_queue(&kvm->session->ordered_events, true);
 	machine__synthesize_threads(&kvm->session->machines.host, &kvm->opts.target,
-				    kvm->evlist->threads, false,
-				    kvm->opts.proc_map_timeout, 1);
+				    kvm->evlist->threads, false, 1);
 	err = kvm_live_open_events(kvm);
 	if (err)
 		goto out;

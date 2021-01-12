@@ -1,20 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (c) 2000-2005 Silicon Graphics, Inc.
  * Copyright (c) 2013 Red Hat, Inc.
  * All Rights Reserved.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it would be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write the Free Software Foundation,
- * Inc.,  51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
 #include "xfs.h"
 #include "xfs_fs.h"
@@ -99,7 +87,7 @@ xfs_attr_shortform_list(xfs_attr_list_context_t *context)
 	 */
 	if (context->bufsize == 0 ||
 	    (XFS_ISRESET_CURSOR(cursor) &&
-             (dp->i_afp->if_bytes + sf->hdr.count * 16) < context->bufsize)) {
+	     (dp->i_afp->if_bytes + sf->hdr.count * 16) < context->bufsize)) {
 		for (i = 0, sfe = &sf->list[0]; i < sf->hdr.count; i++) {
 			context->put_listent(context,
 					     sfe->flags,
@@ -454,7 +442,8 @@ xfs_attr3_leaf_list_int(
 			cursor->offset = 0;
 		}
 
-		if (entry->flags & XFS_ATTR_INCOMPLETE)
+		if ((entry->flags & XFS_ATTR_INCOMPLETE) &&
+		    !(context->flags & ATTR_INCOMPLETE))
 			continue;		/* skip incomplete entries */
 
 		if (entry->flags & XFS_ATTR_LOCAL) {
@@ -629,6 +618,10 @@ xfs_attr_list(
 		return -EINVAL;
 	if ((cursor->initted == 0) &&
 	    (cursor->hashval || cursor->blkno || cursor->offset))
+		return -EINVAL;
+
+	/* Only internal consumers can retrieve incomplete attrs. */
+	if (flags & ATTR_INCOMPLETE)
 		return -EINVAL;
 
 	/*

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_X86_MCE_H
 #define _ASM_X86_MCE_H
 
@@ -131,7 +132,7 @@
  * debugging tools.  Each entry is only valid when its finished flag
  * is set.
  */
-struct mce_log {
+struct mce_log_buffer {
 	char signature[12]; /* "MACHINECHECK" */
 	unsigned len;	    /* = MCE_LOG_LEN */
 	unsigned next;
@@ -140,64 +141,13 @@ struct mce_log {
 	struct mce entry[MCE_LOG_LEN];
 };
 
-struct mca_config {
-	bool dont_log_ce;
-	bool cmci_disabled;
-	bool lmce_disabled;
-	bool ignore_ce;
-	bool disabled;
-	bool ser;
-	bool recovery;
-	bool bios_cmci_threshold;
-	u8 banks;
-	s8 bootlog;
-	int tolerant;
-	int monarch_timeout;
-	int panic_timeout;
-	u32 rip_msr;
-};
-
-struct mce_vendor_flags {
-	/*
-	 * Indicates that overflow conditions are not fatal, when set.
-	 */
-	__u64 overflow_recov	: 1,
-
-	/*
-	 * (AMD) SUCCOR stands for S/W UnCorrectable error COntainment and
-	 * Recovery. It indicates support for data poisoning in HW and deferred
-	 * error interrupts.
-	 */
-	      succor		: 1,
-
-	/*
-	 * (AMD) SMCA: This bit indicates support for Scalable MCA which expands
-	 * the register space for each MCA bank and also increases number of
-	 * banks. Also, to accommodate the new banks and registers, the MCA
-	 * register space is moved to a new MSR range.
-	 */
-	      smca		: 1,
-
-	      __reserved_0	: 61;
-};
-
-struct mca_msr_regs {
-	u32 (*ctl)	(int bank);
-	u32 (*status)	(int bank);
-	u32 (*addr)	(int bank);
-	u32 (*misc)	(int bank);
-};
-
-extern struct mce_vendor_flags mce_flags;
-
-extern struct mca_config mca_cfg;
-extern struct mca_msr_regs msr_ops;
-
 enum mce_notifier_prios {
-	MCE_PRIO_SRAO		= INT_MAX,
-	MCE_PRIO_EXTLOG		= INT_MAX - 1,
-	MCE_PRIO_NFIT		= INT_MAX - 2,
-	MCE_PRIO_EDAC		= INT_MAX - 3,
+	MCE_PRIO_FIRST		= INT_MAX,
+	MCE_PRIO_SRAO		= INT_MAX - 1,
+	MCE_PRIO_EXTLOG		= INT_MAX - 2,
+	MCE_PRIO_NFIT		= INT_MAX - 3,
+	MCE_PRIO_EDAC		= INT_MAX - 4,
+	MCE_PRIO_MCELOG		= 1,
 	MCE_PRIO_LOWEST		= 0,
 };
 
@@ -249,8 +199,6 @@ void cmci_clear(void);
 void cmci_reenable(void);
 void cmci_rediscover(void);
 void cmci_recheck(void);
-void lmce_clear(void);
-void lmce_enable(void);
 #else
 static inline void mce_intel_feature_init(struct cpuinfo_x86 *c) { }
 static inline void mce_intel_feature_clear(struct cpuinfo_x86 *c) { }
@@ -258,8 +206,6 @@ static inline void cmci_clear(void) {}
 static inline void cmci_reenable(void) {}
 static inline void cmci_rediscover(void) {}
 static inline void cmci_recheck(void) {}
-static inline void lmce_clear(void) {}
-static inline void lmce_enable(void) {}
 #endif
 
 #ifdef CONFIG_X86_MCE_AMD
@@ -292,10 +238,6 @@ int mce_notify_irq(void);
 
 DECLARE_PER_CPU(struct mce, injectm);
 
-extern void register_mce_write_callback(ssize_t (*)(struct file *filp,
-				    const char __user *ubuf,
-				    size_t usize, loff_t *off));
-
 /* Disable CMCI/polling for MCA bank claimed by firmware */
 extern void mce_disable_bank(int bank);
 
@@ -310,9 +252,7 @@ void do_machine_check(struct pt_regs *, long);
 /*
  * Threshold handler
  */
-
 extern void (*mce_threshold_vector)(void);
-extern void (*threshold_cpu_callback)(unsigned long action, unsigned int cpu);
 
 /* Deferred error interrupt handler */
 extern void (*deferred_error_int_vector)(void);
@@ -396,6 +336,17 @@ struct smca_bank {
 extern struct smca_bank smca_banks[MAX_NR_BANKS];
 
 extern const char *smca_get_long_name(enum smca_bank_types t);
+extern bool amd_mce_is_memory_error(struct mce *m);
+
+extern int mce_threshold_create_device(unsigned int cpu);
+extern int mce_threshold_remove_device(unsigned int cpu);
+
+#else
+
+static inline int mce_threshold_create_device(unsigned int cpu) { return 0; };
+static inline int mce_threshold_remove_device(unsigned int cpu) { return 0; };
+static inline bool amd_mce_is_memory_error(struct mce *m) { return false; };
+
 #endif
 
 #endif /* _ASM_X86_MCE_H */

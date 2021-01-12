@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (c) 2014 Anna Schumaker <Anna.Schumaker@Netapp.com>
  */
@@ -93,13 +94,13 @@ int nfs42_proc_allocate(struct file *filep, loff_t offset, loff_t len)
 	if (!nfs_server_capable(inode, NFS_CAP_ALLOCATE))
 		return -EOPNOTSUPP;
 
-	mutex_lock(&inode->i_mutex);
+	inode_lock(inode);
 
 	err = nfs42_proc_fallocate(&msg, filep, offset, len);
 	if (err == -EOPNOTSUPP)
 		NFS_SERVER(inode)->caps &= ~NFS_CAP_ALLOCATE;
 
-	mutex_unlock(&inode->i_mutex);
+	inode_unlock(inode);
 	return err;
 }
 
@@ -114,16 +115,18 @@ int nfs42_proc_deallocate(struct file *filep, loff_t offset, loff_t len)
 	if (!nfs_server_capable(inode, NFS_CAP_DEALLOCATE))
 		return -EOPNOTSUPP;
 
-	nfs_wb_all(inode);
-	mutex_lock(&inode->i_mutex);
+	inode_lock(inode);
+	err = nfs_sync_inode(inode);
+	if (err)
+		goto out_unlock;
 
 	err = nfs42_proc_fallocate(&msg, filep, offset, len);
 	if (err == 0)
 		truncate_pagecache_range(inode, offset, (offset + len) -1);
 	if (err == -EOPNOTSUPP)
 		NFS_SERVER(inode)->caps &= ~NFS_CAP_DEALLOCATE;
-
-	mutex_unlock(&inode->i_mutex);
+out_unlock:
+	inode_unlock(inode);
 	return err;
 }
 
@@ -233,11 +236,11 @@ ssize_t nfs42_proc_copy(struct file *src, loff_t pos_src,
 	dst_exception.state = dst_lock->open_context->state;
 
 	do {
-		mutex_lock(&file_inode(dst)->i_mutex);
+		inode_lock(file_inode(dst));
 		err = _nfs42_proc_copy(src, src_lock,
 				dst, dst_lock,
 				&args, &res);
-		mutex_unlock(&file_inode(dst)->i_mutex);
+		inode_unlock(file_inode(dst));
 
 		if (err >= 0)
 			break;
@@ -288,7 +291,11 @@ static loff_t _nfs42_proc_llseek(struct file *filep,
 	if (status)
 		return status;
 
-	nfs_wb_all(inode);
+	status = nfs_filemap_write_and_wait_range(inode->i_mapping,
+			offset, LLONG_MAX);
+	if (status)
+		return status;
+
 	status = nfs4_call_sync(server->client, server, &msg,
 				&args.seq_args, &res.seq_res, 0);
 	if (status == -ENOTSUPP)
@@ -328,6 +335,7 @@ loff_t nfs42_proc_llseek(struct file *filep, loff_t offset, int whence)
 	return err;
 }
 
+
 static void
 nfs42_layoutstat_prepare(struct rpc_task *task, void *calldata)
 {
@@ -362,7 +370,13 @@ nfs42_layoutstat_done(struct rpc_task *task, void *calldata)
 	switch (task->tk_status) {
 	case 0:
 		break;
+	case -NFS4ERR_BADHANDLE:
+	case -ESTALE:
+		pnfs_destroy_layout(NFS_I(inode));
+		break;
 	case -NFS4ERR_EXPIRED:
+	case -NFS4ERR_ADMIN_REVOKED:
+	case -NFS4ERR_DELEG_REVOKED:
 	case -NFS4ERR_STALE_STATEID:
 	case -NFS4ERR_BAD_STATEID:
 		spin_lock(&inode->i_lock);
@@ -401,8 +415,6 @@ nfs42_layoutstat_done(struct rpc_task *task, void *calldata)
 	case -EOPNOTSUPP:
 		NFS_SERVER(inode)->caps &= ~NFS_CAP_LAYOUTSTATS;
 	}
-
-	dprintk("%s server returns %d\n", __func__, task->tk_status);
 }
 
 static void
@@ -454,7 +466,7 @@ int nfs42_proc_layoutstats_generic(struct nfs_server *server,
 		nfs42_layoutstat_release(data);
 		return -EAGAIN;
 	}
-	nfs4_init_sequence(&data->args.seq_args, &data->res.seq_res, 0);
+	nfs4_init_sequence(&data->args.seq_args, &data->res.seq_res, 0, 0);
 	task = rpc_run_task(&task_setup);
 	if (IS_ERR(task))
 		return PTR_ERR(task);

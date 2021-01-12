@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __PERF_STATS_H
 #define __PERF_STATS_H
 
@@ -43,7 +44,6 @@ enum aggr_mode {
 	AGGR_NONE,
 	AGGR_GLOBAL,
 	AGGR_SOCKET,
-	AGGR_DIE,
 	AGGR_CORE,
 	AGGR_THREAD,
 	AGGR_UNSET,

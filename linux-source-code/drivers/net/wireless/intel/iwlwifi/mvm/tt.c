@@ -616,11 +616,7 @@ send:
 }
 
 static int iwl_mvm_tzone_get_temp(struct thermal_zone_device *device,
-#if 0 /* Not in RHEL */
 				  int *temperature)
-#else
-				  unsigned long *temperature)
-#endif
 {
 	struct iwl_mvm *mvm = (struct iwl_mvm *)device->devdata;
 	int ret;
@@ -646,11 +642,7 @@ out:
 }
 
 static int iwl_mvm_tzone_get_trip_temp(struct thermal_zone_device *device,
-#if 0 /* Not in RHEL */
 				       int trip, int *temp)
-#else
-				       int trip, unsigned long *temp)
-#endif
 {
 	struct iwl_mvm *mvm = (struct iwl_mvm *)device->devdata;
 
@@ -674,11 +666,7 @@ static int iwl_mvm_tzone_get_trip_type(struct thermal_zone_device *device,
 }
 
 static int iwl_mvm_tzone_set_trip_temp(struct thermal_zone_device *device,
-#if 0 /* Not in RHEL */
 				       int trip, int temp)
-#else
-				       int trip, unsigned long temp)
-#endif
 {
 	struct iwl_mvm *mvm = (struct iwl_mvm *)device->devdata;
 	struct iwl_mvm_thermal_device *tzone;

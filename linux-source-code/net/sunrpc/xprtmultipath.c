@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Multipath support for RPC
  *
@@ -17,18 +18,6 @@
 #include <linux/sunrpc/xprt.h>
 #include <linux/sunrpc/addr.h>
 #include <linux/sunrpc/xprtmultipath.h>
-
-#ifndef RCU_INITIALIZER
-/**
- * RCU_INITIALIZER() - statically initialize an RCU-protected global variable
- * @v: The value to statically initialize with.
- */
-#define RCU_INITIALIZER(v) (typeof(*(v)) __force __rcu *)(v)
-#endif
-
-#ifndef cmpxchg_relaxed
-#define  cmpxchg_relaxed        cmpxchg
-#endif
 
 typedef struct rpc_xprt *(*xprt_switch_find_xprt_t)(struct list_head *head,
 		const struct rpc_xprt *cur);

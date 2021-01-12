@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /* Test context switching to see if the DSCR SPR is correctly preserved
  * when within a transaction.
  *
@@ -28,34 +29,35 @@
 #include <assert.h>
 #include <asm/tm.h>
 
-#define TBEGIN          ".long 0x7C00051D ;"
-#define TEND            ".long 0x7C00055D ;"
-#define TCHECK          ".long 0x7C00059C ;"
-#define TSUSPEND        ".long 0x7C0005DD ;"
-#define TRESUME         ".long 0x7C2005DD ;"
-#define SPRN_TEXASR     0x82
+#include "utils.h"
+#include "tm.h"
+#include "../pmu/lib.h"
+
 #define SPRN_DSCR       0x03
 
-int main(void) {
+int test_body(void)
+{
 	uint64_t rv, dscr1 = 1, dscr2, texasr;
+
+	SKIP_IF(!have_htm());
 
 	printf("Check DSCR TM context switch: ");
 	fflush(stdout);
 	for (;;) {
-		rv = 1;
 		asm __volatile__ (
 			/* set a known value into the DSCR */
 			"ld      3, %[dscr1];"
 			"mtspr   %[sprn_dscr], 3;"
 
+			"li      %[rv], 1;"
 			/* start and suspend a transaction */
-			TBEGIN
+			"tbegin.;"
 			"beq     1f;"
-			TSUSPEND
+			"tsuspend.;"
 
 			/* hard loop until the transaction becomes doomed */
 			"2: ;"
-			TCHECK
+			"tcheck 0;"
 			"bc      4, 0, 2b;"
 
 			/* record DSCR and TEXASR */
@@ -64,8 +66,8 @@ int main(void) {
 			"mfspr   3, %[sprn_texasr];"
 			"std     3, %[texasr];"
 
-			TRESUME
-			TEND
+			"tresume.;"
+			"tend.;"
 			"li      %[rv], 0;"
 			"1: ;"
 			: [rv]"=r"(rv), [dscr2]"=m"(dscr2), [texasr]"=m"(texasr)
@@ -75,16 +77,24 @@ int main(void) {
 		);
 		assert(rv); /* make sure the transaction aborted */
 		if ((texasr >> 56) != TM_CAUSE_RESCHED) {
-			putchar('.');
-			fflush(stdout);
 			continue;
 		}
 		if (dscr2 != dscr1) {
 			printf(" FAIL\n");
-			exit(EXIT_FAILURE);
+			return 1;
 		} else {
 			printf(" OK\n");
-			exit(EXIT_SUCCESS);
+			return 0;
 		}
 	}
+}
+
+static int tm_resched_dscr(void)
+{
+	return eat_cpu(test_body);
+}
+
+int main(int argc, const char *argv[])
+{
+	return test_harness(tm_resched_dscr, "tm_resched_dscr");
 }

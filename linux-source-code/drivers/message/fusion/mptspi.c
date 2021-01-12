@@ -461,8 +461,7 @@ static int mptspi_target_alloc(struct scsi_target *starget)
 static void
 mptspi_target_destroy(struct scsi_target *starget)
 {
-	if (starget->hostdata)
-		kfree(starget->hostdata);
+	kfree(starget->hostdata);
 	starget->hostdata = NULL;
 }
 
@@ -620,7 +619,7 @@ static void mptspi_read_parameters(struct scsi_target *starget)
 	spi_width(starget) = (nego & MPI_SCSIDEVPAGE0_NP_WIDE) ? 1 : 0;
 }
 
-int
+static int
 mptscsih_quiesce_raid(MPT_SCSI_HOST *hd, int quiesce, u8 channel, u8 id)
 {
 	MPT_ADAPTER	*ioc = hd->ioc;
@@ -1246,11 +1245,7 @@ static struct spi_function_template mptspi_transport_functions = {
 
 static struct pci_device_id mptspi_pci_table[] = {
 	{ PCI_VENDOR_ID_LSI_LOGIC, MPI_MANUFACTPAGE_DEVID_53C1030,
-		PCI_ANY_ID, PCI_ANY_ID },
-	{ PCI_VENDOR_ID_ATTO, MPI_MANUFACTPAGE_DEVID_53C1030,
-		PCI_ANY_ID, PCI_ANY_ID },
-	{ PCI_VENDOR_ID_LSI_LOGIC, MPI_MANUFACTPAGE_DEVID_53C1035,
-		PCI_ANY_ID, PCI_ANY_ID },
+		PCI_VENDOR_ID_VMWARE, PCI_ANY_ID },
 	{0}	/* Terminating entry */
 };
 MODULE_DEVICE_TABLE(pci, mptspi_pci_table);
@@ -1420,6 +1415,11 @@ mptspi_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		goto out_mptspi_probe;
         }
 
+	/* VMWare emulation doesn't properly implement WRITE_SAME
+	 */
+	if (pdev->subsystem_vendor == 0x15AD)
+		sh->no_write_same = 1;
+
 	spin_lock_irqsave(&ioc->FreeQlock, flags);
 
 	/* Attach the SCSI Host to the IOC structure
@@ -1536,6 +1536,10 @@ mptspi_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		    0, 0, 0, 0, 5);
 
 	scsi_scan_host(sh);
+
+	add_taint(TAINT_SUPPORT_REMOVED, LOCKDEP_STILL_OK);
+	pr_warn("MPTSPI MODULE IS NOT SUPPORTED\n");
+
 	return 0;
 
 out_mptspi_probe:

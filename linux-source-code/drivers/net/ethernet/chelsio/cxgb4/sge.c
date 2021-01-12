@@ -45,6 +45,9 @@
 #include <net/ipv6.h>
 #include <net/tcp.h>
 #include <net/busy_poll.h>
+#ifdef CONFIG_CHELSIO_T4_FCOE
+#include <scsi/fc/fc_fcoe.h>
+#endif /* CONFIG_CHELSIO_T4_FCOE */
 #include "cxgb4.h"
 #include "t4_regs.h"
 #include "t4_values.h"
@@ -77,9 +80,10 @@
  * Max number of Tx descriptors we clean up at a time.  Should be modest as
  * freeing skbs isn't cheap and it happens while holding locks.  We just need
  * to free packets faster than they arrive, we eventually catch up and keep
- * the amortized cost reasonable.  Must be >= 2 * TXQ_STOP_THRES.
+ * the amortized cost reasonable.  Must be >= 2 * TXQ_STOP_THRES.  It should
+ * also match the CIDX Flush Threshold.
  */
-#define MAX_TX_RECLAIM 16
+#define MAX_TX_RECLAIM 32
 
 /*
  * Max number of Rx buffers we replenish at a time.  Again keep this modest,
@@ -398,6 +402,39 @@ static inline int reclaimable(const struct sge_txq *q)
 }
 
 /**
+ *	reclaim_completed_tx - reclaims completed TX Descriptors
+ *	@adap: the adapter
+ *	@q: the Tx queue to reclaim completed descriptors from
+ *	@maxreclaim: the maximum number of TX Descriptors to reclaim or -1
+ *	@unmap: whether the buffers should be unmapped for DMA
+ *
+ *	Reclaims Tx Descriptors that the SGE has indicated it has processed,
+ *	and frees the associated buffers if possible.  If @max == -1, then
+ *	we'll use a defaiult maximum.  Called with the TX Queue locked.
+ */
+static inline int reclaim_completed_tx(struct adapter *adap, struct sge_txq *q,
+				       int maxreclaim, bool unmap)
+{
+	int reclaim = reclaimable(q);
+
+	if (reclaim) {
+		/*
+		 * Limit the amount of clean up work we do at a time to keep
+		 * the Tx lock hold time O(1).
+		 */
+		if (maxreclaim < 0)
+			maxreclaim = MAX_TX_RECLAIM;
+		if (reclaim > maxreclaim)
+			reclaim = maxreclaim;
+
+		free_tx_desc(adap, q, reclaim, unmap);
+		q->in_use -= reclaim;
+	}
+
+	return reclaim;
+}
+
+/**
  *	cxgb4_reclaim_completed_tx - reclaims completed Tx descriptors
  *	@adap: the adapter
  *	@q: the Tx queue to reclaim completed descriptors from
@@ -407,22 +444,10 @@ static inline int reclaimable(const struct sge_txq *q)
  *	and frees the associated buffers if possible.  Called with the Tx
  *	queue locked.
  */
-inline void cxgb4_reclaim_completed_tx(struct adapter *adap, struct sge_txq *q,
-					bool unmap)
+void cxgb4_reclaim_completed_tx(struct adapter *adap, struct sge_txq *q,
+				bool unmap)
 {
-	int avail = reclaimable(q);
-
-	if (avail) {
-		/*
-		 * Limit the amount of clean up work we do at a time to keep
-		 * the Tx lock hold time O(1).
-		 */
-		if (avail > MAX_TX_RECLAIM)
-			avail = MAX_TX_RECLAIM;
-
-		free_tx_desc(adap, q, avail, unmap);
-		q->in_use -= avail;
-	}
+	(void)reclaim_completed_tx(adap, q, -1, unmap);
 }
 EXPORT_SYMBOL(cxgb4_reclaim_completed_tx);
 
@@ -451,7 +476,7 @@ static inline int get_buf_size(struct adapter *adapter,
 		break;
 
 	default:
-		BUG_ON(1);
+		BUG();
 	}
 
 	return buf_size;
@@ -579,7 +604,7 @@ static unsigned int refill_fl(struct adapter *adap, struct sge_fl *q, int n,
 		goto out;
 #endif
 
-	gfp |= __GFP_NOWARN | __GFP_COLD;
+	gfp |= __GFP_NOWARN;
 	node = dev_to_node(adap->pdev_dev);
 
 	if (s->fl_pg_order == 0)
@@ -909,8 +934,8 @@ void cxgb4_write_sgl(const struct sk_buff *skb, struct sge_txq *q,
 EXPORT_SYMBOL(cxgb4_write_sgl);
 
 /* This function copies 64 byte coalesced work request to
- * memory mapped BAR2 space(user space writes).
- * For coalesced WR SGE, fetches data from the FIFO instead of from Host.
+ * memory mapped BAR2 space. For coalesced WR SGE fetches
+ * data from the FIFO instead of from Host.
  */
 static void cxgb_pio_copy(u64 __iomem *dst, u64 *src)
 {
@@ -977,14 +1002,14 @@ inline void cxgb4_ring_tx_db(struct adapter *adap, struct sge_txq *q, int n)
 				     ? (q->pidx - 1)
 				     : (q->size - 1));
 			u64 *wr = (u64 *)&q->desc[index];
-			
+
 			cxgb_pio_copy((u64 __iomem *)
 				      (q->bar2_addr + SGE_UDB_WCDOORBELL),
 				      wr);
 		} else {
 			writel(val | QID_V(q->bar2_qid),
-			       q->bar2_addr + SGE_UDB_KDOORBELL);		
-}
+			       q->bar2_addr + SGE_UDB_KDOORBELL);
+		}
 
 		/* This Write Memory Barrier will force the write to the User
 		 * Doorbell area to be flushed.  This is needed to prevent
@@ -1153,6 +1178,38 @@ static inline void txq_advance(struct sge_txq *q, unsigned int n)
 		q->pidx -= q->size;
 }
 
+#ifdef CONFIG_CHELSIO_T4_FCOE
+static inline int
+cxgb_fcoe_offload(struct sk_buff *skb, struct adapter *adap,
+		  const struct port_info *pi, u64 *cntrl)
+{
+	const struct cxgb_fcoe *fcoe = &pi->fcoe;
+
+	if (!(fcoe->flags & CXGB_FCOE_ENABLED))
+		return 0;
+
+	if (skb->protocol != htons(ETH_P_FCOE))
+		return 0;
+
+	skb_reset_mac_header(skb);
+	skb->mac_len = sizeof(struct ethhdr);
+
+	skb_set_network_header(skb, skb->mac_len);
+	skb_set_transport_header(skb, skb->mac_len + sizeof(struct fcoe_hdr));
+
+	if (!cxgb_fcoe_sof_eof_supported(adap, skb))
+		return -ENOTSUPP;
+
+	/* FC CRC offload */
+	*cntrl = TXPKT_CSUM_TYPE_V(TX_CSUM_FCOE) |
+		     TXPKT_L4CSUM_DIS_F | TXPKT_IPCSUM_DIS_F |
+		     TXPKT_CSUM_START_V(CXGB_FCOE_TXPKT_CSUM_START) |
+		     TXPKT_CSUM_END_V(CXGB_FCOE_TXPKT_CSUM_END) |
+		     TXPKT_CSUM_LOC_V(CXGB_FCOE_TXPKT_CSUM_END);
+	return 0;
+}
+#endif /* CONFIG_CHELSIO_T4_FCOE */
+
 /* Returns tunnel type if hardware supports offloading of the same.
  * It is called only for T5 and onwards.
  */
@@ -1253,6 +1310,44 @@ static inline void t6_fill_tnl_lso(struct sk_buff *skb,
 }
 
 /**
+ *	t4_sge_eth_txq_egress_update - handle Ethernet TX Queue update
+ *	@adap: the adapter
+ *	@eq: the Ethernet TX Queue
+ *	@maxreclaim: the maximum number of TX Descriptors to reclaim or -1
+ *
+ *	We're typically called here to update the state of an Ethernet TX
+ *	Queue with respect to the hardware's progress in consuming the TX
+ *	Work Requests that we've put on that Egress Queue.  This happens
+ *	when we get Egress Queue Update messages and also prophylactically
+ *	in regular timer-based Ethernet TX Queue maintenance.
+ */
+int t4_sge_eth_txq_egress_update(struct adapter *adap, struct sge_eth_txq *eq,
+				 int maxreclaim)
+{
+	struct sge_txq *q = &eq->q;
+	unsigned int reclaimed;
+
+	if (!q->in_use || !__netif_tx_trylock(eq->txq))
+		return 0;
+
+	/* Reclaim pending completed TX Descriptors. */
+	reclaimed = reclaim_completed_tx(adap, &eq->q, maxreclaim, true);
+
+	/* If the TX Queue is currently stopped and there's now more than half
+	 * the queue available, restart it.  Otherwise bail out since the rest
+	 * of what we want do here is with the possibility of shipping any
+	 * currently buffered Coalesced TX Work Request.
+	 */
+	if (netif_tx_queue_stopped(eq->txq) && txq_avail(q) > (q->size / 2)) {
+		netif_tx_wake_queue(eq->txq);
+		eq->q.restarts++;
+	}
+
+	__netif_tx_unlock(eq->txq);
+	return reclaimed;
+}
+
+/**
  *	cxgb4_eth_xmit - add a packet to an Ethernet Tx queue
  *	@skb: the packet
  *	@dev: the egress net device
@@ -1262,8 +1357,7 @@ static inline void t6_fill_tnl_lso(struct sk_buff *skb,
 static netdev_tx_t cxgb4_eth_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	u32 wr_mid, ctrl0, op;
-	u64 cntrl = 0;
-	u64 *end, *sgl;
+	u64 cntrl, *end, *sgl;
 	int qidx, credits;
 	unsigned int flits, ndesc;
 	struct adapter *adap;
@@ -1279,6 +1373,9 @@ static netdev_tx_t cxgb4_eth_xmit(struct sk_buff *skb, struct net_device *dev)
 	unsigned int chip_ver;
 	enum cpl_tx_tnl_lso_type tnl_type = TX_TNL_TYPE_OPAQUE;
 
+#ifdef CONFIG_CHELSIO_T4_FCOE
+	int err;
+#endif /* CONFIG_CHELSIO_T4_FCOE */
 
 	/*
 	 * The chip min packet length is 10 octets but play safe and reject
@@ -1291,7 +1388,7 @@ out_free:	dev_kfree_skb_any(skb);
 
 	/* Discard the packet if the length is greater than mtu */
 	max_pkt_len = ETH_HLEN + dev->mtu;
-	if (skb_vlan_tagged(skb)) 
+	if (skb_vlan_tagged(skb))
 		max_pkt_len += VLAN_HLEN;
 	if (!skb_shinfo(skb)->gso_size && (unlikely(skb->len > max_pkt_len)))
 		goto out_free;
@@ -1320,7 +1417,17 @@ out_free:	dev_kfree_skb_any(skb);
 	}
 	skb_tx_timestamp(skb);
 
-	cxgb4_reclaim_completed_tx(adap, &q->q, true);
+	reclaim_completed_tx(adap, &q->q, -1, true);
+	cntrl = TXPKT_L4CSUM_DIS_F | TXPKT_IPCSUM_DIS_F;
+
+#ifdef CONFIG_CHELSIO_T4_FCOE
+	err = cxgb_fcoe_offload(skb, adap, pi, &cntrl);
+	if (unlikely(err == -ENOTSUPP)) {
+		if (ptp_enabled)
+			spin_unlock(&adap->ptp_lock);
+		goto out_free;
+	}
+#endif /* CONFIG_CHELSIO_T4_FCOE */
 
 	chip_ver = CHELSIO_CHIP_VERSION(adap->params.chip);
 	flits = calc_tx_flits(skb, chip_ver);
@@ -1353,8 +1460,25 @@ out_free:	dev_kfree_skb_any(skb);
 
 	wr_mid = FW_WR_LEN16_V(DIV_ROUND_UP(flits, 2));
 	if (unlikely(credits < ETHTXQ_STOP_THRES)) {
+		/* After we're done injecting the Work Request for this
+		 * packet, we'll be below our "stop threshold" so stop the TX
+		 * Queue now and schedule a request for an SGE Egress Queue
+		 * Update message. The queue will get started later on when
+		 * the firmware processes this Work Request and sends us an
+		 * Egress Queue Status Update message indicating that space
+		 * has opened up.
+		 */
 		eth_txq_stop(q);
-		wr_mid |= FW_WR_EQUEQ_F | FW_WR_EQUIQ_F;
+
+		/* If we're using the SGE Doorbell Queue Timer facility, we
+		 * don't need to ask the Firmware to send us Egress Queue CIDX
+		 * Updates: the Hardware will do this automatically.  And
+		 * since we send the Ingress Queue CIDX Updates to the
+		 * corresponding Ethernet Response Queue, we'll get them very
+		 * quickly.
+		 */
+		if (!q->dbqt)
+			wr_mid |= FW_WR_EQUEQ_F | FW_WR_EQUIQ_F;
 	}
 
 	wr = (void *)&q->q.desc[q->q.pidx];
@@ -1448,13 +1572,17 @@ out_free:	dev_kfree_skb_any(skb);
 			cntrl = hwcsum(adap->params.chip, skb) |
 				TXPKT_IPCSUM_DIS_F;
 			q->tx_cso++;
-		} else
-			cntrl = TXPKT_L4CSUM_DIS_F | TXPKT_IPCSUM_DIS_F;
+		}
 	}
 
 	if (skb_vlan_tag_present(skb)) {
 		q->vlan_ins++;
 		cntrl |= TXPKT_VLAN_VLD_F | TXPKT_VLAN_V(skb_vlan_tag_get(skb));
+#ifdef CONFIG_CHELSIO_T4_FCOE
+		if (skb->protocol == htons(ETH_P_FCOE))
+			cntrl |= TXPKT_VLAN_V(
+				 ((skb->priority & 0x7) << VLAN_PRIO_SHIFT));
+#endif /* CONFIG_CHELSIO_T4_FCOE */
 	}
 
 	ctrl0 = TXPKT_OPCODE_V(CPL_TX_PKT_XT) | TXPKT_INTF_V(pi->tx_chan) |
@@ -1620,7 +1748,7 @@ static netdev_tx_t cxgb4_vf_eth_xmit(struct sk_buff *skb,
 	/* Take this opportunity to reclaim any TX Descriptors whose DMA
 	 * transfers have completed.
 	 */
-	cxgb4_reclaim_completed_tx(adapter, &txq->q, true);
+	reclaim_completed_tx(adapter, &txq->q, -1, true);
 
 	/* Calculate the number of flits and TX Descriptors we're going to
 	 * need along with how many TX Descriptors will be left over after
@@ -1664,7 +1792,16 @@ static netdev_tx_t cxgb4_vf_eth_xmit(struct sk_buff *skb,
 		 * has opened up.
 		 */
 		eth_txq_stop(txq);
-		wr_mid |= FW_WR_EQUEQ_F | FW_WR_EQUIQ_F;
+
+		/* If we're using the SGE Doorbell Queue Timer facility, we
+		 * don't need to ask the Firmware to send us Egress Queue CIDX
+		 * Updates: the Hardware will do this automatically.  And
+		 * since we send the Ingress Queue CIDX Updates to the
+		 * corresponding Ethernet Response Queue, we'll get them very
+		 * quickly.
+		 */
+		if (!txq->dbqt)
+			wr_mid |= FW_WR_EQUEQ_F | FW_WR_EQUIQ_F;
 	}
 
 	/* Start filling in our Work Request.  Note that we do _not_ handle
@@ -2635,7 +2772,6 @@ static void do_gro(struct sge_eth_rxq *rxq, const struct pkt_gl *gl,
 	skb->truesize += skb->data_len;
 	skb->ip_summed = CHECKSUM_UNNECESSARY;
 	skb_record_rx_queue(skb, rxq->rspq.idx);
-	skb_mark_napi_id(skb, &rxq->rspq.napi);
 	pi = netdev_priv(skb->dev);
 	if (pi->rxtstamp)
 		cxgb4_sgetim_to_hwtstamp(adapter, skb_hwtstamps(skb),
@@ -2744,6 +2880,74 @@ static int t4_tx_hststamp(struct adapter *adapter, struct sk_buff *skb,
 }
 
 /**
+ *	t4_tx_completion_handler - handle CPL_SGE_EGR_UPDATE messages
+ *	@rspq: Ethernet RX Response Queue associated with Ethernet TX Queue
+ *	@rsp: Response Entry pointer into Response Queue
+ *	@gl: Gather List pointer
+ *
+ *	For adapters which support the SGE Doorbell Queue Timer facility,
+ *	we configure the Ethernet TX Queues to send CIDX Updates to the
+ *	Associated Ethernet RX Response Queue with CPL_SGE_EGR_UPDATE
+ *	messages.  This adds a small load to PCIe Link RX bandwidth and,
+ *	potentially, higher CPU Interrupt load, but allows us to respond
+ *	much more quickly to the CIDX Updates.  This is important for
+ *	Upper Layer Software which isn't willing to have a large amount
+ *	of TX Data outstanding before receiving DMA Completions.
+ */
+static void t4_tx_completion_handler(struct sge_rspq *rspq,
+				     const __be64 *rsp,
+				     const struct pkt_gl *gl)
+{
+	u8 opcode = ((const struct rss_header *)rsp)->opcode;
+	struct port_info *pi = netdev_priv(rspq->netdev);
+	struct adapter *adapter = rspq->adap;
+	struct sge *s = &adapter->sge;
+	struct sge_eth_txq *txq;
+
+	/* skip RSS header */
+	rsp++;
+
+	/* FW can send EGR_UPDATEs encapsulated in a CPL_FW4_MSG.
+	 */
+	if (unlikely(opcode == CPL_FW4_MSG &&
+		     ((const struct cpl_fw4_msg *)rsp)->type ==
+							FW_TYPE_RSSCPL)) {
+		rsp++;
+		opcode = ((const struct rss_header *)rsp)->opcode;
+		rsp++;
+	}
+
+	if (unlikely(opcode != CPL_SGE_EGR_UPDATE)) {
+		pr_info("%s: unexpected FW4/CPL %#x on Rx queue\n",
+			__func__, opcode);
+		return;
+	}
+
+	txq = &s->ethtxq[pi->first_qset + rspq->idx];
+
+	/* We've got the Hardware Consumer Index Update in the Egress Update
+	 * message.  If we're using the SGE Doorbell Queue Timer mechanism,
+	 * these Egress Update messages will be our sole CIDX Updates we get
+	 * since we don't want to chew up PCIe bandwidth for both Ingress
+	 * Messages and Status Page writes.  However, The code which manages
+	 * reclaiming successfully DMA'ed TX Work Requests uses the CIDX value
+	 * stored in the Status Page at the end of the TX Queue.  It's easiest
+	 * to simply copy the CIDX Update value from the Egress Update message
+	 * to the Status Page.  Also note that no Endian issues need to be
+	 * considered here since both are Big Endian and we're just copying
+	 * bytes consistently ...
+	 */
+	if (txq->dbqt) {
+		struct cpl_sge_egr_update *egr;
+
+		egr = (struct cpl_sge_egr_update *)rsp;
+		WRITE_ONCE(txq->q.stat->cidx, egr->cidx);
+	}
+
+	t4_sge_eth_txq_egress_update(adapter, txq, -1);
+}
+
+/**
  *	t4_ethrx_handler - process an ingress ethernet packet
  *	@q: the response queue that received the packet
  *	@rsp: the response queue descriptor holding the RX_PKT message
@@ -2765,6 +2969,15 @@ int t4_ethrx_handler(struct sge_rspq *q, const __be64 *rsp,
 	u16 err_vec, tnl_hdr_len = 0;
 	struct port_info *pi;
 	int ret = 0;
+
+	/* If we're looking at TX Queue CIDX Update, handle that separately
+	 * and return.
+	 */
+	if (unlikely((*(u8 *)rsp == CPL_FW4_MSG) ||
+		     (*(u8 *)rsp == CPL_SGE_EGR_UPDATE))) {
+		t4_tx_completion_handler(q, rsp, si);
+		return 0;
+	}
 
 	if (unlikely(*(u8 *)rsp == cpl_trace_pkt))
 		return handle_trace_pkt(q->adap, si);
@@ -2843,8 +3056,28 @@ int t4_ethrx_handler(struct sge_rspq *q, const __be64 *rsp,
 			}
 			rxq->stats.rx_cso++;
 		}
-	} else
+	} else {
 		skb_checksum_none_assert(skb);
+#ifdef CONFIG_CHELSIO_T4_FCOE
+#define CPL_RX_PKT_FLAGS (RXF_PSH_F | RXF_SYN_F | RXF_UDP_F | \
+			  RXF_TCP_F | RXF_IP_F | RXF_IP6_F | RXF_LRO_F)
+
+		if (!(pkt->l2info & cpu_to_be32(CPL_RX_PKT_FLAGS))) {
+			if ((pkt->l2info & cpu_to_be32(RXF_FCOE_F)) &&
+			    (pi->fcoe.flags & CXGB_FCOE_ENABLED)) {
+				if (q->adap->params.tp.rx_pkt_encap)
+					csum_ok = err_vec &
+						  T6_COMPR_RXERR_SUM_F;
+				else
+					csum_ok = err_vec & RXERR_CSUM_F;
+				if (!csum_ok)
+					skb->ip_summed = CHECKSUM_UNNECESSARY;
+			}
+		}
+
+#undef CPL_RX_PKT_FLAGS
+#endif /* CONFIG_CHELSIO_T4_FCOE */
+	}
 
 	if (unlikely(pkt->vlan_ex)) {
 		__vlan_hwaccel_put_tag(skb, htons(ETH_P_8021Q), ntohs(pkt->vlan));
@@ -3142,7 +3375,7 @@ static irqreturn_t t4_intr_msi(int irq, void *cookie)
 {
 	struct adapter *adap = cookie;
 
-	if (adap->flags & MASTER_PF)
+	if (adap->flags & CXGB4_MASTER_PF)
 		t4_slow_intr_handler(adap);
 	process_intrq(adap);
 	return IRQ_HANDLED;
@@ -3158,7 +3391,7 @@ static irqreturn_t t4_intr_intx(int irq, void *cookie)
 	struct adapter *adap = cookie;
 
 	t4_write_reg(adap, MYPF_REG(PCIE_PF_CLI_A), 0);
-	if (((adap->flags & MASTER_PF) && t4_slow_intr_handler(adap)) |
+	if (((adap->flags & CXGB4_MASTER_PF) && t4_slow_intr_handler(adap)) |
 	    process_intrq(adap))
 		return IRQ_HANDLED;
 	return IRQ_NONE;             /* probably shared interrupt */
@@ -3173,9 +3406,9 @@ static irqreturn_t t4_intr_intx(int irq, void *cookie)
  */
 irq_handler_t t4_intr_handler(struct adapter *adap)
 {
-	if (adap->flags & USING_MSIX)
+	if (adap->flags & CXGB4_USING_MSIX)
 		return t4_sge_intr_msix;
-	if (adap->flags & USING_MSI)
+	if (adap->flags & CXGB4_USING_MSI)
 		return t4_intr_msi;
 	return t4_intr_intx;
 }
@@ -3194,7 +3427,7 @@ static void sge_rx_timer_cb(struct timer_list *t)
 			struct sge_fl *fl = s->egr_map[id];
 
 			clear_bit(id, s->starving_fl);
-			smp_mb__after_clear_bit();
+			smp_mb__after_atomic();
 
 			if (fl_starving(adap, fl)) {
 				rxq = container_of(fl, struct sge_eth_rxq, fl);
@@ -3208,7 +3441,7 @@ static void sge_rx_timer_cb(struct timer_list *t)
 	 * global Master PF activities like checking for chip ingress stalls,
 	 * etc.
 	 */
-	if (!(adap->flags & MASTER_PF))
+	if (!(adap->flags & CXGB4_MASTER_PF))
 		goto done;
 
 	t4_idma_monitor(adap, &s->idma_monitor, HZ, RX_QCHECK_PERIOD);
@@ -3219,10 +3452,10 @@ done:
 
 static void sge_tx_timer_cb(struct timer_list *t)
 {
-	unsigned long m;
-	unsigned int i, budget;
 	struct adapter *adap = from_timer(adap, t, sge.tx_timer);
 	struct sge *s = &adap->sge;
+	unsigned long m, period;
+	unsigned int i, budget;
 
 	for (i = 0; i < BITS_TO_LONGS(s->egr_sz); i++)
 		for (m = s->txq_maperr[i]; m; m &= m - 1) {
@@ -3250,48 +3483,48 @@ static void sge_tx_timer_cb(struct timer_list *t)
 	budget = MAX_TIMER_TX_RECLAIM;
 	i = s->ethtxq_rover;
 	do {
-		struct sge_eth_txq *q = &s->ethtxq[i];
-
-		if (q->q.in_use &&
-		    time_after_eq(jiffies, q->txq->trans_start + HZ / 100) &&
-		    __netif_tx_trylock(q->txq)) {
-			int avail = reclaimable(&q->q);
-
-			if (avail) {
-				if (avail > budget)
-					avail = budget;
-
-				free_tx_desc(adap, &q->q, avail, true);
-				q->q.in_use -= avail;
-				budget -= avail;
-			}
-			__netif_tx_unlock(q->txq);
-		}
+		budget -= t4_sge_eth_txq_egress_update(adap, &s->ethtxq[i],
+						       budget);
+		if (!budget)
+			break;
 
 		if (++i >= s->ethqsets)
 			i = 0;
-	} while (budget && i != s->ethtxq_rover);
+	} while (i != s->ethtxq_rover);
 	s->ethtxq_rover = i;
-	mod_timer(&s->tx_timer, jiffies + (budget ? TX_QCHECK_PERIOD : 2));
+
+	if (budget == 0) {
+		/* If we found too many reclaimable packets schedule a timer
+		 * in the near future to continue where we left off.
+		 */
+		period = 2;
+	} else {
+		/* We reclaimed all reclaimable TX Descriptors, so reschedule
+		 * at the normal period.
+		 */
+		period = TX_QCHECK_PERIOD;
+	}
+
+	mod_timer(&s->tx_timer, jiffies + period);
 }
 
 /**
- * 	bar2_address - return the BAR2 address for an SGE Queue's Registers
- * 	@adapter: the adapter
- * 	@qid: the SGE Queue ID
- * 	@qtype: the SGE Queue Type (Egress or Ingress)
- * 	@pbar2_qid: BAR2 Queue ID or 0 for Queue ID inferred SGE Queues
+ *	bar2_address - return the BAR2 address for an SGE Queue's Registers
+ *	@adapter: the adapter
+ *	@qid: the SGE Queue ID
+ *	@qtype: the SGE Queue Type (Egress or Ingress)
+ *	@pbar2_qid: BAR2 Queue ID or 0 for Queue ID inferred SGE Queues
  *
- * 	Returns the BAR2 address for the SGE Queue Registers associated with
- * 	@qid. If BAR2 SGE Registers aren't available, returns NULL. Also
- * 	returns the BAR2 Queue ID to be used with writes to the BAR2 SGE
- * 	Queue Registers. If the BAR2 Queue ID is 0, then "Inferred Queue ID"
- * 	Registers are supported (e.g. the Write Combining Doorbell Buffer).
+ *	Returns the BAR2 address for the SGE Queue Registers associated with
+ *	@qid.  If BAR2 SGE Registers aren't available, returns NULL.  Also
+ *	returns the BAR2 Queue ID to be used with writes to the BAR2 SGE
+ *	Queue Registers.  If the BAR2 Queue ID is 0, then "Inferred Queue ID"
+ *	Registers are supported (e.g. the Write Combining Doorbell Buffer).
  */
 static void __iomem *bar2_address(struct adapter *adapter,
-				 unsigned int qid,
-				 enum t4_bar2_qtype qtype,
-				 unsigned int *pbar2_qid)
+				  unsigned int qid,
+				  enum t4_bar2_qtype qtype,
+				  unsigned int *pbar2_qid)
 {
 	u64 bar2_qoffset;
 	int ret;
@@ -3300,6 +3533,7 @@ static void __iomem *bar2_address(struct adapter *adapter,
 				&bar2_qoffset, pbar2_qid);
 	if (ret)
 		return NULL;
+
 	return adapter->bar2 + bar2_qoffset;
 }
 
@@ -3315,7 +3549,7 @@ int t4_sge_alloc_rxq(struct adapter *adap, struct sge_rspq *iq, bool fwevtq,
 	struct fw_iq_cmd c;
 	struct sge *s = &adap->sge;
 	struct port_info *pi = netdev_priv(dev);
-	int relaxed = !(adap->flags & ROOT_NO_RELAXED_ORDERING);
+	int relaxed = !(adap->flags & CXGB4_ROOT_NO_RELAXED_ORDERING);
 
 	/* Size needs to be multiple of 16, including status entry. */
 	iq->size = roundup(iq->size, 16);
@@ -3350,7 +3584,8 @@ int t4_sge_alloc_rxq(struct adapter *adap, struct sge_rspq *iq, bool fwevtq,
 							:  FW_IQ_IQTYPE_OFLD));
 
 	if (fl) {
-		enum chip_type chip = CHELSIO_CHIP_VERSION(adap->params.chip);
+		unsigned int chip_ver =
+			CHELSIO_CHIP_VERSION(adap->params.chip);
 
 		/* Allocate the ring for the hardware free list (with space
 		 * for its status page) along with the associated software
@@ -3388,10 +3623,10 @@ int t4_sge_alloc_rxq(struct adapter *adap, struct sge_rspq *iq, bool fwevtq,
 		 * the smaller 64-byte value there).
 		 */
 		c.fl0dcaen_to_fl0cidxfthresh =
-			htons(FW_IQ_CMD_FL0FBMIN_V(chip <= CHELSIO_T5 ?
+			htons(FW_IQ_CMD_FL0FBMIN_V(chip_ver <= CHELSIO_T5 ?
 						   FETCHBURSTMIN_128B_X :
-						   FETCHBURSTMIN_64B_X) |
-			      FW_IQ_CMD_FL0FBMAX_V((chip <= CHELSIO_T5) ?
+						   FETCHBURSTMIN_64B_T6_X) |
+			      FW_IQ_CMD_FL0FBMAX_V((chip_ver <= CHELSIO_T5) ?
 						   FETCHBURSTMAX_512B_X :
 						   FETCHBURSTMAX_256B_X));
 		c.fl0size = htons(flsz);
@@ -3513,14 +3748,24 @@ static void init_txq(struct adapter *adap, struct sge_txq *q, unsigned int id)
 	adap->sge.egr_map[id - adap->sge.egr_start] = q;
 }
 
+/**
+ *	t4_sge_alloc_eth_txq - allocate an Ethernet TX Queue
+ *	@adap: the adapter
+ *	@txq: the SGE Ethernet TX Queue to initialize
+ *	@dev: the Linux Network Device
+ *	@netdevq: the corresponding Linux TX Queue
+ *	@iqid: the Ingress Queue to which to deliver CIDX Update messages
+ *	@dbqt: whether this TX Queue will use the SGE Doorbell Queue Timers
+ */
 int t4_sge_alloc_eth_txq(struct adapter *adap, struct sge_eth_txq *txq,
 			 struct net_device *dev, struct netdev_queue *netdevq,
-			 unsigned int iqid)
+			 unsigned int iqid, u8 dbqt)
 {
-	int ret, nentries;
-	struct fw_eq_eth_cmd c;
-	struct sge *s = &adap->sge;
+	unsigned int chip_ver = CHELSIO_CHIP_VERSION(adap->params.chip);
 	struct port_info *pi = netdev_priv(dev);
+	struct sge *s = &adap->sge;
+	struct fw_eq_eth_cmd c;
+	int ret, nentries;
 
 	/* Add status entries */
 	nentries = txq->q.size + s->stat_len / sizeof(struct tx_desc);
@@ -3539,18 +3784,46 @@ int t4_sge_alloc_eth_txq(struct adapter *adap, struct sge_eth_txq *txq,
 			    FW_EQ_ETH_CMD_VFN_V(0));
 	c.alloc_to_len16 = htonl(FW_EQ_ETH_CMD_ALLOC_F |
 				 FW_EQ_ETH_CMD_EQSTART_F | FW_LEN16(c));
-	c.viid_pkd = htonl(FW_EQ_ETH_CMD_AUTOEQUEQE_F |
-			   FW_EQ_ETH_CMD_VIID_V(pi->viid));
+
+	/* For TX Ethernet Queues using the SGE Doorbell Queue Timer
+	 * mechanism, we use Ingress Queue messages for Hardware Consumer
+	 * Index Updates on the TX Queue.  Otherwise we have the Hardware
+	 * write the CIDX Updates into the Status Page at the end of the
+	 * TX Queue.
+	 */
+	c.autoequiqe_to_viid = htonl((dbqt
+				      ? FW_EQ_ETH_CMD_AUTOEQUIQE_F
+				      : FW_EQ_ETH_CMD_AUTOEQUEQE_F) |
+				     FW_EQ_ETH_CMD_VIID_V(pi->viid));
+
 	c.fetchszm_to_iqid =
-		htonl(FW_EQ_ETH_CMD_HOSTFCMODE_V(HOSTFCMODE_STATUS_PAGE_X) |
+		htonl(FW_EQ_ETH_CMD_HOSTFCMODE_V(dbqt
+						 ? HOSTFCMODE_INGRESS_QUEUE_X
+						 : HOSTFCMODE_STATUS_PAGE_X) |
 		      FW_EQ_ETH_CMD_PCIECHN_V(pi->tx_chan) |
 		      FW_EQ_ETH_CMD_FETCHRO_F | FW_EQ_ETH_CMD_IQID_V(iqid));
+
+	/* Note that the CIDX Flush Threshold should match MAX_TX_RECLAIM. */
 	c.dcaen_to_eqsize =
-		htonl(FW_EQ_ETH_CMD_FBMIN_V(FETCHBURSTMIN_64B_X) |
+		htonl(FW_EQ_ETH_CMD_FBMIN_V(chip_ver <= CHELSIO_T5
+					    ? FETCHBURSTMIN_64B_X
+					    : FETCHBURSTMIN_64B_T6_X) |
 		      FW_EQ_ETH_CMD_FBMAX_V(FETCHBURSTMAX_512B_X) |
 		      FW_EQ_ETH_CMD_CIDXFTHRESH_V(CIDXFLUSHTHRESH_32_X) |
 		      FW_EQ_ETH_CMD_EQSIZE_V(nentries));
+
 	c.eqaddr = cpu_to_be64(txq->q.phys_addr);
+
+	/* If we're using the SGE Doorbell Queue Timer mechanism, pass in the
+	 * currently configured Timer Index.  THis can be changed later via an
+	 * ethtool -C tx-usecs {Timer Val} command.  Note that the SGE
+	 * Doorbell Queue mode is currently automatically enabled in the
+	 * Firmware by setting either AUTOEQUEQE or AUTOEQUIQE ...
+	 */
+	if (dbqt)
+		c.timeren_timerix =
+			cpu_to_be32(FW_EQ_ETH_CMD_TIMEREN_F |
+				    FW_EQ_ETH_CMD_TIMERIX_V(txq->dbqtimerix));
 
 	ret = t4_wr_mbox(adap, adap->mbox, &c, sizeof(c), &c);
 	if (ret) {
@@ -3568,6 +3841,8 @@ int t4_sge_alloc_eth_txq(struct adapter *adap, struct sge_eth_txq *txq,
 	txq->txq = netdevq;
 	txq->tso = txq->tx_cso = txq->vlan_ins = 0;
 	txq->mapping_err = 0;
+	txq->dbqt = dbqt;
+
 	return 0;
 }
 
@@ -3575,10 +3850,11 @@ int t4_sge_alloc_ctrl_txq(struct adapter *adap, struct sge_ctrl_txq *txq,
 			  struct net_device *dev, unsigned int iqid,
 			  unsigned int cmplqid)
 {
-	int ret, nentries;
-	struct fw_eq_ctrl_cmd c;
-	struct sge *s = &adap->sge;
+	unsigned int chip_ver = CHELSIO_CHIP_VERSION(adap->params.chip);
 	struct port_info *pi = netdev_priv(dev);
+	struct sge *s = &adap->sge;
+	struct fw_eq_ctrl_cmd c;
+	int ret, nentries;
 
 	/* Add status entries */
 	nentries = txq->q.size + s->stat_len / sizeof(struct tx_desc);
@@ -3602,7 +3878,9 @@ int t4_sge_alloc_ctrl_txq(struct adapter *adap, struct sge_ctrl_txq *txq,
 		      FW_EQ_CTRL_CMD_PCIECHN_V(pi->tx_chan) |
 		      FW_EQ_CTRL_CMD_FETCHRO_F | FW_EQ_CTRL_CMD_IQID_V(iqid));
 	c.dcaen_to_eqsize =
-		htonl(FW_EQ_CTRL_CMD_FBMIN_V(FETCHBURSTMIN_64B_X) |
+		htonl(FW_EQ_CTRL_CMD_FBMIN_V(chip_ver <= CHELSIO_T5
+					     ? FETCHBURSTMIN_64B_X
+					     : FETCHBURSTMIN_64B_T6_X) |
 		      FW_EQ_CTRL_CMD_FBMAX_V(FETCHBURSTMAX_512B_X) |
 		      FW_EQ_CTRL_CMD_CIDXFTHRESH_V(CIDXFLUSHTHRESH_32_X) |
 		      FW_EQ_CTRL_CMD_EQSIZE_V(nentries));
@@ -3642,6 +3920,7 @@ int t4_sge_alloc_uld_txq(struct adapter *adap, struct sge_uld_txq *txq,
 			 struct net_device *dev, unsigned int iqid,
 			 unsigned int uld_type)
 {
+	unsigned int chip_ver = CHELSIO_CHIP_VERSION(adap->params.chip);
 	int ret, nentries;
 	struct fw_eq_ofld_cmd c;
 	struct sge *s = &adap->sge;
@@ -3672,7 +3951,9 @@ int t4_sge_alloc_uld_txq(struct adapter *adap, struct sge_uld_txq *txq,
 		      FW_EQ_OFLD_CMD_PCIECHN_V(pi->tx_chan) |
 		      FW_EQ_OFLD_CMD_FETCHRO_F | FW_EQ_OFLD_CMD_IQID_V(iqid));
 	c.dcaen_to_eqsize =
-		htonl(FW_EQ_OFLD_CMD_FBMIN_V(FETCHBURSTMIN_64B_X) |
+		htonl(FW_EQ_OFLD_CMD_FBMIN_V(chip_ver <= CHELSIO_T5
+					     ? FETCHBURSTMIN_64B_X
+					     : FETCHBURSTMIN_64B_T6_X) |
 		      FW_EQ_OFLD_CMD_FBMAX_V(FETCHBURSTMAX_512B_X) |
 		      FW_EQ_OFLD_CMD_CIDXFTHRESH_V(CIDXFLUSHTHRESH_32_X) |
 		      FW_EQ_OFLD_CMD_EQSIZE_V(nentries));

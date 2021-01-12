@@ -31,7 +31,7 @@
  * For readq() and writeq() on 32-bit builds, the hi-lo, lo-hi order is
  * irrelevant.
  */
-#include <asm-generic/io-64-nonatomic-hi-lo.h>
+#include <linux/io-64-nonatomic-hi-lo.h>
 
 static bool force_enable_dimms;
 module_param(force_enable_dimms, bool, S_IRUGO|S_IWUSR);
@@ -54,6 +54,10 @@ MODULE_PARM_DESC(default_dsm_family,
 static bool no_init_ars;
 module_param(no_init_ars, bool, 0644);
 MODULE_PARM_DESC(no_init_ars, "Skip ARS run at nfit init time");
+
+static bool force_labels;
+module_param(force_labels, bool, 0444);
+MODULE_PARM_DESC(force_labels, "Opt-in to labels despite missing methods");
 
 LIST_HEAD(acpi_descs);
 DEFINE_MUTEX(acpi_desc_lock);
@@ -398,17 +402,6 @@ static u8 nfit_dsm_revid(unsigned family, unsigned func)
 	return id;
 }
 
-static bool payload_dumpable(struct nvdimm *nvdimm, unsigned int func)
-{
-	struct nfit_mem *nfit_mem = nvdimm_provider_data(nvdimm);
-
-	if (nfit_mem && nfit_mem->family == NVDIMM_FAMILY_INTEL
-			&& func >= NVDIMM_INTEL_GET_SECURITY_STATE
-			&& func <= NVDIMM_INTEL_MASTER_SECURE_ERASE)
-		return IS_ENABLED(CONFIG_NFIT_SECURITY_DEBUG);
-	return true;
-}
-
 static int cmd_to_func(struct nfit_mem *nfit_mem, unsigned int cmd,
 		struct nd_cmd_pkg *call_pkg)
 {
@@ -437,6 +430,17 @@ static int cmd_to_func(struct nfit_mem *nfit_mem, unsigned int cmd,
 	 * published as a valid function in dsm_mask.
 	 */
 	return 0;
+}
+
+static bool payload_dumpable(struct nvdimm *nvdimm, unsigned int func)
+{
+	struct nfit_mem *nfit_mem = nvdimm_provider_data(nvdimm);
+
+	if (nfit_mem && nfit_mem->family == NVDIMM_FAMILY_INTEL
+			&& func >= NVDIMM_INTEL_GET_SECURITY_STATE
+			&& func <= NVDIMM_INTEL_MASTER_SECURE_ERASE)
+		return IS_ENABLED(CONFIG_NFIT_SECURITY_DEBUG);
+	return true;
 }
 
 int acpi_nfit_ctl(struct nvdimm_bus_descriptor *nd_desc, struct nvdimm *nvdimm,
@@ -544,17 +548,30 @@ int acpi_nfit_ctl(struct nvdimm_bus_descriptor *nd_desc, struct nvdimm *nvdimm,
 	} else {
 		u8 revid;
 
-		if (nfit_mem)
+		if (nvdimm)
 			revid = nfit_dsm_revid(nfit_mem->family, func);
 		else
 			revid = 1;
-		out_obj = acpi_evaluate_dsm(handle, guid->b, revid, func, &in_obj);
+		out_obj = acpi_evaluate_dsm(handle, guid, revid, func, &in_obj);
 	}
 
 	if (!out_obj) {
 		dev_dbg(dev, "%s _DSM failed cmd: %s\n", dimm_name, cmd_name);
 		return -EINVAL;
 	}
+
+	if (out_obj->type != ACPI_TYPE_BUFFER) {
+		dev_dbg(dev, "%s unexpected output object type cmd: %s type: %d\n",
+				dimm_name, cmd_name, out_obj->type);
+		rc = -EINVAL;
+		goto out;
+	}
+
+	dev_dbg(dev, "%s cmd: %s output length: %d\n", dimm_name,
+			cmd_name, out_obj->buffer.length);
+	print_hex_dump_debug(cmd_name, DUMP_PREFIX_OFFSET, 4, 4,
+			out_obj->buffer.pointer,
+			min_t(u32, 128, out_obj->buffer.length), true);
 
 	if (call_pkg) {
 		call_pkg->nd_fw_size = out_obj->buffer.length;
@@ -573,19 +590,6 @@ int acpi_nfit_ctl(struct nvdimm_bus_descriptor *nd_desc, struct nvdimm *nvdimm,
 			*cmd_rc = 0;
 		return 0;
 	}
-
-	if (out_obj->package.type != ACPI_TYPE_BUFFER) {
-		dev_dbg(dev, "%s unexpected output object type cmd: %s type: %d\n",
-				dimm_name, cmd_name, out_obj->type);
-		rc = -EINVAL;
-		goto out;
-	}
-
-	dev_dbg(dev, "%s cmd: %s output length: %d\n", dimm_name,
-			cmd_name, out_obj->buffer.length);
-	print_hex_dump_debug(cmd_name, DUMP_PREFIX_OFFSET, 4, 4,
-			out_obj->buffer.pointer,
-			min_t(u32, 128, out_obj->buffer.length), true);
 
 	for (i = 0, offset = 0; i < desc->out_num; i++) {
 		u32 out_size = nd_cmd_out_size(nvdimm, cmd, desc, i, buf,
@@ -1137,9 +1141,10 @@ static int __nfit_mem_init(struct acpi_nfit_desc *acpi_desc,
 				continue;
 			nfit_mem->nfit_flush = nfit_flush;
 			flush = nfit_flush->flush;
-			nfit_mem->flush_wpq = devm_kzalloc(acpi_desc->dev,
-					flush->hint_count
-					* sizeof(struct resource), GFP_KERNEL);
+			nfit_mem->flush_wpq = devm_kcalloc(acpi_desc->dev,
+					flush->hint_count,
+					sizeof(struct resource),
+					GFP_KERNEL);
 			if (!nfit_mem->flush_wpq)
 				return -ENOMEM;
 			for (i = 0; i < flush->hint_count; i++) {
@@ -1792,7 +1797,7 @@ __weak void nfit_intel_shutdown_status(struct nfit_mem *nfit_mem)
 	if ((nfit_mem->dsm_mask & (1 << func)) == 0)
 		return;
 
-	out_obj = acpi_evaluate_dsm(handle, guid->b, revid, func, &in_obj);
+	out_obj = acpi_evaluate_dsm(handle, guid, revid, func, &in_obj);
 	if (!out_obj || out_obj->type != ACPI_TYPE_BUFFER
 			|| out_obj->buffer.length < sizeof(smart)) {
 		dev_dbg(dev->parent, "%s: failed to retrieve initial health\n",
@@ -1879,12 +1884,20 @@ static int acpi_nfit_add_dimm(struct acpi_nfit_desc *acpi_desc,
 	dev_set_drvdata(&adev_dimm->dev, nfit_mem);
 
 	/*
-	 * Until standardization materializes we need to consider 4
-	 * different command sets.  Note, that checking for function0 (bit0)
-	 * tells us if any commands are reachable through this GUID.
+	 * There are 4 "legacy" NVDIMM command sets
+	 * (NVDIMM_FAMILY_{INTEL,MSFT,HPE1,HPE2}) that were created before
+	 * an EFI working group was established to constrain this
+	 * proliferation. The nfit driver probes for the supported command
+	 * set by GUID. Note, if you're a platform developer looking to add
+	 * a new command set to this probe, consider using an existing set,
+	 * or otherwise seek approval to publish the command set at
+	 * http://www.uefi.org/RFIC_LIST.
+	 *
+	 * Note, that checking for function0 (bit0) tells us if any commands
+	 * are reachable through this GUID.
 	 */
 	for (i = 0; i <= NVDIMM_FAMILY_MAX; i++)
-		if (acpi_check_dsm(adev_dimm->handle, (to_nfit_uuid(i))->b, 1, 1))
+		if (acpi_check_dsm(adev_dimm->handle, to_nfit_uuid(i), 1, 1))
 			if (family < 0 || i == default_dsm_family)
 				family = i;
 
@@ -1904,6 +1917,8 @@ static int acpi_nfit_add_dimm(struct acpi_nfit_desc *acpi_desc,
 			dsm_mask &= ~(1 << 8);
 	} else if (nfit_mem->family == NVDIMM_FAMILY_MSFT) {
 		dsm_mask = 0xffffffff;
+	} else if (nfit_mem->family == NVDIMM_FAMILY_HYPERV) {
+		dsm_mask = 0x1f;
 	} else {
 		dev_dbg(dev, "unknown dimm command family\n");
 		nfit_mem->family = -1;
@@ -1920,9 +1935,9 @@ static int acpi_nfit_add_dimm(struct acpi_nfit_desc *acpi_desc,
 
 	guid = to_nfit_uuid(nfit_mem->family);
 	for_each_set_bit(i, &dsm_mask, BITS_PER_LONG)
-		if (acpi_check_dsm(adev_dimm->handle, guid->b,
-				   nfit_dsm_revid(nfit_mem->family, i),
-				   1ULL << i))
+		if (acpi_check_dsm(adev_dimm->handle, guid,
+					nfit_dsm_revid(nfit_mem->family, i),
+					1ULL << i))
 			set_bit(i, &nfit_mem->dsm_mask);
 
 	/*
@@ -1946,6 +1961,19 @@ static int acpi_nfit_add_dimm(struct acpi_nfit_desc *acpi_desc,
 			dev_dbg(dev, "%s: has _LSW\n", dev_name(&adev_dimm->dev));
 			set_bit(NFIT_MEM_LSW, &nfit_mem->flags);
 		}
+
+		/*
+		 * Quirk read-only label configurations to preserve
+		 * access to label-less namespaces by default.
+		 */
+		if (!test_bit(NFIT_MEM_LSW, &nfit_mem->flags)
+				&& !force_labels) {
+			dev_dbg(dev, "%s: No _LSW, disable labels\n",
+					dev_name(&adev_dimm->dev));
+			clear_bit(NFIT_MEM_LSR, &nfit_mem->flags);
+		} else
+			dev_dbg(dev, "%s: Force enable labels\n",
+					dev_name(&adev_dimm->dev));
 	}
 
 	populate_shutdown_status(nfit_mem);
@@ -2046,6 +2074,10 @@ static int acpi_nfit_register_dimms(struct acpi_nfit_desc *acpi_desc)
 			cmd_mask |= nfit_mem->dsm_mask & NVDIMM_STANDARD_CMDMASK;
 		}
 
+		/* Quirk to ignore LOCAL for labels on HYPERV DIMMs */
+		if (nfit_mem->family == NVDIMM_FAMILY_HYPERV)
+			set_bit(NDD_NOBLK, &flags);
+
 		if (test_bit(NFIT_MEM_LSR, &nfit_mem->flags)) {
 			set_bit(ND_CMD_GET_CONFIG_SIZE, &cmd_mask);
 			set_bit(ND_CMD_GET_CONFIG_DATA, &cmd_mask);
@@ -2069,7 +2101,7 @@ static int acpi_nfit_register_dimms(struct acpi_nfit_desc *acpi_desc)
 		if ((mem_flags & ACPI_NFIT_MEM_FAILED_MASK) == 0)
 			continue;
 
-		dev_info(acpi_desc->dev, "%s flags:%s%s%s%s%s\n",
+		dev_err(acpi_desc->dev, "Error found in NVDIMM %s flags:%s%s%s%s%s\n",
 				nvdimm_name(nvdimm),
 		  mem_flags & ACPI_NFIT_MEM_SAVE_FAILED ? " save_fail" : "",
 		  mem_flags & ACPI_NFIT_MEM_RESTORE_FAILED ? " restore_fail":"",
@@ -2134,7 +2166,7 @@ static void acpi_nfit_init_dsms(struct acpi_nfit_desc *acpi_desc)
 		return;
 
 	for (i = ND_CMD_ARS_CAP; i <= ND_CMD_CLEAR_ERROR; i++)
-		if (acpi_check_dsm(adev->handle, guid->b, 1, 1ULL << i))
+		if (acpi_check_dsm(adev->handle, guid, 1, 1ULL << i))
 			set_bit(i, &nd_desc->cmd_mask);
 	set_bit(ND_CMD_CALL, &nd_desc->cmd_mask);
 
@@ -2148,7 +2180,7 @@ static void acpi_nfit_init_dsms(struct acpi_nfit_desc *acpi_desc)
 		(1 << NFIT_CMD_ARS_INJECT_CLEAR) |
 		(1 << NFIT_CMD_ARS_INJECT_GET);
 	for_each_set_bit(i, &dsm_mask, BITS_PER_LONG)
-		if (acpi_check_dsm(adev->handle, guid->b, 1, 1ULL << i))
+		if (acpi_check_dsm(adev->handle, guid, 1, 1ULL << i))
 			set_bit(i, &nd_desc->bus_dsm_mask);
 }
 
@@ -2440,7 +2472,7 @@ static int acpi_nfit_blk_single_io(struct nfit_blk *nfit_blk,
 			memcpy_flushcache(mmio->addr.aperture + offset, iobuf + copied, c);
 		else {
 			if (nfit_blk->dimm_flags & NFIT_BLK_READ_FLUSH)
-				mmio_flush_range((void __force *)
+				arch_invalidate_pmem((void __force *)
 					mmio->addr.aperture + offset, c);
 
 			memcpy(iobuf + copied, mmio->addr.aperture + offset, c);
@@ -2798,7 +2830,8 @@ static int acpi_nfit_insert_resource(struct acpi_nfit_desc *acpi_desc,
 	int is_pmem, ret;
 
 	/* No operation if the region is already registered as PMEM */
-	is_pmem = region_intersects_pmem(nd_res->start, resource_size(nd_res));
+	is_pmem = region_intersects(nd_res->start, resource_size(nd_res),
+				IORESOURCE_MEM, IORES_DESC_PERSISTENT_MEMORY);
 	if (is_pmem == REGION_INTERSECTS)
 		return 0;
 
@@ -2810,16 +2843,17 @@ static int acpi_nfit_insert_resource(struct acpi_nfit_desc *acpi_desc,
 	res->start = nd_res->start;
 	res->end = nd_res->end;
 	res->flags = IORESOURCE_MEM;
+	res->desc = IORES_DESC_PERSISTENT_MEMORY;
 
 	ret = insert_resource(&iomem_resource, res);
 	if (ret)
 		return ret;
 
-	ret = devm_add_action(acpi_desc->dev, acpi_nfit_remove_resource, res);
-	if (ret) {
-		remove_resource(res);
+	ret = devm_add_action_or_reset(acpi_desc->dev,
+					acpi_nfit_remove_resource,
+					res);
+	if (ret)
 		return ret;
-	}
 
 	return 0;
 }
@@ -2965,10 +2999,12 @@ static int acpi_nfit_register_region(struct acpi_nfit_desc *acpi_desc,
 	nvdimm_bus = acpi_desc->nvdimm_bus;
 	if (nfit_spa_type(spa) == NFIT_SPA_PM) {
 		rc = acpi_nfit_insert_resource(acpi_desc, ndr_desc);
-		if (rc)
+		if (rc) {
 			dev_warn(acpi_desc->dev,
 				"failed to insert pmem resource to iomem: %d\n",
 				rc);
+			goto out;
+		}
 
 		nfit_spa->nd_region = nvdimm_pmem_region_create(nvdimm_bus,
 				ndr_desc);
@@ -3542,6 +3578,11 @@ void acpi_nfit_desc_init(struct acpi_nfit_desc *acpi_desc, struct device *dev)
 }
 EXPORT_SYMBOL_GPL(acpi_nfit_desc_init);
 
+static void acpi_nfit_put_table(void *table)
+{
+	acpi_put_table(table);
+}
+
 void acpi_nfit_shutdown(void *data)
 {
 	struct acpi_nfit_desc *acpi_desc = data;
@@ -3582,7 +3623,7 @@ static int acpi_nfit_add(struct acpi_device *adev)
 	acpi_size sz;
 	int rc = 0;
 
-	status = acpi_get_table_with_size(ACPI_SIG_NFIT, 0, &tbl, &sz);
+	status = acpi_get_table(ACPI_SIG_NFIT, 0, &tbl);
 	if (ACPI_FAILURE(status)) {
 		/* The NVDIMM root device allows OS to trigger enumeration of
 		 * NVDIMMs through NFIT at boot time and re-enumeration at
@@ -3594,6 +3635,11 @@ static int acpi_nfit_add(struct acpi_device *adev)
 		dev_dbg(dev, "failed to find NFIT at startup\n");
 		return 0;
 	}
+
+	rc = devm_add_action_or_reset(dev, acpi_nfit_put_table, tbl);
+	if (rc)
+		return rc;
+	sz = tbl->length;
 
 	acpi_desc = devm_kzalloc(dev, sizeof(*acpi_desc), GFP_KERNEL);
 	if (!acpi_desc)
@@ -3751,6 +3797,7 @@ static __init int nfit_init(void)
 	guid_parse(UUID_NFIT_DIMM_N_HPE1, &nfit_uuid[NFIT_DEV_DIMM_N_HPE1]);
 	guid_parse(UUID_NFIT_DIMM_N_HPE2, &nfit_uuid[NFIT_DEV_DIMM_N_HPE2]);
 	guid_parse(UUID_NFIT_DIMM_N_MSFT, &nfit_uuid[NFIT_DEV_DIMM_N_MSFT]);
+	guid_parse(UUID_NFIT_DIMM_N_HYPERV, &nfit_uuid[NFIT_DEV_DIMM_N_HYPERV]);
 
 	nfit_wq = create_singlethread_workqueue("nfit");
 	if (!nfit_wq)

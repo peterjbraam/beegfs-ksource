@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef BLK_STAT_H
 #define BLK_STAT_H
 
@@ -6,14 +7,6 @@
 #include <linux/ktime.h>
 #include <linux/rcupdate.h>
 #include <linux/timer.h>
-
-/*
- * Upper 3 bits can be used elsewhere
- */
-#define BLK_STAT_RES_BITS	3
-#define BLK_STAT_SHIFT		(64 - BLK_STAT_RES_BITS)
-#define BLK_STAT_TIME_MASK	((1ULL << BLK_STAT_SHIFT) - 1)
-#define BLK_STAT_MASK		~BLK_STAT_TIME_MASK
 
 /**
  * struct blk_stat_callback - Block statistics callback.
@@ -72,34 +65,10 @@ struct blk_stat_callback {
 struct blk_queue_stats *blk_alloc_queue_stats(void);
 void blk_free_queue_stats(struct blk_queue_stats *);
 
-void blk_stat_add(struct request *);
+void blk_stat_add(struct request *rq, u64 now);
 
-static inline void blk_stat_set_issue_time(struct blk_issue_stat *stat)
-{
-	stat->time = ((stat->time & BLK_STAT_MASK) |
-		      (ktime_to_ns(ktime_get()) & BLK_STAT_TIME_MASK));
-}
-
-static inline u64 __blk_stat_time(u64 time)
-{
-	return time & BLK_STAT_TIME_MASK;
-}
-
-static inline u64 blk_stat_time(struct blk_issue_stat *stat)
-{
-	return __blk_stat_time(stat->time);
-}
-
-/*
- * blk_stat_rq_ddir() - Bucket callback function for the request data direction.
- * @rq: Request.
- *
- * This is the same as rq_data_dir() but as a function so it can be used as
- * @bucket_fn for blk_stat_alloc_callback().
- *
- * Return: Data direction of the request, either READ or WRITE.
- */
-int blk_stat_rq_ddir(const struct request *rq);
+/* record time/size info in request but not add a callback */
+void blk_stat_enable_accounting(struct request_queue *q);
 
 /**
  * blk_stat_alloc_callback() - Allocate a block statistics callback.
@@ -176,6 +145,11 @@ static inline void blk_stat_activate_nsecs(struct blk_stat_callback *cb,
 	mod_timer(&cb->timer, jiffies + nsecs_to_jiffies(nsecs));
 }
 
+static inline void blk_stat_deactivate(struct blk_stat_callback *cb)
+{
+	del_timer_sync(&cb->timer);
+}
+
 /**
  * blk_stat_activate_msecs() - Gather block statistics during a time window in
  * milliseconds.
@@ -189,5 +163,9 @@ static inline void blk_stat_activate_msecs(struct blk_stat_callback *cb,
 {
 	mod_timer(&cb->timer, jiffies + msecs_to_jiffies(msecs));
 }
+
+void blk_rq_stat_add(struct blk_rq_stat *, u64);
+void blk_rq_stat_sum(struct blk_rq_stat *, struct blk_rq_stat *);
+void blk_rq_stat_init(struct blk_rq_stat *);
 
 #endif

@@ -26,6 +26,10 @@
 #define _INTEL_DISPLAY_H_
 
 #include <drm/drm_util.h>
+#include <drm/i915_drm.h>
+
+struct drm_i915_private;
+struct intel_plane_state;
 
 enum i915_gpio {
 	GPIOA,
@@ -121,7 +125,7 @@ enum i9xx_plane_id {
 };
 
 #define plane_name(p) ((p) + 'A')
-#define sprite_name(p, s) ((p) * INTEL_INFO(dev_priv)->num_sprites[(p)] + (s) + 'A')
+#define sprite_name(p, s) ((p) * RUNTIME_INFO(dev_priv)->num_sprites[(p)] + (s) + 'A')
 
 /*
  * Per-pipe plane identifier.
@@ -149,21 +153,6 @@ enum plane_id {
 #define for_each_plane_id_on_crtc(__crtc, __p) \
 	for ((__p) = PLANE_PRIMARY; (__p) < I915_MAX_PLANES; (__p)++) \
 		for_each_if((__crtc)->plane_ids_mask & BIT(__p))
-
-enum port {
-	PORT_NONE = -1,
-
-	PORT_A = 0,
-	PORT_B,
-	PORT_C,
-	PORT_D,
-	PORT_E,
-	PORT_F,
-
-	I915_MAX_PORTS
-};
-
-#define port_name(p) ((p) + 'A')
 
 /*
  * Ports identifier referenced from other drivers.
@@ -311,12 +300,12 @@ struct intel_link_m_n {
 
 #define for_each_universal_plane(__dev_priv, __pipe, __p)		\
 	for ((__p) = 0;							\
-	     (__p) < INTEL_INFO(__dev_priv)->num_sprites[(__pipe)] + 1;	\
+	     (__p) < RUNTIME_INFO(__dev_priv)->num_sprites[(__pipe)] + 1;	\
 	     (__p)++)
 
 #define for_each_sprite(__dev_priv, __p, __s)				\
 	for ((__s) = 0;							\
-	     (__s) < INTEL_INFO(__dev_priv)->num_sprites[(__p)];	\
+	     (__s) < RUNTIME_INFO(__dev_priv)->num_sprites[(__p)];	\
 	     (__s)++)
 
 #define for_each_port_masked(__port, __ports_mask) \
@@ -446,4 +435,8 @@ void intel_link_compute_m_n(u16 bpp, int nlanes,
 			    struct intel_link_m_n *m_n,
 			    bool constant_n);
 bool is_ccs_modifier(u64 modifier);
+u32 intel_plane_fb_max_stride(struct drm_i915_private *dev_priv,
+			      u32 pixel_format, u64 modifier);
+bool intel_plane_can_remap(const struct intel_plane_state *plane_state);
+
 #endif

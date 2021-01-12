@@ -51,20 +51,29 @@ static void clean_mr(struct mlx5_ib_dev *dev, struct mlx5_ib_mr *mr);
 static void dereg_mr(struct mlx5_ib_dev *dev, struct mlx5_ib_mr *mr);
 static int mr_cache_max_order(struct mlx5_ib_dev *dev);
 static int unreg_umr(struct mlx5_ib_dev *dev, struct mlx5_ib_mr *mr);
+static bool umr_can_modify_entity_size(struct mlx5_ib_dev *dev)
+{
+	return !MLX5_CAP_GEN(dev->mdev, umr_modify_entity_size_disabled);
+}
 
 static bool umr_can_use_indirect_mkey(struct mlx5_ib_dev *dev)
 {
 	return !MLX5_CAP_GEN(dev->mdev, umr_indirect_mkey_disabled);
 }
 
+static bool use_umr(struct mlx5_ib_dev *dev, int order)
+{
+	return order <= mr_cache_max_order(dev) &&
+		umr_can_modify_entity_size(dev);
+}
+
 static int destroy_mkey(struct mlx5_ib_dev *dev, struct mlx5_ib_mr *mr)
 {
 	int err = mlx5_core_destroy_mkey(dev->mdev, &mr->mmkey);
 
-#ifdef CONFIG_INFINIBAND_ON_DEMAND_PAGING
-	/* Wait until all page fault handlers using the mr complete. */
-	synchronize_srcu(&dev->mr_srcu);
-#endif
+	if (IS_ENABLED(CONFIG_INFINIBAND_ON_DEMAND_PAGING))
+		/* Wait until all page fault handlers using the mr complete. */
+		synchronize_srcu(&dev->mr_srcu);
 
 	return err;
 }
@@ -85,10 +94,9 @@ static bool use_umr_mtt_update(struct mlx5_ib_mr *mr, u64 start, u64 length)
 		length + (start & (MLX5_ADAPTER_PAGE_SIZE - 1));
 }
 
-#ifdef CONFIG_INFINIBAND_ON_DEMAND_PAGING
 static void update_odp_mr(struct mlx5_ib_mr *mr)
 {
-	if (mr->umem->is_odp) {
+	if (is_odp_mr(mr)) {
 		/*
 		 * This barrier prevents the compiler from moving the
 		 * setting of umem->odp_data->private to point to our
@@ -111,11 +119,11 @@ static void update_odp_mr(struct mlx5_ib_mr *mr)
 		smp_wmb();
 	}
 }
-#endif
 
-static void reg_mr_callback(int status, void *context)
+static void reg_mr_callback(int status, struct mlx5_async_work *context)
 {
-	struct mlx5_ib_mr *mr = context;
+	struct mlx5_ib_mr *mr =
+		container_of(context, struct mlx5_ib_mr, cb_work);
 	struct mlx5_ib_dev *dev = mr->dev;
 	struct mlx5_mr_cache *cache = &dev->cache;
 	int c = order2idx(dev, mr->order);
@@ -206,9 +214,9 @@ static int add_keys(struct mlx5_ib_dev *dev, int c, int num)
 		ent->pending++;
 		spin_unlock_irq(&ent->lock);
 		err = mlx5_core_create_mkey_cb(dev->mdev, &mr->mmkey,
-					       in, inlen,
+					       &dev->async_ctx, in, inlen,
 					       mr->out, sizeof(mr->out),
-					       reg_mr_callback, mr);
+					       reg_mr_callback, &mr->cb_work);
 		if (err) {
 			spin_lock_irq(&ent->lock);
 			ent->pending--;
@@ -246,9 +254,8 @@ static void remove_keys(struct mlx5_ib_dev *dev, int c, int num)
 		mlx5_core_destroy_mkey(dev->mdev, &mr->mmkey);
 	}
 
-#ifdef CONFIG_INFINIBAND_ON_DEMAND_PAGING
-	synchronize_srcu(&dev->mr_srcu);
-#endif
+	if (IS_ENABLED(CONFIG_INFINIBAND_ON_DEMAND_PAGING))
+		synchronize_srcu(&dev->mr_srcu);
 
 	list_for_each_entry_safe(mr, tmp_mr, &del_list, list) {
 		list_del(&mr->list);
@@ -538,16 +545,13 @@ void mlx5_mr_cache_free(struct mlx5_ib_dev *dev, struct mlx5_ib_mr *mr)
 		return;
 
 	c = order2idx(dev, mr->order);
-	WARN_ON(c < 0 || c >= MAX_MR_CACHE_ENTRIES);
-
-	if (unreg_umr(dev, mr)) {
-		mr->allocated_from_cache = false;
-		destroy_mkey(dev, mr);
-		ent = &cache->ent[c];
-		if (ent->cur < ent->limit)
-			queue_work(cache->wq, &ent->work);
+	if (c < 0 || c >= MAX_MR_CACHE_ENTRIES) {
+		mlx5_ib_warn(dev, "order %d, cache index %d\n", mr->order, c);
 		return;
 	}
+
+	if (unreg_umr(dev, mr))
+		return;
 
 	ent = &cache->ent[c];
 	spin_lock_irq(&ent->lock);
@@ -651,9 +655,9 @@ err:
 	return -ENOMEM;
 }
 
-static void delay_time_func(unsigned long ctx)
+static void delay_time_func(struct timer_list *t)
 {
-	struct mlx5_ib_dev *dev = (struct mlx5_ib_dev *)ctx;
+	struct mlx5_ib_dev *dev = from_timer(dev, t, delay_timer);
 
 	dev->fill_delay = 0;
 }
@@ -672,7 +676,8 @@ int mlx5_mr_cache_init(struct mlx5_ib_dev *dev)
 		return -ENOMEM;
 	}
 
-	setup_timer(&dev->delay_timer, delay_time_func, (unsigned long)dev);
+	mlx5_cmd_init_async_ctx(dev->mdev, &dev->async_ctx);
+	timer_setup(&dev->delay_timer, delay_time_func, 0);
 	for (i = 0; i < MAX_MR_CACHE_ENTRIES; i++) {
 		ent = &cache->ent[i];
 		INIT_LIST_HEAD(&ent->head);
@@ -718,33 +723,6 @@ int mlx5_mr_cache_init(struct mlx5_ib_dev *dev)
 	return 0;
 }
 
-static void wait_for_async_commands(struct mlx5_ib_dev *dev)
-{
-	struct mlx5_mr_cache *cache = &dev->cache;
-	struct mlx5_cache_ent *ent;
-	int total = 0;
-	int i;
-	int j;
-
-	for (i = 0; i < MAX_MR_CACHE_ENTRIES; i++) {
-		ent = &cache->ent[i];
-		for (j = 0 ; j < 1000; j++) {
-			if (!ent->pending)
-				break;
-			msleep(50);
-		}
-	}
-	for (i = 0; i < MAX_MR_CACHE_ENTRIES; i++) {
-		ent = &cache->ent[i];
-		total += ent->pending;
-	}
-
-	if (total)
-		mlx5_ib_warn(dev, "aborted while there are %d pending mr requests\n", total);
-	else
-		mlx5_ib_warn(dev, "done with all pending requests\n");
-}
-
 int mlx5_mr_cache_cleanup(struct mlx5_ib_dev *dev)
 {
 	int i;
@@ -756,12 +734,12 @@ int mlx5_mr_cache_cleanup(struct mlx5_ib_dev *dev)
 	flush_workqueue(dev->cache.wq);
 
 	mlx5_mr_cache_debugfs_cleanup(dev);
+	mlx5_cmd_cleanup_async_ctx(&dev->async_ctx);
 
 	for (i = 0; i < MAX_MR_CACHE_ENTRIES; i++)
 		clean_keys(dev, i);
 
 	destroy_workqueue(dev->cache.wq);
-	wait_for_async_commands(dev);
 	del_timer_sync(&dev->delay_timer);
 
 	return 0;
@@ -1273,6 +1251,21 @@ err_free:
 	return ERR_PTR(err);
 }
 
+int mlx5_ib_advise_mr(struct ib_pd *pd,
+		      enum ib_uverbs_advise_mr_advice advice,
+		      u32 flags,
+		      struct ib_sge *sg_list,
+		      u32 num_sge,
+		      struct uverbs_attr_bundle *attrs)
+{
+	if (advice != IB_UVERBS_ADVISE_MR_ADVICE_PREFETCH &&
+	    advice != IB_UVERBS_ADVISE_MR_ADVICE_PREFETCH_WRITE)
+		return -EOPNOTSUPP;
+
+	return mlx5_ib_advise_mr_prefetch(pd, advice, flags,
+					 sg_list, num_sge);
+}
+
 struct ib_mr *mlx5_ib_reg_dm_mr(struct ib_pd *pd, struct ib_dm *dm,
 				struct ib_dm_mr_attr *attr,
 				struct uverbs_attr_bundle *attrs)
@@ -1295,7 +1288,7 @@ struct ib_mr *mlx5_ib_reg_user_mr(struct ib_pd *pd, u64 start, u64 length,
 {
 	struct mlx5_ib_dev *dev = to_mdev(pd->device);
 	struct mlx5_ib_mr *mr = NULL;
-	bool use_umr;
+	bool populate_mtts = false;
 	struct ib_umem *umem;
 	int page_shift;
 	int npages;
@@ -1309,8 +1302,8 @@ struct ib_mr *mlx5_ib_reg_user_mr(struct ib_pd *pd, u64 start, u64 length,
 	mlx5_ib_dbg(dev, "start 0x%llx, virt_addr 0x%llx, length 0x%llx, access_flags 0x%x\n",
 		    start, virt_addr, length, access_flags);
 
-#ifdef CONFIG_INFINIBAND_ON_DEMAND_PAGING
-	if (!start && length == U64_MAX) {
+	if (IS_ENABLED(CONFIG_INFINIBAND_ON_DEMAND_PAGING) && !start &&
+	    length == U64_MAX) {
 		if (!(access_flags & IB_ACCESS_ON_DEMAND) ||
 		    !(dev->odp_caps.general_caps & IB_ODP_SUPPORT_IMPLICIT))
 			return ERR_PTR(-EINVAL);
@@ -1320,7 +1313,6 @@ struct ib_mr *mlx5_ib_reg_user_mr(struct ib_pd *pd, u64 start, u64 length,
 			return ERR_CAST(mr);
 		return &mr->ibmr;
 	}
-#endif
 
 	err = mr_umem_get(pd, start, length, access_flags, &umem, &npages,
 			   &page_shift, &ncont, &order);
@@ -1328,30 +1320,29 @@ struct ib_mr *mlx5_ib_reg_user_mr(struct ib_pd *pd, u64 start, u64 length,
 	if (err < 0)
 		return ERR_PTR(err);
 
-	use_umr = !MLX5_CAP_GEN(dev->mdev, umr_modify_entity_size_disabled) &&
-		  (!MLX5_CAP_GEN(dev->mdev, umr_modify_atomic_disabled) ||
-		   !MLX5_CAP_GEN(dev->mdev, atomic));
-
-	if (order <= mr_cache_max_order(dev) && use_umr) {
+	if (use_umr(dev, order)) {
 		mr = alloc_mr_from_cache(pd, umem, virt_addr, length, ncont,
 					 page_shift, order, access_flags);
 		if (PTR_ERR(mr) == -EAGAIN) {
 			mlx5_ib_dbg(dev, "cache empty for order %d\n", order);
 			mr = NULL;
 		}
+		populate_mtts = false;
 	} else if (!MLX5_CAP_GEN(dev->mdev, umr_extended_translation_offset)) {
 		if (access_flags & IB_ACCESS_ON_DEMAND) {
 			err = -EINVAL;
 			pr_err("Got MR registration for ODP MR > 512MB, not supported for Connect-IB\n");
 			goto error;
 		}
-		use_umr = false;
+		populate_mtts = true;
 	}
 
 	if (!mr) {
+		if (!umr_can_modify_entity_size(dev))
+			populate_mtts = true;
 		mutex_lock(&dev->slow_path_mutex);
 		mr = reg_create(NULL, pd, virt_addr, length, umem, ncont,
-				page_shift, access_flags, !use_umr);
+				page_shift, access_flags, populate_mtts);
 		mutex_unlock(&dev->slow_path_mutex);
 	}
 
@@ -1365,11 +1356,9 @@ struct ib_mr *mlx5_ib_reg_user_mr(struct ib_pd *pd, u64 start, u64 length,
 	mr->umem = umem;
 	set_mr_fields(dev, mr, npages, length, access_flags);
 
-#ifdef CONFIG_INFINIBAND_ON_DEMAND_PAGING
 	update_odp_mr(mr);
-#endif
 
-	if (use_umr) {
+	if (!populate_mtts) {
 		int update_xlt_flags = MLX5_IB_UPD_XLT_ENABLE;
 
 		if (access_flags & IB_ACCESS_ON_DEMAND)
@@ -1384,9 +1373,11 @@ struct ib_mr *mlx5_ib_reg_user_mr(struct ib_pd *pd, u64 start, u64 length,
 		}
 	}
 
-#ifdef CONFIG_INFINIBAND_ON_DEMAND_PAGING
-	mr->live = 1;
-#endif
+	if (IS_ENABLED(CONFIG_INFINIBAND_ON_DEMAND_PAGING)) {
+		mr->live = 1;
+		atomic_set(&mr->num_pending_prefetch, 0);
+	}
+
 	return &mr->ibmr;
 error:
 	ib_umem_release(umem);
@@ -1401,10 +1392,10 @@ static int unreg_umr(struct mlx5_ib_dev *dev, struct mlx5_ib_mr *mr)
 	if (mdev->state == MLX5_DEVICE_STATE_INTERNAL_ERROR)
 		return 0;
 
-	umrwr.wr.send_flags = MLX5_IB_SEND_UMR_DISABLE_MR;
+	umrwr.wr.send_flags = MLX5_IB_SEND_UMR_DISABLE_MR |
+			      MLX5_IB_SEND_UMR_FAIL_IF_FREE;
 	umrwr.wr.opcode = MLX5_IB_WR_UMR;
 	umrwr.mkey = mr->mmkey.key;
-	umrwr.ignore_free_state = 1;
 
 	return mlx5_ib_post_send_wait(dev, &umrwr);
 }
@@ -1501,9 +1492,8 @@ int mlx5_ib_rereg_user_mr(struct ib_mr *ib_mr, int flags, u64 start,
 		}
 
 		mr->allocated_from_cache = 0;
-#ifdef CONFIG_INFINIBAND_ON_DEMAND_PAGING
-		mr->live = 1;
-#endif
+		if (IS_ENABLED(CONFIG_INFINIBAND_ON_DEMAND_PAGING))
+			mr->live = 1;
 	} else {
 		/*
 		 * Send a UMR WQE
@@ -1532,9 +1522,7 @@ int mlx5_ib_rereg_user_mr(struct ib_mr *ib_mr, int flags, u64 start,
 
 	set_mr_fields(dev, mr, npages, len, access_flags);
 
-#ifdef CONFIG_INFINIBAND_ON_DEMAND_PAGING
 	update_odp_mr(mr);
-#endif
 	return 0;
 
 err:
@@ -1609,10 +1597,10 @@ static void clean_mr(struct mlx5_ib_dev *dev, struct mlx5_ib_mr *mr)
 		mr->sig = NULL;
 	}
 
-	if (!allocated_from_cache) {
+	mlx5_free_priv_descs(mr);
+
+	if (!allocated_from_cache)
 		destroy_mkey(dev, mr);
-		mlx5_free_priv_descs(mr);
-	}
 }
 
 static void dereg_mr(struct mlx5_ib_dev *dev, struct mlx5_ib_mr *mr)
@@ -1620,12 +1608,19 @@ static void dereg_mr(struct mlx5_ib_dev *dev, struct mlx5_ib_mr *mr)
 	int npages = mr->npages;
 	struct ib_umem *umem = mr->umem;
 
-#ifdef CONFIG_INFINIBAND_ON_DEMAND_PAGING
-	if (umem && umem->is_odp) {
+	if (is_odp_mr(mr)) {
 		struct ib_umem_odp *umem_odp = to_ib_umem_odp(umem);
 
-		/* Prevent new page faults from succeeding */
+		/* Prevent new page faults and
+		 * prefetch requests from succeeding
+		 */
 		mr->live = 0;
+
+		/* dequeue pending prefetch requests for the mr */
+		if (atomic_read(&mr->num_pending_prefetch))
+			flush_workqueue(system_unbound_wq);
+		WARN_ON(atomic_read(&mr->num_pending_prefetch));
+
 		/* Wait for all running page-fault handlers to finish. */
 		synchronize_srcu(&dev->mr_srcu);
 		/* Destroy all page mappings */
@@ -1645,7 +1640,7 @@ static void dereg_mr(struct mlx5_ib_dev *dev, struct mlx5_ib_mr *mr)
 		/* Avoid double-freeing the umem. */
 		umem = NULL;
 	}
-#endif
+
 	clean_mr(dev, mr);
 
 	/*

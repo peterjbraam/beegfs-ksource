@@ -726,9 +726,6 @@ int iwl_mvm_tx_skb_non_sta(struct iwl_mvm *mvm, struct sk_buff *skb)
 
 	memcpy(&info, skb->cb, sizeof(info));
 
-	if (WARN_ON_ONCE(skb->len > IEEE80211_MAX_DATA_LEN + hdrlen))
-		return -1;
-
 	if (WARN_ON_ONCE(info.flags & IEEE80211_TX_CTL_AMPDU))
 		return -1;
 
@@ -831,7 +828,6 @@ iwl_mvm_tx_tso_segment(struct sk_buff *skb, unsigned int num_subframes,
 	unsigned int tcp_payload_len;
 	unsigned int mss = skb_shinfo(skb)->gso_size;
 	bool ipv4 = (skb->protocol == htons(ETH_P_IP));
-	bool qos = ieee80211_is_data_qos(hdr->frame_control);
 	u16 ip_base_id = ipv4 ? ntohs(ip_hdr(skb)->id) : 0;
 
 	skb_shinfo(skb)->gso_size = num_subframes * mss;
@@ -865,7 +861,7 @@ iwl_mvm_tx_tso_segment(struct sk_buff *skb, unsigned int num_subframes,
 		if (tcp_payload_len > mss) {
 			skb_shinfo(tmp)->gso_size = mss;
 		} else {
-			if (qos) {
+			if (ieee80211_is_data_qos(hdr->frame_control)) {
 				u8 *qc;
 
 				if (ipv4)
@@ -897,15 +893,18 @@ static int iwl_mvm_tx_tso(struct iwl_mvm *mvm, struct sk_buff *skb,
 	unsigned int mss = skb_shinfo(skb)->gso_size;
 	unsigned int num_subframes, tcp_payload_len, subf_len, max_amsdu_len;
 	u16 snap_ip_tcp, pad;
+	unsigned int dbg_max_amsdu_len;
 	netdev_features_t netdev_flags = NETIF_F_CSUM_MASK | NETIF_F_SG;
 	u8 tid;
 
 	snap_ip_tcp = 8 + skb_transport_header(skb) - skb_network_header(skb) +
 		tcp_hdrlen(skb);
 
+	dbg_max_amsdu_len = READ_ONCE(mvm->max_amsdu_len);
+
 	if (!mvmsta->max_amsdu_len ||
 	    !ieee80211_is_data_qos(hdr->frame_control) ||
-	    !mvmsta->amsdu_enabled)
+	    (!mvmsta->amsdu_enabled && !dbg_max_amsdu_len))
 		return iwl_mvm_tx_tso_segment(skb, 1, netdev_flags, mpdus_skb);
 
 	/*
@@ -936,6 +935,10 @@ static int iwl_mvm_tx_tso(struct iwl_mvm *mvm, struct sk_buff *skb,
 		return iwl_mvm_tx_tso_segment(skb, 1, netdev_flags, mpdus_skb);
 
 	max_amsdu_len = iwl_mvm_max_amsdu_size(mvm, sta, tid);
+
+	if (unlikely(dbg_max_amsdu_len))
+		max_amsdu_len = min_t(unsigned int, max_amsdu_len,
+				      dbg_max_amsdu_len);
 
 	/*
 	 * Limit A-MSDU in A-MPDU to 4095 bytes when VHT is not
@@ -1060,9 +1063,7 @@ static int iwl_mvm_tx_pkt_queued(struct iwl_mvm *mvm,
 }
 
 /*
- * Sets the fields in the Tx cmd that are crypto related.
- *
- * This function must be called with BHs disabled.
+ * Sets the fields in the Tx cmd that are crypto related
  */
 static int iwl_mvm_tx_mpdu(struct iwl_mvm *mvm, struct sk_buff *skb,
 			   struct ieee80211_tx_info *info,

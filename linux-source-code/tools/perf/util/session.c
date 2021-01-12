@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <errno.h>
 #include <inttypes.h>
 #include <linux/kernel.h>
@@ -23,6 +24,7 @@
 #include "thread.h"
 #include "thread-stack.h"
 #include "stat.h"
+#include "arch/common.h"
 
 static int perf_session__deliver_event(struct perf_session *session,
 				       union perf_event *event,
@@ -149,6 +151,9 @@ struct perf_session *perf_session__new(struct perf_data *data,
 	} else  {
 		session->machines.host.env = &perf_env;
 	}
+
+	session->machines.host.single_address_space =
+		perf_env__single_address_space(session->machines.host.env);
 
 	if (!data || perf_data__is_write(data)) {
 		/*
@@ -355,6 +360,8 @@ void perf_tool__fill_defaults(struct perf_tool *tool)
 		tool->mmap2 = process_event_stub;
 	if (tool->comm == NULL)
 		tool->comm = process_event_stub;
+	if (tool->namespaces == NULL)
+		tool->namespaces = process_event_stub;
 	if (tool->fork == NULL)
 		tool->fork = process_event_stub;
 	if (tool->exit == NULL)
@@ -593,6 +600,7 @@ do { 						\
 	if (bswap_safe(f, 0))			\
 		attr->f = bswap_##sz(attr->f);	\
 } while(0)
+#define bswap_field_16(f) bswap_field(f, 16)
 #define bswap_field_32(f) bswap_field(f, 32)
 #define bswap_field_64(f) bswap_field(f, 64)
 
@@ -608,6 +616,7 @@ do { 						\
 	bswap_field_64(sample_regs_user);
 	bswap_field_32(sample_stack_user);
 	bswap_field_32(aux_watermark);
+	bswap_field_16(sample_max_stack);
 
 	/*
 	 * After read_format are bitfields. Check read_format because
@@ -1262,6 +1271,8 @@ static int machines__deliver_event(struct machines *machines,
 		return tool->mmap2(tool, event, sample, machine);
 	case PERF_RECORD_COMM:
 		return tool->comm(tool, event, sample, machine);
+	case PERF_RECORD_NAMESPACES:
+		return tool->namespaces(tool, event, sample, machine);
 	case PERF_RECORD_FORK:
 		return tool->fork(tool, event, sample, machine);
 	case PERF_RECORD_EXIT:
@@ -1516,6 +1527,13 @@ struct thread *perf_session__findnew(struct perf_session *session, pid_t pid)
 	return machine__findnew_thread(&session->machines.host, -1, pid);
 }
 
+/*
+ * Threads are identified by pid and tid, and the idle task has pid == tid == 0.
+ * So here a single thread is created for that, but actually there is a separate
+ * idle task per cpu, so there should be one 'struct thread' per cpu, but there
+ * is only 1. That causes problems for some tools, requiring workarounds. For
+ * example get_idle_thread() in builtin-sched.c, or thread_stack__per_cpu().
+ */
 int perf_session__register_idle_thread(struct perf_session *session)
 {
 	struct thread *thread;
@@ -1523,6 +1541,11 @@ int perf_session__register_idle_thread(struct perf_session *session)
 
 	thread = machine__findnew_thread(&session->machines.host, 0, 0);
 	if (thread == NULL || thread__set_comm(thread, "swapper", 0)) {
+		pr_err("problem inserting idle task.\n");
+		err = -1;
+	}
+
+	if (thread == NULL || thread__set_namespaces(thread, 0, NULL)) {
 		pr_err("problem inserting idle task.\n");
 		err = -1;
 	}

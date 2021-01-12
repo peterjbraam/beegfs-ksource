@@ -55,7 +55,7 @@
 
 int ocrdma_query_pkey(struct ib_device *ibdev, u8 port, u16 index, u16 *pkey)
 {
-	if (index > 0)
+	if (index > 1)
 		return -EINVAL;
 
 	*pkey = 0xffff;
@@ -177,11 +177,6 @@ int ocrdma_query_port(struct ib_device *ibdev,
 
 	/* props being zeroed by the caller, avoid zeroing it here */
 	dev = get_ocrdma_dev(ibdev);
-	if (port > 1) {
-		pr_err("%s(%d) invalid_port=0x%x\n", __func__,
-		       dev->id, port);
-		return -EINVAL;
-	}
 	netdev = dev->nic_info.netdev;
 	if (netif_running(netdev) && netif_oper_up(netdev)) {
 		port_state = IB_PORT_ACTIVE;
@@ -215,13 +210,6 @@ int ocrdma_query_port(struct ib_device *ibdev,
 int ocrdma_modify_port(struct ib_device *ibdev, u8 port, int mask,
 		       struct ib_port_modify *props)
 {
-	struct ocrdma_dev *dev;
-
-	dev = get_ocrdma_dev(ibdev);
-	if (port > 1) {
-		pr_err("%s(%d) invalid_port=0x%x\n", __func__, dev->id, port);
-		return -EINVAL;
-	}
 	return 0;
 }
 
@@ -1169,7 +1157,8 @@ static void ocrdma_del_qpn_map(struct ocrdma_dev *dev, struct ocrdma_qp *qp)
 }
 
 static int ocrdma_check_qp_params(struct ib_pd *ibpd, struct ocrdma_dev *dev,
-				  struct ib_qp_init_attr *attrs)
+				  struct ib_qp_init_attr *attrs,
+				  struct ib_udata *udata)
 {
 	if ((attrs->qp_type != IB_QPT_GSI) &&
 	    (attrs->qp_type != IB_QPT_RC) &&
@@ -1217,7 +1206,7 @@ static int ocrdma_check_qp_params(struct ib_pd *ibpd, struct ocrdma_dev *dev,
 		return -EINVAL;
 	}
 	/* unprivileged user space cannot create special QP */
-	if (ibpd->uobject && attrs->qp_type == IB_QPT_GSI) {
+	if (udata && attrs->qp_type == IB_QPT_GSI) {
 		pr_err
 		    ("%s(%d) Userspace can't create special QPs of type=0x%x\n",
 		     __func__, dev->id, attrs->qp_type);
@@ -1374,7 +1363,7 @@ struct ib_qp *ocrdma_create_qp(struct ib_pd *ibpd,
 	struct ocrdma_create_qp_ureq ureq;
 	u16 dpp_credit_lmt, dpp_offset;
 
-	status = ocrdma_check_qp_params(ibpd, dev, attrs);
+	status = ocrdma_check_qp_params(ibpd, dev, attrs, udata);
 	if (status)
 		goto gen_err;
 
@@ -1773,13 +1762,13 @@ int ocrdma_destroy_qp(struct ib_qp *ibqp)
 	 * protect against proessing in-flight CQEs for this QP.
 	 */
 	spin_lock_irqsave(&qp->sq_cq->cq_lock, flags);
-	if (qp->rq_cq && (qp->rq_cq != qp->sq_cq)) {
+	if (qp->rq_cq && (qp->rq_cq != qp->sq_cq))
 		spin_lock(&qp->rq_cq->cq_lock);
-		ocrdma_del_qpn_map(dev, qp);
+
+	ocrdma_del_qpn_map(dev, qp);
+
+	if (qp->rq_cq && (qp->rq_cq != qp->sq_cq))
 		spin_unlock(&qp->rq_cq->cq_lock);
-	} else {
-		ocrdma_del_qpn_map(dev, qp);
-	}
 	spin_unlock_irqrestore(&qp->sq_cq->cq_lock, flags);
 
 	if (!pd->uctx) {
@@ -2008,7 +1997,7 @@ static int ocrdma_build_inline_sges(struct ocrdma_qp *qp,
 		hdr->total_len = ocrdma_sglist_len(wr->sg_list, wr->num_sge);
 		if (unlikely(hdr->total_len > qp->max_inline_data)) {
 			pr_err("%s() supported_len=0x%x,\n"
-			       " unspported len req=0x%x\n", __func__,
+			       " unsupported len req=0x%x\n", __func__,
 				qp->max_inline_data, hdr->total_len);
 			return -EINVAL;
 		}

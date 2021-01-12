@@ -554,7 +554,7 @@ static const struct bin_attribute dmi_entry_raw_attr = {
 static void dmi_sysfs_entry_release(struct kobject *kobj)
 {
 	struct dmi_sysfs_entry *entry = to_entry(kobj);
-	sysfs_remove_bin_file(&entry->kobj, &dmi_entry_raw_attr);
+
 	spin_lock(&entry_list_lock);
 	list_del(&entry->list);
 	spin_unlock(&entry_list_lock);
@@ -652,7 +652,7 @@ static int __init dmi_sysfs_init(void)
 	int val;
 
 	if (!dmi_kobj) {
-		pr_err("dmi-sysfs: dmi entry is absent.\n");
+		pr_debug("dmi-sysfs: dmi entry is absent.\n");
 		error = -ENODATA;
 		goto err;
 	}

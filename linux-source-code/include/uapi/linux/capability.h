@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /*
  * This is <linux/capability.h>
  *
@@ -14,8 +15,6 @@
 #define _UAPI_LINUX_CAPABILITY_H
 
 #include <linux/types.h>
-
-struct task_struct;
 
 /* User-level do most of the mapping between kernel and user
    capabilities based on the version tag given by the kernel. The
@@ -324,7 +323,11 @@ struct vfs_ns_cap_data {
 
 #define CAP_LEASE            28
 
+/* Allow writing the audit log via unicast netlink socket */
+
 #define CAP_AUDIT_WRITE      29
+
+/* Allow configuration of audit via unicast netlink socket */
 
 #define CAP_AUDIT_CONTROL    30
 
@@ -359,7 +362,12 @@ struct vfs_ns_cap_data {
 
 #define CAP_BLOCK_SUSPEND    36
 
-#define CAP_LAST_CAP         CAP_BLOCK_SUSPEND
+/* Allow reading the audit log via multicast netlink socket */
+
+#define CAP_AUDIT_READ		37
+
+
+#define CAP_LAST_CAP         CAP_AUDIT_READ
 
 #define cap_valid(x) ((x) >= 0 && (x) <= CAP_LAST_CAP)
 

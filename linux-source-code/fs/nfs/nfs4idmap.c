@@ -175,8 +175,9 @@ static int nfs_map_numeric_to_string(__u32 id, char *buf, size_t buflen)
 
 static struct key_type key_type_id_resolver = {
 	.name		= "id_resolver",
-	.instantiate	= user_instantiate,
-	.match		= user_match,
+	.preparse	= user_preparse,
+	.free_preparse	= user_free_preparse,
+	.instantiate	= generic_key_instantiate,
 	.revoke		= user_revoke,
 	.destroy	= user_destroy,
 	.describe	= user_describe,
@@ -200,7 +201,7 @@ int nfs_idmap_init(void)
 				GLOBAL_ROOT_UID, GLOBAL_ROOT_GID, cred,
 				(KEY_POS_ALL & ~KEY_POS_SETATTR) |
 				KEY_USR_VIEW | KEY_USR_READ,
-				KEY_ALLOC_NOT_IN_QUOTA, NULL);
+				KEY_ALLOC_NOT_IN_QUOTA, NULL, NULL);
 	if (IS_ERR(keyring)) {
 		ret = PTR_ERR(keyring);
 		goto failed_put_cred;
@@ -273,7 +274,7 @@ static struct key *nfs_idmap_request_key(const char *name, size_t namelen,
 	ssize_t ret;
 
 	ret = nfs_idmap_get_desc(name, namelen, type, strlen(type), &desc);
-	if (ret <= 0)
+	if (ret < 0)
 		return ERR_PTR(ret);
 
 	rkey = request_key(&key_type_id_resolver, desc, "");
@@ -363,7 +364,8 @@ static int nfs_idmap_lookup_id(const char *name, size_t namelen, const char *typ
 		ret = -EINVAL;
 	} else {
 		ret = kstrtol(id_str, 10, &id_long);
-		*id = (__u32)id_long;
+		if (!ret)
+			*id = (__u32)id_long;
 	}
 	return ret;
 }
@@ -397,8 +399,9 @@ static const struct rpc_pipe_ops idmap_upcall_ops = {
 
 static struct key_type key_type_id_resolver_legacy = {
 	.name		= "id_legacy",
-	.instantiate	= user_instantiate,
-	.match		= user_match,
+	.preparse	= user_preparse,
+	.free_preparse	= user_free_preparse,
+	.instantiate	= generic_key_instantiate,
 	.revoke		= user_revoke,
 	.destroy	= user_destroy,
 	.describe	= user_describe,

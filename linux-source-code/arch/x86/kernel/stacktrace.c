@@ -4,8 +4,10 @@
  *  Copyright (C) 2006-2009 Red Hat, Inc., Ingo Molnar <mingo@redhat.com>
  */
 #include <linux/sched.h>
+#include <linux/sched/debug.h>
+#include <linux/sched/task_stack.h>
 #include <linux/stacktrace.h>
-#include <linux/module.h>
+#include <linux/export.h>
 #include <linux/uaccess.h>
 #include <asm/stacktrace.h>
 #include <asm/unwind.h>
@@ -66,10 +68,14 @@ void save_stack_trace_regs(struct pt_regs *regs, struct stack_trace *trace)
 
 void save_stack_trace_tsk(struct task_struct *tsk, struct stack_trace *trace)
 {
+	if (!try_get_task_stack(tsk))
+		return;
+
 	if (tsk == current)
 		trace->skip++;
-
 	__save_stack_trace(trace, tsk, NULL, true);
+
+	put_task_stack(tsk);
 }
 EXPORT_SYMBOL_GPL(save_stack_trace_tsk);
 
@@ -80,10 +86,29 @@ __save_stack_trace_reliable(struct stack_trace *trace,
 			    struct task_struct *task)
 {
 	struct unwind_state state;
+	struct pt_regs *regs;
 	unsigned long addr;
 
-	for (unwind_start(&state, task, NULL, NULL); !unwind_done(&state);
+	for (unwind_start(&state, task, NULL, NULL);
+	     !unwind_done(&state) && !unwind_error(&state);
 	     unwind_next_frame(&state)) {
+
+		regs = unwind_get_entry_regs(&state, NULL);
+		if (regs) {
+			/* Success path for user tasks */
+			if (user_mode(regs))
+				goto success;
+
+			/*
+			 * Kernel mode registers on the stack indicate an
+			 * in-kernel interrupt or exception (e.g., preemption
+			 * or a page fault), which can make frame pointers
+			 * unreliable.
+			 */
+
+			if (IS_ENABLED(CONFIG_FRAME_POINTER))
+				return -EINVAL;
+		}
 
 		addr = unwind_get_return_address(&state);
 
@@ -95,7 +120,7 @@ __save_stack_trace_reliable(struct stack_trace *trace,
 		if (!addr)
 			return -EINVAL;
 
-		if (save_stack_address(trace, addr, 1))
+		if (save_stack_address(trace, addr, false))
 			return -EINVAL;
 	}
 
@@ -103,6 +128,11 @@ __save_stack_trace_reliable(struct stack_trace *trace,
 	if (unwind_error(&state))
 		return -EINVAL;
 
+	/* Success path for non-user tasks, i.e. kthreads and idle tasks */
+	if (!(task->flags & (PF_KTHREAD | PF_IDLE)))
+		return -EINVAL;
+
+success:
 	if (trace->nr_entries < trace->max_entries)
 		trace->entries[trace->nr_entries++] = ULONG_MAX;
 
@@ -118,7 +148,20 @@ __save_stack_trace_reliable(struct stack_trace *trace,
 int save_stack_trace_tsk_reliable(struct task_struct *tsk,
 				  struct stack_trace *trace)
 {
-	return __save_stack_trace_reliable(trace, tsk);
+	int ret;
+
+	/*
+	 * If the task doesn't have a stack (e.g., a zombie), the stack is
+	 * "reliably" empty.
+	 */
+	if (!try_get_task_stack(tsk))
+		return 0;
+
+	ret = __save_stack_trace_reliable(trace, tsk);
+
+	put_task_stack(tsk);
+
+	return ret;
 }
 #endif /* CONFIG_HAVE_RELIABLE_STACKTRACE */
 
@@ -134,7 +177,7 @@ copy_stack_frame(const void __user *fp, struct stack_frame_user *frame)
 {
 	int ret;
 
-	if (__range_not_ok(fp, sizeof(*frame), TASK_SIZE))
+	if (!access_ok(fp, sizeof(*frame)))
 		return 0;
 
 	ret = 1;

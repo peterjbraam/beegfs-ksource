@@ -1,20 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (c) 2000-2003,2005 Silicon Graphics, Inc.
  * Copyright (c) 2013 Red Hat, Inc.
  * All Rights Reserved.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it would be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write the Free Software Foundation,
- * Inc.,  51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
 #include "xfs.h"
 #include "xfs_fs.h"
@@ -209,7 +197,7 @@ __write_verify(
 	uint16_t	magic)
 {
 	struct xfs_mount	*mp = bp->b_target->bt_mount;
-	struct xfs_buf_log_item	*bip = bp->b_fspriv;
+	struct xfs_buf_log_item	*bip = bp->b_log_item;
 	struct xfs_dir3_leaf_hdr *hdr3 = bp->b_addr;
 	xfs_failaddr_t		fa;
 
@@ -602,8 +590,8 @@ xfs_dir3_leaf_find_entry(
 				(index - lowstale - 1) *
 					sizeof(xfs_dir2_leaf_entry_t));
 		}
-		*lfloglow = MIN(lowstale, *lfloglow);
-		*lfloghigh = MAX(index - 1, *lfloghigh);
+		*lfloglow = min(lowstale, *lfloglow);
+		*lfloghigh = max(index - 1, *lfloghigh);
 		leafhdr->stale--;
 		return &ents[index - 1];
 	}
@@ -622,8 +610,8 @@ xfs_dir3_leaf_find_entry(
 		memmove(&ents[index + 1], &ents[index],
 			(highstale - index) * sizeof(xfs_dir2_leaf_entry_t));
 	}
-	*lfloglow = MIN(index, *lfloglow);
-	*lfloghigh = MAX(highstale, *lfloghigh);
+	*lfloglow = min(index, *lfloglow);
+	*lfloghigh = max(highstale, *lfloghigh);
 	leafhdr->stale--;
 	return &ents[index];
 }

@@ -295,16 +295,6 @@ struct req_que;
 struct qla_tgt_sess;
 
 /*
- * (sd.h is not exported, hence local inclusion)
- * Data Integrity Field tuple.
- */
-struct sd_dif_tuple {
-	__be16 guard_tag;	/* Checksum */
-	__be16 app_tag;		/* Opaque storage */
-	__be32 ref_tag;		/* Target LBA or indirect LBA */
-};
-
-/*
  * SCSI Request Block
  */
 struct srb_cmd {
@@ -425,8 +415,8 @@ struct srb_iocb {
 			 * defined in tsk_mgmt_entry struct
 			 * for control_flags field in qla_fw.h.
 			 */
+			uint64_t lun;
 			uint32_t flags;
-			uint32_t lun;
 			uint32_t data;
 			struct completion comp;
 			__le16 comp_status;
@@ -540,23 +530,18 @@ typedef struct srb {
 	 */
 	uint8_t cmd_type;
 	uint8_t pad[3];
+	atomic_t ref_count;
 	struct kref cmd_kref;	/* need to migrate ref_count over to this */
 	void *priv;
 	wait_queue_head_t nvme_ls_waitq;
 	struct fc_port *fcport;
 	struct scsi_qla_host *vha;
-	unsigned int start_timer:1;
-	unsigned int abort:1;
-	unsigned int aborted:1;
-	unsigned int completed:1;
-
 	uint32_t handle;
 	uint16_t flags;
 	uint16_t type;
 	const char *name;
 	int iocbs;
 	struct qla_qpair *qpair;
-	struct srb *cmd_sp;
 	struct list_head elem;
 	u32 gen1;	/* scratch */
 	u32 gen2;	/* scratch */
@@ -565,7 +550,7 @@ typedef struct srb {
 	struct completion *comp;
 	union {
 		struct srb_iocb iocb_cmd;
-		struct fc_bsg_job *bsg_job;
+		struct bsg_job *bsg_job;
 		struct srb_cmd scmd;
 	} u;
 	void (*done)(void *, int);
@@ -574,6 +559,7 @@ typedef struct srb {
 } srb_t;
 
 #define GET_CMD_SP(sp) (sp->u.scmd.cmd)
+#define SET_CMD_SP(sp, cmd) (sp->u.scmd.cmd = cmd)
 #define GET_CMD_CTX_SP(sp) (sp->u.scmd.ctx)
 
 #define GET_CMD_SENSE_LEN(sp) \
@@ -2249,7 +2235,7 @@ typedef struct {
 	uint8_t fabric_port_name[WWN_SIZE];
 	uint16_t fp_speed;
 	uint8_t fc4_type;
-	uint8_t fc4_features;
+	uint8_t fc4f_nvme;	/* nvme fc4 feature bits */
 } sw_info_t;
 
 /* FCP-4 types */
@@ -2335,6 +2321,22 @@ enum login_state {	/* FW control Target side */
 	DSC_LS_LOGO_PEND,
 };
 
+enum fcport_mgt_event {
+	FCME_RELOGIN = 1,
+	FCME_RSCN,
+	FCME_PLOGI_DONE,	/* Initiator side sent LLIOCB */
+	FCME_PRLI_DONE,
+	FCME_GNL_DONE,
+	FCME_GPSC_DONE,
+	FCME_GPDB_DONE,
+	FCME_GPNID_DONE,
+	FCME_GFFID_DONE,
+	FCME_ADISC_DONE,
+	FCME_GNNID_DONE,
+	FCME_GFPNID_DONE,
+	FCME_ELS_PLOGI_DONE,
+};
+
 enum rscn_addr_format {
 	RSCN_PORT_ADDR,
 	RSCN_AREA_ADDR,
@@ -2368,7 +2370,6 @@ typedef struct fc_port {
 	unsigned int query:1;
 	unsigned int id_changed:1;
 	unsigned int scan_needed:1;
-	unsigned int n2n_flag:1;
 
 	struct completion nvme_del_done;
 	uint32_t nvme_prli_service_param;
@@ -2417,8 +2418,9 @@ typedef struct fc_port {
 	u32 supported_classes;
 
 	uint8_t fc4_type;
-	uint8_t fc4_features;
+	uint8_t	fc4f_nvme;
 	uint8_t scan_state;
+	uint8_t n2n_flag;
 
 	unsigned long last_queue_full;
 	unsigned long last_ramp_up;
@@ -2448,13 +2450,11 @@ typedef struct fc_port {
 	u16 n2n_chip_reset;
 } fc_port_t;
 
-#define FC4_PRIORITY_NVME	0
-#define FC4_PRIORITY_FCP	1
-
 #define QLA_FCPORT_SCAN		1
 #define QLA_FCPORT_FOUND	2
 
 struct event_arg {
+	enum fcport_mgt_event	event;
 	fc_port_t		*fcport;
 	srb_t			*sp;
 	port_id_t		id;
@@ -2473,7 +2473,13 @@ struct event_arg {
 #define FCS_DEVICE_LOST		3
 #define FCS_ONLINE		4
 
-extern const char *const port_state_str[5];
+static const char * const port_state_str[] = {
+	"Unknown",
+	"UNCONFIGURED",
+	"DEAD",
+	"LOST",
+	"ONLINE"
+};
 
 /*
  * FC port flags.
@@ -3011,7 +3017,6 @@ enum scan_flags_t {
 enum fc4type_t {
 	FS_FC4TYPE_FCP	= BIT_0,
 	FS_FC4TYPE_NVME	= BIT_1,
-	FS_FCP_IS_N2N = BIT_7,
 };
 
 struct fab_scan_rp {
@@ -3152,8 +3157,8 @@ struct isp_operations {
 	void (*disable_intrs) (struct qla_hw_data *);
 
 	int (*abort_command) (srb_t *);
-	int (*target_reset) (struct fc_port *, unsigned int, int);
-	int (*lun_reset) (struct fc_port *, unsigned int, int);
+	int (*target_reset) (struct fc_port *, uint64_t, int);
+	int (*lun_reset) (struct fc_port *, uint64_t, int);
 	int (*fabric_login) (struct scsi_qla_host *, uint16_t, uint8_t,
 		uint8_t, uint8_t, uint16_t *, uint8_t);
 	int (*fabric_logout) (struct scsi_qla_host *, uint16_t, uint8_t,
@@ -3185,7 +3190,7 @@ struct isp_operations {
 	int (*start_scsi) (srb_t *);
 	int (*start_scsi_mq) (srb_t *);
 	int (*abort_isp) (struct scsi_qla_host *);
-	int (*iospace_config)(struct qla_hw_data *);
+	int (*iospace_config)(struct qla_hw_data*);
 	int (*initialize_adapter)(struct scsi_qla_host *);
 };
 
@@ -3206,6 +3211,7 @@ struct isp_operations {
 #define QLA_83XX_PCI_MSIX_CONTROL	0x92
 
 struct scsi_qla_host;
+
 
 #define QLA83XX_RSPQ_MSIX_ENTRY_NUMBER 1 /* refer to qla83xx_msix_entries */
 
@@ -3482,7 +3488,6 @@ struct qla_qpair {
 	uint32_t use_shadow_reg:1;
 
 	uint16_t id;			/* qp number used with FW */
-	cpumask_t cpu_mask; /* CPU mask for cpu affinity operation */
 	uint16_t vp_idx;		/* vport ID */
 	mempool_t *srb_mempool;
 
@@ -3543,11 +3548,11 @@ struct qlt_hw_data {
 	uint8_t saved_add_firmware_options[2];
 
 	uint8_t tgt_node_name[WWN_SIZE];
-	int rspq_vector_cpuid;
+
 	struct dentry *dfs_tgt_sess;
 	struct dentry *dfs_tgt_port_database;
+	struct dentry *dfs_naqp;
 
-	spinlock_t atio_lock ____cacheline_aligned;
 	struct list_head q_full_list;
 	uint32_t num_pend_cmds;
 	uint32_t num_qfull_cmds_alloc;
@@ -3555,6 +3560,9 @@ struct qlt_hw_data {
 	spinlock_t q_full_lock;
 	uint32_t leak_exchg_thresh_hold;
 	spinlock_t sess_lock;
+	int num_act_qpairs;
+#define DEFAULT_NAQP 2
+	spinlock_t atio_lock ____cacheline_aligned;
 	struct btree_head32 host_map;
 };
 
@@ -3609,8 +3617,8 @@ struct qla_hw_data {
 		uint32_t	idc_compl_status:1;
 		uint32_t        mr_reset_hdlr_active:1;
 		uint32_t        mr_intr_valid:1;
-		uint32_t	dport_enabled:1;
 
+		uint32_t        dport_enabled:1;
 		uint32_t	fawwpn_enabled:1;
 		uint32_t	exlogins_enabled:1;
 		uint32_t	exchoffld_enabled:1;
@@ -4263,10 +4271,9 @@ struct qla_hw_data {
 	atomic_t        nvme_active_aen_cnt;
 	uint16_t        nvme_last_rptd_aen;             /* Last recorded aen count */
 
-	uint8_t fc4_type_priority;
-
 	atomic_t zio_threshold;
 	uint16_t last_zio_threshold;
+
 #define DEFAULT_ZIO_THRESHOLD 5
 };
 
@@ -4421,8 +4428,6 @@ typedef struct scsi_qla_host {
 	spinlock_t		cmd_list_lock;
 	struct delayed_work	unknown_atio_work;
 
-	struct list_head	qp_list;
-
 	/* Counter to detect races between ELS and RSCN events */
 	atomic_t		generation_tick;
 	/* Time when global fcport update has been scheduled */
@@ -4431,6 +4436,8 @@ typedef struct scsi_qla_host {
 	struct list_head	logo_list;
 	/* List of pending PLOGI acks, protected by hw lock */
 	struct list_head	plogi_ack_list;
+
+	struct list_head	qp_list;
 
 	uint32_t	vp_abort_cnt;
 
@@ -4487,6 +4494,8 @@ typedef struct scsi_qla_host {
 	uint16_t	n2n_id;
 	struct list_head gpnid_list;
 	struct fab_scan scan;
+
+	unsigned int irq_offset;
 } scsi_qla_host_t;
 
 struct qla27xx_image_status {
@@ -4657,7 +4666,6 @@ struct secure_flash_update_block_pk {
 #define QLA_SUSPENDED			0x106
 #define QLA_BUSY			0x107
 #define QLA_ALREADY_REGISTERED		0x109
-#define QLA_OS_TIMER_EXPIRED		0x10a
 
 #define NVRAM_DELAY()		udelay(10)
 
@@ -4773,6 +4781,9 @@ struct sff_8247_a0 {
 
 #define FLASH_SEMAPHORE_REGISTER_ADDR   0x00101016
 
+#define USER_CTRL_IRQ(_ha) (ql2xuctrlirq && QLA_TGT_MODE_ENABLED() && \
+	(IS_QLA27XX(_ha) || IS_QLA28XX(_ha) || IS_QLA83XX(_ha)))
+
 #define SAVE_TOPO(_ha) { \
 	if (_ha->current_topology)				\
 		_ha->prev_topology = _ha->current_topology;     \
@@ -4783,26 +4794,8 @@ struct sff_8247_a0 {
 	 ha->current_topology == ISP_CFG_N || \
 	 !ha->current_topology)
 
-#define NVME_TYPE(fcport) \
-	(fcport->fc4_type & FS_FC4TYPE_NVME) \
-
-#define FCP_TYPE(fcport) \
-	(fcport->fc4_type & FS_FC4TYPE_FCP) \
-
-#define NVME_ONLY_TARGET(fcport) \
-	(NVME_TYPE(fcport) && !FCP_TYPE(fcport))  \
-
-#define NVME_FCP_TARGET(fcport) \
-	(FCP_TYPE(fcport) && NVME_TYPE(fcport)) \
-
-#define NVME_TARGET(ha, fcport) \
-	((NVME_FCP_TARGET(fcport) && \
-	(ha->fc4_type_priority == FC4_PRIORITY_NVME)) || \
-	NVME_ONLY_TARGET(fcport)) \
-
 #include "qla_target.h"
 #include "qla_gbl.h"
 #include "qla_dbg.h"
 #include "qla_inline.h"
-
 #endif

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Device operations for the pnfs nfs4 file layout driver.
  *
@@ -98,7 +99,8 @@ nfs4_ff_alloc_deviceid_node(struct nfs_server *server, struct pnfs_device *pdev,
 	version_count = be32_to_cpup(p);
 	dprintk("%s: version count %d\n", __func__, version_count);
 
-	ds_versions = kzalloc(version_count * sizeof(struct nfs4_ff_ds_version),
+	ds_versions = kcalloc(version_count,
+			      sizeof(struct nfs4_ff_ds_version),
 			      gfp_flags);
 	if (!ds_versions)
 		goto out_scratch;
@@ -438,8 +440,7 @@ nfs4_ff_layout_prepare_ds(struct pnfs_layout_segment *lseg, u32 ds_idx,
 	status = nfs4_pnfs_ds_connect(s, ds, devid, dataserver_timeo,
 			     dataserver_retrans,
 			     mirror->mirror_ds->ds_versions[0].version,
-			     mirror->mirror_ds->ds_versions[0].minor_version,
-			     RPC_AUTH_UNIX);
+			     mirror->mirror_ds->ds_versions[0].minor_version);
 
 	/* connect success, check rsize/wsize limit */
 	if (!status) {
@@ -471,7 +472,7 @@ ff_layout_get_ds_cred(struct pnfs_layout_segment *lseg, u32 ds_idx,
 	struct nfs4_ff_layout_mirror *mirror = FF_LAYOUT_COMP(lseg, ds_idx);
 	struct rpc_cred *cred;
 
-	if (mirror && !mirror->mirror_ds->ds_versions[0].tightly_coupled) {
+	if (mirror) {
 		cred = ff_layout_get_mirror_cred(mirror, lseg->pls_range.iomode);
 		if (!cred)
 			cred = get_rpccred(mdscred);

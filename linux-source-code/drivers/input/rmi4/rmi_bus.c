@@ -9,7 +9,8 @@
 
 #include <linux/kernel.h>
 #include <linux/device.h>
-#include <linux/kconfig.h>
+#include <linux/irq.h>
+#include <linux/irqdomain.h>
 #include <linux/list.h>
 #include <linux/pm.h>
 #include <linux/rmi.h>
@@ -153,6 +154,54 @@ static int rmi_function_match(struct device *dev, struct device_driver *drv)
 	return fn->fd.function_number == handler->func;
 }
 
+#ifdef CONFIG_OF
+static void rmi_function_of_probe(struct rmi_function *fn)
+{
+	char of_name[9];
+	struct device_node *node = fn->rmi_dev->xport->dev->of_node;
+
+	snprintf(of_name, sizeof(of_name), "rmi4-f%02x",
+		fn->fd.function_number);
+	fn->dev.of_node = of_get_child_by_name(node, of_name);
+}
+#else
+static inline void rmi_function_of_probe(struct rmi_function *fn)
+{}
+#endif
+
+static struct irq_chip rmi_irq_chip = {
+	.name = "rmi4",
+};
+
+static int rmi_create_function_irq(struct rmi_function *fn,
+				   struct rmi_function_handler *handler)
+{
+	struct rmi_driver_data *drvdata = dev_get_drvdata(&fn->rmi_dev->dev);
+	int i, error;
+
+	for (i = 0; i < fn->num_of_irqs; i++) {
+		set_bit(fn->irq_pos + i, fn->irq_mask);
+
+		fn->irq[i] = irq_create_mapping(drvdata->irqdomain,
+						fn->irq_pos + i);
+
+		irq_set_chip_data(fn->irq[i], fn);
+		irq_set_chip_and_handler(fn->irq[i], &rmi_irq_chip,
+					 handle_simple_irq);
+		irq_set_nested_thread(fn->irq[i], 1);
+
+		error = devm_request_threaded_irq(&fn->dev, fn->irq[i], NULL,
+					handler->attention, IRQF_ONESHOT,
+					dev_name(&fn->dev), fn);
+		if (error) {
+			dev_err(&fn->dev, "Error %d registering IRQ\n", error);
+			return error;
+		}
+	}
+
+	return 0;
+}
+
 static int rmi_function_probe(struct device *dev)
 {
 	struct rmi_function *fn = to_rmi_function(dev);
@@ -160,9 +209,18 @@ static int rmi_function_probe(struct device *dev)
 					to_rmi_function_handler(dev->driver);
 	int error;
 
+	rmi_function_of_probe(fn);
+
 	if (handler->probe) {
 		error = handler->probe(fn);
-		return error;
+		if (error)
+			return error;
+	}
+
+	if (fn->num_of_irqs && handler->attention) {
+		error = rmi_create_function_irq(fn, handler);
+		if (error)
+			return error;
 	}
 
 	return 0;
@@ -214,12 +272,18 @@ err_put_device:
 
 void rmi_unregister_function(struct rmi_function *fn)
 {
+	int i;
+
 	rmi_dbg(RMI_DEBUG_CORE, &fn->dev, "Unregistering F%02X.\n",
 			fn->fd.function_number);
 
 	device_del(&fn->dev);
 	of_node_put(fn->dev.of_node);
 	put_device(&fn->dev);
+
+	for (i = 0; i < fn->num_of_irqs; i++)
+		irq_dispose_mapping(fn->irq[i]);
+
 }
 
 /**
@@ -301,6 +365,15 @@ static struct rmi_function_handler *fn_handlers[] = {
 #ifdef CONFIG_RMI4_F30
 	&rmi_f30_handler,
 #endif
+#ifdef CONFIG_RMI4_F34
+	&rmi_f34_handler,
+#endif
+#ifdef CONFIG_RMI4_F54
+	&rmi_f54_handler,
+#endif
+#ifdef CONFIG_RMI4_F55
+	&rmi_f55_handler,
+#endif
 };
 
 static void __rmi_unregister_function_handlers(int start_idx)
@@ -336,6 +409,24 @@ err_unregister_function_handlers:
 	__rmi_unregister_function_handlers(i - 1);
 	return ret;
 }
+
+int rmi_of_property_read_u32(struct device *dev, u32 *result,
+				const char *prop, bool optional)
+{
+	int retval;
+	u32 val = 0;
+
+	retval = of_property_read_u32(dev->of_node, prop, &val);
+	if (retval && (!optional && retval == -EINVAL)) {
+		dev_err(dev, "Failed to get %s value: %d\n",
+			prop, retval);
+		return retval;
+	}
+	*result = val;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(rmi_of_property_read_u32);
 
 static int __init rmi_bus_init(void)
 {

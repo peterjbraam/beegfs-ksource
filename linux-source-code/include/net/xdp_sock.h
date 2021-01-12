@@ -11,7 +11,6 @@
 #include <linux/mutex.h>
 #include <linux/spinlock.h>
 #include <linux/mm.h>
-#include <linux/refcount.h>
 #include <net/sock.h>
 
 struct net_device;

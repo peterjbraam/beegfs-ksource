@@ -15,7 +15,6 @@
 
 #include <linux/device.h>
 #include <linux/cdev.h>
-#include <linux/idr.h>
 
 /**
  * struct dax_region - mapping infrastructure for dax devices
@@ -41,10 +40,8 @@ struct dax_region {
 /**
  * struct dev_dax - instance data for a subdivision of a dax region
  * @region - parent region
- * @inode - inode
- * @dev - device backing the character device
- * @cdev - core chardev data
- * @alive - !alive + srcu grace period == no new mappings can be established
+ * @dax_dev - core dax functionality
+ * @dev - device core
  * @id - child id in the region
  * @num_resources - number of physical address extents in this device
  * @res - array of physical address ranges

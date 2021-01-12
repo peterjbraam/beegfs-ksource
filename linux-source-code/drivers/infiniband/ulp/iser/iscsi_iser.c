@@ -585,12 +585,13 @@ iscsi_iser_session_destroy(struct iscsi_cls_session *cls_session)
 static inline unsigned int
 iser_dif_prot_caps(int prot_caps)
 {
-	return ((prot_caps & IB_PROT_T10DIF_TYPE_1) ? SHOST_DIF_TYPE1_PROTECTION |
-						      SHOST_DIX_TYPE1_PROTECTION : 0) |
-	       ((prot_caps & IB_PROT_T10DIF_TYPE_2) ? SHOST_DIF_TYPE2_PROTECTION |
-						      SHOST_DIX_TYPE2_PROTECTION : 0) |
-	       ((prot_caps & IB_PROT_T10DIF_TYPE_3) ? SHOST_DIF_TYPE3_PROTECTION |
-						      SHOST_DIX_TYPE3_PROTECTION : 0);
+	return ((prot_caps & IB_PROT_T10DIF_TYPE_1) ?
+		SHOST_DIF_TYPE1_PROTECTION | SHOST_DIX_TYPE0_PROTECTION |
+		SHOST_DIX_TYPE1_PROTECTION : 0) |
+	       ((prot_caps & IB_PROT_T10DIF_TYPE_2) ?
+		SHOST_DIF_TYPE2_PROTECTION | SHOST_DIX_TYPE2_PROTECTION : 0) |
+	       ((prot_caps & IB_PROT_T10DIF_TYPE_3) ?
+		SHOST_DIF_TYPE3_PROTECTION | SHOST_DIX_TYPE3_PROTECTION : 0);
 }
 
 /**
@@ -646,10 +647,8 @@ iscsi_iser_session_create(struct iscsi_endpoint *ep,
 			u32 sig_caps = ib_conn->device->ib_device->attrs.sig_prot_cap;
 
 			scsi_host_set_prot(shost, iser_dif_prot_caps(sig_caps));
-			if (iser_pi_guard)
-				scsi_host_set_guard(shost, SHOST_DIX_GUARD_IP);
-			else
-				scsi_host_set_guard(shost, SHOST_DIX_GUARD_CRC);
+			scsi_host_set_guard(shost, SHOST_DIX_GUARD_IP |
+						   SHOST_DIX_GUARD_CRC);
 		}
 
 		if (iscsi_host_add(shost,
@@ -764,6 +763,7 @@ static int iscsi_iser_get_ep_param(struct iscsi_endpoint *ep,
 				   enum iscsi_param param, char *buf)
 {
 	struct iser_conn *iser_conn = ep->dd_data;
+	int len;
 
 	switch (param) {
 	case ISCSI_PARAM_CONN_PORT:
@@ -774,10 +774,12 @@ static int iscsi_iser_get_ep_param(struct iscsi_endpoint *ep,
 		return iscsi_conn_get_addr_param((struct sockaddr_storage *)
 				&iser_conn->ib_conn.cma_id->route.addr.dst_addr,
 				param, buf);
-	default:
 		break;
+	default:
+		return -ENOSYS;
 	}
-	return -ENOSYS;
+
+	return len;
 }
 
 /**
@@ -860,7 +862,7 @@ iscsi_iser_ep_poll(struct iscsi_endpoint *ep, int timeout_ms)
 	iser_info("iser conn %p rc = %d\n", iser_conn, rc);
 
 	if (rc > 0)
-		return 1; /* success, this is the equivalent of POLLOUT */
+		return 1; /* success, this is the equivalent of EPOLLOUT */
 	else if (!rc)
 		return 0; /* timeout */
 	else
@@ -987,9 +989,10 @@ static struct scsi_host_template iscsi_iser_sht = {
 	.module                 = THIS_MODULE,
 	.name                   = "iSCSI Initiator over iSER",
 	.queuecommand           = iscsi_queuecommand,
-	.change_queue_depth	= iscsi_change_queue_depth,
+	.change_queue_depth	= scsi_change_queue_depth,
 	.sg_tablesize           = ISCSI_ISER_DEF_SG_TABLESIZE,
 	.cmd_per_lun            = ISER_DEF_CMD_PER_LUN,
+	.eh_timed_out		= iscsi_eh_cmd_timed_out,
 	.eh_abort_handler       = iscsi_eh_abort,
 	.eh_device_reset_handler= iscsi_eh_device_reset,
 	.eh_target_reset_handler = iscsi_eh_recover_target,
@@ -998,6 +1001,7 @@ static struct scsi_host_template iscsi_iser_sht = {
 	.slave_alloc            = iscsi_iser_slave_alloc,
 	.proc_name              = "iscsi_iser",
 	.this_id                = -1,
+	.track_queue_depth	= 1,
 };
 
 static struct iscsi_transport iscsi_iser_transport = {

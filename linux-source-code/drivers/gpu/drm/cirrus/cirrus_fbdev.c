@@ -10,6 +10,7 @@
  */
 #include <linux/module.h>
 #include <drm/drmP.h>
+#include <drm/drm_util.h>
 #include <drm/drm_fb_helper.h>
 #include <drm/drm_crtc_helper.h>
 
@@ -256,7 +257,7 @@ static int cirrus_fbdev_destroy(struct drm_device *dev,
 {
 	struct drm_framebuffer *gfb = gfbdev->gfb;
 
-	drm_crtc_force_disable_all(dev);
+	drm_helper_force_disable_all(dev);
 
 	drm_fb_helper_unregister_fbi(&gfbdev->helper);
 

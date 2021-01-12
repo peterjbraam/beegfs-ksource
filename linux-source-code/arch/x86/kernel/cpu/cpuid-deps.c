@@ -19,7 +19,7 @@ struct cpuid_dep {
  * called from cpu hotplug. It shouldn't do anything in this case,
  * but it's difficult to tell that to the init reference checker.
  */
-const static struct cpuid_dep cpuid_deps[] = {
+static const struct cpuid_dep cpuid_deps[] = {
 	{ X86_FEATURE_XSAVEOPT,		X86_FEATURE_XSAVE     },
 	{ X86_FEATURE_XSAVEC,		X86_FEATURE_XSAVE     },
 	{ X86_FEATURE_XSAVES,		X86_FEATURE_XSAVE     },
@@ -59,26 +59,25 @@ const static struct cpuid_dep cpuid_deps[] = {
 	{ X86_FEATURE_AVX512_4VNNIW,	X86_FEATURE_AVX512F   },
 	{ X86_FEATURE_AVX512_4FMAPS,	X86_FEATURE_AVX512F   },
 	{ X86_FEATURE_AVX512_VPOPCNTDQ, X86_FEATURE_AVX512F   },
+	{ X86_FEATURE_CQM_OCCUP_LLC,	X86_FEATURE_CQM_LLC   },
+	{ X86_FEATURE_CQM_MBM_TOTAL,	X86_FEATURE_CQM_LLC   },
+	{ X86_FEATURE_CQM_MBM_LOCAL,	X86_FEATURE_CQM_LLC   },
 	{}
 };
 
-static inline void __clear_cpu_cap(struct cpuinfo_x86 *c, unsigned int bit)
-{
-	clear_bit32(bit, c->x86_capability);
-}
-
-static inline void __setup_clear_cpu_cap(unsigned int bit)
-{
-	clear_cpu_cap(&boot_cpu_data, bit);
-	set_bit32(bit, cpu_caps_cleared);
-}
-
 static inline void clear_feature(struct cpuinfo_x86 *c, unsigned int feature)
 {
-	if (!c)
-		__setup_clear_cpu_cap(feature);
-	else
-		__clear_cpu_cap(c, feature);
+	/*
+	 * Note: This could use the non atomic __*_bit() variants, but the
+	 * rest of the cpufeature code uses atomics as well, so keep it for
+	 * consistency. Cleanup all of it separately.
+	 */
+	if (!c) {
+		clear_cpu_cap(&boot_cpu_data, feature);
+		set_bit(feature, (unsigned long *)cpu_caps_cleared);
+	} else {
+		clear_bit(feature, (unsigned long *)c->x86_capability);
+	}
 }
 
 /* Take the capabilities and the BUG bits into account */

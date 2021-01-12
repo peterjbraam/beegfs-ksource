@@ -39,11 +39,11 @@
 #include <linux/vmalloc.h>
 #include <linux/highmem.h>
 #include <linux/io.h>
-#include <linux/aio.h>
 #include <linux/jiffies.h>
 #include <asm/pgtable.h>
 #include <linux/delay.h>
 #include <linux/export.h>
+#include <linux/uio.h>
 
 #include <rdma/ib.h>
 
@@ -57,15 +57,19 @@
 static int qib_open(struct inode *, struct file *);
 static int qib_close(struct inode *, struct file *);
 static ssize_t qib_write(struct file *, const char __user *, size_t, loff_t *);
-static ssize_t qib_aio_write(struct kiocb *, const struct iovec *,
-			     unsigned long, loff_t);
-static unsigned int qib_poll(struct file *, struct poll_table_struct *);
+static ssize_t qib_write_iter(struct kiocb *, struct iov_iter *);
+static __poll_t qib_poll(struct file *, struct poll_table_struct *);
 static int qib_mmapf(struct file *, struct vm_area_struct *);
 
+/*
+ * This is really, really weird shit - write() and writev() here
+ * have completely unrelated semantics.  Sucky userland ABI,
+ * film at 11.
+ */
 static const struct file_operations qib_file_ops = {
 	.owner = THIS_MODULE,
 	.write = qib_write,
-	.aio_write = qib_aio_write,
+	.write_iter = qib_write_iter,
 	.open = qib_open,
 	.release = qib_close,
 	.poll = qib_poll,
@@ -339,7 +343,7 @@ static int qib_tid_update(struct qib_ctxtdata *rcd, struct file *fp,
 
 	/* virtual address of first page in transfer */
 	vaddr = ti->tidvaddr;
-	if (!access_ok(VERIFY_WRITE, (void __user *) vaddr,
+	if (!access_ok((void __user *) vaddr,
 		       cnt * PAGE_SIZE)) {
 		ret = -EFAULT;
 		goto done;
@@ -678,14 +682,7 @@ static void qib_clean_part_key(struct qib_ctxtdata *rcd,
 			       struct qib_devdata *dd)
 {
 	int i, j, pchanged = 0;
-	u64 oldpkey;
 	struct qib_pportdata *ppd = rcd->ppd;
-
-	/* for debugging only */
-	oldpkey = (u64) ppd->pkeys[0] |
-		((u64) ppd->pkeys[1] << 16) |
-		((u64) ppd->pkeys[2] << 32) |
-		((u64) ppd->pkeys[3] << 48);
 
 	for (i = 0; i < ARRAY_SIZE(rcd->pkeys); i++) {
 		if (!rcd->pkeys[i])
@@ -816,7 +813,8 @@ static int mmap_piobufs(struct vm_area_struct *vma,
 	vma->vm_flags &= ~VM_MAYREAD;
 	vma->vm_flags |= VM_DONTCOPY | VM_DONTEXPAND;
 
-	if (qib_wc_pat)
+	/* We used PAT if wc_cookie == 0 */
+	if (!dd->wc_cookie)
 		vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
 
 	ret = io_remap_pfn_range(vma, vma->vm_start, phys >> PAGE_SHIFT,
@@ -874,7 +872,7 @@ bail:
 /*
  * qib_file_vma_fault - handle a VMA page fault.
  */
-static int qib_file_vma_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
+static vm_fault_t qib_file_vma_fault(struct vm_fault *vmf)
 {
 	struct page *page;
 
@@ -888,7 +886,7 @@ static int qib_file_vma_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 	return 0;
 }
 
-static struct vm_operations_struct qib_file_vm_ops = {
+static const struct vm_operations_struct qib_file_vm_ops = {
 	.fault = qib_file_vma_fault,
 };
 
@@ -1080,18 +1078,18 @@ bail:
 	return ret;
 }
 
-static unsigned int qib_poll_urgent(struct qib_ctxtdata *rcd,
+static __poll_t qib_poll_urgent(struct qib_ctxtdata *rcd,
 				    struct file *fp,
 				    struct poll_table_struct *pt)
 {
 	struct qib_devdata *dd = rcd->dd;
-	unsigned pollflag;
+	__poll_t pollflag;
 
 	poll_wait(fp, &rcd->wait, pt);
 
 	spin_lock_irq(&dd->uctxt_lock);
 	if (rcd->urgent != rcd->urgent_poll) {
-		pollflag = POLLIN | POLLRDNORM;
+		pollflag = EPOLLIN | EPOLLRDNORM;
 		rcd->urgent_poll = rcd->urgent;
 	} else {
 		pollflag = 0;
@@ -1102,12 +1100,12 @@ static unsigned int qib_poll_urgent(struct qib_ctxtdata *rcd,
 	return pollflag;
 }
 
-static unsigned int qib_poll_next(struct qib_ctxtdata *rcd,
+static __poll_t qib_poll_next(struct qib_ctxtdata *rcd,
 				  struct file *fp,
 				  struct poll_table_struct *pt)
 {
 	struct qib_devdata *dd = rcd->dd;
-	unsigned pollflag;
+	__poll_t pollflag;
 
 	poll_wait(fp, &rcd->wait, pt);
 
@@ -1117,26 +1115,26 @@ static unsigned int qib_poll_next(struct qib_ctxtdata *rcd,
 		dd->f_rcvctrl(rcd->ppd, QIB_RCVCTRL_INTRAVAIL_ENB, rcd->ctxt);
 		pollflag = 0;
 	} else
-		pollflag = POLLIN | POLLRDNORM;
+		pollflag = EPOLLIN | EPOLLRDNORM;
 	spin_unlock_irq(&dd->uctxt_lock);
 
 	return pollflag;
 }
 
-static unsigned int qib_poll(struct file *fp, struct poll_table_struct *pt)
+static __poll_t qib_poll(struct file *fp, struct poll_table_struct *pt)
 {
 	struct qib_ctxtdata *rcd;
-	unsigned pollflag;
+	__poll_t pollflag;
 
 	rcd = ctxt_fp(fp);
 	if (!rcd)
-		pollflag = POLLERR;
+		pollflag = EPOLLERR;
 	else if (rcd->poll_type == QIB_POLL_TYPE_URGENT)
 		pollflag = qib_poll_urgent(rcd, fp, pt);
 	else  if (rcd->poll_type == QIB_POLL_TYPE_ANYRCV)
 		pollflag = qib_poll_next(rcd, fp, pt);
 	else /* invalid */
-		pollflag = POLLERR;
+		pollflag = EPOLLERR;
 
 	return pollflag;
 }
@@ -1798,7 +1796,6 @@ static int qib_close(struct inode *in, struct file *fp)
 	struct qib_devdata *dd;
 	unsigned long flags;
 	unsigned ctxt;
-	pid_t pid;
 
 	mutex_lock(&qib_mutex);
 
@@ -1840,7 +1837,6 @@ static int qib_close(struct inode *in, struct file *fp)
 	spin_lock_irqsave(&dd->uctxt_lock, flags);
 	ctxt = rcd->ctxt;
 	dd->rcd[ctxt] = NULL;
-	pid = rcd->pid;
 	rcd->pid = 0;
 	spin_unlock_irqrestore(&dd->uctxt_lock, flags);
 
@@ -2245,17 +2241,16 @@ bail:
 	return ret;
 }
 
-static ssize_t qib_aio_write(struct kiocb *iocb, const struct iovec *iov,
-			     unsigned long dim, loff_t off)
+static ssize_t qib_write_iter(struct kiocb *iocb, struct iov_iter *from)
 {
 	struct qib_filedata *fp = iocb->ki_filp->private_data;
 	struct qib_ctxtdata *rcd = ctxt_fp(iocb->ki_filp);
 	struct qib_user_sdma_queue *pq = fp->pq;
 
-	if (!dim || !pq)
+	if (!iter_is_iovec(from) || !from->nr_segs || !pq)
 		return -EINVAL;
-
-	return qib_user_sdma_writev(rcd, pq, iov, dim);
+			 
+	return qib_user_sdma_writev(rcd, pq, from->iov, from->nr_segs);
 }
 
 static struct class *qib_class;

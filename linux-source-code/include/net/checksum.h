@@ -22,7 +22,7 @@
 #include <linux/errno.h>
 #include <asm/types.h>
 #include <asm/byteorder.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/checksum.h>
 
 #ifndef _HAVE_ARCH_COPY_AND_CSUM_FROM_USER
@@ -30,7 +30,7 @@ static inline
 __wsum csum_and_copy_from_user (const void __user *src, void *dst,
 				      int len, __wsum sum, int *err_ptr)
 {
-	if (access_ok(VERIFY_READ, src, len))
+	if (access_ok(src, len))
 		return csum_partial_copy_from_user(src, dst, len, sum, err_ptr);
 
 	if (len)
@@ -46,7 +46,7 @@ static __inline__ __wsum csum_and_copy_to_user
 {
 	sum = csum_partial(src, len, sum);
 
-	if (access_ok(VERIFY_WRITE, dst, len)) {
+	if (access_ok(dst, len)) {
 		if (copy_to_user(dst, src, len) == 0)
 			return sum;
 	}
@@ -69,6 +69,19 @@ static inline __wsum csum_add(__wsum csum, __wsum addend)
 static inline __wsum csum_sub(__wsum csum, __wsum addend)
 {
 	return csum_add(csum, ~addend);
+}
+
+static inline __sum16 csum16_add(__sum16 csum, __be16 addend)
+{
+	u16 res = (__force u16)csum;
+
+	res += (__force u16)addend;
+	return (__force __sum16)(res + (res < (__force u16)addend));
+}
+
+static inline __sum16 csum16_sub(__sum16 csum, __be16 addend)
+{
+	return csum16_add(csum, ~addend);
 }
 
 static inline __wsum
@@ -114,26 +127,34 @@ static inline void csum_replace_by_diff(__sum16 *sum, __wsum diff)
 
 static inline void csum_replace4(__sum16 *sum, __be32 from, __be32 to)
 {
-	__be32 diff[] = { ~from, to };
+	__wsum tmp = csum_sub(~csum_unfold(*sum), (__force __wsum)from);
 
-	*sum = csum_fold(csum_partial(diff, sizeof(diff), ~csum_unfold(*sum)));
+	*sum = csum_fold(csum_add(tmp, (__force __wsum)to));
 }
 
-static inline void csum_replace2(__sum16 *sum, __be16 from, __be16 to)
+/* Implements RFC 1624 (Incremental Internet Checksum)
+ * 3. Discussion states :
+ *     HC' = ~(~HC + ~m + m')
+ *  m : old value of a 16bit field
+ *  m' : new value of a 16bit field
+ */
+static inline void csum_replace2(__sum16 *sum, __be16 old, __be16 new)
 {
-	csum_replace4(sum, (__force __be32)from, (__force __be32)to);
+	*sum = ~csum16_add(csum16_sub(~(*sum), old), new);
 }
 
 struct sk_buff;
-extern void inet_proto_csum_replace4(__sum16 *sum, struct sk_buff *skb,
-				     __be32 from, __be32 to, int pseudohdr);
-extern void inet_proto_csum_replace16(__sum16 *sum, struct sk_buff *skb,
-				      const __be32 *from, const __be32 *to,
-				      int pseudohdr);
+void inet_proto_csum_replace4(__sum16 *sum, struct sk_buff *skb,
+			      __be32 from, __be32 to, bool pseudohdr);
+void inet_proto_csum_replace16(__sum16 *sum, struct sk_buff *skb,
+			       const __be32 *from, const __be32 *to,
+			       bool pseudohdr);
+void inet_proto_csum_replace_by_diff(__sum16 *sum, struct sk_buff *skb,
+				     __wsum diff, bool pseudohdr);
 
 static inline void inet_proto_csum_replace2(__sum16 *sum, struct sk_buff *skb,
 					    __be16 from, __be16 to,
-					    int pseudohdr)
+					    bool pseudohdr)
 {
 	inet_proto_csum_replace4(sum, skb, (__force __be32)from,
 				 (__force __be32)to, pseudohdr);
@@ -149,7 +170,8 @@ static inline __wsum remcsum_adjust(void *ptr, __wsum csum,
 	csum = csum_sub(csum, csum_partial(ptr, start, 0));
 
 	/* Set derived checksum in packet */
-	delta = csum_sub(csum_fold(csum), *psum);
+	delta = csum_sub((__force __wsum)csum_fold(csum),
+			 (__force __wsum)*psum);
 	*psum = csum_fold(csum);
 
 	return delta;
@@ -157,7 +179,7 @@ static inline __wsum remcsum_adjust(void *ptr, __wsum csum,
 
 static inline void remcsum_unadjust(__sum16 *psum, __wsum delta)
 {
-	*psum = csum_fold(csum_sub(delta, *psum));
+	*psum = csum_fold(csum_sub(delta, (__force __wsum)*psum));
 }
 
 #endif

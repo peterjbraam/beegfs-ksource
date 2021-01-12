@@ -14,6 +14,8 @@
 #include <linux/iommu.h>
 #include <linux/module.h>
 
+#include <asm/apic.h>
+#include <asm/cpu.h>
 #include <asm/hw_irq.h>
 #include <asm/io_apic.h>
 #include <asm/irq_remapping.h>
@@ -31,64 +33,129 @@
 #define IOAPIC_REMAPPING_ENTRY 24
 
 static cpumask_t ioapic_max_cpumask = { CPU_BITS_NONE };
+static struct irq_domain *ioapic_ir_domain;
 
 static int hyperv_ir_set_affinity(struct irq_data *data,
 		const struct cpumask *mask, bool force)
 {
-	struct irq_cfg *cfg = data->chip_data;
-	cpumask_t affinity_mask;
+	struct irq_data *parent = data->parent_data;
+	struct irq_cfg *cfg = irqd_cfg(data);
+	struct IO_APIC_route_entry *entry;
 	int ret;
 
 	/* Return error If new irq affinity is out of ioapic_max_cpumask. */
 	if (!cpumask_subset(mask, &ioapic_max_cpumask))
 		return -EINVAL;
 
-	cpumask_and(&affinity_mask, mask, &ioapic_max_cpumask);
-	ret = native_ioapic_set_affinity(data, &affinity_mask, force);
-	if (ret)
+	ret = parent->chip->irq_set_affinity(parent, mask, force);
+	if (ret < 0 || ret == IRQ_SET_MASK_OK_DONE)
 		return ret;
 
+	entry = data->chip_data;
+	entry->dest = cfg->dest_apicid;
+	entry->vector = cfg->vector;
 	send_cleanup_vector(cfg);
 
 	return 0;
 }
 
-static int hyperv_ir_setup_ioapic_entry(int irq,
-				    struct IO_APIC_route_entry *route_entry,
-				    unsigned int destination, int vector,
-				    struct io_apic_irq_attr *attr)
+static struct irq_chip hyperv_ir_chip = {
+	.name			= "HYPERV-IR",
+	.irq_ack		= apic_ack_irq,
+	.irq_set_affinity	= hyperv_ir_set_affinity,
+};
+
+static int hyperv_irq_remapping_alloc(struct irq_domain *domain,
+				     unsigned int virq, unsigned int nr_irqs,
+				     void *arg)
 {
-	struct irq_cfg *cfg = irq_get_chip_data(irq);
-	struct irq_data *irq_data = irq_get_irq_data(irq);
-	unsigned int dest;
+	struct irq_alloc_info *info = arg;
+	struct irq_data *irq_data;
+	struct irq_desc *desc;
 	int ret = 0;
 
-	if (!irq_data || !cfg)
+	if (!info || info->type != X86_IRQ_ALLOC_TYPE_IOAPIC || nr_irqs > 1)
 		return -EINVAL;
+
+	ret = irq_domain_alloc_irqs_parent(domain, virq, nr_irqs, arg);
+	if (ret < 0)
+		return ret;
+
+	irq_data = irq_domain_get_irq_data(domain, virq);
+	if (!irq_data) {
+		irq_domain_free_irqs_common(domain, virq, nr_irqs);
+		return -EINVAL;
+	}
+
+	irq_data->chip = &hyperv_ir_chip;
+
+	/*
+	 * If there is interrupt remapping function of IOMMU, setting irq
+	 * affinity only needs to change IRTE of IOMMU. But Hyper-V doesn't
+	 * support interrupt remapping function, setting irq affinity of IO-APIC
+	 * interrupts still needs to change IO-APIC registers. But ioapic_
+	 * configure_entry() will ignore value of cfg->vector and cfg->
+	 * dest_apicid when IO-APIC's parent irq domain is not the vector
+	 * domain.(See ioapic_configure_entry()) In order to setting vector
+	 * and dest_apicid to IO-APIC register, IO-APIC entry pointer is saved
+	 * in the chip_data and hyperv_irq_remapping_activate()/hyperv_ir_set_
+	 * affinity() set vector and dest_apicid directly into IO-APIC entry.
+	 */
+	irq_data->chip_data = info->ioapic_entry;
 
 	/*
 	 * Hypver-V IO APIC irq affinity should be in the scope of
 	 * ioapic_max_cpumask because no irq remapping support.
 	 */
-	ret = __ioapic_set_affinity(irq_data, &ioapic_max_cpumask, &dest);
-	if (ret)
-		return ret;
-
-	native_setup_ioapic_entry(irq, route_entry, dest, vector, attr);
-
-	cfg->remapped = 1;
+	desc = irq_data_to_desc(irq_data);
+	cpumask_copy(desc->irq_common_data.affinity, &ioapic_max_cpumask);
 
 	return 0;
 }
 
+static void hyperv_irq_remapping_free(struct irq_domain *domain,
+				 unsigned int virq, unsigned int nr_irqs)
+{
+	irq_domain_free_irqs_common(domain, virq, nr_irqs);
+}
+
+static int hyperv_irq_remapping_activate(struct irq_domain *domain,
+			  struct irq_data *irq_data, bool reserve)
+{
+	struct irq_cfg *cfg = irqd_cfg(irq_data);
+	struct IO_APIC_route_entry *entry = irq_data->chip_data;
+
+	entry->dest = cfg->dest_apicid;
+	entry->vector = cfg->vector;
+
+	return 0;
+}
+
+static struct irq_domain_ops hyperv_ir_domain_ops = {
+	.alloc = hyperv_irq_remapping_alloc,
+	.free = hyperv_irq_remapping_free,
+	.activate = hyperv_irq_remapping_activate,
+};
 
 static int __init hyperv_prepare_irq_remapping(void)
 {
+	struct fwnode_handle *fn;
 	int i;
 
-	if (x86_hyper != &x86_hyper_ms_hyperv ||
+	if (!hypervisor_is_type(X86_HYPER_MS_HYPERV) ||
 	    !x2apic_supported())
 		return -ENODEV;
+
+	fn = irq_domain_alloc_named_id_fwnode("HYPERV-IR", 0);
+	if (!fn)
+		return -ENOMEM;
+
+	ioapic_ir_domain =
+		irq_domain_create_hierarchy(arch_get_ir_parent_domain(),
+				0, IOAPIC_REMAPPING_ENTRY, fn,
+				&hyperv_ir_domain_ops, NULL);
+
+	irq_domain_free_fwnode(fn);
 
 	/*
 	 * Hyper-V doesn't provide irq remapping function for
@@ -109,28 +176,21 @@ static int __init hyperv_prepare_irq_remapping(void)
 
 static int __init hyperv_enable_irq_remapping(void)
 {
-	irq_remapping_enabled = 1;
 	return IRQ_REMAP_X2APIC_MODE;
 }
 
-static int hyperv_msi_setup_irq(struct pci_dev *pdev, unsigned int irq,
-				int index, int sub_handle)
+static struct irq_domain *hyperv_get_ir_irq_domain(struct irq_alloc_info *info)
 {
-	return 0;
-}
-
-static int hyperv_msi_alloc_irq(struct pci_dev *dev, int irq, int nvec)
-{
-	return 0;
+	if (info->type == X86_IRQ_ALLOC_TYPE_IOAPIC)
+		return ioapic_ir_domain;
+	else
+		return NULL;
 }
 
 struct irq_remap_ops hyperv_irq_remap_ops = {
 	.prepare		= hyperv_prepare_irq_remapping,
 	.enable			= hyperv_enable_irq_remapping,
-	.set_affinity		= hyperv_ir_set_affinity,
-	.setup_ioapic_entry	= hyperv_ir_setup_ioapic_entry,
-	.msi_setup_irq          = hyperv_msi_setup_irq,
-	.msi_alloc_irq          = hyperv_msi_alloc_irq,
+	.get_ir_irq_domain	= hyperv_get_ir_irq_domain,
 };
 
 #endif

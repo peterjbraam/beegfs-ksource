@@ -18,6 +18,7 @@
 #include <linux/module.h>
 #include <linux/errno.h>
 #include <linux/debugfs.h>
+#include <linux/vmalloc.h>
 #include "fnic.h"
 
 static struct dentry *fnic_trace_debugfs_root;
@@ -178,7 +179,7 @@ static ssize_t fnic_trace_ctrl_write(struct file *filp,
 	else if (*trace_type == fc_trc_flag->fc_clear)
 		fnic_fc_trace_cleared = val;
 	else
-		pr_err("fnic: cannot write to any debufs file\n");
+		pr_err("fnic: cannot write to any debugfs file\n");
 
 	(*ppos)++;
 
@@ -218,8 +219,8 @@ static int fnic_trace_debugfs_open(struct inode *inode,
 		return -ENOMEM;
 
 	if (*rdata_ptr == fc_trc_flag->fnic_trace) {
-		fnic_dbg_prt->buffer = vmalloc(3 *
-					(trace_max_pages * PAGE_SIZE));
+		fnic_dbg_prt->buffer = vmalloc(array3_size(3, trace_max_pages,
+							   PAGE_SIZE));
 		if (!fnic_dbg_prt->buffer) {
 			kfree(fnic_dbg_prt);
 			return -ENOMEM;
@@ -229,7 +230,8 @@ static int fnic_trace_debugfs_open(struct inode *inode,
 		fnic_dbg_prt->buffer_len = fnic_get_trace_data(fnic_dbg_prt);
 	} else {
 		fnic_dbg_prt->buffer =
-			vmalloc(3 * (fnic_fc_trace_max_pages * PAGE_SIZE));
+			vmalloc(array3_size(3, fnic_fc_trace_max_pages,
+					    PAGE_SIZE));
 		if (!fnic_dbg_prt->buffer) {
 			kfree(fnic_dbg_prt);
 			return -ENOMEM;
@@ -550,7 +552,7 @@ static ssize_t fnic_reset_stats_write(struct file *file,
 			sizeof(struct io_path_stats) - sizeof(u64));
 		memset(fw_stats_p+1, 0,
 			sizeof(struct fw_stats) - sizeof(u64));
-		getnstimeofday(&stats->stats_timestamps.last_reset_time);
+		ktime_get_real_ts64(&stats->stats_timestamps.last_reset_time);
 	}
 
 	(*ppos)++;

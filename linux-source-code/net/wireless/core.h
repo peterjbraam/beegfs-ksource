@@ -78,7 +78,7 @@ struct cfg80211_registered_device {
 	struct cfg80211_scan_request *scan_req; /* protected by RTNL */
 	struct sk_buff *scan_msg;
 	struct list_head sched_scan_req_list;
-	unsigned long suspend_at;
+	time64_t suspend_at;
 	struct work_struct scan_done_wk;
 
 	struct genl_info *cur_cmd_info;
@@ -531,10 +531,6 @@ void cfg80211_stop_p2p_device(struct cfg80211_registered_device *rdev,
 void cfg80211_stop_nan(struct cfg80211_registered_device *rdev,
 		       struct wireless_dev *wdev);
 
-struct cfg80211_internal_bss *
-cfg80211_bss_update(struct cfg80211_registered_device *rdev,
-		    struct cfg80211_internal_bss *tmp,
-		    bool signal_valid, unsigned long ts);
 #ifdef CONFIG_CFG80211_DEVELOPER_WARNINGS
 #define CFG80211_DEV_WARN_ON(cond)	WARN_ON(cond)
 #else

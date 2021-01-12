@@ -1172,6 +1172,18 @@ struct cpl_rx_pkt {
 #define RXF_IP6_V(x) ((x) << RXF_IP6_S)
 #define RXF_IP6_F    RXF_IP6_V(1U)
 
+#define RXF_SYN_COOKIE_S    26
+#define RXF_SYN_COOKIE_V(x) ((x) << RXF_SYN_COOKIE_S)
+#define RXF_SYN_COOKIE_F    RXF_SYN_COOKIE_V(1U)
+
+#define RXF_FCOE_S    26
+#define RXF_FCOE_V(x) ((x) << RXF_FCOE_S)
+#define RXF_FCOE_F    RXF_FCOE_V(1U)
+
+#define RXF_LRO_S    27
+#define RXF_LRO_V(x) ((x) << RXF_LRO_S)
+#define RXF_LRO_F    RXF_LRO_V(1U)
+
 /* rx_pkt.l2info fields */
 #define RX_ETHHDR_LEN_S    0
 #define RX_ETHHDR_LEN_M    0x1F
@@ -1207,6 +1219,11 @@ struct cpl_rx_pkt {
 #define RX_IPHDR_LEN_M    0x3FF
 #define RX_IPHDR_LEN_V(x) ((x) << RX_IPHDR_LEN_S)
 #define RX_IPHDR_LEN_G(x) (((x) >> RX_IPHDR_LEN_S) & RX_IPHDR_LEN_M)
+
+/* rx_pkt.err_vec fields */
+#define RXERR_CSUM_S    13
+#define RXERR_CSUM_V(x) ((x) << RXERR_CSUM_S)
+#define RXERR_CSUM_F    RXERR_CSUM_V(1U)
 
 #define T6_COMPR_RXERR_LEN_S    1
 #define T6_COMPR_RXERR_LEN_V(x) ((x) << T6_COMPR_RXERR_LEN_S)

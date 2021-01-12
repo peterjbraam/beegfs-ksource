@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <asm/bug.h>
 #include <linux/kernel.h>
 #include <sys/time.h>
@@ -34,6 +35,7 @@ char dso__symtab_origin(const struct dso *dso)
 		[DSO_BINARY_TYPE__JAVA_JIT]			= 'j',
 		[DSO_BINARY_TYPE__DEBUGLINK]			= 'l',
 		[DSO_BINARY_TYPE__BUILD_ID_CACHE]		= 'B',
+		[DSO_BINARY_TYPE__BUILD_ID_CACHE_DEBUGINFO]	= 'D',
 		[DSO_BINARY_TYPE__FEDORA_DEBUGINFO]		= 'f',
 		[DSO_BINARY_TYPE__UBUNTU_DEBUGINFO]		= 'u',
 		[DSO_BINARY_TYPE__OPENEMBEDDED_DEBUGINFO]	= 'o',
@@ -99,7 +101,12 @@ int dso__read_binary_type_filename(const struct dso *dso,
 		break;
 	}
 	case DSO_BINARY_TYPE__BUILD_ID_CACHE:
-		if (dso__build_id_filename(dso, filename, size) == NULL)
+		if (dso__build_id_filename(dso, filename, size, false) == NULL)
+			ret = -1;
+		break;
+
+	case DSO_BINARY_TYPE__BUILD_ID_CACHE_DEBUGINFO:
+		if (dso__build_id_filename(dso, filename, size, true) == NULL)
 			ret = -1;
 		break;
 
@@ -288,7 +295,7 @@ static int decompress_kmodule(struct dso *dso, const char *name,
 		unlink(tmpbuf);
 
 	if (pathname && (fd >= 0))
-		strncpy(pathname, tmpbuf, len);
+		strlcpy(pathname, tmpbuf, len);
 
 	return fd;
 }
@@ -502,7 +509,14 @@ static void check_data_close(void);
  */
 static int open_dso(struct dso *dso, struct machine *machine)
 {
-	int fd = __open_dso(dso, machine);
+	int fd;
+	struct nscookie nsc;
+
+	if (dso->binary_type != DSO_BINARY_TYPE__BUILD_ID_CACHE)
+		nsinfo__mountns_enter(dso->nsinfo, &nsc);
+	fd = __open_dso(dso, machine);
+	if (dso->binary_type != DSO_BINARY_TYPE__BUILD_ID_CACHE)
+		nsinfo__mountns_exit(&nsc);
 
 	if (fd >= 0) {
 		dso__list_add(dso);
@@ -880,7 +894,7 @@ static ssize_t cached_read(struct dso *dso, struct machine *machine,
 	return r;
 }
 
-static int data_file_size(struct dso *dso, struct machine *machine)
+int dso__data_file_size(struct dso *dso, struct machine *machine)
 {
 	int ret = 0;
 	struct stat st;
@@ -929,7 +943,7 @@ out:
  */
 off_t dso__data_size(struct dso *dso, struct machine *machine)
 {
-	if (data_file_size(dso, machine))
+	if (dso__data_file_size(dso, machine))
 		return -1;
 
 	/* For now just estimate dso data size is close to file size */
@@ -939,7 +953,7 @@ off_t dso__data_size(struct dso *dso, struct machine *machine)
 static ssize_t data_read_offset(struct dso *dso, struct machine *machine,
 				u64 offset, u8 *data, ssize_t size)
 {
-	if (data_file_size(dso, machine))
+	if (dso__data_file_size(dso, machine))
 		return -1;
 
 	/* Check the offset sanity. */
@@ -1236,6 +1250,7 @@ void dso__delete(struct dso *dso)
 	dso_cache__free(dso);
 	dso__free_a2l(dso);
 	zfree(&dso->symsrc_filename);
+	nsinfo__zput(dso->nsinfo);
 	pthread_mutex_destroy(&dso->lock);
 	free(dso);
 }
@@ -1301,6 +1316,7 @@ bool __dsos__read_build_ids(struct list_head *head, bool with_hits)
 {
 	bool have_build_id = false;
 	struct dso *pos;
+	struct nscookie nsc;
 
 	list_for_each_entry(pos, head, node) {
 		if (with_hits && !pos->hit && !dso__is_vdso(pos))
@@ -1309,11 +1325,13 @@ bool __dsos__read_build_ids(struct list_head *head, bool with_hits)
 			have_build_id = true;
 			continue;
 		}
+		nsinfo__mountns_enter(pos->nsinfo, &nsc);
 		if (filename__read_build_id(pos->long_name, pos->build_id,
 					    sizeof(pos->build_id)) > 0) {
 			have_build_id	  = true;
 			pos->has_build_id = true;
 		}
+		nsinfo__mountns_exit(&nsc);
 	}
 
 	return have_build_id;

@@ -343,7 +343,7 @@ static int cm_alloc_msg(struct cm_id_private *cm_id_priv,
 		ret = -ENODEV;
 		goto out;
 	}
-	ah = rdma_create_ah(mad_agent->qp->pd, &av->ah_attr);
+	ah = rdma_create_ah(mad_agent->qp->pd, &av->ah_attr, 0);
 	if (IS_ERR(ah)) {
 		ret = PTR_ERR(ah);
 		goto out;
@@ -355,7 +355,7 @@ static int cm_alloc_msg(struct cm_id_private *cm_id_priv,
 			       GFP_ATOMIC,
 			       IB_MGMT_BASE_VERSION);
 	if (IS_ERR(m)) {
-		rdma_destroy_ah(ah);
+		rdma_destroy_ah(ah, 0);
 		ret = PTR_ERR(m);
 		goto out;
 	}
@@ -400,7 +400,7 @@ static int cm_create_response_msg_ah(struct cm_port *port,
 static void cm_free_msg(struct ib_mad_send_buf *msg)
 {
 	if (msg->ah)
-		rdma_destroy_ah(msg->ah);
+		rdma_destroy_ah(msg->ah, 0);
 	if (msg->context[0])
 		cm_deref_id(msg->context[0]);
 	ib_free_send_mad(msg);
@@ -1988,12 +1988,11 @@ static int cm_req_handler(struct cm_work *work)
 	grh = rdma_ah_read_grh(&cm_id_priv->av.ah_attr);
 	gid_attr = grh->sgid_attr;
 
-	if (gid_attr &&
-	    rdma_protocol_roce(work->port->cm_dev->ib_device,
-			       work->port->port_num)) {
+	if (gid_attr && gid_attr->ndev) {
 		work->path[0].rec_type =
 			sa_conv_gid_to_pathrec_type(gid_attr->gid_type);
 	} else {
+		/* If no GID attribute or ndev is null, it is not RoCE. */
 		cm_path_set_rec_type(work->port->cm_dev->ib_device,
 				     work->port->port_num,
 				     &work->path[0],
@@ -4504,6 +4503,7 @@ static int __init ib_cm_init(void)
 {
 	int ret;
 
+	memset(&cm, 0, sizeof cm);
 	INIT_LIST_HEAD(&cm.device_list);
 	rwlock_init(&cm.device_lock);
 	spin_lock_init(&cm.lock);

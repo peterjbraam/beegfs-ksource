@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #include <target/target_core_base.h>
 #include <linux/btree.h>
 
@@ -32,6 +33,7 @@ struct tcm_qla2xxx_tpg_attrib {
 	int demo_mode_write_protect;
 	int prod_mode_write_protect;
 	int demo_mode_login_only;
+	int fabric_prot_type;
 	int jam_host;
 };
 

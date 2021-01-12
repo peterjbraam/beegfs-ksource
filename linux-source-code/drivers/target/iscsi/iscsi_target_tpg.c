@@ -16,9 +16,9 @@
  * GNU General Public License for more details.
  ******************************************************************************/
 
+#include <linux/slab.h>
 #include <target/target_core_base.h>
 #include <target/target_core_fabric.h>
-
 #include <target/iscsi/iscsi_target_core.h>
 #include "iscsi_target_erl0.h"
 #include "iscsi_target_login.h"
@@ -636,8 +636,7 @@ int iscsit_ta_authentication(struct iscsi_portal_group *tpg, u32 authentication)
 		none = strstr(buf1, NONE);
 		if (none)
 			goto out;
-		strncat(buf1, ",", strlen(","));
-		strncat(buf1, NONE, strlen(NONE));
+		strlcat(buf1, "," NONE, sizeof(buf1));
 		if (iscsi_update_param_value(param, buf1) < 0)
 			return -EINVAL;
 	}
@@ -864,24 +863,6 @@ int iscsit_ta_t10_pi(
 	return 0;
 }
 
-int iscsit_ta_tpg_enabled_sendtargets(
-	struct iscsi_portal_group *tpg,
-	u32 flag)
-{
-	struct iscsi_tpg_attrib *a = &tpg->tpg_attrib;
-
-	if ((flag != 0) && (flag != 1)) {
-		pr_err("Illegal value %d\n", flag);
-		return -EINVAL;
-	}
-
-	a->tpg_enabled_sendtargets = flag;
-	pr_debug("iSCSI_TPG[%hu] - TPG enabled bit required for SendTargets:"
-		" %s\n", tpg->tpgt, (a->tpg_enabled_sendtargets) ? "ON" : "OFF");
-
-	return 0;
-}
-
 int iscsit_ta_fabric_prot_type(
 	struct iscsi_portal_group *tpg,
 	u32 prot_type)
@@ -896,6 +877,24 @@ int iscsit_ta_fabric_prot_type(
 	a->fabric_prot_type = prot_type;
 	pr_debug("iSCSI_TPG[%hu] - T10 Fabric Protection Type: %u\n",
 		 tpg->tpgt, prot_type);
+
+	return 0;
+}
+
+int iscsit_ta_tpg_enabled_sendtargets(
+	struct iscsi_portal_group *tpg,
+	u32 flag)
+{
+	struct iscsi_tpg_attrib *a = &tpg->tpg_attrib;
+
+	if ((flag != 0) && (flag != 1)) {
+		pr_err("Illegal value %d\n", flag);
+		return -EINVAL;
+	}
+
+	a->tpg_enabled_sendtargets = flag;
+	pr_debug("iSCSI_TPG[%hu] - TPG enabled bit required for SendTargets:"
+		" %s\n", tpg->tpgt, (a->tpg_enabled_sendtargets) ? "ON" : "OFF");
 
 	return 0;
 }

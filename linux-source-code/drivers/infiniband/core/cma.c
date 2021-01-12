@@ -188,7 +188,7 @@ static LIST_HEAD(dev_list);
 static LIST_HEAD(listen_any_list);
 static DEFINE_MUTEX(lock);
 static struct workqueue_struct *cma_wq;
-static int cma_pernet_id;
+static unsigned int cma_pernet_id;
 
 struct cma_pernet {
 	struct idr tcp_ps;
@@ -494,7 +494,10 @@ static void _cma_attach_to_dev(struct rdma_id_private *id_priv,
 	id_priv->id.route.addr.dev_addr.transport =
 		rdma_node_get_transport(cma_dev->device->node_type);
 	list_add_tail(&id_priv->list, &cma_dev->id_list);
-	rdma_restrack_add(&id_priv->res);
+	if (id_priv->res.kern_name)
+		rdma_restrack_kadd(&id_priv->res);
+	else
+		rdma_restrack_uadd(&id_priv->res);
 }
 
 static void cma_attach_to_dev(struct rdma_id_private *id_priv,
@@ -1405,7 +1408,7 @@ static bool validate_ipv4_net_dev(struct net_device *net_dev,
 	fl4.saddr = saddr;
 
 	rcu_read_lock();
-	err = fib_lookup(dev_net(net_dev), &fl4, &res);
+	err = fib_lookup(dev_net(net_dev), &fl4, &res, 0);
 	ret = err == 0 && FIB_RES_DEV(res) == net_dev;
 	rcu_read_unlock();
 
@@ -1421,7 +1424,7 @@ static bool validate_ipv6_net_dev(struct net_device *net_dev,
 			   IPV6_ADDR_LINKLOCAL;
 	struct rt6_info *rt = rt6_lookup(dev_net(net_dev), &dst_addr->sin6_addr,
 					 &src_addr->sin6_addr, net_dev->ifindex,
-					 strict);
+					 NULL, strict);
 	bool ret;
 
 	if (!rt)
@@ -2407,6 +2410,7 @@ static int cma_iw_listen(struct rdma_id_private *id_priv, int backlog)
 		return PTR_ERR(id);
 
 	id->tos = id_priv->tos;
+	id->tos_set = id_priv->tos_set;
 	id_priv->cm_id.iw = id;
 
 	memcpy(&id_priv->cm_id.iw->local_addr, cma_src_addr(id_priv),
@@ -2459,6 +2463,8 @@ static void cma_listen_on_dev(struct rdma_id_private *id_priv,
 	atomic_inc(&id_priv->refcount);
 	dev_id_priv->internal_id = 1;
 	dev_id_priv->afonly = id_priv->afonly;
+	dev_id_priv->tos_set = id_priv->tos_set;
+	dev_id_priv->tos = id_priv->tos;
 
 	ret = rdma_listen(id, id_priv->backlog);
 	if (ret)
@@ -3806,6 +3812,7 @@ static int cma_connect_iw(struct rdma_id_private *id_priv,
 		return PTR_ERR(cm_id);
 
 	cm_id->tos = id_priv->tos;
+	cm_id->tos_set = id_priv->tos_set;
 	id_priv->cm_id.iw = cm_id;
 
 	memcpy(&cm_id->local_addr, cma_src_addr(id_priv),
@@ -4224,7 +4231,7 @@ static int cma_join_ib_multicast(struct rdma_id_private *id_priv,
 						id_priv->id.port_num, &rec,
 						comp_mask, GFP_KERNEL,
 						cma_ib_mc_handler, mc);
-	return PTR_RET(mc->multicast.ib);
+	return PTR_ERR_OR_ZERO(mc->multicast.ib);
 }
 
 static void iboe_mcast_work_handler(struct work_struct *work)
@@ -4734,7 +4741,7 @@ static int __init cma_init(void)
 		goto err_wq;
 
 	ib_sa_register_client(&sa_client);
-	register_netdevice_notifier_rh(&cma_nb);
+	register_netdevice_notifier(&cma_nb);
 
 	ret = ib_register_client(&cma_client);
 	if (ret)
@@ -4746,7 +4753,7 @@ static int __init cma_init(void)
 	return 0;
 
 err:
-	unregister_netdevice_notifier_rh(&cma_nb);
+	unregister_netdevice_notifier(&cma_nb);
 	ib_sa_unregister_client(&sa_client);
 err_wq:
 	destroy_workqueue(cma_wq);
@@ -4758,7 +4765,7 @@ static void __exit cma_cleanup(void)
 	cma_configfs_exit();
 	rdma_nl_unregister(RDMA_NL_RDMA_CM);
 	ib_unregister_client(&cma_client);
-	unregister_netdevice_notifier_rh(&cma_nb);
+	unregister_netdevice_notifier(&cma_nb);
 	ib_sa_unregister_client(&sa_client);
 	unregister_pernet_subsys(&cma_pernet_operations);
 	destroy_workqueue(cma_wq);

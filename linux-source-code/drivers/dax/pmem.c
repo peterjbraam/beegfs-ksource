@@ -44,17 +44,16 @@ static void dax_pmem_percpu_exit(void *data)
 	struct dax_pmem *dax_pmem = to_dax_pmem(ref);
 
 	dev_dbg(dax_pmem->dev, "trace\n");
+	wait_for_completion(&dax_pmem->cmp);
 	percpu_ref_exit(ref);
 }
 
-static void dax_pmem_percpu_kill(void *data)
+static void dax_pmem_percpu_kill(struct percpu_ref *ref)
 {
-	struct percpu_ref *ref = data;
 	struct dax_pmem *dax_pmem = to_dax_pmem(ref);
 
 	dev_dbg(dax_pmem->dev, "trace\n");
 	percpu_ref_kill(ref);
-	wait_for_completion(&dax_pmem->cmp);
 }
 
 static int dax_pmem_probe(struct device *dev)
@@ -111,19 +110,11 @@ static int dax_pmem_probe(struct device *dev)
 		return rc;
 	}
 
-	dax_pmem->pgmap.type = MEMORY_DEVICE_DEV_DAX;
 	dax_pmem->pgmap.ref = &dax_pmem->ref;
+	dax_pmem->pgmap.kill = dax_pmem_percpu_kill;
 	addr = devm_memremap_pages(dev, &dax_pmem->pgmap);
-	if (IS_ERR(addr)) {
-		devm_remove_action(dev, dax_pmem_percpu_exit, &dax_pmem->ref);
-		percpu_ref_exit(&dax_pmem->ref);
+	if (IS_ERR(addr))
 		return PTR_ERR(addr);
-	}
-
-	rc = devm_add_action_or_reset(dev, dax_pmem_percpu_kill,
-							&dax_pmem->ref);
-	if (rc)
-		return rc;
 
 	/* adjust the dax_region resource to the start of data */
 	memcpy(&res, &dax_pmem->pgmap.res, sizeof(res));

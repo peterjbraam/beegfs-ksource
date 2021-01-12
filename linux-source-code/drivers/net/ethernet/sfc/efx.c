@@ -903,7 +903,7 @@ rollback:
 
 void efx_schedule_slow_fill(struct efx_rx_queue *rx_queue)
 {
-	mod_timer(&rx_queue->slow_fill, jiffies + msecs_to_jiffies(100));
+	mod_timer(&rx_queue->slow_fill, jiffies + msecs_to_jiffies(10));
 }
 
 static bool efx_default_channel_want_txqs(struct efx_channel *channel)
@@ -1289,9 +1289,8 @@ static int efx_init_io(struct efx_nic *efx)
 
 	pci_set_master(pci_dev);
 
-	/* Set the PCI DMA mask.  Try all possibilities from our
-	 * genuine mask down to 32 bits, because some architectures
-	 * (e.g. x86_64 with iommu_sac_force set) will allow 40 bit
+	/* Set the PCI DMA mask.  Try all possibilities from our genuine mask
+	 * down to 32 bits, because some architectures will allow 40 bit
 	 * masks event though they reject 46 bit masks.
 	 */
 	while (dma_mask > 0x7fffffffUL) {
@@ -2453,7 +2452,6 @@ static void efx_udp_tunnel_del(struct net_device *dev, struct udp_tunnel_info *t
 }
 
 static const struct net_device_ops efx_netdev_ops = {
-	.ndo_size		= sizeof(struct net_device_ops),
 	.ndo_open		= efx_net_open,
 	.ndo_stop		= efx_net_stop,
 	.ndo_get_stats64	= efx_net_stats,
@@ -2461,7 +2459,7 @@ static const struct net_device_ops efx_netdev_ops = {
 	.ndo_start_xmit		= efx_hard_start_xmit,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_do_ioctl		= efx_ioctl,
-	.extended.ndo_change_mtu	= efx_change_mtu,
+	.ndo_change_mtu		= efx_change_mtu,
 	.ndo_set_mac_address	= efx_set_mac_address,
 	.ndo_set_rx_mode	= efx_set_rx_mode,
 	.ndo_set_features	= efx_set_features,
@@ -2469,19 +2467,19 @@ static const struct net_device_ops efx_netdev_ops = {
 	.ndo_vlan_rx_kill_vid	= efx_vlan_rx_kill_vid,
 #ifdef CONFIG_SFC_SRIOV
 	.ndo_set_vf_mac		= efx_sriov_set_vf_mac,
-	.extended.ndo_set_vf_vlan	= efx_sriov_set_vf_vlan,
+	.ndo_set_vf_vlan	= efx_sriov_set_vf_vlan,
 	.ndo_set_vf_spoofchk	= efx_sriov_set_vf_spoofchk,
 	.ndo_get_vf_config	= efx_sriov_get_vf_config,
 	.ndo_set_vf_link_state  = efx_sriov_set_vf_link_state,
 #endif
 	.ndo_get_phys_port_id   = efx_get_phys_port_id,
-	.extended.ndo_get_phys_port_name	= efx_get_phys_port_name,
-	.extended.ndo_setup_tc_rh = efx_setup_tc,
+	.ndo_get_phys_port_name	= efx_get_phys_port_name,
+	.ndo_setup_tc		= efx_setup_tc,
 #ifdef CONFIG_RFS_ACCEL
 	.ndo_rx_flow_steer	= efx_filter_rfs,
 #endif
-	.extended.ndo_udp_tunnel_add	= efx_udp_tunnel_add,
-	.extended.ndo_udp_tunnel_del	= efx_udp_tunnel_del,
+	.ndo_udp_tunnel_add	= efx_udp_tunnel_add,
+	.ndo_udp_tunnel_del	= efx_udp_tunnel_del,
 };
 
 static void efx_update_name(struct efx_nic *efx)
@@ -2550,8 +2548,8 @@ static int efx_register_netdev(struct efx_nic *efx)
 		net_dev->priv_flags |= IFF_UNICAST_FLT;
 	net_dev->ethtool_ops = &efx_ethtool_ops;
 	net_dev->gso_max_segs = EFX_TSO_MAX_SEGS;
-	net_dev->extended->min_mtu = EFX_MIN_MTU;
-	net_dev->extended->max_mtu = EFX_MAX_MTU;
+	net_dev->min_mtu = EFX_MIN_MTU;
+	net_dev->max_mtu = EFX_MAX_MTU;
 
 	rtnl_lock();
 
@@ -2850,7 +2848,7 @@ static void efx_reset_work(struct work_struct *data)
 	unsigned long pending;
 	enum reset_type method;
 
-	pending = ACCESS_ONCE(efx->reset_pending);
+	pending = READ_ONCE(efx->reset_pending);
 	method = fls(pending) - 1;
 
 	if (method == RESET_TYPE_MC_BIST)
@@ -2915,7 +2913,7 @@ void efx_schedule_reset(struct efx_nic *efx, enum reset_type type)
 	/* If we're not READY then just leave the flags set as the cue
 	 * to abort probing or reschedule the reset later.
 	 */
-	if (ACCESS_ONCE(efx->state) != STATE_READY)
+	if (READ_ONCE(efx->state) != STATE_READY)
 		return;
 
 	/* efx_process_channel() will no longer read events once a
@@ -3811,19 +3809,11 @@ static pci_ers_result_t efx_io_slot_reset(struct pci_dev *pdev)
 {
 	struct efx_nic *efx = pci_get_drvdata(pdev);
 	pci_ers_result_t status = PCI_ERS_RESULT_RECOVERED;
-	int rc;
 
 	if (pci_enable_device(pdev)) {
 		netif_err(efx, hw, efx->net_dev,
 			  "Cannot re-enable PCI device after reset.\n");
 		status =  PCI_ERS_RESULT_DISCONNECT;
-	}
-
-	rc = pci_cleanup_aer_uncorrect_error_status(pdev);
-	if (rc) {
-		netif_err(efx, hw, efx->net_dev,
-		"pci_cleanup_aer_uncorrect_error_status failed (%d)\n", rc);
-		/* Non-fatal error. Continue. */
 	}
 
 	return status;
@@ -3894,7 +3884,7 @@ static int __init efx_init_module(void)
 
 	printk(KERN_INFO "Solarflare NET driver v" EFX_DRIVER_VERSION "\n");
 
-	rc = register_netdevice_notifier_rh(&efx_netdev_notifier);
+	rc = register_netdevice_notifier(&efx_netdev_notifier);
 	if (rc)
 		goto err_notifier;
 
@@ -3923,7 +3913,7 @@ static int __init efx_init_module(void)
 	efx_fini_sriov();
  err_sriov:
 #endif
-	unregister_netdevice_notifier_rh(&efx_netdev_notifier);
+	unregister_netdevice_notifier(&efx_netdev_notifier);
  err_notifier:
 	return rc;
 }
@@ -3937,7 +3927,7 @@ static void __exit efx_exit_module(void)
 #ifdef CONFIG_SFC_SRIOV
 	efx_fini_sriov();
 #endif
-	unregister_netdevice_notifier_rh(&efx_netdev_notifier);
+	unregister_netdevice_notifier(&efx_netdev_notifier);
 
 }
 

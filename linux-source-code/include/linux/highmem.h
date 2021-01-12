@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _LINUX_HIGHMEM_H
 #define _LINUX_HIGHMEM_H
 
@@ -78,7 +79,6 @@ static inline void __kunmap_atomic(void *addr)
 }
 
 #define kmap_atomic_pfn(pfn)	kmap_atomic(pfn_to_page(pfn))
-#define kmap_atomic_to_page(ptr)	virt_to_page(ptr)
 
 #define kmap_flush_unused()	do {} while(0)
 #endif
@@ -95,7 +95,7 @@ static inline int kmap_atomic_idx_push(void)
 
 #ifdef CONFIG_DEBUG_HIGHMEM
 	WARN_ON_ONCE(in_irq() && !irqs_disabled());
-	BUG_ON(idx > KM_TYPE_NR);
+	BUG_ON(idx >= KM_TYPE_NR);
 #endif
 	return idx;
 }
@@ -237,6 +237,8 @@ static inline void copy_user_highpage(struct page *to, struct page *from,
 
 #endif
 
+#ifndef __HAVE_ARCH_COPY_HIGHPAGE
+
 static inline void copy_highpage(struct page *to, struct page *from)
 {
 	char *vfrom, *vto;
@@ -247,5 +249,7 @@ static inline void copy_highpage(struct page *to, struct page *from)
 	kunmap_atomic(vto);
 	kunmap_atomic(vfrom);
 }
+
+#endif
 
 #endif /* _LINUX_HIGHMEM_H */

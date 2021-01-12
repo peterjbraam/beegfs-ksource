@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __PERF_SORT_H
 #define __PERF_SORT_H
 #include "../builtin.h"
@@ -55,6 +56,11 @@ struct he_stat {
 	u32			nr_events;
 };
 
+struct namespace_id {
+	u64			dev;
+	u64			ino;
+};
+
 struct hist_entry_diff {
 	bool	computed;
 	union {
@@ -92,6 +98,7 @@ struct hist_entry {
 	struct map_symbol	ms;
 	struct thread		*thread;
 	struct comm		*comm;
+	struct namespace_id	cgroup_id;
 	u64			ip;
 	u64			transaction;
 	s32			socket;
@@ -221,6 +228,8 @@ enum sort_type {
 	SORT_TRACE,
 	SORT_SYM_SIZE,
 	SORT_DSO_SIZE,
+	SORT_CGROUP_ID,
+	SORT_SYM_IPC_NULL,
 
 	/* branch stack specific sort keys */
 	__SORT_BRANCH_STACK,
@@ -234,6 +243,7 @@ enum sort_type {
 	SORT_CYCLES,
 	SORT_SRCLINE_FROM,
 	SORT_SRCLINE_TO,
+	SORT_SYM_IPC,
 
 	/* memory mode specific sort keys */
 	__SORT_MEMORY_MODE,
@@ -268,7 +278,7 @@ extern struct sort_entry sort_thread;
 extern struct list_head hist_entry__sort_list;
 
 struct perf_evlist;
-struct pevent;
+struct tep_handle;
 int setup_sorting(struct perf_evlist *evlist);
 int setup_output_field(void);
 void reset_output_field(void);

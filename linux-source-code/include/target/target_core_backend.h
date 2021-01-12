@@ -1,7 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef TARGET_CORE_BACKEND_H
 #define TARGET_CORE_BACKEND_H
 
+#include <linux/types.h>
 #include <asm/unaligned.h>
+#include <target/target_core_base.h>
 
 #define TRANSPORT_FLAG_PASSTHROUGH		0x1
 /*
@@ -10,6 +13,9 @@
  */
 #define TRANSPORT_FLAG_PASSTHROUGH_ALUA		0x2
 #define TRANSPORT_FLAG_PASSTHROUGH_PGR          0x4
+
+struct request_queue;
+struct scatterlist;
 
 struct target_backend_ops {
 	char name[16];
@@ -31,10 +37,6 @@ struct target_backend_ops {
 	ssize_t (*set_configfs_dev_params)(struct se_device *,
 					   const char *, ssize_t);
 	ssize_t (*show_configfs_dev_params)(struct se_device *, char *);
-
-	void (*transport_complete)(struct se_cmd *cmd,
-				   struct scatterlist *,
-				   unsigned char *);
 
 	sense_reason_t (*parse_cdb)(struct se_cmd *cmd);
 	u32 (*get_device_type)(struct se_device *);

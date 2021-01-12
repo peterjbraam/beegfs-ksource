@@ -67,27 +67,54 @@
  * Good-instruction tables for 32-bit apps.  This is non-const and volatile
  * to keep gcc from statically optimizing it out, as variable_test_bit makes
  * some versions of gcc to think only *(unsigned long*) is used.
+ *
+ * Opcodes we'll probably never support:
+ * 6c-6f - ins,outs. SEGVs if used in userspace
+ * e4-e7 - in,out imm. SEGVs if used in userspace
+ * ec-ef - in,out acc. SEGVs if used in userspace
+ * cc - int3. SIGTRAP if used in userspace
+ * ce - into. Not used in userspace - no kernel support to make it useful. SEGVs
+ *	(why we support bound (62) then? it's similar, and similarly unused...)
+ * f1 - int1. SIGTRAP if used in userspace
+ * f4 - hlt. SEGVs if used in userspace
+ * fa - cli. SEGVs if used in userspace
+ * fb - sti. SEGVs if used in userspace
+ *
+ * Opcodes which need some work to be supported:
+ * 07,17,1f - pop es/ss/ds
+ *	Normally not used in userspace, but would execute if used.
+ *	Can cause GP or stack exception if tries to load wrong segment descriptor.
+ *	We hesitate to run them under single step since kernel's handling
+ *	of userspace single-stepping (TF flag) is fragile.
+ *	We can easily refuse to support push es/cs/ss/ds (06/0e/16/1e)
+ *	on the same grounds that they are never used.
+ * cd - int N.
+ *	Used by userspace for "int 80" syscall entry. (Other "int N"
+ *	cause GP -> SEGV since their IDT gates don't allow calls from CPL 3).
+ *	Not supported since kernel's handling of userspace single-stepping
+ *	(TF flag) is fragile.
+ * cf - iret. Normally not used in userspace. Doesn't SEGV unless arguments are bad
  */
 #if defined(CONFIG_X86_32) || defined(CONFIG_IA32_EMULATION)
 static volatile u32 good_insns_32[256 / 32] = {
 	/*      0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f         */
 	/*      ----------------------------------------------         */
-	W(0x00, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 0) | /* 00 */
+	W(0x00, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1) | /* 00 */
 	W(0x10, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 0) , /* 10 */
-	W(0x20, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 0, 1) | /* 20 */
-	W(0x30, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 0, 1) , /* 30 */
+	W(0x20, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1) | /* 20 */
+	W(0x30, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1) , /* 30 */
 	W(0x40, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1) | /* 40 */
 	W(0x50, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1) , /* 50 */
-	W(0x60, 1, 1, 1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0) | /* 60 */
+	W(0x60, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0) | /* 60 */
 	W(0x70, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1) , /* 70 */
 	W(0x80, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1) | /* 80 */
 	W(0x90, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1) , /* 90 */
 	W(0xa0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1) | /* a0 */
 	W(0xb0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1) , /* b0 */
 	W(0xc0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0) | /* c0 */
-	W(0xd0, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1) , /* d0 */
+	W(0xd0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1) , /* d0 */
 	W(0xe0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0) | /* e0 */
-	W(0xf0, 0, 0, 1, 1, 0, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1)   /* f0 */
+	W(0xf0, 1, 0, 1, 1, 0, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1)   /* f0 */
 	/*      ----------------------------------------------         */
 	/*      0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f         */
 };
@@ -95,27 +122,61 @@ static volatile u32 good_insns_32[256 / 32] = {
 #define good_insns_32	NULL
 #endif
 
-/* Good-instruction tables for 64-bit apps */
+/* Good-instruction tables for 64-bit apps.
+ *
+ * Genuinely invalid opcodes:
+ * 06,07 - formerly push/pop es
+ * 0e - formerly push cs
+ * 16,17 - formerly push/pop ss
+ * 1e,1f - formerly push/pop ds
+ * 27,2f,37,3f - formerly daa/das/aaa/aas
+ * 60,61 - formerly pusha/popa
+ * 62 - formerly bound. EVEX prefix for AVX512 (not yet supported)
+ * 82 - formerly redundant encoding of Group1
+ * 9a - formerly call seg:ofs
+ * ce - formerly into
+ * d4,d5 - formerly aam/aad
+ * d6 - formerly undocumented salc
+ * ea - formerly jmp seg:ofs
+ *
+ * Opcodes we'll probably never support:
+ * 6c-6f - ins,outs. SEGVs if used in userspace
+ * e4-e7 - in,out imm. SEGVs if used in userspace
+ * ec-ef - in,out acc. SEGVs if used in userspace
+ * cc - int3. SIGTRAP if used in userspace
+ * f1 - int1. SIGTRAP if used in userspace
+ * f4 - hlt. SEGVs if used in userspace
+ * fa - cli. SEGVs if used in userspace
+ * fb - sti. SEGVs if used in userspace
+ *
+ * Opcodes which need some work to be supported:
+ * cd - int N.
+ *	Used by userspace for "int 80" syscall entry. (Other "int N"
+ *	cause GP -> SEGV since their IDT gates don't allow calls from CPL 3).
+ *	Not supported since kernel's handling of userspace single-stepping
+ *	(TF flag) is fragile.
+ * cf - iret. Normally not used in userspace. Doesn't SEGV unless arguments are bad
+ */
 #if defined(CONFIG_X86_64)
 static volatile u32 good_insns_64[256 / 32] = {
 	/*      0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f         */
 	/*      ----------------------------------------------         */
-	W(0x00, 1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0) | /* 00 */
+	W(0x00, 1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 1, 1, 0, 1) | /* 00 */
 	W(0x10, 1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0) , /* 10 */
-	W(0x20, 1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0) | /* 20 */
-	W(0x30, 1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0) , /* 30 */
-	W(0x40, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0) | /* 40 */
+	W(0x20, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 0) | /* 20 */
+	W(0x30, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 0) , /* 30 */
+	W(0x40, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1) | /* 40 */
 	W(0x50, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1) , /* 50 */
-	W(0x60, 0, 0, 0, 1, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0) | /* 60 */
+	W(0x60, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0) | /* 60 */
 	W(0x70, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1) , /* 70 */
 	W(0x80, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1) | /* 80 */
-	W(0x90, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1) , /* 90 */
+	W(0x90, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1) , /* 90 */
 	W(0xa0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1) | /* a0 */
 	W(0xb0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1) , /* b0 */
-	W(0xc0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0) | /* c0 */
+	W(0xc0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0) | /* c0 */
 	W(0xd0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1) , /* d0 */
-	W(0xe0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0) | /* e0 */
-	W(0xf0, 0, 0, 1, 1, 0, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1)   /* f0 */
+	W(0xe0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 0, 1, 0, 0, 0, 0) | /* e0 */
+	W(0xf0, 1, 0, 1, 1, 0, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1)   /* f0 */
 	/*      ----------------------------------------------         */
 	/*      0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f         */
 };
@@ -123,49 +184,55 @@ static volatile u32 good_insns_64[256 / 32] = {
 #define good_insns_64	NULL
 #endif
 
-/* Using this for both 64-bit and 32-bit apps */
+/* Using this for both 64-bit and 32-bit apps.
+ * Opcodes we don't support:
+ * 0f 00 - SLDT/STR/LLDT/LTR/VERR/VERW/-/- group. System insns
+ * 0f 01 - SGDT/SIDT/LGDT/LIDT/SMSW/-/LMSW/INVLPG group.
+ *	Also encodes tons of other system insns if mod=11.
+ *	Some are in fact non-system: xend, xtest, rdtscp, maybe more
+ * 0f 05 - syscall
+ * 0f 06 - clts (CPL0 insn)
+ * 0f 07 - sysret
+ * 0f 08 - invd (CPL0 insn)
+ * 0f 09 - wbinvd (CPL0 insn)
+ * 0f 0b - ud2
+ * 0f 30 - wrmsr (CPL0 insn) (then why rdmsr is allowed, it's also CPL0 insn?)
+ * 0f 34 - sysenter
+ * 0f 35 - sysexit
+ * 0f 37 - getsec
+ * 0f 78 - vmread (Intel VMX. CPL0 insn)
+ * 0f 79 - vmwrite (Intel VMX. CPL0 insn)
+ *	Note: with prefixes, these two opcodes are
+ *	extrq/insertq/AVX512 convert vector ops.
+ * 0f ae - group15: [f]xsave,[f]xrstor,[v]{ld,st}mxcsr,clflush[opt],
+ *	{rd,wr}{fs,gs}base,{s,l,m}fence.
+ *	Why? They are all user-executable.
+ */
 static volatile u32 good_2byte_insns[256 / 32] = {
 	/*      0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f         */
 	/*      ----------------------------------------------         */
-	W(0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1) | /* 00 */
-	W(0x10, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1) , /* 10 */
-	W(0x20, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1) | /* 20 */
-	W(0x30, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0) , /* 30 */
+	W(0x00, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1) | /* 00 */
+	W(0x10, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1) , /* 10 */
+	W(0x20, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1) | /* 20 */
+	W(0x30, 0, 1, 1, 1, 0, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1) , /* 30 */
 	W(0x40, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1) | /* 40 */
 	W(0x50, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1) , /* 50 */
 	W(0x60, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1) | /* 60 */
-	W(0x70, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 1, 1) , /* 70 */
+	W(0x70, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 1, 1) , /* 70 */
 	W(0x80, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1) | /* 80 */
 	W(0x90, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1) , /* 90 */
-	W(0xa0, 1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 1, 1, 0, 1) | /* a0 */
-	W(0xb0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1) , /* b0 */
+	W(0xa0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1) | /* a0 */
+	W(0xb0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1) , /* b0 */
 	W(0xc0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1) | /* c0 */
-	W(0xd0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1) , /* d0 */
+	W(0xd0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1) , /* d0 */
 	W(0xe0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1) | /* e0 */
-	W(0xf0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0)   /* f0 */
+	W(0xf0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1)   /* f0 */
 	/*      ----------------------------------------------         */
 	/*      0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f         */
 };
 #undef W
 
 /*
- * opcodes we'll probably never support:
- *
- *  6c-6d, e4-e5, ec-ed - in
- *  6e-6f, e6-e7, ee-ef - out
- *  cc, cd - int3, int
- *  cf - iret
- *  d6 - illegal instruction
- *  f1 - int1/icebp
- *  f4 - hlt
- *  fa, fb - cli, sti
- *  0f - lar, lsl, syscall, clts, sysret, sysenter, sysexit, invd, wbinvd, ud2
- *
- * invalid opcodes in 64-bit mode:
- *
- *  06, 0e, 16, 1e, 27, 2f, 37, 3f, 60-62, 82, c4-c5, d4-d5
- *  63 - we support this opcode in x86_64 but not in i386.
- *
  * opcodes we may need to refine support for:
  *
  *  0f - 2-byte instructions: For many of these instructions, the validity
@@ -226,10 +293,14 @@ static int uprobe_init_insn(struct arch_uprobe *auprobe, struct insn *insn, bool
 	insn_init(insn, auprobe->insn, sizeof(auprobe->insn), x86_64);
 	/* has the side-effect of processing the entire instruction */
 	insn_get_length(insn);
-	if (WARN_ON_ONCE(!insn_complete(insn)))
+	if (!insn_complete(insn))
 		return -ENOEXEC;
 
 	if (is_prefix_bad(insn))
+		return -ENOTSUPP;
+
+	/* We should not singlestep on the exception masking instructions */
+	if (insn_masking_exception(insn))
 		return -ENOTSUPP;
 
 	if (x86_64)
@@ -293,20 +364,22 @@ static void riprel_analyze(struct arch_uprobe *auprobe, struct insn *insn)
 		*cursor &= 0xfe;
 	}
 	/*
-	 * Similar treatment for VEX3 prefix.
-	 * TODO: add XOP/EVEX treatment when insn decoder supports them
+	 * Similar treatment for VEX3/EVEX prefix.
+	 * TODO: add XOP treatment when insn decoder supports them
 	 */
-	if (insn->vex_prefix.nbytes == 3) {
+	if (insn->vex_prefix.nbytes >= 3) {
 		/*
 		 * vex2:     c5    rvvvvLpp   (has no b bit)
 		 * vex3/xop: c4/8f rxbmmmmm wvvvvLpp
 		 * evex:     62    rxbR00mm wvvvv1pp zllBVaaa
-		 *   (evex will need setting of both b and x since
-		 *   in non-sib encoding evex.x is 4th bit of MODRM.rm)
-		 * Setting VEX3.b (setting because it has inverted meaning):
+		 * Setting VEX3.b (setting because it has inverted meaning).
+		 * Setting EVEX.x since (in non-SIB encoding) EVEX.x
+		 * is the 4th bit of MODRM.rm, and needs the same treatment.
+		 * For VEX3-encoded insns, VEX3.x value has no effect in
+		 * non-SIB encoding, the change is superfluous but harmless.
 		 */
 		cursor = auprobe->insn + insn_offset_vex_prefix(insn) + 1;
-		*cursor |= 0x20;
+		*cursor |= 0x60;
 	}
 
 	/*
@@ -351,12 +424,10 @@ static void riprel_analyze(struct arch_uprobe *auprobe, struct insn *insn)
 
 	reg = MODRM_REG(insn);	/* Fetch modrm.reg */
 	reg2 = 0xff;		/* Fetch vex.vvvv */
-	if (insn->vex_prefix.nbytes == 2)
-		reg2 = insn->vex_prefix.bytes[1];
-	else if (insn->vex_prefix.nbytes == 3)
+	if (insn->vex_prefix.nbytes)
 		reg2 = insn->vex_prefix.bytes[2];
 	/*
-	 * TODO: add XOP, EXEV vvvv reading.
+	 * TODO: add XOP vvvv reading.
 	 *
 	 * vex.vvvv field is in bits 6-3, bits are inverted.
 	 * But in 32-bit mode, high-order bit may be ignored.
@@ -452,7 +523,7 @@ struct uprobe_xol_ops {
 
 static inline int sizeof_long(void)
 {
-	return is_ia32_task() ? 4 : 8;
+	return in_ia32_syscall() ? 4 : 8;
 }
 
 static int default_pre_xol_op(struct arch_uprobe *auprobe, struct pt_regs *regs)
@@ -461,11 +532,11 @@ static int default_pre_xol_op(struct arch_uprobe *auprobe, struct pt_regs *regs)
 	return 0;
 }
 
-static int push_ret_address(struct pt_regs *regs, unsigned long ip)
+static int emulate_push_stack(struct pt_regs *regs, unsigned long val)
 {
 	unsigned long new_sp = regs->sp - sizeof_long();
 
-	if (copy_to_user((void __user *)new_sp, &ip, sizeof_long()))
+	if (copy_to_user((void __user *)new_sp, &val, sizeof_long()))
 		return -EFAULT;
 
 	regs->sp = new_sp;
@@ -499,7 +570,7 @@ static int default_post_xol_op(struct arch_uprobe *auprobe, struct pt_regs *regs
 		regs->ip += correction;
 	} else if (auprobe->defparam.fixups & UPROBE_FIX_CALL) {
 		regs->sp += sizeof_long(); /* Pop incorrect return address */
-		if (push_ret_address(regs, utask->vaddr + auprobe->defparam.ilen))
+		if (emulate_push_stack(regs, utask->vaddr + auprobe->defparam.ilen))
 			return -ERESTART;
 	}
 	/* popf; tell the caller to not touch TF */
@@ -514,7 +585,7 @@ static void default_abort_op(struct arch_uprobe *auprobe, struct pt_regs *regs)
 	riprel_post_xol(auprobe, regs);
 }
 
-static struct uprobe_xol_ops default_xol_ops = {
+static const struct uprobe_xol_ops default_xol_ops = {
 	.pre_xol  = default_pre_xol_op,
 	.post_xol = default_post_xol_op,
 	.abort	  = default_abort_op,
@@ -588,13 +659,23 @@ static bool branch_emulate_op(struct arch_uprobe *auprobe, struct pt_regs *regs)
 		 *
 		 * But there is corner case, see the comment in ->post_xol().
 		 */
-		if (push_ret_address(regs, new_ip))
+		if (emulate_push_stack(regs, new_ip))
 			return false;
 	} else if (!check_jmp_cond(auprobe, regs)) {
 		offs = 0;
 	}
 
 	regs->ip = new_ip + offs;
+	return true;
+}
+
+static bool push_emulate_op(struct arch_uprobe *auprobe, struct pt_regs *regs)
+{
+	unsigned long *src_ptr = (void *)regs + auprobe->push.reg_offset;
+
+	if (emulate_push_stack(regs, *src_ptr))
+		return false;
+	regs->ip += auprobe->push.ilen;
 	return true;
 }
 
@@ -631,9 +712,13 @@ static void branch_clear_offset(struct arch_uprobe *auprobe, struct insn *insn)
 		0, insn->immediate.nbytes);
 }
 
-static struct uprobe_xol_ops branch_xol_ops = {
+static const struct uprobe_xol_ops branch_xol_ops = {
 	.emulate  = branch_emulate_op,
 	.post_xol = branch_post_xol_op,
+};
+
+static const struct uprobe_xol_ops push_xol_ops = {
+	.emulate  = push_emulate_op,
 };
 
 /* Returns -ENOSYS if branch_xol_ops doesn't handle this insn */
@@ -683,6 +768,87 @@ static int branch_setup_xol_ops(struct arch_uprobe *auprobe, struct insn *insn)
 	return 0;
 }
 
+/* Returns -ENOSYS if push_xol_ops doesn't handle this insn */
+static int push_setup_xol_ops(struct arch_uprobe *auprobe, struct insn *insn)
+{
+	u8 opc1 = OPCODE1(insn), reg_offset = 0;
+
+	if (opc1 < 0x50 || opc1 > 0x57)
+		return -ENOSYS;
+
+	if (insn->length > 2)
+		return -ENOSYS;
+	if (insn->length == 2) {
+		/* only support rex_prefix 0x41 (x64 only) */
+#ifdef CONFIG_X86_64
+		if (insn->rex_prefix.nbytes != 1 ||
+		    insn->rex_prefix.bytes[0] != 0x41)
+			return -ENOSYS;
+
+		switch (opc1) {
+		case 0x50:
+			reg_offset = offsetof(struct pt_regs, r8);
+			break;
+		case 0x51:
+			reg_offset = offsetof(struct pt_regs, r9);
+			break;
+		case 0x52:
+			reg_offset = offsetof(struct pt_regs, r10);
+			break;
+		case 0x53:
+			reg_offset = offsetof(struct pt_regs, r11);
+			break;
+		case 0x54:
+			reg_offset = offsetof(struct pt_regs, r12);
+			break;
+		case 0x55:
+			reg_offset = offsetof(struct pt_regs, r13);
+			break;
+		case 0x56:
+			reg_offset = offsetof(struct pt_regs, r14);
+			break;
+		case 0x57:
+			reg_offset = offsetof(struct pt_regs, r15);
+			break;
+		}
+#else
+		return -ENOSYS;
+#endif
+	} else {
+		switch (opc1) {
+		case 0x50:
+			reg_offset = offsetof(struct pt_regs, ax);
+			break;
+		case 0x51:
+			reg_offset = offsetof(struct pt_regs, cx);
+			break;
+		case 0x52:
+			reg_offset = offsetof(struct pt_regs, dx);
+			break;
+		case 0x53:
+			reg_offset = offsetof(struct pt_regs, bx);
+			break;
+		case 0x54:
+			reg_offset = offsetof(struct pt_regs, sp);
+			break;
+		case 0x55:
+			reg_offset = offsetof(struct pt_regs, bp);
+			break;
+		case 0x56:
+			reg_offset = offsetof(struct pt_regs, si);
+			break;
+		case 0x57:
+			reg_offset = offsetof(struct pt_regs, di);
+			break;
+		}
+	}
+
+	auprobe->push.reg_offset = reg_offset;
+	auprobe->push.ilen = insn->length;
+	auprobe->ops = &push_xol_ops;
+	return 0;
+}
+
 /**
  * arch_uprobe_analyze_insn - instruction analysis including validity and fixups.
  * @mm: the probed address space.
@@ -701,6 +867,10 @@ int arch_uprobe_analyze_insn(struct arch_uprobe *auprobe, struct mm_struct *mm, 
 		return ret;
 
 	ret = branch_setup_xol_ops(auprobe, &insn);
+	if (ret != -ENOSYS)
+		return ret;
+
+	ret = push_setup_xol_ops(auprobe, &insn);
 	if (ret != -ENOSYS)
 		return ret;
 
@@ -840,7 +1010,7 @@ int arch_uprobe_exception_notify(struct notifier_block *self, unsigned long val,
 	int ret = NOTIFY_DONE;
 
 	/* We are only interested in userspace traps */
-	if (regs && !user_mode_vm(regs))
+	if (regs && !user_mode(regs))
 		return NOTIFY_DONE;
 
 	switch (val) {
@@ -913,10 +1083,10 @@ arch_uretprobe_hijack_return_addr(unsigned long trampoline_vaddr, struct pt_regs
 		return orig_ret_vaddr;
 
 	if (nleft != rasize) {
-		pr_err("uprobe: return address clobbered: pid=%d, %%sp=%#lx, "
-			"%%ip=%#lx\n", current->pid, regs->sp, regs->ip);
+		pr_err("return address clobbered: pid=%d, %%sp=%#lx, %%ip=%#lx\n",
+		       current->pid, regs->sp, regs->ip);
 
-		force_sig_info(SIGSEGV, SEND_SIG_FORCED, current);
+		force_sig(SIGSEGV, current);
 	}
 
 	return -1;

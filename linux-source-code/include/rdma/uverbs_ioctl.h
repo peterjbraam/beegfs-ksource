@@ -419,10 +419,10 @@ struct uapi_definition {
 		.kind = UAPI_DEF_IS_SUPPORTED_DEV_FN,                          \
 		.scope = UAPI_SCOPE_OBJECT,                                    \
 		.needs_fn_offset =                                             \
-			offsetof(struct ib_device, ibdev_fn) +                 \
+			offsetof(struct ib_device_ops, ibdev_fn) +             \
 			BUILD_BUG_ON_ZERO(                                     \
-				sizeof(((struct ib_device *)0)->ibdev_fn) !=   \
-				sizeof(void *)),                               \
+			    sizeof(((struct ib_device_ops *)0)->ibdev_fn) !=   \
+			    sizeof(void *)),				       \
 	}
 
 /*
@@ -434,10 +434,10 @@ struct uapi_definition {
 		.kind = UAPI_DEF_IS_SUPPORTED_DEV_FN,                          \
 		.scope = UAPI_SCOPE_METHOD,                                    \
 		.needs_fn_offset =                                             \
-			offsetof(struct ib_device, ibdev_fn) +                 \
+			offsetof(struct ib_device_ops, ibdev_fn) +             \
 			BUILD_BUG_ON_ZERO(                                     \
-				sizeof(((struct ib_device *)0)->ibdev_fn) !=   \
-				sizeof(void *)),                               \
+			    sizeof(((struct ib_device_ops *)0)->ibdev_fn) !=   \
+			    sizeof(void *)),                                   \
 	}
 
 /* Call a function to determine if the entire object is supported or not */
@@ -454,15 +454,16 @@ struct uapi_definition {
 	}
 
 /* Temporary until the tree base description is replaced */
-#define UAPI_DEF_CHAIN_OBJ_TREE(_object_enum, _object_ptr)                     \
+#define UAPI_DEF_CHAIN_OBJ_TREE(_object_enum, _object_ptr, ...)                \
 	{                                                                      \
 		.kind = UAPI_DEF_CHAIN_OBJ_TREE,                               \
 		.object_start = { .object_id = _object_enum },                 \
 		.chain_obj_tree = _object_ptr,                                 \
-	}
-#define UAPI_DEF_CHAIN_OBJ_TREE_NAMED(_object_enum, ...)                       \
-	UAPI_DEF_CHAIN_OBJ_TREE(_object_enum, &UVERBS_OBJECT(_object_enum)),   \
+	},								       \
 		##__VA_ARGS__
+#define UAPI_DEF_CHAIN_OBJ_TREE_NAMED(_object_enum, ...)                       \
+	UAPI_DEF_CHAIN_OBJ_TREE(_object_enum, &UVERBS_OBJECT(_object_enum),    \
+				##__VA_ARGS__)
 
 /*
  * =======================================
@@ -718,6 +719,28 @@ uverbs_attr_get_len(const struct uverbs_attr_bundle *attrs_bundle, u16 idx)
 	return attr->ptr_attr.len;
 }
 
+/*
+ * uverbs_attr_ptr_get_array_size() - Get array size pointer by a ptr
+ * attribute.
+ * @attrs: The attribute bundle
+ * @idx: The ID of the attribute
+ * @elem_size: The size of the element in the array
+ */
+static inline int
+uverbs_attr_ptr_get_array_size(struct uverbs_attr_bundle *attrs, u16 idx,
+			       size_t elem_size)
+{
+	int size = uverbs_attr_get_len(attrs, idx);
+
+	if (size < 0)
+		return size;
+
+	if (size % elem_size)
+		return -EINVAL;
+
+	return size / elem_size;
+}
+
 /**
  * uverbs_attr_get_uobjs_arr() - Provides array's properties for attribute for
  * UVERBS_ATTR_TYPE_IDRS_ARRAY.
@@ -831,16 +854,16 @@ int uverbs_get_flags32(u32 *to, const struct uverbs_attr_bundle *attrs_bundle,
 		       size_t idx, u64 allowed_bits);
 int uverbs_copy_to(const struct uverbs_attr_bundle *attrs_bundle, size_t idx,
 		   const void *from, size_t size);
-void *_uverbs_alloc(struct uverbs_attr_bundle *bundle, size_t size,
+__malloc void *_uverbs_alloc(struct uverbs_attr_bundle *bundle, size_t size,
 			     gfp_t flags);
 
-static inline void *uverbs_alloc(struct uverbs_attr_bundle *bundle,
+static inline __malloc void *uverbs_alloc(struct uverbs_attr_bundle *bundle,
 					  size_t size)
 {
 	return _uverbs_alloc(bundle, size, GFP_KERNEL);
 }
 
-static inline void *uverbs_zalloc(struct uverbs_attr_bundle *bundle,
+static inline __malloc void *uverbs_zalloc(struct uverbs_attr_bundle *bundle,
 					   size_t size)
 {
 	return _uverbs_alloc(bundle, size, GFP_KERNEL | __GFP_ZERO);
@@ -868,12 +891,12 @@ static inline int uverbs_copy_to(const struct uverbs_attr_bundle *attrs_bundle,
 {
 	return -EINVAL;
 }
-static inline void *uverbs_alloc(struct uverbs_attr_bundle *bundle,
+static inline __malloc void *uverbs_alloc(struct uverbs_attr_bundle *bundle,
 					  size_t size)
 {
 	return ERR_PTR(-EINVAL);
 }
-static inline void *uverbs_zalloc(struct uverbs_attr_bundle *bundle,
+static inline __malloc void *uverbs_zalloc(struct uverbs_attr_bundle *bundle,
 					   size_t size)
 {
 	return ERR_PTR(-EINVAL);

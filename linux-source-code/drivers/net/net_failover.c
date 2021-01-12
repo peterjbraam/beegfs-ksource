@@ -41,14 +41,14 @@ static int net_failover_open(struct net_device *dev)
 
 	primary_dev = rtnl_dereference(nfo_info->primary_dev);
 	if (primary_dev) {
-		err = dev_open(primary_dev);
+		err = dev_open(primary_dev, NULL);
 		if (err)
 			goto err_primary_open;
 	}
 
 	standby_dev = rtnl_dereference(nfo_info->standby_dev);
 	if (standby_dev) {
-		err = dev_open(standby_dev);
+		err = dev_open(standby_dev, NULL);
 		if (err)
 			goto err_standby_open;
 	}
@@ -89,7 +89,7 @@ static int net_failover_close(struct net_device *dev)
 static netdev_tx_t net_failover_drop_xmit(struct sk_buff *skb,
 					  struct net_device *dev)
 {
-	++dev->stats.tx_dropped;
+	atomic_long_inc(&dev->tx_dropped);
 	dev_kfree_skb_any(skb);
 	return NETDEV_TX_OK;
 }
@@ -115,7 +115,8 @@ static netdev_tx_t net_failover_start_xmit(struct sk_buff *skb,
 }
 
 static u16 net_failover_select_queue(struct net_device *dev,
-				     struct sk_buff *skb, void *accel_priv,
+				     struct sk_buff *skb,
+				     struct net_device *sb_dev,
 				     select_queue_fallback_t fallback)
 {
 	struct net_failover_info *nfo_info = netdev_priv(dev);
@@ -128,9 +129,9 @@ static u16 net_failover_select_queue(struct net_device *dev,
 
 		if (ops->ndo_select_queue)
 			txq = ops->ndo_select_queue(primary_dev, skb,
-						    accel_priv, fallback);
+						    sb_dev, fallback);
 		else
-			txq = fallback(primary_dev, skb);
+			txq = fallback(primary_dev, skb, NULL);
 
 		qdisc_skb_cb(skb)->slave_dev_queue_mapping = skb->queue_mapping;
 
@@ -311,7 +312,7 @@ static const struct net_device_ops failover_dev_ops = {
 	.ndo_start_xmit		= net_failover_start_xmit,
 	.ndo_select_queue	= net_failover_select_queue,
 	.ndo_get_stats64	= net_failover_get_stats,
-	.extended.ndo_change_mtu = net_failover_change_mtu,
+	.ndo_change_mtu		= net_failover_change_mtu,
 	.ndo_set_rx_mode	= net_failover_set_rx_mode,
 	.ndo_vlan_rx_add_vid	= net_failover_vlan_rx_add_vid,
 	.ndo_vlan_rx_kill_vid	= net_failover_vlan_rx_kill_vid,
@@ -517,7 +518,7 @@ static int net_failover_slave_register(struct net_device *slave_dev,
 	dev_hold(slave_dev);
 
 	if (netif_running(failover_dev)) {
-		err = dev_open(slave_dev);
+		err = dev_open(slave_dev, NULL);
 		if (err && (err != -EBUSY)) {
 			netdev_err(failover_dev, "Opening slave %s failed err:%d\n",
 				   slave_dev->name, err);
@@ -550,8 +551,8 @@ static int net_failover_slave_register(struct net_device *slave_dev,
 		rcu_assign_pointer(nfo_info->primary_dev, slave_dev);
 		primary_dev = slave_dev;
 		dev_get_stats(primary_dev, &nfo_info->primary_stats);
-		failover_dev->extended->min_mtu = slave_dev->extended->min_mtu;
-		failover_dev->extended->max_mtu = slave_dev->extended->max_mtu;
+		failover_dev->min_mtu = slave_dev->min_mtu;
+		failover_dev->max_mtu = slave_dev->max_mtu;
 	}
 
 	net_failover_lower_state_changed(slave_dev, primary_dev, standby_dev);
@@ -616,8 +617,8 @@ static int net_failover_slave_unregister(struct net_device *slave_dev,
 	} else {
 		RCU_INIT_POINTER(nfo_info->primary_dev, NULL);
 		if (standby_dev) {
-			failover_dev->extended->min_mtu = standby_dev->extended->min_mtu;
-			failover_dev->extended->max_mtu = standby_dev->extended->max_mtu;
+			failover_dev->min_mtu = standby_dev->min_mtu;
+			failover_dev->max_mtu = standby_dev->max_mtu;
 		}
 	}
 
@@ -677,7 +678,7 @@ static int net_failover_slave_name_change(struct net_device *slave_dev,
 	/* We need to bring up the slave after the rename by udev in case
 	 * open failed with EBUSY when it was registered.
 	 */
-	dev_open(slave_dev);
+	dev_open(slave_dev, NULL);
 
 	return 0;
 }
@@ -749,8 +750,8 @@ struct failover *net_failover_create(struct net_device *standby_dev)
 	memcpy(failover_dev->dev_addr, standby_dev->dev_addr,
 	       failover_dev->addr_len);
 
-	failover_dev->extended->min_mtu = standby_dev->extended->min_mtu;
-	failover_dev->extended->max_mtu = standby_dev->extended->max_mtu;
+	failover_dev->min_mtu = standby_dev->min_mtu;
+	failover_dev->max_mtu = standby_dev->max_mtu;
 
 	err = register_netdev(failover_dev);
 	if (err) {

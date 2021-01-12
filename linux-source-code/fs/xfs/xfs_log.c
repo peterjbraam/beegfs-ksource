@@ -1,19 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (c) 2000-2005 Silicon Graphics, Inc.
  * All Rights Reserved.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it would be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write the Free Software Foundation,
- * Inc.,  51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
 #include "xfs.h"
 #include "xfs_fs.h"
@@ -422,7 +410,7 @@ out_error:
 }
 
 /*
- * Reserve log space and return a ticket corresponding the reservation.
+ * Reserve log space and return a ticket corresponding to the reservation.
  *
  * Each reservation is going to reserve extra space for a log record header.
  * When writes happen to the on-disk log, we don't subtract the length of the
@@ -560,7 +548,6 @@ xfs_log_done(
  */
 int
 xfs_log_notify(
-	struct xfs_mount	*mp,
 	struct xlog_in_core	*iclog,
 	xfs_log_callback_t	*cb)
 {
@@ -767,9 +754,32 @@ xfs_log_mount_finish(
 		mp->m_flags &= ~XFS_MOUNT_RDONLY;
 	}
 
+	/*
+	 * During the second phase of log recovery, we need iget and
+	 * iput to behave like they do for an active filesystem.
+	 * xfs_fs_drop_inode needs to be able to prevent the deletion
+	 * of inodes before we're done replaying log items on those
+	 * inodes.  Turn it off immediately after recovery finishes
+	 * so that we don't leak the quota inodes if subsequent mount
+	 * activities fail.
+	 *
+	 * We let all inodes involved in redo item processing end up on
+	 * the LRU instead of being evicted immediately so that if we do
+	 * something to an unlinked inode, the irele won't cause
+	 * premature truncation and freeing of the inode, which results
+	 * in log recovery failure.  We have to evict the unreferenced
+	 * lru inodes after clearing SB_ACTIVE because we don't
+	 * otherwise clean up the lru if there's a subsequent failure in
+	 * xfs_mountfs, which leads to us leaking the inodes if nothing
+	 * else (e.g. quotacheck) references the inodes before the
+	 * mount failure occurs.
+	 */
+	mp->m_super->s_flags |= SB_ACTIVE;
 	error = xlog_recover_finish(mp->m_log);
 	if (!error)
 		xfs_log_work_queue(mp);
+	mp->m_super->s_flags &= ~SB_ACTIVE;
+	evict_inodes(mp->m_super);
 
 	/*
 	 * Drain the buffer LRU after log recovery. This is required for v4
@@ -816,6 +826,88 @@ xfs_log_mount_cancel(
  * deallocation must not be done until source-end.
  */
 
+/* Actually write the unmount record to disk. */
+static void
+xfs_log_write_unmount_record(
+	struct xfs_mount	*mp)
+{
+	/* the data section must be 32 bit size aligned */
+	struct xfs_unmount_log_format magic = {
+		.magic = XLOG_UNMOUNT_TYPE,
+	};
+	struct xfs_log_iovec reg = {
+		.i_addr = &magic,
+		.i_len = sizeof(magic),
+		.i_type = XLOG_REG_TYPE_UNMOUNT,
+	};
+	struct xfs_log_vec vec = {
+		.lv_niovecs = 1,
+		.lv_iovecp = &reg,
+	};
+	struct xlog		*log = mp->m_log;
+	struct xlog_in_core	*iclog;
+	struct xlog_ticket	*tic = NULL;
+	xfs_lsn_t		lsn;
+	uint			flags = XLOG_UNMOUNT_TRANS;
+	int			error;
+
+	error = xfs_log_reserve(mp, 600, 1, &tic, XFS_LOG, 0);
+	if (error)
+		goto out_err;
+
+	/*
+	 * If we think the summary counters are bad, clear the unmount header
+	 * flag in the unmount record so that the summary counters will be
+	 * recalculated during log recovery at next mount.  Refer to
+	 * xlog_check_unmount_rec for more details.
+	 */
+	if (XFS_TEST_ERROR((mp->m_flags & XFS_MOUNT_BAD_SUMMARY), mp,
+			XFS_ERRTAG_FORCE_SUMMARY_RECALC)) {
+		xfs_alert(mp, "%s: will fix summary counters at next mount",
+				__func__);
+		flags &= ~XLOG_UNMOUNT_TRANS;
+	}
+
+	/* remove inited flag, and account for space used */
+	tic->t_flags = 0;
+	tic->t_curr_res -= sizeof(magic);
+	error = xlog_write(log, &vec, tic, &lsn, NULL, flags);
+	/*
+	 * At this point, we're umounting anyway, so there's no point in
+	 * transitioning log state to IOERROR. Just continue...
+	 */
+out_err:
+	if (error)
+		xfs_alert(mp, "%s: unmount record failed", __func__);
+
+	spin_lock(&log->l_icloglock);
+	iclog = log->l_iclog;
+	atomic_inc(&iclog->ic_refcnt);
+	xlog_state_want_sync(log, iclog);
+	spin_unlock(&log->l_icloglock);
+	error = xlog_state_release_iclog(log, iclog);
+
+	spin_lock(&log->l_icloglock);
+	switch (iclog->ic_state) {
+	default:
+		if (!XLOG_FORCED_SHUTDOWN(log)) {
+			xlog_wait(&iclog->ic_force_wait, &log->l_icloglock);
+			break;
+		}
+		/* fall through */
+	case XLOG_STATE_ACTIVE:
+	case XLOG_STATE_DIRTY:
+		spin_unlock(&log->l_icloglock);
+		break;
+	}
+
+	if (tic) {
+		trace_xfs_log_umount_write(log, tic);
+		xlog_ungrant_log_space(log, tic);
+		xfs_log_ticket_put(tic);
+	}
+}
+
 /*
  * Unmount record used to have a string "Unmount filesystem--" in the
  * data section where the "Un" was really a magic number (XLOG_UNMOUNT_TYPE).
@@ -832,8 +924,6 @@ xfs_log_unmount_write(xfs_mount_t *mp)
 #ifdef DEBUG
 	xlog_in_core_t	 *first_iclog;
 #endif
-	xlog_ticket_t	*tic = NULL;
-	xfs_lsn_t	 lsn;
 	int		 error;
 
 	/*
@@ -860,66 +950,7 @@ xfs_log_unmount_write(xfs_mount_t *mp)
 	} while (iclog != first_iclog);
 #endif
 	if (! (XLOG_FORCED_SHUTDOWN(log))) {
-		error = xfs_log_reserve(mp, 600, 1, &tic, XFS_LOG, 0);
-		if (!error) {
-			/* the data section must be 32 bit size aligned */
-			struct {
-			    uint16_t magic;
-			    uint16_t pad1;
-			    uint32_t pad2; /* may as well make it 64 bits */
-			} magic = {
-				.magic = XLOG_UNMOUNT_TYPE,
-			};
-			struct xfs_log_iovec reg = {
-				.i_addr = &magic,
-				.i_len = sizeof(magic),
-				.i_type = XLOG_REG_TYPE_UNMOUNT,
-			};
-			struct xfs_log_vec vec = {
-				.lv_niovecs = 1,
-				.lv_iovecp = &reg,
-			};
-
-			/* remove inited flag, and account for space used */
-			tic->t_flags = 0;
-			tic->t_curr_res -= sizeof(magic);
-			error = xlog_write(log, &vec, tic, &lsn,
-					   NULL, XLOG_UNMOUNT_TRANS);
-			/*
-			 * At this point, we're umounting anyway,
-			 * so there's no point in transitioning log state
-			 * to IOERROR. Just continue...
-			 */
-		}
-
-		if (error)
-			xfs_alert(mp, "%s: unmount record failed", __func__);
-
-
-		spin_lock(&log->l_icloglock);
-		iclog = log->l_iclog;
-		atomic_inc(&iclog->ic_refcnt);
-		xlog_state_want_sync(log, iclog);
-		spin_unlock(&log->l_icloglock);
-		error = xlog_state_release_iclog(log, iclog);
-
-		spin_lock(&log->l_icloglock);
-		if (!(iclog->ic_state == XLOG_STATE_ACTIVE ||
-		      iclog->ic_state == XLOG_STATE_DIRTY)) {
-			if (!XLOG_FORCED_SHUTDOWN(log)) {
-				xlog_wait(&iclog->ic_force_wait,
-							&log->l_icloglock);
-			} else {
-				spin_unlock(&log->l_icloglock);
-			}
-		} else {
-			spin_unlock(&log->l_icloglock);
-		}
-		if (tic) {
-			trace_xfs_log_umount_write(log, tic);
-			xlog_ungrant_log_space(log, tic);
-			xfs_log_ticket_put(tic);
-		}
+		xfs_log_write_unmount_record(mp);
 	} else {
 		/*
 		 * We're already in forced_shutdown mode, couldn't
@@ -1024,6 +1055,8 @@ xfs_log_item_init(
 
 	INIT_LIST_HEAD(&item->li_ail);
 	INIT_LIST_HEAD(&item->li_cil);
+	INIT_LIST_HEAD(&item->li_bio_list);
+	INIT_LIST_HEAD(&item->li_trans);
 }
 
 /*
@@ -1125,7 +1158,7 @@ xlog_assign_tail_lsn_locked(
 	struct xfs_log_item	*lip;
 	xfs_lsn_t		tail_lsn;
 
-	assert_spin_locked(&mp->m_ail->xa_lock);
+	assert_spin_locked(&mp->m_ail->ail_lock);
 
 	/*
 	 * To make sure we always have a valid LSN for the log tail we keep
@@ -1148,9 +1181,9 @@ xlog_assign_tail_lsn(
 {
 	xfs_lsn_t		tail_lsn;
 
-	spin_lock(&mp->m_ail->xa_lock);
+	spin_lock(&mp->m_ail->ail_lock);
 	tail_lsn = xlog_assign_tail_lsn_locked(mp);
-	spin_unlock(&mp->m_ail->xa_lock);
+	spin_unlock(&mp->m_ail->ail_lock);
 
 	return tail_lsn;
 }
@@ -1219,7 +1252,7 @@ xlog_space_left(
 static void
 xlog_iodone(xfs_buf_t *bp)
 {
-	struct xlog_in_core	*iclog = bp->b_fspriv;
+	struct xlog_in_core	*iclog = bp->b_log_item;
 	struct xlog		*l = iclog->ic_log;
 	int			aborted = 0;
 
@@ -1617,8 +1650,8 @@ xlog_grant_push_ail(
 	 * log, and 256 blocks.
 	 */
 	free_threshold = BTOBB(need_bytes);
-	free_threshold = MAX(free_threshold, (log->l_logBBsize >> 2));
-	free_threshold = MAX(free_threshold, 256);
+	free_threshold = max(free_threshold, (log->l_logBBsize >> 2));
+	free_threshold = max(free_threshold, 256);
 	if (free_blocks >= free_threshold)
 		return;
 
@@ -1750,7 +1783,7 @@ STATIC int
 xlog_bdstrat(
 	struct xfs_buf		*bp)
 {
-	struct xlog_in_core	*iclog = bp->b_fspriv;
+	struct xlog_in_core	*iclog = bp->b_log_item;
 
 	xfs_buf_lock(bp);
 	if (iclog->ic_state & XLOG_STATE_IOERROR) {
@@ -1896,7 +1929,7 @@ xlog_sync(
 	}
 
 	bp->b_io_length = BTOBB(count);
-	bp->b_fspriv = iclog;
+	bp->b_log_item = iclog;
 	bp->b_flags &= ~XBF_FLUSH;
 	bp->b_flags |= (XBF_ASYNC | XBF_SYNCIO | XBF_WRITE | XBF_FUA);
 
@@ -1935,7 +1968,7 @@ xlog_sync(
 		XFS_BUF_SET_ADDR(bp, 0);	     /* logical 0 */
 		xfs_buf_associate_memory(bp,
 				(char *)&iclog->ic_header + count, split);
-		bp->b_fspriv = iclog;
+		bp->b_log_item = iclog;
 		bp->b_flags &= ~XBF_FLUSH;
 		bp->b_flags |= (XBF_ASYNC | XBF_SYNCIO | XBF_WRITE | XBF_FUA);
 
@@ -2087,10 +2120,10 @@ xlog_print_tic_res(
  */
 void
 xlog_print_trans(
-	struct xfs_trans		*tp)
+	struct xfs_trans	*tp)
 {
-	struct xfs_mount		*mp = tp->t_mountp;
-	struct xfs_log_item_desc	*lidp;
+	struct xfs_mount	*mp = tp->t_mountp;
+	struct xfs_log_item	*lip;
 
 	/* dump core transaction and ticket info */
 	xfs_warn(mp, "transaction summary:");
@@ -2101,8 +2134,7 @@ xlog_print_trans(
 	xlog_print_tic_res(mp, tp->t_ticket);
 
 	/* dump each log item */
-	list_for_each_entry(lidp, &tp->t_items, lid_trans) {
-		struct xfs_log_item	*lip = lidp->lid_item;
+	list_for_each_entry(lip, &tp->t_items, li_trans) {
 		struct xfs_log_vec	*lv = lip->li_lv;
 		struct xfs_log_iovec	*vec;
 		int			i;
@@ -2221,7 +2253,7 @@ xlog_write_setup_ophdr(
 		break;
 	default:
 		xfs_warn(log->l_mp,
-			"Bad XFS transaction clientid 0x%x in ticket %p",
+			"Bad XFS transaction clientid 0x%x in ticket "PTR_FMT,
 			ophdr->oh_clientid, ticket);
 		return NULL;
 	}
@@ -3371,41 +3403,17 @@ out_error:
 	return -EIO;
 }
 
-/*
- * Force the in-core log to disk for a specific LSN.
- *
- * Find in-core log with lsn.
- *	If it is in the DIRTY state, just return.
- *	If it is in the ACTIVE state, move the in-core log into the WANT_SYNC
- *		state and go to sleep or return.
- *	If it is in any other state, go to sleep or return.
- *
- * Synchronous forces are implemented with a wait queue.  All callers trying
- * to force a given lsn to disk must wait on the queue attached to the
- * specific in-core log.  When given in-core log finally completes its write
- * to disk, that thread will wake up all threads waiting on the queue.
- */
-int
-xfs_log_force_lsn(
+static int
+__xfs_log_force_lsn(
 	struct xfs_mount	*mp,
 	xfs_lsn_t		lsn,
 	uint			flags,
-	int			*log_flushed)
+	int			*log_flushed,
+	bool			already_slept)
 {
 	struct xlog		*log = mp->m_log;
 	struct xlog_in_core	*iclog;
-	int			already_slept = 0;
 
-	ASSERT(lsn != 0);
-
-	XFS_STATS_INC(mp, xs_log_force);
-	trace_xfs_log_force(mp, lsn, _RET_IP_);
-
-	lsn = xlog_cil_force_lsn(log, lsn);
-	if (lsn == NULLCOMMITLSN)
-		return 0;
-
-try_again:
 	spin_lock(&log->l_icloglock);
 	iclog = log->l_iclog;
 	if (iclog->ic_state & XLOG_STATE_IOERROR)
@@ -3445,8 +3453,7 @@ try_again:
 
 			xlog_wait(&iclog->ic_prev->ic_write_wait,
 					&log->l_icloglock);
-			already_slept = 1;
-			goto try_again;
+			return -EAGAIN;
 		}
 		atomic_inc(&iclog->ic_refcnt);
 		xlog_state_switch_iclogs(log, iclog, 0);
@@ -3477,6 +3484,43 @@ out_unlock:
 out_error:
 	spin_unlock(&log->l_icloglock);
 	return -EIO;
+}
+
+/*
+ * Force the in-core log to disk for a specific LSN.
+ *
+ * Find in-core log with lsn.
+ *	If it is in the DIRTY state, just return.
+ *	If it is in the ACTIVE state, move the in-core log into the WANT_SYNC
+ *		state and go to sleep or return.
+ *	If it is in any other state, go to sleep or return.
+ *
+ * Synchronous forces are implemented with a wait queue.  All callers trying
+ * to force a given lsn to disk must wait on the queue attached to the
+ * specific in-core log.  When given in-core log finally completes its write
+ * to disk, that thread will wake up all threads waiting on the queue.
+ */
+int
+xfs_log_force_lsn(
+	struct xfs_mount	*mp,
+	xfs_lsn_t		lsn,
+	uint			flags,
+	int			*log_flushed)
+{
+	int			ret;
+	ASSERT(lsn != 0);
+
+	XFS_STATS_INC(mp, xs_log_force);
+	trace_xfs_log_force(mp, lsn, _RET_IP_);
+
+	lsn = xlog_cil_force_lsn(mp->m_log, lsn);
+	if (lsn == NULLCOMMITLSN)
+		return 0;
+
+	ret = __xfs_log_force_lsn(mp, lsn, flags, log_flushed, false);
+	if (ret == -EAGAIN)
+		ret = __xfs_log_force_lsn(mp, lsn, flags, log_flushed, true);
+	return ret;
 }
 
 /*
@@ -3837,7 +3881,7 @@ xlog_verify_iclog(
 		}
 		if (clientid != XFS_TRANSACTION && clientid != XFS_LOG)
 			xfs_warn(log->l_mp,
-				"%s: invalid clientid %d op %p offset 0x%lx",
+				"%s: invalid clientid %d op "PTR_FMT" offset 0x%lx",
 				__func__, clientid, ophead,
 				(unsigned long)field_offset);
 
@@ -4059,4 +4103,13 @@ xfs_log_check_lsn(
 	}
 
 	return valid;
+}
+
+bool
+xfs_log_in_recovery(
+	struct xfs_mount	*mp)
+{
+	struct xlog		*log = mp->m_log;
+
+	return log->l_flags & XLOG_ACTIVE_RECOVERY;
 }

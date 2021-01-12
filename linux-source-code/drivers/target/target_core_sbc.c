@@ -24,8 +24,9 @@
 #include <linux/module.h>
 #include <linux/ratelimit.h>
 #include <linux/crc-t10dif.h>
+#include <linux/t10-pi.h>
 #include <asm/unaligned.h>
-#include <scsi/scsi.h>
+#include <scsi/scsi_proto.h>
 #include <scsi/scsi_tcq.h>
 
 #include <target/target_core_base.h>
@@ -974,9 +975,10 @@ sbc_parse_cdb(struct se_cmd *cmd, struct sbc_ops *ops)
 	}
 	case COMPARE_AND_WRITE:
 		if (!dev->dev_attrib.emulate_caw) {
-			pr_err_ratelimited("se_device %s/%s (vpd_unit_serial %s) reject"
-				" COMPARE_AND_WRITE\n", dev->se_hba->backend->ops->name,
-				dev->dev_group.cg_item.ci_name, dev->t10_wwn.unit_serial);
+			pr_err_ratelimited("se_device %s/%s (vpd_unit_serial %s) reject COMPARE_AND_WRITE\n",
+					   dev->se_hba->backend->ops->name,
+					   config_item_name(&dev->dev_group.cg_item),
+					   dev->t10_wwn.unit_serial);
 			return TCM_UNSUPPORTED_SCSI_OPCODE;
 		}
 		sectors = cdb[13];
@@ -1212,9 +1214,11 @@ sbc_execute_unmap(struct se_cmd *cmd)
 			goto err;
 		}
 
-		ret = ops->execute_unmap(cmd, lba, range);
-		if (ret)
-			goto err;
+		if (range) {
+			ret = ops->execute_unmap(cmd, lba, range);
+			if (ret)
+				goto err;
+		}
 
 		ptr += 16;
 		size -= 16;
@@ -1231,7 +1235,7 @@ void
 sbc_dif_generate(struct se_cmd *cmd)
 {
 	struct se_device *dev = cmd->se_dev;
-	struct se_dif_v1_tuple *sdt;
+	struct t10_pi_tuple *sdt;
 	struct scatterlist *dsg = cmd->t_data_sg, *psg;
 	sector_t sector = cmd->t_task_lba;
 	void *daddr, *paddr;
@@ -1243,7 +1247,7 @@ sbc_dif_generate(struct se_cmd *cmd)
 		daddr = kmap_atomic(sg_page(dsg)) + dsg->offset;
 
 		for (j = 0; j < psg->length;
-				j += sizeof(struct se_dif_v1_tuple)) {
+				j += sizeof(*sdt)) {
 			__u16 crc;
 			unsigned int avail;
 
@@ -1296,7 +1300,7 @@ sbc_dif_generate(struct se_cmd *cmd)
 }
 
 static sense_reason_t
-sbc_dif_v1_verify(struct se_cmd *cmd, struct se_dif_v1_tuple *sdt,
+sbc_dif_v1_verify(struct se_cmd *cmd, struct t10_pi_tuple *sdt,
 		  __u16 crc, sector_t sector, unsigned int ei_lba)
 {
 	__be16 csum;
@@ -1386,7 +1390,7 @@ sbc_dif_verify(struct se_cmd *cmd, sector_t start, unsigned int sectors,
 	       unsigned int ei_lba, struct scatterlist *psg, int psg_off)
 {
 	struct se_device *dev = cmd->se_dev;
-	struct se_dif_v1_tuple *sdt;
+	struct t10_pi_tuple *sdt;
 	struct scatterlist *dsg = cmd->t_data_sg;
 	sector_t sector = start;
 	void *daddr, *paddr;
@@ -1401,7 +1405,7 @@ sbc_dif_verify(struct se_cmd *cmd, sector_t start, unsigned int sectors,
 
 		for (i = psg_off; i < psg->length &&
 				sector < start + sectors;
-				i += sizeof(struct se_dif_v1_tuple)) {
+				i += sizeof(*sdt)) {
 			__u16 crc;
 			unsigned int avail;
 
@@ -1423,7 +1427,7 @@ sbc_dif_verify(struct se_cmd *cmd, sector_t start, unsigned int sectors,
 				 (unsigned long long)sector, sdt->guard_tag,
 				 sdt->app_tag, be32_to_cpu(sdt->ref_tag));
 
-			if (sdt->app_tag == cpu_to_be16(0xffff)) {
+			if (sdt->app_tag == T10_PI_APP_ESCAPE) {
 				dsg_off += block_size;
 				goto next;
 			}

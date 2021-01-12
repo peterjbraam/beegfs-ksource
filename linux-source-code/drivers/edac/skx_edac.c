@@ -33,9 +33,9 @@
 #include <asm/processor.h>
 #include <asm/mce.h>
 
-#include "edac_core.h"
+#include "edac_module.h"
 
-#define SKX_REVISION    " Ver: 1.0 "
+#define EDAC_MOD_STR    "skx_edac"
 #define MSG_SIZE	1024
 
 /*
@@ -425,7 +425,7 @@ static int get_nvdimm_info(struct dimm_info *dimm, struct skx_imc *imc,
 
 	smbios_handle = nfit_get_smbios_id(dev_handle, &flags);
 	if (smbios_handle == -EOPNOTSUPP) {
-		pr_warn_once("skx_edac: Can't find size of NVDIMM. Try enabling CONFIG_ACPI_NFIT\n");
+		pr_warn_once(EDAC_MOD_STR ": Can't find size of NVDIMM. Try enabling CONFIG_ACPI_NFIT\n");
 		goto unknown_size;
 	}
 
@@ -551,12 +551,16 @@ static int skx_register_mci(struct skx_imc *imc)
 
 	mci->ctl_name = kasprintf(GFP_KERNEL, "Skylake Socket#%d IMC#%d",
 				  imc->node_id, imc->lmc);
+	if (!mci->ctl_name) {
+		rc = -ENOMEM;
+		goto fail0;
+	}
+
 	mci->mtype_cap = MEM_FLAG_DDR4 | MEM_FLAG_NVDIMM;
 	mci->edac_ctl_cap = EDAC_FLAG_NONE;
 	mci->edac_cap = EDAC_FLAG_NONE;
-	mci->mod_name = "skx_edac.c";
+	mci->mod_name = EDAC_MOD_STR;
 	mci->dev_name = pci_name(imc->chan[0].cdev);
-	mci->mod_ver = SKX_REVISION;
 	mci->ctl_page_to_phys = NULL;
 
 	rc = skx_get_dimm_config(mci);
@@ -577,6 +581,7 @@ static int skx_register_mci(struct skx_imc *imc)
 
 fail:
 	kfree(mci->ctl_name);
+fail0:
 	edac_mc_free(mci);
 	imc->mci = NULL;
 	return rc;
@@ -1113,7 +1118,7 @@ static int skx_mce_check_error(struct notifier_block *nb, unsigned long val,
 	struct mem_ctl_info *mci;
 	char *type;
 
-	if (get_edac_report_status() == EDAC_REPORTING_DISABLED)
+	if (edac_get_report_status() == EDAC_REPORTING_DISABLED)
 		return NOTIFY_DONE;
 
 	/* ignore unless this is memory related with an address */
@@ -1253,11 +1258,16 @@ static int __init skx_init(void)
 {
 	const struct x86_cpu_id *id;
 	const struct munit *m;
+	const char *owner;
 	int rc = 0, i;
 	u8 mc = 0, src_id, node_id;
 	struct skx_dev *d;
 
 	edac_dbg(2, "\n");
+
+	owner = edac_get_owner();
+	if (owner && strncmp(owner, EDAC_MOD_STR, sizeof(EDAC_MOD_STR)))
+		return -EBUSY;
 
 	id = x86_match_cpu(skx_cpuids);
 	if (!id)

@@ -13,10 +13,10 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the
- * Free Software Foundation, Inc.,
- * 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
+ * along with this program; if not, see <http://www.gnu.org/licenses/>.
  */
+
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/module.h>
 #include <linux/mod_devicetable.h>
@@ -59,8 +59,6 @@ static int microread_mei_remove(struct mei_cl_device *cldev)
 {
 	struct nfc_mei_phy *phy = mei_cldev_get_drvdata(cldev);
 
-	pr_info("Removing microread\n");
-
 	microread_remove(phy->hdev);
 
 	nfc_mei_phy_free(phy);
@@ -84,28 +82,7 @@ static struct mei_cl_driver microread_driver = {
 	.remove = microread_mei_remove,
 };
 
-static int microread_mei_init(void)
-{
-	int r;
-
-	pr_debug(DRIVER_DESC ": %s\n", __func__);
-
-	r = mei_cldev_driver_register(&microread_driver);
-	if (r) {
-		pr_err(MICROREAD_DRIVER_NAME ": driver registration failed\n");
-		return r;
-	}
-
-	return 0;
-}
-
-static void microread_mei_exit(void)
-{
-	mei_cldev_driver_unregister(&microread_driver);
-}
-
-module_init(microread_mei_init);
-module_exit(microread_mei_exit);
+module_mei_cl_driver(microread_driver);
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION(DRIVER_DESC);

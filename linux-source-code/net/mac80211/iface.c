@@ -1127,16 +1127,11 @@ static void ieee80211_uninit(struct net_device *dev)
 {
 	ieee80211_teardown_sdata(IEEE80211_DEV_TO_SUB_IF(dev));
 }
-#if 0 /* Not in RHEL */
+
 static u16 ieee80211_netdev_select_queue(struct net_device *dev,
 					 struct sk_buff *skb,
-					 struct net_device *sb_dev)
-#else
-static u16 ieee80211_netdev_select_queue(struct net_device *dev,
-					 struct sk_buff *skb,
-					 void *accel_priv,
+					 struct net_device *sb_dev,
 					 select_queue_fallback_t fallback)
-#endif
 {
 	return ieee80211_select_queue(IEEE80211_DEV_TO_SUB_IF(dev), skb);
 }
@@ -1179,16 +1174,10 @@ static const struct net_device_ops ieee80211_dataif_ops = {
 	.ndo_get_stats64	= ieee80211_get_stats64,
 };
 
-#if 0 /* Not in RHEL */
 static u16 ieee80211_monitor_select_queue(struct net_device *dev,
 					  struct sk_buff *skb,
-					  struct net_device *sb_dev)
-#else
-static u16 ieee80211_monitor_select_queue(struct net_device *dev,
-					 struct sk_buff *skb,
-					 void *accel_priv,
-					 select_queue_fallback_t fallback)
-#endif
+					  struct net_device *sb_dev,
+					  select_queue_fallback_t fallback)
 {
 	struct ieee80211_sub_if_data *sdata = IEEE80211_DEV_TO_SUB_IF(dev);
 	struct ieee80211_local *local = sdata->local;
@@ -1228,13 +1217,14 @@ static void ieee80211_if_setup(struct net_device *dev)
 	ether_setup(dev);
 	dev->priv_flags &= ~IFF_TX_SKB_SHARING;
 	dev->netdev_ops = &ieee80211_dataif_ops;
-	dev->extended->needs_free_netdev = true;
-	dev->extended->priv_destructor = ieee80211_if_free;
+	dev->needs_free_netdev = true;
+	dev->priv_destructor = ieee80211_if_free;
 }
 
 static void ieee80211_if_setup_no_queue(struct net_device *dev)
 {
 	ieee80211_if_setup(dev);
+	dev->features |= NETIF_F_LLTX;
 	dev->priv_flags |= IFF_NO_QUEUE;
 }
 
@@ -1781,11 +1771,7 @@ int ieee80211_if_add(struct ieee80211_local *local, const char *name,
 		}
 
 		ndev = alloc_netdev_mqs(size + txq_size,
-#if 0 /* Not in RHEL */
 					name, name_assign_type,
-#else
-					name,
-#endif
 					if_setup, txqs, 1);
 		if (!ndev)
 			return -ENOMEM;
@@ -1892,8 +1878,8 @@ int ieee80211_if_add(struct ieee80211_local *local, const char *name,
 		netdev_set_default_ethtool_ops(ndev, &ieee80211_ethtool_ops);
 
 		/* MTU range: 256 - 2304 */
-		ndev->extended->min_mtu = 256;
-		ndev->extended->max_mtu = IEEE80211_MAX_DATA_LEN;
+		ndev->min_mtu = 256;
+		ndev->max_mtu = IEEE80211_MAX_DATA_LEN;
 
 		ret = register_netdevice(ndev);
 		if (ret) {
@@ -1989,11 +1975,7 @@ void ieee80211_remove_interfaces(struct ieee80211_local *local)
 static int netdev_notify(struct notifier_block *nb,
 			 unsigned long state, void *ptr)
 {
-#if 0 /* Not in RHEL */
 	struct net_device *dev = netdev_notifier_info_to_dev(ptr);
-#else
-	struct net_device *dev = ptr;
-#endif
 	struct ieee80211_sub_if_data *sdata;
 
 	if (state != NETDEV_CHANGENAME)

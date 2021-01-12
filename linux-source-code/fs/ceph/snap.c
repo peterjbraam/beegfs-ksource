@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <linux/ceph/ceph_debug.h>
 
 #include <linux/sort.h>
@@ -140,14 +141,11 @@ static struct ceph_snap_realm *__lookup_snap_realm(struct ceph_mds_client *mdsc,
 
 	while (n) {
 		r = rb_entry(n, struct ceph_snap_realm, node);
-		if (ino < r->ino) {
-			gmb();
+		if (ino < r->ino)
 			n = n->rb_left;
-		} else if (ino > r->ino) {
-			gmb();
+		else if (ino > r->ino)
 			n = n->rb_right;
-		} else {
-			gmb();
+		else {
 			dout("lookup_snap_realm %llx %p\n", r->ino, r);
 			return r;
 		}
@@ -526,7 +524,7 @@ void ceph_queue_cap_snap(struct ceph_inode_info *ci)
 	     capsnap->need_flush ? "" : "no_flush");
 	ihold(inode);
 
-	atomic_set(&capsnap->nref, 1);
+	refcount_set(&capsnap->nref, 1);
 	INIT_LIST_HEAD(&capsnap->ci_item);
 
 	capsnap->follows = old_snapc->seq;
@@ -596,9 +594,9 @@ int __ceph_finish_cap_snap(struct ceph_inode_info *ci,
 
 	BUG_ON(capsnap->writing);
 	capsnap->size = inode->i_size;
-	capsnap->mtime = inode->i_mtime;
-	capsnap->atime = inode->i_atime;
-	capsnap->ctime = inode->i_ctime;
+	capsnap->mtime = timespec64_to_timespec(inode->i_mtime);
+	capsnap->atime = timespec64_to_timespec(inode->i_atime);
+	capsnap->ctime = timespec64_to_timespec(inode->i_ctime);
 	capsnap->time_warp_seq = ci->i_time_warp_seq;
 	capsnap->truncate_size = ci->i_truncate_size;
 	capsnap->truncate_seq = ci->i_truncate_seq;

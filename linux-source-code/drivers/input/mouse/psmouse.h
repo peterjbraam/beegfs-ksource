@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _PSMOUSE_H
 #define _PSMOUSE_H
 
@@ -39,6 +40,11 @@ typedef enum {
 	PSMOUSE_FULL_PACKET
 } psmouse_ret_t;
 
+enum psmouse_scale {
+	PSMOUSE_SCALE11,
+	PSMOUSE_SCALE21
+};
+
 enum psmouse_type {
 	PSMOUSE_NONE,
 	PSMOUSE_PS2,
@@ -58,8 +64,11 @@ enum psmouse_type {
 	PSMOUSE_FSP,
 	PSMOUSE_SYNAPTICS_RELATIVE,
 	PSMOUSE_CYPRESS,
+	PSMOUSE_FOCALTECH,
 	PSMOUSE_VMMOUSE,
+	PSMOUSE_BYD,
 	PSMOUSE_SYNAPTICS_SMBUS,
+	PSMOUSE_ELANTECH_SMBUS,
 	PSMOUSE_AUTO		/* This one should always be last */
 };
 
@@ -109,6 +118,7 @@ struct psmouse {
 	psmouse_ret_t (*protocol_handler)(struct psmouse *psmouse);
 	void (*set_rate)(struct psmouse *psmouse, unsigned int rate);
 	void (*set_resolution)(struct psmouse *psmouse, unsigned int resolution);
+	void (*set_scale)(struct psmouse *psmouse, enum psmouse_scale scale);
 
 	int (*reconnect)(struct psmouse *psmouse);
 	int (*fast_reconnect)(struct psmouse *psmouse);
@@ -215,6 +225,7 @@ struct i2c_board_info;
 int psmouse_smbus_init(struct psmouse *psmouse,
 		       const struct i2c_board_info *board,
 		       const void *pdata, size_t pdata_size,
+		       bool need_deactivate,
 		       bool leave_breadcrumbs);
 void psmouse_smbus_cleanup(struct psmouse *psmouse);
 

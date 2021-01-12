@@ -67,23 +67,10 @@ static inline int qedr_ib_copy_to_udata(struct ib_udata *udata, void *src,
 
 int qedr_query_pkey(struct ib_device *ibdev, u8 port, u16 index, u16 *pkey)
 {
-	if (index > QEDR_ROCE_PKEY_TABLE_LEN)
+	if (index >= QEDR_ROCE_PKEY_TABLE_LEN)
 		return -EINVAL;
 
 	*pkey = QEDR_ROCE_PKEY_DEFAULT;
-	return 0;
-}
-
-int qedr_query_srq(struct ib_srq *ibsrq, struct ib_srq_attr *srq_attr)
-{
-	struct qedr_dev *dev = get_qedr_dev(ibsrq->device);
-	struct qedr_device_attr *qattr = &dev->attr;
-	struct qedr_srq *srq = get_qedr_srq(ibsrq);
-
-	srq_attr->srq_limit = srq->srq_limit;
-	srq_attr->max_wr = qattr->max_srq_wr;
-	srq_attr->max_sge = qattr->max_sge;
-
 	return 0;
 }
 
@@ -97,6 +84,19 @@ int qedr_iw_query_gid(struct ib_device *ibdev, u8 port,
 
 	DP_DEBUG(dev, QEDR_MSG_INIT, "QUERY sgid[%d]=%llx:%llx\n", index,
 		 sgid->global.interface_id, sgid->global.subnet_prefix);
+
+	return 0;
+}
+
+int qedr_query_srq(struct ib_srq *ibsrq, struct ib_srq_attr *srq_attr)
+{
+	struct qedr_dev *dev = get_qedr_dev(ibsrq->device);
+	struct qedr_device_attr *qattr = &dev->attr;
+	struct qedr_srq *srq = get_qedr_srq(ibsrq);
+
+	srq_attr->srq_limit = srq->srq_limit;
+	srq_attr->max_wr = qattr->max_srq_wr;
+	srq_attr->max_sge = qattr->max_sge;
 
 	return 0;
 }
@@ -1129,7 +1129,8 @@ static inline int get_gid_info_from_table(struct ib_qp *ibqp,
 }
 
 static int qedr_check_qp_attrs(struct ib_pd *ibpd, struct qedr_dev *dev,
-			       struct ib_qp_init_attr *attrs)
+			       struct ib_qp_init_attr *attrs,
+			       struct ib_udata *udata)
 {
 	struct qedr_device_attr *qattr = &dev->attr;
 
@@ -1170,7 +1171,7 @@ static int qedr_check_qp_attrs(struct ib_pd *ibpd, struct qedr_dev *dev,
 	}
 
 	/* Unprivileged user space cannot create special QP */
-	if (ibpd->uobject && attrs->qp_type == IB_QPT_GSI) {
+	if (udata && attrs->qp_type == IB_QPT_GSI) {
 		DP_ERR(dev,
 		       "create qp: userspace can't create special QPs of type=0x%x\n",
 		       attrs->qp_type);
@@ -1533,7 +1534,7 @@ int qedr_destroy_srq(struct ib_srq *ibsrq)
 	in_params.srq_id = srq->srq_id;
 	dev->ops->rdma_destroy_srq(dev->rdma_ctx, &in_params);
 
-	if (ibsrq->pd->uobject)
+	if (ibsrq->uobject)
 		qedr_free_srq_user_params(srq);
 	else
 		qedr_free_srq_kernel_params(srq);
@@ -1986,7 +1987,7 @@ struct ib_qp *qedr_create_qp(struct ib_pd *ibpd,
 	DP_DEBUG(dev, QEDR_MSG_QP, "create qp: called from %s, pd=%p\n",
 		 udata ? "user library" : "kernel", pd);
 
-	rc = qedr_check_qp_attrs(ibpd, dev, attrs);
+	rc = qedr_check_qp_attrs(ibpd, dev, attrs, udata);
 	if (rc)
 		return ERR_PTR(rc);
 
@@ -2607,7 +2608,7 @@ int qedr_destroy_qp(struct ib_qp *ibqp)
 }
 
 struct ib_ah *qedr_create_ah(struct ib_pd *ibpd, struct rdma_ah_attr *attr,
-			     struct ib_udata *udata)
+			     u32 flags, struct ib_udata *udata)
 {
 	struct qedr_ah *ah;
 
@@ -2620,7 +2621,7 @@ struct ib_ah *qedr_create_ah(struct ib_pd *ibpd, struct rdma_ah_attr *attr,
 	return &ah->ibah;
 }
 
-int qedr_destroy_ah(struct ib_ah *ibah)
+int qedr_destroy_ah(struct ib_ah *ibah, u32 flags)
 {
 	struct qedr_ah *ah = get_qedr_ah(ibah);
 

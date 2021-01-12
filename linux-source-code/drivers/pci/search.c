@@ -1,10 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
- *	PCI searching functions.
+ * PCI searching functions
  *
- *	Copyright (C) 1993 -- 1997 Drew Eckhardt, Frederic Potter,
+ * Copyright (C) 1993 -- 1997 Drew Eckhardt, Frederic Potter,
  *					David Mosberger-Tang
- *	Copyright (C) 1997 -- 2000 Martin Mares <mj@ucw.cz>
- *	Copyright (C) 2003 -- 2004 Greg Kroah-Hartman <greg@kroah.com>
+ * Copyright (C) 1997 -- 2000 Martin Mares <mj@ucw.cz>
+ * Copyright (C) 2003 -- 2004 Greg Kroah-Hartman <greg@kroah.com>
  */
 
 #include <linux/pci.h>
@@ -40,11 +41,12 @@ int pci_for_each_dma_alias(struct pci_dev *pdev,
 	 * If the device is broken and uses an alias requester ID for
 	 * DMA, iterate over that too.
 	 */
-	if (unlikely(pdev->pci_dev_rh->dma_alias_mask)) {
+	if (unlikely(pdev->dma_alias_mask)) {
 		u8 devfn;
 
-		for_each_set_bit(devfn, pdev->pci_dev_rh->dma_alias_mask, U8_MAX) {
-			ret = fn(pdev, PCI_DEVID(pdev->bus->number, devfn), data);
+		for_each_set_bit(devfn, pdev->dma_alias_mask, U8_MAX) {
+			ret = fn(pdev, PCI_DEVID(pdev->bus->number, devfn),
+				 data);
 			if (ret)
 				return ret;
 		}
@@ -58,6 +60,10 @@ int pci_for_each_dma_alias(struct pci_dev *pdev,
 			continue;
 
 		tmp = bus->self;
+
+		/* stop at bridge where translation unit is associated */
+		if (tmp->dev_flags & PCI_DEV_FLAGS_BRIDGE_XLATE_ROOT)
+			return ret;
 
 		/*
 		 * PCIe-to-PCI/X bridges alias transactions from downstream
@@ -204,12 +210,6 @@ struct pci_dev *pci_get_slot(struct pci_bus *bus, unsigned int devfn)
 	return dev;
 }
 EXPORT_SYMBOL(pci_get_slot);
-
-struct pci_dev *pci_get_bus_and_slot(unsigned int bus, unsigned int devfn)
-{
-	return pci_get_domain_bus_and_slot(0, bus, devfn);
-}
-EXPORT_SYMBOL(pci_get_bus_and_slot);
 
 /**
  * pci_get_domain_bus_and_slot - locate PCI device for a given PCI domain (segment), bus, and slot

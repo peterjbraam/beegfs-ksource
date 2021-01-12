@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <inttypes.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -394,6 +395,7 @@ int cmd_mem(int argc, const char **argv)
 			.lost		= perf_event__process_lost,
 			.fork		= perf_event__process_fork,
 			.build_id	= perf_event__process_build_id,
+			.namespaces	= perf_event__process_namespaces,
 			.ordered_events	= true,
 		},
 		.input_name		 = "perf.data",

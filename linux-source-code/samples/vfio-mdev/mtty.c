@@ -534,7 +534,7 @@ static void handle_bar_read(unsigned int index, struct mdev_state *mdev_state,
 
 		/* Interrupt priority 2: Fifo trigger level reached */
 		if ((ier & UART_IER_RDI) &&
-		    (mdev_state->s[index].rxtx.count ==
+		    (mdev_state->s[index].rxtx.count >=
 		      mdev_state->s[index].intr_trigger_level))
 			*buf |= UART_IIR_RDI;
 
@@ -1073,7 +1073,7 @@ int mtty_get_region_info(struct mdev_device *mdev,
 {
 	unsigned int size = 0;
 	struct mdev_state *mdev_state;
-	int bar_index;
+	u32 bar_index;
 
 	if (!mdev)
 		return -EINVAL;
@@ -1082,8 +1082,11 @@ int mtty_get_region_info(struct mdev_device *mdev,
 	if (!mdev_state)
 		return -EINVAL;
 
-	mutex_lock(&mdev_state->ops_lock);
 	bar_index = region_info->index;
+	if (bar_index >= VFIO_PCI_NUM_REGIONS)
+		return -EINVAL;
+
+	mutex_lock(&mdev_state->ops_lock);
 
 	switch (bar_index) {
 	case VFIO_PCI_CONFIG_REGION_INDEX:
@@ -1180,7 +1183,10 @@ static long mtty_ioctl(struct mdev_device *mdev, unsigned int cmd,
 
 		memcpy(&mdev_state->dev_info, &info, sizeof(info));
 
-		return copy_to_user((void __user *)arg, &info, minsz);
+		if (copy_to_user((void __user *)arg, &info, minsz))
+			return -EFAULT;
+
+		return 0;
 	}
 	case VFIO_DEVICE_GET_REGION_INFO:
 	{
@@ -1201,7 +1207,10 @@ static long mtty_ioctl(struct mdev_device *mdev, unsigned int cmd,
 		if (ret)
 			return ret;
 
-		return copy_to_user((void __user *)arg, &info, minsz);
+		if (copy_to_user((void __user *)arg, &info, minsz))
+			return -EFAULT;
+
+		return 0;
 	}
 
 	case VFIO_DEVICE_GET_IRQ_INFO:
@@ -1221,10 +1230,10 @@ static long mtty_ioctl(struct mdev_device *mdev, unsigned int cmd,
 		if (ret)
 			return ret;
 
-		if (info.count == -1)
-			return -EINVAL;
+		if (copy_to_user((void __user *)arg, &info, minsz))
+			return -EFAULT;
 
-		return copy_to_user((void __user *)arg, &info, minsz);
+		return 0;
 	}
 	case VFIO_DEVICE_SET_IRQS:
 	{
@@ -1404,7 +1413,7 @@ struct attribute_group *mdev_type_groups[] = {
 	NULL,
 };
 
-struct mdev_parent_ops mdev_fops = {
+static const struct mdev_parent_ops mdev_fops = {
 	.owner                  = THIS_MODULE,
 	.dev_attr_groups        = mtty_dev_groups,
 	.mdev_attr_groups       = mdev_dev_groups,
@@ -1449,6 +1458,7 @@ static int __init mtty_dev_init(void)
 
 	if (IS_ERR(mtty_dev.vd_class)) {
 		pr_err("Error: failed to register mtty_dev class\n");
+		ret = PTR_ERR(mtty_dev.vd_class);
 		goto failed1;
 	}
 
@@ -1460,7 +1470,8 @@ static int __init mtty_dev_init(void)
 	if (ret)
 		goto failed2;
 
-	if (mdev_register_device(&mtty_dev.dev, &mdev_fops) != 0)
+	ret = mdev_register_device(&mtty_dev.dev, &mdev_fops);
+	if (ret)
 		goto failed3;
 
 	mutex_init(&mdev_list_lock);

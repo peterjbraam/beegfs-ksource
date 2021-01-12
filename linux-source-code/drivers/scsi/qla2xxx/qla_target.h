@@ -28,7 +28,6 @@
 #ifndef __QLA_TARGET_H
 #define __QLA_TARGET_H
 
-#include <asm/unaligned.h>
 #include "qla_def.h"
 
 /*
@@ -375,8 +374,8 @@ struct atio_from_isp {
 static inline int fcpcmd_is_corrupted(struct atio *atio)
 {
 	if (atio->entry_type == ATIO_TYPE7 &&
-	    (le16_to_cpu(atio->attr_n_length & FCP_CMD_LENGTH_MASK) <
-	    FCP_CMD_LENGTH_MIN))
+	    ((le16_to_cpu(atio->attr_n_length) & FCP_CMD_LENGTH_MASK) <
+	     FCP_CMD_LENGTH_MIN))
 		return 1;
 	else
 		return 0;
@@ -864,7 +863,7 @@ enum trace_flags {
 	TRC_CTIO_ERR = BIT_11,
 	TRC_CTIO_DONE = BIT_12,
 	TRC_CTIO_ABORTED =  BIT_13,
-	TRC_CTIO_STRANGE = BIT_14,
+	TRC_CTIO_STRANGE= BIT_14,
 	TRC_CMD_DONE = BIT_15,
 	TRC_CMD_CHK_STOP = BIT_16,
 	TRC_CMD_FREE = BIT_17,
@@ -899,6 +898,8 @@ struct qla_tgt_cmd {
 	unsigned int cmd_sent_to_fw:1;
 	unsigned int cmd_in_wq:1;
 	unsigned int aborted:1;
+	unsigned int data_work:1;
+	unsigned int data_work_free:1;
 	unsigned int released:1;
 
 	struct scatterlist *sg;	/* cmd data buffer SG vector */
@@ -987,10 +988,10 @@ struct qla_tgt_prm {
 	struct qla_tgt *tgt;
 	void *pkt;
 	struct scatterlist *sg;	/* cmd data buffer SG vector */
+	unsigned char *sense_buffer;
 	int seg_cnt;
 	int req_cnt;
 	uint16_t rq_result;
-	unsigned char *sense_buffer;
 	int sense_buffer_len;
 	int residual;
 	int add_status_pkt;

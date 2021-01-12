@@ -145,7 +145,8 @@ static int bnxt_dl_nvm_param_set(struct devlink *dl, u32 id,
 }
 
 static int bnxt_dl_msix_validate(struct devlink *dl, u32 id,
-				 union devlink_param_value val)
+				 union devlink_param_value val,
+				 struct netlink_ext_ack *extack)
 {
 	int max_val = -1;
 
@@ -223,6 +224,8 @@ int bnxt_dl_register(struct bnxt *bp)
 			    rc);
 		goto err_dl_unreg;
 	}
+
+	devlink_params_publish(dl);
 
 	return 0;
 

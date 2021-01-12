@@ -184,8 +184,7 @@ static int snd_sbdsp_probe(struct snd_sb * chip)
 
 static int snd_sbdsp_free(struct snd_sb *chip)
 {
-	if (chip->res_port)
-		release_and_free_resource(chip->res_port);
+	release_and_free_resource(chip->res_port);
 	if (chip->irq >= 0)
 		free_irq(chip->irq, (void *) chip);
 #ifdef CONFIG_ISA
@@ -306,19 +305,3 @@ EXPORT_SYMBOL(snd_sbmixer_add_ctl);
 EXPORT_SYMBOL(snd_sbmixer_suspend);
 EXPORT_SYMBOL(snd_sbmixer_resume);
 #endif
-
-/*
- *  INIT part
- */
-
-static int __init alsa_sb_common_init(void)
-{
-	return 0;
-}
-
-static void __exit alsa_sb_common_exit(void)
-{
-}
-
-module_init(alsa_sb_common_init)
-module_exit(alsa_sb_common_exit)

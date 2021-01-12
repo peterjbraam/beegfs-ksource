@@ -27,8 +27,6 @@
 #include <net/xdp.h>
 #include <linux/net_dim.h>
 
-extern struct list_head bnxt_block_cb_list;
-
 struct tx_bd {
 	__le32 tx_bd_len_flags_type;
 	#define TX_BD_TYPE					(0x3f << 0)
@@ -949,6 +947,7 @@ struct bnxt_vf_info {
 					 * stored by PF.
 					 */
 	u16	vlan;
+	u16	func_qcfg_flags;
 	u32	flags;
 #define BNXT_VF_QOS		0x1
 #define BNXT_VF_SPOOFCHK	0x2
@@ -1135,14 +1134,6 @@ struct bnxt_tc_flow_stats {
 	u64		bytes;
 };
 
-#ifdef CONFIG_BNXT_FLOWER_OFFLOAD
-struct bnxt_flower_indr_block_cb_priv {
-	struct net_device *tunnel_netdev;
-	struct bnxt *bp;
-	struct list_head list;
-};
-#endif
-
 struct bnxt_tc_info {
 	bool				enabled;
 
@@ -1282,9 +1273,7 @@ struct bnxt {
 
 #define CHIP_NUM_5745X		0xd730
 
-#define CHIP_NUM_57508		0x1750
-#define CHIP_NUM_57504		0x1751
-#define CHIP_NUM_57502		0x1752
+#define CHIP_NUM_57500		0x1750
 
 #define CHIP_NUM_58802		0xd802
 #define CHIP_NUM_58804		0xd804
@@ -1385,9 +1374,7 @@ struct bnxt {
 
 /* Chip class phase 5 */
 #define BNXT_CHIP_P5(bp)			\
-	((bp)->chip_num == CHIP_NUM_57508 ||	\
-	 (bp)->chip_num == CHIP_NUM_57504 ||	\
-	 (bp)->chip_num == CHIP_NUM_57502)
+	((bp)->chip_num == CHIP_NUM_57500)
 
 /* Chip class phase 4.x */
 #define BNXT_CHIP_P4(bp)			\
@@ -1495,6 +1482,7 @@ struct bnxt {
 	#define BNXT_FW_CAP_IF_CHANGE			0x00000010
 	#define BNXT_FW_CAP_KONG_MB_CHNL		0x00000080
 	#define BNXT_FW_CAP_OVS_64BIT_HANDLE		0x00000400
+	#define BNXT_FW_CAP_TRUSTED_VF			0x00000800
 
 #define BNXT_NEW_RM(bp)		((bp)->fw_cap & BNXT_FW_CAP_NEW_RM)
 	u32			hwrm_spec_code;
@@ -1630,8 +1618,6 @@ struct bnxt {
 	u16			*cfa_code_map; /* cfa_code -> vf_idx map */
 	u8			switch_id[8];
 	struct bnxt_tc_info	*tc_info;
-	struct list_head	tc_indr_block_list;
-	struct notifier_block	tc_netdev_nb;
 	struct dentry		*debugfs_pdev;
 	struct dentry		*debugfs_dim;
 	struct device		*hwmon_dev;

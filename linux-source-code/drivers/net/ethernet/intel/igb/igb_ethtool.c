@@ -15,14 +15,8 @@
 #include <linux/pm_runtime.h>
 #include <linux/highmem.h>
 #include <linux/mdio.h>
-#include <linux/overflow.h>
 
 #include "igb.h"
-
-/* RHEL7-only */
-#ifndef WAKE_FILTER
-#define WAKE_FILTER 0
-#endif
 
 struct igb_stats {
 	char stat_string[ETH_GSTRING_LEN];

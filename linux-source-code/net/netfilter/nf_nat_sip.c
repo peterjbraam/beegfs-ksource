@@ -23,15 +23,11 @@
 #include <net/netfilter/nf_conntrack_seqadj.h>
 #include <linux/netfilter/nf_conntrack_sip.h>
 
-#define NAT_HELPER_NAME "sip"
-
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Christian Hentschel <chentschel@arnet.com.ar>");
 MODULE_DESCRIPTION("SIP NAT helper");
-MODULE_ALIAS_NF_NAT_HELPER(NAT_HELPER_NAME);
+MODULE_ALIAS("ip_nat_sip");
 
-static struct nf_conntrack_nat_helper nat_helper_sip =
-	NF_CT_NAT_HELPER_INIT(NAT_HELPER_NAME);
 
 static unsigned int mangle_packet(struct sk_buff *skb, unsigned int protoff,
 				  unsigned int dataoff,
@@ -159,7 +155,7 @@ static unsigned int nf_nat_sip(struct sk_buff *skb, unsigned int protoff,
 	int request, in_header;
 
 	/* Basic rules: requests and responses. */
-	if (strnicmp(*dptr, "SIP/2.0", strlen("SIP/2.0")) != 0) {
+	if (strncasecmp(*dptr, "SIP/2.0", strlen("SIP/2.0")) != 0) {
 		if (ct_sip_parse_request(ct, *dptr, *datalen,
 					 &matchoff, &matchlen,
 					 &addr, &port) > 0 &&
@@ -320,7 +316,7 @@ static void nf_nat_sip_seq_adjust(struct sk_buff *skb, unsigned int protoff,
 static void nf_nat_sip_expected(struct nf_conn *ct,
 				struct nf_conntrack_expect *exp)
 {
-	struct nf_nat_range range;
+	struct nf_nat_range2 range;
 
 	/* This must be a fresh one. */
 	BUG_ON(ct->status & IPS_NAT_DONE_MASK);
@@ -629,35 +625,26 @@ static struct nf_ct_helper_expectfn sip_nat = {
 
 static void __exit nf_nat_sip_fini(void)
 {
-	nf_nat_helper_unregister(&nat_helper_sip);
-	RCU_INIT_POINTER(nf_nat_sip_hook, NULL);
-	RCU_INIT_POINTER(nf_nat_sip_seq_adjust_hook, NULL);
-	RCU_INIT_POINTER(nf_nat_sip_expect_hook, NULL);
-	RCU_INIT_POINTER(nf_nat_sdp_addr_hook, NULL);
-	RCU_INIT_POINTER(nf_nat_sdp_port_hook, NULL);
-	RCU_INIT_POINTER(nf_nat_sdp_session_hook, NULL);
-	RCU_INIT_POINTER(nf_nat_sdp_media_hook, NULL);
+	RCU_INIT_POINTER(nf_nat_sip_hooks, NULL);
+
 	nf_ct_helper_expectfn_unregister(&sip_nat);
 	synchronize_rcu();
 }
 
+static const struct nf_nat_sip_hooks sip_hooks = {
+	.msg		= nf_nat_sip,
+	.seq_adjust	= nf_nat_sip_seq_adjust,
+	.expect		= nf_nat_sip_expect,
+	.sdp_addr	= nf_nat_sdp_addr,
+	.sdp_port	= nf_nat_sdp_port,
+	.sdp_session	= nf_nat_sdp_session,
+	.sdp_media	= nf_nat_sdp_media,
+};
+
 static int __init nf_nat_sip_init(void)
 {
-	BUG_ON(nf_nat_sip_hook != NULL);
-	BUG_ON(nf_nat_sip_seq_adjust_hook != NULL);
-	BUG_ON(nf_nat_sip_expect_hook != NULL);
-	BUG_ON(nf_nat_sdp_addr_hook != NULL);
-	BUG_ON(nf_nat_sdp_port_hook != NULL);
-	BUG_ON(nf_nat_sdp_session_hook != NULL);
-	BUG_ON(nf_nat_sdp_media_hook != NULL);
-	nf_nat_helper_register(&nat_helper_sip);
-	RCU_INIT_POINTER(nf_nat_sip_hook, nf_nat_sip);
-	RCU_INIT_POINTER(nf_nat_sip_seq_adjust_hook, nf_nat_sip_seq_adjust);
-	RCU_INIT_POINTER(nf_nat_sip_expect_hook, nf_nat_sip_expect);
-	RCU_INIT_POINTER(nf_nat_sdp_addr_hook, nf_nat_sdp_addr);
-	RCU_INIT_POINTER(nf_nat_sdp_port_hook, nf_nat_sdp_port);
-	RCU_INIT_POINTER(nf_nat_sdp_session_hook, nf_nat_sdp_session);
-	RCU_INIT_POINTER(nf_nat_sdp_media_hook, nf_nat_sdp_media);
+	BUG_ON(nf_nat_sip_hooks != NULL);
+	RCU_INIT_POINTER(nf_nat_sip_hooks, &sip_hooks);
 	nf_ct_helper_expectfn_register(&sip_nat);
 	return 0;
 }

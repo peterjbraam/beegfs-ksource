@@ -77,8 +77,8 @@ int iser_assign_reg_ops(struct iser_device *device)
 	struct ib_device *ib_dev = device->ib_device;
 
 	/* Assign function handles  - based on FMR support */
-	if (ib_dev->alloc_fmr && ib_dev->dealloc_fmr &&
-	    ib_dev->map_phys_fmr && ib_dev->unmap_fmr) {
+	if (ib_dev->ops.alloc_fmr && ib_dev->ops.dealloc_fmr &&
+	    ib_dev->ops.map_phys_fmr && ib_dev->ops.unmap_fmr) {
 		iser_info("FMR supported, using FMR for registration\n");
 		device->reg_ops = &fmr_ops;
 	} else if (ib_dev->attrs.device_cap_flags & IB_DEVICE_MEM_MGT_EXTENSIONS) {
@@ -277,16 +277,13 @@ void iser_unreg_mem_fmr(struct iscsi_iser_task *iser_task,
 			enum iser_data_dir cmd_dir)
 {
 	struct iser_mem_reg *reg = &iser_task->rdma_reg[cmd_dir];
-	int ret;
 
 	if (!reg->mem_h)
 		return;
 
 	iser_dbg("PHYSICAL Mem.Unregister mem_h %p\n", reg->mem_h);
 
-	ret = ib_fmr_pool_unmap((struct ib_pool_fmr *)reg->mem_h);
-	if (ret)
-		iser_err("ib_fmr_pool_unmap failed %d\n", ret);
+	ib_fmr_pool_unmap((struct ib_pool_fmr *)reg->mem_h);
 
 	reg->mem_h = NULL;
 }
@@ -310,8 +307,8 @@ iser_set_dif_domain(struct scsi_cmnd *sc, struct ib_sig_attrs *sig_attrs,
 		    struct ib_sig_domain *domain)
 {
 	domain->sig_type = IB_SIG_TYPE_T10_DIF;
-	domain->sig.dif.pi_interval = sc->device->sector_size;
-	domain->sig.dif.ref_tag = scsi_get_lba(sc) & 0xffffffff;
+	domain->sig.dif.pi_interval = scsi_prot_interval(sc);
+	domain->sig.dif.ref_tag = t10_pi_ref_tag(sc->request);
 	/*
 	 * At the moment we hard code those, but in the future
 	 * we will take them from sc.
@@ -319,8 +316,7 @@ iser_set_dif_domain(struct scsi_cmnd *sc, struct ib_sig_attrs *sig_attrs,
 	domain->sig.dif.apptag_check_mask = 0xffff;
 	domain->sig.dif.app_escape = true;
 	domain->sig.dif.ref_escape = true;
-	if (scsi_get_prot_type(sc) == SCSI_PROT_DIF_TYPE1 ||
-	    scsi_get_prot_type(sc) == SCSI_PROT_DIF_TYPE2)
+	if (sc->prot_flags & SCSI_PROT_REF_INCREMENT)
 		domain->sig.dif.ref_remap = true;
 };
 
@@ -338,26 +334,16 @@ iser_set_sig_attrs(struct scsi_cmnd *sc, struct ib_sig_attrs *sig_attrs)
 	case SCSI_PROT_WRITE_STRIP:
 		sig_attrs->wire.sig_type = IB_SIG_TYPE_NONE;
 		iser_set_dif_domain(sc, sig_attrs, &sig_attrs->mem);
-		/*
-		 * At the moment we use this modparam to tell what is
-		 * the memory bg_type, in the future we will take it
-		 * from sc.
-		 */
-		sig_attrs->mem.sig.dif.bg_type = iser_pi_guard ? IB_T10DIF_CSUM :
-						 IB_T10DIF_CRC;
+		sig_attrs->mem.sig.dif.bg_type = sc->prot_flags & SCSI_PROT_IP_CHECKSUM ?
+						IB_T10DIF_CSUM : IB_T10DIF_CRC;
 		break;
 	case SCSI_PROT_READ_PASS:
 	case SCSI_PROT_WRITE_PASS:
 		iser_set_dif_domain(sc, sig_attrs, &sig_attrs->wire);
 		sig_attrs->wire.sig.dif.bg_type = IB_T10DIF_CRC;
 		iser_set_dif_domain(sc, sig_attrs, &sig_attrs->mem);
-		/*
-		 * At the moment we use this modparam to tell what is
-		 * the memory bg_type, in the future we will take it
-		 * from sc.
-		 */
-		sig_attrs->mem.sig.dif.bg_type = iser_pi_guard ? IB_T10DIF_CSUM :
-						 IB_T10DIF_CRC;
+		sig_attrs->mem.sig.dif.bg_type = sc->prot_flags & SCSI_PROT_IP_CHECKSUM ?
+						IB_T10DIF_CSUM : IB_T10DIF_CRC;
 		break;
 	default:
 		iser_err("Unsupported PI operation %d\n",
@@ -368,27 +354,14 @@ iser_set_sig_attrs(struct scsi_cmnd *sc, struct ib_sig_attrs *sig_attrs)
 	return 0;
 }
 
-static int
+static inline void
 iser_set_prot_checks(struct scsi_cmnd *sc, u8 *mask)
 {
-	switch (scsi_get_prot_type(sc)) {
-	case SCSI_PROT_DIF_TYPE0:
-		*mask = 0x0;
-		break;
-	case SCSI_PROT_DIF_TYPE1:
-	case SCSI_PROT_DIF_TYPE2:
-		*mask = ISER_CHECK_GUARD | ISER_CHECK_REFTAG;
-		break;
-	case SCSI_PROT_DIF_TYPE3:
-		*mask = ISER_CHECK_GUARD;
-		break;
-	default:
-		iser_err("Unsupported protection type %d\n",
-			 scsi_get_prot_type(sc));
-		return -EINVAL;
-	}
-
-	return 0;
+	*mask = 0;
+	if (sc->prot_flags & SCSI_PROT_REF_CHECK)
+		*mask |= IB_SIG_CHECK_REFTAG;
+	if (sc->prot_flags & SCSI_PROT_GUARD_CHECK)
+		*mask |= IB_SIG_CHECK_GUARD;
 }
 
 static inline void
@@ -422,9 +395,7 @@ iser_reg_sig_mr(struct iscsi_iser_task *iser_task,
 	if (ret)
 		goto err;
 
-	ret = iser_set_prot_checks(iser_task->sc, &sig_attrs->check_mask);
-	if (ret)
-		goto err;
+	iser_set_prot_checks(iser_task->sc, &sig_attrs->check_mask);
 
 	if (pi_ctx->sig_mr_valid)
 		iser_inv_rkey(iser_tx_next_wr(tx_desc), mr, cqe);

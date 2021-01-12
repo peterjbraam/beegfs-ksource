@@ -163,7 +163,7 @@ static int vtpm_send(struct tpm_chip *chip, u8 *buf, size_t count)
 	wmb();
 	notify_remote_via_evtchn(priv->evtchn);
 
-	ordinal = be32_to_cpu(((struct tpm_input_header*)buf)->ordinal);
+	ordinal = be32_to_cpu(((struct tpm_header *)buf)->ordinal);
 	duration = tpm_calc_ordinal_duration(chip, ordinal);
 
 	if (wait_for_tpm_stat(chip, VTPM_STATUS_IDLE, duration,
@@ -173,7 +173,7 @@ static int vtpm_send(struct tpm_chip *chip, u8 *buf, size_t count)
 		return -ETIME;
 	}
 
-	return count;
+	return 0;
 }
 
 static int vtpm_recv(struct tpm_chip *chip, u8 *buf, size_t count)
@@ -256,6 +256,7 @@ static int setup_ring(struct xenbus_device *dev, struct tpm_private *priv)
 	struct xenbus_transaction xbt;
 	const char *message = NULL;
 	int rv;
+	grant_ref_t gref;
 
 	priv->shr = (void *)__get_free_page(GFP_KERNEL|__GFP_ZERO);
 	if (!priv->shr) {
@@ -263,11 +264,11 @@ static int setup_ring(struct xenbus_device *dev, struct tpm_private *priv)
 		return -ENOMEM;
 	}
 
-	rv = xenbus_grant_ring(dev, virt_to_mfn(priv->shr));
+	rv = xenbus_grant_ring(dev, &priv->shr, 1, &gref);
 	if (rv < 0)
 		return rv;
 
-	priv->ring_ref = rv;
+	priv->ring_ref = gref;
 
 	rv = xenbus_alloc_evtchn(dev, &priv->evtchn);
 	if (rv)
@@ -349,7 +350,6 @@ static int tpmfront_probe(struct xenbus_device *dev,
 		const struct xenbus_device_id *id)
 {
 	struct tpm_private *priv;
-	struct tpm_chip *chip;
 	int rv;
 
 	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
@@ -366,8 +366,6 @@ static int tpmfront_probe(struct xenbus_device *dev,
 
 	rv = setup_ring(dev, priv);
 	if (rv) {
-		chip = dev_get_drvdata(&dev->dev);
-		tpm_chip_unregister(chip);
 		ring_free(priv);
 		return rv;
 	}
@@ -397,18 +395,14 @@ static int tpmfront_resume(struct xenbus_device *dev)
 static void backend_changed(struct xenbus_device *dev,
 		enum xenbus_state backend_state)
 {
-	int val;
-
 	switch (backend_state) {
 	case XenbusStateInitialised:
 	case XenbusStateConnected:
 		if (dev->state == XenbusStateConnected)
 			break;
 
-		if (xenbus_scanf(XBT_NIL, dev->otherend,
-				"feature-protocol-v2", "%d", &val) < 0)
-			val = 0;
-		if (!val) {
+		if (!xenbus_read_unsigned(dev->otherend, "feature-protocol-v2",
+					  0)) {
 			xenbus_dev_fatal(dev, -EINVAL,
 					"vTPM protocol 2 required");
 			return;
@@ -432,12 +426,13 @@ static const struct xenbus_device_id tpmfront_ids[] = {
 };
 MODULE_ALIAS("xen:vtpm");
 
-static DEFINE_XENBUS_DRIVER(tpmfront, ,
-		.probe = tpmfront_probe,
-		.remove = tpmfront_remove,
-		.resume = tpmfront_resume,
-		.otherend_changed = backend_changed,
-	);
+static struct xenbus_driver tpmfront_driver = {
+	.ids = tpmfront_ids,
+	.probe = tpmfront_probe,
+	.remove = tpmfront_remove,
+	.resume = tpmfront_resume,
+	.otherend_changed = backend_changed,
+};
 
 static int __init xen_tpmfront_init(void)
 {

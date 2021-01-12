@@ -31,9 +31,10 @@
  * prepare/check/commit/cleanup steps.
  */
 
-#include <drm/drmP.h>
 #include <drm/drm_atomic_helper.h>
+#include <drm/drm_fourcc.h>
 #include <drm/drm_plane_helper.h>
+
 #include "intel_drv.h"
 
 struct intel_plane *intel_plane_alloc(void)
@@ -110,42 +111,72 @@ intel_plane_destroy_state(struct drm_plane *plane,
 	drm_atomic_helper_plane_destroy_state(plane, state);
 }
 
-int intel_plane_atomic_check_with_state(const struct intel_crtc_state *old_crtc_state,
-					struct intel_crtc_state *crtc_state,
-					const struct intel_plane_state *old_plane_state,
-					struct intel_plane_state *intel_state)
+unsigned int intel_plane_data_rate(const struct intel_crtc_state *crtc_state,
+				   const struct intel_plane_state *plane_state)
 {
-	struct drm_plane *plane = intel_state->base.plane;
-	struct drm_plane_state *state = &intel_state->base;
-	struct intel_plane *intel_plane = to_intel_plane(plane);
-	int ret;
+	const struct drm_framebuffer *fb = plane_state->base.fb;
+	unsigned int cpp;
 
-	crtc_state->active_planes &= ~BIT(intel_plane->id);
-	crtc_state->nv12_planes &= ~BIT(intel_plane->id);
-	intel_state->base.visible = false;
-
-	/* If this is a cursor plane, no further checks are needed. */
-	if (!intel_state->base.crtc && !old_plane_state->base.crtc)
+	if (!plane_state->base.visible)
 		return 0;
 
-	ret = intel_plane->check_plane(crtc_state, intel_state);
+	cpp = fb->format->cpp[0];
+
+	/*
+	 * Based on HSD#:1408715493
+	 * NV12 cpp == 4, P010 cpp == 8
+	 *
+	 * FIXME what is the logic behind this?
+	 */
+	if (fb->format->is_yuv && fb->format->num_planes > 1)
+		cpp *= 4;
+
+	return cpp * crtc_state->pixel_rate;
+}
+
+int intel_plane_atomic_check_with_state(const struct intel_crtc_state *old_crtc_state,
+					struct intel_crtc_state *new_crtc_state,
+					const struct intel_plane_state *old_plane_state,
+					struct intel_plane_state *new_plane_state)
+{
+	struct intel_plane *plane = to_intel_plane(new_plane_state->base.plane);
+	int ret;
+
+	new_crtc_state->active_planes &= ~BIT(plane->id);
+	new_crtc_state->nv12_planes &= ~BIT(plane->id);
+	new_crtc_state->c8_planes &= ~BIT(plane->id);
+	new_crtc_state->data_rate[plane->id] = 0;
+	new_plane_state->base.visible = false;
+
+	if (!new_plane_state->base.crtc && !old_plane_state->base.crtc)
+		return 0;
+
+	ret = plane->check_plane(new_crtc_state, new_plane_state);
 	if (ret)
 		return ret;
 
 	/* FIXME pre-g4x don't work like this */
-	if (state->visible)
-		crtc_state->active_planes |= BIT(intel_plane->id);
+	if (new_plane_state->base.visible)
+		new_crtc_state->active_planes |= BIT(plane->id);
 
-	if (state->visible && state->fb->format->format == DRM_FORMAT_NV12)
-		crtc_state->nv12_planes |= BIT(intel_plane->id);
+	if (new_plane_state->base.visible &&
+	    new_plane_state->base.fb->format->format == DRM_FORMAT_NV12)
+		new_crtc_state->nv12_planes |= BIT(plane->id);
 
-	if (state->visible || old_plane_state->base.visible)
-		crtc_state->update_planes |= BIT(intel_plane->id);
+	if (new_plane_state->base.visible &&
+	    new_plane_state->base.fb->format->format == DRM_FORMAT_C8)
+		new_crtc_state->c8_planes |= BIT(plane->id);
+
+	if (new_plane_state->base.visible || old_plane_state->base.visible)
+		new_crtc_state->update_planes |= BIT(plane->id);
+
+	new_crtc_state->data_rate[plane->id] =
+		intel_plane_data_rate(new_crtc_state, new_plane_state);
 
 	return intel_plane_atomic_calc_changes(old_crtc_state,
-					       &crtc_state->base,
+					       &new_crtc_state->base,
 					       old_plane_state,
-					       state);
+					       &new_plane_state->base);
 }
 
 static int intel_plane_atomic_check(struct drm_plane *plane,
@@ -312,7 +343,7 @@ int
 intel_plane_atomic_get_property(struct drm_plane *plane,
 				const struct drm_plane_state *state,
 				struct drm_property *property,
-				uint64_t *val)
+				u64 *val)
 {
 	DRM_DEBUG_KMS("Unknown property [PROP:%d:%s]\n",
 		      property->base.id, property->name);
@@ -335,7 +366,7 @@ int
 intel_plane_atomic_set_property(struct drm_plane *plane,
 				struct drm_plane_state *state,
 				struct drm_property *property,
-				uint64_t val)
+				u64 val)
 {
 	DRM_DEBUG_KMS("Unknown property [PROP:%d:%s]\n",
 		      property->base.id, property->name);

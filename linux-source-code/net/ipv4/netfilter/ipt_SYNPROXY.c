@@ -16,9 +16,11 @@
 #include <net/netfilter/nf_conntrack.h>
 #include <net/netfilter/nf_conntrack_seqadj.h>
 #include <net/netfilter/nf_conntrack_synproxy.h>
+#include <net/netfilter/nf_conntrack_ecache.h>
 
 static struct iphdr *
-synproxy_build_ip(struct net *net, struct sk_buff *skb, u32 saddr, u32 daddr)
+synproxy_build_ip(struct net *net, struct sk_buff *skb, __be32 saddr,
+		  __be32 daddr)
 {
 	struct iphdr *iph;
 
@@ -29,7 +31,7 @@ synproxy_build_ip(struct net *net, struct sk_buff *skb, u32 saddr, u32 daddr)
 	iph->tos	= 0;
 	iph->id		= 0;
 	iph->frag_off	= htons(IP_DF);
-	iph->ttl	= net->ipv4_sysctl_ip_default_ttl;
+	iph->ttl	= net->ipv4.sysctl_ip_default_ttl;
 	iph->protocol	= IPPROTO_TCP;
 	iph->check	= 0;
 	iph->saddr	= saddr;
@@ -52,7 +54,7 @@ synproxy_send_tcp(struct net *net,
 
 	skb_dst_set_noref(nskb, skb_dst(skb));
 	nskb->protocol = htons(ETH_P_IP);
-	if (ip_route_me_harder(nskb, RTN_UNSPEC))
+	if (ip_route_me_harder(net, nskb, RTN_UNSPEC))
 		goto free_nskb;
 
 	if (nfct) {
@@ -60,7 +62,7 @@ synproxy_send_tcp(struct net *net,
 		nf_conntrack_get(nfct);
 	}
 
-	ip_local_out(nskb);
+	ip_local_out(net, nskb->sk, nskb);
 	return;
 
 free_nskb:
@@ -222,7 +224,7 @@ synproxy_send_client_ack(struct net *net,
 	nth->ack_seq	= th->ack_seq;
 	tcp_flag_word(nth) = TCP_FLAG_ACK;
 	nth->doff	= tcp_hdr_size / 4;
-	nth->window	= ntohs(htons(th->window) >> opts->wscale);
+	nth->window	= htons(ntohs(th->window) >> opts->wscale);
 	nth->check	= 0;
 	nth->urg_ptr	= 0;
 
@@ -292,24 +294,26 @@ synproxy_tg4(struct sk_buff *skb, const struct xt_action_param *par)
 					  XT_SYNPROXY_OPT_ECN);
 
 		synproxy_send_client_synack(net, skb, th, &opts);
-		return NF_DROP;
-
+		consume_skb(skb);
+		return NF_STOLEN;
 	} else if (th->ack && !(th->fin || th->rst || th->syn)) {
 		/* ACK from client */
-		synproxy_recv_client_ack(net, skb, th, &opts, ntohl(th->seq));
-		return NF_DROP;
+		if (synproxy_recv_client_ack(net, skb, th, &opts, ntohl(th->seq))) {
+			consume_skb(skb);
+			return NF_STOLEN;
+		} else {
+			return NF_DROP;
+		}
 	}
 
 	return XT_CONTINUE;
 }
 
-static unsigned int ipv4_synproxy_hook(const struct nf_hook_ops *ops,
+static unsigned int ipv4_synproxy_hook(void *priv,
 				       struct sk_buff *skb,
-				       const struct net_device *in,
-				       const struct net_device *out,
 				       const struct nf_hook_state *nhs)
 {
-	struct net *net = dev_net(nhs->in ? : nhs->out);
+	struct net *net = nhs->net;
 	struct synproxy_net *snet = synproxy_pernet(net);
 	enum ip_conntrack_info ctinfo;
 	struct nf_conn *ct;
@@ -327,7 +331,8 @@ static unsigned int ipv4_synproxy_hook(const struct nf_hook_ops *ops,
 	if (synproxy == NULL)
 		return NF_ACCEPT;
 
-	if (nf_is_loopback_packet(skb))
+	if (nf_is_loopback_packet(skb) ||
+	    ip_hdr(skb)->protocol != IPPROTO_TCP)
 		return NF_ACCEPT;
 
 	thoff = ip_hdrlen(skb);
@@ -368,15 +373,20 @@ static unsigned int ipv4_synproxy_hook(const struct nf_hook_ops *ops,
 			 * number match the one of first SYN.
 			 */
 			if (synproxy_recv_client_ack(net, skb, th, &opts,
-						     ntohl(th->seq) + 1))
+						     ntohl(th->seq) + 1)) {
 				this_cpu_inc(snet->stats->cookie_retrans);
-
-			return NF_DROP;
+				consume_skb(skb);
+				return NF_STOLEN;
+			} else {
+				return NF_DROP;
+			}
 		}
 
 		synproxy->isn = ntohl(th->ack_seq);
 		if (opts.options & XT_SYNPROXY_OPT_TIMESTAMP)
 			synproxy->its = opts.tsecr;
+
+		nf_conntrack_event_cache(IPCT_SYNPROXY, ct);
 		break;
 	case TCP_CONNTRACK_SYN_RECV:
 		if (!th->syn || !th->ack)
@@ -385,8 +395,10 @@ static unsigned int ipv4_synproxy_hook(const struct nf_hook_ops *ops,
 		if (!synproxy_parse_options(skb, thoff, th, &opts))
 			return NF_DROP;
 
-		if (opts.options & XT_SYNPROXY_OPT_TIMESTAMP)
+		if (opts.options & XT_SYNPROXY_OPT_TIMESTAMP) {
 			synproxy->tsoff = opts.tsval - synproxy->its;
+			nf_conntrack_event_cache(IPCT_SYNPROXY, ct);
+		}
 
 		opts.options &= ~(XT_SYNPROXY_OPT_MSS |
 				  XT_SYNPROXY_OPT_WSCALE |
@@ -396,6 +408,7 @@ static unsigned int ipv4_synproxy_hook(const struct nf_hook_ops *ops,
 		synproxy_send_server_ack(net, state, skb, th, &opts);
 
 		nf_ct_seqadj_init(ct, ctinfo, synproxy->isn - ntohl(th->seq));
+		nf_conntrack_event_cache(IPCT_SEQADJ, ct);
 
 		swap(opts.tsval, opts.tsecr);
 		synproxy_send_client_ack(net, skb, th, &opts);
@@ -410,20 +423,57 @@ static unsigned int ipv4_synproxy_hook(const struct nf_hook_ops *ops,
 	return NF_ACCEPT;
 }
 
+static const struct nf_hook_ops ipv4_synproxy_ops[] = {
+	{
+		.hook		= ipv4_synproxy_hook,
+		.pf		= NFPROTO_IPV4,
+		.hooknum	= NF_INET_LOCAL_IN,
+		.priority	= NF_IP_PRI_CONNTRACK_CONFIRM - 1,
+	},
+	{
+		.hook		= ipv4_synproxy_hook,
+		.pf		= NFPROTO_IPV4,
+		.hooknum	= NF_INET_POST_ROUTING,
+		.priority	= NF_IP_PRI_CONNTRACK_CONFIRM - 1,
+	},
+};
+
 static int synproxy_tg4_check(const struct xt_tgchk_param *par)
 {
+	struct synproxy_net *snet = synproxy_pernet(par->net);
 	const struct ipt_entry *e = par->entryinfo;
+	int err;
 
 	if (e->ip.proto != IPPROTO_TCP ||
 	    e->ip.invflags & XT_INV_PROTO)
 		return -EINVAL;
 
-	return nf_ct_l3proto_try_module_get(par->family);
+	err = nf_ct_netns_get(par->net, par->family);
+	if (err)
+		return err;
+
+	if (snet->hook_ref4 == 0) {
+		err = nf_register_net_hooks(par->net, ipv4_synproxy_ops,
+					    ARRAY_SIZE(ipv4_synproxy_ops));
+		if (err) {
+			nf_ct_netns_put(par->net, par->family);
+			return err;
+		}
+	}
+
+	snet->hook_ref4++;
+	return err;
 }
 
 static void synproxy_tg4_destroy(const struct xt_tgdtor_param *par)
 {
-	nf_ct_l3proto_module_put(par->family);
+	struct synproxy_net *snet = synproxy_pernet(par->net);
+
+	snet->hook_ref4--;
+	if (snet->hook_ref4 == 0)
+		nf_unregister_net_hooks(par->net, ipv4_synproxy_ops,
+					ARRAY_SIZE(ipv4_synproxy_ops));
+	nf_ct_netns_put(par->net, par->family);
 }
 
 static struct xt_target synproxy_tg4_reg __read_mostly = {
@@ -437,48 +487,14 @@ static struct xt_target synproxy_tg4_reg __read_mostly = {
 	.me		= THIS_MODULE,
 };
 
-static struct nf_hook_ops ipv4_synproxy_ops[] __read_mostly = {
-	{
-		.hook		= ipv4_synproxy_hook,
-		.owner		= THIS_MODULE,
-		.pf		= NFPROTO_IPV4,
-		.hooknum	= NF_INET_LOCAL_IN,
-		.priority	= NF_IP_PRI_CONNTRACK_CONFIRM - 1,
-	},
-	{
-		.hook		= ipv4_synproxy_hook,
-		.owner		= THIS_MODULE,
-		.pf		= NFPROTO_IPV4,
-		.hooknum	= NF_INET_POST_ROUTING,
-		.priority	= NF_IP_PRI_CONNTRACK_CONFIRM - 1,
-	},
-};
-
 static int __init synproxy_tg4_init(void)
 {
-	int err;
-
-	err = nf_register_hooks(ipv4_synproxy_ops,
-				ARRAY_SIZE(ipv4_synproxy_ops));
-	if (err < 0)
-		goto err1;
-
-	err = xt_register_target(&synproxy_tg4_reg);
-	if (err < 0)
-		goto err2;
-
-	return 0;
-
-err2:
-	nf_unregister_hooks(ipv4_synproxy_ops, ARRAY_SIZE(ipv4_synproxy_ops));
-err1:
-	return err;
+	return xt_register_target(&synproxy_tg4_reg);
 }
 
 static void __exit synproxy_tg4_exit(void)
 {
 	xt_unregister_target(&synproxy_tg4_reg);
-	nf_unregister_hooks(ipv4_synproxy_ops, ARRAY_SIZE(ipv4_synproxy_ops));
 }
 
 module_init(synproxy_tg4_init);

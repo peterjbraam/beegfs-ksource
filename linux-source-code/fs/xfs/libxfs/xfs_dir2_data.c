@@ -1,20 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (c) 2000-2002,2005 Silicon Graphics, Inc.
  * Copyright (c) 2013 Red Hat, Inc.
  * All Rights Reserved.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it would be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write the Free Software Foundation,
- * Inc.,  51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
 #include "xfs.h"
 #include "xfs_fs.h"
@@ -94,7 +82,6 @@ __xfs_dir3_data_check(
 	case cpu_to_be32(XFS_DIR2_BLOCK_MAGIC):
 		btp = xfs_dir2_block_tail_p(geo, hdr);
 		lep = xfs_dir2_block_leaf_p(btp);
-		endp = (char *)lep;
 
 		/*
 		 * The number of leaf entries is limited by the size of the
@@ -109,11 +96,13 @@ __xfs_dir3_data_check(
 		break;
 	case cpu_to_be32(XFS_DIR3_DATA_MAGIC):
 	case cpu_to_be32(XFS_DIR2_DATA_MAGIC):
-		endp = (char *)hdr + geo->blksize;
 		break;
 	default:
 		return __this_address;
 	}
+	endp = xfs_dir3_data_endp(geo, hdr);
+	if (!endp)
+		return __this_address;
 
 	/*
 	 * Account for zero bestfree entries.
@@ -329,7 +318,7 @@ xfs_dir3_data_write_verify(
 	struct xfs_buf	*bp)
 {
 	struct xfs_mount	*mp = bp->b_target->bt_mount;
-	struct xfs_buf_log_item	*bip = bp->b_fspriv;
+	struct xfs_buf_log_item	*bip = bp->b_log_item;
 	struct xfs_dir3_blk_hdr	*hdr3 = bp->b_addr;
 	xfs_failaddr_t		fa;
 
@@ -580,7 +569,6 @@ xfs_dir2_data_freescan_int(
 	struct xfs_dir2_data_hdr *hdr,
 	int			*loghead)
 {
-	xfs_dir2_block_tail_t	*btp;		/* block tail */
 	xfs_dir2_data_entry_t	*dep;		/* active data entry */
 	xfs_dir2_data_unused_t	*dup;		/* unused data entry */
 	struct xfs_dir2_data_free *bf;
@@ -602,12 +590,7 @@ xfs_dir2_data_freescan_int(
 	 * Set up pointers.
 	 */
 	p = (char *)ops->data_entry_p(hdr);
-	if (hdr->magic == cpu_to_be32(XFS_DIR2_BLOCK_MAGIC) ||
-	    hdr->magic == cpu_to_be32(XFS_DIR3_BLOCK_MAGIC)) {
-		btp = xfs_dir2_block_tail_p(geo, hdr);
-		endp = (char *)xfs_dir2_block_leaf_p(btp);
-	} else
-		endp = (char *)hdr + geo->blksize;
+	endp = xfs_dir3_data_endp(geo, hdr);
 	/*
 	 * Loop over the block's entries.
 	 */
@@ -820,17 +803,9 @@ xfs_dir2_data_make_free(
 	/*
 	 * Figure out where the end of the data area is.
 	 */
-	if (hdr->magic == cpu_to_be32(XFS_DIR2_DATA_MAGIC) ||
-	    hdr->magic == cpu_to_be32(XFS_DIR3_DATA_MAGIC))
-		endptr = (char *)hdr + args->geo->blksize;
-	else {
-		xfs_dir2_block_tail_t	*btp;	/* block tail */
+	endptr = xfs_dir3_data_endp(args->geo, hdr);
+	ASSERT(endptr != NULL);
 
-		ASSERT(hdr->magic == cpu_to_be32(XFS_DIR2_BLOCK_MAGIC) ||
-			hdr->magic == cpu_to_be32(XFS_DIR3_BLOCK_MAGIC));
-		btp = xfs_dir2_block_tail_p(args->geo, hdr);
-		endptr = (char *)xfs_dir2_block_leaf_p(btp);
-	}
 	/*
 	 * If this isn't the start of the block, then back up to
 	 * the previous entry and see if it's free.
@@ -1173,4 +1148,22 @@ corrupt:
 	xfs_corruption_error(__func__, XFS_ERRLEVEL_LOW, args->dp->i_mount,
 			hdr, sizeof(*hdr), __FILE__, __LINE__, fa);
 	return -EFSCORRUPTED;
+}
+
+/* Find the end of the entry data in a data/block format dir block. */
+void *
+xfs_dir3_data_endp(
+	struct xfs_da_geometry		*geo,
+	struct xfs_dir2_data_hdr	*hdr)
+{
+	switch (hdr->magic) {
+	case cpu_to_be32(XFS_DIR3_BLOCK_MAGIC):
+	case cpu_to_be32(XFS_DIR2_BLOCK_MAGIC):
+		return xfs_dir2_block_leaf_p(xfs_dir2_block_tail_p(geo, hdr));
+	case cpu_to_be32(XFS_DIR3_DATA_MAGIC):
+	case cpu_to_be32(XFS_DIR2_DATA_MAGIC):
+		return (char *)hdr + geo->blksize;
+	default:
+		return NULL;
+	}
 }

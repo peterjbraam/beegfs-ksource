@@ -119,12 +119,27 @@ bool mlx5_ib_devx_is_flow_dest(void *obj, int *dest_id, int *dest_type)
 	}
 }
 
+bool mlx5_ib_devx_is_flow_counter(void *obj, u32 *counter_id)
+{
+	struct devx_obj *devx_obj = obj;
+	u16 opcode = MLX5_GET(general_obj_in_cmd_hdr, devx_obj->dinbox, opcode);
+
+	if (opcode == MLX5_CMD_OP_DEALLOC_FLOW_COUNTER) {
+		*counter_id = MLX5_GET(dealloc_flow_counter_in,
+				       devx_obj->dinbox,
+				       flow_counter_id);
+		return true;
+	}
+
+	return false;
+}
+
 /*
  * As the obj_id in the firmware is not globally unique the object type
  * must be considered upon checking for a valid object id.
  * For that the opcode of the creator command is encoded as part of the obj_id.
  */
-static u64 get_enc_obj_id(u32 opcode, u32 obj_id)
+static u64 get_enc_obj_id(u16 opcode, u32 obj_id)
 {
 	return ((u64)opcode << 32) | obj_id;
 }
@@ -137,9 +152,7 @@ static u64 devx_get_obj_id(const void *in)
 	switch (opcode) {
 	case MLX5_CMD_OP_MODIFY_GENERAL_OBJECT:
 	case MLX5_CMD_OP_QUERY_GENERAL_OBJECT:
-		obj_id = get_enc_obj_id(MLX5_CMD_OP_CREATE_GENERAL_OBJECT |
-					MLX5_GET(general_obj_in_cmd_hdr, in,
-						 obj_type) << 16,
+		obj_id = get_enc_obj_id(MLX5_CMD_OP_CREATE_GENERAL_OBJECT,
 					MLX5_GET(general_obj_in_cmd_hdr, in,
 						 obj_id));
 		break;
@@ -1065,12 +1078,10 @@ static int devx_handle_mkey_create(struct mlx5_ib_dev *dev,
 	return 0;
 }
 
-#ifdef CONFIG_INFINIBAND_ON_DEMAND_PAGING
 static void devx_free_indirect_mkey(struct rcu_head *rcu)
 {
 	kfree(container_of(rcu, struct devx_obj, devx_mr.rcu));
 }
-#endif
 
 /* This function to delete from the radix tree needs to be called before
  * destroying the underlying mkey. Otherwise a race might occur in case that
@@ -1113,12 +1124,10 @@ static int devx_obj_cleanup(struct ib_uobject *uobject,
 		return ret;
 
 	if (obj->flags & DEVX_OBJ_FLAGS_INDIRECT_MKEY) {
-#ifdef CONFIG_INFINIBAND_ON_DEMAND_PAGING
 		struct mlx5_ib_dev *dev = to_mdev(uobject->context->device);
 
 		call_srcu(&dev->mr_srcu, &obj->devx_mr.rcu,
 			  devx_free_indirect_mkey);
-#endif
 		return ret;
 	}
 
@@ -1141,7 +1150,6 @@ static int UVERBS_HANDLER(MLX5_IB_METHOD_DEVX_OBJ_CREATE)(
 	struct mlx5_ib_dev *dev = to_mdev(c->ibucontext.device);
 	u32 out[MLX5_ST_SZ_DW(general_obj_out_cmd_hdr)];
 	struct devx_obj *obj;
-	u16 obj_type = 0;
 	int err;
 	int uid;
 	u32 obj_id;
@@ -1201,11 +1209,7 @@ static int UVERBS_HANDLER(MLX5_IB_METHOD_DEVX_OBJ_CREATE)(
 	if (err)
 		goto err_copy;
 
-	if (opcode == MLX5_CMD_OP_CREATE_GENERAL_OBJECT)
-		obj_type = MLX5_GET(general_obj_in_cmd_hdr, cmd_in, obj_type);
-
-	obj->obj_id = get_enc_obj_id(opcode | obj_type << 16, obj_id);
-
+	obj->obj_id = get_enc_obj_id(opcode, obj_id);
 	return 0;
 
 err_copy:

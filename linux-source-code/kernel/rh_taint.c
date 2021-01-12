@@ -61,14 +61,51 @@ void mark_tech_preview(const char *msg, struct module *mod)
 
 	if (msg)
 		str = msg;
+#ifdef CONFIG_MODULES
 	else if (mod && mod->name)
 		str = mod->name;
+#endif
 
 	pr_warn("TECH PREVIEW: %s may not be fully supported.\n"
 		"Please review provided documentation for limitations.\n",
 		(str ? str : "kernel"));
 	add_taint(TAINT_TECH_PREVIEW, LOCKDEP_STILL_OK);
+#ifdef CONFIG_MODULES
 	if (mod)
 		mod->taints |= (1U << TAINT_TECH_PREVIEW);
+#endif
 }
 EXPORT_SYMBOL(mark_tech_preview);
+
+/**
+ * mark_driver_unsupported - drivers that we know we don't want to support
+ * @name: the name of the driver
+ *
+ * In some cases Red Hat has chosen to build a driver for internal QE
+ * use. Use this function to mark those drivers as unsupported for
+ * customers.
+ */
+void mark_driver_unsupported(const char *name)
+{
+	pr_crit("Warning: %s - This driver has not undergone sufficient testing by Red Hat for this release and therefore cannot be used in production systems.\n",
+	        name ? name : "kernel");
+}
+EXPORT_SYMBOL(mark_driver_unsupported);
+
+/**
+ * mark_hardware_removed - devices that have been removed
+ * @name: the name of the driver
+ *
+ * When we remove support for certain hardware this may help
+ * understand the user possible issues when installing the OS.
+ * The support may be removed only before a new major version
+ * is released.
+ */
+void mark_hardware_removed(const char *name)
+{
+	pr_crit("Warning: %s - Support for this device has been removed in this major release. Please check the removed functionality section of the release notes.\n",
+		name ? name : "kernel");
+
+	add_taint(TAINT_SUPPORT_REMOVED, LOCKDEP_STILL_OK);
+}
+EXPORT_SYMBOL(mark_hardware_removed);

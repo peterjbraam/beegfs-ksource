@@ -19,7 +19,7 @@
 
 #include <linux/ratelimit.h>
 
-char const *audit_point_name[] = {
+static char const *audit_point_name[] = {
 	"pre page fault",
 	"post page fault",
 	"pre pte write",
@@ -62,11 +62,11 @@ static void mmu_spte_walk(struct kvm_vcpu *vcpu, inspect_spte_fn fn)
 	if (!VALID_PAGE(vcpu->arch.mmu->root_hpa))
 		return;
 
-	if (vcpu->arch.mmu->root_level == PT64_ROOT_LEVEL) {
+	if (vcpu->arch.mmu->root_level >= PT64_ROOT_4LEVEL) {
 		hpa_t root = vcpu->arch.mmu->root_hpa;
 
 		sp = page_header(root);
-		__mmu_spte_walk(vcpu, sp, fn, PT64_ROOT_LEVEL);
+		__mmu_spte_walk(vcpu, sp, fn, vcpu->arch.mmu->root_level);
 		return;
 	}
 
@@ -298,7 +298,7 @@ static int mmu_audit_set(const char *val, const struct kernel_param *kp)
 	return 0;
 }
 
-static struct kernel_param_ops audit_param_ops = {
+static const struct kernel_param_ops audit_param_ops = {
 	.set = mmu_audit_set,
 	.get = param_get_bool,
 };

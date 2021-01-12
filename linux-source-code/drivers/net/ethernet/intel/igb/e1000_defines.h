@@ -194,6 +194,8 @@
 /* enable link status from external LINK_0 and LINK_1 pins */
 #define E1000_CTRL_SWDPIN0  0x00040000  /* SWDPIN 0 value */
 #define E1000_CTRL_SWDPIN1  0x00080000  /* SWDPIN 1 value */
+#define E1000_CTRL_ADVD3WUC 0x00100000  /* D3 WUC */
+#define E1000_CTRL_EN_PHY_PWR_MGMT 0x00200000 /* PHY PM enable */
 #define E1000_CTRL_SDP0_DIR 0x00400000  /* SDP0 Data direction */
 #define E1000_CTRL_SDP1_DIR 0x00800000  /* SDP1 Data direction */
 #define E1000_CTRL_RST      0x04000000  /* Global reset */
@@ -1050,12 +1052,7 @@
 #define E1000_TQAVCTRL_DATAFETCHARB	BIT(4)
 #define E1000_TQAVCTRL_DATATRANARB	BIT(8)
 #define E1000_TQAVCTRL_DATATRANTIM	BIT(9)
-/* RHEL7: don't define bit if ETF qdisc isn't available */
-#ifdef TC_SETUP_QDISC_ETF
 #define E1000_TQAVCTRL_SP_WAIT_SR	BIT(10)
-#else
-#define E1000_TQAVCTRL_SP_WAIT_SR	0
-#endif
 /* Fetch Time Delta - bits 31:16
  *
  * This field holds the value to be reduced from the launch time for

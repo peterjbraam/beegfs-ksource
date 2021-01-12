@@ -1,19 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (c) 2000-2005 Silicon Graphics, Inc.
  * All Rights Reserved.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it would be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write the Free Software Foundation,
- * Inc.,  51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
 #ifndef __XFS_SUPPORT_KMEM_H__
 #define __XFS_SUPPORT_KMEM_H__
@@ -50,9 +38,19 @@ kmem_flags_convert(xfs_km_flags_t flags)
 		lflags = GFP_ATOMIC | __GFP_NOWARN;
 	} else {
 		lflags = GFP_KERNEL | __GFP_NOWARN;
-		if ((current->flags & PF_FSTRANS) || (flags & KM_NOFS))
+		if (flags & KM_NOFS)
 			lflags &= ~__GFP_FS;
 	}
+
+	/*
+	 * Default page/slab allocator behavior is to retry for ever
+	 * for small allocations. We can override this behavior by using
+	 * __GFP_RETRY_MAYFAIL which will tell the allocator to retry as long
+	 * as it is feasible but rather fail than retry forever for all
+	 * request sizes.
+	 */
+	if (flags & KM_MAYFAIL)
+		lflags |= __GFP_RETRY_MAYFAIL;
 
 	if (flags & KM_ZERO)
 		lflags |= __GFP_ZERO;
@@ -100,7 +98,7 @@ kmem_zone_init(int size, char *zone_name)
 }
 
 static inline kmem_zone_t *
-kmem_zone_init_flags(int size, char *zone_name, unsigned long flags,
+kmem_zone_init_flags(int size, char *zone_name, slab_flags_t flags,
 		     void (*construct)(void *))
 {
 	return kmem_cache_create(zone_name, size, 0, flags, construct);

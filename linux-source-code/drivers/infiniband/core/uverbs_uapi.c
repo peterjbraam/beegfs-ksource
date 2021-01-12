@@ -22,8 +22,6 @@ static void *uapi_add_elm(struct uverbs_api *uapi, u32 key, size_t alloc_size)
 		return ERR_PTR(-EOVERFLOW);
 
 	elm = kzalloc(alloc_size, GFP_KERNEL);
-	if (!elm)
-		return ERR_PTR(-ENOMEM);
 	rc = radix_tree_insert(&uapi->radix, key, elm);
 	if (rc) {
 		kfree(elm);
@@ -302,7 +300,8 @@ static int uapi_merge_def(struct uverbs_api *uapi, struct ib_device *ibdev,
 			return 0;
 
 		case UAPI_DEF_IS_SUPPORTED_DEV_FN: {
-			void **ibdev_fn = (void *)ibdev + def->needs_fn_offset;
+			void **ibdev_fn =
+				(void *)(&ibdev->ops) + def->needs_fn_offset;
 
 			if (*ibdev_fn)
 				continue;
@@ -472,7 +471,7 @@ static void uapi_remove_range(struct uverbs_api *uapi, u32 start, u32 last)
 		if (iter.index > last)
 			return;
 		kfree(rcu_dereference_protected(*slot, true));
-		radix_tree_delete(&uapi->radix, iter.index);
+		radix_tree_iter_delete(&uapi->radix, &iter, slot);
 	}
 }
 
@@ -561,7 +560,7 @@ again:
 
 			if (method_elm->disabled) {
 				kfree(method_elm);
-				radix_tree_delete(&uapi->radix, iter.index);
+				radix_tree_iter_delete(&uapi->radix, &iter, slot);
 			}
 			continue;
 		}

@@ -160,7 +160,6 @@ static int press_write_raw(struct iio_dev *indio_dev,
 }
 
 static const struct iio_info press_info = {
-	.driver_module = THIS_MODULE,
 	.read_raw = &press_read_raw,
 	.write_raw = &press_write_raw,
 };
@@ -373,7 +372,6 @@ static struct platform_driver hid_press_platform_driver = {
 	.id_table = hid_press_ids,
 	.driver = {
 		.name	= KBUILD_MODNAME,
-		.owner	= THIS_MODULE,
 		.pm	= &hid_sensor_pm_ops,
 	},
 	.probe		= hid_press_probe,

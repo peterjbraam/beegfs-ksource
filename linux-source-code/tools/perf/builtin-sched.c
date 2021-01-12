@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 #include "builtin.h"
 #include "perf.h"
 
@@ -3340,6 +3341,7 @@ int cmd_sched(int argc, const char **argv)
 		.tool = {
 			.sample		 = perf_sched__process_tracepoint_sample,
 			.comm		 = perf_sched__process_comm,
+			.namespaces	 = perf_event__process_namespaces,
 			.lost		 = perf_event__process_lost,
 			.fork		 = perf_sched__process_fork_event,
 			.ordered_events = true,

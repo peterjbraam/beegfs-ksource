@@ -1,10 +1,15 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_IRQ_H
 #define _ASM_IRQ_H
 
-#include <linux/hardirq.h>
-#include <linux/percpu.h>
-#include <linux/cache.h>
-#include <linux/types.h>
+#define EXT_INTERRUPT	0
+#define IO_INTERRUPT	1
+#define THIN_INTERRUPT	2
+
+#define NR_IRQS_BASE	3
+
+#define NR_IRQS	NR_IRQS_BASE
+#define NR_IRQS_LEGACY NR_IRQS_BASE
 
 /* External interruption codes */
 #define EXT_IRQ_INTERRUPT_KEY	0x0040
@@ -20,11 +25,12 @@
 #define EXT_IRQ_CP_SERVICE	0x2603
 #define EXT_IRQ_IUCV		0x4000
 
-enum interruption_main_class {
-	EXTERNAL_INTERRUPT,
-	IO_INTERRUPT,
-	NR_IRQS
-};
+#ifndef __ASSEMBLY__
+
+#include <linux/hardirq.h>
+#include <linux/percpu.h>
+#include <linux/cache.h>
+#include <linux/types.h>
 
 enum interruption_class {
 	IRQEXT_CLK,
@@ -39,29 +45,27 @@ enum interruption_class {
 	IRQEXT_IUC,
 	IRQEXT_CMS,
 	IRQEXT_CMC,
-	IRQEXT_CMR,
+	IRQEXT_FTP,
 	IRQIO_CIO,
-	IRQIO_QAI,
 	IRQIO_DAS,
 	IRQIO_C15,
 	IRQIO_C70,
 	IRQIO_TAP,
 	IRQIO_VMR,
 	IRQIO_LCS,
-	IRQIO_CLW,
 	IRQIO_CTC,
-	IRQIO_APB,
 	IRQIO_ADM,
 	IRQIO_CSC,
-	IRQIO_PCI,
-	IRQIO_MSI,
 	IRQIO_VIR,
+	IRQIO_QAI,
+	IRQIO_APB,
+	IRQIO_PCF,
+	IRQIO_PCD,
+	IRQIO_MSI,
+	IRQIO_VAI,
+	IRQIO_GAL,
 	NMI_NMI,
 	CPU_RST,
-#ifndef __GENKSYMS__
-	IRQIO_VAI,
-	IRQEXT_FTP,
-#endif
 	NR_ARCH_IRQS
 };
 
@@ -73,7 +77,7 @@ DECLARE_PER_CPU_SHARED_ALIGNED(struct irq_stat, irq_stat);
 
 static __always_inline void inc_irq_stat(enum interruption_class irq)
 {
-	__get_cpu_var(irq_stat).irqs[irq]++;
+	__this_cpu_inc(irq_stat.irqs[irq]);
 }
 
 struct ext_code {
@@ -91,17 +95,24 @@ enum irq_subclass {
 	IRQ_SUBCLASS_SERVICE_SIGNAL = 9,
 };
 
+#define CR0_IRQ_SUBCLASS_MASK					  \
+	((1UL << (63 - 30))  /* Warning Track */		| \
+	 (1UL << (63 - 48))  /* Malfunction Alert */		| \
+	 (1UL << (63 - 49))  /* Emergency Signal */		| \
+	 (1UL << (63 - 50))  /* External Call */		| \
+	 (1UL << (63 - 52))  /* Clock Comparator */		| \
+	 (1UL << (63 - 53))  /* CPU Timer */			| \
+	 (1UL << (63 - 54))  /* Service Signal */		| \
+	 (1UL << (63 - 57))  /* Interrupt Key */		| \
+	 (1UL << (63 - 58))  /* Measurement Alert */		| \
+	 (1UL << (63 - 59))  /* Timing Alert */			| \
+	 (1UL << (63 - 62))) /* IUCV */
+
 void irq_subclass_register(enum irq_subclass subclass);
 void irq_subclass_unregister(enum irq_subclass subclass);
 
-#ifdef CONFIG_LOCKDEP
-#  define disable_irq_nosync_lockdep(irq)	disable_irq_nosync(irq)
-#  define disable_irq_nosync_lockdep_irqsave(irq, flags) \
-						disable_irq_nosync(irq)
-#  define disable_irq_lockdep(irq)		disable_irq(irq)
-#  define enable_irq_lockdep(irq)		enable_irq(irq)
-#  define enable_irq_lockdep_irqrestore(irq, flags) \
-						enable_irq(irq)
-#endif
+#define irq_canonicalize(irq)  (irq)
+
+#endif /* __ASSEMBLY__ */
 
 #endif /* _ASM_IRQ_H */

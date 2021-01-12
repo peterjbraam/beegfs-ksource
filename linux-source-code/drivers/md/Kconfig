@@ -5,6 +5,7 @@
 menuconfig MD
 	bool "Multiple devices driver support (RAID and LVM)"
 	depends on BLOCK
+	select SRCU
 	help
 	  Support multiple physical spindles through a single logical device.
 	  Required for RAID and logical volume management.
@@ -114,7 +115,7 @@ config MD_RAID10
 
 	  RAID-10 requires mdadm-1.7.0 or later, available at:
 
-	  ftp://ftp.kernel.org/pub/linux/utils/raid/mdadm/
+	  https://www.kernel.org/pub/linux/utils/raid/mdadm/
 
 	  If unsure, say Y.
 
@@ -122,6 +123,7 @@ config MD_RAID456
 	tristate "RAID-4/RAID-5/RAID-6 mode"
 	depends on BLK_DEV_MD
 	select RAID6_PQ
+	select LIBCRC32C
 	select ASYNC_MEMCPY
 	select ASYNC_XOR
 	select ASYNC_PQ
@@ -174,10 +176,27 @@ config MD_FAULTY
 
 	  In unsure, say N.
 
+
+config MD_CLUSTER
+	tristate "Cluster Support for MD"
+	depends on BLK_DEV_MD
+	depends on DLM
+	default n
+	---help---
+	Clustering support for MD devices. This enables locking and
+	synchronization across multiple systems on the cluster, so all
+	nodes in the cluster can access the MD devices simultaneously.
+
+	This brings the redundancy (and uptime) of RAID levels across the
+	nodes of the cluster. Currently, it can work with raid1 and raid10
+	(limited support).
+
+	If unsure, say N.
+
 source "drivers/md/bcache/Kconfig"
 
 config BLK_DEV_DM_BUILTIN
-	boolean
+	bool
 
 config BLK_DEV_DM
 	tristate "Device mapper support"
@@ -196,19 +215,8 @@ config BLK_DEV_DM
 
 	  If unsure, say N.
 
-config DM_MQ_DEFAULT
-	bool "request-based DM: use blk-mq I/O path by default"
-	depends on BLK_DEV_DM
-	---help---
-	  This option enables the blk-mq based I/O path for request-based
-	  DM devices by default.  With the option the dm_mod.use_blk_mq
-	  module/boot option defaults to Y, without it to N, but it can
-	  still be overriden either way.
-
-	  If unsure say N.
-
 config DM_DEBUG
-	boolean "Device mapper debugging support"
+	bool "Device mapper debugging support"
 	depends on BLK_DEV_DM
 	---help---
 	  Enable this for messages that may help debug device-mapper problems.
@@ -224,7 +232,7 @@ config DM_BUFIO
 	 delayed writes.
 
 config DM_DEBUG_BLOCK_MANAGER_LOCKING
-       boolean "Block manager locking"
+       bool "Block manager locking"
        depends on DM_BUFIO
        ---help---
 	 Block manager locking can catch various metadata corruption issues.
@@ -232,7 +240,7 @@ config DM_DEBUG_BLOCK_MANAGER_LOCKING
 	 If unsure, say N.
 
 config DM_DEBUG_BLOCK_STACK_TRACING
-       boolean "Keep stack trace of persistent data block lock holders"
+       bool "Keep stack trace of persistent data block lock holders"
        depends on STACKTRACE_SUPPORT && DM_DEBUG_BLOCK_MANAGER_LOCKING
        select STACKTRACE
        ---help---
@@ -250,6 +258,13 @@ config DM_BIO_PRISON
 
 source "drivers/md/persistent-data/Kconfig"
 
+config DM_UNSTRIPED
+       tristate "Unstriped target"
+       depends on BLK_DEV_DM
+       ---help---
+	  Unstripes I/O so it is issued solely on a single drive in a HW
+	  RAID0 or dm-striped target.
+
 config DM_CRYPT
 	tristate "Crypt target support"
 	depends on BLK_DEV_DM
@@ -261,7 +276,7 @@ config DM_CRYPT
 	  the ciphers you're going to use in the cryptoapi configuration.
 
 	  For further information on dm-crypt and userspace tools see:
-	  <http://code.google.com/p/cryptsetup/wiki/DMCrypt>
+	  <https://gitlab.com/cryptsetup/cryptsetup/wikis/DMCrypt>
 
 	  To compile this code as a module, choose M here: the module will
 	  be called dm-crypt.
@@ -307,6 +322,17 @@ config DM_CACHE_SMQ
          reads over writes.  This SMQ policy (vs MQ) offers the promise
          of less memory utilization, improved performance and increased
          adaptability in the face of changing workloads.
+
+config DM_WRITECACHE
+	tristate "Writecache target"
+	depends on BLK_DEV_DM
+	---help---
+	   The writecache target caches writes on persistent memory or SSD.
+	   It is intended for databases or other programs that need extremely
+	   low commit latency.
+
+	   The writecache target doesn't cache reads because reads are supposed
+	   to be cached in standard RAM.
 
 config DM_ERA
        tristate "Era target (EXPERIMENTAL)"
@@ -378,7 +404,7 @@ config DM_MULTIPATH
 	# of SCSI_DH if the latter isn't defined but if
 	# it is, DM_MULTIPATH must depend on it.  We get a build
 	# error if SCSI_DH=m and DM_MULTIPATH=y
-	depends on SCSI_DH || !SCSI_DH
+	depends on !SCSI_DH || SCSI
 	---help---
 	  Allow volume managers to support multipath hardware.
 
@@ -442,6 +468,18 @@ config DM_VERITY
 
 	  If unsure, say N.
 
+config DM_VERITY_FEC
+	bool "Verity forward error correction support"
+	depends on DM_VERITY
+	select REED_SOLOMON
+	select REED_SOLOMON_DEC8
+	---help---
+	  Add forward error correction support to dm-verity. This option
+	  makes it possible to use pre-generated error correction data to
+	  recover from corrupted blocks.
+
+	  If unsure, say N.
+
 config DM_SWITCH
 	tristate "Switch target support (EXPERIMENTAL)"
 	depends on BLK_DEV_DM
@@ -463,12 +501,50 @@ config DM_LOG_WRITES
 	  This device-mapper target takes two devices, one device to use
 	  normally, one to log all write operations done to the first device.
 	  This is for use by file system developers wishing to verify that
-	  their fs is writing a consitent file system at all times by allowing
+	  their fs is writing a consistent file system at all times by allowing
 	  them to replay the log in a variety of ways and to check the
 	  contents.
 
 	  To compile this code as a module, choose M here: the module will
 	  be called dm-log-writes.
+
+	  If unsure, say N.
+
+config DM_INTEGRITY
+	tristate "Integrity target support"
+	depends on BLK_DEV_DM
+	select BLK_DEV_INTEGRITY
+	select DM_BUFIO
+	select CRYPTO
+	select ASYNC_XOR
+	---help---
+	  This device-mapper target emulates a block device that has
+	  additional per-sector tags that can be used for storing
+	  integrity information.
+
+	  This integrity target is used with the dm-crypt target to
+	  provide authenticated disk encryption or it can be used
+	  standalone.
+
+	  To compile this code as a module, choose M here: the module will
+	  be called dm-integrity.
+
+config DM_ZONED
+	tristate "Drive-managed zoned block device target support"
+	depends on BLK_DEV_DM
+	depends on BLK_DEV_ZONED
+	---help---
+	  This device-mapper target takes a host-managed or host-aware zoned
+	  block device and exposes most of its capacity as a regular block
+	  device (drive-managed zoned block device) without any write
+	  constraints. This is mainly intended for use with file systems that
+	  do not natively support zoned block devices but still want to
+	  benefit from the increased capacity offered by SMR disks. Other uses
+	  by applications using raw block devices (for example object stores)
+	  are also possible.
+
+	  To compile this code as a module, choose M here: the module will
+	  be called dm-zoned.
 
 	  If unsure, say N.
 

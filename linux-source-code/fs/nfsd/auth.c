@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /* Copyright (C) 1995, 1996 Olaf Kirch <okir@monad.swb.de> */
 
 #include <linux/sched.h>
@@ -24,7 +25,6 @@ int nfsd_setuser(struct svc_rqst *rqstp, struct svc_export *exp)
 	struct cred *new;
 	int i;
 	int flags = nfsexp_flags(rqstp, exp);
-	int ret;
 
 	validate_process_creds();
 
@@ -56,15 +56,14 @@ int nfsd_setuser(struct svc_rqst *rqstp, struct svc_export *exp)
 			goto oom;
 
 		for (i = 0; i < rqgi->ngroups; i++) {
-			if (gid_eq(GLOBAL_ROOT_GID, GROUP_AT(rqgi, i)))
-				GROUP_AT(gi, i) = exp->ex_anon_gid;
+			if (gid_eq(GLOBAL_ROOT_GID, rqgi->gid[i]))
+				gi->gid[i] = exp->ex_anon_gid;
 			else
-				GROUP_AT(gi, i) = GROUP_AT(rqgi, i);
-
+				gi->gid[i] = rqgi->gid[i];
 		}
 
-        /* Each thread allocates its own gi, no race */
-        groups_sort(gi);
+		/* Each thread allocates its own gi, no race */
+		groups_sort(gi);
 	} else {
 		gi = get_group_info(rqgi);
 	}
@@ -74,10 +73,8 @@ int nfsd_setuser(struct svc_rqst *rqstp, struct svc_export *exp)
 	if (gid_eq(new->fsgid, INVALID_GID))
 		new->fsgid = exp->ex_anon_gid;
 
-	ret = set_groups(new, gi);
+	set_groups(new, gi);
 	put_group_info(gi);
-	if (ret < 0)
-		goto error;
 
 	if (!uid_eq(new->fsuid, GLOBAL_ROOT_UID))
 		new->cap_effective = cap_drop_nfsd_set(new->cap_effective);
@@ -91,9 +88,7 @@ int nfsd_setuser(struct svc_rqst *rqstp, struct svc_export *exp)
 	return 0;
 
 oom:
-	ret = -ENOMEM;
-error:
 	abort_creds(new);
-	return ret;
+	return -ENOMEM;
 }
 

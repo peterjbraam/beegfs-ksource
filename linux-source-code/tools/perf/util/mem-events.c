@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,7 +28,7 @@ struct perf_mem_event perf_mem_events[PERF_MEM_EVENTS__MAX] = {
 static char mem_loads_name[100];
 static bool mem_loads_name__init;
 
-char *perf_mem_events__name(int i)
+char * __weak perf_mem_events__name(int i)
 {
 	if (i == PERF_MEM_EVENTS__LOAD) {
 		if (!mem_loads_name__init) {

@@ -16,7 +16,7 @@
 #include <linux/list.h>
 #include <linux/netdevice.h>
 #include <linux/pci.h>
-#include <asm-generic/io-64-nonatomic-hi-lo.h>
+#include <linux/io-64-nonatomic-hi-lo.h>
 #include <net/xdp.h>
 
 #include "nfp_net_ctrl.h"
@@ -356,7 +356,6 @@ struct nfp_net_rx_ring {
  * @tx_ring:        Pointer to TX ring
  * @rx_ring:        Pointer to RX ring
  * @xdp_ring:	    Pointer to an extra TX ring for XDP
- * @irq_idx:        Index into MSI-X table
  * @irq_entry:      MSI-X table entry (use for talking to the device)
  * @rx_sync:	    Seqlock for atomic updates of RX stats
  * @rx_pkts:        Number of received packets
@@ -458,7 +457,6 @@ struct nfp_stat_pair {
  * @dev:		Backpointer to struct device
  * @netdev:		Backpointer to net_device structure
  * @is_vf:		Is the driver attached to a VF?
- * @bpf_offload_xdp:	Offloaded BPF program is XDP
  * @chained_metadata_format:  Firemware will use new metadata format
  * @rx_dma_dir:		Mapping direction for RX buffers
  * @rx_dma_off:		Offset at which DMA packets (for XDP headroom)
@@ -483,7 +481,6 @@ struct nfp_net_dp {
 	struct net_device *netdev;
 
 	u8 is_vf:1;
-	u8 bpf_offload_xdp:1;
 	u8 chained_metadata_format:1;
 
 	u8 rx_dma_dir;
@@ -526,8 +523,8 @@ struct nfp_net_dp {
  * @rss_cfg:            RSS configuration
  * @rss_key:            RSS secret key
  * @rss_itbl:           RSS indirection table
- * @xdp_flags:		Flags with which XDP prog was loaded
- * @xdp_prog:		XDP prog (for ctrl path, both DRV and HW modes)
+ * @xdp:		Information about the driver XDP program
+ * @xdp_hw:		Information about the HW XDP program
  * @max_r_vecs:		Number of allocated interrupt vectors for RX/TX
  * @max_tx_rings:       Maximum number of TX rings supported by the Firmware
  * @max_rx_rings:       Maximum number of RX rings supported by the Firmware
@@ -584,8 +581,8 @@ struct nfp_net {
 	u8 rss_key[NFP_NET_CFG_RSS_KEY_SZ];
 	u8 rss_itbl[NFP_NET_CFG_RSS_ITBL_SZ];
 
-	u32 xdp_flags;
-	struct bpf_prog *xdp_prog;
+	struct xdp_attachment_info xdp;
+	struct xdp_attachment_info xdp_hw;
 
 	unsigned int max_tx_rings;
 	unsigned int max_rx_rings;
@@ -874,6 +871,7 @@ unsigned int nfp_net_rss_key_sz(struct nfp_net *nn);
 void nfp_net_rss_write_itbl(struct nfp_net *nn);
 void nfp_net_rss_write_key(struct nfp_net *nn);
 void nfp_net_coalesce_write_cfg(struct nfp_net *nn);
+int nfp_net_reconfig_mbox(struct nfp_net *nn, u32 mbox_cmd);
 
 unsigned int
 nfp_net_irqs_alloc(struct pci_dev *pdev, struct msix_entry *irq_entries,
@@ -884,7 +882,8 @@ nfp_net_irqs_assign(struct nfp_net *nn, struct msix_entry *irq_entries,
 		    unsigned int n);
 
 struct nfp_net_dp *nfp_net_clone_dp(struct nfp_net *nn);
-int nfp_net_ring_reconfig(struct nfp_net *nn, struct nfp_net_dp *new);
+int nfp_net_ring_reconfig(struct nfp_net *nn, struct nfp_net_dp *new,
+			  struct netlink_ext_ack *extack);
 
 #ifdef CONFIG_NFP_DEBUG
 void nfp_net_debugfs_create(void);

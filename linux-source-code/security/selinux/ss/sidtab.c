@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Implementation of the SID table type.
  *
@@ -318,9 +319,8 @@ static int sidtab_reverse_lookup(struct sidtab *s, struct context *context,
 	}
 
 	if (context->len)
-		printk(KERN_INFO
-		       "SELinux:  Context %s is not valid (left unmapped).\n",
-		       context->str);
+		pr_info("SELinux:  Context %s is not valid (left unmapped).\n",
+			context->str);
 
 	sidtab_rcache_push(s, count);
 	*index = count;
@@ -439,7 +439,7 @@ int sidtab_convert(struct sidtab *s, struct sidtab_convert_params *params)
 	/* we can safely do the rest of the conversion outside the lock */
 	spin_unlock_irqrestore(&s->lock, flags);
 
-	printk(KERN_INFO "SELinux:  Converting %u SID table entries...\n", count);
+	pr_info("SELinux:  Converting %u SID table entries...\n", count);
 
 	/* convert all entries not covered by live convert */
 	pos = 0;

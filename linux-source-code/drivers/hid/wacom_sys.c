@@ -56,6 +56,107 @@ static int wacom_set_report(struct hid_device *hdev, u8 type, u8 *buf,
 	return retval;
 }
 
+static void wacom_wac_queue_insert(struct hid_device *hdev,
+				   struct kfifo_rec_ptr_2 *fifo,
+				   u8 *raw_data, int size)
+{
+	bool warned = false;
+
+	while (kfifo_avail(fifo) < size) {
+		if (!warned)
+			hid_warn(hdev, "%s: kfifo has filled, starting to drop events\n", __func__);
+		warned = true;
+
+		kfifo_skip(fifo);
+	}
+
+	kfifo_in(fifo, raw_data, size);
+}
+
+static void wacom_wac_queue_flush(struct hid_device *hdev,
+				  struct kfifo_rec_ptr_2 *fifo)
+{
+	while (!kfifo_is_empty(fifo)) {
+		u8 buf[WACOM_PKGLEN_MAX];
+		int size;
+		int err;
+
+		size = kfifo_out(fifo, buf, sizeof(buf));
+		err = hid_report_raw_event(hdev, HID_INPUT_REPORT, buf, size, false);
+		if (err) {
+			hid_warn(hdev, "%s: unable to flush event due to error %d\n",
+				 __func__, err);
+		}
+	}
+}
+
+static int wacom_wac_pen_serial_enforce(struct hid_device *hdev,
+		struct hid_report *report, u8 *raw_data, int size)
+{
+	struct wacom *wacom = hid_get_drvdata(hdev);
+	struct wacom_wac *wacom_wac = &wacom->wacom_wac;
+	struct wacom_features *features = &wacom_wac->features;
+	bool flush = false;
+	bool insert = false;
+	int i, j;
+
+	if (wacom_wac->serial[0] || !(features->quirks & WACOM_QUIRK_TOOLSERIAL))
+		return 0;
+
+	/* Queue events which have invalid tool type or serial number */
+	for (i = 0; i < report->maxfield; i++) {
+		for (j = 0; j < report->field[i]->maxusage; j++) {
+			struct hid_field *field = report->field[i];
+			struct hid_usage *usage = &field->usage[j];
+			unsigned int equivalent_usage = wacom_equivalent_usage(usage->hid);
+			unsigned int offset;
+			unsigned int size;
+			unsigned int value;
+
+			if (equivalent_usage != HID_DG_INRANGE &&
+			    equivalent_usage != HID_DG_TOOLSERIALNUMBER &&
+			    equivalent_usage != WACOM_HID_WD_SERIALHI &&
+			    equivalent_usage != WACOM_HID_WD_TOOLTYPE)
+				continue;
+
+			offset = field->report_offset;
+			size = field->report_size;
+			value = hid_field_extract(hdev, raw_data+1, offset + j * size, size);
+
+			/* If we go out of range, we need to flush the queue ASAP */
+			if (equivalent_usage == HID_DG_INRANGE)
+				value = !value;
+
+			if (value) {
+				flush = true;
+				switch (equivalent_usage) {
+				case HID_DG_TOOLSERIALNUMBER:
+					wacom_wac->serial[0] = value;
+					break;
+
+				case WACOM_HID_WD_SERIALHI:
+					wacom_wac->serial[0] |= ((__u64)value) << 32;
+					break;
+
+				case WACOM_HID_WD_TOOLTYPE:
+					wacom_wac->id[0] = value;
+					break;
+				}
+			}
+			else {
+				insert = true;
+			}
+		}
+	}
+
+	if (flush)
+		wacom_wac_queue_flush(hdev, &wacom_wac->pen_fifo);
+	else if (insert)
+		wacom_wac_queue_insert(hdev, &wacom_wac->pen_fifo, raw_data, size);
+
+	return insert && !flush;
+}
+
 static int wacom_raw_event(struct hid_device *hdev, struct hid_report *report,
 		u8 *raw_data, int size)
 {
@@ -63,6 +164,9 @@ static int wacom_raw_event(struct hid_device *hdev, struct hid_report *report,
 
 	if (size > WACOM_PKGLEN_MAX)
 		return 1;
+
+	if (wacom_wac_pen_serial_enforce(hdev, report, raw_data, size))
+		return -1;
 
 	memcpy(wacom->wacom_wac.data, raw_data, size);
 
@@ -780,9 +884,6 @@ static int wacom_led_control(struct wacom *wacom)
 	unsigned char report_id = WAC_CMD_LED_CONTROL;
 	int buf_size = 9;
 
-	if (!hid_get_drvdata(wacom->hdev))
-		return -ENODEV;
-
 	if (!wacom->led.groups)
 		return -ENOTSUPP;
 
@@ -1120,8 +1221,10 @@ static int __wacom_devm_sysfs_create_group(struct wacom *wacom,
 	devres->root = root;
 
 	error = sysfs_create_group(devres->root, group);
-	if (error)
+	if (error) {
+		devres_free(devres);
 		return error;
+	}
 
 	devres_add(&wacom->hdev->dev, devres);
 
@@ -1135,17 +1238,123 @@ static int wacom_devm_sysfs_create_group(struct wacom *wacom,
 					       group);
 }
 
+enum led_brightness wacom_leds_brightness_get(struct wacom_led *led)
+{
+	struct wacom *wacom = led->wacom;
+
+	if (wacom->led.max_hlv)
+		return led->hlv * LED_FULL / wacom->led.max_hlv;
+
+	if (wacom->led.max_llv)
+		return led->llv * LED_FULL / wacom->led.max_llv;
+
+	/* device doesn't support brightness tuning */
+	return LED_FULL;
+}
+
+static enum led_brightness __wacom_led_brightness_get(struct led_classdev *cdev)
+{
+	struct wacom_led *led = container_of(cdev, struct wacom_led, cdev);
+	struct wacom *wacom = led->wacom;
+
+	if (wacom->led.groups[led->group].select != led->id)
+		return LED_OFF;
+
+	return wacom_leds_brightness_get(led);
+}
+
+static int wacom_led_brightness_set(struct led_classdev *cdev,
+				    enum led_brightness brightness)
+{
+	struct wacom_led *led = container_of(cdev, struct wacom_led, cdev);
+	struct wacom *wacom = led->wacom;
+	int error;
+
+	mutex_lock(&wacom->lock);
+
+	if (!wacom->led.groups || (brightness == LED_OFF &&
+	    wacom->led.groups[led->group].select != led->id)) {
+		error = 0;
+		goto out;
+	}
+
+	led->llv = wacom->led.llv = wacom->led.max_llv * brightness / LED_FULL;
+	led->hlv = wacom->led.hlv = wacom->led.max_hlv * brightness / LED_FULL;
+
+	wacom->led.groups[led->group].select = led->id;
+
+	error = wacom_led_control(wacom);
+
+out:
+	mutex_unlock(&wacom->lock);
+
+	return error;
+}
+
+static void wacom_led_readonly_brightness_set(struct led_classdev *cdev,
+					       enum led_brightness brightness)
+{
+}
+
 static int wacom_led_register_one(struct device *dev, struct wacom *wacom,
 				  struct wacom_led *led, unsigned int group,
 				  unsigned int id, bool read_only)
 {
+	int error;
+	char *name;
+
+	name = devm_kasprintf(dev, GFP_KERNEL,
+			      "%s::wacom-%d.%d",
+			      dev_name(dev),
+			      group,
+			      id);
+	if (!name)
+		return -ENOMEM;
+
+	if (!read_only) {
+		led->trigger.name = name;
+		error = devm_led_trigger_register(dev, &led->trigger);
+		if (error) {
+			hid_err(wacom->hdev,
+				"failed to register LED trigger %s: %d\n",
+				led->cdev.name, error);
+			return error;
+		}
+	}
+
 	led->group = group;
 	led->id = id;
 	led->wacom = wacom;
 	led->llv = wacom->led.llv;
 	led->hlv = wacom->led.hlv;
+	led->cdev.name = name;
+	led->cdev.max_brightness = LED_FULL;
+	led->cdev.flags = LED_HW_PLUGGABLE;
+	led->cdev.brightness_get = __wacom_led_brightness_get;
+	if (!read_only) {
+		led->cdev.brightness_set_blocking = wacom_led_brightness_set;
+		led->cdev.default_trigger = led->cdev.name;
+	} else {
+		led->cdev.brightness_set = wacom_led_readonly_brightness_set;
+	}
+
+	error = devm_led_classdev_register(dev, &led->cdev);
+	if (error) {
+		hid_err(wacom->hdev,
+			"failed to register LED %s: %d\n",
+			led->cdev.name, error);
+		led->cdev.name = NULL;
+		return error;
+	}
 
 	return 0;
+}
+
+static void wacom_led_groups_release_one(void *data)
+{
+	struct wacom_group_leds *group = data;
+
+	devres_release_group(group->dev, group);
 }
 
 static int wacom_led_groups_alloc_and_register_one(struct device *dev,
@@ -1162,7 +1371,7 @@ static int wacom_led_groups_alloc_and_register_one(struct device *dev,
 	if (!devres_open_group(dev, &wacom->led.groups[group_id], GFP_KERNEL))
 		return -ENOMEM;
 
-	leds = devm_kzalloc(dev, sizeof(struct wacom_led) * count, GFP_KERNEL);
+	leds = devm_kcalloc(dev, count, sizeof(struct wacom_led), GFP_KERNEL);
 	if (!leds) {
 		error = -ENOMEM;
 		goto err;
@@ -1178,12 +1387,74 @@ static int wacom_led_groups_alloc_and_register_one(struct device *dev,
 			goto err;
 	}
 
-	devres_remove_group(dev, &wacom->led.groups[group_id]);
+	wacom->led.groups[group_id].dev = dev;
+
+	devres_close_group(dev, &wacom->led.groups[group_id]);
+
+	/*
+	 * There is a bug (?) in devm_led_classdev_register() in which its
+	 * increments the refcount of the parent. If the parent is an input
+	 * device, that means the ref count never reaches 0 when
+	 * devm_input_device_release() gets called.
+	 * This means that the LEDs are still there after disconnect.
+	 * Manually force the release of the group so that the leds are released
+	 * once we are done using them.
+	 */
+	error = devm_add_action_or_reset(&wacom->hdev->dev,
+					 wacom_led_groups_release_one,
+					 &wacom->led.groups[group_id]);
+	if (error)
+		return error;
+
 	return 0;
 
 err:
 	devres_release_group(dev, &wacom->led.groups[group_id]);
 	return error;
+}
+
+struct wacom_led *wacom_led_find(struct wacom *wacom, unsigned int group_id,
+				 unsigned int id)
+{
+	struct wacom_group_leds *group;
+
+	if (group_id >= wacom->led.count)
+		return NULL;
+
+	group = &wacom->led.groups[group_id];
+
+	if (!group->leds)
+		return NULL;
+
+	id %= group->count;
+
+	return &group->leds[id];
+}
+
+/**
+ * wacom_led_next: gives the next available led with a wacom trigger.
+ *
+ * returns the next available struct wacom_led which has its default trigger
+ * or the current one if none is available.
+ */
+struct wacom_led *wacom_led_next(struct wacom *wacom, struct wacom_led *cur)
+{
+	struct wacom_led *next_led;
+	int group, next;
+
+	if (!wacom || !cur)
+		return NULL;
+
+	group = cur->group;
+	next = cur->id;
+
+	do {
+		next_led = wacom_led_find(wacom, group, ++next);
+		if (!next_led || next_led == cur)
+			return next_led;
+	} while (next_led->cdev.trigger != &next_led->trigger);
+
+	return next_led;
 }
 
 static void wacom_led_groups_release(void *data)
@@ -1200,7 +1471,7 @@ static int wacom_led_groups_allocate(struct wacom *wacom, int count)
 	struct wacom_group_leds *groups;
 	int error;
 
-	groups = devm_kzalloc(dev, sizeof(struct wacom_group_leds) * count,
+	groups = devm_kcalloc(dev, count, sizeof(struct wacom_group_leds),
 			      GFP_KERNEL);
 	if (!groups)
 		return -ENOMEM;
@@ -1327,7 +1598,8 @@ int wacom_initialize_leds(struct wacom *wacom)
 
 	case INTUOSP2_BT:
 		wacom->led.llv = 50;
-		error = wacom_led_groups_allocate(wacom, 4);
+		wacom->led.max_llv = 100;
+		error = wacom_leds_alloc_and_register(wacom, 1, 4, false);
 		if (error) {
 			hid_err(wacom->hdev,
 				"cannot create leds err: %d\n", error);
@@ -2189,23 +2461,23 @@ static void wacom_remote_destroy_one(struct wacom *wacom, unsigned int index)
 	int i;
 	unsigned long flags;
 
-	spin_lock_irqsave(&remote->remote_lock, flags);
-	remote->remotes[index].registered = false;
-	spin_unlock_irqrestore(&remote->remote_lock, flags);
-
-	if (remote->remotes[index].battery.battery)
-		devres_release_group(&wacom->hdev->dev,
-				     &remote->remotes[index].battery.bat_desc);
-
-	if (remote->remotes[index].group.name)
-		devres_release_group(&wacom->hdev->dev,
-				     &remote->remotes[index]);
-
 	for (i = 0; i < WACOM_MAX_REMOTES; i++) {
 		if (remote->remotes[i].serial == serial) {
+
+			spin_lock_irqsave(&remote->remote_lock, flags);
+			remote->remotes[i].registered = false;
+			spin_unlock_irqrestore(&remote->remote_lock, flags);
+
+			if (remote->remotes[i].battery.battery)
+				devres_release_group(&wacom->hdev->dev,
+						     &remote->remotes[i].battery.bat_desc);
+
+			if (remote->remotes[i].group.name)
+				devres_release_group(&wacom->hdev->dev,
+						     &remote->remotes[i]);
+
 			remote->remotes[i].serial = 0;
 			remote->remotes[i].group.name = NULL;
-			remote->remotes[i].registered = false;
 			remote->remotes[i].battery.battery = NULL;
 			wacom->led.groups[i].select = WACOM_STATUS_UNKNOWN;
 		}
@@ -2422,6 +2694,10 @@ static int wacom_probe(struct hid_device *hdev,
 		goto fail;
 	}
 
+	error = kfifo_alloc(&wacom_wac->pen_fifo, WACOM_PKGLEN_MAX, GFP_KERNEL);
+	if (error)
+		goto fail;
+
 	wacom_wac->hid_data.inputmode = -1;
 	wacom_wac->mode_report = -1;
 
@@ -2484,6 +2760,8 @@ static void wacom_remove(struct hid_device *hdev)
 
 	if (wacom->wacom_wac.features.type != REMOTE)
 		wacom_release_resources(wacom);
+
+	kfifo_free(&wacom_wac->pen_fifo);
 
 	hid_set_drvdata(hdev, NULL);
 }

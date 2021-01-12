@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <linux/module.h>
 #include <asm/alternative.h>
 #include <asm/facility.h>
@@ -26,7 +27,7 @@ static struct brcl_insn __initdata_or_module nop48 = {
 	0xc004, 0
 };
 
-static const void * __initdata_or_module nops[] = {
+static const void *nops[] __initdata_or_module = {
 	&nop16,
 	&nop32,
 	&nop48
@@ -94,7 +95,7 @@ static void __init_or_module __apply_alternatives(struct alt_instr *start,
 			insnbuf_sz += a->instrlen - a->replacementlen;
 		}
 
-		probe_kernel_write(instr, insnbuf, insnbuf_sz);
+		s390_kernel_write(instr, insnbuf, insnbuf_sz);
 	}
 }
 

@@ -753,7 +753,6 @@ u32 igb_rd32(struct e1000_hw *hw, u32 reg)
 		struct net_device *netdev = igb->netdev;
 		hw->hw_addr = NULL;
 		netdev_err(netdev, "PCIe link lost\n");
-		WARN(1, "igb: Failed to read reg 0x%x!\n", reg);
 	}
 
 	return value;
@@ -1190,15 +1189,15 @@ static int igb_alloc_q_vector(struct igb_adapter *adapter,
 {
 	struct igb_q_vector *q_vector;
 	struct igb_ring *ring;
-	int ring_count, size;
+	int ring_count;
+	size_t size;
 
 	/* igb only supports 1 Tx and/or 1 Rx queue per vector */
 	if (txr_count > 1 || rxr_count > 1)
 		return -ENOMEM;
 
 	ring_count = txr_count + rxr_count;
-	size = sizeof(struct igb_q_vector) +
-	       (sizeof(struct igb_ring) * ring_count);
+	size = struct_size(q_vector, ring, ring_count);
 
 	/* allocate q_vector and rings */
 	q_vector = adapter->q_vector[v_idx];
@@ -1859,8 +1858,6 @@ static void igb_config_tx_modes(struct igb_adapter *adapter, int queue)
 		   ring->hicredit, ring->locredit);
 }
 
-/* RHEL7: igb_save_txtime_params may be unused if ETF qdisc isn't available */
-__attribute__ ((__unused__))
 static int igb_save_txtime_params(struct igb_adapter *adapter, int queue,
 				  bool enable)
 {
@@ -2489,7 +2486,8 @@ static int igb_set_features(struct net_device *netdev,
 static int igb_ndo_fdb_add(struct ndmsg *ndm, struct nlattr *tb[],
 			   struct net_device *dev,
 			   const unsigned char *addr, u16 vid,
-			   u16 flags)
+			   u16 flags,
+			   struct netlink_ext_ack *extack)
 {
 	/* guarantee we can provide a unique filter for the unicast address */
 	if (is_unicast_ether_addr(addr) || is_link_local_ether_addr(addr)) {
@@ -2578,21 +2576,16 @@ static int igb_offload_cbs(struct igb_adapter *adapter,
 #define ETHER_TYPE_FULL_MASK ((__force __be16)~0)
 #define VLAN_PRIO_FULL_MASK (0x07)
 
-/* RHEL 7: We don't have a struct netlink_ext_ack and so we don't have the
-   tc_cls_common_offload::extack member (yet?) Fortunately this member is
-   only used to store an error message here.  Override the usage for now. */
-#define __rhel7_no_netlink_ext_ack
-
 static int igb_parse_cls_flower(struct igb_adapter *adapter,
 				struct tc_cls_flower_offload *f,
 				int traffic_class,
 				struct igb_nfc_filter *input)
 {
-#ifndef __rhel7_no_netlink_ext_ack
+	struct flow_rule *rule = tc_cls_flower_offload_flow_rule(f);
+	struct flow_dissector *dissector = rule->match.dissector;
 	struct netlink_ext_ack *extack = f->common.extack;
-#endif
 
-	if (f->dissector->used_keys &
+	if (dissector->used_keys &
 	    ~(BIT(FLOW_DISSECTOR_KEY_BASIC) |
 	      BIT(FLOW_DISSECTOR_KEY_CONTROL) |
 	      BIT(FLOW_DISSECTOR_KEY_ETH_ADDRS) |
@@ -2602,78 +2595,60 @@ static int igb_parse_cls_flower(struct igb_adapter *adapter,
 		return -EOPNOTSUPP;
 	}
 
-	if (dissector_uses_key(f->dissector, FLOW_DISSECTOR_KEY_ETH_ADDRS)) {
-		struct flow_dissector_key_eth_addrs *key, *mask;
+	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_ETH_ADDRS)) {
+		struct flow_match_eth_addrs match;
 
-		key = skb_flow_dissector_target(f->dissector,
-						FLOW_DISSECTOR_KEY_ETH_ADDRS,
-						f->key);
-		mask = skb_flow_dissector_target(f->dissector,
-						 FLOW_DISSECTOR_KEY_ETH_ADDRS,
-						 f->mask);
-
-		if (!is_zero_ether_addr(mask->dst)) {
-			if (!is_broadcast_ether_addr(mask->dst)) {
+		flow_rule_match_eth_addrs(rule, &match);
+		if (!is_zero_ether_addr(match.mask->dst)) {
+			if (!is_broadcast_ether_addr(match.mask->dst)) {
 				NL_SET_ERR_MSG_MOD(extack, "Only full masks are supported for destination MAC address");
 				return -EINVAL;
 			}
 
 			input->filter.match_flags |=
 				IGB_FILTER_FLAG_DST_MAC_ADDR;
-			ether_addr_copy(input->filter.dst_addr, key->dst);
+			ether_addr_copy(input->filter.dst_addr, match.key->dst);
 		}
 
-		if (!is_zero_ether_addr(mask->src)) {
-			if (!is_broadcast_ether_addr(mask->src)) {
+		if (!is_zero_ether_addr(match.mask->src)) {
+			if (!is_broadcast_ether_addr(match.mask->src)) {
 				NL_SET_ERR_MSG_MOD(extack, "Only full masks are supported for source MAC address");
 				return -EINVAL;
 			}
 
 			input->filter.match_flags |=
 				IGB_FILTER_FLAG_SRC_MAC_ADDR;
-			ether_addr_copy(input->filter.src_addr, key->src);
+			ether_addr_copy(input->filter.src_addr, match.key->src);
 		}
 	}
 
-	if (dissector_uses_key(f->dissector, FLOW_DISSECTOR_KEY_BASIC)) {
-		struct flow_dissector_key_basic *key, *mask;
+	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_BASIC)) {
+		struct flow_match_basic match;
 
-		key = skb_flow_dissector_target(f->dissector,
-						FLOW_DISSECTOR_KEY_BASIC,
-						f->key);
-		mask = skb_flow_dissector_target(f->dissector,
-						 FLOW_DISSECTOR_KEY_BASIC,
-						 f->mask);
-
-		if (mask->n_proto) {
-			if (mask->n_proto != ETHER_TYPE_FULL_MASK) {
+		flow_rule_match_basic(rule, &match);
+		if (match.mask->n_proto) {
+			if (match.mask->n_proto != ETHER_TYPE_FULL_MASK) {
 				NL_SET_ERR_MSG_MOD(extack, "Only full mask is supported for EtherType filter");
 				return -EINVAL;
 			}
 
 			input->filter.match_flags |= IGB_FILTER_FLAG_ETHER_TYPE;
-			input->filter.etype = key->n_proto;
+			input->filter.etype = match.key->n_proto;
 		}
 	}
 
-	if (dissector_uses_key(f->dissector, FLOW_DISSECTOR_KEY_VLAN)) {
-		struct flow_dissector_key_vlan *key, *mask;
+	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_VLAN)) {
+		struct flow_match_vlan match;
 
-		key = skb_flow_dissector_target(f->dissector,
-						FLOW_DISSECTOR_KEY_VLAN,
-						f->key);
-		mask = skb_flow_dissector_target(f->dissector,
-						 FLOW_DISSECTOR_KEY_VLAN,
-						 f->mask);
-
-		if (mask->vlan_priority) {
-			if (mask->vlan_priority != VLAN_PRIO_FULL_MASK) {
+		flow_rule_match_vlan(rule, &match);
+		if (match.mask->vlan_priority) {
+			if (match.mask->vlan_priority != VLAN_PRIO_FULL_MASK) {
 				NL_SET_ERR_MSG_MOD(extack, "Only full mask is supported for VLAN priority");
 				return -EINVAL;
 			}
 
 			input->filter.match_flags |= IGB_FILTER_FLAG_VLAN_TCI;
-			input->filter.vlan_tci = key->vlan_priority;
+			input->filter.vlan_tci = match.key->vlan_priority;
 		}
 	}
 
@@ -2686,9 +2661,7 @@ static int igb_parse_cls_flower(struct igb_adapter *adapter,
 static int igb_configure_clsflower(struct igb_adapter *adapter,
 				   struct tc_cls_flower_offload *cls_flower)
 {
-#ifndef __rhel7_no_netlink_ext_ack
 	struct netlink_ext_ack *extack = cls_flower->common.extack;
-#endif
 	struct igb_nfc_filter *filter, *f;
 	int err, tc;
 
@@ -2818,7 +2791,7 @@ static int igb_setup_tc_block(struct igb_adapter *adapter,
 	switch (f->command) {
 	case TC_BLOCK_BIND:
 		return tcf_block_cb_register(f->block, igb_setup_tc_block_cb,
-					     adapter, adapter);
+					     adapter, adapter, f->extack);
 	case TC_BLOCK_UNBIND:
 		tcf_block_cb_unregister(f->block, igb_setup_tc_block_cb,
 					adapter);
@@ -2827,9 +2800,6 @@ static int igb_setup_tc_block(struct igb_adapter *adapter,
 		return -EOPNOTSUPP;
 	}
 }
-
-/* RHEL7: don't define igb_offload_txtime if ETF qdisc isn't available */
-#ifdef TC_SETUP_QDISC_ETF
 
 static int igb_offload_txtime(struct igb_adapter *adapter,
 			      struct tc_etf_qopt_offload *qopt)
@@ -2854,8 +2824,6 @@ static int igb_offload_txtime(struct igb_adapter *adapter,
 	return 0;
 }
 
-#endif /* TC_SETUP_QDISC_ETF */
-
 static int igb_setup_tc(struct net_device *dev, enum tc_setup_type type,
 			void *type_data)
 {
@@ -2866,10 +2834,8 @@ static int igb_setup_tc(struct net_device *dev, enum tc_setup_type type,
 		return igb_offload_cbs(adapter, type_data);
 	case TC_SETUP_BLOCK:
 		return igb_setup_tc_block(adapter, type_data);
-#ifdef TC_SETUP_QDISC_ETF
 	case TC_SETUP_QDISC_ETF:
 		return igb_offload_txtime(adapter, type_data);
-#endif /* TC_SETUP_QDISC_ETF */
 
 	default:
 		return -EOPNOTSUPP;
@@ -2877,30 +2843,29 @@ static int igb_setup_tc(struct net_device *dev, enum tc_setup_type type,
 }
 
 static const struct net_device_ops igb_netdev_ops = {
-	.ndo_size		= sizeof(struct net_device_ops),
 	.ndo_open		= igb_open,
 	.ndo_stop		= igb_close,
 	.ndo_start_xmit		= igb_xmit_frame,
 	.ndo_get_stats64	= igb_get_stats64,
 	.ndo_set_rx_mode	= igb_set_rx_mode,
 	.ndo_set_mac_address	= igb_set_mac,
-	.extended.ndo_change_mtu	= igb_change_mtu,
+	.ndo_change_mtu		= igb_change_mtu,
 	.ndo_do_ioctl		= igb_ioctl,
 	.ndo_tx_timeout		= igb_tx_timeout,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_vlan_rx_add_vid	= igb_vlan_rx_add_vid,
 	.ndo_vlan_rx_kill_vid	= igb_vlan_rx_kill_vid,
 	.ndo_set_vf_mac		= igb_ndo_set_vf_mac,
-	.extended.ndo_set_vf_vlan	= igb_ndo_set_vf_vlan,
+	.ndo_set_vf_vlan	= igb_ndo_set_vf_vlan,
 	.ndo_set_vf_rate	= igb_ndo_set_vf_bw,
 	.ndo_set_vf_spoofchk	= igb_ndo_set_vf_spoofchk,
-	.extended.ndo_set_vf_trust	= igb_ndo_set_vf_trust,
+	.ndo_set_vf_trust	= igb_ndo_set_vf_trust,
 	.ndo_get_vf_config	= igb_ndo_get_vf_config,
 	.ndo_fix_features	= igb_fix_features,
 	.ndo_set_features	= igb_set_features,
 	.ndo_fdb_add		= igb_ndo_fdb_add,
 	.ndo_features_check	= igb_features_check,
-	.extended.ndo_setup_tc_rh	= igb_setup_tc,
+	.ndo_setup_tc		= igb_setup_tc,
 };
 
 /**
@@ -3174,8 +3139,8 @@ static int igb_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 #define IGB_GSO_PARTIAL_FEATURES (NETIF_F_GSO_GRE | \
 				  NETIF_F_GSO_GRE_CSUM | \
-				  NETIF_F_GSO_IPIP | \
-				  NETIF_F_GSO_SIT | \
+				  NETIF_F_GSO_IPXIP4 | \
+				  NETIF_F_GSO_IPXIP6 | \
 				  NETIF_F_GSO_UDP_TUNNEL | \
 				  NETIF_F_GSO_UDP_TUNNEL_CSUM)
 
@@ -3208,8 +3173,8 @@ static int igb_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	netdev->priv_flags |= IFF_UNICAST_FLT;
 
 	/* MTU range: 68 - 9216 */
-	netdev->extended->min_mtu = ETH_MIN_MTU;
-	netdev->extended->max_mtu = MAX_STD_JUMBO_FRAME_SIZE;
+	netdev->min_mtu = ETH_MIN_MTU;
+	netdev->max_mtu = MAX_STD_JUMBO_FRAME_SIZE;
 
 	adapter->en_mng_pt = igb_enable_mng_pass_thru(hw);
 
@@ -4782,7 +4747,6 @@ static void igb_clean_rx_ring(struct igb_ring *rx_ring)
 	/* Free all the Rx ring sk_buffs */
 	while (i != rx_ring->next_to_alloc) {
 		struct igb_rx_buffer *buffer_info = &rx_ring->rx_buffer_info[i];
-		DEFINE_DMA_ATTRS(attrs);
 
 		/* Invalidate cache lines that may have been written to by
 		 * device so that we avoid corrupting memory.
@@ -4794,13 +4758,11 @@ static void igb_clean_rx_ring(struct igb_ring *rx_ring)
 					      DMA_FROM_DEVICE);
 
 		/* free resources associated with mapping */
-		dma_set_attr(DMA_ATTR_SKIP_CPU_SYNC, &attrs);
-		dma_set_attr(DMA_ATTR_WEAK_ORDERING, &attrs);
 		dma_unmap_page_attrs(rx_ring->dev,
 				     buffer_info->dma,
 				     igb_rx_pg_size(rx_ring),
 				     DMA_FROM_DEVICE,
-				     &attrs);
+				     IGB_RX_DMA_ATTR);
 		__page_frag_cache_drain(buffer_info->page,
 					buffer_info->pagecnt_bias);
 
@@ -5721,7 +5683,7 @@ static void igb_tx_ctxtdesc(struct igb_ring *tx_ring,
 	 * should have been handled by the upper layers.
 	 */
 	if (tx_ring->launchtime_enable) {
-		ts = ktime_to_timespec64(first->skb->tstamp);
+		ts = ns_to_timespec64(first->skb->tstamp);
 		context_desc->seqnum_seed = cpu_to_le32(ts.tv_nsec / 32);
 	} else {
 		context_desc->seqnum_seed = 0;
@@ -8338,12 +8300,9 @@ static void igb_put_rx_buffer(struct igb_ring *rx_ring,
 		/* We are not reusing the buffer so unmap it and free
 		 * any references we are holding to it
 		 */
-		DEFINE_DMA_ATTRS(attrs);
-		dma_set_attr(DMA_ATTR_SKIP_CPU_SYNC, &attrs);
-		dma_set_attr(DMA_ATTR_WEAK_ORDERING, &attrs);
 		dma_unmap_page_attrs(rx_ring->dev, rx_buffer->dma,
 				     igb_rx_pg_size(rx_ring), DMA_FROM_DEVICE,
-				     &attrs);
+				     IGB_RX_DMA_ATTR);
 		__page_frag_cache_drain(rx_buffer->page,
 					rx_buffer->pagecnt_bias);
 	}
@@ -8453,7 +8412,6 @@ static bool igb_alloc_mapped_page(struct igb_ring *rx_ring,
 {
 	struct page *page = bi->page;
 	dma_addr_t dma;
-	DEFINE_DMA_ATTRS(attrs);
 
 	/* since we are recycling buffers we should seldom need to alloc */
 	if (likely(page))
@@ -8467,12 +8425,10 @@ static bool igb_alloc_mapped_page(struct igb_ring *rx_ring,
 	}
 
 	/* map page for use */
-	dma_set_attr(DMA_ATTR_SKIP_CPU_SYNC, &attrs);
-	dma_set_attr(DMA_ATTR_WEAK_ORDERING, &attrs);
 	dma = dma_map_page_attrs(rx_ring->dev, page, 0,
 				 igb_rx_pg_size(rx_ring),
 				 DMA_FROM_DEVICE,
-				 &attrs);
+				 IGB_RX_DMA_ATTR);
 
 	/* if mapping failed free memory back to system since
 	 * there isn't much point in holding memory we can't use
@@ -8784,9 +8740,7 @@ static int __igb_shutdown(struct pci_dev *pdev, bool *enable_wake,
 	struct e1000_hw *hw = &adapter->hw;
 	u32 ctrl, rctl, status;
 	u32 wufc = runtime ? E1000_WUFC_LNKC : adapter->wol;
-#ifdef CONFIG_PM
-	int retval = 0;
-#endif
+	bool wake;
 
 	rtnl_lock();
 	netif_device_detach(netdev);
@@ -8798,14 +8752,6 @@ static int __igb_shutdown(struct pci_dev *pdev, bool *enable_wake,
 
 	igb_clear_interrupt_scheme(adapter);
 	rtnl_unlock();
-
-#ifdef CONFIG_PM
-	if (!runtime) {
-		retval = pci_save_state(pdev);
-		if (retval)
-			return retval;
-	}
-#endif
 
 	status = rd32(E1000_STATUS);
 	if (status & E1000_STATUS_LU)
@@ -8823,10 +8769,6 @@ static int __igb_shutdown(struct pci_dev *pdev, bool *enable_wake,
 		}
 
 		ctrl = rd32(E1000_CTRL);
-		/* advertise wake from D3Cold */
-		#define E1000_CTRL_ADVD3WUC 0x00100000
-		/* phy power management enable */
-		#define E1000_CTRL_EN_PHY_PWR_MGMT 0x00200000
 		ctrl |= E1000_CTRL_ADVD3WUC;
 		wr32(E1000_CTRL, ctrl);
 
@@ -8840,11 +8782,14 @@ static int __igb_shutdown(struct pci_dev *pdev, bool *enable_wake,
 		wr32(E1000_WUFC, 0);
 	}
 
-	*enable_wake = wufc || adapter->en_mng_pt;
-	if (!*enable_wake)
+	wake = wufc || adapter->en_mng_pt;
+	if (!wake)
 		igb_power_down_link(adapter);
 	else
 		igb_power_up_link(adapter);
+
+	if (enable_wake)
+		*enable_wake = wake;
 
 	/* Release control of h/w to f/w.  If f/w is AMT enabled, this
 	 * would have already happened in close and is redundant.
@@ -8888,22 +8833,7 @@ static void igb_deliver_wake_packet(struct net_device *netdev)
 
 static int __maybe_unused igb_suspend(struct device *dev)
 {
-	int retval;
-	bool wake;
-	struct pci_dev *pdev = to_pci_dev(dev);
-
-	retval = __igb_shutdown(pdev, &wake, 0);
-	if (retval)
-		return retval;
-
-	if (wake) {
-		pci_prepare_to_sleep(pdev);
-	} else {
-		pci_wake_from_d3(pdev, false);
-		pci_set_power_state(pdev, PCI_D3hot);
-	}
-
-	return 0;
+	return __igb_shutdown(to_pci_dev(dev), NULL, 0);
 }
 
 static int __maybe_unused igb_resume(struct device *dev)
@@ -8974,22 +8904,7 @@ static int __maybe_unused igb_runtime_idle(struct device *dev)
 
 static int __maybe_unused igb_runtime_suspend(struct device *dev)
 {
-	struct pci_dev *pdev = to_pci_dev(dev);
-	int retval;
-	bool wake;
-
-	retval = __igb_shutdown(pdev, &wake, 1);
-	if (retval)
-		return retval;
-
-	if (wake) {
-		pci_prepare_to_sleep(pdev);
-	} else {
-		pci_wake_from_d3(pdev, false);
-		pci_set_power_state(pdev, PCI_D3hot);
-	}
-
-	return 0;
+	return __igb_shutdown(to_pci_dev(dev), NULL, 1);
 }
 
 static int __maybe_unused igb_runtime_resume(struct device *dev)
@@ -9118,7 +9033,6 @@ static pci_ers_result_t igb_io_slot_reset(struct pci_dev *pdev)
 	struct igb_adapter *adapter = netdev_priv(netdev);
 	struct e1000_hw *hw = &adapter->hw;
 	pci_ers_result_t result;
-	int err;
 
 	if (pci_enable_device_mem(pdev)) {
 		dev_err(&pdev->dev,
@@ -9140,14 +9054,6 @@ static pci_ers_result_t igb_io_slot_reset(struct pci_dev *pdev)
 		igb_reset(adapter);
 		wr32(E1000_WUS, ~0);
 		result = PCI_ERS_RESULT_RECOVERED;
-	}
-
-	err = pci_cleanup_aer_uncorrect_error_status(pdev);
-	if (err) {
-		dev_err(&pdev->dev,
-			"pci_cleanup_aer_uncorrect_error_status failed 0x%0x\n",
-			err);
-		/* non-fatal, continue */
 	}
 
 	return result;

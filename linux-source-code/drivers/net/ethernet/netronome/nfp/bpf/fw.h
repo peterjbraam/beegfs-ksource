@@ -7,11 +7,22 @@
 #include <linux/bitops.h>
 #include <linux/types.h>
 
+/* Kernel's enum bpf_reg_type is not uABI so people may change it breaking
+ * our FW ABI.  In that case we will do translation in the driver.
+ */
+#define NFP_BPF_SCALAR_VALUE		1
+#define NFP_BPF_MAP_VALUE		4
+#define NFP_BPF_STACK			6
+#define NFP_BPF_PACKET_DATA		8
+
 enum bpf_cap_tlv_type {
 	NFP_BPF_CAP_TYPE_FUNC		= 1,
 	NFP_BPF_CAP_TYPE_ADJUST_HEAD	= 2,
 	NFP_BPF_CAP_TYPE_MAPS		= 3,
 	NFP_BPF_CAP_TYPE_RANDOM		= 4,
+	NFP_BPF_CAP_TYPE_QUEUE_SELECT	= 5,
+	NFP_BPF_CAP_TYPE_ADJUST_TAIL	= 6,
+	NFP_BPF_CAP_TYPE_ABI_VERSION	= 7,
 };
 
 struct nfp_bpf_cap_tlv_func {
@@ -51,12 +62,14 @@ enum nfp_bpf_cmsg_type {
 	CMSG_TYPE_MAP_DELETE	= 5,
 	CMSG_TYPE_MAP_GETNEXT	= 6,
 	CMSG_TYPE_MAP_GETFIRST	= 7,
+	CMSG_TYPE_BPF_EVENT	= 8,
 	__CMSG_TYPE_MAP_MAX,
 };
 
 #define CMSG_TYPE_MAP_REPLY_BIT		7
 #define __CMSG_REPLY(req)		(BIT(CMSG_TYPE_MAP_REPLY_BIT) | (req))
 
+/* BPF ABIv2 fixed-length control message fields */
 #define CMSG_MAP_KEY_LW			16
 #define CMSG_MAP_VALUE_LW		16
 
@@ -106,23 +119,27 @@ struct cmsg_reply_map_free_tbl {
 	__be32 count;
 };
 
-struct cmsg_key_value_pair {
-	__be32 key[CMSG_MAP_KEY_LW];
-	__be32 value[CMSG_MAP_VALUE_LW];
-};
-
 struct cmsg_req_map_op {
 	struct cmsg_hdr hdr;
 	__be32 tid;
 	__be32 count;
 	__be32 flags;
-	struct cmsg_key_value_pair elem[0];
+	u8 data[0];
 };
 
 struct cmsg_reply_map_op {
 	struct cmsg_reply_map_simple reply_hdr;
 	__be32 count;
 	__be32 resv;
-	struct cmsg_key_value_pair elem[0];
+	u8 data[0];
+};
+
+struct cmsg_bpf_event {
+	struct cmsg_hdr hdr;
+	__be32 cpu_id;
+	__be64 map_ptr;
+	__be32 data_size;
+	__be32 pkt_size;
+	u8 data[0];
 };
 #endif

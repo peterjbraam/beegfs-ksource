@@ -198,9 +198,9 @@ static struct sk_buff *nes_get_next_skb(struct nes_device *nesdev, struct nes_qp
 
 	if (skb) {
 		/* Continue processing fpdu */
-		skb = skb_peek_next(skb, &nesqp->pau_list);
-		if (!skb)
+		if (skb->next == (struct sk_buff *)&nesqp->pau_list)
 			goto out;
+		skb = skb->next;
 		processacks = false;
 	} else {
 		/* Starting a new one */
@@ -553,10 +553,12 @@ static void queue_fpdus(struct sk_buff *skb, struct nes_vnic *nesvnic, struct ne
 	if (skb_queue_len(&nesqp->pau_list) == 0) {
 		skb_queue_head(&nesqp->pau_list, skb);
 	} else {
-		skb_queue_walk(&nesqp->pau_list, tmpskb) {
+		tmpskb = nesqp->pau_list.next;
+		while (tmpskb != (struct sk_buff *)&nesqp->pau_list) {
 			cb = (struct nes_rskb_cb *)&tmpskb->cb[0];
 			if (before(seqnum, cb->seqnum))
 				break;
+			tmpskb = tmpskb->next;
 		}
 		skb_insert(tmpskb, skb, &nesqp->pau_list);
 	}
@@ -795,7 +797,6 @@ static void nes_mgt_ce_handler(struct nes_device *nesdev, struct nes_hw_nic_cq *
 			qp_id = le32_to_cpu(cq->cq_vbase[head].cqe_words[NES_NIC_CQE_ACCQP_ID_IDX]);
 			qp_id &= 0x001fffff;
 			if (qp_id < nesadapter->max_qp) {
-				gmb();
 				context = (unsigned long)nesadapter->qp_table[qp_id - NES_FIRST_QPN];
 				nesqp = (struct nes_qp *)context;
 			}

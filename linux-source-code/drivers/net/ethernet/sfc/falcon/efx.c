@@ -1242,9 +1242,8 @@ static int ef4_init_io(struct ef4_nic *efx)
 
 	pci_set_master(pci_dev);
 
-	/* Set the PCI DMA mask.  Try all possibilities from our
-	 * genuine mask down to 32 bits, because some architectures
-	 * (e.g. x86_64 with iommu_sac_force set) will allow 40 bit
+	/* Set the PCI DMA mask.  Try all possibilities from our genuine mask
+	 * down to 32 bits, because some architectures will allow 40 bit
 	 * masks event though they reject 46 bit masks.
 	 */
 	while (dma_mask > 0x7fffffffUL) {
@@ -2055,6 +2054,29 @@ static void ef4_fini_napi(struct ef4_nic *efx)
 
 /**************************************************************************
  *
+ * Kernel netpoll interface
+ *
+ *************************************************************************/
+
+#ifdef CONFIG_NET_POLL_CONTROLLER
+
+/* Although in the common case interrupts will be disabled, this is not
+ * guaranteed. However, all our work happens inside the NAPI callback,
+ * so no locking is required.
+ */
+static void ef4_netpoll(struct net_device *net_dev)
+{
+	struct ef4_nic *efx = netdev_priv(net_dev);
+	struct ef4_channel *channel;
+
+	ef4_for_each_channel(channel, efx)
+		ef4_schedule_channel(channel);
+}
+
+#endif
+
+/**************************************************************************
+ *
  * Kernel net device interface
  *
  *************************************************************************/
@@ -2133,18 +2155,6 @@ static int ef4_change_mtu(struct net_device *net_dev, int new_mtu)
 	rc = ef4_check_disabled(efx);
 	if (rc)
 		return rc;
-        if (new_mtu > EF4_MAX_MTU) {
-                netif_err(efx, drv, efx->net_dev,
-                          "Requested MTU of %d too big (max: %d)\n",
-                          new_mtu, EF4_MAX_MTU);
-                return -EINVAL;
-        }
-        if (new_mtu < EF4_MIN_MTU) {
-                netif_err(efx, drv, efx->net_dev,
-                          "Requested MTU of %d too small (min: %d)\n",
-                          new_mtu, EF4_MIN_MTU);
-                return -EINVAL;
-        }
 
 	netif_dbg(efx, drv, efx->net_dev, "changing MTU to %d\n", new_mtu);
 
@@ -2229,7 +2239,6 @@ static int ef4_set_features(struct net_device *net_dev, netdev_features_t data)
 }
 
 static const struct net_device_ops ef4_netdev_ops = {
-	.ndo_size		= sizeof(struct net_device_ops),
 	.ndo_open		= ef4_net_open,
 	.ndo_stop		= ef4_net_stop,
 	.ndo_get_stats64	= ef4_net_stats,
@@ -2237,11 +2246,14 @@ static const struct net_device_ops ef4_netdev_ops = {
 	.ndo_start_xmit		= ef4_hard_start_xmit,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_do_ioctl		= ef4_ioctl,
-	.ndo_change_mtu_rh74	= ef4_change_mtu,
+	.ndo_change_mtu		= ef4_change_mtu,
 	.ndo_set_mac_address	= ef4_set_mac_address,
 	.ndo_set_rx_mode	= ef4_set_rx_mode,
 	.ndo_set_features	= ef4_set_features,
-	.extended.ndo_setup_tc_rh = ef4_setup_tc,
+#ifdef CONFIG_NET_POLL_CONTROLLER
+	.ndo_poll_controller = ef4_netpoll,
+#endif
+	.ndo_setup_tc		= ef4_setup_tc,
 #ifdef CONFIG_RFS_ACCEL
 	.ndo_rx_flow_steer	= ef4_filter_rfs,
 #endif
@@ -2289,6 +2301,8 @@ static int ef4_register_netdev(struct ef4_nic *efx)
 	net_dev->netdev_ops = &ef4_netdev_ops;
 	net_dev->ethtool_ops = &ef4_ethtool_ops;
 	net_dev->gso_max_segs = EF4_TSO_MAX_SEGS;
+	net_dev->min_mtu = EF4_MIN_MTU;
+	net_dev->max_mtu = EF4_MAX_MTU;
 
 	rtnl_lock();
 
@@ -2528,7 +2542,7 @@ static void ef4_reset_work(struct work_struct *data)
 	unsigned long pending;
 	enum reset_type method;
 
-	pending = ACCESS_ONCE(efx->reset_pending);
+	pending = READ_ONCE(efx->reset_pending);
 	method = fls(pending) - 1;
 
 	if ((method == RESET_TYPE_RECOVER_OR_DISABLE ||
@@ -2588,7 +2602,7 @@ void ef4_schedule_reset(struct ef4_nic *efx, enum reset_type type)
 	/* If we're not READY then just leave the flags set as the cue
 	 * to abort probing or reschedule the reset later.
 	 */
-	if (ACCESS_ONCE(efx->state) != STATE_READY)
+	if (READ_ONCE(efx->state) != STATE_READY)
 		return;
 
 	queue_work(reset_workqueue, &efx->reset_work);
@@ -3172,19 +3186,11 @@ static pci_ers_result_t ef4_io_slot_reset(struct pci_dev *pdev)
 {
 	struct ef4_nic *efx = pci_get_drvdata(pdev);
 	pci_ers_result_t status = PCI_ERS_RESULT_RECOVERED;
-	int rc;
 
 	if (pci_enable_device(pdev)) {
 		netif_err(efx, hw, efx->net_dev,
 			  "Cannot re-enable PCI device after reset.\n");
 		status =  PCI_ERS_RESULT_DISCONNECT;
-	}
-
-	rc = pci_cleanup_aer_uncorrect_error_status(pdev);
-	if (rc) {
-		netif_err(efx, hw, efx->net_dev,
-		"pci_cleanup_aer_uncorrect_error_status failed (%d)\n", rc);
-		/* Non-fatal error. Continue. */
 	}
 
 	return status;
@@ -3252,7 +3258,7 @@ static int __init ef4_init_module(void)
 
 	printk(KERN_INFO "Solarflare Falcon driver v" EF4_DRIVER_VERSION "\n");
 
-	rc = register_netdevice_notifier_rh(&ef4_netdev_notifier);
+	rc = register_netdevice_notifier(&ef4_netdev_notifier);
 	if (rc)
 		goto err_notifier;
 
@@ -3271,7 +3277,7 @@ static int __init ef4_init_module(void)
  err_pci:
 	destroy_workqueue(reset_workqueue);
  err_reset:
-	unregister_netdevice_notifier_rh(&ef4_netdev_notifier);
+	unregister_netdevice_notifier(&ef4_netdev_notifier);
  err_notifier:
 	return rc;
 }
@@ -3282,7 +3288,7 @@ static void __exit ef4_exit_module(void)
 
 	pci_unregister_driver(&ef4_pci_driver);
 	destroy_workqueue(reset_workqueue);
-	unregister_netdevice_notifier_rh(&ef4_netdev_notifier);
+	unregister_netdevice_notifier(&ef4_netdev_notifier);
 
 }
 

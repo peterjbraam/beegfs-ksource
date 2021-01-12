@@ -39,9 +39,6 @@ unsigned long __phys_offset;	/*  physical kernel offset >> 12  */
 /*  Set as variable to limit PMD copies  */
 int max_kernel_seg = 0x303;
 
-/*  think this should be (page_size-1) the way it's used...*/
-unsigned long zero_page_mask;
-
 /*  indicate pfn's of high memory  */
 unsigned long highstart_pfn, highend_pfn;
 
@@ -70,10 +67,8 @@ unsigned long long kmap_generation;
 void __init mem_init(void)
 {
 	/*  No idea where this is actually declared.  Seems to evade LXR.  */
-	totalram_pages += free_all_bootmem();
-	num_physpages = bootmem_lastpg-ARCH_PFN_OFFSET;
-
-	printk(KERN_INFO "totalram_pages = %ld\n", totalram_pages);
+	free_all_bootmem();
+	mem_init_print_info(NULL);
 
 	/*
 	 *  To-Do:  someone somewhere should wipe out the bootmem map
@@ -95,7 +90,7 @@ void __init mem_init(void)
  * Todo:  free pages between __init_begin and __init_end; possibly
  * some devtree related stuff as well.
  */
-void __init_refok free_initmem(void)
+void __ref free_initmem(void)
 {
 }
 

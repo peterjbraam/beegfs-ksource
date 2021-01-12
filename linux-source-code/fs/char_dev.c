@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/fs/char_dev.c
  *
@@ -24,30 +25,11 @@
 
 #include "internal.h"
 
-/*
- * capabilities for /dev/mem, /dev/kmem and similar directly mappable character
- * devices
- * - permits shared-mmap for read, write and/or exec
- * - does not permit private mmap in NOMMU mode (can't do COW)
- * - no readahead or I/O queue unplugging required
- */
-struct backing_dev_info directly_mappable_cdev_bdi = {
-	.name = "char",
-	.capabilities	= (
-#ifdef CONFIG_MMU
-		/* permit private copies of the data to be taken */
-		BDI_CAP_MAP_COPY |
-#endif
-		/* permit direct mmap, for read, write or exec */
-		BDI_CAP_MAP_DIRECT |
-		BDI_CAP_READ_MAP | BDI_CAP_WRITE_MAP | BDI_CAP_EXEC_MAP |
-		/* no writeback happens */
-		BDI_CAP_NO_ACCT_AND_WRITEBACK),
-};
-
 static struct kobj_map *cdev_map;
 
 static DEFINE_MUTEX(chrdevs_lock);
+
+#define CHRDEV_MAJOR_HASH_SIZE 255
 
 static struct char_device_struct {
 	struct char_device_struct *next;
@@ -70,15 +52,38 @@ void chrdev_show(struct seq_file *f, off_t offset)
 {
 	struct char_device_struct *cd;
 
-	if (offset < CHRDEV_MAJOR_HASH_SIZE) {
-		mutex_lock(&chrdevs_lock);
-		for (cd = chrdevs[offset]; cd; cd = cd->next)
+	mutex_lock(&chrdevs_lock);
+	for (cd = chrdevs[major_to_index(offset)]; cd; cd = cd->next) {
+		if (cd->major == offset)
 			seq_printf(f, "%3d %s\n", cd->major, cd->name);
-		mutex_unlock(&chrdevs_lock);
 	}
+	mutex_unlock(&chrdevs_lock);
 }
 
 #endif /* CONFIG_PROC_FS */
+
+static int find_dynamic_major(void)
+{
+	int i;
+	struct char_device_struct *cd;
+
+	for (i = ARRAY_SIZE(chrdevs)-1; i >= CHRDEV_MAJOR_DYN_END; i--) {
+		if (chrdevs[i] == NULL)
+			return i;
+	}
+
+	for (i = CHRDEV_MAJOR_DYN_EXT_START;
+	     i >= CHRDEV_MAJOR_DYN_EXT_END; i--) {
+		for (cd = chrdevs[major_to_index(i)]; cd; cd = cd->next)
+			if (cd->major == i)
+				break;
+
+		if (cd == NULL)
+			return i;
+	}
+
+	return -EBUSY;
+}
 
 /*
  * Register a single major with a specified minor range.
@@ -105,19 +110,21 @@ __register_chrdev_region(unsigned int major, unsigned int baseminor,
 
 	mutex_lock(&chrdevs_lock);
 
-	/* temporary */
 	if (major == 0) {
-		for (i = ARRAY_SIZE(chrdevs)-1; i > 0; i--) {
-			if (chrdevs[i] == NULL)
-				break;
-		}
-
-		if (i == 0) {
-			ret = -EBUSY;
+		ret = find_dynamic_major();
+		if (ret < 0) {
+			pr_err("CHRDEV \"%s\" dynamic allocation region is full\n",
+			       name);
 			goto out;
 		}
-		major = i;
-		ret = major;
+		major = ret;
+	}
+
+	if (major >= CHRDEV_MAJOR_MAX) {
+		pr_err("CHRDEV \"%s\" major requested (%u) is greater than the maximum (%u)\n",
+		       name, major, CHRDEV_MAJOR_MAX-1);
+		ret = -EINVAL;
+		goto out;
 	}
 
 	cd->major = major;
@@ -296,7 +303,7 @@ out2:
 }
 
 /**
- * unregister_chrdev_region() - return a range of device numbers
+ * unregister_chrdev_region() - unregister a range of device numbers
  * @from: the first in the range of numbers to unregister
  * @count: the number of device numbers to unregister
  *
@@ -368,6 +375,7 @@ void cdev_put(struct cdev *p)
  */
 static int chrdev_open(struct inode *inode, struct file *filp)
 {
+	const struct file_operations *fops;
 	struct cdev *p;
 	struct cdev *new = NULL;
 	int ret = 0;
@@ -400,10 +408,11 @@ static int chrdev_open(struct inode *inode, struct file *filp)
 		return ret;
 
 	ret = -ENXIO;
-	filp->f_op = fops_get(p->ops);
-	if (!filp->f_op)
+	fops = fops_get(p->ops);
+	if (!fops)
 		goto out_cdev_put;
 
+	replace_fops(filp, fops);
 	if (filp->f_op->open) {
 		ret = filp->f_op->open(inode, filp);
 		if (ret)
@@ -658,7 +667,6 @@ static struct kobject *base_probe(dev_t dev, int *part, void *data)
 void __init chrdev_init(void)
 {
 	cdev_map = kobj_map_init(base_probe, &chrdevs_lock);
-	bdi_init(&directly_mappable_cdev_bdi);
 }
 
 
@@ -675,4 +683,3 @@ EXPORT_SYMBOL(cdev_device_add);
 EXPORT_SYMBOL(cdev_device_del);
 EXPORT_SYMBOL(__register_chrdev);
 EXPORT_SYMBOL(__unregister_chrdev);
-EXPORT_SYMBOL(directly_mappable_cdev_bdi);

@@ -14,6 +14,7 @@
 #include <linux/buffer_head.h>
 #include <linux/gfs2_ondisk.h>
 #include <linux/crc32.h>
+#include <linux/crc32c.h>
 #include <linux/ktime.h>
 
 #include "gfs2.h"
@@ -21,6 +22,7 @@
 #include "bmap.h"
 #include "glock.h"
 #include "glops.h"
+#include "log.h"
 #include "lops.h"
 #include "meta_io.h"
 #include "recovery.h"
@@ -118,33 +120,6 @@ void gfs2_revoke_clean(struct gfs2_jdesc *jd)
 	}
 }
 
-int __get_log_header(struct gfs2_sbd *sdp, const struct gfs2_log_header *lh,
-		     unsigned int blkno, struct gfs2_log_header_host *head)
-{
-	const u32 nothing = 0;
-	u32 hash;
-
-	if (lh->lh_header.mh_magic != cpu_to_be32(GFS2_MAGIC) ||
-	    lh->lh_header.mh_type != cpu_to_be32(GFS2_METATYPE_LH) ||
-	    (blkno && be32_to_cpu(lh->lh_blkno) != blkno))
-		return 1;
-
-	hash = crc32_le((u32)~0, (void*)lh, sizeof(struct gfs2_log_header) -
-			sizeof(u32));
-	hash = crc32_le(hash, (unsigned char const *)&nothing, sizeof(nothing));
-	hash ^= (u32)~0;
-
-	if (be32_to_cpu(lh->lh_hash) != hash)
-		return 1;
-
-	head->lh_sequence = be64_to_cpu(lh->lh_sequence);
-	head->lh_flags = be32_to_cpu(lh->lh_flags);
-	head->lh_tail = be32_to_cpu(lh->lh_tail);
-	head->lh_blkno = be32_to_cpu(lh->lh_blkno);
-
-	return 0;
-}
-
 /**
  * get_log_header - read the log header for a given segment
  * @jd: the journal
@@ -162,17 +137,158 @@ int __get_log_header(struct gfs2_sbd *sdp, const struct gfs2_log_header *lh,
 static int get_log_header(struct gfs2_jdesc *jd, unsigned int blk,
 			  struct gfs2_log_header_host *head)
 {
-	struct gfs2_sbd *sdp = GFS2_SB(jd->jd_inode);
+	struct gfs2_log_header *lh;
 	struct buffer_head *bh;
+	u32 hash, crc;
 	int error;
 
 	error = gfs2_replay_read_block(jd, blk, &bh);
 	if (error)
 		return error;
+	lh = (void *)bh->b_data;
 
-	error = __get_log_header(sdp, (const struct gfs2_log_header *)bh->b_data,
-				 blk, head);
+	hash = crc32(~0, lh, LH_V1_SIZE - 4);
+	hash = ~crc32_le_shift(hash, 4);  /* assume lh_hash is zero */
+
+	crc = crc32c(~0, (void *)lh + LH_V1_SIZE + 4,
+		     bh->b_size - LH_V1_SIZE - 4);
+
+	error = lh->lh_header.mh_magic != cpu_to_be32(GFS2_MAGIC) ||
+		lh->lh_header.mh_type != cpu_to_be32(GFS2_METATYPE_LH) ||
+		be32_to_cpu(lh->lh_blkno) != blk ||
+		be32_to_cpu(lh->lh_hash) != hash ||
+		(lh->lh_crc != 0 && be32_to_cpu(lh->lh_crc) != crc);
+
 	brelse(bh);
+
+	if (!error) {
+		head->lh_sequence = be64_to_cpu(lh->lh_sequence);
+		head->lh_flags = be32_to_cpu(lh->lh_flags);
+		head->lh_tail = be32_to_cpu(lh->lh_tail);
+		head->lh_blkno = be32_to_cpu(lh->lh_blkno);
+	}
+	return error;
+}
+
+/**
+ * find_good_lh - find a good log header
+ * @jd: the journal
+ * @blk: the segment to start searching from
+ * @lh: the log header to fill in
+ * @forward: if true search forward in the log, else search backward
+ *
+ * Call get_log_header() to get a log header for a segment, but if the
+ * segment is bad, either scan forward or backward until we find a good one.
+ *
+ * Returns: errno
+ */
+
+static int find_good_lh(struct gfs2_jdesc *jd, unsigned int *blk,
+			struct gfs2_log_header_host *head)
+{
+	unsigned int orig_blk = *blk;
+	int error;
+
+	for (;;) {
+		error = get_log_header(jd, *blk, head);
+		if (error <= 0)
+			return error;
+
+		if (++*blk == jd->jd_blocks)
+			*blk = 0;
+
+		if (*blk == orig_blk) {
+			gfs2_consist_inode(GFS2_I(jd->jd_inode));
+			return -EIO;
+		}
+	}
+}
+
+/**
+ * jhead_scan - make sure we've found the head of the log
+ * @jd: the journal
+ * @head: this is filled in with the log descriptor of the head
+ *
+ * At this point, seg and lh should be either the head of the log or just
+ * before.  Scan forward until we find the head.
+ *
+ * Returns: errno
+ */
+
+static int jhead_scan(struct gfs2_jdesc *jd, struct gfs2_log_header_host *head)
+{
+	unsigned int blk = head->lh_blkno;
+	struct gfs2_log_header_host lh;
+	int error;
+
+	for (;;) {
+		if (++blk == jd->jd_blocks)
+			blk = 0;
+
+		error = get_log_header(jd, blk, &lh);
+		if (error < 0)
+			return error;
+		if (error == 1)
+			continue;
+
+		if (lh.lh_sequence == head->lh_sequence) {
+			gfs2_consist_inode(GFS2_I(jd->jd_inode));
+			return -EIO;
+		}
+		if (lh.lh_sequence < head->lh_sequence)
+			break;
+
+		*head = lh;
+	}
+
+	return 0;
+}
+
+/**
+ * gfs2_find_jhead - find the head of a log
+ * @jd: the journal
+ * @head: the log descriptor for the head of the log is returned here
+ *
+ * Do a binary search of a journal and find the valid log entry with the
+ * highest sequence number.  (i.e. the log head)
+ *
+ * Returns: errno
+ */
+
+int gfs2_find_jhead(struct gfs2_jdesc *jd, struct gfs2_log_header_host *head)
+{
+	struct gfs2_log_header_host lh_1, lh_m;
+	u32 blk_1, blk_2, blk_m;
+	int error;
+
+	blk_1 = 0;
+	blk_2 = jd->jd_blocks - 1;
+
+	for (;;) {
+		blk_m = (blk_1 + blk_2) / 2;
+
+		error = find_good_lh(jd, &blk_1, &lh_1);
+		if (error)
+			return error;
+
+		error = find_good_lh(jd, &blk_m, &lh_m);
+		if (error)
+			return error;
+
+		if (blk_1 == blk_m || blk_m == blk_2)
+			break;
+
+		if (lh_1.lh_sequence <= lh_m.lh_sequence)
+			blk_1 = blk_m;
+		else
+			blk_2 = blk_m;
+	}
+
+	error = jhead_scan(jd, &lh_1);
+	if (error)
+		return error;
+
+	*head = lh_1;
 
 	return error;
 }
@@ -189,7 +305,7 @@ static int get_log_header(struct gfs2_jdesc *jd, unsigned int blk,
  * Returns: errno
  */
 
-static int foreach_descriptor(struct gfs2_jdesc *jd, unsigned int start,
+static int foreach_descriptor(struct gfs2_jdesc *jd, u32 start,
 			      unsigned int end, int pass)
 {
 	struct gfs2_sbd *sdp = GFS2_SB(jd->jd_inode);
@@ -249,62 +365,24 @@ static int foreach_descriptor(struct gfs2_jdesc *jd, unsigned int start,
 
 /**
  * clean_journal - mark a dirty journal as being clean
- * @sdp: the filesystem
  * @jd: the journal
- * @gl: the journal's glock
  * @head: the head journal to start from
  *
  * Returns: errno
  */
 
-static int clean_journal(struct gfs2_jdesc *jd, struct gfs2_log_header_host *head)
+static void clean_journal(struct gfs2_jdesc *jd,
+			  struct gfs2_log_header_host *head)
 {
-	struct gfs2_inode *ip = GFS2_I(jd->jd_inode);
 	struct gfs2_sbd *sdp = GFS2_SB(jd->jd_inode);
-	unsigned int lblock;
-	struct gfs2_log_header *lh;
-	u32 hash;
-	struct buffer_head *bh;
-	int error;
-	struct buffer_head bh_map = { .b_state = 0, .b_blocknr = 0 };
+	u32 lblock = head->lh_blkno;
 
-	lblock = head->lh_blkno;
 	gfs2_replay_incr_blk(jd, &lblock);
-	bh_map.b_size = 1 << ip->i_inode.i_blkbits;
-	error = gfs2_block_map(&ip->i_inode, lblock, &bh_map, 0);
-	if (error)
-		return error;
-	if (!bh_map.b_blocknr) {
-		gfs2_consist_inode(ip);
-		return -EIO;
-	}
-
-	bh = sb_getblk(sdp->sd_vfs, bh_map.b_blocknr);
-	lock_buffer(bh);
-	memset(bh->b_data, 0, bh->b_size);
-	set_buffer_uptodate(bh);
-	clear_buffer_dirty(bh);
-	unlock_buffer(bh);
-
-	lh = (struct gfs2_log_header *)bh->b_data;
-	memset(lh, 0, sizeof(struct gfs2_log_header));
-	lh->lh_header.mh_magic = cpu_to_be32(GFS2_MAGIC);
-	lh->lh_header.mh_type = cpu_to_be32(GFS2_METATYPE_LH);
-	lh->lh_header.__pad0 = cpu_to_be64(0);
-	lh->lh_header.mh_format = cpu_to_be32(GFS2_FORMAT_LH);
-	lh->lh_header.mh_jid = cpu_to_be32(sdp->sd_jdesc->jd_jid);
-	lh->lh_sequence = cpu_to_be64(head->lh_sequence + 1);
-	lh->lh_flags = cpu_to_be32(GFS2_LOG_HEAD_UNMOUNT);
-	lh->lh_blkno = cpu_to_be32(lblock);
-	hash = gfs2_disk_hash((const char *)lh, sizeof(struct gfs2_log_header));
-	lh->lh_hash = cpu_to_be32(hash);
-
-	set_buffer_dirty(bh);
-	if (sync_dirty_buffer(bh))
-		gfs2_io_error_bh(sdp, bh);
-	brelse(bh);
-
-	return error;
+	if (jd->jd_jid == sdp->sd_lockstruct.ls_jid)
+		sdp->sd_log_flush_head = lblock;
+	gfs2_write_log_header(sdp, jd, head->lh_sequence + 1, 0, lblock,
+			      GFS2_LOG_HEAD_UNMOUNT | GFS2_LOG_HEAD_RECOVERY,
+			      REQ_PREFLUSH | REQ_FUA | REQ_META | REQ_SYNC);
 }
 
 
@@ -318,7 +396,7 @@ static void gfs2_recovery_done(struct gfs2_sbd *sdp, unsigned int jid,
 
         ls->ls_recover_jid_done = jid;
         ls->ls_recover_jid_status = message;
-	sprintf(env_jid, "JID=%d", jid);
+	sprintf(env_jid, "JID=%u", jid);
 	sprintf(env_status, "RECOVERY=%s",
 		message == LM_RD_SUCCESS ? "Done" : "Failed");
         kobject_uevent_env(&sdp->sd_kobj, KOBJ_CHANGE, envp);
@@ -333,7 +411,7 @@ void gfs2_recover_func(struct work_struct *work)
 	struct gfs2_inode *ip = GFS2_I(jd->jd_inode);
 	struct gfs2_sbd *sdp = GFS2_SB(jd->jd_inode);
 	struct gfs2_log_header_host head;
-	struct gfs2_holder j_gh, ji_gh, t_gh;
+	struct gfs2_holder j_gh, ji_gh, thaw_gh;
 	ktime_t t_start, t_jlck, t_jhd, t_tlck, t_rep;
 	int ro = 0;
 	unsigned int pass;
@@ -380,22 +458,20 @@ void gfs2_recover_func(struct work_struct *work)
 	if (error)
 		goto fail_gunlock_ji;
 
-	error = gfs2_find_jhead(jd, &head, true);
+	error = gfs2_find_jhead(jd, &head);
 	if (error)
 		goto fail_gunlock_ji;
 	t_jhd = ktime_get();
-	fs_info(sdp, "jid=%u: Journal head lookup took %lldms\n", jd->jd_jid,
-		ktime_ms_delta(t_jhd, t_jlck));
 
 	if (!(head.lh_flags & GFS2_LOG_HEAD_UNMOUNT)) {
 		fs_info(sdp, "jid=%u: Acquiring the transaction lock...\n",
 			jd->jd_jid);
 
-		/* Acquire a shared hold on the transaction lock */
+		/* Acquire a shared hold on the freeze lock */
 
-		error = gfs2_glock_nq_init(sdp->sd_trans_gl, LM_ST_SHARED,
-					   LM_FLAG_NOEXP | LM_FLAG_PRIORITY |
-					   GL_NOCACHE, &t_gh);
+		error = gfs2_glock_nq_init(sdp->sd_freeze_gl, LM_ST_SHARED,
+					   LM_FLAG_NOEXP | LM_FLAG_PRIORITY,
+					   &thaw_gh);
 		if (error)
 			goto fail_gunlock_ji;
 
@@ -405,7 +481,7 @@ void gfs2_recover_func(struct work_struct *work)
 			if (!test_bit(SDF_JOURNAL_LIVE, &sdp->sd_flags))
 				ro = 1;
 		} else {
-			if (sdp->sd_vfs->s_flags & MS_RDONLY) {
+			if (sb_rdonly(sdp->sd_vfs)) {
 				/* check if device itself is read-only */
 				ro = bdev_read_only(sdp->sd_vfs->s_bdev);
 				if (!ro) {
@@ -421,7 +497,7 @@ void gfs2_recover_func(struct work_struct *work)
 			fs_warn(sdp, "jid=%u: Can't replay: read-only block "
 				"device\n", jd->jd_jid);
 			error = -EROFS;
-			goto fail_gunlock_tr;
+			goto fail_gunlock_thaw;
 		}
 
 		t_tlck = ktime_get();
@@ -433,14 +509,12 @@ void gfs2_recover_func(struct work_struct *work)
 						   head.lh_blkno, pass);
 			lops_after_scan(jd, error, pass);
 			if (error)
-				goto fail_gunlock_tr;
+				goto fail_gunlock_thaw;
 		}
 
-		error = clean_journal(jd, &head);
-		if (error)
-			goto fail_gunlock_tr;
+		clean_journal(jd, &head);
 
-		gfs2_glock_dq_uninit(&t_gh);
+		gfs2_glock_dq_uninit(&thaw_gh);
 		t_rep = ktime_get();
 		fs_info(sdp, "jid=%u: Journal replayed in %lldms [jlck:%lldms, "
 			"jhead:%lldms, tlck:%lldms, replay:%lldms]\n",
@@ -461,8 +535,8 @@ void gfs2_recover_func(struct work_struct *work)
 	fs_info(sdp, "jid=%u: Done\n", jd->jd_jid);
 	goto done;
 
-fail_gunlock_tr:
-	gfs2_glock_dq_uninit(&t_gh);
+fail_gunlock_thaw:
+	gfs2_glock_dq_uninit(&thaw_gh);
 fail_gunlock_ji:
 	if (jlocked) {
 		gfs2_glock_dq_uninit(&ji_gh);
@@ -476,7 +550,7 @@ fail:
 	gfs2_recovery_done(sdp, jd->jd_jid, LM_RD_GAVEUP);
 done:
 	clear_bit(JDF_RECOVERY, &jd->jd_flags);
-	smp_mb__after_clear_bit();
+	smp_mb__after_atomic();
 	wake_up_bit(&jd->jd_flags, JDF_RECOVERY);
 }
 

@@ -194,7 +194,7 @@ static int mlx4_en_fill_rx_buffers(struct mlx4_en_priv *priv)
 
 			if (mlx4_en_prepare_rx_desc(priv, ring,
 						    ring->actual_size,
-						    GFP_KERNEL | __GFP_COLD)) {
+						    GFP_KERNEL)) {
 				if (ring->actual_size < MLX4_EN_MIN_RX_SIZE) {
 					en_err(priv, "Failed to allocate enough rx buffers\n");
 					return -ENOMEM;
@@ -272,11 +272,8 @@ int mlx4_en_create_rx_ring(struct mlx4_en_priv *priv,
 
 	ring = kzalloc_node(sizeof(*ring), GFP_KERNEL, node);
 	if (!ring) {
-		ring = kzalloc(sizeof(*ring), GFP_KERNEL);
-		if (!ring) {
-			en_err(priv, "Failed to allocate RX ring structure\n");
-			return -ENOMEM;
-		}
+		en_err(priv, "Failed to allocate RX ring structure\n");
+		return -ENOMEM;
 	}
 
 	ring->prod = 0;
@@ -559,8 +556,7 @@ static void mlx4_en_refill_rx_buffers(struct mlx4_en_priv *priv,
 	do {
 		if (mlx4_en_prepare_rx_desc(priv, ring,
 					    ring->prod & ring->size_mask,
-					    GFP_ATOMIC | __GFP_COLD |
-					    __GFP_MEMALLOC))
+					    GFP_ATOMIC | __GFP_MEMALLOC))
 			break;
 		ring->prod++;
 	} while (likely(--missing));
@@ -622,6 +618,8 @@ static int get_fixed_ipv6_csum(__wsum hw_checksum, struct sk_buff *skb,
 }
 #endif
 
+#define short_frame(size) ((size) <= ETH_ZLEN + ETH_FCS_LEN)
+
 /* We reach this function only after checking that any of
  * the (IPv4 | IPv6) bits are set in cqe->status.
  */
@@ -629,9 +627,20 @@ static int check_csum(struct mlx4_cqe *cqe, struct sk_buff *skb, void *va,
 		      netdev_features_t dev_features)
 {
 	__wsum hw_checksum = 0;
+	void *hdr;
 
-	void *hdr = (u8 *)va + sizeof(struct ethhdr);
+	/* CQE csum doesn't cover padding octets in short ethernet
+	 * frames. And the pad field is appended prior to calculating
+	 * and appending the FCS field.
+	 *
+	 * Detecting these padded frames requires to verify and parse
+	 * IP headers, so we simply force all those small frames to skip
+	 * checksum complete.
+	 */
+	if (short_frame(skb->len))
+		return -EINVAL;
 
+	hdr = (u8 *)va + sizeof(struct ethhdr);
 	hw_checksum = csum_unfold((__force __sum16)cqe->checksum);
 
 	if (cqe->vlan_my_qpn & cpu_to_be32(MLX4_CQE_CVLAN_PRESENT_MASK) &&
@@ -770,6 +779,7 @@ int mlx4_en_process_rx_cq(struct net_device *dev, struct mlx4_en_cq *cq, int bud
 
 			xdp.data_hard_start = va - frags[0].page_offset;
 			xdp.data = va;
+			xdp_set_data_meta_invalid(&xdp);
 			xdp.data_end = xdp.data + length;
 			orig_data = xdp.data;
 
@@ -823,6 +833,11 @@ xdp_drop_no_cnt:
 		skb_record_rx_queue(skb, cq_ring);
 
 		if (likely(dev->features & NETIF_F_RXCSUM)) {
+			/* TODO: For IP non TCP/UDP packets when csum complete is
+			 * not an option (not supported or any other reason) we can
+			 * actually check cqe IPOK status bit and report
+			 * CHECKSUM_UNNECESSARY rather than CHECKSUM_NONE
+			 */
 			if ((cqe->status & cpu_to_be16(MLX4_CQE_STATUS_TCP |
 						       MLX4_CQE_STATUS_UDP)) &&
 			    (cqe->status & cpu_to_be16(MLX4_CQE_STATUS_IPOK)) &&
@@ -852,9 +867,7 @@ csum_none:
 			hash_type = PKT_HASH_TYPE_L3;
 			ring->csum_none++;
 		}
-
 		skb->ip_summed = ip_summed;
-
 		if (dev->features & NETIF_F_RXHASH)
 			skb_set_hash(skb,
 				     be32_to_cpu(cqe->immed_rss_invalid),
@@ -878,7 +891,7 @@ csum_none:
 			skb->data_len = length;
 			napi_gro_frags(&cq->napi);
 		} else {
-			skb->vlan_tci = 0;
+			__vlan_hwaccel_clear_tag(skb);
 			skb_clear_hash(skb);
 		}
 next:
@@ -907,6 +920,7 @@ next:
 
 	return polled;
 }
+
 
 void mlx4_en_rx_irq(struct mlx4_cq *mcq)
 {
@@ -941,21 +955,19 @@ int mlx4_en_poll_rx_cq(struct napi_struct *napi, int budget)
 	done = mlx4_en_process_rx_cq(dev, cq, budget);
 
 	/* If we used up all the quota - we're probably not done yet... */
-#ifndef CONFIG_GENERIC_HARDIRQS
-	cq->tot_rx += done;
-#endif
-
-	if (done == budget) {
-#ifdef CONFIG_GENERIC_HARDIRQS
-		int cpu_curr;
+	if (done == budget || !clean_complete) {
 		const struct cpumask *aff;
-#endif
+		struct irq_data *idata;
+		int cpu_curr;
+
+		/* in case we got here because of !clean_complete */
+		done = budget;
 
 		INC_PERF_COUNTER(priv->pstats.napi_quota);
 
-#ifdef CONFIG_GENERIC_HARDIRQS
 		cpu_curr = smp_processor_id();
-		aff = irq_desc_get_irq_data(cq->irq_desc)->affinity;
+		idata = irq_desc_get_irq_data(cq->irq_desc);
+		aff = irq_data_get_affinity_mask(idata);
 
 		if (likely(cpumask_test_cpu(cpu_curr, aff)))
 			return budget;
@@ -968,15 +980,6 @@ int mlx4_en_poll_rx_cq(struct napi_struct *napi, int budget)
 		 */
 		if (done)
 			done--;
-#else
-		if (cq->tot_rx < MLX4_EN_MIN_RX_ARM)
-			return budget;
-
-		cq->tot_rx = 0;
-		done = 0;
-	} else {
-		cq->tot_rx = 0;
-#endif
 	}
 	/* Done for now */
 	if (likely(napi_complete_done(napi, done)))
@@ -987,10 +990,7 @@ int mlx4_en_poll_rx_cq(struct napi_struct *napi, int budget)
 void mlx4_en_calc_rx_buf(struct net_device *dev)
 {
 	struct mlx4_en_priv *priv = netdev_priv(dev);
-	/* VLAN_HLEN is added twice,to support skb vlan tagged with multiple
-	 * headers. (For example: ETH_P_8021Q and ETH_P_8021AD).
-	 */
-	int eff_mtu = dev->mtu + ETH_HLEN + (2 * VLAN_HLEN);
+	int eff_mtu = MLX4_EN_EFF_MTU(dev->mtu);
 	int i = 0;
 
 	/* bpf requires buffers to be set up as 1 packet per page.
@@ -1195,13 +1195,10 @@ int mlx4_en_config_rss_steer(struct mlx4_en_priv *priv)
 	mlx4_en_fill_qp_context(priv, 0, 0, 0, 1, priv->base_qpn,
 				priv->rx_ring[0]->cqn, -1, &context);
 
-	if (!priv->prof->rss_rings || priv->prof->rss_rings > priv->rx_ring_num) {
-		gmb();
+	if (!priv->prof->rss_rings || priv->prof->rss_rings > priv->rx_ring_num)
 		rss_rings = priv->rx_ring_num;
-	} else {
-		gmb();
+	else
 		rss_rings = priv->prof->rss_rings;
-	}
 
 	ptr = ((void *) &context) + offsetof(struct mlx4_qp_context, pri_path)
 					+ MLX4_RSS_OFFSET_IN_QPC_PRI_PATH;

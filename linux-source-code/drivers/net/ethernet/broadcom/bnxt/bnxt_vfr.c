@@ -173,7 +173,7 @@ static int bnxt_vf_rep_setup_tc_block(struct net_device *dev,
 	case TC_BLOCK_BIND:
 		return tcf_block_cb_register(f->block,
 					     bnxt_vf_rep_setup_tc_block_cb,
-					     vf_rep, vf_rep);
+					     vf_rep, vf_rep, f->extack);
 	case TC_BLOCK_UNBIND:
 		tcf_block_cb_unregister(f->block,
 					bnxt_vf_rep_setup_tc_block_cb, vf_rep);
@@ -257,13 +257,12 @@ static const struct ethtool_ops bnxt_vf_rep_ethtool_ops = {
 };
 
 static const struct net_device_ops bnxt_vf_rep_netdev_ops = {
-	.ndo_size		= sizeof(struct net_device_ops),
 	.ndo_open		= bnxt_vf_rep_open,
 	.ndo_stop		= bnxt_vf_rep_close,
 	.ndo_start_xmit		= bnxt_vf_rep_xmit,
 	.ndo_get_stats64	= bnxt_vf_rep_get_stats64,
-	.extended.ndo_setup_tc_rh		= bnxt_vf_rep_setup_tc,
-	.extended.ndo_get_phys_port_name = bnxt_vf_rep_get_phys_port_name
+	.ndo_setup_tc		= bnxt_vf_rep_setup_tc,
+	.ndo_get_phys_port_name = bnxt_vf_rep_get_phys_port_name
 };
 
 bool bnxt_dev_is_vf_rep(struct net_device *dev)
@@ -407,8 +406,8 @@ static void bnxt_vf_rep_netdev_init(struct bnxt *bp, struct bnxt_vf_rep *vf_rep,
 	ether_addr_copy(dev->dev_addr, dev->perm_addr);
 	/* Set VF-Rep's max-mtu to the corresponding VF's max-mtu */
 	if (!bnxt_hwrm_vfr_qcfg(bp, vf_rep, &max_mtu))
-		dev->extended->max_mtu = max_mtu;
-	dev->extended->min_mtu = ETH_ZLEN;
+		dev->max_mtu = max_mtu;
+	dev->min_mtu = ETH_ZLEN;
 }
 
 static int bnxt_pcie_dsn_get(struct bnxt *bp, u8 dsn[])
@@ -443,8 +442,8 @@ static int bnxt_vf_reps_create(struct bnxt *bp)
 		return -ENOMEM;
 
 	/* storage for cfa_code to vf-idx mapping */
-	cfa_code_map = kmalloc(sizeof(*bp->cfa_code_map) * MAX_CFA_CODE,
-			       GFP_KERNEL);
+	cfa_code_map = kmalloc_array(MAX_CFA_CODE, sizeof(*bp->cfa_code_map),
+				     GFP_KERNEL);
 	if (!cfa_code_map) {
 		rc = -ENOMEM;
 		goto err;
@@ -522,7 +521,8 @@ int bnxt_dl_eswitch_mode_get(struct devlink *devlink, u16 *mode)
 	return 0;
 }
 
-int bnxt_dl_eswitch_mode_set(struct devlink *devlink, u16 mode)
+int bnxt_dl_eswitch_mode_set(struct devlink *devlink, u16 mode,
+			     struct netlink_ext_ack *extack)
 {
 	struct bnxt *bp = bnxt_get_bp_from_dl(devlink);
 	int rc = 0;

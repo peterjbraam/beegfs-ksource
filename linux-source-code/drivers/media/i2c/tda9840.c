@@ -31,7 +31,6 @@
 #include <linux/slab.h>
 #include <linux/i2c.h>
 #include <media/v4l2-device.h>
-#include <media/v4l2-chip-ident.h>
 
 MODULE_AUTHOR("Michael Hunold <michael@mihu.de>");
 MODULE_DESCRIPTION("tda9840 driver");
@@ -69,11 +68,15 @@ static void tda9840_write(struct v4l2_subdev *sd, u8 reg, u8 val)
 static int tda9840_status(struct v4l2_subdev *sd)
 {
 	struct i2c_client *client = v4l2_get_subdevdata(sd);
+	int rc;
 	u8 byte;
 
-	if (1 != i2c_master_recv(client, &byte, 1)) {
+	rc = i2c_master_recv(client, &byte, 1);
+	if (rc != 1) {
 		v4l2_dbg(1, debug, sd,
 			"i2c_master_recv() failed\n");
+		if (rc < 0)
+			return rc;
 		return -EIO;
 	}
 
@@ -145,18 +148,7 @@ static int tda9840_g_tuner(struct v4l2_subdev *sd, struct v4l2_tuner *t)
 	return 0;
 }
 
-static int tda9840_g_chip_ident(struct v4l2_subdev *sd, struct v4l2_dbg_chip_ident *chip)
-{
-	struct i2c_client *client = v4l2_get_subdevdata(sd);
-
-	return v4l2_chip_ident_i2c_client(client, chip, V4L2_IDENT_TDA9840, 0);
-}
-
 /* ----------------------------------------------------------------------- */
-
-static const struct v4l2_subdev_core_ops tda9840_core_ops = {
-	.g_chip_ident = tda9840_g_chip_ident,
-};
 
 static const struct v4l2_subdev_tuner_ops tda9840_tuner_ops = {
 	.s_tuner = tda9840_s_tuner,
@@ -164,7 +156,6 @@ static const struct v4l2_subdev_tuner_ops tda9840_tuner_ops = {
 };
 
 static const struct v4l2_subdev_ops tda9840_ops = {
-	.core = &tda9840_core_ops,
 	.tuner = &tda9840_tuner_ops,
 };
 
@@ -184,7 +175,7 @@ static int tda9840_probe(struct i2c_client *client,
 	v4l_info(client, "chip found @ 0x%x (%s)\n",
 			client->addr << 1, client->adapter->name);
 
-	sd = kzalloc(sizeof(struct v4l2_subdev), GFP_KERNEL);
+	sd = devm_kzalloc(&client->dev, sizeof(*sd), GFP_KERNEL);
 	if (sd == NULL)
 		return -ENOMEM;
 	v4l2_i2c_subdev_init(sd, client, &tda9840_ops);
@@ -201,7 +192,6 @@ static int tda9840_remove(struct i2c_client *client)
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
 
 	v4l2_device_unregister_subdev(sd);
-	kfree(sd);
 	return 0;
 }
 
@@ -213,7 +203,6 @@ MODULE_DEVICE_TABLE(i2c, tda9840_id);
 
 static struct i2c_driver tda9840_driver = {
 	.driver = {
-		.owner	= THIS_MODULE,
 		.name	= "tda9840",
 	},
 	.probe		= tda9840_probe,

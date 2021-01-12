@@ -17,10 +17,8 @@
 #include <linux/init.h>
 #include <linux/spinlock.h>
 #include <linux/slab.h>
-#include <linux/kmsg_dump.h>
-#include <linux/pstore.h>
 #include <linux/ctype.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/nvram.h>
 #include <asm/rtas.h>
 #include <asm/prom.h>
@@ -36,10 +34,10 @@ static DEFINE_SPINLOCK(nvram_lock);
 
 /* See clobbering_unread_rtas_event() */
 #define NVRAM_RTAS_READ_TIMEOUT 5		/* seconds */
-static unsigned long last_unread_rtas_event;	/* timestamp */
+static time64_t last_unread_rtas_event;		/* timestamp */
 
 #ifdef CONFIG_PSTORE
-unsigned long last_rtas_event;
+time64_t last_rtas_event;
 #endif
 
 static ssize_t pSeries_nvram_read(char *buf, size_t count, loff_t *index)
@@ -133,7 +131,6 @@ static ssize_t pSeries_nvram_get_size(void)
 	return nvram_size ? nvram_size : -ENODEV;
 }
 
-
 /* nvram_write_error_log
  *
  * We need to buffer the error logs into nvram to ensure that we have
@@ -145,9 +142,9 @@ int nvram_write_error_log(char * buff, int length,
 	int rc = nvram_write_os_partition(&rtas_log_partition, buff, length,
 						err_type, error_log_cnt);
 	if (!rc) {
-		last_unread_rtas_event = get_seconds();
+		last_unread_rtas_event = ktime_get_real_seconds();
 #ifdef CONFIG_PSTORE
-		last_rtas_event = get_seconds();
+		last_rtas_event = ktime_get_real_seconds();
 #endif
 	}
 
@@ -201,7 +198,7 @@ int clobbering_unread_rtas_event(void)
 {
 	return (oops_log_partition.index == rtas_log_partition.index
 		&& last_unread_rtas_event
-		&& get_seconds() - last_unread_rtas_event <=
+		&& ktime_get_real_seconds() - last_unread_rtas_event <=
 						NVRAM_RTAS_READ_TIMEOUT);
 }
 

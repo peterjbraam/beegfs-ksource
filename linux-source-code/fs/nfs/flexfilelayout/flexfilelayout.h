@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * NFSv4 flexfile layout driver data structures.
  *
@@ -13,6 +14,7 @@
 #define FF_FLAGS_NO_IO_THRU_MDS  2
 #define FF_FLAGS_NO_READ_IO      4
 
+#include <linux/refcount.h>
 #include "../pnfs.h"
 
 /* XXX: Let's filter out insanely large mirror count for now to avoid oom
@@ -81,7 +83,7 @@ struct nfs4_ff_layout_mirror {
 	nfs4_stateid			stateid;
 	struct rpc_cred	__rcu		*ro_cred;
 	struct rpc_cred	__rcu		*rw_cred;
-	atomic_t			ref;
+	refcount_t			ref;
 	spinlock_t			lock;
 	unsigned long			flags;
 	struct nfs4_ff_layoutstat	read_stat;
@@ -130,6 +132,16 @@ FF_LAYOUT_LSEG(struct pnfs_layout_segment *lseg)
 			    generic_hdr);
 }
 
+static inline struct nfs4_deviceid_node *
+FF_LAYOUT_DEVID_NODE(struct pnfs_layout_segment *lseg, u32 idx)
+{
+	if (idx >= FF_LAYOUT_LSEG(lseg)->mirror_array_cnt ||
+	    FF_LAYOUT_LSEG(lseg)->mirror_array[idx] == NULL ||
+	    FF_LAYOUT_LSEG(lseg)->mirror_array[idx]->mirror_ds == NULL)
+		return NULL;
+	return &FF_LAYOUT_LSEG(lseg)->mirror_array[idx]->mirror_ds->id_node;
+}
+
 static inline struct nfs4_ff_layout_ds *
 FF_LAYOUT_MIRROR_DS(struct nfs4_deviceid_node *node)
 {
@@ -139,25 +151,9 @@ FF_LAYOUT_MIRROR_DS(struct nfs4_deviceid_node *node)
 static inline struct nfs4_ff_layout_mirror *
 FF_LAYOUT_COMP(struct pnfs_layout_segment *lseg, u32 idx)
 {
-	struct nfs4_ff_layout_segment *fls = FF_LAYOUT_LSEG(lseg);
-
-	if (idx < fls->mirror_array_cnt)
-		return fls->mirror_array[idx];
-	return NULL;
-}
-
-static inline struct nfs4_deviceid_node *
-FF_LAYOUT_DEVID_NODE(struct pnfs_layout_segment *lseg, u32 idx)
-{
-	struct nfs4_ff_layout_mirror *mirror = FF_LAYOUT_COMP(lseg, idx);
-
-	if (mirror != NULL) {
-		struct nfs4_ff_layout_ds *mirror_ds = mirror->mirror_ds;
-
-		if (!IS_ERR_OR_NULL(mirror_ds))
-			return &mirror_ds->id_node;
-	}
-	return NULL;
+	if (idx >= FF_LAYOUT_LSEG(lseg)->mirror_array_cnt)
+		return NULL;
+	return FF_LAYOUT_LSEG(lseg)->mirror_array[idx];
 }
 
 static inline u32

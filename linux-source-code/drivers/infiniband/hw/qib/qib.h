@@ -431,14 +431,12 @@ struct qib_irq_notify;
 #endif
 
 struct qib_msix_entry {
-	int irq;
 	void *arg;
 #ifdef CONFIG_INFINIBAND_QIB_DCA
 	int dca;
 	int rcv;
 	struct qib_irq_notify *notifier;
 #endif
-	char name[MAX_NAME_SIZE];
 	cpumask_var_t mask;
 };
 
@@ -473,9 +471,6 @@ enum qib_sdma_events {
 	qib_sdma_event_e7322_err_halted,
 	qib_sdma_event_e90_timer_tick,
 };
-
-extern char *qib_sdma_state_names[];
-extern char *qib_sdma_event_names[];
 
 struct sdma_set_state_action {
 	unsigned op_enable:1;
@@ -890,7 +885,7 @@ struct qib_devdata {
 	/* PCI Device ID (here for NodeInfo) */
 	u16 deviceid;
 	/* for write combining settings */
-	unsigned long wc_cookie;
+	int wc_cookie;
 	unsigned long wc_base;
 	unsigned long wc_len;
 
@@ -1115,8 +1110,6 @@ extern spinlock_t qib_devs_lock;
 extern struct qib_devdata *qib_lookup(int unit);
 extern u32 qib_cpulist_count;
 extern unsigned long *qib_cpulist;
-
-extern unsigned qib_wc_pat;
 extern unsigned qib_cc_table_size;
 
 int qib_init(struct qib_devdata *, int);
@@ -1419,10 +1412,8 @@ int qib_pcie_ddinit(struct qib_devdata *, struct pci_dev *,
 		    const struct pci_device_id *);
 void qib_pcie_ddcleanup(struct qib_devdata *);
 int qib_pcie_params(struct qib_devdata *dd, u32 minw, u32 *nent);
-int qib_reinit_intr(struct qib_devdata *);
-void qib_enable_intx(struct qib_devdata *dd);
-void qib_nomsi(struct qib_devdata *);
-void qib_nomsix(struct qib_devdata *);
+void qib_free_irq(struct qib_devdata *dd);
+int qib_reinit_intr(struct qib_devdata *dd);
 void qib_pcie_getcmd(struct qib_devdata *, u16 *, u8 *, u8 *);
 void qib_pcie_reenable(struct qib_devdata *, u16, u8, u8);
 /* interrupts for device */

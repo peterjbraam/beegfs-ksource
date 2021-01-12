@@ -35,7 +35,7 @@
 #include "cq_enet_desc.h"
 #include "cq_exch_desc.h"
 
-static u8 fcoe_all_fcfs[ETH_ALEN] =  FIP_ALL_FCF_MACS;
+static u8 fcoe_all_fcfs[ETH_ALEN] = FIP_ALL_FCF_MACS;
 struct workqueue_struct *fnic_fip_queue;
 struct workqueue_struct *fnic_event_queue;
 
@@ -52,7 +52,6 @@ void fnic_handle_link(struct work_struct *work)
 	unsigned long flags;
 	int old_link_status;
 	u32 old_link_down_cnt;
-	u64 old_port_speed, new_port_speed;
 
 	spin_lock_irqsave(&fnic->fnic_lock, flags);
 
@@ -63,19 +62,14 @@ void fnic_handle_link(struct work_struct *work)
 
 	old_link_down_cnt = fnic->link_down_cnt;
 	old_link_status = fnic->link_status;
-	old_port_speed = atomic64_read(
-			&fnic->fnic_stats.misc_stats.current_port_speed);
-
 	fnic->link_status = vnic_dev_link_status(fnic->vdev);
 	fnic->link_down_cnt = vnic_dev_link_down_cnt(fnic->vdev);
 
-	new_port_speed = vnic_dev_port_speed(fnic->vdev);
 	atomic64_set(&fnic->fnic_stats.misc_stats.current_port_speed,
-			new_port_speed);
-	if (old_port_speed != new_port_speed)
-		shost_printk(KERN_INFO, fnic->lport->host,
-				"Current vnic speed set to :  %llu\n",
-				new_port_speed);
+			vnic_dev_port_speed(fnic->vdev));
+	shost_printk(KERN_INFO, fnic->lport->host, "Current vnic speed set to :  %llu\n",
+			(u64)atomic64_read(
+			&fnic->fnic_stats.misc_stats.current_port_speed));
 
 	switch (vnic_dev_port_speed(fnic->vdev)) {
 	case DCEM_PORTSPEED_10G:
@@ -343,11 +337,6 @@ static inline int is_fnic_fip_flogi_reject(struct fcoe_ctlr *fip,
 
 	if (desc->fip_dtype == FIP_DT_FLOGI) {
 
-		shost_printk(KERN_DEBUG, lport->host,
-			  " FIP TYPE FLOGI: fab name:%llx "
-			  "vfid:%d map:%x\n",
-			  fip->sel_fcf->fabric_name, fip->sel_fcf->vfid,
-			  fip->sel_fcf->fc_map);
 		if (dlen < sizeof(*els) + sizeof(*fh) + 1)
 			return 0;
 
@@ -597,7 +586,7 @@ static int fnic_fcoe_handle_fip_frame(struct fnic *fnic, struct sk_buff *skb)
 			goto drop;
 		/* pass it on to fcoe */
 		ret = 1;
-	} else if (op == FIP_OP_VLAN && sub == FIP_SC_VL_REP) {
+	} else if (op == FIP_OP_VLAN && sub == FIP_SC_VL_NOTE) {
 		/* set the vlan as used */
 		fnic_fcoe_process_vlan_resp(fnic, skb);
 		ret = 0;
@@ -683,7 +672,7 @@ static inline int fnic_import_rq_eth_pkt(struct fnic *fnic, struct sk_buff *skb)
 	eh = (struct ethhdr *)skb->data;
 	if (eh->h_proto == htons(ETH_P_8021Q)) {
 		memmove((u8 *)eh + VLAN_HLEN, eh, ETH_ALEN * 2);
-		eh = (struct ethhdr *)skb_pull(skb, VLAN_HLEN);
+		eh = skb_pull(skb, VLAN_HLEN);
 		skb_reset_mac_header(skb);
 	}
 	if (eh->h_proto == htons(ETH_P_FIP)) {
@@ -1041,8 +1030,7 @@ void fnic_eth_send(struct fcoe_ctlr *fip, struct sk_buff *skb)
 
 	if (!fnic->vlan_hw_insert) {
 		eth_hdr = (struct ethhdr *)skb_mac_header(skb);
-		vlan_hdr = (struct vlan_ethhdr *)skb_push(skb,
-				sizeof(*vlan_hdr) - sizeof(*eth_hdr));
+		vlan_hdr = skb_push(skb, sizeof(*vlan_hdr) - sizeof(*eth_hdr));
 		memcpy(vlan_hdr, eth_hdr, 2 * ETH_ALEN);
 		vlan_hdr->h_vlan_proto = htons(ETH_P_8021Q);
 		vlan_hdr->h_vlan_encapsulated_proto = eth_hdr->h_proto;
@@ -1107,7 +1095,7 @@ static int fnic_send_frame(struct fnic *fnic, struct fc_frame *fp)
 
 	if (!fnic->vlan_hw_insert) {
 		eth_hdr_len = sizeof(*vlan_hdr) + sizeof(*fcoe_hdr);
-		vlan_hdr = (struct vlan_ethhdr *)skb_push(skb, eth_hdr_len);
+		vlan_hdr = skb_push(skb, eth_hdr_len);
 		eth_hdr = (struct ethhdr *)vlan_hdr;
 		vlan_hdr->h_vlan_proto = htons(ETH_P_8021Q);
 		vlan_hdr->h_vlan_encapsulated_proto = htons(ETH_P_FCOE);
@@ -1115,7 +1103,7 @@ static int fnic_send_frame(struct fnic *fnic, struct fc_frame *fp)
 		fcoe_hdr = (struct fcoe_hdr *)(vlan_hdr + 1);
 	} else {
 		eth_hdr_len = sizeof(*eth_hdr) + sizeof(*fcoe_hdr);
-		eth_hdr = (struct ethhdr *)skb_push(skb, eth_hdr_len);
+		eth_hdr = skb_push(skb, eth_hdr_len);
 		eth_hdr->h_proto = htons(ETH_P_FCOE);
 		fcoe_hdr = (struct fcoe_hdr *)(eth_hdr + 1);
 	}
@@ -1349,7 +1337,7 @@ void fnic_handle_fip_timer(struct fnic *fnic)
 	}
 	spin_unlock_irqrestore(&fnic->fnic_lock, flags);
 
-	if (fnic->ctlr.mode == FIP_ST_NON_FIP)
+	if (fnic->ctlr.mode == FIP_MODE_NON_FIP)
 		return;
 
 	spin_lock_irqsave(&fnic->vlans_lock, flags);

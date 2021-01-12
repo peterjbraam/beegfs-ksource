@@ -21,7 +21,7 @@
 #ifndef __ASM_PPC64_HMI_H__
 #define __ASM_PPC64_HMI_H__
 
-#ifdef CONFIG_PPC_BOOK3S_64
+#ifdef CONFIG_KVM_BOOK3S_HV_POSSIBLE
 
 #define	CORE_TB_RESYNC_REQ_BIT		63
 #define MAX_SUBCORE_PER_CORE		4
@@ -42,4 +42,8 @@ extern void wait_for_tb_resync(void);
 static inline void wait_for_subcore_guest_exit(void) { }
 static inline void wait_for_tb_resync(void) { }
 #endif
+
+struct pt_regs;
+extern long hmi_handle_debugtrig(struct pt_regs *regs);
+
 #endif /* __ASM_PPC64_HMI_H__ */

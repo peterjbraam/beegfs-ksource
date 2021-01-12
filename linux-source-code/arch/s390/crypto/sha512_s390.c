@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * Cryptographic API.
  *
@@ -5,12 +6,6 @@
  *
  * Copyright IBM Corp. 2007
  * Author(s): Jan Glauber (jang@de.ibm.com)
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option)
- * any later version.
- *
  */
 #include <crypto/internal/hash.h>
 #include <crypto/sha.h>
@@ -18,6 +13,7 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/cpufeature.h>
 #include <asm/cpacf.h>
 
 #include "sha.h"
@@ -148,7 +144,7 @@ static void __exit fini(void)
 	crypto_unregister_shash(&sha384_alg);
 }
 
-module_init(init);
+module_cpu_feature_match(MSA, init);
 module_exit(fini);
 
 MODULE_LICENSE("GPL");

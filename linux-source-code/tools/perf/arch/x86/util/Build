@@ -8,6 +8,7 @@ libperf-y += machine.o
 libperf-y += event.o
 
 libperf-$(CONFIG_DWARF) += dwarf-regs.o
+libperf-$(CONFIG_BPF_PROLOGUE) += dwarf-regs.o
 
 libperf-$(CONFIG_LOCAL_LIBUNWIND)    += unwind-libunwind.o
 libperf-$(CONFIG_LIBDW_DWARF_UNWIND) += unwind-libdw.o

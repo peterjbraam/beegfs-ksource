@@ -104,7 +104,7 @@ static ssize_t hvt_op_write(struct file *file, const char __user *buf,
 	return ret ? ret : count;
 }
 
-static unsigned int hvt_op_poll(struct file *file, poll_table *wait)
+static __poll_t hvt_op_poll(struct file *file, poll_table *wait)
 {
 	struct hvutil_transport *hvt;
 
@@ -113,10 +113,10 @@ static unsigned int hvt_op_poll(struct file *file, poll_table *wait)
 	poll_wait(file, &hvt->outmsg_q, wait);
 
 	if (hvt->mode == HVUTIL_TRANSPORT_DESTROY)
-		return POLLERR | POLLHUP;
+		return EPOLLERR | EPOLLHUP;
 
 	if (hvt->outmsg_len > 0)
-		return POLLIN | POLLRDNORM;
+		return EPOLLIN | EPOLLRDNORM;
 
 	return 0;
 }
@@ -241,7 +241,7 @@ int hvutil_transport_send(struct hvutil_transport *hvt, void *msg, int len,
 		cn_msg->id.val = hvt->cn_id.val;
 		cn_msg->len = len;
 		memcpy(cn_msg->data, msg, len);
-		ret = cn_netlink_send(cn_msg, 0, GFP_ATOMIC);
+		ret = cn_netlink_send(cn_msg, 0, 0, GFP_ATOMIC);
 		kfree(cn_msg);
 		/*
 		 * We don't know when netlink messages are delivered but unlike

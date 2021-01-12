@@ -1,4 +1,5 @@
-#ifndef __LINUX_COMPILER_H
+/* SPDX-License-Identifier: GPL-2.0 */
+#ifndef __LINUX_COMPILER_TYPES_H
 #error "Please don't include <linux/compiler-intel.h> directly, include <linux/compiler.h> instead."
 #endif
 
@@ -13,10 +14,12 @@
 /* Intel ECC compiler doesn't support gcc specific asm stmts.
  * It uses intrinsics to do the equivalent things.
  */
+#undef barrier
 #undef barrier_data
 #undef RELOC_HIDE
 #undef OPTIMIZER_HIDE_VAR
 
+#define barrier() __memory_barrier()
 #define barrier_data(ptr) barrier()
 
 #define RELOC_HIDE(ptr, off)					\
@@ -35,11 +38,13 @@
 
 #endif
 
-#define uninitialized_var(x) x
-
 #ifndef __HAVE_BUILTIN_BSWAP16__
 /* icc has this, but it's called _bswap16 */
 #define __HAVE_BUILTIN_BSWAP16__
 #define __builtin_bswap16 _bswap16
 #endif
 
+/*
+ * icc defines __GNUC__, but does not implement the builtin overflow checkers.
+ */
+#undef COMPILER_HAS_GENERIC_BUILTIN_OVERFLOW

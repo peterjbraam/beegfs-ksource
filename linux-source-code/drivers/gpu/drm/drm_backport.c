@@ -1,70 +1,132 @@
-/*
- * Copyright (C) 2015 Red Hat
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License v2. See the file COPYING in the main directory of this archive for
- * more details.
- */
-
-#include <drm/drm_backport.h>
-#include <drm/drmP.h>
+#include <linux/mmu_notifier.h>
 #include <linux/slab.h>
 
-/*
- * shrinker
+/* linux/mmu_notifier.h wrappers */
+
+#ifdef CONFIG_MMU_NOTIFIER
+
+/* Undefine the various wrappers from drm_backport.h so we can use both the
+ * drm backport versions and the current RH kernel versions
  */
+#undef mmu_notifier
+#undef mmu_notifier_ops
 
-#undef shrinker
-#undef register_shrinker
-#undef unregister_shrinker
+#define to_rh_drm_mmu_notifier(mn) \
+	container_of(mn, struct __rh_drm_mmu_notifier, base)
 
-static int shrinker2_shrink(struct shrinker *shrinker, struct shrink_control *sc)
+static void rh_drm_mmu_notifier_release(struct mmu_notifier *mn,
+					struct mm_struct *mm)
 {
-	struct shrinker2 *s2 = container_of(shrinker, struct shrinker2, compat);
-	int count;
+	struct __rh_drm_mmu_notifier *drm_mn = to_rh_drm_mmu_notifier(mn);
 
-	s2->scan_objects(s2, sc);
-	count = s2->count_objects(s2, sc);
-	shrinker->seeks = s2->seeks;
-
-	return count;
+	drm_mn->ops->release(drm_mn, mm);
 }
 
-int register_shrinker2(struct shrinker2 *s2)
+static int rh_drm_mmu_notifier_clear_flush_young(struct mmu_notifier *mn,
+						 struct mm_struct *mm,
+						 unsigned long start,
+						 unsigned long end)
 {
-	s2->compat.shrink = shrinker2_shrink;
-	s2->compat.seeks = s2->seeks;
-	register_shrinker(&s2->compat);
-	return 0;
-}
-EXPORT_SYMBOL(register_shrinker2);
+	struct __rh_drm_mmu_notifier *drm_mn = to_rh_drm_mmu_notifier(mn);
 
-void unregister_shrinker2(struct shrinker2 *s2)
-{
-	unregister_shrinker(&s2->compat);
-}
-EXPORT_SYMBOL(unregister_shrinker2);
-
-#if IS_ENABLED(CONFIG_SWIOTLB)
-#  include <linux/dma-direction.h>
-#  include <linux/swiotlb.h>
-#endif
-
-unsigned int swiotlb_max_size(void)
-{
-#if IS_ENABLED(CONFIG_SWIOTLB)
-	return rounddown(swiotlb_nr_tbl() << IO_TLB_SHIFT, PAGE_SIZE);
-#else
-	return 0;
-#endif
-}
-EXPORT_SYMBOL(swiotlb_max_size);
-
-int __init drm_backport_init(void)
-{
-	return 0;
+	return drm_mn->ops->clear_flush_young(drm_mn, mm, start, end);
 }
 
-void __exit drm_backport_exit(void)
+static int rh_drm_mmu_notifier_clear_young(struct mmu_notifier *mn,
+					   struct mm_struct *mm,
+					   unsigned long start,
+					   unsigned long end)
 {
+	struct __rh_drm_mmu_notifier *drm_mn = to_rh_drm_mmu_notifier(mn);
+
+	return drm_mn->ops->clear_young(drm_mn, mm, start, end);
 }
+
+static int rh_drm_mmu_notifier_test_young(struct mmu_notifier *mn,
+					  struct mm_struct *mm,
+					  unsigned long address)
+{
+	struct __rh_drm_mmu_notifier *drm_mn = to_rh_drm_mmu_notifier(mn);
+
+	return drm_mn->ops->test_young(drm_mn, mm, address);
+}
+
+static void rh_drm_mmu_notifier_change_pte(struct mmu_notifier *mn,
+					   struct mm_struct *mm,
+					   unsigned long address,
+					   pte_t pte)
+{
+	struct __rh_drm_mmu_notifier *drm_mn = to_rh_drm_mmu_notifier(mn);
+
+	drm_mn->ops->change_pte(drm_mn, mm, address, pte);
+}
+
+static void
+rh_drm_mmu_notifier_invalidate_range_start(struct mmu_notifier *mn,
+					   struct mm_struct *mm,
+					   unsigned long start,
+					   unsigned long end)
+{
+	struct __rh_drm_mmu_notifier *drm_mn = to_rh_drm_mmu_notifier(mn);
+	struct mmu_notifier_range range = {
+		.mm = mm,
+		.start = start,
+		.end = end,
+		.blockable = true,
+	};
+
+	drm_mn->ops->invalidate_range_start(drm_mn, &range);
+}
+
+static void rh_drm_mmu_notifier_invalidate_range_end(struct mmu_notifier *mn,
+						     struct mm_struct *mm,
+						     unsigned long start,
+						     unsigned long end)
+{
+	struct __rh_drm_mmu_notifier *drm_mn = to_rh_drm_mmu_notifier(mn);
+	struct mmu_notifier_range range = {
+		.mm = mm, .start = start, .end = end
+	};
+
+	drm_mn->ops->invalidate_range_end(drm_mn, &range);
+}
+
+void rh_drm_mmu_notifier_invalidate_range(struct mmu_notifier *mn,
+					  struct mm_struct *mm,
+					  unsigned long start,
+					  unsigned long end)
+{
+	struct __rh_drm_mmu_notifier *drm_mn = to_rh_drm_mmu_notifier(mn);
+
+	drm_mn->ops->invalidate_range(drm_mn, mm, start, end);
+}
+
+int __rh_drm_mmu_notifier_register(struct __rh_drm_mmu_notifier *mn,
+				   struct mm_struct *mm,
+				   int (*orig_func)(struct mmu_notifier *,
+						    struct mm_struct *))
+{
+	memset(&mn->base_ops, 0, sizeof(mn->base_ops));
+	mn->base_ops.flags = mn->ops->flags;
+
+#define C(callback) \
+	if (mn->ops->callback) \
+		mn->base_ops.callback = rh_drm_mmu_notifier_ ## callback
+
+	C(release);
+	C(clear_flush_young);
+	C(clear_young);
+	C(test_young);
+	C(change_pte);
+	C(invalidate_range);
+	C(invalidate_range_start);
+	C(invalidate_range_end);
+#undef C
+
+	mn->base.ops = &mn->base_ops;
+
+	return orig_func(&mn->base, mm);
+}
+EXPORT_SYMBOL(__rh_drm_mmu_notifier_register);
+
+#endif /* CONFIG_MMU_NOTIFIER */

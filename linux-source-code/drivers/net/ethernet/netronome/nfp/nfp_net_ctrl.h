@@ -234,7 +234,6 @@
  * %NFP_NET_CFG_BPF_ADDR:	DMA address of the buffer with JITed BPF code
  */
 #define NFP_NET_CFG_BPF_ABI		0x0080
-#define   NFP_NET_BPF_ABI		2
 #define NFP_NET_CFG_BPF_CAP		0x0081
 #define   NFP_NET_BPF_CAP_RELO		(1 << 0) /* seamless reload */
 #define NFP_NET_CFG_BPF_MAX_LEN		0x0082
@@ -393,10 +392,12 @@
 #define NFP_NET_CFG_MBOX_SIMPLE_CMD	0x0
 #define NFP_NET_CFG_MBOX_SIMPLE_RET	0x4
 #define NFP_NET_CFG_MBOX_SIMPLE_VAL	0x8
-#define NFP_NET_CFG_MBOX_SIMPLE_LEN	0x12
+#define NFP_NET_CFG_MBOX_SIMPLE_LEN	12
 
 #define NFP_NET_CFG_MBOX_CMD_CTAG_FILTER_ADD 1
 #define NFP_NET_CFG_MBOX_CMD_CTAG_FILTER_KILL 2
+
+#define NFP_NET_CFG_MBOX_CMD_PCI_DSCP_PRIOMAP_SET	5
 
 /**
  * VLAN filtering using general use mailbox

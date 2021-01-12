@@ -78,7 +78,7 @@ static void uvc_input_report_key(struct uvc_device *dev, unsigned int code,
 /* --------------------------------------------------------------------------
  * Status interrupt endpoint
  */
-static void uvc_event_streaming(struct uvc_device *dev, __u8 *data, int len)
+static void uvc_event_streaming(struct uvc_device *dev, u8 *data, int len)
 {
 	if (len < 3) {
 		uvc_trace(UVC_TRACE_STATUS, "Invalid streaming status event "
@@ -93,12 +93,13 @@ static void uvc_event_streaming(struct uvc_device *dev, __u8 *data, int len)
 			data[1], data[3] ? "pressed" : "released", len);
 		uvc_input_report_key(dev, KEY_CAMERA, data[3]);
 	} else {
-		uvc_trace(UVC_TRACE_STATUS, "Stream %u error event %02x %02x "
-			"len %d.\n", data[1], data[2], data[3], len);
+		uvc_trace(UVC_TRACE_STATUS,
+			  "Stream %u error event %02x len %d.\n",
+			  data[1], data[2], len);
 	}
 }
 
-static void uvc_event_control(struct uvc_device *dev, __u8 *data, int len)
+static void uvc_event_control(struct uvc_device *dev, u8 *data, int len)
 {
 	char *attrs[3] = { "value", "info", "failure" };
 
@@ -206,32 +207,15 @@ void uvc_status_cleanup(struct uvc_device *dev)
 	uvc_input_cleanup(dev);
 }
 
-int uvc_status_start(struct uvc_device *dev)
+int uvc_status_start(struct uvc_device *dev, gfp_t flags)
 {
 	if (dev->int_urb == NULL)
 		return 0;
 
-	return usb_submit_urb(dev->int_urb, GFP_KERNEL);
+	return usb_submit_urb(dev->int_urb, flags);
 }
 
 void uvc_status_stop(struct uvc_device *dev)
 {
 	usb_kill_urb(dev->int_urb);
 }
-
-int uvc_status_suspend(struct uvc_device *dev)
-{
-	if (atomic_read(&dev->users))
-		usb_kill_urb(dev->int_urb);
-
-	return 0;
-}
-
-int uvc_status_resume(struct uvc_device *dev)
-{
-	if (dev->int_urb == NULL || atomic_read(&dev->users) == 0)
-		return 0;
-
-	return usb_submit_urb(dev->int_urb, GFP_NOIO);
-}
-

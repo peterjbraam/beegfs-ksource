@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 #ifndef _UAPI_LINUX_IF_LINK_H
 #define _UAPI_LINUX_IF_LINK_H
 
@@ -36,8 +37,20 @@ struct rtnl_link_stats {
 	__u32	rx_compressed;
 	__u32	tx_compressed;
 
-#ifndef __GENKSYMS__
 	__u32	rx_nohandler;		/* dropped, no handler found	*/
+
+#ifdef __KERNEL__
+#ifndef __GENKSYMS__
+	/*
+	 * RHEL: when used, reserved fields must be moved before __KERNEL__
+	 * and must be under a #ifndef __GENKSYMS__ conditional
+	 */
+	char __rh_tail[0];
+	__u32	__rh_reserved_1;
+	__u32	__rh_reserved_2;
+	__u32	__rh_reserved_3;
+	__u32	__rh_reserved_4;
+#endif
 #endif
 };
 
@@ -73,10 +86,23 @@ struct rtnl_link_stats64 {
 	__u64	rx_compressed;
 	__u64	tx_compressed;
 
-#ifndef __GENKSYMS__
 	__u64	rx_nohandler;		/* dropped, no handler found	*/
+
+#ifdef __KERNEL__
+#ifndef __GENKSYMS__
+	char __rh_tail[0];
+	__u64	__rh_reserved_1;
+	__u64	__rh_reserved_2;
+	__u64	__rh_reserved_3;
+	__u64	__rh_reserved_4;
+#endif
 #endif
 };
+
+#ifdef __KERNEL__
+#define sizeof_rtnl_link_stats offsetof(struct rtnl_link_stats, __rh_tail)
+#define sizeof_rtnl_link_stats64 offsetof(struct rtnl_link_stats64, __rh_tail)
+#endif
 
 /* The struct should be in sync with struct ifmap */
 struct rtnl_link_ifmap {
@@ -160,12 +186,13 @@ enum {
 	IFLA_GSO_MAX_SEGS,
 	IFLA_GSO_MAX_SIZE,
 	IFLA_PAD,
-	__RH_RESERVED_IFLA_XDP,
+	IFLA_XDP,
 	IFLA_EVENT,
 	IFLA_NEW_NETNSID,
 	IFLA_IF_NETNSID,
-	__RH_RESERVED_IFLA_CARRIER_UP_COUNT,
-	__RH_RESERVED_IFLA_CARRIER_DOWN_COUNT,
+	IFLA_TARGET_NETNSID = IFLA_IF_NETNSID, /* new alias */
+	IFLA_CARRIER_UP_COUNT,
+	IFLA_CARRIER_DOWN_COUNT,
 	IFLA_NEW_IFINDEX,
 	__IFLA_MAX
 };
@@ -287,6 +314,7 @@ enum {
 	IFLA_BR_MCAST_STATS_ENABLED,
 	IFLA_BR_MCAST_IGMP_VERSION,
 	IFLA_BR_MCAST_MLD_VERSION,
+	IFLA_BR_VLAN_STATS_PER_PORT,
 	__IFLA_BR_MAX,
 };
 
@@ -334,6 +362,9 @@ enum {
 	IFLA_BRPORT_MCAST_TO_UCAST,
 	IFLA_BRPORT_VLAN_TUNNEL,
 	IFLA_BRPORT_BCAST_FLOOD,
+	IFLA_BRPORT_GROUP_FWD_MASK,
+	IFLA_BRPORT_NEIGH_SUPPRESS,
+	IFLA_BRPORT_ISOLATED,
 	__IFLA_BRPORT_MAX
 };
 #define IFLA_BRPORT_MAX (__IFLA_BRPORT_MAX - 1)
@@ -394,6 +425,10 @@ enum {
 	IFLA_MACVLAN_UNSPEC,
 	IFLA_MACVLAN_MODE,
 	IFLA_MACVLAN_FLAGS,
+	IFLA_MACVLAN_MACADDR_MODE,
+	IFLA_MACVLAN_MACADDR,
+	IFLA_MACVLAN_MACADDR_DATA,
+	IFLA_MACVLAN_MACADDR_COUNT,
 	__IFLA_MACVLAN_MAX,
 };
 
@@ -404,9 +439,34 @@ enum macvlan_mode {
 	MACVLAN_MODE_VEPA    = 2, /* talk to other ports through ext bridge */
 	MACVLAN_MODE_BRIDGE  = 4, /* talk to bridge ports directly */
 	MACVLAN_MODE_PASSTHRU = 8,/* take over the underlying device */
+	MACVLAN_MODE_SOURCE  = 16,/* use source MAC address list to assign */
+};
+
+enum macvlan_macaddr_mode {
+	MACVLAN_MACADDR_ADD,
+	MACVLAN_MACADDR_DEL,
+	MACVLAN_MACADDR_FLUSH,
+	MACVLAN_MACADDR_SET,
 };
 
 #define MACVLAN_FLAG_NOPROMISC	1
+
+/* VRF section */
+enum {
+	IFLA_VRF_UNSPEC,
+	IFLA_VRF_TABLE,
+	__IFLA_VRF_MAX
+};
+
+#define IFLA_VRF_MAX (__IFLA_VRF_MAX - 1)
+
+enum {
+	IFLA_VRF_PORT_UNSPEC,
+	IFLA_VRF_PORT_TABLE,
+	__IFLA_VRF_PORT_MAX
+};
+
+#define IFLA_VRF_PORT_MAX (__IFLA_VRF_PORT_MAX - 1)
 
 /* MACSEC section */
 enum {
@@ -430,6 +490,16 @@ enum {
 
 #define IFLA_MACSEC_MAX (__IFLA_MACSEC_MAX - 1)
 
+/* XFRM section */
+enum {
+	IFLA_XFRM_UNSPEC,
+	IFLA_XFRM_LINK,
+	IFLA_XFRM_IF_ID,
+	__IFLA_XFRM_MAX
+};
+
+#define IFLA_XFRM_MAX (__IFLA_XFRM_MAX - 1)
+
 enum macsec_validation_type {
 	MACSEC_VALIDATE_DISABLED = 0,
 	MACSEC_VALIDATE_CHECK = 1,
@@ -437,6 +507,26 @@ enum macsec_validation_type {
 	__MACSEC_VALIDATE_END,
 	MACSEC_VALIDATE_MAX = __MACSEC_VALIDATE_END - 1,
 };
+
+/* IPVLAN section */
+enum {
+	IFLA_IPVLAN_UNSPEC,
+	IFLA_IPVLAN_MODE,
+	IFLA_IPVLAN_FLAGS,
+	__IFLA_IPVLAN_MAX
+};
+
+#define IFLA_IPVLAN_MAX (__IFLA_IPVLAN_MAX - 1)
+
+enum ipvlan_mode {
+	IPVLAN_MODE_L2 = 0,
+	IPVLAN_MODE_L3,
+	IPVLAN_MODE_L3S,
+	IPVLAN_MODE_MAX
+};
+
+#define IPVLAN_F_PRIVATE	0x01
+#define IPVLAN_F_VEPA		0x02
 
 /* VXLAN section */
 enum {
@@ -492,9 +582,35 @@ enum {
 	IFLA_GENEVE_UDP_ZERO_CSUM6_TX,
 	IFLA_GENEVE_UDP_ZERO_CSUM6_RX,
 	IFLA_GENEVE_LABEL,
+	IFLA_GENEVE_TTL_INHERIT,
 	__IFLA_GENEVE_MAX
 };
 #define IFLA_GENEVE_MAX	(__IFLA_GENEVE_MAX - 1)
+
+/* PPP section */
+enum {
+	IFLA_PPP_UNSPEC,
+	IFLA_PPP_DEV_FD,
+	__IFLA_PPP_MAX
+};
+#define IFLA_PPP_MAX (__IFLA_PPP_MAX - 1)
+
+/* GTP section */
+
+enum ifla_gtp_role {
+	GTP_ROLE_GGSN = 0,
+	GTP_ROLE_SGSN,
+};
+
+enum {
+	IFLA_GTP_UNSPEC,
+	IFLA_GTP_FD0,
+	IFLA_GTP_FD1,
+	IFLA_GTP_PDP_HASHSIZE,
+	IFLA_GTP_ROLE,
+	__IFLA_GTP_MAX,
+};
+#define IFLA_GTP_MAX (__IFLA_GTP_MAX - 1)
 
 /* Bonding section */
 
@@ -765,6 +881,22 @@ enum {
 
 #define IFLA_IPOIB_MAX (__IFLA_IPOIB_MAX - 1)
 
+
+/* HSR section */
+
+enum {
+	IFLA_HSR_UNSPEC,
+	IFLA_HSR_SLAVE1,
+	IFLA_HSR_SLAVE2,
+	IFLA_HSR_MULTICAST_SPEC,	/* Last byte of supervision addr */
+	IFLA_HSR_SUPERVISION_ADDR,	/* Supervision frame multicast addr */
+	IFLA_HSR_SEQ_NR,
+	IFLA_HSR_VERSION,		/* HSR version */
+	__IFLA_HSR_MAX,
+};
+
+#define IFLA_HSR_MAX (__IFLA_HSR_MAX - 1)
+
 /* STATS section */
 
 struct if_stats_msg {
@@ -784,6 +916,7 @@ enum {
 	IFLA_STATS_LINK_XSTATS,
 	IFLA_STATS_LINK_XSTATS_SLAVE,
 	IFLA_STATS_LINK_OFFLOAD_XSTATS,
+	IFLA_STATS_AF_SPEC,
 	__IFLA_STATS_MAX,
 };
 
@@ -812,6 +945,41 @@ enum {
 };
 #define IFLA_OFFLOAD_XSTATS_MAX (__IFLA_OFFLOAD_XSTATS_MAX - 1)
 
+/* XDP section */
+
+#define XDP_FLAGS_UPDATE_IF_NOEXIST	(1U << 0)
+#define XDP_FLAGS_SKB_MODE		(1U << 1)
+#define XDP_FLAGS_DRV_MODE		(1U << 2)
+#define XDP_FLAGS_HW_MODE		(1U << 3)
+#define XDP_FLAGS_MODES			(XDP_FLAGS_SKB_MODE | \
+					 XDP_FLAGS_DRV_MODE | \
+					 XDP_FLAGS_HW_MODE)
+#define XDP_FLAGS_MASK			(XDP_FLAGS_UPDATE_IF_NOEXIST | \
+					 XDP_FLAGS_MODES)
+
+/* These are stored into IFLA_XDP_ATTACHED on dump. */
+enum {
+	XDP_ATTACHED_NONE = 0,
+	XDP_ATTACHED_DRV,
+	XDP_ATTACHED_SKB,
+	XDP_ATTACHED_HW,
+	XDP_ATTACHED_MULTI,
+};
+
+enum {
+	IFLA_XDP_UNSPEC,
+	IFLA_XDP_FD,
+	IFLA_XDP_ATTACHED,
+	IFLA_XDP_FLAGS,
+	IFLA_XDP_PROG_ID,
+	IFLA_XDP_DRV_PROG_ID,
+	IFLA_XDP_SKB_PROG_ID,
+	IFLA_XDP_HW_PROG_ID,
+	__IFLA_XDP_MAX,
+};
+
+#define IFLA_XDP_MAX (__IFLA_XDP_MAX - 1)
+
 enum {
 	IFLA_EVENT_NONE,
 	IFLA_EVENT_REBOOT,		/* internal reset / reboot */
@@ -839,5 +1007,26 @@ enum {
 };
 
 #define IFLA_TUN_MAX (__IFLA_TUN_MAX - 1)
+
+/* rmnet section */
+
+#define RMNET_FLAGS_INGRESS_DEAGGREGATION         (1U << 0)
+#define RMNET_FLAGS_INGRESS_MAP_COMMANDS          (1U << 1)
+#define RMNET_FLAGS_INGRESS_MAP_CKSUMV4           (1U << 2)
+#define RMNET_FLAGS_EGRESS_MAP_CKSUMV4            (1U << 3)
+
+enum {
+	IFLA_RMNET_UNSPEC,
+	IFLA_RMNET_MUX_ID,
+	IFLA_RMNET_FLAGS,
+	__IFLA_RMNET_MAX,
+};
+
+#define IFLA_RMNET_MAX	(__IFLA_RMNET_MAX - 1)
+
+struct ifla_rmnet_flags {
+	__u32	flags;
+	__u32	mask;
+};
 
 #endif /* _UAPI_LINUX_IF_LINK_H */

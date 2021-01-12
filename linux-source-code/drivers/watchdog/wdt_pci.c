@@ -49,7 +49,6 @@
 #include <linux/delay.h>
 #include <linux/notifier.h>
 #include <linux/reboot.h>
-#include <linux/init.h>
 #include <linux/fs.h>
 #include <linux/pci.h>
 #include <linux/io.h>
@@ -333,7 +332,7 @@ static irqreturn_t wdtpci_interrupt(int irq, void *dev_id)
 		pr_crit("Would Reboot\n");
 #else
 		pr_crit("Initiating system reboot\n");
-		emergency_restart(NULL);
+		emergency_restart();
 #endif
 #else
 		pr_crit("Reset in 5ms\n");
@@ -431,7 +430,7 @@ static long wdtpci_ioctl(struct file *file, unsigned int cmd,
 		if (wdtpci_set_heartbeat(new_heartbeat))
 			return -EINVAL;
 		wdtpci_ping();
-		/* Fall */
+		/* fall through */
 	case WDIOC_GETTIMEOUT:
 		return put_user(heartbeat, p);
 	default:
@@ -744,5 +743,3 @@ module_pci_driver(wdtpci_driver);
 MODULE_AUTHOR("JP Nollmann, Alan Cox");
 MODULE_DESCRIPTION("Driver for the ICS PCI-WDT500/501 watchdog cards");
 MODULE_LICENSE("GPL");
-MODULE_ALIAS_MISCDEV(WATCHDOG_MINOR);
-MODULE_ALIAS_MISCDEV(TEMP_MINOR);

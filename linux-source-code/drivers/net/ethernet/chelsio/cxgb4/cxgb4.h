@@ -53,7 +53,6 @@
 #include <linux/ptp_classify.h>
 #include <linux/crash_dump.h>
 #include <linux/thermal.h>
-#include <linux/refcount.h>
 #include <asm/io.h>
 #include "t4_chip_type.h"
 #include "cxgb4_uld.h"
@@ -562,6 +561,10 @@ struct sge_rspq;
 
 #include "cxgb4_dcb.h"
 
+#ifdef CONFIG_CHELSIO_T4_FCOE
+#include "cxgb4_fcoe.h"
+#endif /* CONFIG_CHELSIO_T4_FCOE */
+
 struct port_info {
 	struct adapter *adapter;
 	u16    viid;
@@ -582,6 +585,9 @@ struct port_info {
 #ifdef CONFIG_CHELSIO_T4_DCB
 	struct port_dcb_info dcb;     /* Data Center Bridging support */
 #endif
+#ifdef CONFIG_CHELSIO_T4_FCOE
+	struct cxgb_fcoe fcoe;
+#endif /* CONFIG_CHELSIO_T4_FCOE */
 	bool rxtstamp;  /* Enable TS */
 	struct hwtstamp_config tstamp_config;
 	bool ptp_enable;
@@ -600,17 +606,18 @@ struct dentry;
 struct work_struct;
 
 enum {                                 /* adapter flags */
-	FULL_INIT_DONE     = (1 << 0),
-	DEV_ENABLED        = (1 << 1),
-	USING_MSI          = (1 << 2),
-	USING_MSIX         = (1 << 3),
-	FW_OK              = (1 << 4),
-	RSS_TNLALLLOOKUP   = (1 << 5),
-	USING_SOFT_PARAMS  = (1 << 6),
-	MASTER_PF          = (1 << 7),
-	FW_OFLD_CONN       = (1 << 9),
-	ROOT_NO_RELAXED_ORDERING = (1 << 10),
-	SHUTTING_DOWN	   = (1 << 11),
+	CXGB4_FULL_INIT_DONE		= (1 << 0),
+	CXGB4_DEV_ENABLED		= (1 << 1),
+	CXGB4_USING_MSI			= (1 << 2),
+	CXGB4_USING_MSIX		= (1 << 3),
+	CXGB4_FW_OK			= (1 << 4),
+	CXGB4_RSS_TNLALLLOOKUP		= (1 << 5),
+	CXGB4_USING_SOFT_PARAMS		= (1 << 6),
+	CXGB4_MASTER_PF			= (1 << 7),
+	CXGB4_FW_OFLD_CONN		= (1 << 9),
+	CXGB4_ROOT_NO_RELAXED_ORDERING	= (1 << 10),
+	CXGB4_SHUTTING_DOWN		= (1 << 11),
+	CXGB4_SGE_DBQ_TIMER		= (1 << 12),
 };
 
 enum {
@@ -750,6 +757,8 @@ struct sge_eth_txq {                /* state for an SGE Ethernet Tx queue */
 #ifdef CONFIG_CHELSIO_T4_DCB
 	u8 dcb_prio;		    /* DCB Priority bound to queue */
 #endif
+	u8 dbqt;                    /* SGE Doorbell Queue Timer in use */
+	unsigned int dbqtimerix;    /* SGE Doorbell Queue Timer Index */
 	unsigned long tso;          /* # of TSO requests */
 	unsigned long tx_cso;       /* # of Tx checksum offloads */
 	unsigned long vlan_ins;     /* # of Tx VLAN insertions */
@@ -810,6 +819,8 @@ struct sge {
 	u16 nqs_per_uld;	    /* # of Rx queues per ULD */
 	u16 timer_val[SGE_NTIMERS];
 	u8 counter_val[SGE_NCOUNTERS];
+	u16 dbqtimer_tick;
+	u16 dbqtimer_val[SGE_NDBQTIMERS];
 	u32 fl_pg_order;            /* large page allocation size */
 	u32 stat_len;               /* length of status page at ring end */
 	u32 pktshift;               /* padding between CPL & packet data */
@@ -891,6 +902,10 @@ struct mbox_list {
 	struct list_head list;
 };
 
+struct mps_encap_entry {
+	atomic_t refcnt;
+};
+
 #if IS_ENABLED(CONFIG_THERMAL)
 struct ch_thermal {
 	struct thermal_zone_device *tzdev;
@@ -898,14 +913,6 @@ struct ch_thermal {
 	int trip_type;
 };
 #endif
-
-struct mps_entries_ref {
-	struct list_head list;
-	u8 addr[ETH_ALEN];
-	u8 mask[ETH_ALEN];
-	u16 idx;
-	refcount_t refcnt;
-};
 
 struct adapter {
 	void __iomem *regs;
@@ -958,6 +965,7 @@ struct adapter {
 	unsigned int rawf_start;
 	unsigned int rawf_cnt;
 	struct smt_data *smt;
+	struct mps_encap_entry *mps_encap;
 	struct cxgb4_uld_info *uld;
 	void *uld_handle[CXGB4_ULD_MAX];
 	unsigned int num_uld;
@@ -965,8 +973,6 @@ struct adapter {
 	struct list_head list_node;
 	struct list_head rcu_node;
 	struct list_head mac_hlist; /* list of MAC addresses in MPS Hash */
-	struct list_head mps_ref;
-	spinlock_t mps_ref_lock; /* lock for syncing mps ref/def activities */
 
 	void *iscsi_ppm;
 
@@ -991,8 +997,8 @@ struct adapter {
 	struct mutex uld_mutex;
 
 	struct dentry *debugfs_root;
-	u32 use_bd;     /* Use SGE Back Door intfc for reading SGE Contexts */
-	u32 trace_rss;	/* 1 implies that different RSS flit per filter is
+	bool use_bd;     /* Use SGE Back Door intfc for reading SGE Contexts */
+	bool trace_rss;	/* 1 implies that different RSS flit per filter is
 			 * used per filter else if 0 default RSS flit is
 			 * used for all 4 filters.
 			 */
@@ -1402,7 +1408,7 @@ int t4_sge_alloc_rxq(struct adapter *adap, struct sge_rspq *iq, bool fwevtq,
 		     rspq_flush_handler_t flush_handler, int cong);
 int t4_sge_alloc_eth_txq(struct adapter *adap, struct sge_eth_txq *txq,
 			 struct net_device *dev, struct netdev_queue *netdevq,
-			 unsigned int iqid);
+			 unsigned int iqid, u8 dbqt);
 int t4_sge_alloc_ctrl_txq(struct adapter *adap, struct sge_ctrl_txq *txq,
 			  struct net_device *dev, unsigned int iqid,
 			  unsigned int cmplqid);
@@ -1415,6 +1421,8 @@ irqreturn_t t4_sge_intr_msix(int irq, void *cookie);
 int t4_sge_init(struct adapter *adap);
 void t4_sge_start(struct adapter *adap);
 void t4_sge_stop(struct adapter *adap);
+int t4_sge_eth_txq_egress_update(struct adapter *adap, struct sge_eth_txq *q,
+				 int maxreclaim);
 void cxgb4_set_ethtool_ops(struct net_device *netdev);
 int cxgb4_write_rss(const struct port_info *pi, const u16 *queues);
 enum cpl_tx_tnl_lso_type cxgb_encap_offload_supported(struct sk_buff *skb);
@@ -1821,6 +1829,8 @@ int t4_ctrl_eq_free(struct adapter *adap, unsigned int mbox, unsigned int pf,
 int t4_ofld_eq_free(struct adapter *adap, unsigned int mbox, unsigned int pf,
 		    unsigned int vf, unsigned int eqid);
 int t4_sge_ctxt_flush(struct adapter *adap, unsigned int mbox, int ctxt_type);
+int t4_read_sge_dbqtimers(struct adapter *adap, unsigned int ndbqtimers,
+			  u16 *dbqtimers);
 void t4_handle_get_port_info(struct port_info *pi, const __be64 *rpl);
 int t4_update_port_info(struct port_info *pi);
 int t4_get_link_params(struct port_info *pi, unsigned int *link_okp,
@@ -1886,43 +1896,5 @@ int cxgb4_dcb_enabled(const struct net_device *dev);
 
 int cxgb4_thermal_init(struct adapter *adap);
 int cxgb4_thermal_remove(struct adapter *adap);
-
-int cxgb4_change_mac(struct port_info *pi, unsigned int viid,
-		     int *tcam_idx, const u8 *addr,
-		     bool persistent, u8 *smt_idx);
-
-int cxgb4_alloc_mac_filt(struct adapter *adap, unsigned int viid,
-			 bool free, unsigned int naddr,
-			 const u8 **addr, u16 *idx,
-			 u64 *hash, bool sleep_ok);
-int cxgb4_free_mac_filt(struct adapter *adap, unsigned int viid,
-			unsigned int naddr, const u8 **addr, bool sleep_ok);
-int cxgb4_init_mps_ref_entries(struct adapter *adap);
-void cxgb4_free_mps_ref_entries(struct adapter *adap);
-int cxgb4_alloc_encap_mac_filt(struct adapter *adap, unsigned int viid,
-			       const u8 *addr, const u8 *mask,
-			       unsigned int vni, unsigned int vni_mask,
-			       u8 dip_hit, u8 lookup_type, bool sleep_ok);
-int cxgb4_free_encap_mac_filt(struct adapter *adap, unsigned int viid,
-			      int idx, bool sleep_ok);
-int cxgb4_free_raw_mac_filt(struct adapter *adap,
-			    unsigned int viid,
-			    const u8 *addr,
-			    const u8 *mask,
-			    unsigned int idx,
-			    u8 lookup_type,
-			    u8 port_id,
-			    bool sleep_ok);
-int cxgb4_alloc_raw_mac_filt(struct adapter *adap,
-			     unsigned int viid,
-			     const u8 *addr,
-			     const u8 *mask,
-			     unsigned int idx,
-			     u8 lookup_type,
-			     u8 port_id,
-			     bool sleep_ok);
-int cxgb4_update_mac_filt(struct port_info *pi, unsigned int viid,
-			  int *tcam_idx, const u8 *addr,
-			  bool persistent, u8 *smt_idx);
 
 #endif /* __CXGB4_H__ */

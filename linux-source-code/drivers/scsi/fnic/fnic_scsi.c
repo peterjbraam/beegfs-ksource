@@ -324,13 +324,11 @@ static inline int fnic_queue_wq_copy_desc(struct fnic *fnic,
 	struct fc_rport_libfc_priv *rp = rport->dd_data;
 	struct host_sg_desc *desc;
 	struct misc_stats *misc_stats = &fnic->fnic_stats.misc_stats;
-	u8 pri_tag = 0;
 	unsigned int i;
 	unsigned long intr_flags;
 	int flags;
 	u8 exch_flags;
 	struct scsi_lun fc_lun;
-	char msg[2];
 
 	if (sg_count) {
 		/* For each SGE, create a device desc entry */
@@ -366,12 +364,6 @@ static inline int fnic_queue_wq_copy_desc(struct fnic *fnic,
 
 	int_to_scsilun(sc->device->lun, &fc_lun);
 
-	pri_tag = FCPIO_ICMND_PTA_SIMPLE;
-	msg[0] = MSG_SIMPLE_TAG;
-	scsi_populate_tag_msg(sc, msg);
-	if (msg[0] == MSG_ORDERED_TAG)
-		pri_tag = FCPIO_ICMND_PTA_ORDERED;
-
 	/* Enqueue the descriptor in the Copy WQ */
 	spin_lock_irqsave(&fnic->wq_copy_lock[0], intr_flags);
 
@@ -403,7 +395,8 @@ static inline int fnic_queue_wq_copy_desc(struct fnic *fnic,
 					 io_req->sgl_list_pa,
 					 io_req->sense_buf_pa,
 					 0, /* scsi cmd ref, always 0 */
-					 pri_tag, /* scsi pri and tag */
+					 FCPIO_ICMND_PTA_SIMPLE,
+					 	/* scsi pri and tag */
 					 flags,	/* command flags */
 					 sc->cmnd, sc->cmd_len,
 					 scsi_bufflen(sc),
@@ -1332,13 +1325,32 @@ int fnic_wq_copy_cmpl_handler(struct fnic *fnic, int copy_work_to_do)
 	unsigned int wq_work_done = 0;
 	unsigned int i, cq_index;
 	unsigned int cur_work_done;
+	struct misc_stats *misc_stats = &fnic->fnic_stats.misc_stats;
+	u64 start_jiffies = 0;
+	u64 end_jiffies = 0;
+	u64 delta_jiffies = 0;
+	u64 delta_ms = 0;
 
 	for (i = 0; i < fnic->wq_copy_count; i++) {
 		cq_index = i + fnic->raw_wq_count + fnic->rq_count;
+
+		start_jiffies = jiffies;
 		cur_work_done = vnic_cq_copy_service(&fnic->cq[cq_index],
 						     fnic_fcpio_cmpl_handler,
 						     copy_work_to_do);
+		end_jiffies = jiffies;
+
 		wq_work_done += cur_work_done;
+		delta_jiffies = end_jiffies - start_jiffies;
+		if (delta_jiffies >
+			(u64) atomic64_read(&misc_stats->max_isr_jiffies)) {
+			atomic64_set(&misc_stats->max_isr_jiffies,
+					delta_jiffies);
+			delta_ms = jiffies_to_msecs(delta_jiffies);
+			atomic64_set(&misc_stats->max_isr_time_ms, delta_ms);
+			atomic64_set(&misc_stats->corr_work_done,
+					cur_work_done);
+		}
 	}
 	return wq_work_done;
 }
@@ -1850,7 +1862,7 @@ int fnic_abort_cmd(struct scsi_cmnd *sc)
 	tag = sc->request->tag;
 	FNIC_SCSI_DBG(KERN_DEBUG,
 		fnic->lport->host,
-		"Abort Cmd called FCID 0x%x, LUN 0x%x TAG %x flags %x\n",
+		"Abort Cmd called FCID 0x%x, LUN 0x%llx TAG %x flags %x\n",
 		rport->port_id, sc->device->lun, tag, CMD_FLAGS(sc));
 
 	CMD_FLAGS(sc) = FNIC_NO_FLAGS;
@@ -2341,7 +2353,7 @@ int fnic_device_reset(struct scsi_cmnd *sc)
 
 	rport = starget_to_rport(scsi_target(sc->device));
 	FNIC_SCSI_DBG(KERN_DEBUG, fnic->lport->host,
-		      "Device reset called FCID 0x%x, LUN 0x%x sc 0x%p\n",
+		      "Device reset called FCID 0x%x, LUN 0x%llx sc 0x%p\n",
 		      rport->port_id, sc->device->lun, sc);
 
 	if (lp->state != LPORT_ST_READY || !(lp->link_up))
@@ -2574,7 +2586,7 @@ int fnic_reset(struct Scsi_Host *shost)
 	 * Reset local port, this will clean up libFC exchanges,
 	 * reset remote port sessions, and if link is up, begin flogi
 	 */
-	ret = lp->tt.lport_reset(lp);
+	ret = fc_lport_reset(lp);
 
 	FNIC_SCSI_DBG(KERN_DEBUG, fnic->lport->host,
 		      "Returning from fnic reset %s\n",

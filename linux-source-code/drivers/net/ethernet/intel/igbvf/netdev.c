@@ -1895,9 +1895,9 @@ static bool igbvf_has_link(struct igbvf_adapter *adapter)
  * igbvf_watchdog - Timer Call-back
  * @data: pointer to adapter cast into an unsigned long
  **/
-static void igbvf_watchdog(unsigned long data)
+static void igbvf_watchdog(struct timer_list *t)
 {
-	struct igbvf_adapter *adapter = (struct igbvf_adapter *)data;
+	struct igbvf_adapter *adapter = from_timer(adapter, t, watchdog_timer);
 
 	/* Do the rest outside of interrupt context */
 	schedule_work(&adapter->watchdog_task);
@@ -2319,7 +2319,8 @@ static netdev_tx_t igbvf_xmit_frame_ring_adv(struct sk_buff *skb,
 
 	if (skb_vlan_tag_present(skb)) {
 		tx_flags |= IGBVF_TX_FLAGS_VLAN;
-		tx_flags |= (skb_vlan_tag_get(skb) << IGBVF_TX_FLAGS_VLAN_SHIFT);
+		tx_flags |= (skb_vlan_tag_get(skb) <<
+			     IGBVF_TX_FLAGS_VLAN_SHIFT);
 	}
 
 	if (protocol == htons(ETH_P_IP))
@@ -2680,13 +2681,12 @@ igbvf_features_check(struct sk_buff *skb, struct net_device *dev,
 }
 
 static const struct net_device_ops igbvf_netdev_ops = {
-	.ndo_size		= sizeof(struct net_device_ops),
 	.ndo_open		= igbvf_open,
 	.ndo_stop		= igbvf_close,
 	.ndo_start_xmit		= igbvf_xmit_frame,
 	.ndo_set_rx_mode	= igbvf_set_rx_mode,
 	.ndo_set_mac_address	= igbvf_set_mac,
-	.extended.ndo_change_mtu	= igbvf_change_mtu,
+	.ndo_change_mtu		= igbvf_change_mtu,
 	.ndo_do_ioctl		= igbvf_ioctl,
 	.ndo_tx_timeout		= igbvf_tx_timeout,
 	.ndo_vlan_rx_add_vid	= igbvf_vlan_rx_add_vid,
@@ -2805,8 +2805,8 @@ static int igbvf_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 #define IGBVF_GSO_PARTIAL_FEATURES (NETIF_F_GSO_GRE | \
 				    NETIF_F_GSO_GRE_CSUM | \
-				    NETIF_F_GSO_IPIP | \
-				    NETIF_F_GSO_SIT | \
+				    NETIF_F_GSO_IPXIP4 | \
+				    NETIF_F_GSO_IPXIP6 | \
 				    NETIF_F_GSO_UDP_TUNNEL | \
 				    NETIF_F_GSO_UDP_TUNNEL_CSUM)
 
@@ -2829,8 +2829,8 @@ static int igbvf_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 			    NETIF_F_HW_VLAN_CTAG_TX;
 
 	/* MTU range: 68 - 9216 */
-	netdev->extended->min_mtu = ETH_MIN_MTU;
-	netdev->extended->max_mtu = MAX_STD_JUMBO_FRAME_SIZE;
+	netdev->min_mtu = ETH_MIN_MTU;
+	netdev->max_mtu = MAX_STD_JUMBO_FRAME_SIZE;
 
 	spin_lock_bh(&hw->mbx_lock);
 
@@ -2859,8 +2859,7 @@ static int igbvf_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 		       netdev->addr_len);
 	}
 
-	setup_timer(&adapter->watchdog_timer, &igbvf_watchdog,
-		    (unsigned long)adapter);
+	timer_setup(&adapter->watchdog_timer, igbvf_watchdog, 0);
 
 	INIT_WORK(&adapter->reset_task, igbvf_reset_task);
 	INIT_WORK(&adapter->watchdog_task, igbvf_watchdog_task);

@@ -347,9 +347,9 @@ struct efx_ptp_data {
 
 static int efx_phc_adjfreq(struct ptp_clock_info *ptp, s32 delta);
 static int efx_phc_adjtime(struct ptp_clock_info *ptp, s64 delta);
-static int efx_phc_gettime(struct ptp_clock_info *ptp, struct timespec *ts);
+static int efx_phc_gettime(struct ptp_clock_info *ptp, struct timespec64 *ts);
 static int efx_phc_settime(struct ptp_clock_info *ptp,
-			   const struct timespec *e_ts);
+			   const struct timespec64 *e_ts);
 static int efx_phc_enable(struct ptp_clock_info *ptp,
 			  struct ptp_clock_request *request, int on);
 
@@ -828,27 +828,27 @@ static void efx_ptp_send_times(struct efx_nic *efx,
 			       struct pps_event_time *last_time)
 {
 	struct pps_event_time now;
-	struct timespec limit;
+	struct timespec64 limit;
 	struct efx_ptp_data *ptp = efx->ptp_data;
 	int *mc_running = ptp->start.addr;
 
 	pps_get_ts(&now);
 	limit = now.ts_real;
-	timespec_add_ns(&limit, SYNCHRONISE_PERIOD_NS);
+	timespec64_add_ns(&limit, SYNCHRONISE_PERIOD_NS);
 
 	/* Write host time for specified period or until MC is done */
-	while ((timespec_compare(&now.ts_real, &limit) < 0) &&
-	       ACCESS_ONCE(*mc_running)) {
-		struct timespec update_time;
+	while ((timespec64_compare(&now.ts_real, &limit) < 0) &&
+	       READ_ONCE(*mc_running)) {
+		struct timespec64 update_time;
 		unsigned int host_time;
 
 		/* Don't update continuously to avoid saturating the PCIe bus */
 		update_time = now.ts_real;
-		timespec_add_ns(&update_time, SYNCHRONISATION_GRANULARITY_NS);
+		timespec64_add_ns(&update_time, SYNCHRONISATION_GRANULARITY_NS);
 		do {
 			pps_get_ts(&now);
-		} while ((timespec_compare(&now.ts_real, &update_time) < 0) &&
-			 ACCESS_ONCE(*mc_running));
+		} while ((timespec64_compare(&now.ts_real, &update_time) < 0) &&
+			 READ_ONCE(*mc_running));
 
 		/* Synchronise NIC with single word of time only */
 		host_time = (now.ts_real.tv_sec << MC_NANOSECOND_BITS |
@@ -903,7 +903,7 @@ efx_ptp_process_times(struct efx_nic *efx, MCDI_DECLARE_STRUCT_PTR(synch_buf),
 	struct efx_ptp_data *ptp = efx->ptp_data;
 	u32 last_sec;
 	u32 start_sec;
-	struct timespec delta;
+	struct timespec64 delta;
 	ktime_t mc_time;
 
 	if (number_readings == 0)
@@ -1012,14 +1012,14 @@ static int efx_ptp_synchronize(struct efx_nic *efx, unsigned int num_readings)
 		       ptp->start.dma_addr);
 
 	/* Clear flag that signals MC ready */
-	ACCESS_ONCE(*start) = 0;
+	WRITE_ONCE(*start, 0);
 	rc = efx_mcdi_rpc_start(efx, MC_CMD_PTP, synch_buf,
 				MC_CMD_PTP_IN_SYNCHRONIZE_LEN);
 	EFX_WARN_ON_ONCE_PARANOID(rc);
 
 	/* Wait for start from MCDI (or timeout) */
 	timeout = jiffies + msecs_to_jiffies(MAX_SYNCHRONISE_WAIT_MS);
-	while (!ACCESS_ONCE(*start) && (time_before(jiffies, timeout))) {
+	while (!READ_ONCE(*start) && (time_before(jiffies, timeout))) {
 		udelay(20);	/* Usually start MCDI execution quickly */
 		loops++;
 	}
@@ -1029,7 +1029,7 @@ static int efx_ptp_synchronize(struct efx_nic *efx, unsigned int num_readings)
 	if (!time_before(jiffies, timeout))
 		++ptp->sync_timeouts;
 
-	if (ACCESS_ONCE(*start))
+	if (READ_ONCE(*start))
 		efx_ptp_send_times(efx, &last_time);
 
 	/* Collect results */
@@ -1400,11 +1400,12 @@ static const struct ptp_clock_info efx_phc_clock_info = {
 	.n_alarm	= 0,
 	.n_ext_ts	= 0,
 	.n_per_out	= 0,
+	.n_pins		= 0,
 	.pps		= 1,
 	.adjfreq	= efx_phc_adjfreq,
 	.adjtime	= efx_phc_adjtime,
-	.gettime	= efx_phc_gettime,
-	.settime	= efx_phc_settime,
+	.gettime64	= efx_phc_gettime,
+	.settime64	= efx_phc_settime,
 	.enable		= efx_phc_enable,
 };
 
@@ -2081,7 +2082,7 @@ static int efx_phc_adjtime(struct ptp_clock_info *ptp, s64 delta)
 			    NULL, 0, NULL);
 }
 
-static int efx_phc_gettime(struct ptp_clock_info *ptp, struct timespec *ts)
+static int efx_phc_gettime(struct ptp_clock_info *ptp, struct timespec64 *ts)
 {
 	struct efx_ptp_data *ptp_data = container_of(ptp,
 						     struct efx_ptp_data,
@@ -2103,28 +2104,28 @@ static int efx_phc_gettime(struct ptp_clock_info *ptp, struct timespec *ts)
 	kt = ptp_data->nic_to_kernel_time(
 		MCDI_DWORD(outbuf, PTP_OUT_READ_NIC_TIME_MAJOR),
 		MCDI_DWORD(outbuf, PTP_OUT_READ_NIC_TIME_MINOR), 0);
-	*ts = ktime_to_timespec(kt);
+	*ts = ktime_to_timespec64(kt);
 	return 0;
 }
 
 static int efx_phc_settime(struct ptp_clock_info *ptp,
-			   const struct timespec *e_ts)
+			   const struct timespec64 *e_ts)
 {
 	/* Get the current NIC time, efx_phc_gettime.
 	 * Subtract from the desired time to get the offset
 	 * call efx_phc_adjtime with the offset
 	 */
 	int rc;
-	struct timespec time_now;
-	struct timespec delta;
+	struct timespec64 time_now;
+	struct timespec64 delta;
 
 	rc = efx_phc_gettime(ptp, &time_now);
 	if (rc != 0)
 		return rc;
 
-	delta = timespec_sub(*e_ts, time_now);
+	delta = timespec64_sub(*e_ts, time_now);
 
-	rc = efx_phc_adjtime(ptp, timespec_to_ns(&delta));
+	rc = efx_phc_adjtime(ptp, timespec64_to_ns(&delta));
 	if (rc != 0)
 		return rc;
 

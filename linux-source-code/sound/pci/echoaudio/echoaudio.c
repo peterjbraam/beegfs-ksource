@@ -713,6 +713,7 @@ static int pcm_prepare(struct snd_pcm_substream *substream)
 		break;
 	case SNDRV_PCM_FORMAT_S32_BE:
 		format.data_are_bigendian = 1;
+		/* fall through */
 	case SNDRV_PCM_FORMAT_S32_LE:
 		format.bits_per_sample = 32;
 		break;
@@ -764,6 +765,7 @@ static int pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 					pipe->last_counter = 0;
 					pipe->position = 0;
 					*pipe->dma_counter = 0;
+					/* fall through */
 				case PIPE_STATE_PAUSED:
 					pipe->state = PIPE_STATE_STARTED;
 					break;
@@ -1950,6 +1952,11 @@ static int snd_echo_create(struct snd_card *card,
 	}
 	chip->dsp_registers = (volatile u32 __iomem *)
 		ioremap_nocache(chip->dsp_registers_phys, sz);
+	if (!chip->dsp_registers) {
+		dev_err(chip->card->dev, "ioremap failed\n");
+		snd_echo_free(chip);
+		return -ENOMEM;
+	}
 
 	if (request_irq(pci->irq, snd_echo_interrupt, IRQF_SHARED,
 			KBUILD_MODNAME, chip)) {
@@ -2160,9 +2167,6 @@ ctl_error:
 static int snd_echo_suspend(struct device *dev)
 {
 	struct echoaudio *chip = dev_get_drvdata(dev);
-
-	snd_pcm_suspend_all(chip->analog_pcm);
-	snd_pcm_suspend_all(chip->digital_pcm);
 
 #ifdef ECHOCARD_HAS_MIDI
 	/* This call can sleep */

@@ -46,7 +46,7 @@ static struct sk_buff *sctp_gso_segment(struct sk_buff *skb,
 	struct sk_buff *segs = ERR_PTR(-EINVAL);
 	struct sctphdr *sh;
 
-	if (!(skb_shinfo(skb)->gso_type & SKB_GSO_SCTP))
+	if (!skb_is_gso_sctp(skb))
 		goto out;
 
 	sh = sctp_hdr(skb);
@@ -103,11 +103,6 @@ static const struct net_offload sctp6_offload = {
 	},
 };
 
-static const struct skb_checksum_ops crc32c_csum_ops = {
-	.update  = sctp_csum_update,
-	.combine = sctp_csum_combine,
-};
-
 int __init sctp_offload_init(void)
 {
 	int ret;
@@ -120,7 +115,7 @@ int __init sctp_offload_init(void)
 	if (ret)
 		goto ipv4;
 
-	crc32c_csum_stub = &crc32c_csum_ops;
+	crc32c_csum_stub = &sctp_csum_ops;
 	return ret;
 
 ipv4:

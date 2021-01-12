@@ -21,8 +21,8 @@
 static unsigned int
 netmap_tg6(struct sk_buff *skb, const struct xt_action_param *par)
 {
-	const struct nf_nat_range *range = par->targinfo;
-	struct nf_nat_range newrange;
+	const struct nf_nat_range2 *range = par->targinfo;
+	struct nf_nat_range2 newrange;
 	struct nf_conn *ct;
 	enum ip_conntrack_info ctinfo;
 	union nf_inet_addr new_addr, netmask;
@@ -56,11 +56,16 @@ netmap_tg6(struct sk_buff *skb, const struct xt_action_param *par)
 
 static int netmap_tg6_checkentry(const struct xt_tgchk_param *par)
 {
-	const struct nf_nat_range *range = par->targinfo;
+	const struct nf_nat_range2 *range = par->targinfo;
 
 	if (!(range->flags & NF_NAT_RANGE_MAP_IPS))
 		return -EINVAL;
-	return 0;
+	return nf_ct_netns_get(par->net, par->family);
+}
+
+static void netmap_tg_destroy(const struct xt_tgdtor_param *par)
+{
+	nf_ct_netns_put(par->net, par->family);
 }
 
 static unsigned int
@@ -70,12 +75,12 @@ netmap_tg4(struct sk_buff *skb, const struct xt_action_param *par)
 	enum ip_conntrack_info ctinfo;
 	__be32 new_ip, netmask;
 	const struct nf_nat_ipv4_multi_range_compat *mr = par->targinfo;
-	struct nf_nat_range newrange;
+	struct nf_nat_range2 newrange;
 
-	NF_CT_ASSERT(xt_hooknum(par) == NF_INET_PRE_ROUTING ||
-		     xt_hooknum(par) == NF_INET_POST_ROUTING ||
-		     xt_hooknum(par) == NF_INET_LOCAL_OUT ||
-		     xt_hooknum(par) == NF_INET_LOCAL_IN);
+	WARN_ON(xt_hooknum(par) != NF_INET_PRE_ROUTING &&
+		xt_hooknum(par) != NF_INET_POST_ROUTING &&
+		xt_hooknum(par) != NF_INET_LOCAL_OUT &&
+		xt_hooknum(par) != NF_INET_LOCAL_IN);
 	ct = nf_ct_get(skb, &ctinfo);
 
 	netmask = ~(mr->range[0].min_ip ^ mr->range[0].max_ip);
@@ -111,7 +116,7 @@ static int netmap_tg4_check(const struct xt_tgchk_param *par)
 		pr_debug("bad rangesize %u.\n", mr->rangesize);
 		return -EINVAL;
 	}
-	return 0;
+	return nf_ct_netns_get(par->net, par->family);
 }
 
 static struct xt_target netmap_tg_reg[] __read_mostly = {
@@ -127,6 +132,7 @@ static struct xt_target netmap_tg_reg[] __read_mostly = {
 		              (1 << NF_INET_LOCAL_OUT) |
 		              (1 << NF_INET_LOCAL_IN),
 		.checkentry = netmap_tg6_checkentry,
+		.destroy    = netmap_tg_destroy,
 		.me         = THIS_MODULE,
 	},
 	{
@@ -141,6 +147,7 @@ static struct xt_target netmap_tg_reg[] __read_mostly = {
 		              (1 << NF_INET_LOCAL_OUT) |
 		              (1 << NF_INET_LOCAL_IN),
 		.checkentry = netmap_tg4_check,
+		.destroy    = netmap_tg_destroy,
 		.me         = THIS_MODULE,
 	},
 };

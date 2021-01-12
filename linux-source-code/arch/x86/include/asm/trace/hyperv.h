@@ -10,10 +10,8 @@
 
 TRACE_EVENT(hyperv_mmu_flush_tlb_others,
 	    TP_PROTO(const struct cpumask *cpus,
-		     struct mm_struct *mm,
-		     unsigned long start,
-		     unsigned long end),
-	    TP_ARGS(cpus, mm, start, end),
+		     const struct flush_tlb_info *info),
+	    TP_ARGS(cpus, info),
 	    TP_STRUCT__entry(
 		    __field(unsigned int, ncpus)
 		    __field(struct mm_struct *, mm)
@@ -21,13 +19,56 @@ TRACE_EVENT(hyperv_mmu_flush_tlb_others,
 		    __field(unsigned long, end)
 		    ),
 	    TP_fast_assign(__entry->ncpus = cpumask_weight(cpus);
-			   __entry->mm = mm;
-			   __entry->addr = start;
-			   __entry->end = end;
+			   __entry->mm = info->mm;
+			   __entry->addr = info->start;
+			   __entry->end = info->end;
 		    ),
 	    TP_printk("ncpus %d mm %p addr %lx, end %lx",
 		      __entry->ncpus, __entry->mm,
 		      __entry->addr, __entry->end)
+	);
+
+TRACE_EVENT(hyperv_nested_flush_guest_mapping,
+	    TP_PROTO(u64 as, int ret),
+	    TP_ARGS(as, ret),
+
+	    TP_STRUCT__entry(
+		    __field(u64, as)
+		    __field(int, ret)
+		    ),
+	    TP_fast_assign(__entry->as = as;
+			   __entry->ret = ret;
+		    ),
+	    TP_printk("address space %llx ret %d", __entry->as, __entry->ret)
+	);
+
+TRACE_EVENT(hyperv_nested_flush_guest_mapping_range,
+	    TP_PROTO(u64 as, int ret),
+	    TP_ARGS(as, ret),
+
+	    TP_STRUCT__entry(
+		    __field(u64, as)
+		    __field(int, ret)
+		    ),
+	    TP_fast_assign(__entry->as = as;
+			   __entry->ret = ret;
+		    ),
+	    TP_printk("address space %llx ret %d", __entry->as, __entry->ret)
+	);
+
+TRACE_EVENT(hyperv_send_ipi_mask,
+	    TP_PROTO(const struct cpumask *cpus,
+		     int vector),
+	    TP_ARGS(cpus, vector),
+	    TP_STRUCT__entry(
+		    __field(unsigned int, ncpus)
+		    __field(int, vector)
+		    ),
+	    TP_fast_assign(__entry->ncpus = cpumask_weight(cpus);
+			   __entry->vector = vector;
+		    ),
+	    TP_printk("ncpus %d vector %x",
+		      __entry->ncpus, __entry->vector)
 	);
 
 #endif /* CONFIG_HYPERV */

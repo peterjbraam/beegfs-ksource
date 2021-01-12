@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * test-all.c: Try to build all the main testcases at once.
  *
@@ -33,10 +34,6 @@
 # include "test-libelf-mmap.c"
 #undef main
 
-#define main main_test_get_current_dir_name
-# include "test-get_current_dir_name.c"
-#undef main
-
 #define main main_test_glibc
 # include "test-glibc.c"
 #undef main
@@ -47,6 +44,10 @@
 
 #define main main_test_dwarf_getlocations
 # include "test-dwarf_getlocations.c"
+#undef main
+
+#define main main_test_eventfd
+# include "test-eventfd.c"
 #undef main
 
 #define main main_test_libelf_getphdrnum
@@ -63,10 +64,6 @@
 
 #define main main_test_libunwind
 # include "test-libunwind.c"
-#undef main
-
-#define main main_test_libunwind_debug_frame
-# include "test-libunwind-debug-frame.c"
 #undef main
 
 #define main main_test_libaudit
@@ -153,6 +150,10 @@
 # include "test-get_cpuid.c"
 #undef main
 
+#define main main_test_bpf
+# include "test-bpf.c"
+#undef main
+
 #define main main_test_libcrypto
 # include "test-libcrypto.c"
 #undef main
@@ -165,6 +166,14 @@
 # include "test-setns.c"
 #undef main
 
+#define main main_test_libopencsd
+# include "test-libopencsd.c"
+#undef main
+
+#define main main_test_libaio
+# include "test-libaio.c"
+#undef main
+
 int main(int argc, char *argv[])
 {
 	main_test_libpython();
@@ -173,10 +182,10 @@ int main(int argc, char *argv[])
 	main_test_hello();
 	main_test_libelf();
 	main_test_libelf_mmap();
-	main_test_get_current_dir_name();
 	main_test_glibc();
 	main_test_dwarf();
 	main_test_dwarf_getlocations();
+	main_test_eventfd();
 	main_test_libelf_getphdrnum();
 	main_test_libelf_gelf_getnote();
 	main_test_libelf_getshdrstrndx();
@@ -198,10 +207,13 @@ int main(int argc, char *argv[])
 	main_test_pthread_barrier();
 	main_test_lzma();
 	main_test_get_cpuid();
+	main_test_bpf();
 	main_test_libcrypto();
 	main_test_sched_getcpu();
 	main_test_sdt();
 	main_test_setns();
+	main_test_libopencsd();
+	main_test_libaio();
 
 	return 0;
 }

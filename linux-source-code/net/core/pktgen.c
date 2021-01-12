@@ -418,7 +418,7 @@ struct pktgen_dev {
 	__u8	ipsmode;		/* IPSEC mode (config) */
 	__u8	ipsproto;		/* IPSEC type (config) */
 	__u32	spi;
-	struct dst_entry dst;
+	struct xfrm_dst xdst;
 	struct dst_ops dstops;
 #endif
 	char result[512];
@@ -432,7 +432,7 @@ struct pktgen_hdr {
 };
 
 
-static int pg_net_id __read_mostly;
+static unsigned int pg_net_id __read_mostly;
 
 struct pktgen_net {
 	struct net		*net;
@@ -542,7 +542,6 @@ static int pgctrl_open(struct inode *inode, struct file *file)
 }
 
 static const struct file_operations pktgen_fops = {
-	.owner   = THIS_MODULE,
 	.open    = pgctrl_open,
 	.read    = seq_read,
 	.llseek  = seq_lseek,
@@ -1266,7 +1265,7 @@ static ssize_t pktgen_if_write(struct file *file,
 		buf[len] = 0;
 		if (strcmp(buf, pkt_dev->dst_min) != 0) {
 			memset(pkt_dev->dst_min, 0, sizeof(pkt_dev->dst_min));
-			strcpy(pkt_dev->dst_min, buf);
+			strncpy(pkt_dev->dst_min, buf, len);
 			pkt_dev->daddr_min = in_aton(pkt_dev->dst_min);
 			pkt_dev->cur_daddr = pkt_dev->daddr_min;
 		}
@@ -1281,12 +1280,14 @@ static ssize_t pktgen_if_write(struct file *file,
 		if (len < 0)
 			return len;
 
+
 		if (copy_from_user(buf, &user_buffer[i], len))
 			return -EFAULT;
+
 		buf[len] = 0;
 		if (strcmp(buf, pkt_dev->dst_max) != 0) {
 			memset(pkt_dev->dst_max, 0, sizeof(pkt_dev->dst_max));
-			strcpy(pkt_dev->dst_max, buf);
+			strncpy(pkt_dev->dst_max, buf, len);
 			pkt_dev->daddr_max = in_aton(pkt_dev->dst_max);
 			pkt_dev->cur_daddr = pkt_dev->daddr_max;
 		}
@@ -1395,7 +1396,7 @@ static ssize_t pktgen_if_write(struct file *file,
 		buf[len] = 0;
 		if (strcmp(buf, pkt_dev->src_min) != 0) {
 			memset(pkt_dev->src_min, 0, sizeof(pkt_dev->src_min));
-			strcpy(pkt_dev->src_min, buf);
+			strncpy(pkt_dev->src_min, buf, len);
 			pkt_dev->saddr_min = in_aton(pkt_dev->src_min);
 			pkt_dev->cur_saddr = pkt_dev->saddr_min;
 		}
@@ -1415,7 +1416,7 @@ static ssize_t pktgen_if_write(struct file *file,
 		buf[len] = 0;
 		if (strcmp(buf, pkt_dev->src_max) != 0) {
 			memset(pkt_dev->src_max, 0, sizeof(pkt_dev->src_max));
-			strcpy(pkt_dev->src_max, buf);
+			strncpy(pkt_dev->src_max, buf, len);
 			pkt_dev->saddr_max = in_aton(pkt_dev->src_max);
 			pkt_dev->cur_saddr = pkt_dev->saddr_max;
 		}
@@ -1715,7 +1716,6 @@ static int pktgen_if_open(struct inode *inode, struct file *file)
 }
 
 static const struct file_operations pktgen_if_fops = {
-	.owner   = THIS_MODULE,
 	.open    = pktgen_if_open,
 	.read    = seq_read,
 	.llseek  = seq_lseek,
@@ -1853,7 +1853,6 @@ static int pktgen_thread_open(struct inode *inode, struct file *file)
 }
 
 static const struct file_operations pktgen_thread_fops = {
-	.owner   = THIS_MODULE,
 	.open    = pktgen_thread_open,
 	.read    = seq_read,
 	.llseek  = seq_lseek,
@@ -2256,7 +2255,7 @@ static void get_ipsec_sa(struct pktgen_dev *pkt_dev, int flow)
 			x = xfrm_state_lookup_byspi(pn->net, htonl(pkt_dev->spi), AF_INET);
 		} else {
 			/* slow path: we dont already have xfrm_state */
-			x = xfrm_stateonly_find(pn->net, DUMMY_MARK,
+			x = xfrm_stateonly_find(pn->net, DUMMY_MARK, 0,
 						(xfrm_address_t *)&pkt_dev->cur_daddr,
 						(xfrm_address_t *)&pkt_dev->cur_saddr,
 						AF_INET,
@@ -2520,7 +2519,7 @@ static int pktgen_output_ipsec(struct sk_buff *skb, struct pktgen_dev *pkt_dev)
 	 * supports both transport/tunnel mode + ESP/AH type.
 	 */
 	if ((x->props.mode == XFRM_MODE_TUNNEL) && (pkt_dev->spi != 0))
-		skb->_skb_refdst = (unsigned long)&pkt_dev->dst | SKB_DST_NOREF;
+		skb->_skb_refdst = (unsigned long)&pkt_dev->xdst.u.dst | SKB_DST_NOREF;
 
 	rcu_read_lock_bh();
 	err = x->outer_mode->output(x, skb);
@@ -3068,7 +3067,13 @@ static int pktgen_wait_thread_run(struct pktgen_thread *t)
 {
 	while (thread_is_running(t)) {
 
+		/* note: 't' will still be around even after the unlock/lock
+		 * cycle because pktgen_thread threads are only cleared at
+		 * net exit
+		 */
+		mutex_unlock(&pktgen_thread_lock);
 		msleep_interruptible(100);
+		mutex_lock(&pktgen_thread_lock);
 
 		if (signal_pending(current))
 			goto signal;
@@ -3083,6 +3088,10 @@ static int pktgen_wait_all_threads_run(struct pktgen_net *pn)
 	struct pktgen_thread *t;
 	int sig = 1;
 
+	/* prevent from racing with rmmod */
+	if (!try_module_get(THIS_MODULE))
+		return sig;
+
 	mutex_lock(&pktgen_thread_lock);
 
 	list_for_each_entry(t, &pn->pktgen_threads, th_list) {
@@ -3096,6 +3105,7 @@ static int pktgen_wait_all_threads_run(struct pktgen_net *pn)
 			t->control |= (T_STOP);
 
 	mutex_unlock(&pktgen_thread_lock);
+	module_put(THIS_MODULE);
 	return sig;
 }
 
@@ -3282,7 +3292,7 @@ static void pktgen_wait_for_skb(struct pktgen_dev *pkt_dev)
 {
 	ktime_t idle_start = ktime_get();
 
-	while (atomic_read(&(pkt_dev->skb->users)) != 1) {
+	while (refcount_read(&(pkt_dev->skb->users)) != 1) {
 		if (signal_pending(current))
 			break;
 
@@ -3296,7 +3306,7 @@ static void pktgen_wait_for_skb(struct pktgen_dev *pkt_dev)
 
 static void pktgen_xmit(struct pktgen_dev *pkt_dev)
 {
-	unsigned int burst = ACCESS_ONCE(pkt_dev->burst);
+	unsigned int burst = READ_ONCE(pkt_dev->burst);
 	struct net_device *odev = pkt_dev->odev;
 	struct netdev_queue *txq;
 	struct sk_buff *skb;
@@ -3339,7 +3349,7 @@ static void pktgen_xmit(struct pktgen_dev *pkt_dev)
 	if (pkt_dev->xmit_mode == M_NETIF_RECEIVE) {
 		skb = pkt_dev->skb;
 		skb->protocol = eth_type_trans(skb, skb->dev);
-		atomic_add(burst, &skb->users);
+		refcount_add(burst, &skb->users);
 		local_bh_disable();
 		do {
 			ret = netif_receive_skb(skb);
@@ -3347,11 +3357,11 @@ static void pktgen_xmit(struct pktgen_dev *pkt_dev)
 				pkt_dev->errors++;
 			pkt_dev->sofar++;
 			pkt_dev->seq_num++;
-			if (atomic_read(&skb->users) != burst) {
+			if (refcount_read(&skb->users) != burst) {
 				/* skb was queued by rps/rfs or taps,
 				 * so cannot reuse this skb
 				 */
-				atomic_sub(burst - 1, &skb->users);
+				WARN_ON(refcount_sub_and_test(burst - 1, &skb->users));
 				/* get out of the loop and wait
 				 * until skb is consumed
 				 */
@@ -3360,14 +3370,12 @@ static void pktgen_xmit(struct pktgen_dev *pkt_dev)
 			/* skb was 'freed' by stack, so clean few
 			 * bits and reuse it
 			 */
-#ifdef CONFIG_NET_CLS_ACT
-			skb->tc_verd = 0; /* reset reclass/redir ttl */
-#endif
+			skb_reset_tc(skb);
 		} while (--burst > 0);
 		goto out; /* Skips xmit_mode M_START_XMIT */
 	} else if (pkt_dev->xmit_mode == M_QUEUE_XMIT) {
 		local_bh_disable();
-		atomic_inc(&pkt_dev->skb->users);
+		refcount_inc(&pkt_dev->skb->users);
 
 		ret = dev_queue_xmit(pkt_dev->skb);
 		switch (ret) {
@@ -3408,7 +3416,7 @@ static void pktgen_xmit(struct pktgen_dev *pkt_dev)
 		pkt_dev->last_ok = 0;
 		goto unlock;
 	}
-	atomic_add(burst, &pkt_dev->skb->users);
+	refcount_add(burst, &pkt_dev->skb->users);
 
 xmit_more:
 	ret = netdev_start_xmit(pkt_dev->skb, odev, txq, --burst > 0);
@@ -3431,15 +3439,14 @@ xmit_more:
 		net_info_ratelimited("%s xmit error: %d\n",
 				     pkt_dev->odevname, ret);
 		pkt_dev->errors++;
-		/* fall through */
-	case NETDEV_TX_LOCKED:
+		/* fallthru */
 	case NETDEV_TX_BUSY:
 		/* Retry it next time */
-		atomic_dec(&(pkt_dev->skb->users));
+		refcount_dec(&(pkt_dev->skb->users));
 		pkt_dev->last_ok = 0;
 	}
 	if (unlikely(burst))
-		atomic_sub(burst, &pkt_dev->skb->users);
+		WARN_ON(refcount_sub_and_test(burst, &pkt_dev->skb->users));
 unlock:
 	HARD_TX_UNLOCK(odev, txq);
 
@@ -3657,10 +3664,10 @@ static int pktgen_add_device(struct pktgen_thread *t, const char *ifname)
 	 * performance under such circumstance.
 	 */
 	pkt_dev->dstops.family = AF_INET;
-	pkt_dev->dst.dev = pkt_dev->odev;
-	dst_init_metrics(&pkt_dev->dst, pktgen_dst_metrics, false);
-	pkt_dev->dst.child = &pkt_dev->dst;
-	pkt_dev->dst.ops = &pkt_dev->dstops;
+	pkt_dev->xdst.u.dst.dev = pkt_dev->odev;
+	dst_init_metrics(&pkt_dev->xdst.u.dst, pktgen_dst_metrics, false);
+	pkt_dev->xdst.child = &pkt_dev->xdst.u.dst;
+	pkt_dev->xdst.u.dst.ops = &pkt_dev->dstops;
 #endif
 
 	return add_dev_to_thread(t, pkt_dev);
@@ -3867,7 +3874,7 @@ static int __init pg_init(void)
 	ret = register_pernet_subsys(&pg_net_ops);
 	if (ret)
 		return ret;
-	ret = register_netdevice_notifier_rh(&pktgen_notifier_block);
+	ret = register_netdevice_notifier(&pktgen_notifier_block);
 	if (ret)
 		unregister_pernet_subsys(&pg_net_ops);
 
@@ -3876,7 +3883,7 @@ static int __init pg_init(void)
 
 static void __exit pg_cleanup(void)
 {
-	unregister_netdevice_notifier_rh(&pktgen_notifier_block);
+	unregister_netdevice_notifier(&pktgen_notifier_block);
 	unregister_pernet_subsys(&pg_net_ops);
 	/* Don't need rcu_barrier() due to use of kfree_rcu() */
 }

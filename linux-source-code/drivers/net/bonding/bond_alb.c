@@ -674,7 +674,7 @@ static struct slave *rlb_arp_xmit(struct sk_buff *skb, struct bonding *bond)
 	/* Don't modify or load balance ARPs that do not originate locally
 	 * (e.g.,arrive via a bridge).
 	 */
-	if (!bond_slave_has_mac_rcu(bond, arp->mac_src))
+	if (!bond_slave_has_mac_rx(bond, arp->mac_src))
 		return NULL;
 
 	if (arp->op_code == htons(ARPOP_REPLY)) {
@@ -939,6 +939,10 @@ static void alb_send_lp_vid(struct slave *slave, u8 mac_addr[],
 	skb->priority = TC_PRIO_CONTROL;
 	skb->dev = slave->dev;
 
+	netdev_dbg(slave->bond->dev,
+		   "Send learning packet: dev %s mac %pM vlan %d\n",
+		   slave->dev->name, mac_addr, vid);
+
 	if (vid)
 		__vlan_hwaccel_put_tag(skb, vlan_proto, vid);
 
@@ -956,21 +960,34 @@ static int alb_upper_dev_walk(struct net_device *upper, void *_data)
 {
 	struct alb_walk_data *data = _data;
 	bool strict_match = data->strict_match;
+	struct bonding *bond = data->bond;
 	struct slave *slave = data->slave;
 	u8 *mac_addr = data->mac_addr;
+	struct bond_vlan_tag *tags;
 
-	if (is_vlan_dev(upper) && upper->priv_flags & IFF_802_1Q_VLAN) {
-		if (strict_match &&
-		    ether_addr_equal_64bits(mac_addr,
-					    upper->dev_addr)) {
+	if (is_vlan_dev(upper) &&
+	    bond->nest_level == vlan_get_encap_level(upper) - 1) {
+		if (upper->addr_assign_type == NET_ADDR_STOLEN) {
 			alb_send_lp_vid(slave, mac_addr,
 					vlan_dev_vlan_proto(upper),
 					vlan_dev_vlan_id(upper));
-		} else if (!strict_match) {
+		} else {
 			alb_send_lp_vid(slave, upper->dev_addr,
 					vlan_dev_vlan_proto(upper),
 					vlan_dev_vlan_id(upper));
 		}
+	}
+
+	/* If this is a macvlan device, then only send updates
+	 * when strict_match is turned off.
+	 */
+	if (netif_is_macvlan(upper) && !strict_match) {
+		tags = bond_verify_device_path(bond->dev, upper, 0);
+		if (IS_ERR_OR_NULL(tags))
+			BUG();
+		alb_send_lp_vid(slave, upper->dev_addr,
+				tags[0].vlan_proto, tags[0].vlan_id);
+		kfree(tags);
 	}
 
 	return 0;
@@ -990,7 +1007,9 @@ static void alb_send_learning_packets(struct slave *slave, u8 mac_addr[],
 	/* send untagged */
 	alb_send_lp_vid(slave, mac_addr, 0, 0);
 
-	/* loop through vlans and send one packet for each */
+	/* loop through all devices and see if we need to send a packet
+	 * for that device.
+	 */
 	rcu_read_lock();
 	netdev_walk_all_upper_dev_rcu(bond->dev, alb_upper_dev_walk, &data);
 	rcu_read_unlock();
@@ -1012,7 +1031,7 @@ static int alb_set_slave_mac_addr(struct slave *slave, u8 addr[],
 	 */
 	memcpy(ss.__data, addr, len);
 	ss.ss_family = dev->type;
-	if (dev_set_mac_address(dev, (struct sockaddr *)&ss)) {
+	if (dev_set_mac_address(dev, (struct sockaddr *)&ss, NULL)) {
 		netdev_err(slave->bond->dev, "dev_set_mac_address of dev %s failed! ALB mode requires that the base driver support setting the hw address also when the network device's interface is open\n",
 			   dev->name);
 		return -EOPNOTSUPP;
@@ -1231,7 +1250,7 @@ static int alb_set_mac_address(struct bonding *bond, void *addr)
 		bond_hw_addr_copy(tmp_addr, slave->dev->dev_addr,
 				  slave->dev->addr_len);
 
-		res = dev_set_mac_address(slave->dev, addr);
+		res = dev_set_mac_address(slave->dev, addr, NULL);
 
 		/* restore net_device's hw address */
 		bond_hw_addr_copy(slave->dev->dev_addr, tmp_addr,
@@ -1254,7 +1273,7 @@ unwind:
 		bond_hw_addr_copy(tmp_addr, rollback_slave->dev->dev_addr,
 				  rollback_slave->dev->addr_len);
 		dev_set_mac_address(rollback_slave->dev,
-				    (struct sockaddr *)&ss);
+				    (struct sockaddr *)&ss, NULL);
 		bond_hw_addr_copy(rollback_slave->dev->dev_addr, tmp_addr,
 				  rollback_slave->dev->addr_len);
 	}
@@ -1358,7 +1377,7 @@ netdev_tx_t bond_tlb_xmit(struct sk_buff *skb, struct net_device *bond_dev)
 				unsigned int count;
 
 				slaves = rcu_dereference(bond->slave_arr);
-				count = slaves ? ACCESS_ONCE(slaves->count) : 0;
+				count = slaves ? READ_ONCE(slaves->count) : 0;
 				if (likely(count))
 					tx_slave = slaves->arr[hash_index %
 							       count];
@@ -1509,8 +1528,10 @@ void bond_alb_monitor(struct work_struct *work)
 			/* If updating current_active, use all currently
 			 * user mac addreses (!strict_match).  Otherwise, only
 			 * use mac of the slave device.
+			 * In RLB mode, we always use strict matches.
 			 */
-			strict_match = (slave != bond->curr_active_slave);
+			strict_match = (slave != rcu_access_pointer(bond->curr_active_slave) ||
+					bond_info->rlb_enabled);
 			alb_send_learning_packets(slave, slave->dev->dev_addr,
 						  strict_match);
 		}
@@ -1711,7 +1732,8 @@ void bond_alb_handle_active_change(struct bonding *bond, struct slave *new_slave
 				  bond->dev->addr_len);
 		ss.ss_family = bond->dev->type;
 		/* we don't care if it can't change its mac, best effort */
-		dev_set_mac_address(new_slave->dev, (struct sockaddr *)&ss);
+		dev_set_mac_address(new_slave->dev, (struct sockaddr *)&ss,
+				    NULL);
 
 		bond_hw_addr_copy(new_slave->dev->dev_addr, tmp_addr,
 				  new_slave->dev->addr_len);

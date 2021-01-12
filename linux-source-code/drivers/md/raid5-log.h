@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _RAID5_LOG_H
 #define _RAID5_LOG_H
 
@@ -13,10 +14,10 @@ extern bool r5l_log_disk_error(struct r5conf *conf);
 extern bool r5c_is_writeback(struct r5l_log *log);
 extern int
 r5c_try_caching_write(struct r5conf *conf, struct stripe_head *sh,
-			struct stripe_head_state *s, int disks);
+		      struct stripe_head_state *s, int disks);
 extern void
 r5c_finish_stripe_write_out(struct r5conf *conf, struct stripe_head *sh,
-				struct stripe_head_state *s);
+			    struct stripe_head_state *s);
 extern void r5c_release_extra_page(struct stripe_head *sh);
 extern void r5c_use_extra_page(struct stripe_head *sh);
 extern void r5l_wake_reclaim(struct r5l_log *log, sector_t space);
@@ -42,6 +43,9 @@ extern int ppl_write_stripe(struct r5conf *conf, struct stripe_head *sh);
 extern void ppl_write_stripe_run(struct r5conf *conf);
 extern void ppl_stripe_write_finished(struct stripe_head *sh);
 extern int ppl_modify_log(struct r5conf *conf, struct md_rdev *rdev, bool add);
+extern void ppl_quiesce(struct r5conf *conf, int quiesce);
+extern int ppl_handle_flush_request(struct r5l_log *log, struct bio *bio);
+extern struct md_sysfs_entry ppl_write_hint;
 
 static inline bool raid5_has_log(struct r5conf *conf)
 {
@@ -67,8 +71,9 @@ static inline int log_stripe(struct stripe_head *sh, struct stripe_head_state *s
 			/* caching phase */
 			return r5c_cache_data(conf->log, sh);
 		}
-	} else if (raid5_has_ppl(conf))
+	} else if (raid5_has_ppl(conf)) {
 		return ppl_write_stripe(conf, sh);
+	}
 
 	return -EAGAIN;
 }
@@ -89,6 +94,34 @@ static inline void log_write_stripe_run(struct r5conf *conf)
 		r5l_write_stripe_run(conf->log);
 	else if (raid5_has_ppl(conf))
 		ppl_write_stripe_run(conf);
+}
+
+static inline void log_flush_stripe_to_raid(struct r5conf *conf)
+{
+	if (conf->log)
+		r5l_flush_stripe_to_raid(conf->log);
+	else if (raid5_has_ppl(conf))
+		ppl_write_stripe_run(conf);
+}
+
+static inline int log_handle_flush_request(struct r5conf *conf, struct bio *bio)
+{
+	int ret = -ENODEV;
+
+	if (conf->log)
+		ret = r5l_handle_flush_request(conf->log, bio);
+	else if (raid5_has_ppl(conf))
+		ret = ppl_handle_flush_request(conf->log, bio);
+
+	return ret;
+}
+
+static inline void log_quiesce(struct r5conf *conf, int quiesce)
+{
+	if (conf->log)
+		r5l_quiesce(conf->log, quiesce);
+	else if (raid5_has_ppl(conf))
+		ppl_quiesce(conf, quiesce);
 }
 
 static inline void log_exit(struct r5conf *conf)

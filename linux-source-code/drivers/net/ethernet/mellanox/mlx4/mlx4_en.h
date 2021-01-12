@@ -105,11 +105,6 @@
 
 #define MLX4_EN_MAX_RX_FRAGS	4
 
-#ifndef CONFIG_GENERIC_HARDIRQS
-/* Minimum packet number till arming the CQ */
-#define MLX4_EN_MIN_RX_ARM	2097152
-#endif
-
 /* Maximum ring sizes */
 #define MLX4_EN_MAX_TX_SIZE	8192
 #define MLX4_EN_MAX_RX_SIZE	8192
@@ -129,7 +124,6 @@
 					 MLX4_EN_NUM_UP_HIGH)
 
 #define MLX4_EN_DEFAULT_TX_WORK		256
-#define MLX4_EN_DOORBELL_BUDGET		8
 
 /* Target number of packets to coalesce with interrupt moderation */
 #define MLX4_EN_RX_COAL_TARGET	44
@@ -167,6 +161,10 @@
 #define MLX4_SELFTEST_LB_MIN_MTU (MLX4_LOOPBACK_TEST_PAYLOAD + NET_IP_ALIGN + \
 				  ETH_HLEN + PREAMBLE_LEN)
 
+/* VLAN_HLEN is added twice,to support skb vlan tagged with multiple
+ * headers. (For example: ETH_P_8021Q and ETH_P_8021AD).
+ */
+#define MLX4_EN_EFF_MTU(mtu)	((mtu) + ETH_HLEN + (2 * VLAN_HLEN))
 #define ETH_BCAST		0xffffffffffffULL
 
 #define MLX4_EN_LOOPBACK_RETRIES	5
@@ -381,9 +379,6 @@ struct mlx4_en_cq {
 	u16 moder_cnt;
 	struct mlx4_cqe *buf;
 #define MLX4_EN_OPCODE_ERROR	0x1e
-#ifndef CONFIG_GENERIC_HARDIRQS
-	u32 tot_rx;
-#endif
 
 	struct irq_desc *irq_desc;
 };
@@ -703,7 +698,8 @@ void mlx4_en_arm_cq(struct mlx4_en_priv *priv, struct mlx4_en_cq *cq);
 
 void mlx4_en_tx_irq(struct mlx4_cq *mcq);
 u16 mlx4_en_select_queue(struct net_device *dev, struct sk_buff *skb,
-			 void *accel_priv, select_queue_fallback_t fallback);
+			 struct net_device *sb_dev,
+			 select_queue_fallback_t fallback);
 netdev_tx_t mlx4_en_xmit(struct sk_buff *skb, struct net_device *dev);
 netdev_tx_t mlx4_en_xmit_frame(struct mlx4_en_rx_ring *rx_ring,
 			       struct mlx4_en_rx_alloc *frame,
@@ -775,7 +771,6 @@ int mlx4_en_QUERY_PORT(struct mlx4_en_dev *mdev, u8 port);
 
 #ifdef CONFIG_MLX4_EN_DCB
 extern const struct dcbnl_rtnl_ops mlx4_en_dcbnl_ops;
-extern const struct dcbnl_rtnl_ops_ext mlx4_en_dcbnl_ops_ext;
 extern const struct dcbnl_rtnl_ops mlx4_en_dcbnl_pfc_ops;
 #endif
 
@@ -800,7 +795,6 @@ void mlx4_en_update_pfc_stats_bitmap(struct mlx4_dev *dev,
 				     struct mlx4_en_stats_bitmap *stats_bitmap,
 				     u8 rx_ppp, u8 rx_pause,
 				     u8 tx_ppp, u8 tx_pause);
-
 int mlx4_en_netdev_event(struct notifier_block *this,
 			 unsigned long event, void *ptr);
 

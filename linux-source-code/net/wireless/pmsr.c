@@ -9,13 +9,10 @@
 #include "nl80211.h"
 #include "rdev-ops.h"
 
-#define nlmsg_parse_deprecated(a1, a2, a3, a4, a5, a6) \
-	nlmsg_parse((a1), (a2), (a3), (a4), (a5))
-#define nla_parse_nested_deprecated(a1, a2, a3, a4, a5) \
-	nla_parse_nested((a1), (a2), (a3), (a4))
+#define nlmsg_parse_deprecated nlmsg_parse
+#define nla_parse_nested_deprecated nla_parse_nested
 #define nla_nest_start_noflag nla_nest_start
 
-#define NL_SET_ERR_MSG_ATTR(info, attr, msg) NL_SET_ERR_MSG((info), msg)
 
 static int pmsr_parse_ftm(struct cfg80211_registered_device *rdev,
 			  struct nlattr *ftmreq,
@@ -289,9 +286,7 @@ int nl80211_pmsr_start(struct sk_buff *skb, struct genl_info *info)
 
 	list_add_tail(&req->list, &wdev->pmsr_list);
 
-#if 0 /* Non in RHEL */
 	nl_set_extack_cookie_u64(info->extack, req->cookie);
-#endif
 	return 0;
 out_err:
 	kfree(req);

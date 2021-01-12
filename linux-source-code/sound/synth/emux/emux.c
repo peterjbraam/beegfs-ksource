@@ -53,9 +53,7 @@ int snd_emux_new(struct snd_emux **remu)
 	emu->max_voices = 0;
 	emu->use_time = 0;
 
-	init_timer(&emu->tlist);
-	emu->tlist.function = snd_emux_timer_callback;
-	emu->tlist.data = (unsigned long)emu;
+	timer_setup(&emu->tlist, snd_emux_timer_callback, 0);
 	emu->timer_active = 0;
 
 	*remu = emu;
@@ -156,12 +154,8 @@ int snd_emux_free(struct snd_emux *emu)
 	snd_emux_detach_seq_oss(emu);
 #endif
 	snd_emux_detach_seq(emu);
-
 	snd_emux_delete_hwdep(emu);
-
-	if (emu->sflist)
-		snd_sf_free(emu->sflist);
-
+	snd_sf_free(emu->sflist);
 	kfree(emu->voices);
 	kfree(emu->name);
 	kfree(emu);
@@ -169,20 +163,3 @@ int snd_emux_free(struct snd_emux *emu)
 }
 
 EXPORT_SYMBOL(snd_emux_free);
-
-
-/*
- *  INIT part
- */
-
-static int __init alsa_emux_init(void)
-{
-	return 0;
-}
-
-static void __exit alsa_emux_exit(void)
-{
-}
-
-module_init(alsa_emux_init)
-module_exit(alsa_emux_exit)

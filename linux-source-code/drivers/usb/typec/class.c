@@ -1484,6 +1484,7 @@ EXPORT_SYMBOL_GPL(typec_set_mode);
  * typec_port_register_altmode - Register USB Type-C Port Alternate Mode
  * @port: USB Type-C Port that supports the alternate mode
  * @desc: Description of the alternate mode
+ * @drvdata: Private pointer to driver specific info
  *
  * This routine is used to register an alternate mode that @port is capable of
  * supporting.
@@ -1594,8 +1595,7 @@ struct typec_port *typec_register_port(struct device *parent,
 
 	port->dev.class = typec_class;
 	port->dev.parent = parent;
-	if (port->dev.device_rh)
-		port->dev.device_rh->fwnode = cap->fwnode;
+	port->dev.fwnode = cap->fwnode;
 	port->dev.type = &typec_port_dev_type;
 	dev_set_name(&port->dev, "port%d", id);
 

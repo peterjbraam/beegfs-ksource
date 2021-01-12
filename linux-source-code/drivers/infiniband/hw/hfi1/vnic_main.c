@@ -423,7 +423,7 @@ tx_finish:
 
 static u16 hfi1_vnic_select_queue(struct net_device *netdev,
 				  struct sk_buff *skb,
-				  void *accel_priv,
+				  struct net_device *sb_dev,
 				  select_queue_fallback_t fallback)
 {
 	struct hfi1_vnic_vport_info *vinfo = opa_vnic_dev_priv(netdev);
@@ -815,7 +815,7 @@ struct net_device *hfi1_vnic_alloc_rn(struct ib_device *device,
 		return ERR_PTR(-EOPNOTSUPP);
 
 	size = sizeof(struct opa_vnic_rdma_netdev) + sizeof(*vinfo);
-	netdev = alloc_netdev_mqs(size, name, setup,
+	netdev = alloc_netdev_mqs(size, name, name_assign_type, setup,
 				  dd->num_sdma, dd->num_vnic_contexts);
 	if (!netdev)
 		return ERR_PTR(-ENOMEM);

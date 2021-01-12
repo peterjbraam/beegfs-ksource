@@ -22,7 +22,6 @@
  */
 
 #include <linux/dmi.h>
-#include <linux/module.h>
 #include <linux/init.h>
 #include <linux/export.h>
 #include <linux/clocksource.h>
@@ -53,7 +52,7 @@
 			"2"(VMWARE_HYPERVISOR_PORT), "3"(UINT_MAX) :	\
 			"memory");
 
-static unsigned long vmware_tsc_khz;
+static unsigned long vmware_tsc_khz __ro_after_init;
 
 static inline int __vmware_platform(void)
 {
@@ -68,7 +67,7 @@ static unsigned long vmware_get_tsc_khz(void)
 }
 
 #ifdef CONFIG_PARAVIRT
-static struct cyc2ns_data vmware_cyc2ns;
+static struct cyc2ns_data vmware_cyc2ns __ro_after_init;
 static int vmw_sched_clock __initdata = 1;
 
 static __init int setup_vmw_sched_clock(char *s)
@@ -163,8 +162,7 @@ static void __init vmware_platform_setup(void)
 			ecx);
 #endif
 	} else {
-		printk(KERN_WARNING
-		       "Failed to get TSC freq from the hypervisor\n");
+		pr_warn("Failed to get TSC freq from the hypervisor\n");
 	}
 
 	vmware_paravirt_ops_setup();
@@ -183,7 +181,7 @@ static void __init vmware_platform_setup(void)
  */
 static uint32_t __init vmware_platform(void)
 {
-	if (cpu_has_hypervisor) {
+	if (boot_cpu_has(X86_FEATURE_HYPERVISOR)) {
 		unsigned int eax;
 		unsigned int hyper_vendor_id[3];
 
@@ -207,10 +205,10 @@ static bool __init vmware_legacy_x2apic_available(void)
 	       (eax & (1 << VMWARE_PORT_CMD_LEGACY_X2APIC)) != 0;
 }
 
-const __refconst struct hypervisor_x86 x86_hyper_vmware = {
+const __initconst struct hypervisor_x86 x86_hyper_vmware = {
 	.name			= "VMware",
 	.detect			= vmware_platform,
-	.init_platform		= vmware_platform_setup,
-	.x2apic_available	= vmware_legacy_x2apic_available,
+	.type			= X86_HYPER_VMWARE,
+	.init.init_platform	= vmware_platform_setup,
+	.init.x2apic_available	= vmware_legacy_x2apic_available,
 };
-EXPORT_SYMBOL(x86_hyper_vmware);

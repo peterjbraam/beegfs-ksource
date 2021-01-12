@@ -57,8 +57,6 @@
 #define RPCRDMA_DEF_INLINE  (4096)	/* default inline thresh */
 #define RPCRDMA_MAX_INLINE  (65536)	/* max inline thresh */
 
-#define RPCRDMA_INLINE_PAD_THRESH  (512)/* payload threshold to pad (bytes) */
-
 /* Memory registration strategies, by number.
  * This is part of a kernel / user space API. Do not remove. */
 enum rpcrdma_memreg {

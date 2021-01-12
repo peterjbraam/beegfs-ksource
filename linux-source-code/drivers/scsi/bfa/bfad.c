@@ -27,7 +27,7 @@
 #include <linux/fs.h>
 #include <linux/pci.h>
 #include <linux/firmware.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/fcntl.h>
 
 #include "bfad_drv.h"
@@ -504,7 +504,7 @@ bfa_fcb_pbc_vport_create(struct bfad_s *bfad, struct bfi_pbc_vport_s pbc_vport)
 	struct bfad_vport_s   *vport;
 	int rc;
 
-	vport = kzalloc(sizeof(struct bfad_vport_s), GFP_KERNEL);
+	vport = kzalloc(sizeof(struct bfad_vport_s), GFP_ATOMIC);
 	if (!vport) {
 		bfa_trc(bfad, 0);
 		return;
@@ -610,13 +610,12 @@ bfad_hal_mem_alloc(struct bfad_s *bfad)
 	/* Iterate through the KVA meminfo queue */
 	list_for_each(km_qe, &kva_info->qe) {
 		kva_elem = (struct bfa_mem_kva_s *) km_qe;
-		kva_elem->kva = vmalloc(kva_elem->mem_len);
+		kva_elem->kva = vzalloc(kva_elem->mem_len);
 		if (kva_elem->kva == NULL) {
 			bfad_hal_mem_release(bfad);
 			rc = BFA_STATUS_ENOMEM;
 			goto ext;
 		}
-		memset(kva_elem->kva, 0, kva_elem->mem_len);
 	}
 
 	/* Iterate through the DMA meminfo queue */
@@ -692,9 +691,9 @@ ext:
 }
 
 void
-bfad_bfa_tmo(unsigned long data)
+bfad_bfa_tmo(struct timer_list *t)
 {
-	struct bfad_s	      *bfad = (struct bfad_s *) data;
+	struct bfad_s	      *bfad = from_timer(bfad, t, hal_tmo);
 	unsigned long	flags;
 	struct list_head	       doneq;
 
@@ -719,9 +718,7 @@ bfad_bfa_tmo(unsigned long data)
 void
 bfad_init_timer(struct bfad_s *bfad)
 {
-	init_timer(&bfad->hal_tmo);
-	bfad->hal_tmo.function = bfad_bfa_tmo;
-	bfad->hal_tmo.data = (unsigned long)bfad;
+	timer_setup(&bfad->hal_tmo, bfad_bfa_tmo, 0);
 
 	mod_timer(&bfad->hal_tmo,
 		  jiffies + msecs_to_jiffies(BFA_TIMER_FREQ));
@@ -817,7 +814,6 @@ bfad_pci_uninit(struct pci_dev *pdev, struct bfad_s *bfad)
 	/* Disable PCIE Advanced Error Recovery (AER) */
 	pci_disable_pcie_error_reporting(pdev);
 	pci_disable_device(pdev);
-	pci_set_drvdata(pdev, NULL);
 }
 
 bfa_status_t
@@ -984,20 +980,20 @@ bfad_start_ops(struct bfad_s *bfad) {
 
 	/* Fill the driver_info info to fcs*/
 	memset(&driver_info, 0, sizeof(driver_info));
-	strncpy(driver_info.version, BFAD_DRIVER_VERSION,
-		sizeof(driver_info.version) - 1);
+	strlcpy(driver_info.version, BFAD_DRIVER_VERSION,
+		sizeof(driver_info.version));
 	if (host_name)
-		strncpy(driver_info.host_machine_name, host_name,
-			sizeof(driver_info.host_machine_name) - 1);
+		strlcpy(driver_info.host_machine_name, host_name,
+			sizeof(driver_info.host_machine_name));
 	if (os_name)
-		strncpy(driver_info.host_os_name, os_name,
-			sizeof(driver_info.host_os_name) - 1);
+		strlcpy(driver_info.host_os_name, os_name,
+			sizeof(driver_info.host_os_name));
 	if (os_patch)
-		strncpy(driver_info.host_os_patch, os_patch,
-			sizeof(driver_info.host_os_patch) - 1);
+		strlcpy(driver_info.host_os_patch, os_patch,
+			sizeof(driver_info.host_os_patch));
 
-	strncpy(driver_info.os_device_name, bfad->pci_name,
-		sizeof(driver_info.os_device_name) - 1);
+	strlcpy(driver_info.os_device_name, bfad->pci_name,
+		sizeof(driver_info.os_device_name));
 
 	/* FCS driver info init */
 	spin_lock_irqsave(&bfad->bfad_lock, flags);
@@ -1076,22 +1072,18 @@ bfad_start_ops(struct bfad_s *bfad) {
 int
 bfad_worker(void *ptr)
 {
-	struct bfad_s *bfad;
-	unsigned long   flags;
+	struct bfad_s *bfad = ptr;
+	unsigned long flags;
 
-	bfad = (struct bfad_s *)ptr;
+	if (kthread_should_stop())
+		return 0;
 
-	while (!kthread_should_stop()) {
+	/* Send event BFAD_E_INIT_SUCCESS */
+	bfa_sm_send_event(bfad, BFAD_E_INIT_SUCCESS);
 
-		/* Send event BFAD_E_INIT_SUCCESS */
-		bfa_sm_send_event(bfad, BFAD_E_INIT_SUCCESS);
-
-		spin_lock_irqsave(&bfad->bfad_lock, flags);
-		bfad->bfad_tsk = NULL;
-		spin_unlock_irqrestore(&bfad->bfad_lock, flags);
-
-		break;
-	}
+	spin_lock_irqsave(&bfad->bfad_lock, flags);
+	bfad->bfad_tsk = NULL;
+	spin_unlock_irqrestore(&bfad->bfad_lock, flags);
 
 	return 0;
 }
@@ -1216,7 +1208,7 @@ bfad_install_msix_handler(struct bfad_s *bfad)
 int
 bfad_setup_intr(struct bfad_s *bfad)
 {
-	int error = 0;
+	int error;
 	u32 mask = 0, i, num_bit = 0, max_bit = 0;
 	struct msix_entry msix_entries[MAX_MSIX_ENTRY];
 	struct pci_dev *pdev = bfad->pcidev;
@@ -1231,34 +1223,24 @@ bfad_setup_intr(struct bfad_s *bfad)
 	if ((bfa_asic_id_ctc(pdev->device) && !msix_disable_ct) ||
 	   (bfa_asic_id_cb(pdev->device) && !msix_disable_cb)) {
 
-		error = pci_enable_msix(bfad->pcidev, msix_entries, bfad->nvec);
-		if (error) {
-			/* In CT1 & CT2, try to allocate just one vector */
-			if (bfa_asic_id_ctc(pdev->device)) {
-				printk(KERN_WARNING "bfa %s: trying one msix "
-				       "vector failed to allocate %d[%d]\n",
-				       bfad->pci_name, bfad->nvec, error);
-				bfad->nvec = 1;
-				error = pci_enable_msix(bfad->pcidev,
-						msix_entries, bfad->nvec);
-			}
+		error = pci_enable_msix_exact(bfad->pcidev,
+					      msix_entries, bfad->nvec);
+		/* In CT1 & CT2, try to allocate just one vector */
+		if (error == -ENOSPC && bfa_asic_id_ctc(pdev->device)) {
+			printk(KERN_WARNING "bfa %s: trying one msix "
+			       "vector failed to allocate %d[%d]\n",
+			       bfad->pci_name, bfad->nvec, error);
+			bfad->nvec = 1;
+			error = pci_enable_msix_exact(bfad->pcidev,
+						      msix_entries, 1);
+		}
 
-			/*
-			 * Only error number of vector is available.
-			 * We don't have a mechanism to map multiple
-			 * interrupts into one vector, so even if we
-			 * can try to request less vectors, we don't
-			 * know how to associate interrupt events to
-			 *  vectors. Linux doesn't duplicate vectors
-			 * in the MSIX table for this case.
-			 */
-			if (error) {
-				printk(KERN_WARNING "bfad%d: "
-				       "pci_enable_msix failed (%d), "
-				       "use line based.\n",
-					bfad->inst_no, error);
-				goto line_based;
-			}
+		if (error) {
+			printk(KERN_WARNING "bfad%d: "
+			       "pci_enable_msix_exact failed (%d), "
+			       "use line based.\n",
+				bfad->inst_no, error);
+			goto line_based;
 		}
 
 		/* Disable INTX in MSI-X mode */
@@ -1278,20 +1260,18 @@ bfad_setup_intr(struct bfad_s *bfad)
 
 		bfad->bfad_flags |= BFAD_MSIX_ON;
 
-		return error;
+		return 0;
 	}
 
 line_based:
-	error = 0;
-	if (request_irq
-	    (bfad->pcidev->irq, (irq_handler_t) bfad_intx, BFAD_IRQ_FLAGS,
-	     BFAD_DRIVER_NAME, bfad) != 0) {
-		/* Enable interrupt handler failed */
-		return 1;
-	}
+	error = request_irq(bfad->pcidev->irq, (irq_handler_t)bfad_intx,
+			    BFAD_IRQ_FLAGS, BFAD_DRIVER_NAME, bfad);
+	if (error)
+		return error;
+
 	bfad->bfad_flags |= BFAD_INTX_ON;
 
-	return error;
+	return 0;
 }
 
 void
@@ -1588,8 +1568,6 @@ bfad_pci_slot_reset(struct pci_dev *pdev)
 	if (pci_set_dma_mask(bfad->pcidev, DMA_BIT_MASK(64)) != 0)
 		if (pci_set_dma_mask(bfad->pcidev, DMA_BIT_MASK(32)) != 0)
 			goto out_disable_device;
-
-	pci_cleanup_aer_uncorrect_error_status(pdev);
 
 	if (restart_bfa(bfad) == -1)
 		goto out_disable_device;

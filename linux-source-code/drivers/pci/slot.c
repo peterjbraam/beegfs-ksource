@@ -1,5 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
- * drivers/pci/slot.c
  * Copyright (C) 2006 Matthew Wilcox <matthew@wil.cx>
  * Copyright (C) 2006-2009 Hewlett-Packard Development Company, L.P.
  *	Alex Chiang <achiang@hp.com>
@@ -14,7 +14,6 @@
 
 struct kset *pci_slots_kset;
 EXPORT_SYMBOL_GPL(pci_slots_kset);
-static DEFINE_MUTEX(pci_slot_mutex);
 
 static ssize_t pci_slot_attr_show(struct kobject *kobj,
 					struct attribute *attr, char *buf)
@@ -120,11 +119,11 @@ static void pci_slot_release(struct kobject *kobj)
 }
 
 static struct pci_slot_attribute pci_slot_attr_address =
-	__ATTR(address, (S_IFREG | S_IRUGO), address_read_file, NULL);
+	__ATTR(address, S_IRUGO, address_read_file, NULL);
 static struct pci_slot_attribute pci_slot_attr_max_speed =
-	__ATTR(max_bus_speed, (S_IFREG | S_IRUGO), max_speed_read_file, NULL);
+	__ATTR(max_bus_speed, S_IRUGO, max_speed_read_file, NULL);
 static struct pci_slot_attribute pci_slot_attr_cur_speed =
-	__ATTR(cur_bus_speed, (S_IFREG | S_IRUGO), cur_speed_read_file, NULL);
+	__ATTR(cur_bus_speed, S_IRUGO, cur_speed_read_file, NULL);
 
 static struct attribute *pci_slot_default_attrs[] = {
 	&pci_slot_attr_address.attr,
@@ -371,7 +370,7 @@ void pci_hp_create_module_link(struct pci_slot *pci_slot)
 
 	if (!slot || !slot->ops)
 		return;
-	kobj = kset_find_obj(module_kset, slot->ops->mod_name);
+	kobj = kset_find_obj(module_kset, slot->mod_name);
 	if (!kobj)
 		return;
 	ret = sysfs_create_link(&pci_slot->kobj, kobj, "module");

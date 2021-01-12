@@ -81,10 +81,13 @@ static int nfp_tx_q_show(struct seq_file *file, void *data)
 
 	rtnl_lock();
 
-	if (!r_vec->nfp_net || !r_vec->tx_ring)
+	if (debugfs_real_fops(file->file) == &nfp_tx_q_fops)
+		tx_ring = r_vec->tx_ring;
+	else
+		tx_ring = r_vec->xdp_ring;
+	if (!r_vec->nfp_net || !tx_ring)
 		goto out;
 	nn = r_vec->nfp_net;
-	tx_ring = r_vec->tx_ring;
 	if (!nfp_net_running(nn))
 		goto out;
 
@@ -144,7 +147,7 @@ DEFINE_SHOW_ATTRIBUTE(nfp_xdp_q);
 
 void nfp_net_debugfs_vnic_add(struct nfp_net *nn, struct dentry *ddir)
 {
-	struct dentry *queues, *tx, *rx;
+	struct dentry *queues, *tx, *rx, *xdp;
 	char name[20];
 	int i;
 
@@ -166,13 +169,16 @@ void nfp_net_debugfs_vnic_add(struct nfp_net *nn, struct dentry *ddir)
 
 	rx = debugfs_create_dir("rx", queues);
 	tx = debugfs_create_dir("tx", queues);
-	if (IS_ERR_OR_NULL(rx) || IS_ERR_OR_NULL(tx))
+	xdp = debugfs_create_dir("xdp", queues);
+	if (IS_ERR_OR_NULL(rx) || IS_ERR_OR_NULL(tx) || IS_ERR_OR_NULL(xdp))
 		return;
 
 	for (i = 0; i < min(nn->max_rx_rings, nn->max_r_vecs); i++) {
 		sprintf(name, "%d", i);
 		debugfs_create_file(name, 0400, rx,
 				    &nn->r_vecs[i], &nfp_rx_q_fops);
+		debugfs_create_file(name, 0400, xdp,
+				    &nn->r_vecs[i], &nfp_xdp_q_fops);
 	}
 
 	for (i = 0; i < min(nn->max_tx_rings, nn->max_r_vecs); i++) {

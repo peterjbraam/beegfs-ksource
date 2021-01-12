@@ -1,10 +1,5 @@
 # ALSA PCI drivers
 
-config SND_TEA575X
-	tristate
-	depends on SND_FM801_TEA575X_BOOL || SND_ES1968_RADIO || RADIO_SF16FMR2 || RADIO_MAXIRADIO || RADIO_SHARK
-	default SND_FM801 || SND_ES1968 || RADIO_SF16FMR2 || RADIO_MAXIRADIO || RADIO_SHARK
-
 menuconfig SND_PCI
 	bool "PCI sound devices"
 	depends on PCI
@@ -180,7 +175,7 @@ config SND_BT87X
 	help
 	  If you want to record audio from TV cards based on
 	  Brooktree Bt878/Bt879 chips, say Y here and read
-	  <file:Documentation/sound/alsa/Bt87x.txt>.
+	  <file:Documentation/sound/cards/bt87x.rst>.
 
 	  To compile this driver as a module, choose M here: the module
 	  will be called snd-bt87x.
@@ -215,7 +210,7 @@ config SND_CMIPCI
 	help
 	  If you want to use soundcards based on C-Media CMI8338, CMI8738,
 	  CMI8768 or CMI8770 chips, say Y here and read
-	  <file:Documentation/sound/alsa/CMIPCI.txt>.
+	  <file:Documentation/sound/cards/cmipci.rst>.
 
 	  To compile this driver as a module, choose M here: the module
 	  will be called snd-cmipci.
@@ -263,6 +258,7 @@ config SND_CS46XX
 	tristate "Cirrus Logic (Sound Fusion) CS4280/CS461x/CS462x/CS463x"
 	select SND_RAWMIDI
 	select SND_AC97_CODEC
+	select FW_LOADER
 	help
 	  Say Y here to include support for Cirrus Logic CS4610/CS4612/
 	  CS4614/CS4615/CS4622/CS4624/CS4630/CS4280 chips.
@@ -476,8 +472,8 @@ config SND_EMU10K1
 	  Audigy and E-mu APS (partially supported) soundcards.
 
 	  The confusing multitude of mixer controls is documented in
-	  <file:Documentation/sound/alsa/SB-Live-mixer.txt> and
-	  <file:Documentation/sound/alsa/Audigy-mixer.txt>.
+	  <file:Documentation/sound/cards/sb-live-mixer.rst> and
+	  <file:Documentation/sound/cards/audigy-mixer.rst>.
 
 	  To compile this driver as a module, choose M here: the module
 	  will be called snd-emu10k1.
@@ -560,7 +556,11 @@ config SND_ES1968_INPUT
 config SND_ES1968_RADIO
 	bool "Enable TEA5757 radio tuner support for es1968"
 	depends on SND_ES1968
+	depends on MEDIA_RADIO_SUPPORT
 	depends on VIDEO_V4L2=y || VIDEO_V4L2=SND_ES1968
+	select RADIO_ADAPTERS
+	select RADIO_TEA575X
+
 	help
 	  Say Y here to include support for TEA5757 radio tuner integrated on
 	  some MediaForte cards (e.g. SF64-PCE2).
@@ -580,7 +580,10 @@ config SND_FM801
 config SND_FM801_TEA575X_BOOL
 	bool "ForteMedia FM801 + TEA5757 tuner"
 	depends on SND_FM801
+	depends on MEDIA_RADIO_SUPPORT
 	depends on VIDEO_V4L2=y || VIDEO_V4L2=SND_FM801
+	select RADIO_ADAPTERS
+	select RADIO_TEA575X
 	help
 	  Say Y here to include support for soundcards based on the ForteMedia
 	  FM801 chip with a TEA5757 tuner (MediaForte SF256-PCS, SF256-PCP and
@@ -695,7 +698,7 @@ config SND_LOLA
 
 config SND_LX6464ES
 	tristate "Digigram LX6464ES"
-	depends on HAS_IOPORT
+	depends on HAS_IOPORT_MAP
 	select SND_PCM
 	help
 	  Say Y here to include support for Digigram LX6464ES boards.
@@ -732,7 +735,7 @@ config SND_MIXART
 	select SND_PCM
 	help
 	  If you want to use Digigram miXart soundcards, say Y here and
-	  read <file:Documentation/sound/alsa/MIXART.txt>.
+	  read <file:Documentation/sound/cards/mixart.rst>.
 
 	  To compile this driver as a module, choose M here: the module
 	  will be called snd-mixart.

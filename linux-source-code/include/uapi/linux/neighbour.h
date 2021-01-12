@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 #ifndef __LINUX_NEIGHBOUR_H
 #define __LINUX_NEIGHBOUR_H
 
@@ -62,7 +63,7 @@ enum {
 
 /* NUD_NOARP & NUD_PERMANENT are pseudostates, they never change
    and make no address resolution or NUD.
-   NUD_PERMANENT is also cannot be deleted by garbage collectors.
+   NUD_PERMANENT also cannot be deleted by garbage collectors.
  */
 
 struct nda_cacheinfo {
@@ -108,6 +109,7 @@ struct ndt_stats {
 	__u64		ndts_rcv_probes_ucast;
 	__u64		ndts_periodic_gc_runs;
 	__u64		ndts_forced_gc_runs;
+	__u64		ndts_table_fulls;
 };
 
 enum {
@@ -128,7 +130,7 @@ enum {
 	NDTPA_PROXY_QLEN,		/* u32 */
 	NDTPA_LOCKTIME,			/* u64, msecs */
 	NDTPA_QUEUE_LENBYTES,		/* u32 */
-	__RH_RESERVED_NDTPA_MCAST_REPROBES,	/* u32 */
+	NDTPA_MCAST_REPROBES,		/* u32 */
 	NDTPA_PAD,
 	__NDTPA_MAX
 };

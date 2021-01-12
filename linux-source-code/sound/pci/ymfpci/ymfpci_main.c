@@ -781,7 +781,7 @@ static snd_pcm_uframes_t snd_ymfpci_capture_pointer(struct snd_pcm_substream *su
 
 static void snd_ymfpci_irq_wait(struct snd_ymfpci *chip)
 {
-	wait_queue_t wait;
+	wait_queue_entry_t wait;
 	int loops = 4;
 
 	while (loops-- > 0) {
@@ -2300,10 +2300,6 @@ static int snd_ymfpci_suspend(struct device *dev)
 	unsigned int i;
 	
 	snd_power_change_state(card, SNDRV_CTL_POWER_D3hot);
-	snd_pcm_suspend_all(chip->pcm);
-	snd_pcm_suspend_all(chip->pcm2);
-	snd_pcm_suspend_all(chip->pcm_spdif);
-	snd_pcm_suspend_all(chip->pcm_4ch);
 	snd_ac97_suspend(chip->ac97);
 	for (i = 0; i < YDSXGR_NUM_SAVED_REGS; i++)
 		chip->saved_regs[i] = snd_ymfpci_readl(chip, saved_regs_index[i]);

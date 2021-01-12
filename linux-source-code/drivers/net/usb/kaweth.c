@@ -964,7 +964,6 @@ static const struct net_device_ops kaweth_netdev_ops = {
 	.ndo_start_xmit =		kaweth_start_xmit,
 	.ndo_tx_timeout =		kaweth_tx_timeout,
 	.ndo_set_rx_mode =		kaweth_set_rx_mode,
-	.ndo_change_mtu_rh74 =		eth_change_mtu,
 	.ndo_set_mac_address =		eth_mac_addr,
 	.ndo_validate_addr =		eth_validate_addr,
 };

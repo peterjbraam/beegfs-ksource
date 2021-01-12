@@ -50,11 +50,14 @@ struct xt_led_info_internal {
 	struct timer_list timer;
 };
 
+#define XT_LED_BLINK_DELAY 50 /* ms */
+
 static unsigned int
 led_tg(struct sk_buff *skb, const struct xt_action_param *par)
 {
 	const struct xt_led_info *ledinfo = par->targinfo;
 	struct xt_led_info_internal *ledinternal = ledinfo->internal_data;
+	unsigned long led_delay = XT_LED_BLINK_DELAY;
 
 	/*
 	 * If "always blink" is enabled, and there's still some time until the
@@ -62,9 +65,10 @@ led_tg(struct sk_buff *skb, const struct xt_action_param *par)
 	 */
 	if ((ledinfo->delay > 0) && ledinfo->always_blink &&
 	    timer_pending(&ledinternal->timer))
-		led_trigger_event(&ledinternal->netfilter_led_trigger, LED_OFF);
-
-	led_trigger_event(&ledinternal->netfilter_led_trigger, LED_FULL);
+		led_trigger_blink_oneshot(&ledinternal->netfilter_led_trigger,
+					  &led_delay, &led_delay, 1);
+	else
+		led_trigger_event(&ledinternal->netfilter_led_trigger, LED_FULL);
 
 	/* If there's a positive delay, start/update the timer */
 	if (ledinfo->delay > 0) {
@@ -84,7 +88,7 @@ led_tg(struct sk_buff *skb, const struct xt_action_param *par)
 static void led_timeout_callback(struct timer_list *t)
 {
 	struct xt_led_info_internal *ledinternal = from_timer(ledinternal, t,
-							       timer);
+							      timer);
 
 	led_trigger_event(&ledinternal->netfilter_led_trigger, LED_OFF);
 }
@@ -107,10 +111,8 @@ static int led_tg_check(const struct xt_tgchk_param *par)
 	struct xt_led_info_internal *ledinternal;
 	int err;
 
-	if (ledinfo->id[0] == '\0') {
-		pr_info("No 'id' parameter given.\n");
+	if (ledinfo->id[0] == '\0')
 		return -EINVAL;
-	}
 
 	mutex_lock(&xt_led_mutex);
 
@@ -134,9 +136,7 @@ static int led_tg_check(const struct xt_tgchk_param *par)
 
 	err = led_trigger_register(&ledinternal->netfilter_led_trigger);
 	if (err) {
-		pr_warning("led_trigger_register() failed\n");
-		if (err == -EEXIST)
-			pr_warning("Trigger name is already in use.\n");
+		pr_info_ratelimited("Trigger name is already in use.\n");
 		goto exit_alloc;
 	}
 
@@ -196,6 +196,7 @@ static struct xt_target led_tg_reg __read_mostly = {
 	.family		= NFPROTO_UNSPEC,
 	.target		= led_tg,
 	.targetsize	= sizeof(struct xt_led_info),
+	.usersize	= offsetof(struct xt_led_info, internal_data),
 	.checkentry	= led_tg_check,
 	.destroy	= led_tg_destroy,
 	.me		= THIS_MODULE,

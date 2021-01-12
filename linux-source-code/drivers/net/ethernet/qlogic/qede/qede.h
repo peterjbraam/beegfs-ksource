@@ -92,7 +92,6 @@ struct qede_stats_common {
 	u64 non_coalesced_pkts;
 	u64 coalesced_bytes;
 	u64 link_change_count;
-	u64 ptp_skip_txts;
 
 	/* port */
 	u64 rx_64_byte_packets;
@@ -190,7 +189,6 @@ struct qede_dev {
 
 	const struct qed_eth_ops	*ops;
 	struct qede_ptp			*ptp;
-	u64				ptp_skip_txts;
 
 	struct qed_dev_eth_info dev_info;
 #define QEDE_MAX_RSS_CNT(edev)	((edev)->dev_info.num_queues)
@@ -500,7 +498,8 @@ struct qede_reload_args {
 /* Datapath functions definition */
 netdev_tx_t qede_start_xmit(struct sk_buff *skb, struct net_device *ndev);
 u16 qede_select_queue(struct net_device *dev, struct sk_buff *skb,
-		      void *accel_priv, select_queue_fallback_t fallback);
+		      struct net_device *sb_dev,
+		      select_queue_fallback_t fallback);
 netdev_features_t qede_features_check(struct sk_buff *skb,
 				      struct net_device *dev,
 				      netdev_features_t features);

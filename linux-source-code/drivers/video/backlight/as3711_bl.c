@@ -28,8 +28,6 @@ enum as3711_bl_type {
 
 struct as3711_bl_data {
 	bool powered;
-	const char *fb_name;
-	struct device *fb_dev;
 	enum as3711_bl_type type;
 	int brightness;
 	struct backlight_device *bl;
@@ -240,7 +238,8 @@ static int as3711_bl_register(struct platform_device *pdev,
 	/* max tuning I = 31uA for voltage- and 38250uA for current-feedback */
 	props.max_brightness = max_brightness;
 
-	bl = backlight_device_register(su->type == AS3711_BL_SU1 ?
+	bl = devm_backlight_device_register(&pdev->dev,
+				       su->type == AS3711_BL_SU1 ?
 				       "as3711-su1" : "as3711-su2",
 				       &pdev->dev, su,
 				       &as3711_bl_ops, &props);
@@ -261,10 +260,10 @@ static int as3711_bl_register(struct platform_device *pdev,
 static int as3711_backlight_parse_dt(struct device *dev)
 {
 	struct as3711_bl_pdata *pdata = dev_get_platdata(dev);
-	struct device_node *bl =
-		of_find_node_by_name(dev->parent->of_node, "backlight"), *fb;
+	struct device_node *bl, *fb;
 	int ret;
 
+	bl = of_get_child_by_name(dev->parent->of_node, "backlight");
 	if (!bl) {
 		dev_dbg(dev, "backlight node not found\n");
 		return -ENODEV;
@@ -272,26 +271,30 @@ static int as3711_backlight_parse_dt(struct device *dev)
 
 	fb = of_parse_phandle(bl, "su1-dev", 0);
 	if (fb) {
-		pdata->su1_fb = fb->full_name;
+		of_node_put(fb);
+
+		pdata->su1_fb = true;
 
 		ret = of_property_read_u32(bl, "su1-max-uA", &pdata->su1_max_uA);
 		if (pdata->su1_max_uA <= 0)
 			ret = -EINVAL;
 		if (ret < 0)
-			return ret;
+			goto err_put_bl;
 	}
 
 	fb = of_parse_phandle(bl, "su2-dev", 0);
 	if (fb) {
 		int count = 0;
 
-		pdata->su2_fb = fb->full_name;
+		of_node_put(fb);
+
+		pdata->su2_fb = true;
 
 		ret = of_property_read_u32(bl, "su2-max-uA", &pdata->su2_max_uA);
 		if (pdata->su2_max_uA <= 0)
 			ret = -EINVAL;
 		if (ret < 0)
-			return ret;
+			goto err_put_bl;
 
 		if (of_find_property(bl, "su2-feedback-voltage", NULL)) {
 			pdata->su2_feedback = AS3711_SU2_VOLTAGE;
@@ -313,8 +316,10 @@ static int as3711_backlight_parse_dt(struct device *dev)
 			pdata->su2_feedback = AS3711_SU2_CURR_AUTO;
 			count++;
 		}
-		if (count != 1)
-			return -EINVAL;
+		if (count != 1) {
+			ret = -EINVAL;
+			goto err_put_bl;
+		}
 
 		count = 0;
 		if (of_find_property(bl, "su2-fbprot-lx-sd4", NULL)) {
@@ -333,8 +338,10 @@ static int as3711_backlight_parse_dt(struct device *dev)
 			pdata->su2_fbprot = AS3711_SU2_GPIO4;
 			count++;
 		}
-		if (count != 1)
-			return -EINVAL;
+		if (count != 1) {
+			ret = -EINVAL;
+			goto err_put_bl;
+		}
 
 		count = 0;
 		if (of_find_property(bl, "su2-auto-curr1", NULL)) {
@@ -354,11 +361,20 @@ static int as3711_backlight_parse_dt(struct device *dev)
 		 * At least one su2-auto-curr* must be specified iff
 		 * AS3711_SU2_CURR_AUTO is used
 		 */
-		if (!count ^ (pdata->su2_feedback != AS3711_SU2_CURR_AUTO))
-			return -EINVAL;
+		if (!count ^ (pdata->su2_feedback != AS3711_SU2_CURR_AUTO)) {
+			ret = -EINVAL;
+			goto err_put_bl;
+		}
 	}
 
+	of_node_put(bl);
+
 	return 0;
+
+err_put_bl:
+	of_node_put(bl);
+
+	return ret;
 }
 
 static int as3711_backlight_probe(struct platform_device *pdev)
@@ -411,7 +427,6 @@ static int as3711_backlight_probe(struct platform_device *pdev)
 
 	if (pdata->su1_fb) {
 		su = &supply->su1;
-		su->fb_name = pdata->su1_fb;
 		su->type = AS3711_BL_SU1;
 
 		max_brightness = min(pdata->su1_max_uA, 31);
@@ -422,7 +437,6 @@ static int as3711_backlight_probe(struct platform_device *pdev)
 
 	if (pdata->su2_fb) {
 		su = &supply->su2;
-		su->fb_name = pdata->su2_fb;
 		su->type = AS3711_BL_SU2;
 
 		switch (pdata->su2_fbprot) {
@@ -432,8 +446,7 @@ static int as3711_backlight_probe(struct platform_device *pdev)
 		case AS3711_SU2_LX_SD4:
 			break;
 		default:
-			ret = -EINVAL;
-			goto esu2;
+			return -EINVAL;
 		}
 
 		switch (pdata->su2_feedback) {
@@ -447,8 +460,7 @@ static int as3711_backlight_probe(struct platform_device *pdev)
 			max_brightness = min(pdata->su2_max_uA / 150, 255);
 			break;
 		default:
-			ret = -EINVAL;
-			goto esu2;
+			return -EINVAL;
 		}
 
 		ret = as3711_bl_init_su2(supply);
@@ -457,24 +469,10 @@ static int as3711_backlight_probe(struct platform_device *pdev)
 
 		ret = as3711_bl_register(pdev, max_brightness, su);
 		if (ret < 0)
-			goto esu2;
+			return ret;
 	}
 
 	platform_set_drvdata(pdev, supply);
-
-	return 0;
-
-esu2:
-	backlight_device_unregister(supply->su1.bl);
-	return ret;
-}
-
-static int as3711_backlight_remove(struct platform_device *pdev)
-{
-	struct as3711_bl_supply *supply = platform_get_drvdata(pdev);
-
-	backlight_device_unregister(supply->su1.bl);
-	backlight_device_unregister(supply->su2.bl);
 
 	return 0;
 }
@@ -482,10 +480,8 @@ static int as3711_backlight_remove(struct platform_device *pdev)
 static struct platform_driver as3711_backlight_driver = {
 	.driver		= {
 		.name	= "as3711-backlight",
-		.owner	= THIS_MODULE,
 	},
 	.probe		= as3711_backlight_probe,
-	.remove		= as3711_backlight_remove,
 };
 
 module_platform_driver(as3711_backlight_driver);

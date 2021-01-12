@@ -32,14 +32,14 @@ void rmi_2d_sensor_abs_process(struct rmi_2d_sensor *sensor,
 	if (obj->type == RMI_2D_OBJECT_NONE)
 		return;
 
-	if (axis_align->swap_axes)
-		swap(obj->x, obj->y);
-
 	if (axis_align->flip_x)
 		obj->x = sensor->max_x - obj->x;
 
 	if (axis_align->flip_y)
 		obj->y = sensor->max_y - obj->y;
+
+	if (axis_align->swap_axes)
+		swap(obj->x, obj->y);
 
 	/*
 	 * Here checking if X offset or y offset are specified is
@@ -120,14 +120,14 @@ void rmi_2d_sensor_rel_report(struct rmi_2d_sensor *sensor, int x, int y)
 	x = min(RMI_2D_REL_POS_MAX, max(RMI_2D_REL_POS_MIN, (int)x));
 	y = min(RMI_2D_REL_POS_MAX, max(RMI_2D_REL_POS_MIN, (int)y));
 
-	if (axis_align->swap_axes)
-		swap(x, y);
-
 	if (axis_align->flip_x)
 		x = min(RMI_2D_REL_POS_MAX, -x);
 
 	if (axis_align->flip_y)
 		y = min(RMI_2D_REL_POS_MAX, -y);
+
+	if (axis_align->swap_axes)
+		swap(x, y);
 
 	if (x || y) {
 		input_report_rel(sensor->input, REL_X, x);
@@ -141,17 +141,10 @@ static void rmi_2d_sensor_set_input_params(struct rmi_2d_sensor *sensor)
 	struct input_dev *input = sensor->input;
 	int res_x;
 	int res_y;
+	int max_x, max_y;
 	int input_flags = 0;
 
 	if (sensor->report_abs) {
-		if (sensor->axis_align.swap_axes) {
-			swap(sensor->max_x, sensor->max_y);
-			swap(sensor->axis_align.clip_x_low,
-			     sensor->axis_align.clip_y_low);
-			swap(sensor->axis_align.clip_x_high,
-			     sensor->axis_align.clip_y_high);
-		}
-
 		sensor->min_x = sensor->axis_align.clip_x_low;
 		if (sensor->axis_align.clip_x_high)
 			sensor->max_x = min(sensor->max_x,
@@ -163,14 +156,19 @@ static void rmi_2d_sensor_set_input_params(struct rmi_2d_sensor *sensor)
 				sensor->axis_align.clip_y_high);
 
 		set_bit(EV_ABS, input->evbit);
-		input_set_abs_params(input, ABS_MT_POSITION_X, 0, sensor->max_x,
-					0, 0);
-		input_set_abs_params(input, ABS_MT_POSITION_Y, 0, sensor->max_y,
-					0, 0);
+
+		max_x = sensor->max_x;
+		max_y = sensor->max_y;
+		if (sensor->axis_align.swap_axes)
+			swap(max_x, max_y);
+		input_set_abs_params(input, ABS_MT_POSITION_X, 0, max_x, 0, 0);
+		input_set_abs_params(input, ABS_MT_POSITION_Y, 0, max_y, 0, 0);
 
 		if (sensor->x_mm && sensor->y_mm) {
 			res_x = (sensor->max_x - sensor->min_x) / sensor->x_mm;
 			res_y = (sensor->max_y - sensor->min_y) / sensor->y_mm;
+			if (sensor->axis_align.swap_axes)
+				swap(res_x, res_y);
 
 			input_abs_set_res(input, ABS_X, res_x);
 			input_abs_set_res(input, ABS_Y, res_y);
@@ -226,3 +224,111 @@ int rmi_2d_sensor_configure_input(struct rmi_function *fn,
 	return 0;
 }
 EXPORT_SYMBOL_GPL(rmi_2d_sensor_configure_input);
+
+#ifdef CONFIG_OF
+int rmi_2d_sensor_of_probe(struct device *dev,
+			struct rmi_2d_sensor_platform_data *pdata)
+{
+	int retval;
+	u32 val;
+
+	pdata->axis_align.swap_axes = of_property_read_bool(dev->of_node,
+						"touchscreen-swapped-x-y");
+
+	pdata->axis_align.flip_x = of_property_read_bool(dev->of_node,
+						"touchscreen-inverted-x");
+
+	pdata->axis_align.flip_y = of_property_read_bool(dev->of_node,
+						"touchscreen-inverted-y");
+
+	retval = rmi_of_property_read_u32(dev, &val, "syna,clip-x-low", 1);
+	if (retval)
+		return retval;
+
+	pdata->axis_align.clip_x_low = val;
+
+	retval = rmi_of_property_read_u32(dev, &val, "syna,clip-y-low",	1);
+	if (retval)
+		return retval;
+
+	pdata->axis_align.clip_y_low = val;
+
+	retval = rmi_of_property_read_u32(dev, &val, "syna,clip-x-high", 1);
+	if (retval)
+		return retval;
+
+	pdata->axis_align.clip_x_high = val;
+
+	retval = rmi_of_property_read_u32(dev, &val, "syna,clip-y-high", 1);
+	if (retval)
+		return retval;
+
+	pdata->axis_align.clip_y_high = val;
+
+	retval = rmi_of_property_read_u32(dev, &val, "syna,offset-x", 1);
+	if (retval)
+		return retval;
+
+	pdata->axis_align.offset_x = val;
+
+	retval = rmi_of_property_read_u32(dev, &val, "syna,offset-y", 1);
+	if (retval)
+		return retval;
+
+	pdata->axis_align.offset_y = val;
+
+	retval = rmi_of_property_read_u32(dev, &val, "syna,delta-x-threshold",
+						1);
+	if (retval)
+		return retval;
+
+	pdata->axis_align.delta_x_threshold = val;
+
+	retval = rmi_of_property_read_u32(dev, &val, "syna,delta-y-threshold",
+						1);
+	if (retval)
+		return retval;
+
+	pdata->axis_align.delta_y_threshold = val;
+
+	retval = rmi_of_property_read_u32(dev, (u32 *)&pdata->sensor_type,
+			"syna,sensor-type", 1);
+	if (retval)
+		return retval;
+
+	retval = rmi_of_property_read_u32(dev, &val, "touchscreen-x-mm", 1);
+	if (retval)
+		return retval;
+
+	pdata->x_mm = val;
+
+	retval = rmi_of_property_read_u32(dev, &val, "touchscreen-y-mm", 1);
+	if (retval)
+		return retval;
+
+	pdata->y_mm = val;
+
+	retval = rmi_of_property_read_u32(dev, &val,
+				"syna,disable-report-mask", 1);
+	if (retval)
+		return retval;
+
+	pdata->disable_report_mask = val;
+
+	retval = rmi_of_property_read_u32(dev, &val, "syna,rezero-wait-ms",
+						1);
+	if (retval)
+		return retval;
+
+	pdata->rezero_wait = val;
+
+	return 0;
+}
+#else
+inline int rmi_2d_sensor_of_probe(struct device *dev,
+			struct rmi_2d_sensor_platform_data *pdata)
+{
+	return -ENODEV;
+}
+#endif
+EXPORT_SYMBOL_GPL(rmi_2d_sensor_of_probe);

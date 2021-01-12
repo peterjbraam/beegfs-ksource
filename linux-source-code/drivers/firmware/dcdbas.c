@@ -24,6 +24,7 @@
 #include <linux/acpi.h>
 #include <linux/dma-mapping.h>
 #include <linux/errno.h>
+#include <linux/cpu.h>
 #include <linux/gfp.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
@@ -243,33 +244,14 @@ static ssize_t host_control_on_shutdown_store(struct device *dev,
 	return count;
 }
 
-/**
- * dcdbas_smi_request: generate SMI request
- *
- * Called with smi_data_lock.
- */
-int dcdbas_smi_request(struct smi_cmd *smi_cmd)
+static int raise_smi(void *par)
 {
-	cpumask_var_t old_mask;
-	int ret = 0;
+	struct smi_cmd *smi_cmd = par;
 
-	if (smi_cmd->magic != SMI_CMD_MAGIC) {
-		dev_info(&dcdbas_pdev->dev, "%s: invalid magic value\n",
-			 __func__);
-		return -EBADR;
-	}
-
-	/* SMI requires CPU 0 */
-	if (!alloc_cpumask_var(&old_mask, GFP_KERNEL))
-		return -ENOMEM;
-
-	cpumask_copy(old_mask, &current->cpus_allowed);
-	set_cpus_allowed_ptr(current, cpumask_of(0));
 	if (smp_processor_id() != 0) {
 		dev_dbg(&dcdbas_pdev->dev, "%s: failed to get CPU 0\n",
 			__func__);
-		ret = -EBUSY;
-		goto out;
+		return -EBUSY;
 	}
 
 	/* generate SMI */
@@ -285,9 +267,28 @@ int dcdbas_smi_request(struct smi_cmd *smi_cmd)
 		: "memory"
 	);
 
-out:
-	set_cpus_allowed_ptr(current, old_mask);
-	free_cpumask_var(old_mask);
+	return 0;
+}
+/**
+ * dcdbas_smi_request: generate SMI request
+ *
+ * Called with smi_data_lock.
+ */
+int dcdbas_smi_request(struct smi_cmd *smi_cmd)
+{
+	int ret;
+
+	if (smi_cmd->magic != SMI_CMD_MAGIC) {
+		dev_info(&dcdbas_pdev->dev, "%s: invalid magic value\n",
+			 __func__);
+		return -EBADR;
+	}
+
+	/* SMI requires CPU 0 */
+	get_online_cpus();
+	ret = smp_call_on_cpu(0, raise_smi, smi_cmd, true);
+	put_online_cpus();
+
 	return ret;
 }
 
@@ -637,13 +638,14 @@ static struct attribute *dcdbas_dev_attrs[] = {
 	NULL
 };
 
-static struct attribute_group dcdbas_attr_group = {
+static const struct attribute_group dcdbas_attr_group = {
 	.attrs = dcdbas_dev_attrs,
+	.bin_attrs = dcdbas_bin_attrs,
 };
 
 static int dcdbas_probe(struct platform_device *dev)
 {
-	int i, error;
+	int error;
 
 	host_control_action = HC_ACTION_NONE;
 	host_control_smi_type = HC_SMITYPE_NONE;
@@ -667,18 +669,6 @@ static int dcdbas_probe(struct platform_device *dev)
 	if (error)
 		return error;
 
-	for (i = 0; dcdbas_bin_attrs[i]; i++) {
-		error = sysfs_create_bin_file(&dev->dev.kobj,
-					      dcdbas_bin_attrs[i]);
-		if (error) {
-			while (--i >= 0)
-				sysfs_remove_bin_file(&dev->dev.kobj,
-						      dcdbas_bin_attrs[i]);
-			sysfs_remove_group(&dev->dev.kobj, &dcdbas_attr_group);
-			return error;
-		}
-	}
-
 	register_reboot_notifier(&dcdbas_reboot_nb);
 
 	dev_info(&dev->dev, "%s (version %s)\n",
@@ -689,11 +679,7 @@ static int dcdbas_probe(struct platform_device *dev)
 
 static int dcdbas_remove(struct platform_device *dev)
 {
-	int i;
-
 	unregister_reboot_notifier(&dcdbas_reboot_nb);
-	for (i = 0; dcdbas_bin_attrs[i]; i++)
-		sysfs_remove_bin_file(&dev->dev.kobj, dcdbas_bin_attrs[i]);
 	sysfs_remove_group(&dev->dev.kobj, &dcdbas_attr_group);
 
 	return 0;
@@ -702,13 +688,12 @@ static int dcdbas_remove(struct platform_device *dev)
 static struct platform_driver dcdbas_driver = {
 	.driver		= {
 		.name	= DRIVER_NAME,
-		.owner	= THIS_MODULE,
 	},
 	.probe		= dcdbas_probe,
 	.remove		= dcdbas_remove,
 };
 
-static const struct platform_device_info dcdbas_dev_info __initdata = {
+static const struct platform_device_info dcdbas_dev_info __initconst = {
 	.name		= DRIVER_NAME,
 	.id		= -1,
 	.dma_mask	= DMA_BIT_MASK(32),

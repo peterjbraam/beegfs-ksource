@@ -56,7 +56,6 @@
 #include <rdma/ib_umem.h>
 #include <rdma/ib_verbs.h>
 #include <rdma/vmw_pvrdma-abi.h>
-#include <linux/refcount.h>  /* rhel7-only */
 
 #include "pvrdma_ring.h"
 #include "pvrdma_dev_api.h"
@@ -176,7 +175,7 @@ struct pvrdma_srq {
 	u32 srq_handle;
 	int npages;
 	refcount_t refcnt;
-	wait_queue_head_t wait;
+	struct completion free;
 };
 
 struct pvrdma_qp {

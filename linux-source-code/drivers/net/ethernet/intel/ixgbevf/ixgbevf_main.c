@@ -1,28 +1,5 @@
-/*******************************************************************************
-
-  Intel 82599 Virtual Function driver
-  Copyright(c) 1999 - 2018 Intel Corporation.
-
-  This program is free software; you can redistribute it and/or modify it
-  under the terms and conditions of the GNU General Public License,
-  version 2, as published by the Free Software Foundation.
-
-  This program is distributed in the hope it will be useful, but WITHOUT
-  ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
-  FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
-  more details.
-
-  You should have received a copy of the GNU General Public License along with
-  this program; if not, see <http://www.gnu.org/licenses/>.
-
-  The full GNU General Public License is included in this distribution in
-  the file called "COPYING".
-
-  Contact Information:
-  e1000-devel Mailing List <e1000-devel@lists.sourceforge.net>
-  Intel Corporation, 5200 N.E. Elam Young Parkway, Hillsboro, OR 97124-6497
-
-*******************************************************************************/
+// SPDX-License-Identifier: GPL-2.0
+/* Copyright(c) 1999 - 2018 Intel Corporation. */
 
 /******************************************************************************
  Copyright (c)2006 - 2007 Myricom, Inc. for some LRO specific code
@@ -53,6 +30,7 @@
 #include <linux/bpf.h>
 #include <linux/bpf_trace.h>
 #include <linux/atomic.h>
+#include <net/xfrm.h>
 
 #include "ixgbevf.h"
 
@@ -60,7 +38,7 @@ const char ixgbevf_driver_name[] = "ixgbevf";
 static const char ixgbevf_driver_string[] =
 	"Intel(R) 10 Gigabit PCI Express Virtual Function Network Driver";
 
-#define DRV_VERSION "4.1.0-k-rh7.7"
+#define DRV_VERSION "4.1.0-k-rh8.1.0"
 const char ixgbevf_driver_version[] = DRV_VERSION;
 static char ixgbevf_copyright[] =
 	"Copyright (c) 2009 - 2018 Intel Corporation.";
@@ -102,7 +80,7 @@ MODULE_DEVICE_TABLE(pci, ixgbevf_pci_tbl);
 
 MODULE_AUTHOR("Intel Corporation, <linux.nics@intel.com>");
 MODULE_DESCRIPTION("Intel(R) 10 Gigabit Virtual Function Network Driver");
-MODULE_LICENSE("GPL");
+MODULE_LICENSE("GPL v2");
 MODULE_VERSION(DRV_VERSION);
 
 #define DEFAULT_MSG_ENABLE (NETIF_MSG_DRV|NETIF_MSG_PROBE|NETIF_MSG_LINK)
@@ -170,7 +148,7 @@ static void ixgbevf_check_remove(struct ixgbe_hw *hw, u32 reg)
 
 u32 ixgbevf_read_reg(struct ixgbe_hw *hw, u32 reg)
 {
-	u8 __iomem *reg_addr = ACCESS_ONCE(hw->hw_addr);
+	u8 __iomem *reg_addr = READ_ONCE(hw->hw_addr);
 	u32 value;
 
 	if (IXGBE_REMOVED(reg_addr))
@@ -573,14 +551,10 @@ static void ixgbevf_put_rx_buffer(struct ixgbevf_ring *rx_ring,
 				  struct ixgbevf_rx_buffer *rx_buffer,
 				  struct sk_buff *skb)
 {
-	DEFINE_DMA_ATTRS(attrs);
-
 	if (ixgbevf_can_reuse_rx_page(rx_buffer)) {
 		/* hand second half of page back to the ring */
 		ixgbevf_reuse_rx_page(rx_ring, rx_buffer);
 	} else {
-		dma_set_attr(DMA_ATTR_SKIP_CPU_SYNC, &attrs);
-		dma_set_attr(DMA_ATTR_WEAK_ORDERING, &attrs);
 		if (IS_ERR(skb))
 			/* We are not reusing the buffer so unmap it and free
 			 * any references we are holding to it
@@ -588,7 +562,7 @@ static void ixgbevf_put_rx_buffer(struct ixgbevf_ring *rx_ring,
 			dma_unmap_page_attrs(rx_ring->dev, rx_buffer->dma,
 					     ixgbevf_rx_pg_size(rx_ring),
 					     DMA_FROM_DEVICE,
-					     &attrs);
+					     IXGBEVF_RX_DMA_ATTR);
 		__page_frag_cache_drain(rx_buffer->page,
 					rx_buffer->pagecnt_bias);
 	}
@@ -634,7 +608,6 @@ static bool ixgbevf_alloc_mapped_page(struct ixgbevf_ring *rx_ring,
 {
 	struct page *page = bi->page;
 	dma_addr_t dma;
-	DEFINE_DMA_ATTRS(attrs);
 
 	/* since we are recycling buffers we should seldom need to alloc */
 	if (likely(page))
@@ -648,11 +621,9 @@ static bool ixgbevf_alloc_mapped_page(struct ixgbevf_ring *rx_ring,
 	}
 
 	/* map page for use */
-	dma_set_attr(DMA_ATTR_SKIP_CPU_SYNC, &attrs);
-	dma_set_attr(DMA_ATTR_WEAK_ORDERING, &attrs);
 	dma = dma_map_page_attrs(rx_ring->dev, page, 0,
 				 ixgbevf_rx_pg_size(rx_ring),
-				 DMA_FROM_DEVICE, &attrs);
+				 DMA_FROM_DEVICE, IXGBEVF_RX_DMA_ATTR);
 
 	/* if mapping failed free memory back to system since
 	 * there isn't much point in holding memory we can't use
@@ -1323,16 +1294,20 @@ static int ixgbevf_poll(struct napi_struct *napi, int budget)
 	/* If all work not completed, return budget and keep polling */
 	if (!clean_complete)
 		return budget;
-	/* all work done, exit the polling mode */
-	napi_complete_done(napi, work_done);
-	if (adapter->rx_itr_setting == 1)
-		ixgbevf_set_itr(q_vector);
-	if (!test_bit(__IXGBEVF_DOWN, &adapter->state) &&
-	    !test_bit(__IXGBEVF_REMOVING, &adapter->state))
-		ixgbevf_irq_enable_queues(adapter,
-					  BIT(q_vector->v_idx));
 
-	return 0;
+	/* Exit the polling mode, but don't re-enable interrupts if stack might
+	 * poll us due to busy-polling
+	 */
+	if (likely(napi_complete_done(napi, work_done))) {
+		if (adapter->rx_itr_setting == 1)
+			ixgbevf_set_itr(q_vector);
+		if (!test_bit(__IXGBEVF_DOWN, &adapter->state) &&
+		    !test_bit(__IXGBEVF_REMOVING, &adapter->state))
+			ixgbevf_irq_enable_queues(adapter,
+						  BIT(q_vector->v_idx));
+	}
+
+	return min(work_done, budget - 1);
 }
 
 /**
@@ -2319,7 +2294,7 @@ static void ixgbevf_up_complete(struct ixgbevf_adapter *adapter)
 
 	spin_unlock_bh(&adapter->mbx_lock);
 
-	smp_mb__before_clear_bit();
+	smp_mb__before_atomic();
 	clear_bit(__IXGBEVF_DOWN, &adapter->state);
 	ixgbevf_napi_enable_all(adapter);
 
@@ -2351,7 +2326,6 @@ void ixgbevf_up(struct ixgbevf_adapter *adapter)
 static void ixgbevf_clean_rx_ring(struct ixgbevf_ring *rx_ring)
 {
 	u16 i = rx_ring->next_to_clean;
-	DEFINE_DMA_ATTRS(attrs);
 
 	/* Free Rx ring sk_buff */
 	if (rx_ring->skb) {
@@ -2359,8 +2333,6 @@ static void ixgbevf_clean_rx_ring(struct ixgbevf_ring *rx_ring)
 		rx_ring->skb = NULL;
 	}
 
-	dma_set_attr(DMA_ATTR_SKIP_CPU_SYNC, &attrs);
-	dma_set_attr(DMA_ATTR_WEAK_ORDERING, &attrs);
 	/* Free all the Rx ring pages */
 	while (i != rx_ring->next_to_alloc) {
 		struct ixgbevf_rx_buffer *rx_buffer;
@@ -2381,7 +2353,7 @@ static void ixgbevf_clean_rx_ring(struct ixgbevf_ring *rx_ring)
 				     rx_buffer->dma,
 				     ixgbevf_rx_pg_size(rx_ring),
 				     DMA_FROM_DEVICE,
-				     &attrs);
+				     IXGBEVF_RX_DMA_ATTR);
 
 		__page_frag_cache_drain(rx_buffer->page,
 					rx_buffer->pagecnt_bias);
@@ -4352,7 +4324,7 @@ static int ixgbevf_resume(struct pci_dev *pdev)
 	}
 
 	adapter->hw.hw_addr = adapter->io_addr;
-	smp_mb__before_clear_bit();
+	smp_mb__before_atomic();
 	clear_bit(__IXGBEVF_DISABLED, &adapter->state);
 	pci_set_master(pdev);
 
@@ -4523,7 +4495,6 @@ static int ixgbevf_xdp(struct net_device *dev, struct netdev_bpf *xdp)
 }
 
 static const struct net_device_ops ixgbevf_netdev_ops = {
-	.ndo_size		= sizeof(struct net_device_ops),
 	.ndo_open		= ixgbevf_open,
 	.ndo_stop		= ixgbevf_close,
 	.ndo_start_xmit		= ixgbevf_xmit_frame,
@@ -4531,12 +4502,12 @@ static const struct net_device_ops ixgbevf_netdev_ops = {
 	.ndo_get_stats64	= ixgbevf_get_stats,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_set_mac_address	= ixgbevf_set_mac,
-	.extended.ndo_change_mtu	= ixgbevf_change_mtu,
+	.ndo_change_mtu		= ixgbevf_change_mtu,
 	.ndo_tx_timeout		= ixgbevf_tx_timeout,
 	.ndo_vlan_rx_add_vid	= ixgbevf_vlan_rx_add_vid,
 	.ndo_vlan_rx_kill_vid	= ixgbevf_vlan_rx_kill_vid,
 	.ndo_features_check	= ixgbevf_features_check,
-	.extended.ndo_bpf	= ixgbevf_xdp,
+	.ndo_bpf		= ixgbevf_xdp,
 };
 
 static void ixgbevf_assign_netdev_ops(struct net_device *dev)
@@ -4649,8 +4620,8 @@ static int ixgbevf_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 #define IXGBEVF_GSO_PARTIAL_FEATURES (NETIF_F_GSO_GRE | \
 				      NETIF_F_GSO_GRE_CSUM | \
-				      NETIF_F_GSO_IPIP | \
-				      NETIF_F_GSO_SIT | \
+				      NETIF_F_GSO_IPXIP4 | \
+				      NETIF_F_GSO_IPXIP6 | \
 				      NETIF_F_GSO_UDP_TUNNEL | \
 				      NETIF_F_GSO_UDP_TUNNEL_CSUM)
 
@@ -4679,21 +4650,21 @@ static int ixgbevf_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	netdev->priv_flags |= IFF_UNICAST_FLT;
 
 	/* MTU range: 68 - 1504 or 9710 */
-	netdev->extended->min_mtu = ETH_MIN_MTU;
+	netdev->min_mtu = ETH_MIN_MTU;
 	switch (adapter->hw.api_version) {
 	case ixgbe_mbox_api_11:
 	case ixgbe_mbox_api_12:
 	case ixgbe_mbox_api_13:
 	case ixgbe_mbox_api_14:
-		netdev->extended->max_mtu = IXGBE_MAX_JUMBO_FRAME_SIZE -
+		netdev->max_mtu = IXGBE_MAX_JUMBO_FRAME_SIZE -
 				  (ETH_HLEN + ETH_FCS_LEN);
 		break;
 	default:
 		if (adapter->hw.mac.type != ixgbe_mac_82599_vf)
-			netdev->extended->max_mtu = IXGBE_MAX_JUMBO_FRAME_SIZE -
+			netdev->max_mtu = IXGBE_MAX_JUMBO_FRAME_SIZE -
 					  (ETH_HLEN + ETH_FCS_LEN);
 		else
-			netdev->extended->max_mtu = ETH_DATA_LEN + ETH_FCS_LEN;
+			netdev->max_mtu = ETH_DATA_LEN + ETH_FCS_LEN;
 		break;
 	}
 
@@ -4859,7 +4830,7 @@ static pci_ers_result_t ixgbevf_io_slot_reset(struct pci_dev *pdev)
 	}
 
 	adapter->hw.hw_addr = adapter->io_addr;
-	smp_mb__before_clear_bit();
+	smp_mb__before_atomic();
 	clear_bit(__IXGBEVF_DISABLED, &adapter->state);
 	pci_set_master(pdev);
 

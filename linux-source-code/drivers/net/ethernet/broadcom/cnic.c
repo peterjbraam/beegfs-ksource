@@ -443,7 +443,7 @@ static int cnic_offld_prep(struct cnic_sock *csk)
 static int cnic_close_prep(struct cnic_sock *csk)
 {
 	clear_bit(SK_F_CONNECT_START, &csk->flags);
-	smp_mb__after_clear_bit();
+	smp_mb__after_atomic();
 
 	if (test_and_clear_bit(SK_F_OFFLD_COMPLETE, &csk->flags)) {
 		while (test_and_set_bit(SK_F_OFFLD_SCHED, &csk->flags))
@@ -457,7 +457,7 @@ static int cnic_close_prep(struct cnic_sock *csk)
 static int cnic_abort_prep(struct cnic_sock *csk)
 {
 	clear_bit(SK_F_CONNECT_START, &csk->flags);
-	smp_mb__after_clear_bit();
+	smp_mb__after_atomic();
 
 	while (test_and_set_bit(SK_F_OFFLD_SCHED, &csk->flags))
 		msleep(1);
@@ -1255,13 +1255,13 @@ static int cnic_alloc_bnx2x_resc(struct cnic_dev *dev)
 			cp->fcoe_init_cid = 0x10;
 	}
 
-	cp->iscsi_tbl = kzalloc(sizeof(struct cnic_iscsi) * MAX_ISCSI_TBL_SZ,
+	cp->iscsi_tbl = kcalloc(MAX_ISCSI_TBL_SZ, sizeof(struct cnic_iscsi),
 				GFP_KERNEL);
 	if (!cp->iscsi_tbl)
 		goto error;
 
-	cp->ctx_tbl = kzalloc(sizeof(struct cnic_context) *
-				cp->max_cid_space, GFP_KERNEL);
+	cp->ctx_tbl = kcalloc(cp->max_cid_space, sizeof(struct cnic_context),
+			      GFP_KERNEL);
 	if (!cp->ctx_tbl)
 		goto error;
 
@@ -3650,7 +3650,7 @@ static int cnic_cm_destroy(struct cnic_sock *csk)
 
 	csk_hold(csk);
 	clear_bit(SK_F_INUSE, &csk->flags);
-	smp_mb__after_clear_bit();
+	smp_mb__after_atomic();
 	while (atomic_read(&csk->ref_count) != 1)
 		msleep(1);
 	cnic_cm_cleanup(csk);
@@ -4030,7 +4030,7 @@ static void cnic_cm_process_kcqe(struct cnic_dev *dev, struct kcqe *kcqe)
 			 L4_KCQE_COMPLETION_STATUS_PARITY_ERROR)
 			set_bit(SK_F_HW_ERR, &csk->flags);
 
-		smp_mb__before_clear_bit();
+		smp_mb__before_atomic();
 		clear_bit(SK_F_OFFLD_SCHED, &csk->flags);
 		cnic_cm_upcall(cp, csk, opcode);
 		break;
@@ -4038,15 +4038,14 @@ static void cnic_cm_process_kcqe(struct cnic_dev *dev, struct kcqe *kcqe)
 	case L5CM_RAMROD_CMD_ID_CLOSE: {
 		struct iscsi_kcqe *l5kcqe = (struct iscsi_kcqe *) kcqe;
 
-		if (l4kcqe->status != 0 || l5kcqe->completion_status != 0) {
-			netdev_warn(dev->netdev, "RAMROD CLOSE compl with status 0x%x completion status 0x%x\n",
-				    l4kcqe->status, l5kcqe->completion_status);
-			opcode = L4_KCQE_OPCODE_VALUE_CLOSE_COMP;
-			/* Fall through */
-		} else {
+		if (l4kcqe->status == 0 && l5kcqe->completion_status == 0)
 			break;
-		}
+
+		netdev_warn(dev->netdev, "RAMROD CLOSE compl with status 0x%x completion status 0x%x\n",
+			    l4kcqe->status, l5kcqe->completion_status);
+		opcode = L4_KCQE_OPCODE_VALUE_CLOSE_COMP;
 	}
+		/* Fall through */
 	case L4_KCQE_OPCODE_VALUE_RESET_RECEIVED:
 	case L4_KCQE_OPCODE_VALUE_CLOSE_COMP:
 	case L4_KCQE_OPCODE_VALUE_RESET_COMP:
@@ -4088,7 +4087,7 @@ static void cnic_cm_free_mem(struct cnic_dev *dev)
 {
 	struct cnic_local *cp = dev->cnic_priv;
 
-	kfree(cp->csk_tbl);
+	kvfree(cp->csk_tbl);
 	cp->csk_tbl = NULL;
 	cnic_free_id_tbl(&cp->csk_port_tbl);
 }
@@ -4098,8 +4097,8 @@ static int cnic_cm_alloc_mem(struct cnic_dev *dev)
 	struct cnic_local *cp = dev->cnic_priv;
 	u32 port_id;
 
-	cp->csk_tbl = kzalloc(sizeof(struct cnic_sock) * MAX_CM_SK_TBL_SZ,
-			      GFP_KERNEL);
+	cp->csk_tbl = kvcalloc(MAX_CM_SK_TBL_SZ, sizeof(struct cnic_sock),
+			       GFP_KERNEL);
 	if (!cp->csk_tbl)
 		return -ENOMEM;
 
@@ -5731,7 +5730,7 @@ static int cnic_netdev_event(struct notifier_block *this, unsigned long event,
 		if (realdev) {
 			dev = cnic_from_netdev(realdev);
 			if (dev) {
-				vid |= VLAN_TAG_PRESENT;
+				vid |= VLAN_CFI_MASK;	/* make non-zero */
 				cnic_rcv_netevent(dev->cnic_priv, event, vid);
 				cnic_put(dev);
 			}
@@ -5762,7 +5761,7 @@ static int __init cnic_init(void)
 
 	pr_info("%s", version);
 
-	rc = register_netdevice_notifier_rh(&cnic_netdev_notifier);
+	rc = register_netdevice_notifier(&cnic_netdev_notifier);
 	if (rc) {
 		cnic_release();
 		return rc;
@@ -5771,7 +5770,7 @@ static int __init cnic_init(void)
 	cnic_wq = create_singlethread_workqueue("cnic_wq");
 	if (!cnic_wq) {
 		cnic_release();
-		unregister_netdevice_notifier_rh(&cnic_netdev_notifier);
+		unregister_netdevice_notifier(&cnic_netdev_notifier);
 		return -ENOMEM;
 	}
 
@@ -5780,7 +5779,7 @@ static int __init cnic_init(void)
 
 static void __exit cnic_exit(void)
 {
-	unregister_netdevice_notifier_rh(&cnic_netdev_notifier);
+	unregister_netdevice_notifier(&cnic_netdev_notifier);
 	cnic_release();
 	destroy_workqueue(cnic_wq);
 }

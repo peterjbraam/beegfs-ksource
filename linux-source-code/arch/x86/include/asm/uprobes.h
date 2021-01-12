@@ -36,7 +36,10 @@ typedef u8 uprobe_opcode_t;
 struct uprobe_xol_ops;
 
 struct arch_uprobe {
-	u8				insn[MAX_UINSN_BYTES];
+	union {
+		u8			insn[MAX_UINSN_BYTES];
+		u8			ixol[MAX_UINSN_BYTES];
+	};
 
 	const struct uprobe_xol_ops	*ops;
 
@@ -50,6 +53,10 @@ struct arch_uprobe {
 			u8	fixups;
 			u8	ilen;
 		} 			defparam;
+		struct {
+			u8	reg_offset;	/* to the start of pt_regs */
+			u8	ilen;
+		}			push;
 	};
 };
 
@@ -61,11 +68,4 @@ struct arch_uprobe_task {
 	unsigned int			saved_tf;
 };
 
-extern int  arch_uprobe_analyze_insn(struct arch_uprobe *aup, struct mm_struct *mm, unsigned long addr);
-extern int  arch_uprobe_pre_xol(struct arch_uprobe *aup, struct pt_regs *regs);
-extern int  arch_uprobe_post_xol(struct arch_uprobe *aup, struct pt_regs *regs);
-extern bool arch_uprobe_xol_was_trapped(struct task_struct *tsk);
-extern int  arch_uprobe_exception_notify(struct notifier_block *self, unsigned long val, void *data);
-extern void arch_uprobe_abort_xol(struct arch_uprobe *aup, struct pt_regs *regs);
-extern unsigned long arch_uretprobe_hijack_return_addr(unsigned long trampoline_vaddr, struct pt_regs *regs);
 #endif	/* _ASM_UPROBES_H */

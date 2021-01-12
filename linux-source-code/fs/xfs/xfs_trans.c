@@ -1,20 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (c) 2000-2003,2005 Silicon Graphics, Inc.
  * Copyright (C) 2010 Red Hat, Inc.
  * All Rights Reserved.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it would be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write the Free Software Foundation,
- * Inc.,  51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
 #include "xfs.h"
 #include "xfs_fs.h"
@@ -31,9 +19,30 @@
 #include "xfs_log.h"
 #include "xfs_trace.h"
 #include "xfs_error.h"
+#include "xfs_defer.h"
 
 kmem_zone_t	*xfs_trans_zone;
-kmem_zone_t	*xfs_log_item_desc_zone;
+
+#if defined(CONFIG_TRACEPOINTS)
+static void
+xfs_trans_trace_reservations(
+	struct xfs_mount	*mp)
+{
+	struct xfs_trans_res	resv;
+	struct xfs_trans_res	*res;
+	struct xfs_trans_res	*end_res;
+	int			i;
+
+	res = (struct xfs_trans_res *)M_RES(mp);
+	end_res = (struct xfs_trans_res *)(M_RES(mp) + 1);
+	for (i = 0; res < end_res; i++, res++)
+		trace_xfs_trans_resv_calc(mp, i, res);
+	xfs_log_get_max_trans_res(mp, &resv);
+	trace_xfs_trans_resv_calc(mp, -1, &resv);
+}
+#else
+# define xfs_trans_trace_reservations(mp)
+#endif
 
 /*
  * Initialize the precomputed transaction reservation values
@@ -44,6 +53,7 @@ xfs_trans_init(
 	struct xfs_mount	*mp)
 {
 	xfs_trans_resv_calc(mp, M_RES(mp));
+	xfs_trans_trace_reservations(mp);
 }
 
 /*
@@ -57,6 +67,7 @@ xfs_trans_free(
 	xfs_extent_busy_sort(&tp->t_busy);
 	xfs_extent_busy_clear(tp->t_mountp, &tp->t_busy, false);
 
+	trace_xfs_trans_free(tp, _RET_IP_);
 	atomic_dec(&tp->t_mountp->m_active_trans);
 	if (!(tp->t_flags & XFS_TRANS_NO_WRITECOUNT))
 		sb_end_intwrite(tp->t_mountp->m_super);
@@ -72,11 +83,13 @@ xfs_trans_free(
  * blocks.  Locks and log items, however, are no inherited.  They must
  * be added to the new transaction explicitly.
  */
-STATIC xfs_trans_t *
+STATIC struct xfs_trans *
 xfs_trans_dup(
-	xfs_trans_t	*tp)
+	struct xfs_trans	*tp)
 {
-	xfs_trans_t	*ntp;
+	struct xfs_trans	*ntp;
+
+	trace_xfs_trans_dup(tp, _RET_IP_);
 
 	ntp = kmem_zone_zalloc(xfs_trans_zone, KM_SLEEP);
 
@@ -87,6 +100,8 @@ xfs_trans_dup(
 	ntp->t_mountp = tp->t_mountp;
 	INIT_LIST_HEAD(&ntp->t_items);
 	INIT_LIST_HEAD(&ntp->t_busy);
+	INIT_LIST_HEAD(&ntp->t_dfops);
+	ntp->t_firstblock = NULLFSBLOCK;
 
 	ASSERT(tp->t_flags & XFS_TRANS_PERM_LOG_RES);
 	ASSERT(tp->t_ticket != NULL);
@@ -105,6 +120,9 @@ xfs_trans_dup(
 	ntp->t_rtx_res = tp->t_rtx_res - tp->t_rtx_res_used;
 	tp->t_rtx_res = tp->t_rtx_res_used;
 	ntp->t_pflags = tp->t_pflags;
+
+	/* move deferred ops over to the new tp */
+	xfs_defer_move(ntp, tp);
 
 	xfs_trans_dup_dqinfo(tp, ntp);
 
@@ -137,7 +155,7 @@ xfs_trans_reserve(
 	bool		rsvd = (tp->t_flags & XFS_TRANS_RESERVE) != 0;
 
 	/* Mark this thread as being in a transaction */
-	current_set_flags_nested(&tp->t_pflags, PF_FSTRANS);
+	current_set_flags_nested(&tp->t_pflags, PF_MEMALLOC_NOFS);
 
 	/*
 	 * Attempt to reserve the needed disk blocks by decrementing
@@ -147,7 +165,7 @@ xfs_trans_reserve(
 	if (blocks > 0) {
 		error = xfs_mod_fdblocks(tp->t_mountp, -((int64_t)blocks), rsvd);
 		if (error != 0) {
-			current_restore_flags_nested(&tp->t_pflags, PF_FSTRANS);
+			current_restore_flags_nested(&tp->t_pflags, PF_MEMALLOC_NOFS);
 			return -ENOSPC;
 		}
 		tp->t_blk_res += blocks;
@@ -224,7 +242,7 @@ undo_blocks:
 		tp->t_blk_res = 0;
 	}
 
-	current_restore_flags_nested(&tp->t_pflags, PF_FSTRANS);
+	current_restore_flags_nested(&tp->t_pflags, PF_MEMALLOC_NOFS);
 
 	return error;
 }
@@ -241,6 +259,14 @@ xfs_trans_alloc(
 	struct xfs_trans	*tp;
 	int			error;
 
+	/*
+	 * Allocate the handle before we do our freeze accounting and setting up
+	 * GFP_NOFS allocation context so that we avoid lockdep false positives
+	 * by doing GFP_KERNEL allocations inside sb_start_intwrite().
+	 */
+	tp = kmem_zone_zalloc(xfs_trans_zone,
+		(flags & XFS_TRANS_NOFS) ? KM_NOFS : KM_SLEEP);
+
 	if (!(flags & XFS_TRANS_NO_WRITECOUNT))
 		sb_start_intwrite(mp->m_super);
 
@@ -252,13 +278,13 @@ xfs_trans_alloc(
 		mp->m_super->s_writers.frozen == SB_FREEZE_COMPLETE);
 	atomic_inc(&mp->m_active_trans);
 
-	tp = kmem_zone_zalloc(xfs_trans_zone,
-		(flags & XFS_TRANS_NOFS) ? KM_NOFS : KM_SLEEP);
 	tp->t_magic = XFS_TRANS_HEADER_MAGIC;
 	tp->t_flags = flags;
 	tp->t_mountp = mp;
 	INIT_LIST_HEAD(&tp->t_items);
 	INIT_LIST_HEAD(&tp->t_busy);
+	INIT_LIST_HEAD(&tp->t_dfops);
+	tp->t_firstblock = NULLFSBLOCK;
 
 	error = xfs_trans_reserve(tp, resp, blocks, rtextents);
 	if (error) {
@@ -266,8 +292,32 @@ xfs_trans_alloc(
 		return error;
 	}
 
+	trace_xfs_trans_alloc(tp, _RET_IP_);
+
 	*tpp = tp;
 	return 0;
+}
+
+/*
+ * Create an empty transaction with no reservation.  This is a defensive
+ * mechanism for routines that query metadata without actually modifying
+ * them -- if the metadata being queried is somehow cross-linked (think a
+ * btree block pointer that points higher in the tree), we risk deadlock.
+ * However, blocks grabbed as part of a transaction can be re-grabbed.
+ * The verifiers will notice the corrupt block and the operation will fail
+ * back to userspace without deadlocking.
+ *
+ * Note the zero-length reservation; this transaction MUST be cancelled
+ * without any dirty data.
+ */
+int
+xfs_trans_alloc_empty(
+	struct xfs_mount		*mp,
+	struct xfs_trans		**tpp)
+{
+	struct xfs_trans_res		resv = {0};
+
+	return xfs_trans_alloc(mp, &resv, 0, 0, XFS_TRANS_NO_WRITECOUNT, tpp);
 }
 
 /*
@@ -327,7 +377,6 @@ xfs_trans_mod_sb(
 		 * in-core superblock's counter.  This should only
 		 * be applied to the on-disk superblock.
 		 */
-		ASSERT(delta < 0);
 		tp->t_res_fdblocks_delta += delta;
 		if (xfs_sb_version_haslazysbcount(&mp->m_sb))
 			flags &= ~XFS_TRANS_SB_DIRTY;
@@ -689,73 +738,52 @@ out:
 	return;
 }
 
-/*
- * Add the given log item to the transaction's list of log items.
- *
- * The log item will now point to its new descriptor with its li_desc field.
- */
+/* Add the given log item to the transaction's list of log items. */
 void
 xfs_trans_add_item(
 	struct xfs_trans	*tp,
 	struct xfs_log_item	*lip)
 {
-	struct xfs_log_item_desc *lidp;
-
 	ASSERT(lip->li_mountp == tp->t_mountp);
 	ASSERT(lip->li_ailp == tp->t_mountp->m_ail);
+	ASSERT(list_empty(&lip->li_trans));
+	ASSERT(!test_bit(XFS_LI_DIRTY, &lip->li_flags));
 
-	lidp = kmem_zone_zalloc(xfs_log_item_desc_zone, KM_SLEEP | KM_NOFS);
-
-	lidp->lid_item = lip;
-	lidp->lid_flags = 0;
-	list_add_tail(&lidp->lid_trans, &tp->t_items);
-
-	lip->li_desc = lidp;
-}
-
-STATIC void
-xfs_trans_free_item_desc(
-	struct xfs_log_item_desc *lidp)
-{
-	list_del_init(&lidp->lid_trans);
-	kmem_zone_free(xfs_log_item_desc_zone, lidp);
+	list_add_tail(&lip->li_trans, &tp->t_items);
+	trace_xfs_trans_add_item(tp, _RET_IP_);
 }
 
 /*
- * Unlink and free the given descriptor.
+ * Unlink the log item from the transaction. the log item is no longer
+ * considered dirty in this transaction, as the linked transaction has
+ * finished, either by abort or commit completion.
  */
 void
 xfs_trans_del_item(
 	struct xfs_log_item	*lip)
 {
-	xfs_trans_free_item_desc(lip->li_desc);
-	lip->li_desc = NULL;
+	clear_bit(XFS_LI_DIRTY, &lip->li_flags);
+	list_del_init(&lip->li_trans);
 }
 
-/*
- * Unlock all of the items of a transaction and free all the descriptors
- * of that transaction.
- */
+/* Detach and unlock all of the items in a transaction */
 void
 xfs_trans_free_items(
 	struct xfs_trans	*tp,
 	xfs_lsn_t		commit_lsn,
 	bool			abort)
 {
-	struct xfs_log_item_desc *lidp, *next;
+	struct xfs_log_item	*lip, *next;
 
-	list_for_each_entry_safe(lidp, next, &tp->t_items, lid_trans) {
-		struct xfs_log_item	*lip = lidp->lid_item;
+	trace_xfs_trans_free_items(tp, _RET_IP_);
 
-		lip->li_desc = NULL;
-
+	list_for_each_entry_safe(lip, next, &tp->t_items, li_trans) {
+		xfs_trans_del_item(lip);
 		if (commit_lsn != NULLCOMMITLSN)
 			lip->li_ops->iop_committing(lip, commit_lsn);
 		if (abort)
 			set_bit(XFS_LI_ABORTED, &lip->li_flags);
 		lip->li_ops->iop_unlock(lip);
-
-		xfs_trans_free_item_desc(lidp);
 	}
 }
 
@@ -769,8 +797,8 @@ xfs_log_item_batch_insert(
 {
 	int	i;
 
-	spin_lock(&ailp->xa_lock);
-	/* xfs_trans_ail_update_bulk drops ailp->xa_lock */
+	spin_lock(&ailp->ail_lock);
+	/* xfs_trans_ail_update_bulk drops ailp->ail_lock */
 	xfs_trans_ail_update_bulk(ailp, cur, log_items, nr_items, commit_lsn);
 
 	for (i = 0; i < nr_items; i++) {
@@ -813,9 +841,9 @@ xfs_trans_committed_bulk(
 	struct xfs_ail_cursor	cur;
 	int			i = 0;
 
-	spin_lock(&ailp->xa_lock);
+	spin_lock(&ailp->ail_lock);
 	xfs_trans_ail_cursor_last(ailp, &cur, commit_lsn);
-	spin_unlock(&ailp->xa_lock);
+	spin_unlock(&ailp->ail_lock);
 
 	/* unpin all the log items */
 	for (lv = log_vector; lv; lv = lv->lv_next ) {
@@ -835,7 +863,7 @@ xfs_trans_committed_bulk(
 		 * object into the AIL as we are in a shutdown situation.
 		 */
 		if (aborted) {
-			ASSERT(XFS_FORCED_SHUTDOWN(ailp->xa_mount));
+			ASSERT(XFS_FORCED_SHUTDOWN(ailp->ail_mount));
 			lip->li_ops->iop_unpin(lip, 1);
 			continue;
 		}
@@ -849,11 +877,11 @@ xfs_trans_committed_bulk(
 			 * not affect the AIL cursor the bulk insert path is
 			 * using.
 			 */
-			spin_lock(&ailp->xa_lock);
+			spin_lock(&ailp->ail_lock);
 			if (XFS_LSN_CMP(item_lsn, lip->li_lsn) > 0)
 				xfs_trans_ail_update(ailp, lip, item_lsn);
 			else
-				spin_unlock(&ailp->xa_lock);
+				spin_unlock(&ailp->ail_lock);
 			lip->li_ops->iop_unpin(lip, 0);
 			continue;
 		}
@@ -871,9 +899,9 @@ xfs_trans_committed_bulk(
 	if (i)
 		xfs_log_item_batch_insert(ailp, &cur, log_items, i, commit_lsn);
 
-	spin_lock(&ailp->xa_lock);
+	spin_lock(&ailp->ail_lock);
 	xfs_trans_ail_cursor_done(&cur);
-	spin_unlock(&ailp->xa_lock);
+	spin_unlock(&ailp->ail_lock);
 }
 
 /*
@@ -897,6 +925,20 @@ __xfs_trans_commit(
 	xfs_lsn_t		commit_lsn = -1;
 	int			error = 0;
 	int			sync = tp->t_flags & XFS_TRANS_SYNC;
+
+	trace_xfs_trans_commit(tp, _RET_IP_);
+
+	/*
+	 * Finish deferred items on final commit. Only permanent transactions
+	 * should ever have deferred ops.
+	 */
+	WARN_ON_ONCE(!list_empty(&tp->t_dfops) &&
+		     !(tp->t_flags & XFS_TRANS_PERM_LOG_RES));
+	if (!regrant && (tp->t_flags & XFS_TRANS_PERM_LOG_RES)) {
+		error = xfs_defer_finish_noroll(&tp);
+		if (error)
+			goto out_unreserve;
+	}
 
 	/*
 	 * If there is nothing to be logged by the transaction,
@@ -924,7 +966,7 @@ __xfs_trans_commit(
 
 	xfs_log_commit_cil(mp, tp, &commit_lsn, regrant);
 
-	current_restore_flags_nested(&tp->t_pflags, PF_FSTRANS);
+	current_restore_flags_nested(&tp->t_pflags, PF_MEMALLOC_NOFS);
 	xfs_trans_free(tp);
 
 	/*
@@ -953,8 +995,9 @@ out_unreserve:
 		commit_lsn = xfs_log_done(mp, tp->t_ticket, NULL, regrant);
 		if (commit_lsn == -1 && !error)
 			error = -EIO;
+		tp->t_ticket = NULL;
 	}
-	current_restore_flags_nested(&tp->t_pflags, PF_FSTRANS);
+	current_restore_flags_nested(&tp->t_pflags, PF_MEMALLOC_NOFS);
 	xfs_trans_free_items(tp, NULLCOMMITLSN, !!error);
 	xfs_trans_free(tp);
 
@@ -984,6 +1027,11 @@ xfs_trans_cancel(
 	struct xfs_mount	*mp = tp->t_mountp;
 	bool			dirty = (tp->t_flags & XFS_TRANS_DIRTY);
 
+	trace_xfs_trans_cancel(tp, _RET_IP_);
+
+	if (tp->t_flags & XFS_TRANS_PERM_LOG_RES)
+		xfs_defer_cancel(tp);
+
 	/*
 	 * See if the caller is relying on us to shut down the
 	 * filesystem.  This happens in paths where we detect
@@ -995,20 +1043,22 @@ xfs_trans_cancel(
 	}
 #ifdef DEBUG
 	if (!dirty && !XFS_FORCED_SHUTDOWN(mp)) {
-		struct xfs_log_item_desc *lidp;
+		struct xfs_log_item *lip;
 
-		list_for_each_entry(lidp, &tp->t_items, lid_trans)
-			ASSERT(!(lidp->lid_item->li_type == XFS_LI_EFD));
+		list_for_each_entry(lip, &tp->t_items, li_trans)
+			ASSERT(!(lip->li_type == XFS_LI_EFD));
 	}
 #endif
 	xfs_trans_unreserve_and_mod_sb(tp);
 	xfs_trans_unreserve_and_mod_dquots(tp);
 
-	if (tp->t_ticket)
+	if (tp->t_ticket) {
 		xfs_log_done(mp, tp->t_ticket, NULL, false);
+		tp->t_ticket = NULL;
+	}
 
 	/* mark this thread as no longer being in a transaction */
-	current_restore_flags_nested(&tp->t_pflags, PF_FSTRANS);
+	current_restore_flags_nested(&tp->t_pflags, PF_MEMALLOC_NOFS);
 
 	xfs_trans_free_items(tp, NULLCOMMITLSN, dirty);
 	xfs_trans_free(tp);
@@ -1028,6 +1078,8 @@ xfs_trans_roll(
 	struct xfs_trans	*trans = *tpp;
 	struct xfs_trans_res	tres;
 	int			error;
+
+	trace_xfs_trans_roll(trans, _RET_IP_);
 
 	/*
 	 * Copy the critical parameters from one trans to the next.

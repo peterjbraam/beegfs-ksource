@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Perf PMU sysfs events attributes for available CPU-measurement counters
  *
@@ -554,7 +555,7 @@ static __init struct attribute **merge_attr(struct attribute **a,
 		j++;
 	j++;
 
-	new = kmalloc(sizeof(struct attribute *) * j, GFP_KERNEL);
+	new = kmalloc_array(j, sizeof(struct attribute *), GFP_KERNEL);
 	if (!new)
 		return NULL;
 	j = 0;
@@ -629,7 +630,7 @@ __init const struct attribute_group **cpumf_cf_event_group(void)
 	default:
 		model = none;
 		break;
-	};
+	}
 
 	combined = merge_attr(cfvn, csvn, model);
 	if (combined)

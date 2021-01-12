@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  fs/partitions/check.c
  *
@@ -34,6 +35,7 @@
 #include "efi.h"
 #include "karma.h"
 #include "sysv68.h"
+#include "cmdline.h"
 
 int warn_no_part = 1; /*This is ugly: should make genhd removable media aware*/
 
@@ -65,6 +67,9 @@ static int (*check_part[])(struct parsed_partitions *) = {
 	adfspart_check_ADFS,
 #endif
 
+#ifdef CONFIG_CMDLINE_PARTITION
+	cmdline_partition,
+#endif
 #ifdef CONFIG_EFI_PARTITION
 	efi_partition,		/* this must come before msdos */
 #endif
@@ -117,7 +122,7 @@ static struct parsed_partitions *allocate_partitions(struct gendisk *hd)
 		return NULL;
 
 	nr = disk_max_parts(hd);
-	state->parts = vzalloc(nr * sizeof(state->parts[0]));
+	state->parts = vzalloc(array_size(nr, sizeof(state->parts[0])));
 	if (!state->parts) {
 		kfree(state);
 		return NULL;

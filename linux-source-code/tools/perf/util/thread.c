@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 #include "../perf.h"
 #include <errno.h>
 #include <stdlib.h>
@@ -9,6 +10,7 @@
 #include "thread-stack.h"
 #include "util.h"
 #include "debug.h"
+#include "namespaces.h"
 #include "comm.h"
 #include "unwind.h"
 
@@ -42,7 +44,9 @@ struct thread *thread__new(pid_t pid, pid_t tid)
 		thread->tid = tid;
 		thread->ppid = -1;
 		thread->cpu = -1;
+		INIT_LIST_HEAD(&thread->namespaces_list);
 		INIT_LIST_HEAD(&thread->comm_list);
+		init_rwsem(&thread->namespaces_lock);
 		init_rwsem(&thread->comm_lock);
 
 		comm_str = malloc(32);
@@ -58,6 +62,9 @@ struct thread *thread__new(pid_t pid, pid_t tid)
 		list_add(&comm->list, &thread->comm_list);
 		refcount_set(&thread->refcnt, 1);
 		RB_CLEAR_NODE(&thread->rb_node);
+		/* Thread holds first ref to nsdata. */
+		thread->nsinfo = nsinfo__new(pid);
+		srccode_state_init(&thread->srccode_state);
 	}
 
 	return thread;
@@ -69,7 +76,8 @@ err_thread:
 
 void thread__delete(struct thread *thread)
 {
-	struct comm *comm, *tmp;
+	struct namespaces *namespaces, *tmp_namespaces;
+	struct comm *comm, *tmp_comm;
 
 	BUG_ON(!RB_EMPTY_NODE(&thread->rb_node));
 
@@ -79,16 +87,26 @@ void thread__delete(struct thread *thread)
 		map_groups__put(thread->mg);
 		thread->mg = NULL;
 	}
+	down_write(&thread->namespaces_lock);
+	list_for_each_entry_safe(namespaces, tmp_namespaces,
+				 &thread->namespaces_list, list) {
+		list_del(&namespaces->list);
+		namespaces__free(namespaces);
+	}
+	up_write(&thread->namespaces_lock);
 
 	down_write(&thread->comm_lock);
-	list_for_each_entry_safe(comm, tmp, &thread->comm_list, list) {
+	list_for_each_entry_safe(comm, tmp_comm, &thread->comm_list, list) {
 		list_del(&comm->list);
 		comm__free(comm);
 	}
 	up_write(&thread->comm_lock);
 
 	unwind__finish_access(thread);
+	nsinfo__zput(thread->nsinfo);
+	srccode_state_free(&thread->srccode_state);
 
+	exit_rwsem(&thread->namespaces_lock);
 	exit_rwsem(&thread->comm_lock);
 	free(thread);
 }
@@ -110,6 +128,49 @@ void thread__put(struct thread *thread)
 		list_del_init(&thread->node);
 		thread__delete(thread);
 	}
+}
+
+struct namespaces *thread__namespaces(const struct thread *thread)
+{
+	if (list_empty(&thread->namespaces_list))
+		return NULL;
+
+	return list_first_entry(&thread->namespaces_list, struct namespaces, list);
+}
+
+static int __thread__set_namespaces(struct thread *thread, u64 timestamp,
+				    struct namespaces_event *event)
+{
+	struct namespaces *new, *curr = thread__namespaces(thread);
+
+	new = namespaces__new(event);
+	if (!new)
+		return -ENOMEM;
+
+	list_add(&new->list, &thread->namespaces_list);
+
+	if (timestamp && curr) {
+		/*
+		 * setns syscall must have changed few or all the namespaces
+		 * of this thread. Update end time for the namespaces
+		 * previously used.
+		 */
+		curr = list_next_entry(new, list);
+		curr->end_time = timestamp;
+	}
+
+	return 0;
+}
+
+int thread__set_namespaces(struct thread *thread, u64 timestamp,
+			   struct namespaces_event *event)
+{
+	int ret;
+
+	down_write(&thread->namespaces_lock);
+	ret = __thread__set_namespaces(thread, timestamp, event);
+	up_write(&thread->namespaces_lock);
+	return ret;
 }
 
 struct comm *thread__comm(const struct thread *thread)

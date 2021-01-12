@@ -18,6 +18,7 @@
 #include <linux/mfd/abx500/ab8500.h>
 #include <linux/delay.h>
 #include <linux/of.h>
+#include <linux/pm_wakeirq.h>
 
 #define AB8500_RTC_SOFF_STAT_REG	0x00
 #define AB8500_RTC_CC_CONF_REG		0x01
@@ -121,7 +122,7 @@ static int ab8500_rtc_read_time(struct device *dev, struct rtc_time *tm)
 	secs += get_elapsed_seconds(AB8500_RTC_EPOCH);
 
 	rtc_time_to_tm(secs, tm);
-	return rtc_valid_tm(tm);
+	return 0;
 }
 
 static int ab8500_rtc_set_time(struct device *dev, struct rtc_time *tm)
@@ -267,7 +268,6 @@ static int ab8500_rtc_set_alarm(struct device *dev, struct rtc_wkalrm *alarm)
 	return ab8500_rtc_irq_enable(dev, alarm->enabled);
 }
 
-
 static int ab8500_rtc_set_calibration(struct device *dev, int calibration)
 {
 	int retval;
@@ -389,8 +389,15 @@ static const struct rtc_class_ops ab8500_rtc_ops = {
 	.alarm_irq_enable	= ab8500_rtc_irq_enable,
 };
 
+static const struct platform_device_id ab85xx_rtc_ids[] = {
+	{ "ab8500-rtc", (kernel_ulong_t)&ab8500_rtc_ops, },
+	{ /* sentinel */ }
+};
+MODULE_DEVICE_TABLE(platform, ab85xx_rtc_ids);
+
 static int ab8500_rtc_probe(struct platform_device *pdev)
 {
+	const struct platform_device_id *platid = platform_get_device_id(pdev);
 	int err;
 	struct rtc_device *rtc;
 	u8 rtc_ctrl;
@@ -423,7 +430,8 @@ static int ab8500_rtc_probe(struct platform_device *pdev)
 	device_init_wakeup(&pdev->dev, true);
 
 	rtc = devm_rtc_device_register(&pdev->dev, "ab8500-rtc",
-					&ab8500_rtc_ops, THIS_MODULE);
+				(struct rtc_class_ops *)platid->driver_data,
+				THIS_MODULE);
 	if (IS_ERR(rtc)) {
 		dev_err(&pdev->dev, "Registration failed\n");
 		err = PTR_ERR(rtc);
@@ -431,11 +439,12 @@ static int ab8500_rtc_probe(struct platform_device *pdev)
 	}
 
 	err = devm_request_threaded_irq(&pdev->dev, irq, NULL,
-			rtc_alarm_handler, IRQF_NO_SUSPEND | IRQF_ONESHOT,
+			rtc_alarm_handler, IRQF_ONESHOT,
 			"ab8500-rtc", rtc);
 	if (err < 0)
 		return err;
 
+	dev_pm_set_wake_irq(&pdev->dev, irq);
 	platform_set_drvdata(pdev, rtc);
 
 	err = ab8500_sysfs_rtc_register(&pdev->dev);
@@ -444,14 +453,16 @@ static int ab8500_rtc_probe(struct platform_device *pdev)
 		return err;
 	}
 
+	rtc->uie_unsupported = 1;
+
 	return 0;
 }
 
 static int ab8500_rtc_remove(struct platform_device *pdev)
 {
+	dev_pm_clear_wake_irq(&pdev->dev);
+	device_init_wakeup(&pdev->dev, false);
 	ab8500_sysfs_rtc_unregister(&pdev->dev);
-
-	platform_set_drvdata(pdev, NULL);
 
 	return 0;
 }
@@ -459,10 +470,10 @@ static int ab8500_rtc_remove(struct platform_device *pdev)
 static struct platform_driver ab8500_rtc_driver = {
 	.driver = {
 		.name = "ab8500-rtc",
-		.owner = THIS_MODULE,
 	},
 	.probe	= ab8500_rtc_probe,
 	.remove = ab8500_rtc_remove,
+	.id_table = ab85xx_rtc_ids,
 };
 
 module_platform_driver(ab8500_rtc_driver);

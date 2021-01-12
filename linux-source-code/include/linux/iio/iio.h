@@ -20,34 +20,6 @@
  * Currently assumes nano seconds.
  */
 
-enum iio_chan_info_enum {
-	IIO_CHAN_INFO_RAW = 0,
-	IIO_CHAN_INFO_PROCESSED,
-	IIO_CHAN_INFO_SCALE,
-	IIO_CHAN_INFO_OFFSET,
-	IIO_CHAN_INFO_CALIBSCALE,
-	IIO_CHAN_INFO_CALIBBIAS,
-	IIO_CHAN_INFO_PEAK,
-	IIO_CHAN_INFO_PEAK_SCALE,
-	IIO_CHAN_INFO_QUADRATURE_CORRECTION_RAW,
-	IIO_CHAN_INFO_AVERAGE_RAW,
-	IIO_CHAN_INFO_LOW_PASS_FILTER_3DB_FREQUENCY,
-	IIO_CHAN_INFO_HIGH_PASS_FILTER_3DB_FREQUENCY,
-	IIO_CHAN_INFO_SAMP_FREQ,
-	IIO_CHAN_INFO_FREQUENCY,
-	IIO_CHAN_INFO_PHASE,
-	IIO_CHAN_INFO_HARDWAREGAIN,
-	IIO_CHAN_INFO_HYSTERESIS,
-	IIO_CHAN_INFO_INT_TIME,
-	IIO_CHAN_INFO_ENABLE,
-	IIO_CHAN_INFO_CALIBHEIGHT,
-	IIO_CHAN_INFO_CALIBWEIGHT,
-	IIO_CHAN_INFO_DEBOUNCE_COUNT,
-	IIO_CHAN_INFO_DEBOUNCE_TIME,
-	IIO_CHAN_INFO_CALIBEMISSIVITY,
-	IIO_CHAN_INFO_OVERSAMPLING_RATIO,
-};
-
 enum iio_shared_by {
 	IIO_SEPARATE,
 	IIO_SHARED_BY_TYPE,
@@ -211,18 +183,18 @@ struct iio_event_spec {
  * @address:		Driver specific identifier.
  * @scan_index:		Monotonic index to give ordering in scans when read
  *			from a buffer.
- * @scan_type:		sign:		's' or 'u' to specify signed or unsigned
- *			realbits:	Number of valid bits of data
- *			storagebits:	Realbits + padding
- *			shift:		Shift right by this before masking out
- *					realbits.
- *			repeat:		Number of times real/storage bits
- *					repeats. When the repeat element is
- *					more than 1, then the type element in
- *					sysfs will show a repeat value.
- *					Otherwise, the number of repetitions is
- *					omitted.
- *			endianness:	little or big endian
+ * @scan_type:		struct describing the scan type
+ * @scan_type.sign:		's' or 'u' to specify signed or unsigned
+ * @scan_type.realbits:		Number of valid bits of data
+ * @scan_type.storagebits:	Realbits + padding
+ * @scan_type.shift:		Shift right by this before masking out
+ *				realbits.
+ * @scan_type.repeat:		Number of times real/storage bits repeats.
+ *				When the repeat element is more than 1, then
+ *				the type element in sysfs will show a repeat
+ *				value. Otherwise, the number of repetitions
+ *				is omitted.
+ * @scan_type.endianness:	little or big endian
  * @info_mask_separate: What information is to be exported that is specific to
  *			this channel.
  * @info_mask_separate_available: What availability information is to be
@@ -343,13 +315,8 @@ static inline bool iio_channel_has_available(const struct iio_chan_spec *chan,
 		},							\
 }
 
-/**
- * iio_get_time_ns() - utility function to get a time stamp for events etc
- **/
-static inline s64 iio_get_time_ns(void)
-{
-	return ktime_get_real_ns();
-}
+s64 iio_get_time_ns(const struct iio_dev *indio_dev);
+unsigned int iio_get_time_res(const struct iio_dev *indio_dev);
 
 /* Device operating modes */
 #define INDIO_DIRECT_MODE		0x01
@@ -357,19 +324,22 @@ static inline s64 iio_get_time_ns(void)
 #define INDIO_BUFFER_SOFTWARE		0x04
 #define INDIO_BUFFER_HARDWARE		0x08
 #define INDIO_EVENT_TRIGGERED		0x10
+#define INDIO_HARDWARE_TRIGGERED	0x20
 
 #define INDIO_ALL_BUFFER_MODES					\
 	(INDIO_BUFFER_TRIGGERED | INDIO_BUFFER_HARDWARE | INDIO_BUFFER_SOFTWARE)
 
+#define INDIO_ALL_TRIGGERED_MODES	\
+	(INDIO_BUFFER_TRIGGERED		\
+	 | INDIO_EVENT_TRIGGERED	\
+	 | INDIO_HARDWARE_TRIGGERED)
+
 #define INDIO_MAX_RAW_ELEMENTS		4
 
 struct iio_trigger; /* forward declaration */
-struct iio_dev;
 
 /**
  * struct iio_info - constant information about device
- * @driver_module:	module structure used to ensure correct
- *			ownership of chrdevs etc
  * @event_attrs:	event control attributes
  * @attrs:		general purpose device attributes
  * @read_raw:		function to request a value from the device.
@@ -424,7 +394,6 @@ struct iio_dev;
  *			were flushed and there was an error.
  **/
 struct iio_info {
-	struct module			*driver_module;
 	const struct attribute_group	*event_attrs;
 	const struct attribute_group	*attrs;
 
@@ -517,6 +486,7 @@ struct iio_buffer_setup_ops {
 /**
  * struct iio_dev - industrial I/O device
  * @id:			[INTERN] used to identify device internally
+ * @driver_module:	[INTERN] used to make it harder to undercut users
  * @modes:		[DRIVER] operating modes supported by device
  * @currentmode:	[DRIVER] current operating mode
  * @dev:		[DRIVER] device structure, should be assigned a parent
@@ -525,7 +495,7 @@ struct iio_buffer_setup_ops {
  * @buffer:		[DRIVER] any buffer present
  * @buffer_list:	[INTERN] list of all buffers currently attached
  * @scan_bytes:		[INTERN] num bytes captured to be fed to buffer demux
- * @mlock:		[INTERN] lock used to prevent simultaneous device state
+ * @mlock:		[DRIVER] lock used to prevent simultaneous device state
  *			changes
  * @available_scan_masks: [DRIVER] optional array of allowed bitmasks
  * @masklength:		[INTERN] the length of the mask established from
@@ -534,6 +504,7 @@ struct iio_buffer_setup_ops {
  * @scan_timestamp:	[INTERN] set if any buffers have requested timestamp
  * @scan_index_timestamp:[INTERN] cache of the index to the timestamp
  * @trig:		[INTERN] current device trigger (buffer modes)
+ * @trig_readonly:	[INTERN] mark the current trigger immutable
  * @pollfunc:		[DRIVER] function run on trigger being received
  * @pollfunc_event:	[DRIVER] function run on events trigger being received
  * @channels:		[DRIVER] channel specification structure table
@@ -543,6 +514,7 @@ struct iio_buffer_setup_ops {
  * @chan_attr_group:	[INTERN] group for all attrs in base directory
  * @name:		[DRIVER] name of the device.
  * @info:		[DRIVER] callbacks and constant info from driver
+ * @clock_id:		[INTERN] timestamping clock posix identifier
  * @info_exist_lock:	[INTERN] lock to prevent use during removal
  * @setup_ops:		[DRIVER] callbacks to call before and after buffer
  *			enable/disable
@@ -555,6 +527,7 @@ struct iio_buffer_setup_ops {
  */
 struct iio_dev {
 	int				id;
+	struct module			*driver_module;
 
 	int				modes;
 	int				currentmode;
@@ -573,6 +546,7 @@ struct iio_dev {
 	bool				scan_timestamp;
 	unsigned			scan_index_timestamp;
 	struct iio_trigger		*trig;
+	bool				trig_readonly;
 	struct iio_poll_func		*pollfunc;
 	struct iio_poll_func		*pollfunc_event;
 
@@ -583,6 +557,7 @@ struct iio_dev {
 	struct attribute_group		chan_attr_group;
 	const char			*name;
 	const struct iio_info		*info;
+	clockid_t			clock_id;
 	struct mutex			info_exist_lock;
 	const struct iio_buffer_setup_ops	*setup_ops;
 	struct cdev			chrdev;
@@ -599,9 +574,34 @@ struct iio_dev {
 
 const struct iio_chan_spec
 *iio_find_channel_from_si(struct iio_dev *indio_dev, int si);
-int iio_device_register(struct iio_dev *indio_dev);
+/**
+ * iio_device_register() - register a device with the IIO subsystem
+ * @indio_dev:		Device structure filled by the device driver
+ **/
+#define iio_device_register(indio_dev) \
+	__iio_device_register((indio_dev), THIS_MODULE)
+int __iio_device_register(struct iio_dev *indio_dev, struct module *this_mod);
 void iio_device_unregister(struct iio_dev *indio_dev);
-int devm_iio_device_register(struct device *dev, struct iio_dev *indio_dev);
+/**
+ * devm_iio_device_register - Resource-managed iio_device_register()
+ * @dev:	Device to allocate iio_dev for
+ * @indio_dev:	Device structure filled by the device driver
+ *
+ * Managed iio_device_register.  The IIO device registered with this
+ * function is automatically unregistered on driver detach. This function
+ * calls iio_device_register() internally. Refer to that function for more
+ * information.
+ *
+ * If an iio_dev registered with this function needs to be unregistered
+ * separately, devm_iio_device_unregister() must be used.
+ *
+ * RETURNS:
+ * 0 on success, negative error number on failure.
+ */
+#define devm_iio_device_register(dev, indio_dev) \
+	__devm_iio_device_register((dev), (indio_dev), THIS_MODULE);
+int __devm_iio_device_register(struct device *dev, struct iio_dev *indio_dev,
+			       struct module *this_mod);
 void devm_iio_device_unregister(struct device *dev, struct iio_dev *indio_dev);
 int iio_push_event(struct iio_dev *indio_dev, u64 ev_code, s64 timestamp);
 int iio_device_claim_direct_mode(struct iio_dev *indio_dev);
@@ -611,12 +611,21 @@ extern struct bus_type iio_bus_type;
 
 /**
  * iio_device_put() - reference counted deallocation of struct device
- * @indio_dev: 		IIO device structure containing the device
+ * @indio_dev: IIO device structure containing the device
  **/
 static inline void iio_device_put(struct iio_dev *indio_dev)
 {
 	if (indio_dev)
 		put_device(&indio_dev->dev);
+}
+
+/**
+ * iio_device_get_clock() - Retrieve current timestamping clock for the device
+ * @indio_dev: IIO device structure containing the device
+ */
+static inline clockid_t iio_device_get_clock(const struct iio_dev *indio_dev)
+{
+	return indio_dev->clock_id;
 }
 
 /**

@@ -1128,6 +1128,8 @@ static ssize_t qlcnic_83xx_sysfs_flash_write_handler(struct file *filp,
 	struct qlcnic_adapter *adapter = dev_get_drvdata(dev);
 
 	ret = kstrtoul(buf, 16, &data);
+	if (ret)
+		return ret;
 
 	switch (data) {
 	case QLC_83XX_FLASH_SECTOR_ERASE_CMD:
@@ -1175,81 +1177,81 @@ static ssize_t qlcnic_83xx_sysfs_flash_write_handler(struct file *filp,
 }
 
 static const struct device_attribute dev_attr_bridged_mode = {
-       .attr = {.name = "bridged_mode", .mode = (S_IRUGO | S_IWUSR)},
-       .show = qlcnic_show_bridged_mode,
-       .store = qlcnic_store_bridged_mode,
+	.attr = { .name = "bridged_mode", .mode = 0644 },
+	.show = qlcnic_show_bridged_mode,
+	.store = qlcnic_store_bridged_mode,
 };
 
 static const struct device_attribute dev_attr_diag_mode = {
-	.attr = {.name = "diag_mode", .mode = (S_IRUGO | S_IWUSR)},
+	.attr = { .name = "diag_mode", .mode = 0644 },
 	.show = qlcnic_show_diag_mode,
 	.store = qlcnic_store_diag_mode,
 };
 
 static const struct device_attribute dev_attr_beacon = {
-	.attr = {.name = "beacon", .mode = (S_IRUGO | S_IWUSR)},
+	.attr = { .name = "beacon", .mode = 0644 },
 	.show = qlcnic_show_beacon,
 	.store = qlcnic_store_beacon,
 };
 
 static const struct bin_attribute bin_attr_crb = {
-	.attr = {.name = "crb", .mode = (S_IRUGO | S_IWUSR)},
+	.attr = { .name = "crb", .mode = 0644 },
 	.size = 0,
 	.read = qlcnic_sysfs_read_crb,
 	.write = qlcnic_sysfs_write_crb,
 };
 
 static const struct bin_attribute bin_attr_mem = {
-	.attr = {.name = "mem", .mode = (S_IRUGO | S_IWUSR)},
+	.attr = { .name = "mem", .mode = 0644 },
 	.size = 0,
 	.read = qlcnic_sysfs_read_mem,
 	.write = qlcnic_sysfs_write_mem,
 };
 
 static const struct bin_attribute bin_attr_npar_config = {
-	.attr = {.name = "npar_config", .mode = (S_IRUGO | S_IWUSR)},
+	.attr = { .name = "npar_config", .mode = 0644 },
 	.size = 0,
 	.read = qlcnic_sysfs_read_npar_config,
 	.write = qlcnic_sysfs_write_npar_config,
 };
 
 static const struct bin_attribute bin_attr_pci_config = {
-	.attr = {.name = "pci_config", .mode = (S_IRUGO | S_IWUSR)},
+	.attr = { .name = "pci_config", .mode = 0644 },
 	.size = 0,
 	.read = qlcnic_sysfs_read_pci_config,
 	.write = NULL,
 };
 
 static const struct bin_attribute bin_attr_port_stats = {
-	.attr = {.name = "port_stats", .mode = (S_IRUGO | S_IWUSR)},
+	.attr = { .name = "port_stats", .mode = 0644 },
 	.size = 0,
 	.read = qlcnic_sysfs_get_port_stats,
 	.write = qlcnic_sysfs_clear_port_stats,
 };
 
 static const struct bin_attribute bin_attr_esw_stats = {
-	.attr = {.name = "esw_stats", .mode = (S_IRUGO | S_IWUSR)},
+	.attr = { .name = "esw_stats", .mode = 0644 },
 	.size = 0,
 	.read = qlcnic_sysfs_get_esw_stats,
 	.write = qlcnic_sysfs_clear_esw_stats,
 };
 
 static const struct bin_attribute bin_attr_esw_config = {
-	.attr = {.name = "esw_config", .mode = (S_IRUGO | S_IWUSR)},
+	.attr = { .name = "esw_config", .mode = 0644 },
 	.size = 0,
 	.read = qlcnic_sysfs_read_esw_config,
 	.write = qlcnic_sysfs_write_esw_config,
 };
 
 static const struct bin_attribute bin_attr_pm_config = {
-	.attr = {.name = "pm_config", .mode = (S_IRUGO | S_IWUSR)},
+	.attr = { .name = "pm_config", .mode = 0644 },
 	.size = 0,
 	.read = qlcnic_sysfs_read_pm_config,
 	.write = qlcnic_sysfs_write_pm_config,
 };
 
 static const struct bin_attribute bin_attr_flash = {
-	.attr = {.name = "flash", .mode = (S_IRUGO | S_IWUSR)},
+	.attr = { .name = "flash", .mode = 0644 },
 	.size = 0,
 	.read = qlcnic_83xx_sysfs_flash_read_handler,
 	.write = qlcnic_83xx_sysfs_flash_write_handler,
@@ -1276,7 +1278,7 @@ static ssize_t qlcnic_hwmon_show_temp(struct device *dev,
 }
 
 /* hwmon-sysfs attributes */
-static SENSOR_DEVICE_ATTR(temp1_input, S_IRUGO,
+static SENSOR_DEVICE_ATTR(temp1_input, 0444,
 			  qlcnic_hwmon_show_temp, NULL, 1);
 
 static struct attribute *qlcnic_hwmon_attrs[] = {
@@ -1284,49 +1286,35 @@ static struct attribute *qlcnic_hwmon_attrs[] = {
 	NULL
 };
 
-static const struct attribute_group qlcnic_hwmon_group = {
-	.attrs = qlcnic_hwmon_attrs,
-};
+ATTRIBUTE_GROUPS(qlcnic_hwmon);
 
 void qlcnic_register_hwmon_dev(struct qlcnic_adapter *adapter)
 {
 	struct device *dev = &adapter->pdev->dev;
 	struct device *hwmon_dev;
-	int err;
 
 	/* Skip hwmon registration for a VF device */
 	if (qlcnic_sriov_vf_check(adapter)) {
 		adapter->ahw->hwmon_dev = NULL;
 		return;
 	}
-
-	err = sysfs_create_group(&dev->kobj, &qlcnic_hwmon_group);
-	if (err) {
-		dev_err(dev, "Cannot create sysfs group, aborting\n");
-		return;
-	}
-
-	hwmon_dev = hwmon_device_register(dev);
+	hwmon_dev = hwmon_device_register_with_groups(dev, qlcnic_driver_name,
+						      adapter,
+						      qlcnic_hwmon_groups);
 	if (IS_ERR(hwmon_dev)) {
 		dev_err(dev, "Cannot register with hwmon, err=%ld\n",
 			PTR_ERR(hwmon_dev));
 		hwmon_dev = NULL;
-		sysfs_remove_group(&dev->kobj, &qlcnic_hwmon_group);
-		return;
 	}
-
 	adapter->ahw->hwmon_dev = hwmon_dev;
 }
 
 void qlcnic_unregister_hwmon_dev(struct qlcnic_adapter *adapter)
 {
 	struct device *hwmon_dev = adapter->ahw->hwmon_dev;
-
 	if (hwmon_dev) {
 		hwmon_device_unregister(hwmon_dev);
 		adapter->ahw->hwmon_dev = NULL;
-		sysfs_remove_group(&adapter->pdev->dev.kobj,
-				   &qlcnic_hwmon_group);
 	}
 }
 #endif

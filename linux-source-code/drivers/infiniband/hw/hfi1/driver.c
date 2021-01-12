@@ -1,5 +1,5 @@
 /*
- * Copyright(c) 2015-2017 Intel Corporation.
+ * Copyright(c) 2015-2018 Intel Corporation.
  *
  * This file is provided under a dual BSD/GPLv2 license.  When using or
  * redistributing this file, you may do so under either license.
@@ -61,6 +61,7 @@
 #include "sdma.h"
 #include "debugfs.h"
 #include "vnic.h"
+#include "fault.h"
 
 #undef pr_fmt
 #define pr_fmt(fmt) DRIVER_NAME ": " fmt
@@ -390,6 +391,7 @@ static void rcv_hdrerr(struct hfi1_ctxtdata *rcd, struct hfi1_pportdata *ppd,
 				svc_type = IB_CC_SVCTYPE_UC;
 				break;
 			default:
+				rcu_read_unlock();
 				goto drop;
 			}
 
@@ -514,7 +516,9 @@ bool hfi1_process_ecn_slowpath(struct rvt_qp *qp, struct hfi1_packet *pkt,
 	 */
 	do_cnp = prescan ||
 		(opcode >= IB_OPCODE_RC_RDMA_READ_RESPONSE_FIRST &&
-		 opcode <= IB_OPCODE_RC_ATOMIC_ACKNOWLEDGE);
+		 opcode <= IB_OPCODE_RC_ATOMIC_ACKNOWLEDGE) ||
+		opcode == TID_OP(READ_RESP) ||
+		opcode == TID_OP(ACK);
 
 	/* Call appropriate CNP handler */
 	if (!ignore_fecn && do_cnp && fecn)
@@ -1573,25 +1577,32 @@ drop:
 	return -EINVAL;
 }
 
-void handle_eflags(struct hfi1_packet *packet)
+static void show_eflags_errs(struct hfi1_packet *packet)
 {
 	struct hfi1_ctxtdata *rcd = packet->rcd;
 	u32 rte = rhf_rcv_type_err(packet->rhf);
 
+	dd_dev_err(rcd->dd,
+		   "receive context %d: rhf 0x%016llx, errs [ %s%s%s%s%s%s%s%s] rte 0x%x\n",
+		   rcd->ctxt, packet->rhf,
+		   packet->rhf & RHF_K_HDR_LEN_ERR ? "k_hdr_len " : "",
+		   packet->rhf & RHF_DC_UNC_ERR ? "dc_unc " : "",
+		   packet->rhf & RHF_DC_ERR ? "dc " : "",
+		   packet->rhf & RHF_TID_ERR ? "tid " : "",
+		   packet->rhf & RHF_LEN_ERR ? "len " : "",
+		   packet->rhf & RHF_ECC_ERR ? "ecc " : "",
+		   packet->rhf & RHF_VCRC_ERR ? "vcrc " : "",
+		   packet->rhf & RHF_ICRC_ERR ? "icrc " : "",
+		   rte);
+}
+
+void handle_eflags(struct hfi1_packet *packet)
+{
+	struct hfi1_ctxtdata *rcd = packet->rcd;
+
 	rcv_hdrerr(rcd, rcd->ppd, packet);
 	if (rhf_err_flags(packet->rhf))
-		dd_dev_err(rcd->dd,
-			   "receive context %d: rhf 0x%016llx, errs [ %s%s%s%s%s%s%s%s] rte 0x%x\n",
-			   rcd->ctxt, packet->rhf,
-			   packet->rhf & RHF_K_HDR_LEN_ERR ? "k_hdr_len " : "",
-			   packet->rhf & RHF_DC_UNC_ERR ? "dc_unc " : "",
-			   packet->rhf & RHF_DC_ERR ? "dc " : "",
-			   packet->rhf & RHF_TID_ERR ? "tid " : "",
-			   packet->rhf & RHF_LEN_ERR ? "len " : "",
-			   packet->rhf & RHF_ECC_ERR ? "ecc " : "",
-			   packet->rhf & RHF_VCRC_ERR ? "vcrc " : "",
-			   packet->rhf & RHF_ICRC_ERR ? "icrc " : "",
-			   rte);
+		show_eflags_errs(packet);
 }
 
 /*
@@ -1600,10 +1611,10 @@ void handle_eflags(struct hfi1_packet *packet)
  */
 static int process_receive_ib(struct hfi1_packet *packet)
 {
-	if (unlikely(hfi1_dbg_fault_packet(packet)))
+	if (hfi1_setup_9B_packet(packet))
 		return RHF_RCV_CONTINUE;
 
-	if (hfi1_setup_9B_packet(packet))
+	if (unlikely(hfi1_dbg_should_fault_rx(packet)))
 		return RHF_RCV_CONTINUE;
 
 	trace_hfi1_rcvhdr(packet);
@@ -1677,7 +1688,8 @@ static int process_receive_error(struct hfi1_packet *packet)
 	/* KHdrHCRCErr -- KDETH packet with a bad HCRC */
 	if (unlikely(
 		 hfi1_dbg_fault_suppress_err(&packet->rcd->dd->verbs_dev) &&
-		 rhf_rcv_type_err(packet->rhf) == 3))
+		 (rhf_rcv_type_err(packet->rhf) == RHF_RCV_TYPE_ERROR ||
+		  packet->rhf & RHF_DC_ERR)))
 		return RHF_RCV_CONTINUE;
 
 	hfi1_setup_ib_header(packet);
@@ -1692,28 +1704,37 @@ static int process_receive_error(struct hfi1_packet *packet)
 
 static int kdeth_process_expected(struct hfi1_packet *packet)
 {
-	if (unlikely(hfi1_dbg_fault_packet(packet)))
+	hfi1_setup_9B_packet(packet);
+	if (unlikely(hfi1_dbg_should_fault_rx(packet)))
 		return RHF_RCV_CONTINUE;
 
-	hfi1_setup_ib_header(packet);
-	if (unlikely(rhf_err_flags(packet->rhf)))
-		handle_eflags(packet);
+	if (unlikely(rhf_err_flags(packet->rhf))) {
+		struct hfi1_ctxtdata *rcd = packet->rcd;
 
-	dd_dev_err(packet->rcd->dd,
-		   "Unhandled expected packet received. Dropping.\n");
+		if (hfi1_handle_kdeth_eflags(rcd, rcd->ppd, packet))
+			return RHF_RCV_CONTINUE;
+	}
+
+	hfi1_kdeth_expected_rcv(packet);
 	return RHF_RCV_CONTINUE;
 }
 
 static int kdeth_process_eager(struct hfi1_packet *packet)
 {
-	hfi1_setup_ib_header(packet);
-	if (unlikely(rhf_err_flags(packet->rhf)))
-		handle_eflags(packet);
-	if (unlikely(hfi1_dbg_fault_packet(packet)))
+	hfi1_setup_9B_packet(packet);
+	if (unlikely(hfi1_dbg_should_fault_rx(packet)))
 		return RHF_RCV_CONTINUE;
 
-	dd_dev_err(packet->rcd->dd,
-		   "Unhandled eager packet received. Dropping.\n");
+	trace_hfi1_rcvhdr(packet);
+	if (unlikely(rhf_err_flags(packet->rhf))) {
+		struct hfi1_ctxtdata *rcd = packet->rcd;
+
+		show_eflags_errs(packet);
+		if (hfi1_handle_kdeth_eflags(rcd, rcd->ppd, packet))
+			return RHF_RCV_CONTINUE;
+	}
+
+	hfi1_kdeth_eager_rcv(packet);
 	return RHF_RCV_CONTINUE;
 }
 

@@ -23,8 +23,7 @@
  * the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program;  if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
+ * along with this program;  if not, see <http://www.gnu.org/licenses/>.
  *
  */
 
@@ -117,11 +116,11 @@ struct netlbl_unlhsh_walk_arg {
 static DEFINE_SPINLOCK(netlbl_unlhsh_lock);
 #define netlbl_unlhsh_rcu_deref(p) \
 	rcu_dereference_check(p, lockdep_is_held(&netlbl_unlhsh_lock))
-static struct netlbl_unlhsh_tbl *netlbl_unlhsh = NULL;
-static struct netlbl_unlhsh_iface *netlbl_unlhsh_def = NULL;
+static struct netlbl_unlhsh_tbl __rcu *netlbl_unlhsh;
+static struct netlbl_unlhsh_iface __rcu *netlbl_unlhsh_def;
 
 /* Accept unlabeled packets flag */
-static u8 netlabel_unlabel_acceptflg = 0;
+static u8 netlabel_unlabel_acceptflg;
 
 /* NetLabel Generic NETLINK unlabeled family */
 static struct genl_family netlbl_unlabel_gnl_family;
@@ -782,7 +781,8 @@ static int netlbl_unlabel_addrinfo_get(struct genl_info *info,
 {
 	u32 addr_len;
 
-	if (info->attrs[NLBL_UNLABEL_A_IPV4ADDR]) {
+	if (info->attrs[NLBL_UNLABEL_A_IPV4ADDR] &&
+	    info->attrs[NLBL_UNLABEL_A_IPV4MASK]) {
 		addr_len = nla_len(info->attrs[NLBL_UNLABEL_A_IPV4ADDR]);
 		if (addr_len != sizeof(struct in_addr) &&
 		    addr_len != nla_len(info->attrs[NLBL_UNLABEL_A_IPV4MASK]))
@@ -1373,7 +1373,7 @@ static const struct genl_ops netlbl_unlabel_genl_ops[] = {
 	},
 };
 
-static struct genl_family netlbl_unlabel_gnl_family = {
+static struct genl_family netlbl_unlabel_gnl_family __ro_after_init = {
 	.hdrsize = 0,
 	.name = NETLBL_NLTYPE_UNLABELED_NAME,
 	.version = NETLBL_PROTO_VERSION,
@@ -1445,7 +1445,7 @@ int __init netlbl_unlabel_init(u32 size)
 	rcu_assign_pointer(netlbl_unlhsh, hsh_tbl);
 	spin_unlock(&netlbl_unlhsh_lock);
 
-	register_netdevice_notifier_rh(&netlbl_unlhsh_netdev_notifier);
+	register_netdevice_notifier(&netlbl_unlhsh_netdev_notifier);
 
 	return 0;
 }
@@ -1473,6 +1473,16 @@ int netlbl_unlabel_getattr(const struct sk_buff *skb,
 		iface = rcu_dereference(netlbl_unlhsh_def);
 	if (iface == NULL || !iface->valid)
 		goto unlabel_getattr_nolabel;
+
+#if IS_ENABLED(CONFIG_IPV6)
+	/* When resolving a fallback label, check the sk_buff version as
+	 * it is possible (e.g. SCTP) to have family = PF_INET6 while
+	 * receiving ip_hdr(skb)->version = 4.
+	 */
+	if (family == PF_INET6 && ip_hdr(skb)->version == 4)
+		family = PF_INET;
+#endif /* IPv6 */
+
 	switch (family) {
 	case PF_INET: {
 		struct iphdr *hdr4;
@@ -1541,6 +1551,7 @@ int __init netlbl_unlabel_defconf(void)
 	entry = kzalloc(sizeof(*entry), GFP_KERNEL);
 	if (entry == NULL)
 		return -ENOMEM;
+	entry->family = AF_UNSPEC;
 	entry->def.type = NETLBL_NLTYPE_UNLABELED;
 	ret_val = netlbl_domhsh_add_default(entry, &audit_info);
 	if (ret_val != 0)

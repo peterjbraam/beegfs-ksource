@@ -1,23 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <linux/export.h>
 #include <linux/lockref.h>
 
-#ifdef CONFIG_CMPXCHG_LOCKREF
-
-/*
- * Allow weakly-ordered memory architectures to provide barrier-less
- * cmpxchg semantics for lockref updates.
- */
-#ifndef cmpxchg64_relaxed
-# define cmpxchg64_relaxed cmpxchg64
-#endif
-
-/*
- * Allow architectures to override the default cpu_relax() within CMPXCHG_LOOP.
- * This is useful for architectures with an expensive cpu_relax().
- */
-#ifndef arch_mutex_cpu_relax
-# define arch_mutex_cpu_relax() cpu_relax()
-#endif
+#if USE_CMPXCHG_LOCKREF
 
 /*
  * Note that the "cmpxchg()" reloads the "old" value for the
@@ -36,7 +21,7 @@
 		if (likely(old.lock_count == prev.lock_count)) {		\
 			SUCCESS;						\
 		}								\
-		arch_mutex_cpu_relax();						\
+		cpu_relax();							\
 	}									\
 } while (0)
 
@@ -68,7 +53,7 @@ void lockref_get(struct lockref *lockref)
 EXPORT_SYMBOL(lockref_get);
 
 /**
- * lockref_get_not_zero - Increments count unless the count is 0
+ * lockref_get_not_zero - Increments count unless the count is 0 or dead
  * @lockref: pointer to lockref structure
  * Return: 1 if count updated successfully or 0 if count was zero
  */
@@ -78,7 +63,7 @@ int lockref_get_not_zero(struct lockref *lockref)
 
 	CMPXCHG_LOOP(
 		new.count++;
-		if (!old.count)
+		if (old.count <= 0)
 			return 0;
 	,
 		return 1;
@@ -86,7 +71,7 @@ int lockref_get_not_zero(struct lockref *lockref)
 
 	spin_lock(&lockref->lock);
 	retval = 0;
-	if (lockref->count) {
+	if (lockref->count > 0) {
 		lockref->count++;
 		retval = 1;
 	}
@@ -96,7 +81,35 @@ int lockref_get_not_zero(struct lockref *lockref)
 EXPORT_SYMBOL(lockref_get_not_zero);
 
 /**
- * lockref_get_or_lock - Increments count unless the count is 0
+ * lockref_put_not_zero - Decrements count unless count <= 1 before decrement
+ * @lockref: pointer to lockref structure
+ * Return: 1 if count updated successfully or 0 if count would become zero
+ */
+int lockref_put_not_zero(struct lockref *lockref)
+{
+	int retval;
+
+	CMPXCHG_LOOP(
+		new.count--;
+		if (old.count <= 1)
+			return 0;
+	,
+		return 1;
+	);
+
+	spin_lock(&lockref->lock);
+	retval = 0;
+	if (lockref->count > 1) {
+		lockref->count--;
+		retval = 1;
+	}
+	spin_unlock(&lockref->lock);
+	return retval;
+}
+EXPORT_SYMBOL(lockref_put_not_zero);
+
+/**
+ * lockref_get_or_lock - Increments count unless the count is 0 or dead
  * @lockref: pointer to lockref structure
  * Return: 1 if count updated successfully or 0 if count was zero
  * and we got the lock instead.
@@ -105,20 +118,40 @@ int lockref_get_or_lock(struct lockref *lockref)
 {
 	CMPXCHG_LOOP(
 		new.count++;
-		if (!old.count)
+		if (old.count <= 0)
 			break;
 	,
 		return 1;
 	);
 
 	spin_lock(&lockref->lock);
-	if (!lockref->count)
+	if (lockref->count <= 0)
 		return 0;
 	lockref->count++;
 	spin_unlock(&lockref->lock);
 	return 1;
 }
 EXPORT_SYMBOL(lockref_get_or_lock);
+
+/**
+ * lockref_put_return - Decrement reference count if possible
+ * @lockref: pointer to lockref structure
+ *
+ * Decrement the reference count and return the new value.
+ * If the lockref was dead or locked, return an error.
+ */
+int lockref_put_return(struct lockref *lockref)
+{
+	CMPXCHG_LOOP(
+		new.count--;
+		if (old.count <= 0)
+			return -1;
+	,
+		return new.count;
+	);
+	return -1;
+}
+EXPORT_SYMBOL(lockref_put_return);
 
 /**
  * lockref_put_or_lock - decrements count unless count <= 1 before decrement
@@ -166,7 +199,7 @@ int lockref_get_not_dead(struct lockref *lockref)
 
 	CMPXCHG_LOOP(
 		new.count++;
-		if ((int)old.count < 0)
+		if (old.count < 0)
 			return 0;
 	,
 		return 1;
@@ -174,7 +207,7 @@ int lockref_get_not_dead(struct lockref *lockref)
 
 	spin_lock(&lockref->lock);
 	retval = 0;
-	if ((int) lockref->count >= 0) {
+	if (lockref->count >= 0) {
 		lockref->count++;
 		retval = 1;
 	}

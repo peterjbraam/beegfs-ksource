@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * builtin-test.c
  *
@@ -115,6 +116,21 @@ static struct test generic_tests[] = {
 		.is_supported = test__bp_signal_is_supported,
 	},
 	{
+		.desc = "Breakpoint accounting",
+		.func = test__bp_accounting,
+		.is_supported = test__bp_signal_is_supported,
+	},
+	{
+		.desc = "Watchpoint",
+		.func = test__wp,
+		.is_supported = test__wp_is_supported,
+		.subtest = {
+			.skip_if_fail	= false,
+			.get_nr		= test__wp_subtest_get_nr,
+			.get_desc	= test__wp_subtest_get_desc,
+		},
+	},
+	{
 		.desc = "Number of exit events of a simple workload",
 		.func = test__task_exit,
 	},
@@ -192,6 +208,15 @@ static struct test generic_tests[] = {
 		.func = test__session_topology,
 	},
 	{
+		.desc = "BPF filter",
+		.func = test__bpf,
+		.subtest = {
+			.skip_if_fail	= true,
+			.get_nr		= test__bpf_subtest_get_nr,
+			.get_desc	= test__bpf_subtest_get_desc,
+		},
+	},
+	{
 		.desc = "Synthesize thread map",
 		.func = test__thread_map_synthesize,
 	},
@@ -248,19 +273,6 @@ static struct test generic_tests[] = {
 		.func = test__perf_hooks,
 	},
 	{
-		.desc = "unit_number__scnprintf",
-		.func = test__unit_number__scnprint,
-	},
-	{
-		.desc = "BPF filter",
-		.func = test__bpf,
-		.subtest = {
-			.skip_if_fail	= true,
-			.get_nr		= test__bpf_subtest_get_nr,
-			.get_desc	= test__bpf_subtest_get_desc,
-		},
-	},
-	{
 		.desc = "builtin clang support",
 		.func = test__clang,
 		.subtest = {
@@ -268,6 +280,10 @@ static struct test generic_tests[] = {
 			.get_nr		= test__clang_subtest_get_nr,
 			.get_desc	= test__clang_subtest_get_desc,
 		}
+	},
+	{
+		.desc = "unit_number__scnprintf",
+		.func = test__unit_number__scnprint,
 	},
 	{
 		.desc = "mem2node",
@@ -407,6 +423,9 @@ static const char *shell_test__description(char *description, size_t size,
 	fp = fopen(filename, "r");
 	if (!fp)
 		return NULL;
+
+	/* Skip shebang */
+	while (fgetc(fp) != '\n');
 
 	description = fgets(description, size, fp);
 	fclose(fp);

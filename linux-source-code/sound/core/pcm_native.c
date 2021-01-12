@@ -23,9 +23,9 @@
 #include <linux/module.h>
 #include <linux/file.h>
 #include <linux/slab.h>
+#include <linux/sched/signal.h>
 #include <linux/time.h>
 #include <linux/pm_qos.h>
-#include <linux/aio.h>
 #include <linux/io.h>
 #include <linux/dma-mapping.h>
 #include <sound/core.h>
@@ -35,6 +35,7 @@
 #include <sound/pcm_params.h>
 #include <sound/timer.h>
 #include <sound/minors.h>
+#include <linux/uio.h>
 #include <linux/delay.h>
 
 #include "pcm_local.h"
@@ -91,7 +92,7 @@ void snd_pcm_group_init(struct snd_pcm_group *group)
 	spin_lock_init(&group->lock);
 	mutex_init(&group->mutex);
 	INIT_LIST_HEAD(&group->substreams);
-	refcount_set(&group->refs, 1);
+	refcount_set(&group->refs, 0);
 }
 
 /* define group lock helpers */
@@ -1110,7 +1111,8 @@ static void snd_pcm_group_unref(struct snd_pcm_group *group,
 
 	if (!group)
 		return;
-	do_free = refcount_dec_and_test(&group->refs);
+	do_free = refcount_dec_and_test(&group->refs) &&
+		list_empty(&group->substreams);
 	snd_pcm_group_unlock(group, substream->pcm->nonatomic);
 	if (do_free)
 		kfree(group);
@@ -1484,29 +1486,24 @@ static const struct action_ops snd_pcm_action_suspend = {
 	.post_action = snd_pcm_post_suspend
 };
 
-/**
+/*
  * snd_pcm_suspend - trigger SUSPEND to all linked streams
  * @substream: the PCM substream
  *
  * After this call, all streams are changed to SUSPENDED state.
  *
- * Return: Zero if successful (or @substream is %NULL), or a negative error
- * code.
+ * Return: Zero if successful, or a negative error code.
  */
-int snd_pcm_suspend(struct snd_pcm_substream *substream)
+static int snd_pcm_suspend(struct snd_pcm_substream *substream)
 {
 	int err;
 	unsigned long flags;
-
-	if (! substream)
-		return 0;
 
 	snd_pcm_stream_lock_irqsave(substream, flags);
 	err = snd_pcm_action(&snd_pcm_action_suspend, substream, 0);
 	snd_pcm_stream_unlock_irqrestore(substream, flags);
 	return err;
 }
-EXPORT_SYMBOL(snd_pcm_suspend);
 
 /**
  * snd_pcm_suspend_all - trigger SUSPEND to all substreams in the given pcm
@@ -1838,7 +1835,7 @@ static int snd_pcm_drain(struct snd_pcm_substream *substream,
 	struct snd_pcm_runtime *runtime;
 	struct snd_pcm_substream *s;
 	struct snd_pcm_group *group;
-	wait_queue_t wait;
+	wait_queue_entry_t wait;
 	int result = 0;
 	int nonblock = 0;
 
@@ -1892,7 +1889,6 @@ static int snd_pcm_drain(struct snd_pcm_substream *substream,
 		if (!to_check)
 			break; /* all drained */
 		init_waitqueue_entry(&wait, current);
-		set_current_state(TASK_INTERRUPTIBLE);
 		add_wait_queue(&to_check->sleep, &wait);
 		snd_pcm_stream_unlock_irq(substream);
 		if (runtime->no_period_wakeup)
@@ -1905,7 +1901,7 @@ static int snd_pcm_drain(struct snd_pcm_substream *substream,
 			}
 			tout = msecs_to_jiffies(tout * 1000);
 		}
-		tout = schedule_timeout(tout);
+		tout = schedule_timeout_interruptible(tout);
 
 		snd_pcm_stream_lock_irq(substream);
 		group = snd_pcm_stream_group_ref(substream);
@@ -2039,7 +2035,6 @@ static int snd_pcm_link(struct snd_pcm_substream *substream, int fd)
 	snd_pcm_group_lock_irq(target_group, nonatomic);
 	snd_pcm_stream_lock(substream1);
 	snd_pcm_group_assign(substream1, target_group);
-	refcount_inc(&target_group->refs);
 	snd_pcm_stream_unlock(substream1);
 	snd_pcm_group_unlock_irq(target_group, nonatomic);
  _end:
@@ -2076,14 +2071,13 @@ static int snd_pcm_unlink(struct snd_pcm_substream *substream)
 	snd_pcm_group_lock_irq(group, nonatomic);
 
 	relink_to_local(substream);
-	refcount_dec(&group->refs);
 
 	/* detach the last stream, too */
 	if (list_is_singular(&group->substreams)) {
 		relink_to_local(list_first_entry(&group->substreams,
 						 struct snd_pcm_substream,
 						 link_list));
-		do_free = refcount_dec_and_test(&group->refs);
+		do_free = !refcount_read(&group->refs);
 	}
 
 	snd_pcm_group_unlock_irq(group, nonatomic);
@@ -2553,7 +2547,7 @@ static int snd_pcm_capture_open(struct inode *inode, struct file *file)
 static int snd_pcm_open(struct file *file, struct snd_pcm *pcm, int stream)
 {
 	int err;
-	wait_queue_t wait;
+	wait_queue_entry_t wait;
 
 	if (pcm == NULL) {
 		err = -ENODEV;
@@ -3106,9 +3100,7 @@ static ssize_t snd_pcm_write(struct file *file, const char __user *buf,
 	return result;
 }
 
-static ssize_t snd_pcm_aio_read(struct kiocb *iocb, const struct iovec *iov,
-			     unsigned long nr_segs, loff_t pos)
-
+static ssize_t snd_pcm_readv(struct kiocb *iocb, struct iov_iter *to)
 {
 	struct snd_pcm_file *pcm_file;
 	struct snd_pcm_substream *substream;
@@ -3125,16 +3117,18 @@ static ssize_t snd_pcm_aio_read(struct kiocb *iocb, const struct iovec *iov,
 	runtime = substream->runtime;
 	if (runtime->status->state == SNDRV_PCM_STATE_OPEN)
 		return -EBADFD;
-	if (nr_segs > 1024 || nr_segs != runtime->channels)
+	if (!iter_is_iovec(to))
 		return -EINVAL;
-	if (!frame_aligned(runtime, iov->iov_len))
+	if (to->nr_segs > 1024 || to->nr_segs != runtime->channels)
 		return -EINVAL;
-	frames = bytes_to_samples(runtime, iov->iov_len);
-	bufs = kmalloc(sizeof(void *) * nr_segs, GFP_KERNEL);
+	if (!frame_aligned(runtime, to->iov->iov_len))
+		return -EINVAL;
+	frames = bytes_to_samples(runtime, to->iov->iov_len);
+	bufs = kmalloc_array(to->nr_segs, sizeof(void *), GFP_KERNEL);
 	if (bufs == NULL)
 		return -ENOMEM;
-	for (i = 0; i < nr_segs; ++i)
-		bufs[i] = iov[i].iov_base;
+	for (i = 0; i < to->nr_segs; ++i)
+		bufs[i] = to->iov[i].iov_base;
 	result = snd_pcm_lib_readv(substream, bufs, frames);
 	if (result > 0)
 		result = frames_to_bytes(runtime, result);
@@ -3142,8 +3136,7 @@ static ssize_t snd_pcm_aio_read(struct kiocb *iocb, const struct iovec *iov,
 	return result;
 }
 
-static ssize_t snd_pcm_aio_write(struct kiocb *iocb, const struct iovec *iov,
-			      unsigned long nr_segs, loff_t pos)
+static ssize_t snd_pcm_writev(struct kiocb *iocb, struct iov_iter *from)
 {
 	struct snd_pcm_file *pcm_file;
 	struct snd_pcm_substream *substream;
@@ -3160,15 +3153,17 @@ static ssize_t snd_pcm_aio_write(struct kiocb *iocb, const struct iovec *iov,
 	runtime = substream->runtime;
 	if (runtime->status->state == SNDRV_PCM_STATE_OPEN)
 		return -EBADFD;
-	if (nr_segs > 128 || nr_segs != runtime->channels ||
-	    !frame_aligned(runtime, iov->iov_len))
+	if (!iter_is_iovec(from))
 		return -EINVAL;
-	frames = bytes_to_samples(runtime, iov->iov_len);
-	bufs = kmalloc(sizeof(void *) * nr_segs, GFP_KERNEL);
+	if (from->nr_segs > 128 || from->nr_segs != runtime->channels ||
+	    !frame_aligned(runtime, from->iov->iov_len))
+		return -EINVAL;
+	frames = bytes_to_samples(runtime, from->iov->iov_len);
+	bufs = kmalloc_array(from->nr_segs, sizeof(void *), GFP_KERNEL);
 	if (bufs == NULL)
 		return -ENOMEM;
-	for (i = 0; i < nr_segs; ++i)
-		bufs[i] = iov[i].iov_base;
+	for (i = 0; i < from->nr_segs; ++i)
+		bufs[i] = from->iov[i].iov_base;
 	result = snd_pcm_lib_writev(substream, bufs, frames);
 	if (result > 0)
 		result = frames_to_bytes(runtime, result);
@@ -3176,82 +3171,46 @@ static ssize_t snd_pcm_aio_write(struct kiocb *iocb, const struct iovec *iov,
 	return result;
 }
 
-static unsigned int snd_pcm_playback_poll(struct file *file, poll_table * wait)
+static __poll_t snd_pcm_poll(struct file *file, poll_table *wait)
 {
 	struct snd_pcm_file *pcm_file;
 	struct snd_pcm_substream *substream;
 	struct snd_pcm_runtime *runtime;
-        unsigned int mask;
+	__poll_t mask, ok;
 	snd_pcm_uframes_t avail;
 
 	pcm_file = file->private_data;
 
 	substream = pcm_file->substream;
+	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
+		ok = EPOLLOUT | EPOLLWRNORM;
+	else
+		ok = EPOLLIN | EPOLLRDNORM;
 	if (PCM_RUNTIME_CHECK(substream))
-		return POLLOUT | POLLWRNORM | POLLERR;
-	runtime = substream->runtime;
+		return ok | EPOLLERR;
 
+	runtime = substream->runtime;
 	poll_wait(file, &runtime->sleep, wait);
 
+	mask = 0;
 	snd_pcm_stream_lock_irq(substream);
-	avail = snd_pcm_playback_avail(runtime);
+	avail = snd_pcm_avail(substream);
 	switch (runtime->status->state) {
 	case SNDRV_PCM_STATE_RUNNING:
 	case SNDRV_PCM_STATE_PREPARED:
 	case SNDRV_PCM_STATE_PAUSED:
-		if (avail >= runtime->control->avail_min) {
-			mask = POLLOUT | POLLWRNORM;
-			break;
-		}
-		/* Fall through */
-	case SNDRV_PCM_STATE_DRAINING:
-		mask = 0;
-		break;
-	default:
-		mask = POLLOUT | POLLWRNORM | POLLERR;
-		break;
-	}
-	snd_pcm_stream_unlock_irq(substream);
-	return mask;
-}
-
-static unsigned int snd_pcm_capture_poll(struct file *file, poll_table * wait)
-{
-	struct snd_pcm_file *pcm_file;
-	struct snd_pcm_substream *substream;
-	struct snd_pcm_runtime *runtime;
-        unsigned int mask;
-	snd_pcm_uframes_t avail;
-
-	pcm_file = file->private_data;
-
-	substream = pcm_file->substream;
-	if (PCM_RUNTIME_CHECK(substream))
-		return POLLIN | POLLRDNORM | POLLERR;
-	runtime = substream->runtime;
-
-	poll_wait(file, &runtime->sleep, wait);
-
-	snd_pcm_stream_lock_irq(substream);
-	avail = snd_pcm_capture_avail(runtime);
-	switch (runtime->status->state) {
-	case SNDRV_PCM_STATE_RUNNING:
-	case SNDRV_PCM_STATE_PREPARED:
-	case SNDRV_PCM_STATE_PAUSED:
-		if (avail >= runtime->control->avail_min) {
-			mask = POLLIN | POLLRDNORM;
-			break;
-		}
-		mask = 0;
+		if (avail >= runtime->control->avail_min)
+			mask = ok;
 		break;
 	case SNDRV_PCM_STATE_DRAINING:
-		if (avail > 0) {
-			mask = POLLIN | POLLRDNORM;
-			break;
+		if (substream->stream == SNDRV_PCM_STREAM_CAPTURE) {
+			mask = ok;
+			if (!avail)
+				mask |= EPOLLERR;
 		}
-		/* Fall through */
+		break;
 	default:
-		mask = POLLIN | POLLRDNORM | POLLERR;
+		mask = ok | EPOLLERR;
 		break;
 	}
 	snd_pcm_stream_unlock_irq(substream);
@@ -3270,10 +3229,9 @@ static unsigned int snd_pcm_capture_poll(struct file *file, poll_table * wait)
 /*
  * mmap status record
  */
-static int snd_pcm_mmap_status_fault(struct vm_area_struct *area,
-						struct vm_fault *vmf)
+static vm_fault_t snd_pcm_mmap_status_fault(struct vm_fault *vmf)
 {
-	struct snd_pcm_substream *substream = area->vm_private_data;
+	struct snd_pcm_substream *substream = vmf->vma->vm_private_data;
 	struct snd_pcm_runtime *runtime;
 	
 	if (substream == NULL)
@@ -3307,10 +3265,9 @@ static int snd_pcm_mmap_status(struct snd_pcm_substream *substream, struct file 
 /*
  * mmap control record
  */
-static int snd_pcm_mmap_control_fault(struct vm_area_struct *area,
-						struct vm_fault *vmf)
+static vm_fault_t snd_pcm_mmap_control_fault(struct vm_fault *vmf)
 {
-	struct snd_pcm_substream *substream = area->vm_private_data;
+	struct snd_pcm_substream *substream = vmf->vma->vm_private_data;
 	struct snd_pcm_runtime *runtime;
 	
 	if (substream == NULL)
@@ -3397,10 +3354,9 @@ snd_pcm_default_page_ops(struct snd_pcm_substream *substream, unsigned long ofs)
 /*
  * fault callback for mmapping a RAM page
  */
-static int snd_pcm_mmap_data_fault(struct vm_area_struct *area,
-						struct vm_fault *vmf)
+static vm_fault_t snd_pcm_mmap_data_fault(struct vm_fault *vmf)
 {
-	struct snd_pcm_substream *substream = area->vm_private_data;
+	struct snd_pcm_substream *substream = vmf->vma->vm_private_data;
 	struct snd_pcm_runtime *runtime;
 	unsigned long offset;
 	struct page * page;
@@ -3742,11 +3698,11 @@ const struct file_operations snd_pcm_f_ops[2] = {
 	{
 		.owner =		THIS_MODULE,
 		.write =		snd_pcm_write,
-		.aio_write =		snd_pcm_aio_write,
+		.write_iter =		snd_pcm_writev,
 		.open =			snd_pcm_playback_open,
 		.release =		snd_pcm_release,
 		.llseek =		no_llseek,
-		.poll =			snd_pcm_playback_poll,
+		.poll =			snd_pcm_poll,
 		.unlocked_ioctl =	snd_pcm_ioctl,
 		.compat_ioctl = 	snd_pcm_ioctl_compat,
 		.mmap =			snd_pcm_mmap,
@@ -3756,11 +3712,11 @@ const struct file_operations snd_pcm_f_ops[2] = {
 	{
 		.owner =		THIS_MODULE,
 		.read =			snd_pcm_read,
-		.aio_read =		snd_pcm_aio_read,
+		.read_iter =		snd_pcm_readv,
 		.open =			snd_pcm_capture_open,
 		.release =		snd_pcm_release,
 		.llseek =		no_llseek,
-		.poll =			snd_pcm_capture_poll,
+		.poll =			snd_pcm_poll,
 		.unlocked_ioctl =	snd_pcm_ioctl,
 		.compat_ioctl = 	snd_pcm_ioctl_compat,
 		.mmap =			snd_pcm_mmap,

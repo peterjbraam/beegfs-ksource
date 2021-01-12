@@ -147,24 +147,23 @@ static void __i915_sw_fence_wake_up_all(struct i915_sw_fence *fence,
 
 	spin_lock_irqsave_nested(&x->lock, flags, 1 + !!continuation);
 	if (continuation) {
-		list_for_each_entry_safe(pos, next, &x->task_list, task_list) {
+		list_for_each_entry_safe(pos, next, &x->head, entry) {
 			if (pos->func == autoremove_wake_function)
 				pos->func(pos, TASK_NORMAL, 0, continuation);
 			else
-				list_move_tail(&pos->task_list, continuation);
+				list_move_tail(&pos->entry, continuation);
 		}
 	} else {
 		LIST_HEAD(extra);
 
 		do {
-			list_for_each_entry_safe(pos, next,
-						 &x->task_list, task_list)
+			list_for_each_entry_safe(pos, next, &x->head, entry)
 				pos->func(pos, TASK_NORMAL, 0, &extra);
 
 			if (list_empty(&extra))
 				break;
 
-			list_splice_tail_init(&extra, &x->task_list);
+			list_splice_tail_init(&extra, &x->head);
 		} while (1);
 	}
 	spin_unlock_irqrestore(&x->lock, flags);
@@ -231,7 +230,7 @@ void i915_sw_fence_commit(struct i915_sw_fence *fence)
 
 static int i915_sw_fence_wake(wait_queue_entry_t *wq, unsigned mode, int flags, void *key)
 {
-	list_del(&wq->task_list);
+	list_del(&wq->entry);
 	__i915_sw_fence_complete(wq->private, key);
 
 	if (wq->flags & I915_SW_FENCE_FLAG_ALLOC)
@@ -250,7 +249,7 @@ static bool __i915_sw_fence_check_if_after(struct i915_sw_fence *fence,
 	if (fence == signaler)
 		return true;
 
-	list_for_each_entry(wq, &fence->wait.task_list, task_list) {
+	list_for_each_entry(wq, &fence->wait.head, entry) {
 		if (wq->func != i915_sw_fence_wake)
 			continue;
 
@@ -268,7 +267,7 @@ static void __i915_sw_fence_clear_checked_bit(struct i915_sw_fence *fence)
 	if (!__test_and_clear_bit(I915_SW_FENCE_CHECKED_BIT, &fence->flags))
 		return;
 
-	list_for_each_entry(wq, &fence->wait.task_list, task_list) {
+	list_for_each_entry(wq, &fence->wait.head, entry) {
 		if (wq->func != i915_sw_fence_wake)
 			continue;
 
@@ -326,7 +325,7 @@ static int __i915_sw_fence_await_sw_fence(struct i915_sw_fence *fence,
 		pending |= I915_SW_FENCE_FLAG_ALLOC;
 	}
 
-	INIT_LIST_HEAD(&wq->task_list);
+	INIT_LIST_HEAD(&wq->entry);
 	wq->flags = pending;
 	wq->func = i915_sw_fence_wake;
 	wq->private = fence;
@@ -391,7 +390,7 @@ static void timer_i915_sw_fence_wake(struct timer_list *t)
 	if (!fence)
 		return;
 
-	pr_notice("Asynchronous wait on fence %s:%s:%x timed out (hint:%pS)\n",
+	pr_notice("Asynchronous wait on fence %s:%s:%llx timed out (hint:%pS)\n",
 		  cb->dma->ops->get_driver_name(cb->dma),
 		  cb->dma->ops->get_timeline_name(cb->dma),
 		  cb->dma->seqno,

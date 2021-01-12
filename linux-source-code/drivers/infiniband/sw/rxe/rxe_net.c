@@ -467,9 +467,9 @@ int rxe_send(struct rxe_pkt_info *pkt, struct sk_buff *skb)
 	atomic_inc(&pkt->qp->skb_out);
 
 	if (av->network_type == RDMA_NETWORK_IPV4) {
-		err = ip_local_out(skb);
+		err = ip_local_out(dev_net(skb_dst(skb)->dev), skb->sk, skb);
 	} else if (av->network_type == RDMA_NETWORK_IPV6) {
-		err = ip6_local_out(skb);
+		err = ip6_local_out(dev_net(skb_dst(skb)->dev), skb->sk, skb);
 	} else {
 		pr_err("Unknown layer 3 protocol: %d\n", av->network_type);
 		atomic_dec(&pkt->qp->skb_out);
@@ -518,9 +518,8 @@ struct sk_buff *rxe_init_packet(struct rxe_dev *rxe, struct rxe_av *av,
 	if (unlikely(!skb))
 		goto out;
 
-	skb_reserve(skb, hdr_len + LL_RESERVED_SPACE(ndev));
+	skb_reserve(skb, hdr_len + LL_RESERVED_SPACE(rxe->ndev));
 
-	/* FIXME: hold reference to this netdev until life of this skb. */
 	skb->dev	= ndev;
 	if (av->network_type == RDMA_NETWORK_IPV4)
 		skb->protocol = htons(ETH_P_IP);
@@ -556,7 +555,7 @@ struct rxe_dev *rxe_net_add(struct net_device *ndev)
 	int err;
 	struct rxe_dev *rxe = NULL;
 
-	rxe = (struct rxe_dev *)ib_alloc_device(sizeof(*rxe));
+	rxe = ib_alloc_device(rxe_dev, ib_dev);
 	if (!rxe)
 		return NULL;
 
@@ -608,7 +607,6 @@ void rxe_port_up(struct rxe_dev *rxe)
 
 	port = &rxe->port;
 	port->attr.state = IB_PORT_ACTIVE;
-	port->attr.phys_state = IB_PHYS_STATE_LINK_UP;
 
 	rxe_port_event(rxe, IB_EVENT_PORT_ACTIVE);
 	dev_info(&rxe->ib_dev.dev, "set active\n");
@@ -621,10 +619,18 @@ void rxe_port_down(struct rxe_dev *rxe)
 
 	port = &rxe->port;
 	port->attr.state = IB_PORT_DOWN;
-	port->attr.phys_state = IB_PHYS_STATE_LINK_DOWN;
 
 	rxe_port_event(rxe, IB_EVENT_PORT_ERR);
+	rxe_counter_inc(rxe, RXE_CNT_LINK_DOWNED);
 	dev_info(&rxe->ib_dev.dev, "set down\n");
+}
+
+void rxe_set_port_state(struct rxe_dev *rxe)
+{
+	if (netif_running(rxe->ndev) && netif_carrier_ok(rxe->ndev))
+		rxe_port_up(rxe);
+	else
+		rxe_port_down(rxe);
 }
 
 static int rxe_notify(struct notifier_block *not_blk,
@@ -653,10 +659,7 @@ static int rxe_notify(struct notifier_block *not_blk,
 		rxe_set_mtu(rxe, ndev->mtu);
 		break;
 	case NETDEV_CHANGE:
-		if (netif_running(ndev) && netif_carrier_ok(ndev))
-			rxe_port_up(rxe);
-		else
-			rxe_port_down(rxe);
+		rxe_set_port_state(rxe);
 		break;
 	case NETDEV_REBOOT:
 	case NETDEV_GOING_DOWN:
@@ -708,7 +711,7 @@ void rxe_net_exit(void)
 {
 	rxe_release_udp_tunnel(recv_sockets.sk6);
 	rxe_release_udp_tunnel(recv_sockets.sk4);
-	unregister_netdevice_notifier_rh(&rxe_net_notifier);
+	unregister_netdevice_notifier(&rxe_net_notifier);
 }
 
 int rxe_net_init(void)
@@ -723,7 +726,7 @@ int rxe_net_init(void)
 	err = rxe_net_ipv6_init();
 	if (err)
 		goto err_out;
-	err = register_netdevice_notifier_rh(&rxe_net_notifier);
+	err = register_netdevice_notifier(&rxe_net_notifier);
 	if (err) {
 		pr_err("Failed to register netdev notifier\n");
 		goto err_out;

@@ -11,8 +11,6 @@
  *          Chris Telfer <chris.telfer@netronome.com>
  */
 
-#undef CONFIG_BPF_SYSCALL
-
 #include <linux/bitfield.h>
 #include <linux/bpf.h>
 #include <linux/bpf_trace.h>
@@ -25,8 +23,8 @@
 #include <linux/interrupt.h>
 #include <linux/ip.h>
 #include <linux/ipv6.h>
-#include <linux/overflow.h>
 #include <linux/mm.h>
+#include <linux/overflow.h>
 #include <linux/page_ref.h>
 #include <linux/pci.h>
 #include <linux/pci_regs.h>
@@ -38,7 +36,6 @@
 #include <linux/vmalloc.h>
 #include <linux/ktime.h>
 
-#include <net/switchdev.h>
 #include <net/vxlan.h>
 
 #include "nfpcore/nfp_nsp.h"
@@ -64,13 +61,9 @@ void nfp_net_get_fw_version(struct nfp_net_fw_version *fw_ver,
 
 static dma_addr_t nfp_net_dma_map_rx(struct nfp_net_dp *dp, void *frag)
 {
-	struct dma_attrs attrs;
-
-	init_dma_attrs(&attrs);
-	dma_set_attr(DMA_ATTR_SKIP_CPU_SYNC, &attrs);
 	return dma_map_single_attrs(dp->dev, frag + NFP_NET_RX_BUF_HEADROOM,
 				    dp->fl_bufsz - NFP_NET_RX_BUF_NON_DATA,
-				    dp->rx_dma_dir, &attrs);
+				    dp->rx_dma_dir, DMA_ATTR_SKIP_CPU_SYNC);
 }
 
 static void
@@ -83,13 +76,9 @@ nfp_net_dma_sync_dev_rx(const struct nfp_net_dp *dp, dma_addr_t dma_addr)
 
 static void nfp_net_dma_unmap_rx(struct nfp_net_dp *dp, dma_addr_t dma_addr)
 {
-	struct dma_attrs attrs;
-
-	init_dma_attrs(&attrs);
-	dma_set_attr(DMA_ATTR_SKIP_CPU_SYNC, &attrs);
 	dma_unmap_single_attrs(dp->dev, dma_addr,
 			       dp->fl_bufsz - NFP_NET_RX_BUF_NON_DATA,
-			       dp->rx_dma_dir, &attrs);
+			       dp->rx_dma_dir, DMA_ATTR_SKIP_CPU_SYNC);
 }
 
 static void nfp_net_dma_sync_cpu_rx(struct nfp_net_dp *dp, dma_addr_t dma_addr,
@@ -294,7 +283,7 @@ int nfp_net_reconfig(struct nfp_net *nn, u32 update)
  *
  * Return: Negative errno on error, 0 on success
  */
-static int nfp_net_reconfig_mbox(struct nfp_net *nn, u32 mbox_cmd)
+int nfp_net_reconfig_mbox(struct nfp_net *nn, u32 mbox_cmd)
 {
 	u32 mbox = nn->tlv_caps.mbox_off;
 	int ret;
@@ -323,8 +312,7 @@ static int nfp_net_reconfig_mbox(struct nfp_net *nn, u32 mbox_cmd)
  * @nn:       NFP Network structure
  * @entry_nr: MSI-X table entry
  *
- * If MSI-X auto-masking is enabled clear the mask bit, otherwise
- * clear the ICR for the entry.
+ * Clear the ICR for the IRQ entry.
  */
 static void nfp_net_irq_unmask(struct nfp_net *nn, unsigned int entry_nr)
 {
@@ -1234,12 +1222,10 @@ static void *nfp_net_napi_alloc_one(struct nfp_net_dp *dp, dma_addr_t *dma_addr)
 	} else {
 		struct page *page;
 
-		page = alloc_page(GFP_ATOMIC);
-		frag = page ? page_address(page) : NULL;
-	}
-	if (!frag) {
-		nn_dp_warn(dp, "Failed to alloc receive page frag\n");
-		return NULL;
+		page = dev_alloc_page();
+		if (unlikely(!page))
+			return NULL;
+		frag = page_address(page);
 	}
 
 	*dma_addr = nfp_net_dma_map_rx(dp, frag);
@@ -1559,7 +1545,6 @@ nfp_net_rx_drop(const struct nfp_net_dp *dp, struct nfp_net_r_vector *r_vec,
 		dev_kfree_skb_any(skb);
 }
 
-#if 0 /* Not in RHEL7 */
 static bool
 nfp_net_tx_xdp_buf(struct nfp_net_dp *dp, struct nfp_net_rx_ring *rx_ring,
 		   struct nfp_net_tx_ring *tx_ring,
@@ -1614,7 +1599,6 @@ nfp_net_tx_xdp_buf(struct nfp_net_dp *dp, struct nfp_net_rx_ring *rx_ring,
 	tx_ring->wr_ptr_add++;
 	return true;
 }
-#endif
 
 /**
  * nfp_net_rx() - receive up to @budget packets on @rx_ring
@@ -1651,12 +1635,9 @@ static int nfp_net_rx(struct nfp_net_rx_ring *rx_ring, int budget)
 		struct nfp_net_rx_buf *rxbuf;
 		struct nfp_net_rx_desc *rxd;
 		struct nfp_meta_parsed meta;
-		bool redir_egress = false;
 		struct net_device *netdev;
 		dma_addr_t new_dma_addr;
-#if 0 /* Not in RHEL7 */
 		u32 meta_len_xdp = 0;
-#endif
 		void *new_frag;
 
 		idx = D_IDX(rx_ring, rx_ring->rd_p);
@@ -1733,9 +1714,7 @@ static int nfp_net_rx(struct nfp_net_rx_ring *rx_ring, int budget)
 			}
 		}
 
-#if 0 /* Not in RHEL7 */
-		if (xdp_prog && !(rxd->rxd.flags & PCIE_DESC_RX_BPF &&
-				  dp->bpf_offload_xdp) && !meta.portid) {
+		if (xdp_prog && !meta.portid) {
 			void *orig_data = rxbuf->frag + pkt_off;
 			unsigned int dma_off;
 			int act;
@@ -1747,7 +1726,7 @@ static int nfp_net_rx(struct nfp_net_rx_ring *rx_ring, int budget)
 
 			act = bpf_prog_run_xdp(xdp_prog, &xdp);
 
-			pkt_len -= xdp.data - orig_data;
+			pkt_len = xdp.data_end - xdp.data;
 			pkt_off += xdp.data - orig_data;
 
 			switch (act) {
@@ -1776,7 +1755,6 @@ static int nfp_net_rx(struct nfp_net_rx_ring *rx_ring, int budget)
 				continue;
 			}
 		}
-#endif
 
 		if (likely(!meta.portid)) {
 			netdev = dp->netdev;
@@ -1792,16 +1770,13 @@ static int nfp_net_rx(struct nfp_net_rx_ring *rx_ring, int budget)
 			struct nfp_net *nn;
 
 			nn = netdev_priv(dp->netdev);
-			netdev = nfp_app_dev_get(nn->app, meta.portid,
-						 &redir_egress);
+			netdev = nfp_app_repr_get(nn->app, meta.portid);
 			if (unlikely(!netdev)) {
 				nfp_net_rx_drop(dp, r_vec, rx_ring, rxbuf,
 						NULL);
 				continue;
 			}
-
-			if (nfp_netdev_is_nfp_repr(netdev))
-				nfp_repr_inc_rx_stats(netdev, pkt_len);
+			nfp_repr_inc_rx_stats(netdev, pkt_len);
 		}
 
 		skb = build_skb(rxbuf->frag, true_bufsz);
@@ -1833,19 +1808,10 @@ static int nfp_net_rx(struct nfp_net_rx_ring *rx_ring, int budget)
 		if (rxd->rxd.flags & PCIE_DESC_RX_VLAN)
 			__vlan_hwaccel_put_tag(skb, htons(ETH_P_8021Q),
 					       le16_to_cpu(rxd->rxd.vlan));
-#if 0 /* Not in RHEL7 */
 		if (meta_len_xdp)
 			skb_metadata_set(skb, meta_len_xdp);
-#endif
 
-		if (likely(!redir_egress)) {
-			napi_gro_receive(&rx_ring->r_vec->napi, skb);
-		} else {
-			skb->dev = netdev;
-			skb_reset_network_header(skb);
-			__skb_push(skb, ETH_HLEN);
-			dev_queue_xmit(skb);
-		}
+		napi_gro_receive(&rx_ring->r_vec->napi, skb);
 	}
 
 	if (xdp_prog) {
@@ -3027,24 +2993,27 @@ struct nfp_net_dp *nfp_net_clone_dp(struct nfp_net *nn)
 	return new;
 }
 
-static int nfp_net_check_config(struct nfp_net *nn, struct nfp_net_dp *dp)
+static int
+nfp_net_check_config(struct nfp_net *nn, struct nfp_net_dp *dp,
+		     struct netlink_ext_ack *extack)
 {
 	/* XDP-enabled tests */
 	if (!dp->xdp_prog)
 		return 0;
 	if (dp->fl_bufsz > PAGE_SIZE) {
-		nn_warn(nn, "MTU too large w/ XDP enabled\n");
+		NL_SET_ERR_MSG_MOD(extack, "MTU too large w/ XDP enabled");
 		return -EINVAL;
 	}
 	if (dp->num_tx_rings > nn->max_tx_rings) {
-		nn_warn(nn, "Insufficient number of TX rings w/ XDP enabled\n");
+		NL_SET_ERR_MSG_MOD(extack, "Insufficient number of TX rings w/ XDP enabled");
 		return -EINVAL;
 	}
 
 	return 0;
 }
 
-int nfp_net_ring_reconfig(struct nfp_net *nn, struct nfp_net_dp *dp)
+int nfp_net_ring_reconfig(struct nfp_net *nn, struct nfp_net_dp *dp,
+			  struct netlink_ext_ack *extack)
 {
 	int r, err;
 
@@ -3056,7 +3025,7 @@ int nfp_net_ring_reconfig(struct nfp_net *nn, struct nfp_net_dp *dp)
 
 	dp->num_r_vecs = max(dp->num_rx_rings, dp->num_stack_tx_rings);
 
-	err = nfp_net_check_config(nn, dp);
+	err = nfp_net_check_config(nn, dp, extack);
 	if (err)
 		goto exit_free_dp;
 
@@ -3136,7 +3105,7 @@ static int nfp_net_change_mtu(struct net_device *netdev, int new_mtu)
 
 	dp->mtu = new_mtu;
 
-	return nfp_net_ring_reconfig(nn, dp);
+	return nfp_net_ring_reconfig(nn, dp, NULL);
 }
 
 static int
@@ -3449,15 +3418,18 @@ static void nfp_net_del_vxlan_port(struct net_device *netdev,
 		nfp_net_set_vxlan_port(nn, idx, 0);
 }
 
-#if 0 /* Not in RHEL7 */
-static int
-nfp_net_xdp_setup_drv(struct nfp_net *nn, struct bpf_prog *prog,
-		      struct netlink_ext_ack *extack)
+static int nfp_net_xdp_setup_drv(struct nfp_net *nn, struct netdev_bpf *bpf)
 {
+	struct bpf_prog *prog = bpf->prog;
 	struct nfp_net_dp *dp;
+	int err;
+
+	if (!xdp_attachment_flags_ok(&nn->xdp, bpf))
+		return -EBUSY;
 
 	if (!prog == !nn->dp.xdp_prog) {
 		WRITE_ONCE(nn->dp.xdp_prog, prog);
+		xdp_attachment_setup(&nn->xdp, bpf);
 		return 0;
 	}
 
@@ -3471,62 +3443,45 @@ nfp_net_xdp_setup_drv(struct nfp_net *nn, struct bpf_prog *prog,
 	dp->rx_dma_off = prog ? XDP_PACKET_HEADROOM - nn->dp.rx_offset : 0;
 
 	/* We need RX reconfig to remap the buffers (BIDIR vs FROM_DEV) */
-	return nfp_net_ring_reconfig(nn, dp, extack);
-}
-
-static int
-nfp_net_xdp_setup(struct nfp_net *nn, struct bpf_prog *prog, u32 flags,
-		  struct netlink_ext_ack *extack)
-{
-	struct bpf_prog *drv_prog, *offload_prog;
-	int err;
-
-	if (nn->xdp_prog && (flags ^ nn->xdp_flags) & XDP_FLAGS_MODES)
-		return -EBUSY;
-
-	/* Load both when no flags set to allow easy activation of driver path
-	 * when program is replaced by one which can't be offloaded.
-	 */
-	drv_prog     = flags & XDP_FLAGS_HW_MODE  ? NULL : prog;
-	offload_prog = flags & XDP_FLAGS_DRV_MODE ? NULL : prog;
-
-	err = nfp_net_xdp_setup_drv(nn, drv_prog, extack);
+	err = nfp_net_ring_reconfig(nn, dp, bpf->extack);
 	if (err)
 		return err;
 
-	err = nfp_app_xdp_offload(nn->app, nn, offload_prog, extack);
-	if (err && flags & XDP_FLAGS_HW_MODE)
-		return err;
-
-	if (nn->xdp_prog)
-		bpf_prog_put(nn->xdp_prog);
-	nn->xdp_prog = prog;
-	nn->xdp_flags = flags;
-
+	xdp_attachment_setup(&nn->xdp, bpf);
 	return 0;
 }
-#endif
 
-static int nfp_net_xdp(struct net_device *netdev, struct netdev_xdp *xdp)
+static int nfp_net_xdp_setup_hw(struct nfp_net *nn, struct netdev_bpf *bpf)
 {
-#if 0 /* Not in RHEL7 */
+	int err;
+
+	if (!xdp_attachment_flags_ok(&nn->xdp_hw, bpf))
+		return -EBUSY;
+
+	err = nfp_app_xdp_offload(nn->app, nn, bpf->prog, bpf->extack);
+	if (err)
+		return err;
+
+	xdp_attachment_setup(&nn->xdp_hw, bpf);
+	return 0;
+}
+
+static int nfp_net_xdp(struct net_device *netdev, struct netdev_bpf *xdp)
+{
 	struct nfp_net *nn = netdev_priv(netdev);
 
 	switch (xdp->command) {
 	case XDP_SETUP_PROG:
+		return nfp_net_xdp_setup_drv(nn, xdp);
 	case XDP_SETUP_PROG_HW:
-		return nfp_net_xdp_setup(nn, xdp->prog, xdp->flags,
-					 xdp->extack);
+		return nfp_net_xdp_setup_hw(nn, xdp);
 	case XDP_QUERY_PROG:
-		xdp->prog_id = nn->xdp_prog ? nn->xdp_prog->aux->id : 0;
-		xdp->prog_flags = nn->xdp_prog ? nn->xdp_flags : 0;
-		return 0;
+		return xdp_attachment_query(&nn->xdp, xdp);
+	case XDP_QUERY_PROG_HW:
+		return xdp_attachment_query(&nn->xdp_hw, xdp);
 	default:
 		return nfp_app_bpf(nn->app, nn, xdp);
 	}
-#else
-	return -EINVAL;
-#endif
 }
 
 static int nfp_net_set_mac_address(struct net_device *netdev, void *addr)
@@ -3551,7 +3506,6 @@ static int nfp_net_set_mac_address(struct net_device *netdev, void *addr)
 }
 
 const struct net_device_ops nfp_net_netdev_ops = {
-	.ndo_size		= sizeof(struct net_device_ops),
 	.ndo_init		= nfp_app_ndo_init,
 	.ndo_uninit		= nfp_app_ndo_uninit,
 	.ndo_open		= nfp_net_netdev_open,
@@ -3560,22 +3514,23 @@ const struct net_device_ops nfp_net_netdev_ops = {
 	.ndo_get_stats64	= nfp_net_stat64,
 	.ndo_vlan_rx_add_vid	= nfp_net_vlan_rx_add_vid,
 	.ndo_vlan_rx_kill_vid	= nfp_net_vlan_rx_kill_vid,
-	.extended.ndo_setup_tc_rh		= nfp_port_setup_tc,
 	.ndo_set_vf_mac         = nfp_app_set_vf_mac,
-	.extended.ndo_set_vf_vlan        = nfp_app_set_vf_vlan,
+	.ndo_set_vf_vlan        = nfp_app_set_vf_vlan,
 	.ndo_set_vf_spoofchk    = nfp_app_set_vf_spoofchk,
 	.ndo_get_vf_config	= nfp_app_get_vf_config,
 	.ndo_set_vf_link_state  = nfp_app_set_vf_link_state,
+	.ndo_setup_tc		= nfp_port_setup_tc,
 	.ndo_tx_timeout		= nfp_net_tx_timeout,
 	.ndo_set_rx_mode	= nfp_net_set_rx_mode,
-	.extended.ndo_change_mtu	= nfp_net_change_mtu,
+	.ndo_change_mtu		= nfp_net_change_mtu,
 	.ndo_set_mac_address	= nfp_net_set_mac_address,
 	.ndo_set_features	= nfp_net_set_features,
 	.ndo_features_check	= nfp_net_features_check,
-	.extended.ndo_get_phys_port_name	= nfp_net_get_phys_port_name,
-	.extended.ndo_udp_tunnel_add	= nfp_net_add_vxlan_port,
-	.extended.ndo_udp_tunnel_del	= nfp_net_del_vxlan_port,
-	.extended.ndo_xdp		= nfp_net_xdp,
+	.ndo_get_phys_port_name	= nfp_net_get_phys_port_name,
+	.ndo_udp_tunnel_add	= nfp_net_add_vxlan_port,
+	.ndo_udp_tunnel_del	= nfp_net_del_vxlan_port,
+	.ndo_bpf		= nfp_net_xdp,
+	.ndo_get_port_parent_id	= nfp_port_get_port_parent_id,
 };
 
 /**
@@ -3860,11 +3815,9 @@ static void nfp_net_netdev_init(struct nfp_net *nn)
 	netdev->netdev_ops = &nfp_net_netdev_ops;
 	netdev->watchdog_timeo = msecs_to_jiffies(5 * 1000);
 
-	SWITCHDEV_SET_OPS(netdev, &nfp_port_switchdev_ops);
-
 	/* MTU range: 68 - hw-specific max */
-	netdev->extended->min_mtu = ETH_MIN_MTU;
-	netdev->extended->max_mtu = nn->max_mtu;
+	netdev->min_mtu = ETH_MIN_MTU;
+	netdev->max_mtu = nn->max_mtu;
 
 	netdev->gso_max_segs = NFP_NET_LSO_MAX_SEGS;
 

@@ -47,7 +47,7 @@
 #define dm_error(fmt, ...) DRM_ERROR(fmt, ##__VA_ARGS__)
 
 #if defined(CONFIG_DRM_AMD_DC_DCN1_0)
-#include <asm/i387.h>
+#include <asm/fpu/api.h>
 #endif
 
 /*

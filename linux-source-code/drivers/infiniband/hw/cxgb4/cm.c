@@ -655,7 +655,7 @@ static int send_halfclose(struct c4iw_ep *ep)
 	return c4iw_l2t_send(&ep->com.dev->rdev, skb, ep->l2t);
 }
 
-void read_tcb(struct c4iw_ep *ep)
+static void read_tcb(struct c4iw_ep *ep)
 {
 	struct sk_buff *skb;
 	struct cpl_get_tcb *req;
@@ -2112,7 +2112,7 @@ static int import_ep(struct c4iw_ep *ep, int iptype, __u8 *peer_ip,
 	} else {
 		pdev = get_real_dev(n->dev);
 		ep->l2t = cxgb4_l2t_get(cdev->rdev.lldi.l2t,
-					n, pdev, 0);
+					n, pdev, rt_tos2priority(tos));
 		if (!ep->l2t)
 			goto out;
 		ep->mtu = dst_mtu(dst);
@@ -2126,6 +2126,7 @@ static int import_ep(struct c4iw_ep *ep, int iptype, __u8 *peer_ip,
 			cdev->rdev.lldi.nchan;
 		ep->rss_qid = cdev->rdev.lldi.rxq_ids[
 			cxgb4_port_idx(pdev) * step];
+		set_tcp_window(ep, (struct port_info *)netdev_priv(pdev));
 
 		if (clear_mpa_v1) {
 			ep->retry_with_mpa_v1 = 0;
@@ -2200,7 +2201,8 @@ static int c4iw_reconnect(struct c4iw_ep *ep)
 					   laddr6->sin6_addr.s6_addr,
 					   raddr6->sin6_addr.s6_addr,
 					   laddr6->sin6_port,
-					   raddr6->sin6_port, 0,
+					   raddr6->sin6_port,
+					   ep->com.cm_id->tos,
 					   raddr6->sin6_scope_id);
 		iptype = 6;
 		ra = (__u8 *)&raddr6->sin6_addr;
@@ -2515,7 +2517,7 @@ static int pass_accept_req(struct c4iw_dev *dev, struct sk_buff *skb)
 	u16 peer_mss = ntohs(req->tcpopt.mss);
 	int iptype;
 	unsigned short hdrs;
-	u8 tos = PASS_OPEN_TOS_G(ntohl(req->tos_stid));
+	u8 tos;
 
 	parent_ep = (struct c4iw_ep *)get_ep_from_stid(dev, stid);
 	if (!parent_ep) {
@@ -2528,6 +2530,11 @@ static int pass_accept_req(struct c4iw_dev *dev, struct sk_buff *skb)
 		pr_err("%s - listening ep not in LISTEN\n", __func__);
 		goto reject;
 	}
+
+	if (parent_ep->com.cm_id->tos_set)
+		tos = parent_ep->com.cm_id->tos;
+	else
+		tos = PASS_OPEN_TOS_G(ntohl(req->tos_stid));
 
 	cxgb_get_4tuple(req, parent_ep->com.dev->rdev.lldi.adapter_type,
 			&iptype, local_ip, peer_ip, &local_port, &peer_port);
@@ -2548,7 +2555,7 @@ static int pass_accept_req(struct c4iw_dev *dev, struct sk_buff *skb)
 			 ntohs(peer_port), peer_mss);
 		dst = cxgb_find_route6(&dev->rdev.lldi, get_real_dev,
 				local_ip, peer_ip, local_port, peer_port,
-				PASS_OPEN_TOS_G(ntohl(req->tos_stid)),
+				tos,
 				((struct sockaddr_in6 *)
 				 &parent_ep->com.local_addr)->sin6_scope_id);
 	}
@@ -3391,7 +3398,7 @@ int c4iw_connect(struct iw_cm_id *cm_id, struct iw_cm_conn_param *conn_param)
 					   laddr6->sin6_addr.s6_addr,
 					   raddr6->sin6_addr.s6_addr,
 					   laddr6->sin6_port,
-					   raddr6->sin6_port, 0,
+					   raddr6->sin6_port, cm_id->tos,
 					   raddr6->sin6_scope_id);
 	}
 	if (!ep->dst) {
@@ -3920,7 +3927,7 @@ static void build_cpl_pass_accept_req(struct sk_buff *skb, int stid , u8 tos)
 	 */
 	memset(&tmp_opt, 0, sizeof(tmp_opt));
 	tcp_clear_options(&tmp_opt);
-	tcp_parse_options(skb, &tmp_opt, 0, NULL);
+	tcp_parse_options(&init_net, skb, &tmp_opt, 0, NULL);
 
 	req = __skb_push(skb, sizeof(*req));
 	memset(req, 0, sizeof(*req));
@@ -3932,7 +3939,7 @@ static void build_cpl_pass_accept_req(struct sk_buff *skb, int stid , u8 tos)
 	tcp_hdr_len = RX_TCPHDR_LEN_G(be16_to_cpu(hdr_len));
 	ip_hdr_len = RX_IPHDR_LEN_G(be16_to_cpu(hdr_len));
 	req->hdr_len =
-		cpu_to_be32(SYN_RX_CHAN_V(RX_CHAN_G(htonl(l2info))));
+		cpu_to_be32(SYN_RX_CHAN_V(RX_CHAN_G(be32_to_cpu(l2info))));
 	if (CHELSIO_CHIP_VERSION(type) <= CHELSIO_T5) {
 		eth_hdr_len = is_t4(type) ?
 				RX_ETHHDR_LEN_G(be32_to_cpu(l2info)) :

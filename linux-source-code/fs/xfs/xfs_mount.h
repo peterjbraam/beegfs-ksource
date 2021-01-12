@@ -1,19 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (c) 2000-2005 Silicon Graphics, Inc.
  * All Rights Reserved.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it would be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write the Free Software Foundation,
- * Inc.,  51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
 #ifndef __XFS_MOUNT_H__
 #define	__XFS_MOUNT_H__
@@ -101,6 +89,13 @@ typedef struct xfs_mount {
 	int			m_logbsize;	/* size of each log buffer */
 	uint			m_rsumlevels;	/* rt summary levels */
 	uint			m_rsumsize;	/* size of rt summary, bytes */
+	/*
+	 * Optional cache of rt summary level per bitmap block with the
+	 * invariant that m_rsum_cache[bbno] <= the minimum i for which
+	 * rsum[i][bbno] != 0. Reads and writes are serialized by the rsumip
+	 * inode lock.
+	 */
+	uint8_t			*m_rsum_cache;
 	struct xfs_inode	*m_rbmip;	/* pointer to bitmap inode */
 	struct xfs_inode	*m_rsumip;	/* pointer to summary inode */
 	struct xfs_inode	*m_rootip;	/* pointer to root directory */
@@ -113,6 +108,10 @@ typedef struct xfs_mount {
 	uint8_t			m_agno_log;	/* log #ag's */
 	uint8_t			m_agino_log;	/* #bits for agino in inum */
 	uint			m_inode_cluster_size;/* min inode buf size */
+	unsigned int		m_inodes_per_cluster;
+	unsigned int		m_blocks_per_cluster;
+	unsigned int		m_cluster_align;
+	unsigned int		m_cluster_align_inodes;
 	uint			m_blockmask;	/* sb_blocksize-1 */
 	uint			m_blockwsize;	/* sb_blocksize in words */
 	uint			m_blockwmask;	/* blockwsize-1 */
@@ -122,9 +121,16 @@ typedef struct xfs_mount {
 	uint			m_bmap_dmnr[2];	/* min bmap btree records */
 	uint			m_inobt_mxr[2];	/* max inobt btree records */
 	uint			m_inobt_mnr[2];	/* min inobt btree records */
+	uint			m_rmap_mxr[2];	/* max rmap btree records */
+	uint			m_rmap_mnr[2];	/* min rmap btree records */
+	uint			m_refc_mxr[2];	/* max refc btree records */
+	uint			m_refc_mnr[2];	/* min refc btree records */
 	uint			m_ag_maxlevels;	/* XFS_AG_MAXLEVELS */
 	uint			m_bm_maxlevels[2]; /* XFS_BM_MAXLEVELS */
 	uint			m_in_maxlevels;	/* max inobt btree levels. */
+	uint			m_rmap_maxlevels; /* max rmap btree levels */
+	uint			m_refc_maxlevels; /* max refcount btree level */
+	xfs_extlen_t		m_ag_prealloc_blocks; /* reserved ag blocks */
 	uint			m_alloc_set_aside; /* space we can't use */
 	uint			m_ag_max_usable; /* max space per AG */
 	struct radix_tree_root	m_perag_tree;	/* per-ag accounting info */
@@ -132,6 +138,7 @@ typedef struct xfs_mount {
 	struct mutex		m_growlock;	/* growfs mutex */
 	int			m_fixedfsid[2];	/* unchanged for life of FS */
 	uint64_t		m_flags;	/* global mount flags */
+	bool			m_finobt_nores; /* no per-AG finobt resv. */
 	int			m_ialloc_inos;	/* inodes in inode allocation */
 	int			m_ialloc_blks;	/* blocks in inode allocation */
 	int			m_ialloc_min_blks;/* min blocks in sparse inode
@@ -155,6 +162,8 @@ typedef struct xfs_mount {
 	struct xfs_mru_cache	*m_filestream;  /* per-mount filestream data */
 	struct delayed_work	m_reclaim_work;	/* background inode reclaim */
 	struct delayed_work	m_eofblocks_work; /* background eof blocks
+						     trimming */
+	struct delayed_work	m_cowblocks_work; /* background cow blocks
 						     trimming */
 	bool			m_update_sb;	/* sb needs update in mount */
 	int64_t			m_low_space[XFS_LOWSP_MAX];
@@ -184,6 +193,7 @@ typedef struct xfs_mount {
 	 * to various other kinds of pain inflicted on the pNFS server.
 	 */
 	uint32_t		m_generation;
+
 	bool			m_fail_unmount;
 #ifdef DEBUG
 	/*
@@ -203,6 +213,7 @@ typedef struct xfs_mount {
 						   must be synchronous except
 						   for space allocations */
 #define XFS_MOUNT_UNMOUNTING	(1ULL << 1)	/* filesystem is unmounting */
+#define XFS_MOUNT_BAD_SUMMARY	(1ULL << 2)	/* summary counters are bad */
 #define XFS_MOUNT_WAS_CLEAN	(1ULL << 3)
 #define XFS_MOUNT_FS_SHUTDOWN	(1ULL << 4)	/* atomic stop of all filesystem
 						   operations, typically for
@@ -217,7 +228,6 @@ typedef struct xfs_mount {
 #define XFS_MOUNT_SMALL_INUMS	(1ULL << 14)	/* user wants 32bit inodes */
 #define XFS_MOUNT_32BITINODES	(1ULL << 15)	/* inode32 allocator active */
 #define XFS_MOUNT_NOUUID	(1ULL << 16)	/* ignore uuid during mount */
-#define XFS_MOUNT_BARRIER	(1ULL << 17)
 #define XFS_MOUNT_IKEEP		(1ULL << 18)	/* keep empty inode clusters*/
 #define XFS_MOUNT_SWALLOC	(1ULL << 19)	/* turn on stripe width
 						 * allocation */
@@ -268,12 +278,12 @@ static inline unsigned long
 xfs_preferred_iosize(xfs_mount_t *mp)
 {
 	if (mp->m_flags & XFS_MOUNT_COMPAT_IOSIZE)
-		return PAGE_CACHE_SIZE;
+		return PAGE_SIZE;
 	return (mp->m_swidth ?
 		(mp->m_swidth << mp->m_sb.sb_blocklog) :
 		((mp->m_flags & XFS_MOUNT_DFLT_IOSIZE) ?
-			(1 << (int)MAX(mp->m_readio_log, mp->m_writeio_log)) :
-			PAGE_CACHE_SIZE));
+			(1 << (int)max(mp->m_readio_log, mp->m_writeio_log)) :
+			PAGE_SIZE));
 }
 
 #define XFS_LAST_UNMOUNT_WAS_CLEAN(mp)	\
@@ -310,6 +320,23 @@ xfs_daddr_to_agbno(struct xfs_mount *mp, xfs_daddr_t d)
 	xfs_rfsblock_t ld = XFS_BB_TO_FSBT(mp, d);
 	return (xfs_agblock_t) do_div(ld, mp->m_sb.sb_agblocks);
 }
+
+/* per-AG block reservation data structures*/
+enum xfs_ag_resv_type {
+	XFS_AG_RESV_NONE = 0,
+	XFS_AG_RESV_AGFL,
+	XFS_AG_RESV_METADATA,
+	XFS_AG_RESV_RMAPBT,
+};
+
+struct xfs_ag_resv {
+	/* number of blocks originally reserved here */
+	xfs_extlen_t			ar_orig_reserved;
+	/* number of blocks reserved here */
+	xfs_extlen_t			ar_reserved;
+	/* number of blocks originally asked for */
+	xfs_extlen_t			ar_asked;
+};
 
 /*
  * Per-ag incore structure, copies of information in agf and agi, to improve the
@@ -355,13 +382,39 @@ typedef struct xfs_perag {
 	unsigned long	pag_ici_reclaim_cursor;	/* reclaim restart point */
 
 	/* buffer cache index */
-	spinlock_t	pag_buf_lock;	/* lock for pag_buf_tree */
-	struct rb_root	pag_buf_tree;	/* ordered tree of active buffers */
+	spinlock_t	pag_buf_lock;	/* lock for pag_buf_hash */
+	struct rhashtable pag_buf_hash;
 
 	/* for rcu-safe freeing */
 	struct rcu_head	rcu_head;
 	int		pagb_count;	/* pagb slots in use */
+
+	/* Blocks reserved for all kinds of metadata. */
+	struct xfs_ag_resv	pag_meta_resv;
+	/* Blocks reserved for the reverse mapping btree. */
+	struct xfs_ag_resv	pag_rmapbt_resv;
+
+	/* reference count */
+	uint8_t			pagf_refcount_level;
 } xfs_perag_t;
+
+static inline struct xfs_ag_resv *
+xfs_perag_resv(
+	struct xfs_perag	*pag,
+	enum xfs_ag_resv_type	type)
+{
+	switch (type) {
+	case XFS_AG_RESV_METADATA:
+		return &pag->pag_meta_resv;
+	case XFS_AG_RESV_RMAPBT:
+		return &pag->pag_rmapbt_resv;
+	default:
+		return NULL;
+	}
+}
+
+int xfs_buf_hash_init(xfs_perag_t *pag);
+void xfs_buf_hash_destroy(xfs_perag_t *pag);
 
 extern void	xfs_uuid_table_free(void);
 extern int	xfs_log_sbcount(xfs_mount_t *);
@@ -387,10 +440,11 @@ extern int	xfs_dev_is_read_only(struct xfs_mount *, char *);
 
 extern void	xfs_set_low_space_thresholds(struct xfs_mount *);
 
-struct xfs_error_cfg * xfs_error_get_cfg(struct xfs_mount *mp,
-		int error_class, int error);
-
 int	xfs_zero_extent(struct xfs_inode *ip, xfs_fsblock_t start_fsb,
 			xfs_off_t count_fsb);
+
+struct xfs_error_cfg * xfs_error_get_cfg(struct xfs_mount *mp,
+		int error_class, int error);
+void xfs_force_summary_recalc(struct xfs_mount *mp);
 
 #endif	/* __XFS_MOUNT_H__ */

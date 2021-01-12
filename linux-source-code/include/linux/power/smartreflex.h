@@ -143,6 +143,13 @@
 #define OMAP3430_SR_ERRWEIGHT		0x04
 #define OMAP3430_SR_ERRMAXLIMIT		0x02
 
+enum sr_instance {
+	OMAP_SR_MPU,			/* shared with iva on omap3 */
+	OMAP_SR_CORE,
+	OMAP_SR_IVA,
+	OMAP_SR_NR,
+};
+
 struct omap_sr {
 	char				*name;
 	struct list_head		node;
@@ -207,7 +214,6 @@ struct omap_smartreflex_dev_attr {
 	const char      *sensor_voltdm_name;
 };
 
-#ifdef CONFIG_POWER_AVS_OMAP
 /*
  * The smart reflex driver supports CLASS1 CLASS2 and CLASS3 SR.
  * The smartreflex class driver should pass the class type.
@@ -290,6 +296,8 @@ struct omap_sr_data {
 	struct voltagedomain		*voltdm;
 };
 
+#ifdef CONFIG_POWER_AVS_OMAP
+
 /* Smartreflex module enable/disable interface */
 void omap_sr_enable(struct voltagedomain *voltdm);
 void omap_sr_disable(struct voltagedomain *voltdm);
@@ -299,11 +307,11 @@ void omap_sr_disable_reset_volt(struct voltagedomain *voltdm);
 void omap_sr_register_pmic(struct omap_sr_pmic_data *pmic_data);
 
 /* Smartreflex driver hooks to be called from Smartreflex class driver */
-int sr_enable(struct voltagedomain *voltdm, unsigned long volt);
-void sr_disable(struct voltagedomain *voltdm);
-int sr_configure_errgen(struct voltagedomain *voltdm);
-int sr_disable_errgen(struct voltagedomain *voltdm);
-int sr_configure_minmax(struct voltagedomain *voltdm);
+int sr_enable(struct omap_sr *sr, unsigned long volt);
+void sr_disable(struct omap_sr *sr);
+int sr_configure_errgen(struct omap_sr *sr);
+int sr_disable_errgen(struct omap_sr *sr);
+int sr_configure_minmax(struct omap_sr *sr);
 
 /* API to register the smartreflex class driver with the smartreflex driver */
 int sr_register_class(struct omap_sr_class_data *class_data);

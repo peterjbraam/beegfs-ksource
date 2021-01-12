@@ -102,7 +102,7 @@ void uapi_compute_bundle_size(struct uverbs_api_ioctl_method *method_elm,
  *
  * This tries to use a small pool of pre-allocated memory for performance.
  */
-void *_uverbs_alloc(struct uverbs_attr_bundle *bundle, size_t size,
+__malloc void *_uverbs_alloc(struct uverbs_attr_bundle *bundle, size_t size,
 			     gfp_t flags)
 {
 	struct bundle_priv *pbundle =
@@ -565,10 +565,10 @@ static int ib_uverbs_cmd_verbs(struct ib_uverbs_file *ufile,
 	if (unlikely(hdr->driver_id != uapi->driver_id))
 		return -EINVAL;
 
-	radix_tree_iter_init(&attrs_iter, uapi_key_obj(hdr->object_id) |
-			     uapi_key_ioctl_method(hdr->method_id));
-	slot = radix_tree_next_chunk(&uapi->radix, &attrs_iter,
-				     RADIX_TREE_ITER_CONTIG);
+	slot = radix_tree_iter_lookup(
+		&uapi->radix, &attrs_iter,
+		uapi_key_obj(hdr->object_id) |
+			uapi_key_ioctl_method(hdr->method_id));
 	if (unlikely(!slot))
 		return -EPROTONOSUPPORT;
 	method_elm = rcu_dereference_protected(*slot, true);

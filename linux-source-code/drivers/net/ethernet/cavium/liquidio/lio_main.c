@@ -91,6 +91,9 @@ static int octeon_console_debug_enabled(u32 console)
  */
 #define LIO_SYNC_OCTEON_TIME_INTERVAL_MS 60000
 
+/* time to wait for possible in-flight requests in milliseconds */
+#define WAIT_INFLIGHT_REQUEST	msecs_to_jiffies(1000)
+
 struct lio_trusted_vf_ctx {
 	struct completion complete;
 	int status;
@@ -259,7 +262,7 @@ static inline void pcierror_quiesce_device(struct octeon_device *oct)
 	force_io_queues_off(oct);
 
 	/* To allow for in-flight requests */
-	schedule_timeout_uninterruptible(100);
+	schedule_timeout_uninterruptible(WAIT_INFLIGHT_REQUEST);
 
 	if (wait_for_pending_requests(oct))
 		dev_err(&oct->pci_dev->dev, "There were pending requests\n");
@@ -626,7 +629,7 @@ static inline void update_link_status(struct net_device *netdev,
 		if (lio->linfo.link.s.mtu != current_max_mtu) {
 			netif_info(lio, probe, lio->netdev, "Max MTU changed from %d to %d\n",
 				   current_max_mtu, lio->linfo.link.s.mtu);
-			netdev->extended->max_mtu = lio->linfo.link.s.mtu;
+			netdev->max_mtu = lio->linfo.link.s.mtu;
 		}
 		if (lio->linfo.link.s.mtu < netdev->mtu) {
 			dev_warn(&oct->pci_dev->dev,
@@ -1766,7 +1769,7 @@ static int load_firmware(struct octeon_device *oct)
 
 	ret = request_firmware(&fw, fw_name, &oct->pci_dev->dev);
 	if (ret) {
-		dev_err(&oct->pci_dev->dev, "Request firmware failed. Could not find file %s.\n.",
+		dev_err(&oct->pci_dev->dev, "Request firmware failed. Could not find file %s.\n",
 			fw_name);
 		release_firmware(fw);
 		return ret;
@@ -3090,7 +3093,8 @@ liquidio_eswitch_mode_get(struct devlink *devlink, u16 *mode)
 }
 
 static int
-liquidio_eswitch_mode_set(struct devlink *devlink, u16 mode)
+liquidio_eswitch_mode_set(struct devlink *devlink, u16 mode,
+			  struct netlink_ext_ack *extack)
 {
 	struct lio_devlink_priv *priv;
 	struct octeon_device *oct;
@@ -3181,7 +3185,6 @@ static int liquidio_get_vf_stats(struct net_device *netdev, int vfidx,
 }
 
 static const struct net_device_ops lionetdevops = {
-	.ndo_size		= sizeof(struct net_device_ops),
 	.ndo_open		= liquidio_open,
 	.ndo_stop		= liquidio_stop,
 	.ndo_start_xmit		= liquidio_xmit,
@@ -3192,16 +3195,16 @@ static const struct net_device_ops lionetdevops = {
 
 	.ndo_vlan_rx_add_vid    = liquidio_vlan_rx_add_vid,
 	.ndo_vlan_rx_kill_vid   = liquidio_vlan_rx_kill_vid,
-	.extended.ndo_change_mtu	= liquidio_change_mtu,
+	.ndo_change_mtu		= liquidio_change_mtu,
 	.ndo_do_ioctl		= liquidio_ioctl,
 	.ndo_fix_features	= liquidio_fix_features,
 	.ndo_set_features	= liquidio_set_features,
-	.extended.ndo_udp_tunnel_add	= liquidio_add_vxlan_port,
-	.extended.ndo_udp_tunnel_del	= liquidio_del_vxlan_port,
+	.ndo_udp_tunnel_add	= liquidio_add_vxlan_port,
+	.ndo_udp_tunnel_del	= liquidio_del_vxlan_port,
 	.ndo_set_vf_mac		= liquidio_set_vf_mac,
-	.extended.ndo_set_vf_vlan	= liquidio_set_vf_vlan,
+	.ndo_set_vf_vlan	= liquidio_set_vf_vlan,
 	.ndo_get_vf_config	= liquidio_get_vf_config,
-	.extended.ndo_set_vf_trust	= liquidio_set_vf_trust,
+	.ndo_set_vf_trust	= liquidio_set_vf_trust,
 	.ndo_set_vf_link_state  = liquidio_set_vf_link_state,
 	.ndo_get_vf_stats	= liquidio_get_vf_stats,
 };
@@ -3553,8 +3556,8 @@ static int setup_nic_devices(struct octeon_device *octeon_dev)
 			~NETIF_F_HW_VLAN_CTAG_RX;
 
 		/* MTU range: 68 - 16000 */
-		netdev->extended->min_mtu = LIO_MIN_MTU_SIZE;
-		netdev->extended->max_mtu = LIO_MAX_MTU_SIZE;
+		netdev->min_mtu = LIO_MIN_MTU_SIZE;
+		netdev->max_mtu = LIO_MAX_MTU_SIZE;
 
 		/* Point to the  properties for octeon device to which this
 		 * interface belongs.

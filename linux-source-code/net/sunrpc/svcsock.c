@@ -42,7 +42,7 @@
 #include <net/udp.h>
 #include <net/tcp.h>
 #include <net/tcp_states.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/ioctls.h>
 #include <trace/events/skb.h>
 
@@ -78,8 +78,7 @@ static void svc_reclassify_socket(struct socket *sock)
 {
 	struct sock *sk = sock->sk;
 
-	WARN_ON_ONCE(sock_owned_by_user(sk));
-	if (sock_owned_by_user(sk))
+	if (WARN_ON_ONCE(!sock_allow_reclassification(sk)))
 		return;
 
 	switch (sk->sk_family) {
@@ -262,7 +261,7 @@ static int svc_sendto(struct svc_rqst *rqstp, struct xdr_buf *xdr)
 
 		svc_set_cmsg_data(rqstp, cmh);
 
-		if (sock_sendmsg(sock, &msg, 0) < 0)
+		if (sock_sendmsg(sock, &msg) < 0)
 			goto out;
 	}
 
@@ -272,7 +271,7 @@ static int svc_sendto(struct svc_rqst *rqstp, struct xdr_buf *xdr)
 			       rqstp->rq_respages[0], tailoff);
 
 out:
-	dprintk("svc: socket %p sendto([%p %Zu... ], %d) = %d (addr %s)\n",
+	dprintk("svc: socket %p sendto([%p %zu... ], %d) = %d (addr %s)\n",
 		svsk, xdr->head[0].iov_base, xdr->head[0].iov_len,
 		xdr->len, len, svc_print_addr(rqstp, buf, sizeof(buf)));
 
@@ -332,15 +331,15 @@ static int svc_recvfrom(struct svc_rqst *rqstp, struct kvec *iov, int nr,
 	rqstp->rq_xprt_hlen = 0;
 
 	clear_bit(XPT_DATA, &svsk->sk_xprt.xpt_flags);
-	len = kernel_recvmsg(svsk->sk_sock, &msg, iov, nr, buflen,
-				msg.msg_flags);
+	iov_iter_kvec(&msg.msg_iter, READ | ITER_KVEC, iov, nr, buflen);
+	len = sock_recvmsg(svsk->sk_sock, &msg, msg.msg_flags);
 	/* If we read a full record, then assume there may be more
 	 * data to read (stream based sockets only!)
 	 */
 	if (len == buflen)
 		set_bit(XPT_DATA, &svsk->sk_xprt.xpt_flags);
 
-	dprintk("svc: socket %p recvfrom(%p, %Zu) = %d\n",
+	dprintk("svc: socket %p recvfrom(%p, %zu) = %d\n",
 		svsk, iov[0].iov_base, iov[0].iov_len, len);
 	return len;
 }
@@ -378,25 +377,11 @@ static int svc_partial_recvfrom(struct svc_rqst *rqstp,
 static void svc_sock_setbufsize(struct socket *sock, unsigned int snd,
 				unsigned int rcv)
 {
-#if 0
-	mm_segment_t	oldfs;
-	oldfs = get_fs(); set_fs(KERNEL_DS);
-	sock_setsockopt(sock, SOL_SOCKET, SO_SNDBUF,
-			(char*)&snd, sizeof(snd));
-	sock_setsockopt(sock, SOL_SOCKET, SO_RCVBUF,
-			(char*)&rcv, sizeof(rcv));
-#else
-	/* sock_setsockopt limits use to sysctl_?mem_max,
-	 * which isn't acceptable.  Until that is made conditional
-	 * on not having CAP_SYS_RESOURCE or similar, we go direct...
-	 * DaveM said I could!
-	 */
 	lock_sock(sock->sk);
 	sock->sk->sk_sndbuf = snd * 2;
 	sock->sk->sk_rcvbuf = rcv * 2;
 	sock->sk->sk_write_space(sock->sk);
 	release_sock(sock->sk);
-#endif
 }
 
 static void svc_sock_secure_port(struct svc_rqst *rqstp)
@@ -410,17 +395,18 @@ static void svc_sock_secure_port(struct svc_rqst *rqstp)
 /*
  * INET callback when data has been received on the socket.
  */
-static void svc_data_ready(struct sock *sk, int count)
+static void svc_data_ready(struct sock *sk)
 {
 	struct svc_sock	*svsk = (struct svc_sock *)sk->sk_user_data;
 
 	if (svsk) {
-		dprintk("svc: socket %p(inet %p), count=%d, busy=%d\n",
-			svsk, sk, count,
+		dprintk("svc: socket %p(inet %p), busy=%d\n",
+			svsk, sk,
 			test_bit(XPT_BUSY, &svsk->sk_xprt.xpt_flags));
+
 		/* Refer to svc_setup_socket() for details. */
 		rmb();
-		svsk->sk_odata(sk, count);
+		svsk->sk_odata(sk);
 		if (!test_and_set_bit(XPT_DATA, &svsk->sk_xprt.xpt_flags))
 			svc_xprt_enqueue(&svsk->sk_xprt);
 	}
@@ -576,7 +562,7 @@ static int svc_udp_recvfrom(struct svc_rqst *rqstp)
 	}
 	len = svc_addr_len(svc_addr(rqstp));
 	rqstp->rq_addrlen = len;
-	if (skb->tstamp.tv64 == 0) {
+	if (skb->tstamp == 0) {
 		skb->tstamp = ktime_get_real();
 		/* Don't enable netstamp, sunrpc doesn't
 		   need that much accuracy */
@@ -584,7 +570,7 @@ static int svc_udp_recvfrom(struct svc_rqst *rqstp)
 	svsk->sk_sk->sk_stamp = skb->tstamp;
 	set_bit(XPT_DATA, &svsk->sk_xprt.xpt_flags); /* there may be more data... */
 
-	len  = skb->len - sizeof(struct udphdr);
+	len  = skb->len;
 	rqstp->rq_arg.len = len;
 
 	rqstp->rq_prot = IPPROTO_UDP;
@@ -608,8 +594,7 @@ static int svc_udp_recvfrom(struct svc_rqst *rqstp)
 		consume_skb(skb);
 	} else {
 		/* we can use it in-place */
-		rqstp->rq_arg.head[0].iov_base = skb->data +
-			sizeof(struct udphdr);
+		rqstp->rq_arg.head[0].iov_base = skb->data;
 		rqstp->rq_arg.head[0].iov_len = len;
 		if (skb_checksum_complete(skb))
 			goto out_free;
@@ -686,7 +671,7 @@ static struct svc_xprt *svc_udp_create(struct svc_serv *serv,
 	return svc_create_socket(serv, IPPROTO_UDP, net, sa, salen, flags);
 }
 
-static struct svc_xprt_ops svc_udp_ops = {
+static const struct svc_xprt_ops svc_udp_ops = {
 	.xpo_create = svc_udp_create,
 	.xpo_recvfrom = svc_udp_recvfrom,
 	.xpo_sendto = svc_udp_sendto,
@@ -751,7 +736,7 @@ static void svc_udp_init(struct svc_sock *svsk, struct svc_serv *serv)
  * A data_ready event on a listening socket means there's a connection
  * pending. Do not use state_change as a substitute for it.
  */
-static void svc_tcp_listen_data_ready(struct sock *sk, int count_unused)
+static void svc_tcp_listen_data_ready(struct sock *sk)
 {
 	struct svc_sock	*svsk = (struct svc_sock *)sk->sk_user_data;
 
@@ -761,7 +746,7 @@ static void svc_tcp_listen_data_ready(struct sock *sk, int count_unused)
 	if (svsk) {
 		/* Refer to svc_setup_socket() for details. */
 		rmb();
-		svsk->sk_odata(sk, count_unused);
+		svsk->sk_odata(sk);
 	}
 
 	/*
@@ -838,12 +823,13 @@ static struct svc_xprt *svc_tcp_accept(struct svc_xprt *xprt)
 	}
 	set_bit(XPT_CONN, &svsk->sk_xprt.xpt_flags);
 
-	err = kernel_getpeername(newsock, sin, &slen);
+	err = kernel_getpeername(newsock, sin);
 	if (err < 0) {
 		net_warn_ratelimited("%s: peername failed (err %d)!\n",
 				     serv->sv_name, -err);
 		goto failed;		/* aborted connection or whatever */
 	}
+	slen = err;
 
 	/* Ideally, we would want to reject connections from unauthorized
 	 * hosts here, but when we get encryption, the IP of the host won't
@@ -872,7 +858,8 @@ static struct svc_xprt *svc_tcp_accept(struct svc_xprt *xprt)
 	if (IS_ERR(newsvsk))
 		goto failed;
 	svc_xprt_set_remote(&newsvsk->sk_xprt, sin, slen);
-	err = kernel_getsockname(newsock, sin, &slen);
+	err = kernel_getsockname(newsock, sin);
+	slen = err;
 	if (unlikely(err < 0)) {
 		dprintk("svc_tcp_accept: kernel_getsockname error %d\n", -err);
 		slen = offsetof(struct sockaddr, sa_data);
@@ -1204,7 +1191,7 @@ static struct svc_xprt *svc_tcp_create(struct svc_serv *serv,
 	return svc_create_socket(serv, IPPROTO_TCP, net, sa, salen, flags);
 }
 
-static struct svc_xprt_ops svc_tcp_ops = {
+static const struct svc_xprt_ops svc_tcp_ops = {
 	.xpo_create = svc_tcp_create,
 	.xpo_recvfrom = svc_tcp_recvfrom,
 	.xpo_sendto = svc_tcp_sendto,
@@ -1406,7 +1393,8 @@ int svc_addsock(struct svc_serv *serv, const int fd, char *name_return,
 		err = PTR_ERR(svsk);
 		goto out;
 	}
-	if (kernel_getsockname(svsk->sk_sock, sin, &salen) == 0)
+	salen = kernel_getsockname(svsk->sk_sock, sin);
+	if (salen >= 0)
 		svc_xprt_set_local(&svsk->sk_xprt, sin, salen);
 	svc_add_new_perm_xprt(serv, &svsk->sk_xprt);
 	return svc_one_sock_name(svsk, name_return, len);
@@ -1480,10 +1468,10 @@ static struct svc_xprt *svc_create_socket(struct svc_serv *serv,
 	if (error < 0)
 		goto bummer;
 
-	newlen = len;
-	error = kernel_getsockname(sock, newsin, &newlen);
+	error = kernel_getsockname(sock, newsin);
 	if (error < 0)
 		goto bummer;
+	newlen = error;
 
 	if (protocol == IPPROTO_TCP) {
 		if ((error = kernel_listen(sock, 64)) < 0)

@@ -57,11 +57,8 @@ int mlx4_en_create_tx_ring(struct mlx4_en_priv *priv,
 
 	ring = kzalloc_node(sizeof(*ring), GFP_KERNEL, node);
 	if (!ring) {
-		ring = kzalloc(sizeof(*ring), GFP_KERNEL);
-		if (!ring) {
-			en_err(priv, "Failed allocating TX ring\n");
-			return -ENOMEM;
-		}
+		en_err(priv, "Failed allocating TX ring\n");
+		return -ENOMEM;
 	}
 
 	ring->size = size;
@@ -266,9 +263,9 @@ static void mlx4_en_stamp_wqe(struct mlx4_en_priv *priv,
 
 
 u32 mlx4_en_free_tx_desc(struct mlx4_en_priv *priv,
-				struct mlx4_en_tx_ring *ring,
-				int index, u64 timestamp,
-				int napi_mode)
+			 struct mlx4_en_tx_ring *ring,
+			 int index, u64 timestamp,
+			 int napi_mode)
 {
 	struct mlx4_en_tx_info *tx_info = &ring->tx_info[index];
 	struct mlx4_en_tx_desc *tx_desc = ring->buf + (index << LOG_TXBB_SIZE);
@@ -414,8 +411,8 @@ bool mlx4_en_process_tx_cq(struct net_device *dev,
 
 	index = cons_index & size_mask;
 	cqe = mlx4_en_get_cqe(buf, index, priv->cqe_size) + factor;
-	last_nr_txbb = ACCESS_ONCE(ring->last_nr_txbb);
-	ring_cons = ACCESS_ONCE(ring->cons);
+	last_nr_txbb = READ_ONCE(ring->last_nr_txbb);
+	ring_cons = READ_ONCE(ring->cons);
 	ring_index = ring_cons & size_mask;
 	stamp_index = ring_index;
 
@@ -479,8 +476,8 @@ bool mlx4_en_process_tx_cq(struct net_device *dev,
 	wmb();
 
 	/* we want to dirty this cache line once */
-	ACCESS_ONCE(ring->last_nr_txbb) = last_nr_txbb;
-	ACCESS_ONCE(ring->cons) = ring_cons + txbbs_skipped;
+	WRITE_ONCE(ring->last_nr_txbb, last_nr_txbb);
+	WRITE_ONCE(ring->cons, ring_cons + txbbs_skipped);
 
 	if (cq->type == TX_XDP)
 		return done < budget;
@@ -688,15 +685,16 @@ static void build_inline_wqe(struct mlx4_en_tx_desc *tx_desc,
 }
 
 u16 mlx4_en_select_queue(struct net_device *dev, struct sk_buff *skb,
-			 void *accel_priv, select_queue_fallback_t fallback)
+			 struct net_device *sb_dev,
+			 select_queue_fallback_t fallback)
 {
 	struct mlx4_en_priv *priv = netdev_priv(dev);
 	u16 rings_p_up = priv->num_tx_rings_p_up;
 
 	if (netdev_get_num_tc(dev))
-		return fallback(dev, skb);
+		return fallback(dev, skb, NULL);
 
-	return fallback(dev, skb) % rings_p_up;
+	return fallback(dev, skb, NULL) % rings_p_up;
 }
 
 static void mlx4_bf_copy(void __iomem *dst, const void *src,
@@ -858,7 +856,7 @@ netdev_tx_t mlx4_en_xmit(struct sk_buff *skb, struct net_device *dev)
 		goto tx_drop;
 
 	/* fetch ring->cons far ahead before needing it to avoid stall */
-	ring_cons = ACCESS_ONCE(ring->cons);
+	ring_cons = READ_ONCE(ring->cons);
 
 	real_size = get_real_size(skb, shinfo, dev, &lso_header_size,
 				  &inline_ok, &fragptr);
@@ -946,7 +944,7 @@ netdev_tx_t mlx4_en_xmit(struct sk_buff *skb, struct net_device *dev)
 	 */
 	tx_info->ts_requested = 0;
 	if (unlikely(ring->hwtstamp_tx_type == HWTSTAMP_TX_ON &&
-	    shinfo->tx_flags & SKBTX_HW_TSTAMP)) {
+		     shinfo->tx_flags & SKBTX_HW_TSTAMP)) {
 		shinfo->tx_flags |= SKBTX_IN_PROGRESS;
 		tx_info->ts_requested = 1;
 	}
@@ -1068,7 +1066,7 @@ netdev_tx_t mlx4_en_xmit(struct sk_buff *skb, struct net_device *dev)
 		 */
 		smp_rmb();
 
-		ring_cons = ACCESS_ONCE(ring->cons);
+		ring_cons = READ_ONCE(ring->cons);
 		if (unlikely(!mlx4_en_is_tx_ring_full(ring))) {
 			netif_tx_wake_queue(ring->tx_queue);
 			ring->wake_queue++;

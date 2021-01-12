@@ -293,8 +293,8 @@ err_alloc:
 }
 
 static int create_constraints(struct powercap_zone *power_zone,
-				int nr_constraints,
-				struct powercap_zone_constraint_ops *const_ops)
+			int nr_constraints,
+			const struct powercap_zone_constraint_ops *const_ops)
 {
 	int i;
 	int ret = 0;
@@ -377,9 +377,14 @@ static void create_power_zone_common_attributes(
 	if (power_zone->ops->get_max_energy_range_uj)
 		power_zone->zone_dev_attrs[count++] =
 					&dev_attr_max_energy_range_uj.attr;
-	if (power_zone->ops->get_energy_uj)
+	if (power_zone->ops->get_energy_uj) {
+		if (power_zone->ops->reset_energy_uj)
+			dev_attr_energy_uj.attr.mode = S_IWUSR | S_IRUGO;
+		else
+			dev_attr_energy_uj.attr.mode = S_IRUGO;
 		power_zone->zone_dev_attrs[count++] =
 					&dev_attr_energy_uj.attr;
+	}
 	if (power_zone->ops->get_power_uw)
 		power_zone->zone_dev_attrs[count++] =
 					&dev_attr_power_uw.attr;
@@ -472,26 +477,28 @@ static ssize_t enabled_store(struct device *dev,
 	return -ENOSYS;
 }
 
-static struct device_attribute powercap_def_attrs[] = {
-		__ATTR(enabled, S_IWUSR | S_IRUGO, enabled_show,
-							enabled_store),
-		__ATTR_NULL
+static DEVICE_ATTR_RW(enabled);
+
+static struct attribute *powercap_attrs[] = {
+	&dev_attr_enabled.attr,
+	NULL,
 };
+ATTRIBUTE_GROUPS(powercap);
 
 static struct class powercap_class = {
 	.name = "powercap",
 	.dev_release = powercap_release,
-	.dev_attrs = powercap_def_attrs,
+	.dev_groups = powercap_groups,
 };
 
 struct powercap_zone *powercap_register_zone(
-				struct powercap_zone *power_zone,
-				struct powercap_control_type *control_type,
-				const char *name,
-				struct powercap_zone *parent,
-				const struct powercap_zone_ops *ops,
-				int nr_constraints,
-				struct powercap_zone_constraint_ops *const_ops)
+			struct powercap_zone *power_zone,
+			struct powercap_control_type *control_type,
+			const char *name,
+			struct powercap_zone *parent,
+			const struct powercap_zone_ops *ops,
+			int nr_constraints,
+			const struct powercap_zone_constraint_ops *const_ops)
 {
 	int result;
 	int nr_attrs;
@@ -531,21 +538,23 @@ struct powercap_zone *powercap_register_zone(
 
 	power_zone->id = result;
 	idr_init(&power_zone->idr);
+	result = -ENOMEM;
 	power_zone->name = kstrdup(name, GFP_KERNEL);
 	if (!power_zone->name)
 		goto err_name_alloc;
 	dev_set_name(&power_zone->dev, "%s:%x",
 					dev_name(power_zone->dev.parent),
 					power_zone->id);
-	power_zone->constraints = kzalloc(sizeof(*power_zone->constraints) *
-					 nr_constraints, GFP_KERNEL);
+	power_zone->constraints = kcalloc(nr_constraints,
+					  sizeof(*power_zone->constraints),
+					  GFP_KERNEL);
 	if (!power_zone->constraints)
 		goto err_const_alloc;
 
 	nr_attrs = nr_constraints * POWERCAP_CONSTRAINTS_ATTRS +
 						POWERCAP_ZONE_MAX_ATTRS + 1;
-	power_zone->zone_dev_attrs = kzalloc(sizeof(void *) *
-						nr_attrs, GFP_KERNEL);
+	power_zone->zone_dev_attrs = kcalloc(nr_attrs, sizeof(void *),
+					     GFP_KERNEL);
 	if (!power_zone->zone_dev_attrs)
 		goto err_attr_alloc;
 	create_power_zone_common_attributes(power_zone);
@@ -665,15 +674,13 @@ EXPORT_SYMBOL_GPL(powercap_unregister_control_type);
 
 static int __init powercap_init(void)
 {
-	int result = 0;
+	int result;
 
 	result = seed_constraint_attributes();
 	if (result)
 		return result;
 
-	result = class_register(&powercap_class);
-
-	return result;
+	return class_register(&powercap_class);
 }
 
 device_initcall(powercap_init);

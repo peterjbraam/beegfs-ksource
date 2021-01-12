@@ -1,18 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (c) 2016 Avago Technologies.  All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of version 2 of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful.
- * ALL EXPRESS OR IMPLIED CONDITIONS, REPRESENTATIONS AND WARRANTIES,
- * INCLUDING ANY IMPLIED WARRANTY OF MERCHANTABILITY, FITNESS FOR A
- * PARTICULAR PURPOSE, OR NON-INFRINGEMENT, ARE DISCLAIMED, EXCEPT TO
- * THE EXTENT THAT SUCH DISCLAIMERS ARE HELD TO BE LEGALLY INVALID.
- * See the GNU General Public License for more details, a copy of which
- * can be found in the file COPYING included with this package
- *
  */
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 #include <linux/module.h>
@@ -26,7 +14,6 @@
 #include "fabrics.h"
 #include <linux/nvme-fc-driver.h>
 #include <linux/nvme-fc.h>
-#include <scsi/scsi_device.h>
 #include <scsi/scsi_transport_fc.h>
 
 /* *************************** Data Structures/Defines ****************** */
@@ -1221,8 +1208,7 @@ nvme_fc_connect_admin_queue(struct nvme_fc_ctrl *ctrl,
 	assoc_rqst->assoc_cmd.sqsize = cpu_to_be16(qsize - 1);
 	/* Linux supports only Dynamic controllers */
 	assoc_rqst->assoc_cmd.cntlid = cpu_to_be16(0xffff);
-	memcpy(&assoc_rqst->assoc_cmd.hostid, &ctrl->ctrl.opts->host->id,
-		min_t(size_t, FCNVME_ASSOC_HOSTID_LEN, sizeof(uuid_be)));
+	uuid_copy(&assoc_rqst->assoc_cmd.hostid, &ctrl->ctrl.opts->host->id);
 	strncpy(assoc_rqst->assoc_cmd.hostnqn, ctrl->ctrl.opts->host->nqn,
 		min(FCNVME_ASSOC_HOSTNQN_LEN, NVMF_NQN_SIZE));
 	strncpy(assoc_rqst->assoc_cmd.subnqn, ctrl->ctrl.opts->subsysnqn,
@@ -1977,7 +1963,7 @@ nvme_fc_connect_io_queues(struct nvme_fc_ctrl *ctrl, u16 qsize)
 					(qsize / 5));
 		if (ret)
 			break;
-		ret = nvmf_connect_io_queue(&ctrl->ctrl, i);
+		ret = nvmf_connect_io_queue(&ctrl->ctrl, i, false);
 		if (ret)
 			break;
 
@@ -2015,7 +2001,6 @@ nvme_fc_ctrl_free(struct kref *ref)
 
 	blk_mq_unquiesce_queue(ctrl->ctrl.admin_q);
 	blk_cleanup_queue(ctrl->ctrl.admin_q);
-	blk_cleanup_queue(ctrl->ctrl.fabrics_q);
 	blk_mq_free_tag_set(&ctrl->admin_tag_set);
 
 	kfree(ctrl->queues);
@@ -2117,28 +2102,28 @@ nvme_fc_map_data(struct nvme_fc_ctrl *ctrl, struct request *rq,
 		struct nvme_fc_fcp_op *op)
 {
 	struct nvmefc_fcp_req *freq = &op->fcp_req;
-	u32 map_len = nvme_map_len(rq);
 	enum dma_data_direction dir;
 	int ret;
 
 	freq->sg_cnt = 0;
 
-	if (!map_len)
+	if (!blk_rq_nr_phys_segments(rq))
 		return 0;
 
 	freq->sg_table.sgl = freq->first_sgl;
-	ret = sg_alloc_table_chained(&freq->sg_table, rq->nr_phys_segments,
-				     GFP_ATOMIC, freq->sg_table.sgl);
+	ret = sg_alloc_table_chained(&freq->sg_table,
+			blk_rq_nr_phys_segments(rq), freq->sg_table.sgl,
+			SG_CHUNK_SIZE);
 	if (ret)
 		return -ENOMEM;
 
 	op->nents = blk_rq_map_sg(rq->q, rq, freq->sg_table.sgl);
-	WARN_ON(op->nents > rq->nr_phys_segments);
+	WARN_ON(op->nents > blk_rq_nr_phys_segments(rq));
 	dir = (rq_data_dir(rq) == WRITE) ? DMA_TO_DEVICE : DMA_FROM_DEVICE;
 	freq->sg_cnt = fc_dma_map_sg(ctrl->lport->dev, freq->sg_table.sgl,
 				op->nents, dir);
 	if (unlikely(freq->sg_cnt <= 0)) {
-		sg_free_table_chained(&freq->sg_table, true);
+		sg_free_table_chained(&freq->sg_table, SG_CHUNK_SIZE);
 		freq->sg_cnt = 0;
 		return -EFAULT;
 	}
@@ -2164,7 +2149,7 @@ nvme_fc_unmap_data(struct nvme_fc_ctrl *ctrl, struct request *rq,
 
 	nvme_cleanup_cmd(rq);
 
-	sg_free_table_chained(&freq->sg_table, true);
+	sg_free_table_chained(&freq->sg_table, SG_CHUNK_SIZE);
 
 	freq->sg_cnt = 0;
 }
@@ -2192,7 +2177,7 @@ nvme_fc_unmap_data(struct nvme_fc_ctrl *ctrl, struct request *rq,
  * level FC exchange resource that is also outstanding. This must be
  * considered in all cleanup operations.
  */
-static int
+static blk_status_t
 nvme_fc_start_fcp_op(struct nvme_fc_ctrl *ctrl, struct nvme_fc_queue *queue,
 	struct nvme_fc_fcp_op *op, u32 data_len,
 	enum nvmefc_fcp_datadir	io_dir)
@@ -2206,10 +2191,10 @@ nvme_fc_start_fcp_op(struct nvme_fc_ctrl *ctrl, struct nvme_fc_queue *queue,
 	 * the target device is present
 	 */
 	if (ctrl->rport->remoteport.port_state != FC_OBJSTATE_ONLINE)
-		return BLK_MQ_RQ_QUEUE_BUSY;
+		return BLK_STS_RESOURCE;
 
 	if (!nvme_fc_ctrl_get(ctrl))
-		return BLK_MQ_RQ_QUEUE_ERROR;
+		return BLK_STS_IOERR;
 
 	/* format the FC-NVME CMD IU and fcp_req */
 	cmdiu->connection_id = cpu_to_be64(queue->connection_id);
@@ -2256,8 +2241,9 @@ nvme_fc_start_fcp_op(struct nvme_fc_ctrl *ctrl, struct nvme_fc_queue *queue,
 		if (ret < 0) {
 			nvme_cleanup_cmd(op->rq);
 			nvme_fc_ctrl_put(ctrl);
-			return (ret == -ENOMEM || ret == -EAGAIN) ?
-				BLK_MQ_RQ_QUEUE_BUSY : BLK_MQ_RQ_QUEUE_ERROR;
+			if (ret == -ENOMEM || ret == -EAGAIN)
+				return BLK_STS_RESOURCE;
+			return BLK_STS_IOERR;
 		}
 	}
 
@@ -2297,15 +2283,15 @@ nvme_fc_start_fcp_op(struct nvme_fc_ctrl *ctrl, struct nvme_fc_queue *queue,
 
 		if (ctrl->rport->remoteport.port_state == FC_OBJSTATE_ONLINE &&
 				ret != -EBUSY)
-			return BLK_MQ_RQ_QUEUE_ERROR;
+			return BLK_STS_IOERR;
 
-		return BLK_MQ_RQ_QUEUE_BUSY;
+		return BLK_STS_RESOURCE;
 	}
 
-	return BLK_MQ_RQ_QUEUE_OK;
+	return BLK_STS_OK;
 }
 
-static int
+static blk_status_t
 nvme_fc_queue_rq(struct blk_mq_hw_ctx *hctx,
 			const struct blk_mq_queue_data *bd)
 {
@@ -2319,7 +2305,7 @@ nvme_fc_queue_rq(struct blk_mq_hw_ctx *hctx,
 	enum nvmefc_fcp_datadir	io_dir;
 	bool queue_ready = test_bit(NVME_FC_Q_LIVE, &queue->flags);
 	u32 data_len;
-	int ret;
+	blk_status_t ret;
 
 	if (ctrl->rport->remoteport.port_state != FC_OBJSTATE_ONLINE ||
 	    !nvmf_check_ready(&queue->ctrl->ctrl, rq, queue_ready))
@@ -2329,12 +2315,23 @@ nvme_fc_queue_rq(struct blk_mq_hw_ctx *hctx,
 	if (ret)
 		return ret;
 
-	data_len = nvme_map_len(rq);
-	if (data_len)
+	/*
+	 * nvme core doesn't quite treat the rq opaquely. Commands such
+	 * as WRITE ZEROES will return a non-zero rq payload_bytes yet
+	 * there is no actual payload to be transferred.
+	 * To get it right, key data transmission on there being 1 or
+	 * more physical segments in the sg list. If there is no
+	 * physical segments, there is no payload.
+	 */
+	if (blk_rq_nr_phys_segments(rq)) {
+		data_len = blk_rq_payload_bytes(rq);
 		io_dir = ((rq_data_dir(rq) == WRITE) ?
 					NVMEFC_FCP_WRITE : NVMEFC_FCP_READ);
-	else
+	} else {
+		data_len = 0;
 		io_dir = NVMEFC_FCP_NODATA;
+	}
+
 
 	return nvme_fc_start_fcp_op(ctrl, queue, op, data_len, io_dir);
 }
@@ -2346,7 +2343,7 @@ nvme_fc_submit_async_event(struct nvme_ctrl *arg)
 	struct nvme_fc_fcp_op *aen_op;
 	unsigned long flags;
 	bool terminating = false;
-	int ret;
+	blk_status_t ret;
 
 	spin_lock_irqsave(&ctrl->lock, flags);
 	if (ctrl->flags & FCCTRL_TERMIO)
@@ -2391,24 +2388,19 @@ nvme_fc_complete_rq(struct request *rq)
  * status. The done path will return the io request back to the block
  * layer with an error status.
  */
-static void
+static bool
 nvme_fc_terminate_exchange(struct request *req, void *data, bool reserved)
 {
 	struct nvme_ctrl *nctrl = data;
 	struct nvme_fc_ctrl *ctrl = to_fc_ctrl(nctrl);
 	struct nvme_fc_fcp_op *op = blk_mq_rq_to_pdu(req);
 
-	if (!blk_mq_request_started(req))
-		return;
-
 	__nvme_fc_abort_op(ctrl, op);
+	return true;
 }
 
-static struct blk_mq_aux_ops nvme_fc_mq_aux_ops = {
-};
 
-static struct blk_mq_ops nvme_fc_mq_ops = {
-	.aux_ops	= &nvme_fc_mq_aux_ops,
+static const struct blk_mq_ops nvme_fc_mq_ops = {
 	.queue_rq	= nvme_fc_queue_rq,
 	.complete	= nvme_fc_complete_rq,
 	.init_request	= nvme_fc_init_request,
@@ -2443,7 +2435,7 @@ nvme_fc_create_io_queues(struct nvme_fc_ctrl *ctrl)
 	ctrl->tag_set.ops = &nvme_fc_mq_ops;
 	ctrl->tag_set.queue_depth = ctrl->ctrl.opts->queue_size;
 	ctrl->tag_set.reserved_tags = 1; /* fabric connect */
-	ctrl->tag_set.numa_node = NUMA_NO_NODE;
+	ctrl->tag_set.numa_node = ctrl->ctrl.numa_node;
 	ctrl->tag_set.flags = BLK_MQ_F_SHOULD_MERGE;
 	ctrl->tag_set.cmd_size =
 		struct_size((struct nvme_fcp_op_w_sgl *)NULL, priv,
@@ -2616,12 +2608,6 @@ nvme_fc_create_association(struct nvme_fc_ctrl *ctrl)
 	if (nvme_fc_ctlr_active_on_rport(ctrl))
 		return -ENOTUNIQ;
 
-	dev_info(ctrl->ctrl.device,
-		"NVME-FC{%d}: create association : host wwpn 0x%016llx "
-		" rport wwpn 0x%016llx: NQN \"%s\"\n",
-		ctrl->cnum, ctrl->lport->localport.port_name,
-		ctrl->rport->remoteport.port_name, ctrl->ctrl.opts->subsysnqn);
-
 	/*
 	 * Create the admin queue
 	 */
@@ -2635,6 +2621,8 @@ nvme_fc_create_association(struct nvme_fc_ctrl *ctrl)
 				NVME_AQ_DEPTH, (NVME_AQ_DEPTH / 4));
 	if (ret)
 		goto out_delete_hw_queue;
+
+	blk_mq_unquiesce_queue(ctrl->ctrl.admin_q);
 
 	ret = nvmf_connect_admin_queue(&ctrl->ctrl);
 	if (ret)
@@ -2665,8 +2653,6 @@ nvme_fc_create_association(struct nvme_fc_ctrl *ctrl)
 
 	ctrl->ctrl.max_hw_sectors =
 		(ctrl->lport->ops->max_sgl_segments - 1) << (PAGE_SHIFT - 9);
-
-	blk_mq_unquiesce_queue(ctrl->ctrl.admin_q);
 
 	ret = nvme_init_identify(&ctrl->ctrl);
 	if (ret)
@@ -2777,7 +2763,6 @@ nvme_fc_delete_association(struct nvme_fc_ctrl *ctrl)
 		nvme_stop_queues(&ctrl->ctrl);
 		blk_mq_tagset_busy_iter(&ctrl->tag_set,
 				nvme_fc_terminate_exchange, &ctrl->ctrl);
-		blk_mq_tagset_wait_completed_request(&ctrl->tag_set);
 	}
 
 	/*
@@ -2800,7 +2785,6 @@ nvme_fc_delete_association(struct nvme_fc_ctrl *ctrl)
 	blk_mq_quiesce_queue(ctrl->ctrl.admin_q);
 	blk_mq_tagset_busy_iter(&ctrl->admin_tag_set,
 				nvme_fc_terminate_exchange, &ctrl->ctrl);
-	blk_mq_tagset_wait_completed_request(&ctrl->admin_tag_set);
 
 	/* kill the aens as they are a separate path */
 	nvme_fc_abort_aen_ops(ctrl);
@@ -2899,22 +2883,10 @@ nvme_fc_reconnect_or_delete(struct nvme_fc_ctrl *ctrl, int status)
 static void
 __nvme_fc_terminate_io(struct nvme_fc_ctrl *ctrl)
 {
-	/*
-	 * if state is connecting - the error occurred as part of a
-	 * reconnect attempt. The create_association error paths will
-	 * clean up any outstanding io.
-	 *
-	 * if it's a different state - ensure all pending io is
-	 * terminated. Given this can delay while waiting for the
-	 * aborted io to return, we recheck adapter state below
-	 * before changing state.
-	 */
-	if (ctrl->ctrl.state != NVME_CTRL_CONNECTING) {
-		nvme_stop_keep_alive(&ctrl->ctrl);
+	nvme_stop_keep_alive(&ctrl->ctrl);
 
-		/* will block will waiting for io to terminate */
-		nvme_fc_delete_association(ctrl);
-	}
+	/* will block will waiting for io to terminate */
+	nvme_fc_delete_association(ctrl);
 
 	if (ctrl->ctrl.state != NVME_CTRL_CONNECTING &&
 	    !nvme_change_ctrl_state(&ctrl->ctrl, NVME_CTRL_CONNECTING))
@@ -2997,8 +2969,7 @@ nvme_fc_connect_ctrl_work(struct work_struct *work)
 }
 
 
-static struct blk_mq_ops nvme_fc_admin_mq_ops = {
-	.aux_ops	= &nvme_fc_mq_aux_ops,
+static const struct blk_mq_ops nvme_fc_admin_mq_ops = {
 	.queue_rq	= nvme_fc_queue_rq,
 	.complete	= nvme_fc_complete_rq,
 	.init_request	= nvme_fc_init_request,
@@ -3069,6 +3040,10 @@ nvme_fc_init_ctrl(struct device *dev, struct nvmf_ctrl_options *opts,
 
 	ctrl->ctrl.opts = opts;
 	ctrl->ctrl.nr_reconnects = 0;
+	if (lport->dev)
+		ctrl->ctrl.numa_node = dev_to_node(lport->dev);
+	else
+		ctrl->ctrl.numa_node = NUMA_NO_NODE;
 	INIT_LIST_HEAD(&ctrl->ctrl_list);
 	ctrl->lport = lport;
 	ctrl->rport = rport;
@@ -3109,7 +3084,7 @@ nvme_fc_init_ctrl(struct device *dev, struct nvmf_ctrl_options *opts,
 	ctrl->admin_tag_set.ops = &nvme_fc_admin_mq_ops;
 	ctrl->admin_tag_set.queue_depth = NVME_AQ_MQ_TAG_DEPTH;
 	ctrl->admin_tag_set.reserved_tags = 2; /* fabric connect + Keep-Alive */
-	ctrl->admin_tag_set.numa_node = NUMA_NO_NODE;
+	ctrl->admin_tag_set.numa_node = ctrl->ctrl.numa_node;
 	ctrl->admin_tag_set.cmd_size =
 		struct_size((struct nvme_fcp_op_w_sgl *)NULL, priv,
 			    ctrl->lport->ops->fcprqst_priv_sz);
@@ -3123,18 +3098,11 @@ nvme_fc_init_ctrl(struct device *dev, struct nvmf_ctrl_options *opts,
 		goto out_free_queues;
 	ctrl->ctrl.admin_tagset = &ctrl->admin_tag_set;
 
-	ctrl->ctrl.fabrics_q = blk_mq_init_queue(&ctrl->admin_tag_set);
-	if (IS_ERR(ctrl->ctrl.fabrics_q)) {
-		ret = PTR_ERR(ctrl->ctrl.fabrics_q);
-		goto out_free_admin_tag_set;
-	}
-
 	ctrl->ctrl.admin_q = blk_mq_init_queue(&ctrl->admin_tag_set);
 	if (IS_ERR(ctrl->ctrl.admin_q)) {
 		ret = PTR_ERR(ctrl->ctrl.admin_q);
-		goto out_cleanup_fabrics_q;
+		goto out_free_admin_tag_set;
 	}
-	ctrl->ctrl.admin_q->tail_queue = 1;
 
 	/*
 	 * Would have been nice to init io queues tag set as well.
@@ -3205,8 +3173,6 @@ fail_ctrl:
 
 out_cleanup_admin_q:
 	blk_cleanup_queue(ctrl->ctrl.admin_q);
-out_cleanup_fabrics_q:
-	blk_cleanup_queue(ctrl->ctrl.fabrics_q);
 out_free_admin_tag_set:
 	blk_mq_free_tag_set(&ctrl->admin_tag_set);
 out_free_queues:

@@ -1613,10 +1613,6 @@ void xhci_endpoint_copy(struct xhci_hcd *xhci,
 	in_ep_ctx->ep_info2 = out_ep_ctx->ep_info2;
 	in_ep_ctx->deq = out_ep_ctx->deq;
 	in_ep_ctx->tx_info = out_ep_ctx->tx_info;
-	if (xhci->quirks & XHCI_MTK_HOST) {
-		in_ep_ctx->reserved[0] = out_ep_ctx->reserved[0];
-		in_ep_ctx->reserved[1] = out_ep_ctx->reserved[1];
-	}
 }
 
 /* Copy output xhci_slot_ctx to the input xhci_slot_ctx.
@@ -2278,8 +2274,8 @@ static int xhci_setup_port_arrays(struct xhci_hcd *xhci, gfp_t flags)
 		xhci->hw_ports[i].hw_portnum = i;
 	}
 
-	xhci->rh_bw = kzalloc_node(sizeof(*xhci->rh_bw)*num_ports, flags,
-			dev_to_node(dev));
+	xhci->rh_bw = kcalloc_node(num_ports, sizeof(*xhci->rh_bw), flags,
+				   dev_to_node(dev));
 	if (!xhci->rh_bw)
 		return -ENOMEM;
 	for (i = 0; i < num_ports; i++) {

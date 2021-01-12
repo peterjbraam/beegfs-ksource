@@ -22,6 +22,7 @@
 #include <net/pkt_sched.h>
 #include <net/caif/caif_device.h>
 #include <net/caif/caif_layer.h>
+#include <net/caif/caif_dev.h>
 #include <net/caif/cfpkt.h>
 #include <net/caif/cfcnfg.h>
 #include <net/caif/cfserl.h>
@@ -51,7 +52,7 @@ struct caif_net {
 	struct caif_device_entry_list caifdevs;
 };
 
-static int caif_net_id;
+static unsigned int caif_net_id;
 static int q_high = 50; /* Percent */
 
 struct cfcnfg *get_cfcnfg(struct net *net)
@@ -130,8 +131,10 @@ static void caif_flow_cb(struct sk_buff *skb)
 	caifd = caif_get(skb->dev);
 
 	WARN_ON(caifd == NULL);
-	if (caifd == NULL)
+	if (!caifd) {
+		rcu_read_unlock();
 		return;
+	}
 
 	caifd_hold(caifd);
 	rcu_read_unlock();
@@ -176,22 +179,26 @@ static int transmit(struct cflayer *layer, struct cfpkt *pkt)
 	skb->protocol = htons(ETH_P_CAIF);
 
 	/* Check if we need to handle xoff */
-	if (likely(caifd->netdev->tx_queue_len == 0))
+	if (likely(caifd->netdev->priv_flags & IFF_NO_QUEUE))
 		goto noxoff;
 
 	if (unlikely(caifd->xoff))
 		goto noxoff;
 
 	if (likely(!netif_queue_stopped(caifd->netdev))) {
+		struct Qdisc *sch;
+
 		/* If we run with a TX queue, check if the queue is too long*/
 		txq = netdev_get_tx_queue(skb->dev, 0);
-		qlen = qdisc_qlen(rcu_dereference_bh(txq->qdisc));
-
-		if (likely(qlen == 0))
+		sch = rcu_dereference_bh(txq->qdisc);
+		if (likely(qdisc_is_empty(sch)))
 			goto noxoff;
 
+		/* can check for explicit qdisc len value only !NOLOCK,
+		 * always set flow off otherwise
+		 */
 		high = (caifd->netdev->tx_queue_len * q_high) / 100;
-		if (likely(qlen < high))
+		if (!(sch->flags & TCQ_F_NOLOCK) && likely(sch->q.qlen < high))
 			goto noxoff;
 	}
 
@@ -333,9 +340,8 @@ void caif_enroll_dev(struct net_device *dev, struct caif_dev_common *caifdev,
 	mutex_lock(&caifdevs->lock);
 	list_add_rcu(&caifd->list, &caifdevs->list);
 
-	strncpy(caifd->layer.name, dev->name,
-		sizeof(caifd->layer.name) - 1);
-	caifd->layer.name[sizeof(caifd->layer.name) - 1] = 0;
+	strlcpy(caifd->layer.name, dev->name,
+		sizeof(caifd->layer.name));
 	caifd->layer.transmit = transmit;
 	cfcnfg_add_phy_layer(cfg,
 				dev,
@@ -556,7 +562,7 @@ static int __init caif_device_init(void)
 	if (result)
 		return result;
 
-	register_netdevice_notifier_rh(&caif_device_notifier);
+	register_netdevice_notifier(&caif_device_notifier);
 	dev_add_pack(&caif_packet_type);
 
 	return result;
@@ -564,7 +570,7 @@ static int __init caif_device_init(void)
 
 static void __exit caif_device_exit(void)
 {
-	unregister_netdevice_notifier_rh(&caif_device_notifier);
+	unregister_netdevice_notifier(&caif_device_notifier);
 	dev_remove_pack(&caif_packet_type);
 	unregister_pernet_subsys(&caif_net_ops);
 }

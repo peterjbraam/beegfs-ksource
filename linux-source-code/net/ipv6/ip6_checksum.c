@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <net/ip.h>
 #include <net/udp.h>
 #include <net/udplite.h>
@@ -6,8 +7,7 @@
 #ifndef _HAVE_ARCH_IPV6_CSUM
 __sum16 csum_ipv6_magic(const struct in6_addr *saddr,
 			const struct in6_addr *daddr,
-			__u32 len, unsigned short proto,
-			__wsum csum)
+			__u32 len, __u8 proto, __wsum csum)
 {
 
 	int carry;

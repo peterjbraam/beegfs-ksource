@@ -12,7 +12,7 @@
  * particular cpu can (and will) wrap - this is fine, when we go to shutdown the
  * percpu counters will all sum to the correct value
  *
- * (More precisely: because moduler arithmatic is commutative the sum of all the
+ * (More precisely: because modular arithmetic is commutative the sum of all the
  * percpu_count vars will be equal to what it would have been if all the gets
  * and puts were done to a single integer, even if some of the percpu integers
  * overflow or underflow).
@@ -356,11 +356,35 @@ EXPORT_SYMBOL_GPL(percpu_ref_kill_and_confirm);
  */
 void percpu_ref_reinit(struct percpu_ref *ref)
 {
+	WARN_ON_ONCE(!percpu_ref_is_zero(ref));
+
+	percpu_ref_resurrect(ref);
+}
+EXPORT_SYMBOL_GPL(percpu_ref_reinit);
+
+/**
+ * percpu_ref_resurrect - modify a percpu refcount from dead to live
+ * @ref: perpcu_ref to resurrect
+ *
+ * Modify @ref so that it's in the same state as before percpu_ref_kill() was
+ * called. @ref must be dead but must not yet have exited.
+ *
+ * If @ref->release() frees @ref then the caller is responsible for
+ * guaranteeing that @ref->release() does not get called while this
+ * function is in progress.
+ *
+ * Note that percpu_ref_tryget[_live]() are safe to perform on @ref while
+ * this function is in progress.
+ */
+void percpu_ref_resurrect(struct percpu_ref *ref)
+{
+	unsigned long __percpu *percpu_count;
 	unsigned long flags;
 
 	spin_lock_irqsave(&percpu_ref_switch_lock, flags);
 
-	WARN_ON_ONCE(!percpu_ref_is_zero(ref));
+	WARN_ON_ONCE(!(ref->percpu_count_ptr & __PERCPU_REF_DEAD));
+	WARN_ON_ONCE(__ref_is_percpu(ref, &percpu_count));
 
 	ref->percpu_count_ptr &= ~__PERCPU_REF_DEAD;
 	percpu_ref_get(ref);
@@ -368,4 +392,4 @@ void percpu_ref_reinit(struct percpu_ref *ref)
 
 	spin_unlock_irqrestore(&percpu_ref_switch_lock, flags);
 }
-EXPORT_SYMBOL_GPL(percpu_ref_reinit);
+EXPORT_SYMBOL_GPL(percpu_ref_resurrect);

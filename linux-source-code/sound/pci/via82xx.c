@@ -92,7 +92,7 @@ module_param(index, int, 0444);
 MODULE_PARM_DESC(index, "Index value for VIA 82xx bridge.");
 module_param(id, charp, 0444);
 MODULE_PARM_DESC(id, "ID string for VIA 82xx bridge.");
-module_param(mpu_port, long, 0444);
+module_param_hw(mpu_port, long, ioport, 0444);
 MODULE_PARM_DESC(mpu_port, "MPU-401 port. (VT82C686x only)");
 #ifdef SUPPORT_JOYSTICK
 module_param(joystick, bool, 0444);
@@ -2276,8 +2276,6 @@ static int snd_via82xx_suspend(struct device *dev)
 	int i;
 
 	snd_power_change_state(card, SNDRV_CTL_POWER_D3hot);
-	for (i = 0; i < 2; i++)
-		snd_pcm_suspend_all(chip->pcms[i]);
 	for (i = 0; i < chip->num_devs; i++)
 		snd_via82xx_channel_reset(chip, &chip->devs[i]);
 	synchronize_irq(chip->irq);

@@ -9,7 +9,7 @@
 
 #include <linux/delay.h>
 #include <linux/moduleparam.h>
-#include <asm/cmpxchg.h>
+#include <linux/atomic.h>
 #include "net_driver.h"
 #include "nic.h"
 #include "io.h"
@@ -375,7 +375,7 @@ static int efx_mcdi_poll(struct efx_nic *efx)
 	 * because generally mcdi responses are fast. After that, back off
 	 * and poll once a jiffy (approximately)
 	 */
-	spins = TICK_USEC;
+	spins = USER_TICK_USEC;
 	finish = jiffies + MCDI_RPC_TIMEOUT;
 
 	while (1) {

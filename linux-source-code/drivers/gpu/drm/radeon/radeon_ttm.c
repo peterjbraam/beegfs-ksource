@@ -538,7 +538,7 @@ release_sg:
 	kfree(ttm->sg);
 
 release_pages:
-	release_pages(ttm->pages, pinned, 0);
+	release_pages(ttm->pages, pinned);
 	return r;
 }
 
@@ -882,21 +882,21 @@ void radeon_ttm_set_active_vram_size(struct radeon_device *rdev, u64 size)
 static struct vm_operations_struct radeon_ttm_vm_ops;
 static const struct vm_operations_struct *ttm_vm_ops = NULL;
 
-static int radeon_ttm_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
+static vm_fault_t radeon_ttm_fault(struct vm_fault *vmf)
 {
 	struct ttm_buffer_object *bo;
 	struct radeon_device *rdev;
-	int r;
+	vm_fault_t ret;
 
-	bo = (struct ttm_buffer_object *)vma->vm_private_data;
+	bo = (struct ttm_buffer_object *)vmf->vma->vm_private_data;
 	if (bo == NULL) {
 		return VM_FAULT_NOPAGE;
 	}
 	rdev = radeon_get_rdev(bo->bdev);
 	down_read(&rdev->pm.mclk_lock);
-	r = ttm_vm_ops->fault(vma, vmf);
+	ret = ttm_vm_ops->fault(vmf);
 	up_read(&rdev->pm.mclk_lock);
-	return r;
+	return ret;
 }
 
 int radeon_mmap(struct file *filp, struct vm_area_struct *vma)

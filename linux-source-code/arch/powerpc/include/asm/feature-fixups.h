@@ -19,11 +19,11 @@
  */
 #if defined(CONFIG_PPC64) && !defined(__powerpc64__)
 /* 64 bits kernel, 32 bits code (ie. vdso32) */
-#define FTR_ENTRY_LONG		.llong
+#define FTR_ENTRY_LONG		.8byte
 #define FTR_ENTRY_OFFSET	.long 0xffffffff; .long
 #elif defined(CONFIG_PPC64)
-#define FTR_ENTRY_LONG		.llong
-#define FTR_ENTRY_OFFSET	.llong
+#define FTR_ENTRY_LONG		.8byte
+#define FTR_ENTRY_OFFSET	.8byte
 #else
 #define FTR_ENTRY_LONG		.long
 #define FTR_ENTRY_OFFSET	.long
@@ -65,6 +65,9 @@ label##5:							\
 
 #define END_FTR_SECTION(msk, val)		\
 	END_FTR_SECTION_NESTED(msk, val, 97)
+
+#define END_FTR_SECTION_NESTED_IFSET(msk, label)	\
+	END_FTR_SECTION_NESTED((msk), (msk), label)
 
 #define END_FTR_SECTION_IFSET(msk)	END_FTR_SECTION((msk), (msk))
 #define END_FTR_SECTION_IFCLR(msk)	END_FTR_SECTION((msk), 0)
@@ -144,6 +147,46 @@ label##5:							\
 #define ALT_FW_FTR_SECTION_END_IFCLR(msk)	\
 	ALT_FW_FTR_SECTION_END_NESTED_IFCLR(msk, 97)
 
+#ifndef __ASSEMBLY__
+
+#define ASM_FTR_IF(section_if, section_else, msk, val)	\
+	stringify_in_c(BEGIN_FTR_SECTION)			\
+	section_if "; "						\
+	stringify_in_c(FTR_SECTION_ELSE)			\
+	section_else "; "					\
+	stringify_in_c(ALT_FTR_SECTION_END((msk), (val)))
+
+#define ASM_FTR_IFSET(section_if, section_else, msk)	\
+	ASM_FTR_IF(section_if, section_else, (msk), (msk))
+
+#define ASM_FTR_IFCLR(section_if, section_else, msk)	\
+	ASM_FTR_IF(section_if, section_else, (msk), 0)
+
+#define ASM_MMU_FTR_IF(section_if, section_else, msk, val)	\
+	stringify_in_c(BEGIN_MMU_FTR_SECTION)			\
+	section_if "; "						\
+	stringify_in_c(MMU_FTR_SECTION_ELSE)			\
+	section_else "; "					\
+	stringify_in_c(ALT_MMU_FTR_SECTION_END((msk), (val)))
+
+#define ASM_MMU_FTR_IFSET(section_if, section_else, msk)	\
+	ASM_MMU_FTR_IF(section_if, section_else, (msk), (msk))
+
+#define ASM_MMU_FTR_IFCLR(section_if, section_else, msk)	\
+	ASM_MMU_FTR_IF(section_if, section_else, (msk), 0)
+
+#endif /* __ASSEMBLY__ */
+
+/* LWSYNC feature sections */
+#define START_LWSYNC_SECTION(label)	label##1:
+#define MAKE_LWSYNC_SECTION_ENTRY(label, sect)		\
+label##2:						\
+	.pushsection sect,"a";				\
+	.align 2;					\
+label##3:					       	\
+	FTR_ENTRY_OFFSET label##1b-label##3b;		\
+	.popsection;
+
 #define STF_ENTRY_BARRIER_FIXUP_SECTION			\
 953:							\
 	.pushsection __stf_entry_barrier_fixup,"a";	\
@@ -186,42 +229,8 @@ extern long __start___stf_exit_barrier_fixup, __stop___stf_exit_barrier_fixup;
 extern long __start___rfi_flush_fixup, __stop___rfi_flush_fixup;
 extern long __start___barrier_nospec_fixup, __stop___barrier_nospec_fixup;
 
-#define ASM_FTR_IF(section_if, section_else, msk, val)	\
-	stringify_in_c(BEGIN_FTR_SECTION)			\
-	section_if "; "						\
-	stringify_in_c(FTR_SECTION_ELSE)			\
-	section_else "; "					\
-	stringify_in_c(ALT_FTR_SECTION_END((msk), (val)))
-
-#define ASM_FTR_IFSET(section_if, section_else, msk)	\
-	ASM_FTR_IF(section_if, section_else, (msk), (msk))
-
-#define ASM_FTR_IFCLR(section_if, section_else, msk)	\
-	ASM_FTR_IF(section_if, section_else, (msk), 0)
-
-#define ASM_MMU_FTR_IF(section_if, section_else, msk, val)	\
-	stringify_in_c(BEGIN_MMU_FTR_SECTION)			\
-	section_if "; "						\
-	stringify_in_c(MMU_FTR_SECTION_ELSE)			\
-	section_else "; "					\
-	stringify_in_c(ALT_MMU_FTR_SECTION_END((msk), (val)))
-
-#define ASM_MMU_FTR_IFSET(section_if, section_else, msk)	\
-	ASM_MMU_FTR_IF(section_if, section_else, (msk), (msk))
-
-#define ASM_MMU_FTR_IFCLR(section_if, section_else, msk)	\
-	ASM_MMU_FTR_IF(section_if, section_else, (msk), 0)
-
-#endif /* __ASSEMBLY__ */
-
-/* LWSYNC feature sections */
-#define START_LWSYNC_SECTION(label)	label##1:
-#define MAKE_LWSYNC_SECTION_ENTRY(label, sect)		\
-label##2:						\
-	.pushsection sect,"a";				\
-	.align 2;					\
-label##3:					       	\
-	FTR_ENTRY_OFFSET label##1b-label##3b;		\
-	.popsection;
+void apply_feature_fixups(void);
+void setup_feature_keys(void);
+#endif
 
 #endif /* __ASM_POWERPC_FEATURE_FIXUPS_H */

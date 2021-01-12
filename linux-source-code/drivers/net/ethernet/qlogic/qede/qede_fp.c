@@ -1116,10 +1116,13 @@ static bool qede_rx_xdp(struct qede_dev *edev,
 		/* Regardless, we've consumed an Rx BD */
 		qede_rx_bd_ring_consume(rxq);
 		return false;
+
 	default:
 		bpf_warn_invalid_xdp_action(act);
+		/* Fall through */
 	case XDP_ABORTED:
 		trace_xdp_exception(edev->ndev, prog, act);
+		/* Fall through */
 	case XDP_DROP:
 		qede_recycle_rx_bd_ring(rxq, cqe->bd_num);
 	}
@@ -1249,7 +1252,7 @@ static int qede_rx_process_cqe(struct qede_dev *edev,
 	if (xdp_prog)
 		if (!qede_rx_xdp(edev, fp, rxq, xdp_prog, bd, fp_cqe,
 				 &pad, &len))
-			return 1;
+			return 0;
 
 	/* If this is an error packet then drop it */
 	flags = cqe->fast_path_regular.pars_flags.flags;
@@ -1693,7 +1696,8 @@ netdev_tx_t qede_start_xmit(struct sk_buff *skb, struct net_device *ndev)
 }
 
 u16 qede_select_queue(struct net_device *dev, struct sk_buff *skb,
-		      void *accel_priv, select_queue_fallback_t fallback)
+		      struct net_device *sb_dev,
+		      select_queue_fallback_t fallback)
 {
 	struct qede_dev *edev = netdev_priv(dev);
 	int total_txq;
@@ -1701,7 +1705,7 @@ u16 qede_select_queue(struct net_device *dev, struct sk_buff *skb,
 	total_txq = QEDE_TSS_COUNT(edev) * edev->dev_info.num_tc;
 
 	return QEDE_TSS_COUNT(edev) ?
-		fallback(dev, skb) % total_txq :  0;
+		fallback(dev, skb, NULL) % total_txq :  0;
 }
 
 /* 8B udp header + 8B base tunnel header + 32B option length */

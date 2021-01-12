@@ -19,7 +19,6 @@
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/wait.h>
-#include <linux/sizes.h>
 
 #include "nfp_arm.h"
 #include "nfp_cpp.h"

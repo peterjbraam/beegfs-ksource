@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * zfcp device driver
  *
@@ -134,10 +135,10 @@ static void zfcp_ccw_remove(struct ccw_device *cdev)
 	zfcp_ccw_adapter_put(adapter); /* put from zfcp_ccw_adapter_by_cdev */
 
 	list_for_each_entry_safe(unit, u, &unit_remove_lh, list)
-		zfcp_device_unregister(&unit->dev, &zfcp_sysfs_unit_attrs);
+		device_unregister(&unit->dev);
 
 	list_for_each_entry_safe(port, p, &port_remove_lh, list)
-		zfcp_device_unregister(&port->dev, &zfcp_sysfs_port_attrs);
+		device_unregister(&port->dev);
 
 	zfcp_adapter_unregister(adapter);
 }

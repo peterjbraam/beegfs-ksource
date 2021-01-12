@@ -1,20 +1,20 @@
-/* Copyright (c) 2012 Coraid, Inc.  See COPYING for GPL terms. */
+/* Copyright (c) 2013 Coraid, Inc.  See COPYING for GPL terms. */
 /*
  * aoedev.c
  * AoE device utility functions; maintains device list.
  */
 
 #include <linux/hdreg.h>
-#include <linux/blkdev.h>
+#include <linux/blk-mq.h>
 #include <linux/netdevice.h>
 #include <linux/delay.h>
 #include <linux/slab.h>
 #include <linux/bitmap.h>
 #include <linux/kdev_t.h>
 #include <linux/moduleparam.h>
+#include <linux/string.h>
 #include "aoe.h"
 
-static void dummy_timer(ulong);
 static void freetgt(struct aoedev *d, struct aoetgt *t);
 static void skbpoolfree(struct aoedev *d);
 
@@ -145,11 +145,11 @@ aoedev_put(struct aoedev *d)
 }
 
 static void
-dummy_timer(ulong vp)
+dummy_timer(struct timer_list *t)
 {
 	struct aoedev *d;
 
-	d = (struct aoedev *)vp;
+	d = from_timer(d, t, timer);
 	if (d->flags & DEVFL_TKILL)
 		return;
 	d->timer.expires = jiffies + HZ;
@@ -160,21 +160,22 @@ static void
 aoe_failip(struct aoedev *d)
 {
 	struct request *rq;
+	struct aoe_req *req;
 	struct bio *bio;
-	unsigned long n;
 
 	aoe_failbuf(d, d->ip.buf);
-
 	rq = d->ip.rq;
 	if (rq == NULL)
 		return;
+
+	req = blk_mq_rq_to_pdu(rq);
 	while ((bio = d->ip.nxbio)) {
-		clear_bit(BIO_UPTODATE, &bio->bi_flags);
+		bio->bi_status = BLK_STS_IOERR;
 		d->ip.nxbio = bio->bi_next;
-		n = (unsigned long) rq->special;
-		rq->special = (void *) --n;
+		req->nr_bios--;
 	}
-	if ((unsigned long) rq->special == 0)
+
+	if (!req->nr_bios)
 		aoe_end_request(d, rq, 0);
 }
 
@@ -197,7 +198,6 @@ aoedev_downdev(struct aoedev *d)
 {
 	struct aoetgt *t, **tt, **te;
 	struct list_head *head, *pos, *nx;
-	struct request *rq;
 	int i;
 
 	d->flags &= ~DEVFL_UP;
@@ -225,10 +225,11 @@ aoedev_downdev(struct aoedev *d)
 
 	/* fast fail all pending I/O */
 	if (d->blkq) {
-		while ((rq = blk_peek_request(d->blkq))) {
-			blk_start_request(rq);
-			aoe_end_request(d, rq, 1);
-		}
+		/* UP is cleared, freeze+quiesce to insure all are errored */
+		blk_mq_freeze_queue(d->blkq);
+		blk_mq_quiesce_queue(d->blkq);
+		blk_mq_unquiesce_queue(d->blkq);
+		blk_mq_unfreeze_queue(d->blkq);
 	}
 
 	if (d->gd)
@@ -241,16 +242,12 @@ aoedev_downdev(struct aoedev *d)
 static int
 user_req(char *s, size_t slen, struct aoedev *d)
 {
-	char *p;
+	const char *p;
 	size_t lim;
 
 	if (!d->gd)
 		return 0;
-	p = strrchr(d->gd->disk_name, '/');
-	if (!p)
-		p = d->gd->disk_name;
-	else
-		p += 1;
+	p = kbasename(d->gd->disk_name);
 	lim = sizeof(d->gd->disk_name);
 	lim -= p - d->gd->disk_name;
 	if (slen < lim)
@@ -278,16 +275,19 @@ freedev(struct aoedev *d)
 
 	del_timer_sync(&d->timer);
 	if (d->gd) {
+		aoedisk_rm_debugfs(d);
+		aoedisk_rm_sysfs(d);
 		del_gendisk(d->gd);
 		put_disk(d->gd);
+		blk_mq_free_tag_set(&d->tag_set);
 		blk_cleanup_queue(d->blkq);
 	}
 	t = d->targets;
 	e = t + d->ntargets;
 	for (; t < e && *t; t++)
 		freetgt(d, *t);
-	if (d->bufpool)
-		mempool_destroy(d->bufpool);
+
+	mempool_destroy(d->bufpool);
 	skbpoolfree(d);
 	minor_free(d->sysminor);
 
@@ -466,10 +466,9 @@ aoedev_by_aoeaddr(ulong maj, int min, int do_alloc)
 	d->ntargets = NTARGETS;
 	INIT_WORK(&d->work, aoecmd_sleepwork);
 	spin_lock_init(&d->lock);
+	INIT_LIST_HEAD(&d->rq_list);
 	skb_queue_head_init(&d->skbpool);
-	init_timer(&d->timer);
-	d->timer.data = (ulong) d;
-	d->timer.function = dummy_timer;
+	timer_setup(&d->timer, dummy_timer, 0);
 	d->timer.expires = jiffies + HZ;
 	add_timer(&d->timer);
 	d->bufpool = NULL;	/* defer to aoeblk_gdalloc */
@@ -517,7 +516,6 @@ void
 aoedev_exit(void)
 {
 	flush_scheduled_work();
-	aoe_flush_iocq();
 	flush(NULL, 0, EXITING);
 }
 

@@ -126,9 +126,6 @@ enum mlx5e_connector_type {
 	(ext ? MLX5_GET(reg, out, ext_##field) :	\
 	MLX5_GET(reg, out, field))
 
-#define PORT_MODULE_EVENT_MODULE_STATUS_MASK 0xF
-#define PORT_MODULE_EVENT_ERROR_TYPE_MASK         0xF
-
 int mlx5_set_port_caps(struct mlx5_core_dev *dev, u8 port_num, u32 caps);
 int mlx5_query_port_ptys(struct mlx5_core_dev *dev, u32 *ptys,
 			 int ptys_size, int proto_mask, u8 local_port);

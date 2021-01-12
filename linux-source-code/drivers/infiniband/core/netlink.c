@@ -154,7 +154,8 @@ int ibnl_put_attr(struct sk_buff *skb, struct nlmsghdr *nlh,
 }
 EXPORT_SYMBOL(ibnl_put_attr);
 
-static int rdma_nl_rcv_msg(struct sk_buff *skb, struct nlmsghdr *nlh)
+static int rdma_nl_rcv_msg(struct sk_buff *skb, struct nlmsghdr *nlh,
+			   struct netlink_ext_ack *extack)
 {
 	int type = nlh->nlmsg_type;
 	unsigned int index = RDMA_NL_GET_CLIENT(type);
@@ -176,7 +177,7 @@ static int rdma_nl_rcv_msg(struct sk_buff *skb, struct nlmsghdr *nlh)
 	 */
 	if (index == RDMA_NL_LS) {
 		if (cb_table[op].doit)
-			return cb_table[op].doit(skb, nlh);
+			return cb_table[op].doit(skb, nlh, extack);
 		return -EINVAL;
 	}
 	/* FIXME: Convert IWCM to properly handle doit callbacks */
@@ -191,7 +192,7 @@ static int rdma_nl_rcv_msg(struct sk_buff *skb, struct nlmsghdr *nlh)
 	}
 
 	if (cb_table[op].doit)
-		return cb_table[op].doit(skb, nlh);
+		return cb_table[op].doit(skb, nlh, extack);
 
 	return 0;
 }
@@ -203,8 +204,10 @@ static int rdma_nl_rcv_msg(struct sk_buff *skb, struct nlmsghdr *nlh)
  * for that consumer only.
  */
 static int rdma_nl_rcv_skb(struct sk_buff *skb, int (*cb)(struct sk_buff *,
-						   struct nlmsghdr *))
+						   struct nlmsghdr *,
+						   struct netlink_ext_ack *))
 {
+	struct netlink_ext_ack extack = {};
 	struct nlmsghdr *nlh;
 	int err;
 
@@ -232,13 +235,13 @@ static int rdma_nl_rcv_skb(struct sk_buff *skb, int (*cb)(struct sk_buff *,
 		if (nlh->nlmsg_type < NLMSG_MIN_TYPE)
 			goto ack;
 
-		err = cb(skb, nlh);
+		err = cb(skb, nlh, &extack);
 		if (err == -EINTR)
 			goto skip;
 
 ack:
 		if (nlh->nlmsg_flags & NLM_F_ACK || err)
-			netlink_ack(skb, nlh, err);
+			netlink_ack(skb, nlh, err, &extack);
 
 skip:
 		msglen = NLMSG_ALIGN(nlh->nlmsg_len);

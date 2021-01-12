@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __PERF_MAP_H
 #define __PERF_MAP_H
 
@@ -143,7 +144,7 @@ struct thread;
 void map__init(struct map *map,
 	       u64 start, u64 end, u64 pgoff, struct dso *dso);
 struct map *map__new(struct machine *machine, u64 start, u64 len,
-		     u64 pgoff, u32 pid, u32 d_maj, u32 d_min, u64 ino,
+		     u64 pgoff, u32 d_maj, u32 d_min, u64 ino,
 		     u64 ino_gen, u32 prot, u32 flags,
 		     char *filename, struct thread *thread);
 struct map *map__new2(u64 start, struct dso *dso);
@@ -167,12 +168,27 @@ static inline void __map__zput(struct map **map)
 
 #define map__zput(map) __map__zput(&map)
 
-int map__overlap(struct map *l, struct map *r);
 size_t map__fprintf(struct map *map, FILE *fp);
 size_t map__fprintf_dsoname(struct map *map, FILE *fp);
 char *map__srcline(struct map *map, u64 addr, struct symbol *sym);
 int map__fprintf_srcline(struct map *map, u64 addr, const char *prefix,
 			 FILE *fp);
+
+struct srccode_state {
+	char *srcfile;
+	unsigned line;
+};
+
+static inline void srccode_state_init(struct srccode_state *state)
+{
+	state->srcfile = NULL;
+	state->line = 0;
+}
+
+void srccode_state_free(struct srccode_state *state);
+
+int map__fprintf_srccode(struct map *map, u64 addr,
+			 FILE *fp, struct srccode_state *state);
 
 int map__load(struct map *map);
 struct symbol *map__find_symbol(struct map *map, u64 addr);

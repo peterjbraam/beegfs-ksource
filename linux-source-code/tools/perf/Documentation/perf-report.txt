@@ -72,7 +72,8 @@ OPTIONS
 --sort=::
 	Sort histogram entries by given key(s) - multiple keys can be specified
 	in CSV format.  Following sort keys are available:
-	pid, comm, dso, symbol, parent, cpu, socket, srcline, weight, local_weight.
+	pid, comm, dso, symbol, parent, cpu, socket, srcline, weight,
+	local_weight, cgroup_id.
 
 	Each key has following meaning:
 
@@ -93,6 +94,7 @@ OPTIONS
 	- weight: Event specific weight, e.g. memory latency or transaction
 	abort cost. This is the global weight.
 	- local_weight: Local weight version of the weight above.
+	- cgroup_id: ID derived from cgroup namespace device and inode numbers.
 	- transaction: Transaction abort flags.
 	- overhead: Overhead percentage of sample
 	- overhead_sys: Overhead percentage of sample running in system mode
@@ -123,6 +125,14 @@ OPTIONS
 
 	And default sort keys are changed to comm, dso_from, symbol_from, dso_to
 	and symbol_to, see '--branch-stack'.
+
+	When the sort key symbol is specified, columns "IPC" and "IPC Coverage"
+	are enabled automatically. Column "IPC" reports the average IPC per function
+	and column "IPC coverage" reports the percentage of instructions with
+	sampled IPC in this function. IPC means Instruction Per Cycle. If it's low,
+	it indicates there may be a performance bottleneck when the function is
+	executed, such as a memory access bottleneck. If a function has high overhead
+	and low IPC, it's worth further analyzing it to optimize its performance.
 
 	If the --mem-mode option is used, the following sort keys are also available
 	(incompatible with --branch-stack):
@@ -242,7 +252,7 @@ OPTIONS
 	          Usually more convenient to use --branch-history for this.
 
 	value can be:
-	- percent: diplay overhead percent (default)
+	- percent: display overhead percent (default)
 	- period: display event period
 	- count: display event count
 
@@ -261,7 +271,7 @@ OPTIONS
 	Note that when using the --itrace option the synthesized callchain size
 	will override this value if the synthesized callchain size is bigger.
 
-	Default: /proc/sys/kernel/perf_event_max_stack when present, 127 otherwise.
+	Default: 127
 
 -G::
 --inverted::

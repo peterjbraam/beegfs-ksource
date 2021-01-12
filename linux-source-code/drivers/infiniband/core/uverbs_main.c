@@ -53,8 +53,8 @@
 #include <rdma/uverbs_std_types.h>
 
 #include "uverbs.h"
-#include "rdma_core.h"
 #include "core_priv.h"
+#include "rdma_core.h"
 
 MODULE_AUTHOR("Roland Dreier");
 MODULE_DESCRIPTION("InfiniBand userspace verbs access");
@@ -73,7 +73,7 @@ enum {
 static dev_t dynamic_uverbs_dev;
 static struct class *uverbs_class;
 
-static DECLARE_BITMAP(dev_map, IB_UVERBS_MAX_DEVICES);
+static DEFINE_IDA(uverbs_ida);
 static void ib_uverbs_add_one(struct ib_device *device);
 static void ib_uverbs_remove_one(struct ib_device *device, void *client_data);
 
@@ -106,7 +106,7 @@ int uverbs_dealloc_mw(struct ib_mw *mw)
 	struct ib_pd *pd = mw->pd;
 	int ret;
 
-	ret = mw->device->dealloc_mw(mw);
+	ret = mw->device->ops.dealloc_mw(mw);
 	if (!ret)
 		atomic_dec(&pd->usecnt);
 	return ret;
@@ -197,7 +197,7 @@ void ib_uverbs_release_file(struct kref *ref)
 	srcu_key = srcu_read_lock(&file->device->disassociate_srcu);
 	ib_dev = srcu_dereference(file->device->ib_dev,
 				  &file->device->disassociate_srcu);
-	if (ib_dev && !ib_dev->disassociate_ucontext)
+	if (ib_dev && !ib_dev->ops.disassociate_ucontext)
 		module_put(ib_dev->owner);
 	srcu_read_unlock(&file->device->disassociate_srcu, srcu_key);
 
@@ -208,6 +208,9 @@ void ib_uverbs_release_file(struct kref *ref)
 		kref_put(&file->async_file->ref,
 			 ib_uverbs_release_async_event_file);
 	put_device(&file->device->dev);
+
+	if (file->disassociate_page)
+		__free_pages(file->disassociate_page, 0);
 	kfree(file);
 }
 
@@ -294,29 +297,29 @@ static ssize_t ib_uverbs_comp_event_read(struct file *filp, char __user *buf,
 				    sizeof(struct ib_uverbs_comp_event_desc));
 }
 
-static unsigned int ib_uverbs_event_poll(struct ib_uverbs_event_queue *ev_queue,
+static __poll_t ib_uverbs_event_poll(struct ib_uverbs_event_queue *ev_queue,
 					 struct file *filp,
 					 struct poll_table_struct *wait)
 {
-	unsigned int pollflags = 0;
+	__poll_t pollflags = 0;
 
 	poll_wait(filp, &ev_queue->poll_wait, wait);
 
 	spin_lock_irq(&ev_queue->lock);
 	if (!list_empty(&ev_queue->event_list))
-		pollflags = POLLIN | POLLRDNORM;
+		pollflags = EPOLLIN | EPOLLRDNORM;
 	spin_unlock_irq(&ev_queue->lock);
 
 	return pollflags;
 }
 
-static unsigned int ib_uverbs_async_event_poll(struct file *filp,
+static __poll_t ib_uverbs_async_event_poll(struct file *filp,
 					       struct poll_table_struct *wait)
 {
 	return ib_uverbs_event_poll(filp->private_data, filp, wait);
 }
 
-static unsigned int ib_uverbs_comp_event_poll(struct file *filp,
+static __poll_t ib_uverbs_comp_event_poll(struct file *filp,
 					      struct poll_table_struct *wait)
 {
 	struct ib_uverbs_completion_event_file *comp_ev_file =
@@ -614,8 +617,7 @@ static ssize_t verify_hdr(struct ib_uverbs_cmd_hdr *hdr,
 			if (hdr->out_words * 8 < method_elm->resp_size)
 				return -ENOSPC;
 
-			if (!access_ok(VERIFY_WRITE,
-				       u64_to_user_ptr(ex_hdr->response),
+			if (!access_ok(u64_to_user_ptr(ex_hdr->response),
 				       (hdr->out_words + ex_hdr->provider_out_words) * 8))
 				return -EFAULT;
 		} else {
@@ -720,7 +722,7 @@ static ssize_t ib_uverbs_write(struct file *filp, const char __user *buf,
 			 * then the command request structure starts
 			 * with a '__aligned u64 response' member.
 			 */
-			ret = get_user(response, (const u64 __user *)buf);
+			ret = get_user(response, (const u64 *)buf);
 			if (ret)
 				goto out_unlock;
 
@@ -778,7 +780,7 @@ static int ib_uverbs_mmap(struct file *filp, struct vm_area_struct *vma)
 		goto out;
 	}
 
-	ret = ucontext->device->mmap(ucontext, vma);
+	ret = ucontext->device->ops.mmap(ucontext, vma);
 out:
 	srcu_read_unlock(&file->device->disassociate_srcu, srcu_key);
 	return ret;
@@ -877,9 +879,50 @@ static void rdma_umap_close(struct vm_area_struct *vma)
 	kfree(priv);
 }
 
+/*
+ * Once the zap_vma_ptes has been called touches to the VMA will come here and
+ * we return a dummy writable zero page for all the pfns.
+ */
+static vm_fault_t rdma_umap_fault(struct vm_fault *vmf)
+{
+	struct ib_uverbs_file *ufile = vmf->vma->vm_file->private_data;
+	struct rdma_umap_priv *priv = vmf->vma->vm_private_data;
+	vm_fault_t ret = 0;
+
+	if (!priv)
+		return VM_FAULT_SIGBUS;
+
+	/* Read only pages can just use the system zero page. */
+	if (!(vmf->vma->vm_flags & (VM_WRITE | VM_MAYWRITE))) {
+		vmf->page = ZERO_PAGE(vmf->address);
+		get_page(vmf->page);
+		return 0;
+	}
+
+	mutex_lock(&ufile->umap_lock);
+	if (!ufile->disassociate_page)
+		ufile->disassociate_page =
+			alloc_pages(vmf->gfp_mask | __GFP_ZERO, 0);
+
+	if (ufile->disassociate_page) {
+		/*
+		 * This VMA is forced to always be shared so this doesn't have
+		 * to worry about COW.
+		 */
+		vmf->page = ufile->disassociate_page;
+		get_page(vmf->page);
+	} else {
+		ret = VM_FAULT_SIGBUS;
+	}
+	mutex_unlock(&ufile->umap_lock);
+
+	return ret;
+}
+
 static const struct vm_operations_struct rdma_umap_ops = {
 	.open = rdma_umap_open,
 	.close = rdma_umap_close,
+	.fault = rdma_umap_fault,
 };
 
 static struct rdma_umap_priv *rdma_user_mmap_pre(struct ib_ucontext *ucontext,
@@ -888,6 +931,9 @@ static struct rdma_umap_priv *rdma_user_mmap_pre(struct ib_ucontext *ucontext,
 {
 	struct ib_uverbs_file *ufile = ucontext->ufile;
 	struct rdma_umap_priv *priv;
+
+	if (!(vma->vm_flags & VM_SHARED))
+		return ERR_PTR(-EINVAL);
 
 	if (vma->vm_end - vma->vm_start != size)
 		return ERR_PTR(-EINVAL);
@@ -992,7 +1038,7 @@ void uverbs_user_mmap_disassociate(struct ib_uverbs_file *ufile)
 		 * at a time to get the lock ordering right. Typically there
 		 * will only be one mm, so no big deal.
 		 */
-		down_write(&mm->mmap_sem);
+		down_read(&mm->mmap_sem);
 		if (!mmget_still_valid(mm))
 			goto skip_mm;
 		mutex_lock(&ufile->umap_lock);
@@ -1006,11 +1052,10 @@ void uverbs_user_mmap_disassociate(struct ib_uverbs_file *ufile)
 
 			zap_vma_ptes(vma, vma->vm_start,
 				     vma->vm_end - vma->vm_start);
-			vma->vm_flags &= ~(VM_SHARED | VM_MAYSHARE);
 		}
 		mutex_unlock(&ufile->umap_lock);
 	skip_mm:
-		up_write(&mm->mmap_sem);
+		up_read(&mm->mmap_sem);
 		mmput(mm);
 	}
 }
@@ -1051,7 +1096,7 @@ static int ib_uverbs_open(struct inode *inode, struct file *filp)
 	/* In case IB device supports disassociate ucontext, there is no hard
 	 * dependency between uverbs device and its low level device.
 	 */
-	module_dependent = !(ib_dev->disassociate_ucontext);
+	module_dependent = !(ib_dev->ops.disassociate_ucontext);
 
 	if (module_dependent) {
 		if (!try_module_get(ib_dev->owner)) {
@@ -1214,7 +1259,7 @@ static void ib_uverbs_add_one(struct ib_device *device)
 	struct ib_uverbs_device *uverbs_dev;
 	int ret;
 
-	if (!device->alloc_ucontext)
+	if (!device->ops.alloc_ucontext)
 		return;
 
 	uverbs_dev = kzalloc(sizeof(*uverbs_dev), GFP_KERNEL);
@@ -1243,11 +1288,11 @@ static void ib_uverbs_add_one(struct ib_device *device)
 	rcu_assign_pointer(uverbs_dev->ib_dev, device);
 	uverbs_dev->num_comp_vectors = device->num_comp_vectors;
 
-	devnum = find_first_zero_bit(dev_map, IB_UVERBS_MAX_DEVICES);
-	if (devnum >= IB_UVERBS_MAX_DEVICES)
+	devnum = ida_alloc_max(&uverbs_ida, IB_UVERBS_MAX_DEVICES - 1,
+			       GFP_KERNEL);
+	if (devnum < 0)
 		goto err;
 	uverbs_dev->devnum = devnum;
-	set_bit(devnum, dev_map);
 	if (devnum >= IB_UVERBS_NUM_FIXED_MINOR)
 		base = dynamic_uverbs_dev + devnum - IB_UVERBS_NUM_FIXED_MINOR;
 	else
@@ -1260,7 +1305,7 @@ static void ib_uverbs_add_one(struct ib_device *device)
 	dev_set_name(&uverbs_dev->dev, "uverbs%d", uverbs_dev->devnum);
 
 	cdev_init(&uverbs_dev->cdev,
-		  device->mmap ? &uverbs_mmap_fops : &uverbs_fops);
+		  device->ops.mmap ? &uverbs_mmap_fops : &uverbs_fops);
 	uverbs_dev->cdev.owner = THIS_MODULE;
 
 	ret = cdev_device_add(&uverbs_dev->cdev, &uverbs_dev->dev);
@@ -1271,7 +1316,7 @@ static void ib_uverbs_add_one(struct ib_device *device)
 	return;
 
 err_uapi:
-	clear_bit(devnum, dev_map);
+	ida_free(&uverbs_ida, devnum);
 err:
 	if (atomic_dec_and_test(&uverbs_dev->refcount))
 		ib_uverbs_comp_dev(uverbs_dev);
@@ -1346,9 +1391,9 @@ static void ib_uverbs_remove_one(struct ib_device *device, void *client_data)
 		return;
 
 	cdev_device_del(&uverbs_dev->cdev, &uverbs_dev->dev);
-	clear_bit(uverbs_dev->devnum, dev_map);
+	ida_free(&uverbs_ida, uverbs_dev->devnum);
 
-	if (device->disassociate_ucontext) {
+	if (device->ops.disassociate_ucontext) {
 		/* We disassociate HW resources and immediately return.
 		 * Userspace will see a EIO errno for all future access.
 		 * Upon returning, ib_device may be freed internally and is not

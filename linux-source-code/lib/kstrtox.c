@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Convert integer string representation to an integer.
  * If an integer doesn't fit into specified type, -E is returned.
@@ -17,7 +18,7 @@
 #include <linux/math64.h>
 #include <linux/export.h>
 #include <linux/types.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include "kstrtox.h"
 
 const char *_parse_integer_fixup_radix(const char *s, unsigned int *base)
@@ -48,18 +49,18 @@ unsigned int _parse_integer(const char *s, unsigned int base, unsigned long long
 {
 	unsigned long long res;
 	unsigned int rv;
-	int overflow;
 
 	res = 0;
 	rv = 0;
-	overflow = 0;
-	while (*s) {
+	while (1) {
+		unsigned int c = *s;
+		unsigned int lc = c | 0x20; /* don't tolower() this line */
 		unsigned int val;
 
-		if ('0' <= *s && *s <= '9')
-			val = *s - '0';
-		else if ('a' <= _tolower(*s) && _tolower(*s) <= 'f')
-			val = _tolower(*s) - 'a' + 10;
+		if ('0' <= c && c <= '9')
+			val = c - '0';
+		else if ('a' <= lc && lc <= 'f')
+			val = lc - 'a' + 10;
 		else
 			break;
 
@@ -71,15 +72,13 @@ unsigned int _parse_integer(const char *s, unsigned int base, unsigned long long
 		 */
 		if (unlikely(res & (~0ull << 60))) {
 			if (res > div_u64(ULLONG_MAX - val, base))
-				overflow = 1;
+				rv |= KSTRTOX_OVERFLOW;
 		}
 		res = res * base + val;
 		rv++;
 		s++;
 	}
 	*p = res;
-	if (overflow)
-		rv |= KSTRTOX_OVERFLOW;
 	return rv;
 }
 
@@ -92,7 +91,6 @@ static int _kstrtoull(const char *s, unsigned int base, unsigned long long *res)
 	rv = _parse_integer(s, base, &_res);
 	if (rv & KSTRTOX_OVERFLOW)
 		return -ERANGE;
-	rv &= ~KSTRTOX_OVERFLOW;
 	if (rv == 0)
 		return -EINVAL;
 	s += rv;
@@ -153,7 +151,7 @@ int kstrtoll(const char *s, unsigned int base, long long *res)
 		rv = _kstrtoull(s + 1, base, &tmp);
 		if (rv < 0)
 			return rv;
-		if ((long long)(-tmp) >= 0)
+		if ((long long)-tmp > 0)
 			return -ERANGE;
 		*res = -tmp;
 	} else {

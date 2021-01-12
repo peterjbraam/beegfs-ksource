@@ -1,9 +1,11 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _PERF_BITOPS_H
 #define _PERF_BITOPS_H
 
 #include <string.h>
 #include <linux/bitops.h>
 #include <stdlib.h>
+#include <linux/kernel.h>
 
 #define DECLARE_BITMAP(name,bits) \
 	unsigned long name[BITS_TO_LONGS(bits)]
@@ -13,6 +15,7 @@ void __bitmap_or(unsigned long *dst, const unsigned long *bitmap1,
 		 const unsigned long *bitmap2, int bits);
 int __bitmap_and(unsigned long *dst, const unsigned long *bitmap1,
 		 const unsigned long *bitmap2, unsigned int bits);
+void bitmap_clear(unsigned long *map, unsigned int start, int len);
 
 #define BITMAP_FIRST_WORD_MASK(start) (~0UL << ((start) & (BITS_PER_LONG - 1)))
 

@@ -1,19 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (c) 2000-2005 Silicon Graphics, Inc.
  * All Rights Reserved.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it would be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write the Free Software Foundation,
- * Inc.,  51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
 #ifndef __XFS_QM_H__
 #define __XFS_QM_H__
@@ -74,9 +62,7 @@ typedef struct xfs_quotainfo {
 	struct xfs_inode	*qi_uquotaip;	/* user quota inode */
 	struct xfs_inode	*qi_gquotaip;	/* group quota inode */
 	struct xfs_inode	*qi_pquotaip;	/* project quota inode */
-	struct list_head qi_lru_list;
-	struct mutex	 qi_lru_lock;
-	int		 qi_lru_count;
+	struct list_lru	 qi_lru;
 	int		 qi_dquots;
 	time_t		 qi_btimelimit;	 /* limit for blks timer */
 	time_t		 qi_itimelimit;	 /* limit for inodes timer */
@@ -172,14 +158,12 @@ extern void		xfs_qm_dqrele_all_inodes(struct xfs_mount *, uint);
 
 /* quota ops */
 extern int		xfs_qm_scall_trunc_qfiles(struct xfs_mount *, uint);
-extern int		xfs_qm_scall_getquota(struct xfs_mount *, xfs_dqid_t *,
-					uint, struct fs_disk_quota *, uint);
+extern int		xfs_qm_scall_getquota(struct xfs_mount *, xfs_dqid_t,
+					uint, struct qc_dqblk *);
+extern int		xfs_qm_scall_getquota_next(struct xfs_mount *,
+					xfs_dqid_t *, uint, struct qc_dqblk *);
 extern int		xfs_qm_scall_setqlim(struct xfs_mount *, xfs_dqid_t, uint,
-					struct fs_disk_quota *);
-extern int		xfs_qm_scall_getqstat(struct xfs_mount *,
-					struct fs_quota_stat *);
-extern int		xfs_qm_scall_getqstatv(struct xfs_mount *,
-					struct fs_quota_statv *);
+					struct qc_dqblk *);
 extern int		xfs_qm_scall_quotaon(struct xfs_mount *, uint);
 extern int		xfs_qm_scall_quotaoff(struct xfs_mount *, uint);
 

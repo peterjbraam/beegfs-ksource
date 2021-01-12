@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * PCI I/O adapter configuration related functions.
  *
@@ -130,7 +131,7 @@ int sclp_pci_report(struct zpci_report_error_header *report, u32 fh, u32 fid)
 {
 	DECLARE_COMPLETION_ONSTACK(completion);
 	struct err_notify_sccb *sccb;
-	struct sclp_req req = { .list = {0}, 0 };
+	struct sclp_req req;
 	int ret;
 
 	ret = sclp_pci_check_report(report);
@@ -153,6 +154,7 @@ int sclp_pci_report(struct zpci_report_error_header *report, u32 fh, u32 fid)
 		goto out_unregister;
 	}
 
+	memset(&req, 0, sizeof(req));
 	req.callback_data = &completion;
 	req.callback = sclp_pci_callback;
 	req.command = SCLP_CMDW_WRITE_EVENT_DATA;

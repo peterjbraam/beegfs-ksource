@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __TOOLS_LINUX_ERR_H
 #define __TOOLS_LINUX_ERR_H
 
@@ -57,5 +58,18 @@ static inline int __must_check PTR_ERR_OR_ZERO(__force const void *ptr)
 		return PTR_ERR(ptr);
 	else
 		return 0;
+}
+
+/**
+ * ERR_CAST - Explicitly cast an error-valued pointer to another pointer type
+ * @ptr: The pointer to cast.
+ *
+ * Explicitly cast an error-valued pointer to another pointer type in such a
+ * way as to make it clear that's what's going on.
+ */
+static inline void * __must_check ERR_CAST(__force const void *ptr)
+{
+	/* cast away the const */
+	return (void *) ptr;
 }
 #endif /* _LINUX_ERR_H */

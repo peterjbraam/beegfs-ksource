@@ -119,7 +119,7 @@ static void enic_init_affinity_hint(struct enic *enic)
 
 	for (i = 0; i < enic->intr_count; i++) {
 		if (enic_is_err_intr(enic, i) || enic_is_notify_intr(enic, i) ||
-		    (enic->msix[i].affinity_mask &&
+		    (cpumask_available(enic->msix[i].affinity_mask) &&
 		     !cpumask_empty(enic->msix[i].affinity_mask)))
 			continue;
 		if (zalloc_cpumask_var(&enic->msix[i].affinity_mask,
@@ -148,7 +148,7 @@ static void enic_set_affinity_hint(struct enic *enic)
 	for (i = 0; i < enic->intr_count; i++) {
 		if (enic_is_err_intr(enic, i)		||
 		    enic_is_notify_intr(enic, i)	||
-		    !enic->msix[i].affinity_mask	||
+		    !cpumask_available(enic->msix[i].affinity_mask) ||
 		    cpumask_empty(enic->msix[i].affinity_mask))
 			continue;
 		err = irq_set_affinity_hint(enic->msix_entry[i].vector,
@@ -161,7 +161,7 @@ static void enic_set_affinity_hint(struct enic *enic)
 	for (i = 0; i < enic->wq_count; i++) {
 		int wq_intr = enic_msix_wq_intr(enic, i);
 
-		if (enic->msix[wq_intr].affinity_mask &&
+		if (cpumask_available(enic->msix[wq_intr].affinity_mask) &&
 		    !cpumask_empty(enic->msix[wq_intr].affinity_mask))
 			netif_set_xps_queue(enic->netdev,
 					    enic->msix[wq_intr].affinity_mask,
@@ -1718,9 +1718,9 @@ static int enic_poll_msix_rq(struct napi_struct *napi, int budget)
 	return work_done;
 }
 
-static void enic_notify_timer(unsigned long data)
+static void enic_notify_timer(struct timer_list *t)
 {
-	struct enic *enic = (struct enic *)data;
+	struct enic *enic = from_timer(enic, t, notify_timer);
 
 	enic_notify_check(enic);
 
@@ -2508,7 +2508,6 @@ static void enic_clear_intr_mode(struct enic *enic)
 }
 
 static const struct net_device_ops enic_netdev_dynamic_ops = {
-	.ndo_size		= sizeof(struct net_device_ops),
 	.ndo_open		= enic_open,
 	.ndo_stop		= enic_stop,
 	.ndo_start_xmit		= enic_hard_start_xmit,
@@ -2516,7 +2515,7 @@ static const struct net_device_ops enic_netdev_dynamic_ops = {
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_set_rx_mode	= enic_set_rx_mode,
 	.ndo_set_mac_address	= enic_set_mac_address_dynamic,
-	.extended.ndo_change_mtu	= enic_change_mtu,
+	.ndo_change_mtu		= enic_change_mtu,
 	.ndo_vlan_rx_add_vid	= enic_vlan_rx_add_vid,
 	.ndo_vlan_rx_kill_vid	= enic_vlan_rx_kill_vid,
 	.ndo_tx_timeout		= enic_tx_timeout,
@@ -2529,13 +2528,12 @@ static const struct net_device_ops enic_netdev_dynamic_ops = {
 #ifdef CONFIG_RFS_ACCEL
 	.ndo_rx_flow_steer	= enic_rx_flow_steer,
 #endif
-	.extended.ndo_udp_tunnel_add	= enic_udp_tunnel_add,
-	.extended.ndo_udp_tunnel_del	= enic_udp_tunnel_del,
+	.ndo_udp_tunnel_add	= enic_udp_tunnel_add,
+	.ndo_udp_tunnel_del	= enic_udp_tunnel_del,
 	.ndo_features_check	= enic_features_check,
 };
 
 static const struct net_device_ops enic_netdev_ops = {
-	.ndo_size		= sizeof(struct net_device_ops),
 	.ndo_open		= enic_open,
 	.ndo_stop		= enic_stop,
 	.ndo_start_xmit		= enic_hard_start_xmit,
@@ -2543,7 +2541,7 @@ static const struct net_device_ops enic_netdev_ops = {
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_set_mac_address	= enic_set_mac_address,
 	.ndo_set_rx_mode	= enic_set_rx_mode,
-	.extended.ndo_change_mtu	= enic_change_mtu,
+	.ndo_change_mtu		= enic_change_mtu,
 	.ndo_vlan_rx_add_vid	= enic_vlan_rx_add_vid,
 	.ndo_vlan_rx_kill_vid	= enic_vlan_rx_kill_vid,
 	.ndo_tx_timeout		= enic_tx_timeout,
@@ -2556,8 +2554,8 @@ static const struct net_device_ops enic_netdev_ops = {
 #ifdef CONFIG_RFS_ACCEL
 	.ndo_rx_flow_steer	= enic_rx_flow_steer,
 #endif
-	.extended.ndo_udp_tunnel_add	= enic_udp_tunnel_add,
-	.extended.ndo_udp_tunnel_del	= enic_udp_tunnel_del,
+	.ndo_udp_tunnel_add	= enic_udp_tunnel_add,
+	.ndo_udp_tunnel_del	= enic_udp_tunnel_del,
 	.ndo_features_check	= enic_features_check,
 };
 
@@ -2880,8 +2878,7 @@ static int enic_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	/* Setup notification timer, HW reset task, and wq locks
 	 */
 
-	setup_timer(&enic->notify_timer, enic_notify_timer,
-		    (unsigned long)enic);
+	timer_setup(&enic->notify_timer, enic_notify_timer, 0);
 
 	enic_rfs_flw_tbl_init(enic);
 	enic_set_rx_coal_setting(enic);
@@ -2983,8 +2980,8 @@ static int enic_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	netdev->priv_flags |= IFF_UNICAST_FLT;
 
 	/* MTU range: 68 - 9000 */
-	netdev->extended->min_mtu = ENIC_MIN_MTU;
-	netdev->extended->max_mtu = ENIC_MAX_MTU;
+	netdev->min_mtu = ENIC_MIN_MTU;
+	netdev->max_mtu = ENIC_MAX_MTU;
 	netdev->mtu	= enic->port_mtu;
 
 	err = register_netdev(netdev);

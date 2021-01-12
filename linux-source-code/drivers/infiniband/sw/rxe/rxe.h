@@ -65,14 +65,16 @@
  */
 #define RXE_UVERBS_ABI_VERSION		2
 
-#define IB_PHYS_STATE_LINK_UP		(5)
-#define IB_PHYS_STATE_LINK_DOWN		(3)
+#define RDMA_LINK_PHYS_STATE_LINK_UP	(5)
+#define RDMA_LINK_PHYS_STATE_DISABLED	(3)
+#define RDMA_LINK_PHYS_STATE_POLLING	(2)
 
 #define RXE_ROCE_V2_SPORT		(0xc000)
 
 static inline u32 rxe_crc32(struct rxe_dev *rxe,
 			    u32 crc, void *next, size_t len)
 {
+	u32 retval;
 	int err;
 
 	SHASH_DESC_ON_STACK(shash, rxe->tfm);
@@ -86,7 +88,9 @@ static inline u32 rxe_crc32(struct rxe_dev *rxe,
 		return crc32_le(crc, next, len);
 	}
 
-	return *(u32 *)shash_desc_ctx(shash);
+	retval = *(u32 *)shash_desc_ctx(shash);
+	barrier_data(shash_desc_ctx(shash));
+	return retval;
 }
 
 void rxe_set_mtu(struct rxe_dev *rxe, unsigned int dev_mtu);
@@ -106,5 +110,6 @@ struct rxe_dev *get_rxe_by_name(const char *name);
 
 void rxe_port_up(struct rxe_dev *rxe);
 void rxe_port_down(struct rxe_dev *rxe);
+void rxe_set_port_state(struct rxe_dev *rxe);
 
 #endif /* RXE_H */

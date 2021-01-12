@@ -40,10 +40,10 @@ static int bcm87xx_of_reg_init(struct phy_device *phydev)
 	const __be32 *paddr_end;
 	int len, ret;
 
-	if (!phydev->mdio_dev.of_node)
+	if (!phydev->mdio.dev.of_node)
 		return 0;
 
-	paddr = of_get_property(phydev->mdio_dev.of_node,
+	paddr = of_get_property(phydev->mdio.dev.of_node,
 				"broadcom,c45-reg-init", &len);
 	if (!paddr)
 		return 0;
@@ -86,8 +86,12 @@ static int bcm87xx_of_reg_init(struct phy_device *phydev)
 
 static int bcm87xx_config_init(struct phy_device *phydev)
 {
-	phydev->supported = SUPPORTED_10000baseR_FEC;
-	phydev->advertising = ADVERTISED_10000baseR_FEC;
+	linkmode_zero(phydev->supported);
+	linkmode_set_bit(ETHTOOL_LINK_MODE_10000baseR_FEC_BIT,
+			 phydev->supported);
+	linkmode_zero(phydev->advertising);
+	linkmode_set_bit(ETHTOOL_LINK_MODE_10000baseR_FEC_BIT,
+			 phydev->advertising);
 	phydev->state = PHY_NOLINK;
 	phydev->autoneg = AUTONEG_DISABLE;
 
@@ -194,6 +198,7 @@ static struct phy_driver bcm87xx_driver[] = {
 	.phy_id_mask	= 0xffffffff,
 	.name		= "Broadcom BCM8706",
 	.flags		= PHY_HAS_INTERRUPT,
+	.features	= PHY_10GBIT_FEC_FEATURES,
 	.config_init	= bcm87xx_config_init,
 	.config_aneg	= bcm87xx_config_aneg,
 	.read_status	= bcm87xx_read_status,
@@ -201,12 +206,12 @@ static struct phy_driver bcm87xx_driver[] = {
 	.config_intr	= bcm87xx_config_intr,
 	.did_interrupt	= bcm87xx_did_interrupt,
 	.match_phy_device = bcm8706_match_phy_device,
-	.driver		= { .owner = THIS_MODULE },
 }, {
 	.phy_id		= PHY_ID_BCM8727,
 	.phy_id_mask	= 0xffffffff,
 	.name		= "Broadcom BCM8727",
 	.flags		= PHY_HAS_INTERRUPT,
+	.features	= PHY_10GBIT_FEC_FEATURES,
 	.config_init	= bcm87xx_config_init,
 	.config_aneg	= bcm87xx_config_aneg,
 	.read_status	= bcm87xx_read_status,
@@ -214,21 +219,8 @@ static struct phy_driver bcm87xx_driver[] = {
 	.config_intr	= bcm87xx_config_intr,
 	.did_interrupt	= bcm87xx_did_interrupt,
 	.match_phy_device = bcm8727_match_phy_device,
-	.driver		= { .owner = THIS_MODULE },
 } };
 
-static int __init bcm87xx_init(void)
-{
-	return phy_drivers_register(bcm87xx_driver,
-		ARRAY_SIZE(bcm87xx_driver));
-}
-module_init(bcm87xx_init);
-
-static void __exit bcm87xx_exit(void)
-{
-	phy_drivers_unregister(bcm87xx_driver,
-		ARRAY_SIZE(bcm87xx_driver));
-}
-module_exit(bcm87xx_exit);
+module_phy_driver(bcm87xx_driver);
 
 MODULE_LICENSE("GPL");

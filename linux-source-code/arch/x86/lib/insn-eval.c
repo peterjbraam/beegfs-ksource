@@ -573,6 +573,7 @@ static bool get_desc(struct desc_struct *out, unsigned short sel)
 	struct desc_ptr gdt_desc = {0, 0};
 	unsigned long desc_base;
 
+#ifdef CONFIG_MODIFY_LDT_SYSCALL
 	if ((sel & SEGMENT_TI_MASK) == SEGMENT_LDT) {
 		bool success = false;
 		struct ldt_struct *ldt;
@@ -582,7 +583,7 @@ static bool get_desc(struct desc_struct *out, unsigned short sel)
 
 		mutex_lock(&current->active_mm->context.lock);
 		ldt = current->active_mm->context.ldt;
-		if (ldt && sel < ldt->size) {
+		if (ldt && sel < ldt->nr_entries) {
 			*out = ldt->entries[sel];
 			success = true;
 		}
@@ -591,7 +592,7 @@ static bool get_desc(struct desc_struct *out, unsigned short sel)
 
 		return success;
 	}
-
+#endif
 	native_store_gdt(&gdt_desc);
 
 	/*
@@ -734,11 +735,11 @@ static unsigned long get_seg_limit(struct pt_regs *regs, int seg_reg_idx)
  *
  * Returns:
  *
- * A signed 8-bit value containing the default parameters on success.
+ * An int containing ORed-in default parameters on success.
  *
  * -EINVAL on error.
  */
-char insn_get_code_seg_params(struct pt_regs *regs)
+int insn_get_code_seg_params(struct pt_regs *regs)
 {
 	struct desc_struct desc;
 	short sel;

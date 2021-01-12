@@ -416,23 +416,23 @@ exit:
 /**
  *	ld_usb_poll
  */
-static unsigned int ld_usb_poll(struct file *file, poll_table *wait)
+static __poll_t ld_usb_poll(struct file *file, poll_table *wait)
 {
 	struct ld_usb *dev;
-	unsigned int mask = 0;
+	__poll_t mask = 0;
 
 	dev = file->private_data;
 
 	if (!dev->intf)
-		return POLLERR | POLLHUP;
+		return EPOLLERR | EPOLLHUP;
 
 	poll_wait(file, &dev->read_wait, wait);
 	poll_wait(file, &dev->write_wait, wait);
 
 	if (dev->ring_head != dev->ring_tail)
-		mask |= POLLIN | POLLRDNORM;
+		mask |= EPOLLIN | EPOLLRDNORM;
 	if (!dev->interrupt_out_busy)
-		mask |= POLLOUT | POLLWRNORM;
+		mask |= EPOLLOUT | EPOLLWRNORM;
 
 	return mask;
 }
@@ -696,7 +696,10 @@ static int ld_usb_probe(struct usb_interface *intf, const struct usb_device_id *
 		dev_warn(&intf->dev, "Interrupt out endpoint not found (using control endpoint instead)\n");
 
 	dev->interrupt_in_endpoint_size = usb_endpoint_maxp(dev->interrupt_in_endpoint);
-	dev->ring_buffer = kmalloc(ring_buffer_size*(sizeof(size_t)+dev->interrupt_in_endpoint_size), GFP_KERNEL);
+	dev->ring_buffer =
+		kmalloc_array(ring_buffer_size,
+			      sizeof(size_t) + dev->interrupt_in_endpoint_size,
+			      GFP_KERNEL);
 	if (!dev->ring_buffer)
 		goto error;
 	dev->interrupt_in_buffer = kmalloc(dev->interrupt_in_endpoint_size, GFP_KERNEL);
@@ -707,7 +710,9 @@ static int ld_usb_probe(struct usb_interface *intf, const struct usb_device_id *
 		goto error;
 	dev->interrupt_out_endpoint_size = dev->interrupt_out_endpoint ? usb_endpoint_maxp(dev->interrupt_out_endpoint) :
 									 udev->descriptor.bMaxPacketSize0;
-	dev->interrupt_out_buffer = kmalloc(write_buffer_size*dev->interrupt_out_endpoint_size, GFP_KERNEL);
+	dev->interrupt_out_buffer =
+		kmalloc_array(write_buffer_size,
+			      dev->interrupt_out_endpoint_size, GFP_KERNEL);
 	if (!dev->interrupt_out_buffer)
 		goto error;
 	dev->interrupt_out_urb = usb_alloc_urb(0, GFP_KERNEL);

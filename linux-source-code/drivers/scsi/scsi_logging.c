@@ -93,20 +93,19 @@ static size_t sdev_format_header(char *logbuf, size_t logbuf_len,
 	return off;
 }
 
-int sdev_prefix_printk(const char *level, const struct scsi_device *sdev,
-		       const char *name, const char *fmt, ...)
+void sdev_prefix_printk(const char *level, const struct scsi_device *sdev,
+			const char *name, const char *fmt, ...)
 {
 	va_list args;
 	char *logbuf;
 	size_t off = 0, logbuf_len;
-	int ret;
 
 	if (!sdev)
-		return 0;
+		return;
 
 	logbuf = scsi_log_reserve_buffer(&logbuf_len);
 	if (!logbuf)
-		return 0;
+		return;
 
 	if (name)
 		off += scnprintf(logbuf + off, logbuf_len - off,
@@ -116,26 +115,24 @@ int sdev_prefix_printk(const char *level, const struct scsi_device *sdev,
 		off += vscnprintf(logbuf + off, logbuf_len - off, fmt, args);
 		va_end(args);
 	}
-	ret = dev_printk(level, &sdev->sdev_gendev, "%s", logbuf);
+	dev_printk(level, &sdev->sdev_gendev, "%s", logbuf);
 	scsi_log_release_buffer(logbuf);
-	return ret;
 }
 EXPORT_SYMBOL(sdev_prefix_printk);
 
-int scmd_printk(const char *level, const struct scsi_cmnd *scmd,
+void scmd_printk(const char *level, const struct scsi_cmnd *scmd,
 		const char *fmt, ...)
 {
 	va_list args;
 	char *logbuf;
 	size_t off = 0, logbuf_len;
-	int ret;
 
 	if (!scmd || !scmd->cmnd)
-		return 0;
+		return;
 
 	logbuf = scsi_log_reserve_buffer(&logbuf_len);
 	if (!logbuf)
-		return 0;
+		return;
 	off = sdev_format_header(logbuf, logbuf_len, scmd_name(scmd),
 				 scmd->request->tag);
 	if (off < logbuf_len) {
@@ -143,9 +140,8 @@ int scmd_printk(const char *level, const struct scsi_cmnd *scmd,
 		off += vscnprintf(logbuf + off, logbuf_len - off, fmt, args);
 		va_end(args);
 	}
-	ret = dev_printk(level, &scmd->device->sdev_gendev, "%s", logbuf);
+	dev_printk(level, &scmd->device->sdev_gendev, "%s", logbuf);
 	scsi_log_release_buffer(logbuf);
-	return ret;
 }
 EXPORT_SYMBOL(scmd_printk);
 
@@ -437,7 +433,6 @@ void scsi_print_result(const struct scsi_cmnd *cmd, const char *msg,
 	const char *mlret_string = scsi_mlreturn_string(disposition);
 	const char *hb_string = scsi_hostbyte_string(cmd->result);
 	const char *db_string = scsi_driverbyte_string(cmd->result);
-	unsigned long cmd_age = (jiffies - cmd->jiffies_at_alloc) / HZ;
 
 	logbuf = scsi_log_reserve_buffer(&logbuf_len);
 	if (!logbuf)
@@ -479,15 +474,10 @@ void scsi_print_result(const struct scsi_cmnd *cmd, const char *msg,
 
 	if (db_string)
 		off += scnprintf(logbuf + off, logbuf_len - off,
-				 "driverbyte=%s ", db_string);
+				 "driverbyte=%s", db_string);
 	else
 		off += scnprintf(logbuf + off, logbuf_len - off,
-				 "driverbyte=0x%02x ",
-				 driver_byte(cmd->result));
-
-	off += scnprintf(logbuf + off, logbuf_len - off,
-			 "cmd_age=%lus", cmd_age);
-
+				 "driverbyte=0x%02x", driver_byte(cmd->result));
 out_printk:
 	dev_printk(KERN_INFO, &cmd->device->sdev_gendev, "%s", logbuf);
 	scsi_log_release_buffer(logbuf);

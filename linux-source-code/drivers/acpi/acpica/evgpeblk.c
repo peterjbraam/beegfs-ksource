@@ -1,45 +1,11 @@
+// SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0
 /******************************************************************************
  *
  * Module Name: evgpeblk - GPE block creation and initialization.
  *
+ * Copyright (C) 2000 - 2018, Intel Corp.
+ *
  *****************************************************************************/
-
-/*
- * Copyright (C) 2000 - 2013, Intel Corp.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions, and the following disclaimer,
- *    without modification.
- * 2. Redistributions in binary form must reproduce at minimum a disclaimer
- *    substantially similar to the "NO WARRANTY" disclaimer below
- *    ("Disclaimer") and any redistribution must be conditioned upon
- *    including a substantially similar Disclaimer requirement for further
- *    binary redistribution.
- * 3. Neither the names of the above-listed copyright holders nor the names
- *    of any contributors may be used to endorse or promote products derived
- *    from this software without specific prior written permission.
- *
- * Alternatively, this software may be distributed under the terms of the
- * GNU General Public License ("GPL") version 2 as published by the Free
- * Software Foundation.
- *
- * NO WARRANTY
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTIBILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * HOLDERS OR CONTRIBUTORS BE LIABLE FOR SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
- * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGES.
- */
 
 #include <acpi/acpi.h>
 #include "accommon.h"
@@ -87,9 +53,9 @@ acpi_ev_install_gpe_block(struct acpi_gpe_block_info *gpe_block,
 		return_ACPI_STATUS(status);
 	}
 
-	gpe_xrupt_block = acpi_ev_get_gpe_xrupt_block(interrupt_number);
-	if (!gpe_xrupt_block) {
-		status = AE_NO_MEMORY;
+	status =
+	    acpi_ev_get_gpe_xrupt_block(interrupt_number, &gpe_xrupt_block);
+	if (ACPI_FAILURE(status)) {
 		goto unlock_and_exit;
 	}
 
@@ -111,8 +77,8 @@ acpi_ev_install_gpe_block(struct acpi_gpe_block_info *gpe_block,
 	gpe_block->xrupt_block = gpe_xrupt_block;
 	acpi_os_release_lock(acpi_gbl_gpe_lock, flags);
 
-      unlock_and_exit:
-	status = acpi_ut_release_mutex(ACPI_MTX_EVENTS);
+unlock_and_exit:
+	(void)acpi_ut_release_mutex(ACPI_MTX_EVENTS);
 	return_ACPI_STATUS(status);
 }
 
@@ -167,6 +133,7 @@ acpi_status acpi_ev_delete_gpe_block(struct acpi_gpe_block_info *gpe_block)
 		if (gpe_block->next) {
 			gpe_block->next->previous = gpe_block->previous;
 		}
+
 		acpi_os_release_lock(acpi_gbl_gpe_lock, flags);
 	}
 
@@ -178,7 +145,7 @@ acpi_status acpi_ev_delete_gpe_block(struct acpi_gpe_block_info *gpe_block)
 	ACPI_FREE(gpe_block->event_info);
 	ACPI_FREE(gpe_block);
 
-      unlock_and_exit:
+unlock_and_exit:
 	status = acpi_ut_release_mutex(ACPI_MTX_EVENTS);
 	return_ACPI_STATUS(status);
 }
@@ -210,7 +177,7 @@ acpi_ev_create_gpe_info_blocks(struct acpi_gpe_block_info *gpe_block)
 
 	/* Allocate the GPE register information block */
 
-	gpe_register_info = ACPI_ALLOCATE_ZEROED((acpi_size) gpe_block->
+	gpe_register_info = ACPI_ALLOCATE_ZEROED((acpi_size)gpe_block->
 						 register_count *
 						 sizeof(struct
 							acpi_gpe_register_info));
@@ -224,7 +191,7 @@ acpi_ev_create_gpe_info_blocks(struct acpi_gpe_block_info *gpe_block)
 	 * Allocate the GPE event_info block. There are eight distinct GPEs
 	 * per register. Initialization to zeros is sufficient.
 	 */
-	gpe_event_info = ACPI_ALLOCATE_ZEROED((acpi_size) gpe_block->gpe_count *
+	gpe_event_info = ACPI_ALLOCATE_ZEROED((acpi_size)gpe_block->gpe_count *
 					      sizeof(struct
 						     acpi_gpe_event_info));
 	if (!gpe_event_info) {
@@ -252,21 +219,17 @@ acpi_ev_create_gpe_info_blocks(struct acpi_gpe_block_info *gpe_block)
 
 		/* Init the register_info for this GPE register (8 GPEs) */
 
-		this_register->base_gpe_number =
-		    (u8) (gpe_block->block_base_number +
-			  (i * ACPI_GPE_REGISTER_WIDTH));
+		this_register->base_gpe_number = (u16)
+		    (gpe_block->block_base_number +
+		     (i * ACPI_GPE_REGISTER_WIDTH));
 
-		this_register->status_address.address =
-		    gpe_block->block_address.address + i;
+		this_register->status_address.address = gpe_block->address + i;
 
 		this_register->enable_address.address =
-		    gpe_block->block_address.address + i +
-		    gpe_block->register_count;
+		    gpe_block->address + i + gpe_block->register_count;
 
-		this_register->status_address.space_id =
-		    gpe_block->block_address.space_id;
-		this_register->enable_address.space_id =
-		    gpe_block->block_address.space_id;
+		this_register->status_address.space_id = gpe_block->space_id;
+		this_register->enable_address.space_id = gpe_block->space_id;
 		this_register->status_address.bit_width =
 		    ACPI_GPE_REGISTER_WIDTH;
 		this_register->enable_address.bit_width =
@@ -302,7 +265,7 @@ acpi_ev_create_gpe_info_blocks(struct acpi_gpe_block_info *gpe_block)
 
 	return_ACPI_STATUS(AE_OK);
 
-      error_exit:
+error_exit:
 	if (gpe_register_info) {
 		ACPI_FREE(gpe_register_info);
 	}
@@ -334,9 +297,10 @@ acpi_ev_create_gpe_info_blocks(struct acpi_gpe_block_info *gpe_block)
 
 acpi_status
 acpi_ev_create_gpe_block(struct acpi_namespace_node *gpe_device,
-			 struct acpi_generic_address *gpe_block_address,
+			 u64 address,
+			 u8 space_id,
 			 u32 register_count,
-			 u8 gpe_block_base_number,
+			 u16 gpe_block_base_number,
 			 u32 interrupt_number,
 			 struct acpi_gpe_block_info **return_gpe_block)
 {
@@ -359,14 +323,13 @@ acpi_ev_create_gpe_block(struct acpi_namespace_node *gpe_device,
 
 	/* Initialize the new GPE block */
 
+	gpe_block->address = address;
+	gpe_block->space_id = space_id;
 	gpe_block->node = gpe_device;
 	gpe_block->gpe_count = (u16)(register_count * ACPI_GPE_REGISTER_WIDTH);
 	gpe_block->initialized = FALSE;
 	gpe_block->register_count = register_count;
 	gpe_block->block_base_number = gpe_block_base_number;
-
-	memcpy(&gpe_block->block_address, gpe_block_address,
-	       sizeof(struct acpi_generic_address));
 
 	/*
 	 * Create the register_info and event_info sub-structures
@@ -408,12 +371,14 @@ acpi_ev_create_gpe_block(struct acpi_namespace_node *gpe_device,
 	}
 
 	ACPI_DEBUG_PRINT_RAW((ACPI_DB_INIT,
-			      "    Initialized GPE %02X to %02X [%4.4s] %u regs on interrupt 0x%X\n",
+			      "    Initialized GPE %02X to %02X [%4.4s] %u regs on interrupt 0x%X%s\n",
 			      (u32)gpe_block->block_base_number,
 			      (u32)(gpe_block->block_base_number +
 				    (gpe_block->gpe_count - 1)),
 			      gpe_device->name.ascii, gpe_block->register_count,
-			      interrupt_number));
+			      interrupt_number,
+			      interrupt_number ==
+			      acpi_gbl_FADT.sci_interrupt ? " (SCI)" : ""));
 
 	/* Update global count of currently available GPEs */
 
@@ -438,16 +403,16 @@ acpi_ev_create_gpe_block(struct acpi_namespace_node *gpe_device,
 acpi_status
 acpi_ev_initialize_gpe_block(struct acpi_gpe_xrupt_info *gpe_xrupt_info,
 			     struct acpi_gpe_block_info *gpe_block,
-			     void *ignored)
+			     void *context)
 {
 	acpi_status status;
-	acpi_event_status event_status;
 	struct acpi_gpe_event_info *gpe_event_info;
 	u32 gpe_enabled_count;
 	u32 gpe_index;
-	u32 gpe_number;
 	u32 i;
 	u32 j;
+	u8 *is_polling_needed = context;
+	ACPI_ERROR_ONLY(u32 gpe_number);
 
 	ACPI_FUNCTION_TRACE(ev_initialize_gpe_block);
 
@@ -473,7 +438,10 @@ acpi_ev_initialize_gpe_block(struct acpi_gpe_xrupt_info *gpe_xrupt_info,
 
 			gpe_index = (i * ACPI_GPE_REGISTER_WIDTH) + j;
 			gpe_event_info = &gpe_block->event_info[gpe_index];
-			gpe_number = gpe_block->block_base_number + gpe_index;
+			ACPI_ERROR_ONLY(gpe_number =
+					gpe_block->block_base_number +
+					gpe_index);
+			gpe_event_info->flags |= ACPI_GPE_INITIALIZED;
 
 			/*
 			 * Ignore GPEs that have no corresponding _Lxx/_Exx method
@@ -485,10 +453,6 @@ acpi_ev_initialize_gpe_block(struct acpi_gpe_xrupt_info *gpe_xrupt_info,
 				continue;
 			}
 
-			event_status = 0;
-			(void)acpi_hw_get_gpe_status(gpe_event_info,
-						     &event_status);
-
 			status = acpi_ev_add_gpe_reference(gpe_event_info);
 			if (ACPI_FAILURE(status)) {
 				ACPI_EXCEPTION((AE_INFO, status,
@@ -499,12 +463,9 @@ acpi_ev_initialize_gpe_block(struct acpi_gpe_xrupt_info *gpe_xrupt_info,
 
 			gpe_event_info->flags |= ACPI_GPE_AUTO_ENABLED;
 
-			if (event_status & ACPI_EVENT_FLAG_STATUS_SET) {
-				ACPI_INFO((AE_INFO, "GPE 0x%02X active on init",
-					   gpe_number));
-				(void)acpi_ev_gpe_dispatch(gpe_block->node,
-							   gpe_event_info,
-							   gpe_number);
+			if (is_polling_needed &&
+			    ACPI_GPE_IS_POLLING_NEEDED(gpe_event_info)) {
+				*is_polling_needed = TRUE;
 			}
 
 			gpe_enabled_count++;
@@ -512,8 +473,7 @@ acpi_ev_initialize_gpe_block(struct acpi_gpe_xrupt_info *gpe_xrupt_info,
 	}
 
 	if (gpe_enabled_count) {
-		ACPI_INFO((AE_INFO,
-			   "Enabled %u GPEs in block %02X to %02X",
+		ACPI_INFO(("Enabled %u GPEs in block %02X to %02X",
 			   gpe_enabled_count, (u32)gpe_block->block_base_number,
 			   (u32)(gpe_block->block_base_number +
 				 (gpe_block->gpe_count - 1))));

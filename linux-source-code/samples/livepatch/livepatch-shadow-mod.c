@@ -96,15 +96,15 @@ MODULE_DESCRIPTION("Buggy module for shadow variable demo");
  * Keep a list of all the dummies so we can clean up any residual ones
  * on module exit
  */
-static LIST_HEAD(dummy_list);
-static DEFINE_MUTEX(dummy_list_mutex);
+LIST_HEAD(dummy_list);
+DEFINE_MUTEX(dummy_list_mutex);
 
 struct dummy {
 	struct list_head list;
 	unsigned long jiffies_expire;
 };
 
-static __used noinline struct dummy *dummy_alloc(void)
+noinline struct dummy *dummy_alloc(void)
 {
 	struct dummy *d;
 	void *leak;
@@ -118,10 +118,6 @@ static __used noinline struct dummy *dummy_alloc(void)
 
 	/* Oops, forgot to save leak! */
 	leak = kzalloc(sizeof(int), GFP_KERNEL);
-	if (!leak) {
-		kfree(d);
-		return NULL;
-	}
 
 	pr_info("%s: dummy @ %p, expires @ %lx\n",
 		__func__, d, d->jiffies_expire);
@@ -129,7 +125,7 @@ static __used noinline struct dummy *dummy_alloc(void)
 	return d;
 }
 
-static __used noinline void dummy_free(struct dummy *d)
+noinline void dummy_free(struct dummy *d)
 {
 	pr_info("%s: dummy @ %p, expired = %lx\n",
 		__func__, d, d->jiffies_expire);
@@ -137,8 +133,7 @@ static __used noinline void dummy_free(struct dummy *d)
 	kfree(d);
 }
 
-static __used noinline bool dummy_check(struct dummy *d,
-					   unsigned long jiffies)
+noinline bool dummy_check(struct dummy *d, unsigned long jiffies)
 {
 	return time_after(jiffies, d->jiffies_expire);
 }

@@ -5,9 +5,12 @@
 #include <asm/dwarf2.h>
 #include <asm/cpufeatures.h>
 #include <asm/alternative-asm.h>
+#include <asm/export.h>
 #include <asm/nospec-branch.h>
 
 .macro THUNK reg
+	.section .text.__x86.indirect_thunk
+
 ENTRY(__x86_indirect_thunk_\reg)
 	CFI_STARTPROC
 	JMP_NOSPEC %\reg
@@ -22,7 +25,9 @@ ENDPROC(__x86_indirect_thunk_\reg)
  * than one per register with the correct names. So we do it
  * the simple and nasty way...
  */
-#define GENERATE_THUNK(reg) THUNK reg
+#define __EXPORT_THUNK(sym) _ASM_NOKPROBE(sym); EXPORT_SYMBOL(sym)
+#define EXPORT_THUNK(reg) __EXPORT_THUNK(__x86_indirect_thunk_ ## reg)
+#define GENERATE_THUNK(reg) THUNK reg ; EXPORT_THUNK(reg)
 
 GENERATE_THUNK(_ASM_AX)
 GENERATE_THUNK(_ASM_BX)

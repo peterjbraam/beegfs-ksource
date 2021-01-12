@@ -16,7 +16,7 @@ struct tb_switch;
 struct tb_dma_port;
 
 #define DMA_PORT_CSS_ADDRESS		0x3fffff
-#define DMA_PORT_CSS_MAX_SIZE		0x00000080
+#define DMA_PORT_CSS_MAX_SIZE		SZ_128
 
 struct tb_dma_port *dma_port_alloc(struct tb_switch *sw);
 void dma_port_free(struct tb_dma_port *dma);

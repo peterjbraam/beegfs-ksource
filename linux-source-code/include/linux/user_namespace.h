@@ -1,21 +1,35 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _LINUX_USER_NAMESPACE_H
 #define _LINUX_USER_NAMESPACE_H
 
 #include <linux/kref.h>
 #include <linux/nsproxy.h>
+#include <linux/ns_common.h>
 #include <linux/sched.h>
+#include <linux/workqueue.h>
+#include <linux/rwsem.h>
+#include <linux/sysctl.h>
 #include <linux/err.h>
 #include <linux/rh_kabi.h>
 
-#define UID_GID_MAP_MAX_EXTENTS 5
+#define UID_GID_MAP_MAX_BASE_EXTENTS 5
+#define UID_GID_MAP_MAX_EXTENTS 340
 
-struct uid_gid_map {	/* 64 bytes -- 1 cache line */
+struct uid_gid_extent {
+	u32 first;
+	u32 lower_first;
+	u32 count;
+};
+
+struct uid_gid_map { /* 64 bytes -- 1 cache line */
 	u32 nr_extents;
-	struct uid_gid_extent {
-		u32 first;
-		u32 lower_first;
-		u32 count;
-	} extent[UID_GID_MAP_MAX_EXTENTS];
+	union {
+		struct uid_gid_extent extent[UID_GID_MAP_MAX_BASE_EXTENTS];
+		struct {
+			struct uid_gid_extent *forward;
+			struct uid_gid_extent *reverse;
+		};
+	};
 };
 
 #define USERNS_SETGROUPS_ALLOWED 1UL
@@ -31,6 +45,16 @@ enum ucount_type {
 	UCOUNT_IPC_NAMESPACES,
 	UCOUNT_NET_NAMESPACES,
 	UCOUNT_MNT_NAMESPACES,
+	UCOUNT_CGROUP_NAMESPACES,
+#ifdef CONFIG_INOTIFY_USER
+	UCOUNT_INOTIFY_INSTANCES,
+	UCOUNT_INOTIFY_WATCHES,
+#endif
+	UCOUNT_KABI_RESERVE_1,
+	UCOUNT_KABI_RESERVE_2,
+	UCOUNT_KABI_RESERVE_3,
+	UCOUNT_KABI_RESERVE_4,
+	UCOUNT_KABI_RESERVE_5,
 	UCOUNT_KABI_RESERVE_6,
 	UCOUNT_KABI_RESERVE_7,
 	UCOUNT_KABI_RESERVE_8,
@@ -50,25 +74,29 @@ struct user_namespace {
 	struct uid_gid_map	projid_map;
 	atomic_t		count;
 	struct user_namespace	*parent;
+	int			level;
 	kuid_t			owner;
 	kgid_t			group;
-	unsigned int		proc_inum;
-	RH_KABI_DEPRECATE(bool,	may_mount_sysfs)
-	RH_KABI_DEPRECATE(bool, may_mount_proc)
+	struct ns_common	ns;
+	unsigned long		flags;
 
 	/* Register of per-UID persistent keyrings for this namespace */
 #ifdef CONFIG_PERSISTENT_KEYRINGS
 	struct key		*persistent_keyring_register;
 	struct rw_semaphore	persistent_keyring_register_sem;
 #endif
-	RH_KABI_EXTEND(int level)
-	RH_KABI_EXTEND(unsigned long flags)
-	RH_KABI_EXTEND(struct work_struct work)
-	RH_KABI_EXTEND(struct ctl_table_set set)
-	RH_KABI_EXTEND(struct ctl_table_header *sysctls)
-	RH_KABI_EXTEND(struct ucounts *ucounts)
-	RH_KABI_EXTEND(int ucount_max[UCOUNT_COUNTS])
-};
+	struct work_struct	work;
+#ifdef CONFIG_SYSCTL
+	struct ctl_table_set	set;
+	struct ctl_table_header *sysctls;
+#endif
+	struct ucounts		*ucounts;
+	int ucount_max[UCOUNT_COUNTS];
+	RH_KABI_RESERVE(1)
+	RH_KABI_RESERVE(2)
+	RH_KABI_RESERVE(3)
+	RH_KABI_RESERVE(4)
+} __randomize_layout;
 
 struct ucounts {
 	struct hlist_node node;
@@ -105,16 +133,19 @@ static inline void put_user_ns(struct user_namespace *ns)
 }
 
 struct seq_operations;
-extern struct seq_operations proc_uid_seq_operations;
-extern struct seq_operations proc_gid_seq_operations;
-extern struct seq_operations proc_projid_seq_operations;
+extern const struct seq_operations proc_uid_seq_operations;
+extern const struct seq_operations proc_gid_seq_operations;
+extern const struct seq_operations proc_projid_seq_operations;
 extern ssize_t proc_uid_map_write(struct file *, const char __user *, size_t, loff_t *);
 extern ssize_t proc_gid_map_write(struct file *, const char __user *, size_t, loff_t *);
 extern ssize_t proc_projid_map_write(struct file *, const char __user *, size_t, loff_t *);
 extern ssize_t proc_setgroups_write(struct file *, const char __user *, size_t, loff_t *);
 extern int proc_setgroups_show(struct seq_file *m, void *v);
 extern bool userns_may_setgroups(const struct user_namespace *ns);
+extern bool in_userns(const struct user_namespace *ancestor,
+		       const struct user_namespace *child);
 extern bool current_in_userns(const struct user_namespace *target_ns);
+struct ns_common *ns_get_owner(struct ns_common *ns);
 #else
 
 static inline struct user_namespace *get_user_ns(struct user_namespace *ns)
@@ -144,9 +175,20 @@ static inline bool userns_may_setgroups(const struct user_namespace *ns)
 	return true;
 }
 
+static inline bool in_userns(const struct user_namespace *ancestor,
+			     const struct user_namespace *child)
+{
+	return true;
+}
+
 static inline bool current_in_userns(const struct user_namespace *target_ns)
 {
 	return true;
+}
+
+static inline struct ns_common *ns_get_owner(struct ns_common *ns)
+{
+	return ERR_PTR(-EPERM);
 }
 #endif
 

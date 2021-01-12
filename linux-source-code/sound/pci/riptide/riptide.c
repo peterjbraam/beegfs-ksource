@@ -137,12 +137,12 @@ MODULE_PARM_DESC(id, "ID string for Riptide soundcard.");
 module_param_array(enable, bool, NULL, 0444);
 MODULE_PARM_DESC(enable, "Enable Riptide soundcard.");
 #ifdef SUPPORT_JOYSTICK
-module_param_array(joystick_port, int, NULL, 0444);
+module_param_hw_array(joystick_port, int, ioport, NULL, 0444);
 MODULE_PARM_DESC(joystick_port, "Joystick port # for Riptide soundcard.");
 #endif
-module_param_array(mpu_port, int, NULL, 0444);
+module_param_hw_array(mpu_port, int, ioport, NULL, 0444);
 MODULE_PARM_DESC(mpu_port, "MPU401 port # for Riptide driver.");
-module_param_array(opl3_port, int, NULL, 0444);
+module_param_hw_array(opl3_port, int, ioport, NULL, 0444);
 MODULE_PARM_DESC(opl3_port, "OPL3 port # for Riptide driver.");
 
 /*
@@ -1017,7 +1017,7 @@ getsamplerate(struct cmdif *cif, unsigned char *intdec, unsigned int *rate)
 static int
 setsampleformat(struct cmdif *cif,
 		unsigned char mixer, unsigned char id,
-		unsigned char channels, unsigned char format)
+		unsigned char channels, snd_pcm_format_t format)
 {
 	unsigned char w, ch, sig, order;
 
@@ -1158,7 +1158,6 @@ static int riptide_suspend(struct device *dev)
 
 	chip->in_suspend = 1;
 	snd_power_change_state(card, SNDRV_CTL_POWER_D3hot);
-	snd_pcm_suspend_all(chip->pcm);
 	snd_ac97_suspend(chip->ac97);
 	return 0;
 }

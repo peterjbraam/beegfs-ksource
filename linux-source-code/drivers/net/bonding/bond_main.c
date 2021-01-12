@@ -199,7 +199,7 @@ MODULE_PARM_DESC(lp_interval, "The number of seconds between instances where "
 atomic_t netpoll_block_tx = ATOMIC_INIT(0);
 #endif
 
-int bond_net_id __read_mostly;
+unsigned int bond_net_id __read_mostly;
 
 /*-------------------------- Forward declarations ---------------------------*/
 
@@ -612,8 +612,14 @@ static void bond_hw_addr_swap(struct bonding *bond, struct slave *new_active,
 static int bond_set_dev_addr(struct net_device *bond_dev,
 			     struct net_device *slave_dev)
 {
+	int err;
+
 	netdev_dbg(bond_dev, "bond_dev=%p slave_dev=%p slave_dev->name=%s slave_dev->addr_len=%d\n",
 		   bond_dev, slave_dev, slave_dev->name, slave_dev->addr_len);
+	err = dev_pre_changeaddr_notify(bond_dev, slave_dev->dev_addr, NULL);
+	if (err)
+		return err;
+
 	memcpy(bond_dev->dev_addr, slave_dev->dev_addr, slave_dev->addr_len);
 	bond_dev->addr_assign_type = NET_ADDR_STOLEN;
 	call_netdevice_notifiers(NETDEV_CHANGEADDR, bond_dev);
@@ -685,7 +691,7 @@ static void bond_do_fail_over_mac(struct bonding *bond,
 		}
 
 		rv = dev_set_mac_address(new_active->dev,
-					 (struct sockaddr *)&ss);
+					 (struct sockaddr *)&ss, NULL);
 		if (rv) {
 			netdev_err(bond->dev, "Error %d setting MAC of slave %s\n",
 				   -rv, new_active->dev->name);
@@ -700,7 +706,7 @@ static void bond_do_fail_over_mac(struct bonding *bond,
 		ss.ss_family = old_active->dev->type;
 
 		rv = dev_set_mac_address(old_active->dev,
-					 (struct sockaddr *)&ss);
+					 (struct sockaddr *)&ss, NULL);
 		if (rv)
 			netdev_err(bond->dev, "Error %d setting MAC of slave %s\n",
 				   -rv, new_active->dev->name);
@@ -1010,7 +1016,7 @@ static void bond_netpoll_cleanup(struct net_device *bond_dev)
 			slave_disable_netpoll(slave);
 }
 
-static int bond_netpoll_setup(struct net_device *dev, struct netpoll_info *ni, gfp_t gfp)
+static int bond_netpoll_setup(struct net_device *dev, struct netpoll_info *ni)
 {
 	struct bonding *bond = netdev_priv(dev);
 	struct list_head *iter;
@@ -1106,7 +1112,8 @@ static void bond_compute_features(struct bonding *bond)
 
 done:
 	bond_dev->vlan_features = vlan_features;
-	bond_dev->hw_enc_features = enc_features | NETIF_F_GSO_ENCAP_ALL;
+	bond_dev->hw_enc_features = enc_features | NETIF_F_GSO_ENCAP_ALL |
+				    NETIF_F_GSO_UDP_L4;
 	bond_dev->gso_max_segs = gso_max_segs;
 	netif_set_gso_max_size(bond_dev, gso_max_size);
 
@@ -1166,7 +1173,7 @@ static rx_handler_result_t bond_handle_frame(struct sk_buff **pskb)
 	slave = bond_slave_get_rcu(skb->dev);
 	bond = slave->bond;
 
-	recv_probe = ACCESS_ONCE(bond->recv_probe);
+	recv_probe = READ_ONCE(bond->recv_probe);
 	if (recv_probe) {
 		ret = recv_probe(skb, bond, slave);
 		if (ret == RX_HANDLER_CONSUMED) {
@@ -1175,29 +1182,22 @@ static rx_handler_result_t bond_handle_frame(struct sk_buff **pskb)
 		}
 	}
 
-	/* Link-local multicast packets should be passed to the
-	 * stack on the link they arrive as well as pass them to the
-	 * bond-master device. These packets are mostly usable when
-	 * stack receives it with the link on which they arrive
-	 * (e.g. LLDP) they also must be available on master. Some of
-	 * the use cases include (but are not limited to): LLDP agents
-	 * that must be able to operate both on enslaved interfaces as
-	 * well as on bonds themselves; linux bridges that must be able
-	 * to process/pass BPDUs from attached bonds when any kind of
-	 * STP version is enabled on the network.
+	/*
+	 * For packets determined by bond_should_deliver_exact_match() call to
+	 * be suppressed we want to make an exception for link-local packets.
+	 * This is necessary for e.g. LLDP daemons to be able to monitor
+	 * inactive slave links without being forced to bind to them
+	 * explicitly.
+	 *
+	 * At the same time, packets that are passed to the bonding master
+	 * (including link-local ones) can have their originating interface
+	 * determined via PACKET_ORIGDEV socket option.
 	 */
-	if (is_link_local_ether_addr(eth_hdr(skb)->h_dest)) {
-		struct sk_buff *nskb = skb_clone(skb, GFP_ATOMIC);
-
-		if (nskb) {
-			nskb->dev = bond->dev;
-			nskb->queue_mapping = 0;
-			netif_rx(nskb);
-		}
-		return RX_HANDLER_PASS;
-	}
-	if (bond_should_deliver_exact_match(skb, slave, bond))
+	if (bond_should_deliver_exact_match(skb, slave, bond)) {
+		if (is_link_local_ether_addr(eth_hdr(skb)->h_dest))
+			return RX_HANDLER_PASS;
 		return RX_HANDLER_EXACT;
+	}
 
 	skb->dev = bond->dev;
 
@@ -1256,37 +1256,22 @@ static enum netdev_lag_hash bond_lag_hash_type(struct bonding *bond,
 	}
 }
 
-
-static int bond_master_upper_dev_link(struct bonding *bond, struct slave *slave)
+static int bond_master_upper_dev_link(struct bonding *bond, struct slave *slave,
+				      struct netlink_ext_ack *extack)
 {
 	struct netdev_lag_upper_info lag_upper_info;
 	enum netdev_lag_tx_type type;
-	char linkname[IFNAMSIZ+7];
-	int err;
 
 	type = bond_lag_tx_type(bond);
 	lag_upper_info.tx_type = type;
 	lag_upper_info.hash_type = bond_lag_hash_type(bond, type);
 
-	err = netdev_master_upper_dev_link(slave->dev, bond->dev, slave,
-					   &lag_upper_info);
-	if (err)
-		return err;
-
-	sprintf(linkname, "slave_%s", slave->dev->name);
-	err = sysfs_create_link(&(bond->dev->dev.kobj), &(slave->dev->dev.kobj),
-				linkname);
-	if (err)
-		netdev_upper_dev_unlink(slave->dev, bond->dev);
-
-	return err;
+	return netdev_master_upper_dev_link(slave->dev, bond->dev, slave,
+					    &lag_upper_info, extack);
 }
 
 static void bond_upper_dev_unlink(struct bonding *bond, struct slave *slave)
 {
-	char linkname[IFNAMSIZ+7];
-	sprintf(linkname, "slave_%s", slave->dev->name);
-	sysfs_remove_link(&(bond->dev->dev.kobj), linkname);
 	netdev_upper_dev_unlink(slave->dev, bond->dev);
 	slave->dev->flags &= ~IFF_SLAVE;
 }
@@ -1371,7 +1356,8 @@ void bond_lower_state_changed(struct slave *slave)
 }
 
 /* enslave device <slave> to bond device <master> */
-int bond_enslave(struct net_device *bond_dev, struct net_device *slave_dev)
+int bond_enslave(struct net_device *bond_dev, struct net_device *slave_dev,
+		 struct netlink_ext_ack *extack)
 {
 	struct bonding *bond = netdev_priv(bond_dev);
 	const struct net_device_ops *slave_ops = slave_dev->netdev_ops;
@@ -1389,12 +1375,14 @@ int bond_enslave(struct net_device *bond_dev, struct net_device *slave_dev)
 
 	/* already in-use? */
 	if (netdev_is_rx_handler_busy(slave_dev)) {
+		NL_SET_ERR_MSG(extack, "Device is in use and cannot be enslaved");
 		netdev_err(bond_dev,
 			   "Error: Device is in use and cannot be enslaved\n");
 		return -EBUSY;
 	}
 
 	if (bond_dev == slave_dev) {
+		NL_SET_ERR_MSG(extack, "Cannot enslave bond to itself.");
 		netdev_err(bond_dev, "cannot enslave bond to itself.\n");
 		return -EPERM;
 	}
@@ -1405,6 +1393,7 @@ int bond_enslave(struct net_device *bond_dev, struct net_device *slave_dev)
 		netdev_dbg(bond_dev, "%s is NETIF_F_VLAN_CHALLENGED\n",
 			   slave_dev->name);
 		if (vlan_uses_dev(bond_dev)) {
+			NL_SET_ERR_MSG(extack, "Can not enslave VLAN challenged device to VLAN enabled bond");
 			netdev_err(bond_dev, "Error: cannot enslave VLAN challenged slave %s on VLAN enabled bond %s\n",
 				   slave_dev->name, bond_dev->name);
 			return -EPERM;
@@ -1424,6 +1413,7 @@ int bond_enslave(struct net_device *bond_dev, struct net_device *slave_dev)
 	 * enslaving it; the old ifenslave will not.
 	 */
 	if (slave_dev->flags & IFF_UP) {
+		NL_SET_ERR_MSG(extack, "Device can not be enslaved while up");
 		netdev_err(bond_dev, "%s is up - this may be due to an out of date ifenslave\n",
 			   slave_dev->name);
 		return -EPERM;
@@ -1464,6 +1454,7 @@ int bond_enslave(struct net_device *bond_dev, struct net_device *slave_dev)
 						 bond_dev);
 		}
 	} else if (bond_dev->type != slave_dev->type) {
+		NL_SET_ERR_MSG(extack, "Device type is different from other slaves");
 		netdev_err(bond_dev, "%s ether type (%d) is different from other slaves (%d), can not enslave it\n",
 			   slave_dev->name, slave_dev->type, bond_dev->type);
 		return -EINVAL;
@@ -1471,6 +1462,7 @@ int bond_enslave(struct net_device *bond_dev, struct net_device *slave_dev)
 
 	if (slave_dev->type == ARPHRD_INFINIBAND &&
 	    BOND_MODE(bond) != BOND_MODE_ACTIVEBACKUP) {
+		NL_SET_ERR_MSG(extack, "Only active-backup mode is supported for infiniband slaves");
 		netdev_warn(bond_dev, "Type (%d) supports only active-backup mode\n",
 			    slave_dev->type);
 		res = -EOPNOTSUPP;
@@ -1486,6 +1478,7 @@ int bond_enslave(struct net_device *bond_dev, struct net_device *slave_dev)
 				bond->params.fail_over_mac = BOND_FOM_ACTIVE;
 				netdev_warn(bond_dev, "Setting fail_over_mac to active for active-backup mode\n");
 			} else {
+				NL_SET_ERR_MSG(extack, "Slave device does not support setting the MAC address, but fail_over_mac is not set to active");
 				netdev_err(bond_dev, "The slave device specified does not support setting the MAC address, but fail_over_mac is not set to active\n");
 				res = -EOPNOTSUPP;
 				goto err_undo_flags;
@@ -1540,7 +1533,8 @@ int bond_enslave(struct net_device *bond_dev, struct net_device *slave_dev)
 		 */
 		memcpy(ss.__data, bond_dev->dev_addr, bond_dev->addr_len);
 		ss.ss_family = slave_dev->type;
-		res = dev_set_mac_address(slave_dev, (struct sockaddr *)&ss);
+		res = dev_set_mac_address(slave_dev, (struct sockaddr *)&ss,
+					  extack);
 		if (res) {
 			netdev_dbg(bond_dev, "Error %d calling set_mac_address\n", res);
 			goto err_restore_mtu;
@@ -1551,7 +1545,7 @@ int bond_enslave(struct net_device *bond_dev, struct net_device *slave_dev)
 	slave_dev->flags |= IFF_SLAVE;
 
 	/* open the slave since the application closed it */
-	res = dev_open(slave_dev);
+	res = dev_open(slave_dev, extack);
 	if (res) {
 		netdev_dbg(bond_dev, "Opening slave %s failed\n", slave_dev->name);
 		goto err_restore_mac;
@@ -1721,7 +1715,7 @@ int bond_enslave(struct net_device *bond_dev, struct net_device *slave_dev)
 		goto err_detach;
 	}
 
-	res = bond_master_upper_dev_link(bond, new_slave);
+	res = bond_master_upper_dev_link(bond, new_slave, extack);
 	if (res) {
 		netdev_dbg(bond_dev, "Error %d calling bond_master_upper_dev_link\n", res);
 		goto err_unregister;
@@ -1732,6 +1726,8 @@ int bond_enslave(struct net_device *bond_dev, struct net_device *slave_dev)
 		netdev_dbg(bond_dev, "Error %d calling bond_sysfs_slave_add\n", res);
 		goto err_upper_unlink;
 	}
+
+	bond->nest_level = dev_get_nest_level(bond_dev) + 1;
 
 	/* If the mode uses primary, then the following is handled by
 	 * bond_change_active_slave().
@@ -1779,6 +1775,7 @@ int bond_enslave(struct net_device *bond_dev, struct net_device *slave_dev)
 
 	if (bond_mode_can_use_xmit_hash(bond))
 		bond_update_slave_arr(bond, NULL);
+
 
 	netdev_info(bond_dev, "Enslaving %s as %s interface with %s link\n",
 		    slave_dev->name,
@@ -1828,7 +1825,7 @@ err_restore_mac:
 		bond_hw_addr_copy(ss.__data, new_slave->perm_hwaddr,
 				  new_slave->dev->addr_len);
 		ss.ss_family = slave_dev->type;
-		dev_set_mac_address(slave_dev, (struct sockaddr *)&ss);
+		dev_set_mac_address(slave_dev, (struct sockaddr *)&ss, NULL);
 	}
 
 err_restore_mtu:
@@ -1958,6 +1955,9 @@ static int __bond_release_one(struct net_device *bond_dev,
 	if (!bond_has_slaves(bond)) {
 		bond_set_carrier(bond);
 		eth_hw_addr_random(bond_dev);
+		bond->nest_level = SINGLE_DEPTH_NESTING;
+	} else {
+		bond->nest_level = dev_get_nest_level(bond_dev) + 1;
 	}
 
 	unblock_netpoll_tx();
@@ -1975,7 +1975,6 @@ static int __bond_release_one(struct net_device *bond_dev,
 		netdev_info(bond_dev, "last VLAN challenged slave %s left bond %s - VLAN blocking is removed\n",
 			    slave_dev->name, bond_dev->name);
 
-	/* must do this from outside any spinlocks */
 	vlan_vids_del_by_dev(slave_dev, bond_dev);
 
 	/* If the mode uses primary, then this case was handled above by
@@ -2010,7 +2009,7 @@ static int __bond_release_one(struct net_device *bond_dev,
 		bond_hw_addr_copy(ss.__data, slave->perm_hwaddr,
 				  slave->dev->addr_len);
 		ss.ss_family = slave_dev->type;
-		dev_set_mac_address(slave_dev, (struct sockaddr *)&ss);
+		dev_set_mac_address(slave_dev, (struct sockaddr *)&ss, NULL);
 	}
 
 	if (unregister)
@@ -2156,7 +2155,6 @@ static int bond_miimon_inspect(struct bonding *bond)
 					    (bond->params.updelay - slave->delay) *
 					    bond->params.miimon,
 					    slave->dev->name);
-
 				commit++;
 				continue;
 			}
@@ -2205,6 +2203,15 @@ static void bond_miimon_commit(struct bonding *bond)
 	bond_for_each_slave(bond, slave, iter) {
 		switch (slave->new_link) {
 		case BOND_LINK_NOCHANGE:
+			/* For 802.3ad mode, check current slave speed and
+			 * duplex again in case its port was disabled after
+			 * invalid speed/duplex reporting but recovered before
+			 * link monitoring could make a decision on the actual
+			 * link status
+			 */
+			if (BOND_MODE(bond) == BOND_MODE_8023AD &&
+			    slave->link == BOND_LINK_UP)
+				bond_3ad_adapter_speed_duplex_changed(slave);
 			continue;
 
 		case BOND_LINK_UP:
@@ -2368,10 +2375,10 @@ static bool bond_has_this_ip(struct bonding *bond, __be32 ip)
  */
 static void bond_arp_send(struct net_device *slave_dev, int arp_op,
 			  __be32 dest_ip, __be32 src_ip,
-			  struct bond_vlan_tag *inner,
-			  struct bond_vlan_tag *outer)
+			  struct bond_vlan_tag *tags)
 {
 	struct sk_buff *skb;
+	struct bond_vlan_tag *outer_tag = tags;
 
 	netdev_dbg(slave_dev, "arp %d on slave %s: dst %pI4 src %pI4\n",
 		   arp_op, slave_dev->name, &dest_ip, &src_ip);
@@ -2383,42 +2390,92 @@ static void bond_arp_send(struct net_device *slave_dev, int arp_op,
 		net_err_ratelimited("ARP packet allocation failed\n");
 		return;
 	}
-	if (outer->vlan_id) {
-		if (inner->vlan_id) {
-			netdev_dbg(slave_dev, "inner tag: proto %X vid %X\n",
-				   ntohs(inner->vlan_proto), inner->vlan_id);
-			skb = vlan_insert_tag_set_proto(skb, inner->vlan_proto,
-							inner->vlan_id);
-			if (!skb) {
-				net_err_ratelimited("failed to insert inner VLAN tag\n");
-				return;
-			}
+
+	if (!tags || tags->vlan_proto == VLAN_N_VID)
+		goto xmit;
+
+	tags++;
+
+	/* Go through all the tags backwards and add them to the packet */
+	while (tags->vlan_proto != VLAN_N_VID) {
+		if (!tags->vlan_id) {
+			tags++;
+			continue;
 		}
 
-		netdev_dbg(slave_dev, "outer reg: proto %X vid %X\n",
-			   ntohs(outer->vlan_proto), outer->vlan_id);
-		__vlan_hwaccel_put_tag(skb, outer->vlan_proto,
-				       outer->vlan_id);
+		netdev_dbg(slave_dev, "inner tag: proto %X vid %X\n",
+			   ntohs(outer_tag->vlan_proto), tags->vlan_id);
+		skb = vlan_insert_tag_set_proto(skb, tags->vlan_proto,
+						tags->vlan_id);
+		if (!skb) {
+			net_err_ratelimited("failed to insert inner VLAN tag\n");
+			return;
+		}
+
+		tags++;
 	}
+	/* Set the outer tag */
+	if (outer_tag->vlan_id) {
+		netdev_dbg(slave_dev, "outer tag: proto %X vid %X\n",
+			   ntohs(outer_tag->vlan_proto), outer_tag->vlan_id);
+		__vlan_hwaccel_put_tag(skb, outer_tag->vlan_proto,
+				       outer_tag->vlan_id);
+	}
+
+xmit:
 	arp_xmit(skb);
 }
 
+/* Validate the device path between the @start_dev and the @end_dev.
+ * The path is valid if the @end_dev is reachable through device
+ * stacking.
+ * When the path is validated, collect any vlan information in the
+ * path.
+ */
+struct bond_vlan_tag *bond_verify_device_path(struct net_device *start_dev,
+					      struct net_device *end_dev,
+					      int level)
+{
+	struct bond_vlan_tag *tags;
+	struct net_device *upper;
+	struct list_head  *iter;
+
+	if (start_dev == end_dev) {
+		tags = kcalloc(level + 1, sizeof(*tags), GFP_ATOMIC);
+		if (!tags)
+			return ERR_PTR(-ENOMEM);
+		tags[level].vlan_proto = VLAN_N_VID;
+		return tags;
+	}
+
+	netdev_for_each_upper_dev_rcu(start_dev, upper, iter) {
+		tags = bond_verify_device_path(upper, end_dev, level + 1);
+		if (IS_ERR_OR_NULL(tags)) {
+			if (IS_ERR(tags))
+				return tags;
+			continue;
+		}
+		if (is_vlan_dev(upper)) {
+			tags[level].vlan_proto = vlan_dev_vlan_proto(upper);
+			tags[level].vlan_id = vlan_dev_vlan_id(upper);
+		}
+
+		return tags;
+	}
+
+	return NULL;
+}
 
 static void bond_arp_send_all(struct bonding *bond, struct slave *slave)
 {
-	struct net_device *upper, *vlan_upper;
-	struct list_head *iter, *vlan_iter;
 	struct rtable *rt;
-	struct bond_vlan_tag inner, outer;
+	struct bond_vlan_tag *tags;
 	__be32 *targets = bond->params.arp_targets, addr;
 	int i;
 
 	for (i = 0; i < BOND_MAX_ARP_TARGETS && targets[i]; i++) {
 		netdev_dbg(bond->dev, "basa: target %pI4\n", &targets[i]);
-		inner.vlan_proto = 0;
-		inner.vlan_id = 0;
-		outer.vlan_proto = 0;
-		outer.vlan_id = 0;
+		tags = NULL;
 
 		/* Find out through which dev should the packet go */
 		rt = ip_route_output(dev_net(bond->dev), targets[i], 0,
@@ -2431,7 +2488,8 @@ static void bond_arp_send_all(struct bonding *bond, struct slave *slave)
 				net_warn_ratelimited("%s: no route to arp_ip_target %pI4 and arp_validate is set\n",
 						     bond->dev->name,
 						     &targets[i]);
-			bond_arp_send(slave->dev, ARPOP_REQUEST, targets[i], 0, &inner, &outer);
+			bond_arp_send(slave->dev, ARPOP_REQUEST, targets[i],
+				      0, tags);
 			continue;
 		}
 
@@ -2440,51 +2498,11 @@ static void bond_arp_send_all(struct bonding *bond, struct slave *slave)
 			goto found;
 
 		rcu_read_lock();
-		/* first we search only for vlan devices. for every vlan
-		 * found we verify its upper dev list, searching for the
-		 * rt->dst.dev. If found we save the tag of the vlan and
-		 * proceed to send the packet.
-		 */
-		netdev_for_each_all_upper_dev_rcu(bond->dev, vlan_upper,
-						  vlan_iter) {
-			if (!is_vlan_dev(vlan_upper))
-				continue;
-
-			if (vlan_upper == rt->dst.dev) {
-				outer.vlan_proto = vlan_dev_vlan_proto(vlan_upper);
-				outer.vlan_id = vlan_dev_vlan_id(vlan_upper);
-				rcu_read_unlock();
-				goto found;
-			}
-			netdev_for_each_all_upper_dev_rcu(vlan_upper, upper,
-							  iter) {
-				if (upper == rt->dst.dev) {
-					/* If the upper dev is a vlan dev too,
-					 *  set the vlan tag to inner tag.
-					 */
-					if (is_vlan_dev(upper)) {
-						inner.vlan_proto = vlan_dev_vlan_proto(upper);
-						inner.vlan_id = vlan_dev_vlan_id(upper);
-					}
-					outer.vlan_proto = vlan_dev_vlan_proto(vlan_upper);
-					outer.vlan_id = vlan_dev_vlan_id(vlan_upper);
-					rcu_read_unlock();
-					goto found;
-				}
-			}
-		}
-
-		/* if the device we're looking for is not on top of any of
-		 * our upper vlans, then just search for any dev that
-		 * matches, and in case it's a vlan - save the id
-		 */
-		netdev_for_each_all_upper_dev_rcu(bond->dev, upper, iter) {
-			if (upper == rt->dst.dev) {
-				rcu_read_unlock();
-				goto found;
-			}
-		}
+		tags = bond_verify_device_path(bond->dev, rt->dst.dev, 0);
 		rcu_read_unlock();
+
+		if (!IS_ERR_OR_NULL(tags))
+			goto found;
 
 		/* Not our device - skip */
 		netdev_dbg(bond->dev, "no path to arp_ip_target %pI4 via rt.dev %s\n",
@@ -2497,7 +2515,8 @@ found:
 		addr = bond_confirm_addr(rt->dst.dev, targets[i], 0);
 		ip_rt_put(rt);
 		bond_arp_send(slave->dev, ARPOP_REQUEST, targets[i],
-			      addr, &inner, &outer);
+			      addr, tags);
+		kfree(tags);
 	}
 }
 
@@ -2528,7 +2547,8 @@ int bond_arp_rcv(const struct sk_buff *skb, struct bonding *bond,
 	struct slave *curr_active_slave, *curr_arp_slave;
 	unsigned char *arp_ptr;
 	__be32 sip, tip;
-	int alen, is_arp = skb->protocol == __cpu_to_be16(ETH_P_ARP);
+	int is_arp = skb->protocol == __cpu_to_be16(ETH_P_ARP);
+	unsigned int alen;
 
 	if (!slave_do_arp_validate(bond, slave)) {
 		if ((slave_do_arp_validate_only(bond) && is_arp) ||
@@ -3207,8 +3227,12 @@ static int bond_netdev_event(struct notifier_block *this,
 		return NOTIFY_DONE;
 
 	if (event_dev->flags & IFF_MASTER) {
+		int ret;
+
 		netdev_dbg(event_dev, "IFF_MASTER\n");
-		return bond_master_netdev_event(event, event_dev);
+		ret = bond_master_netdev_event(event, event_dev);
+		if (ret != NOTIFY_DONE)
+			return ret;
 	}
 
 	if (event_dev->flags & IFF_SLAVE) {
@@ -3423,6 +3447,13 @@ static void bond_fold_stats(struct rtnl_link_stats64 *_res,
 	}
 }
 
+static int bond_get_nest_level(struct net_device *bond_dev)
+{
+	struct bonding *bond = netdev_priv(bond_dev);
+
+	return bond->nest_level;
+}
+
 static void bond_get_stats(struct net_device *bond_dev,
 			   struct rtnl_link_stats64 *stats)
 {
@@ -3431,7 +3462,7 @@ static void bond_get_stats(struct net_device *bond_dev,
 	struct list_head *iter;
 	struct slave *slave;
 
-	spin_lock(&bond->stats_lock);
+	spin_lock_nested(&bond->stats_lock, bond_get_nest_level(bond_dev));
 	memcpy(stats, &bond->bond_stats, sizeof(*stats));
 
 	rcu_read_lock();
@@ -3533,7 +3564,7 @@ static int bond_do_ioctl(struct net_device *bond_dev, struct ifreq *ifr, int cmd
 	switch (cmd) {
 	case BOND_ENSLAVE_OLD:
 	case SIOCBONDENSLAVE:
-		res = bond_enslave(bond_dev, slave_dev);
+		res = bond_enslave(bond_dev, slave_dev, NULL);
 		break;
 	case BOND_RELEASE_OLD:
 	case SIOCBONDRELEASE:
@@ -3655,9 +3686,7 @@ static int bond_change_mtu(struct net_device *bond_dev, int new_mtu)
 
 	bond_for_each_slave(bond, slave, iter) {
 		netdev_dbg(bond_dev, "s %p c_m %p\n",
-			   slave,
-			   get_ndo_ext(slave->dev->netdev_ops, ndo_change_mtu) ?
-			   : slave->dev->netdev_ops->ndo_change_mtu_rh74);
+			   slave, slave->dev->netdev_ops->ndo_change_mtu);
 
 		res = dev_set_mtu(slave->dev, new_mtu);
 
@@ -3730,7 +3759,7 @@ static int bond_set_mac_address(struct net_device *bond_dev, void *addr)
 
 	bond_for_each_slave(bond, slave, iter) {
 		netdev_dbg(bond_dev, "slave %p %s\n", slave, slave->dev->name);
-		res = dev_set_mac_address(slave->dev, addr);
+		res = dev_set_mac_address(slave->dev, addr, NULL);
 		if (res) {
 			/* TODO: consider downing the slave
 			 * and retry ?
@@ -3759,7 +3788,7 @@ unwind:
 			break;
 
 		tmp_res = dev_set_mac_address(rollback_slave->dev,
-					      (struct sockaddr *)&tmp_ss);
+					      (struct sockaddr *)&tmp_ss, NULL);
 		if (tmp_res) {
 			netdev_dbg(bond_dev, "unwind err %d dev %s\n",
 				   tmp_res, rollback_slave->dev->name);
@@ -3863,7 +3892,7 @@ static netdev_tx_t bond_xmit_roundrobin(struct sk_buff *skb,
 		else
 			bond_xmit_slave_id(bond, skb, 0);
 	} else {
-		int slave_cnt = ACCESS_ONCE(bond->slave_cnt);
+		int slave_cnt = READ_ONCE(bond->slave_cnt);
 
 		if (likely(slave_cnt)) {
 			slave_id = bond_rr_gen_slave_id(bond);
@@ -4032,7 +4061,7 @@ static netdev_tx_t bond_3ad_xor_xmit(struct sk_buff *skb,
 	unsigned int count;
 
 	slaves = rcu_dereference(bond->slave_arr);
-	count = slaves ? ACCESS_ONCE(slaves->count) : 0;
+	count = slaves ? READ_ONCE(slaves->count) : 0;
 	if (likely(count)) {
 		slave = slaves->arr[bond_xmit_hash(bond, skb) % count];
 		bond_dev_queue_xmit(bond, skb, slave->dev);
@@ -4103,7 +4132,8 @@ static inline int bond_slave_override(struct bonding *bond,
 
 
 static u16 bond_select_queue(struct net_device *dev, struct sk_buff *skb,
-			     void *accel_priv, select_queue_fallback_t fallback)
+			     struct net_device *sb_dev,
+			     select_queue_fallback_t fallback)
 {
 	/* This helper function exists to help dev_pick_tx get the correct
 	 * destination queue.  Using a helper function skips a call to
@@ -4221,7 +4251,6 @@ static const struct ethtool_ops bond_ethtool_ops = {
 };
 
 static const struct net_device_ops bond_netdev_ops = {
-	.ndo_size		= sizeof(struct net_device_ops),
 	.ndo_init		= bond_init,
 	.ndo_uninit		= bond_uninit,
 	.ndo_open		= bond_open,
@@ -4232,11 +4261,12 @@ static const struct net_device_ops bond_netdev_ops = {
 	.ndo_do_ioctl		= bond_do_ioctl,
 	.ndo_change_rx_flags	= bond_change_rx_flags,
 	.ndo_set_rx_mode	= bond_set_rx_mode,
-	.extended.ndo_change_mtu	= bond_change_mtu,
+	.ndo_change_mtu		= bond_change_mtu,
 	.ndo_set_mac_address	= bond_set_mac_address,
 	.ndo_neigh_setup	= bond_neigh_setup,
 	.ndo_vlan_rx_add_vid	= bond_vlan_rx_add_vid,
 	.ndo_vlan_rx_kill_vid	= bond_vlan_rx_kill_vid,
+	.ndo_get_lock_subclass  = bond_get_nest_level,
 #ifdef CONFIG_NET_POLL_CONTROLLER
 	.ndo_netpoll_setup	= bond_netpoll_setup,
 	.ndo_netpoll_cleanup	= bond_netpoll_cleanup,
@@ -4245,14 +4275,6 @@ static const struct net_device_ops bond_netdev_ops = {
 	.ndo_add_slave		= bond_enslave,
 	.ndo_del_slave		= bond_release,
 	.ndo_fix_features	= bond_fix_features,
-	.extended.ndo_neigh_construct	= netdev_default_l2upper_neigh_construct,
-	.extended.ndo_neigh_destroy	= netdev_default_l2upper_neigh_destroy,
-	.ndo_bridge_setlink	= switchdev_port_bridge_setlink,
-	.ndo_bridge_getlink	= switchdev_port_bridge_getlink,
-	.ndo_bridge_dellink	= switchdev_port_bridge_dellink,
-	.ndo_fdb_add		= switchdev_port_fdb_add,
-	.ndo_fdb_del		= switchdev_port_fdb_del,
-	.extended.ndo_fdb_dump	= switchdev_port_fdb_dump,
 	.ndo_features_check	= passthru_features_check,
 };
 
@@ -4280,12 +4302,12 @@ void bond_setup(struct net_device *bond_dev)
 
 	/* Initialize the device entry points */
 	ether_setup(bond_dev);
-	bond_dev->extended->max_mtu = ETH_MAX_MTU;
+	bond_dev->max_mtu = ETH_MAX_MTU;
 	bond_dev->netdev_ops = &bond_netdev_ops;
 	bond_dev->ethtool_ops = &bond_ethtool_ops;
 
-	bond_dev->extended->needs_free_netdev = true;
-	bond_dev->extended->priv_destructor = bond_destructor;
+	bond_dev->needs_free_netdev = true;
+	bond_dev->priv_destructor = bond_destructor;
 
 	SET_NETDEV_DEVTYPE(bond_dev, &bond_type);
 
@@ -4312,7 +4334,7 @@ void bond_setup(struct net_device *bond_dev)
 				NETIF_F_HW_VLAN_CTAG_RX |
 				NETIF_F_HW_VLAN_CTAG_FILTER;
 
-	bond_dev->hw_features |= NETIF_F_GSO_ENCAP_ALL;
+	bond_dev->hw_features |= NETIF_F_GSO_ENCAP_ALL | NETIF_F_GSO_UDP_L4;
 	bond_dev->features |= bond_dev->hw_features;
 }
 
@@ -4743,6 +4765,7 @@ static int bond_init(struct net_device *bond_dev)
 	if (!bond->wq)
 		return -ENOMEM;
 
+	bond->nest_level = SINGLE_DEPTH_NESTING;
 	netdev_lockdep_set_classes(bond_dev);
 
 	list_add_tail(&bond->bond_list, &bn->dev_list);
@@ -4779,7 +4802,7 @@ int bond_create(struct net *net, const char *name)
 	rtnl_lock();
 
 	bond_dev = alloc_netdev_mq(sizeof(struct bonding),
-				   name ? name : "bond%d",
+				   name ? name : "bond%d", NET_NAME_UNKNOWN,
 				   bond_setup, tx_queues);
 	if (!bond_dev) {
 		pr_err("%s: eek! can't alloc netdev!\n", name);
@@ -4875,7 +4898,7 @@ static int __init bonding_init(void)
 			goto err;
 	}
 
-	register_netdevice_notifier_rh(&bond_netdev_notifier);
+	register_netdevice_notifier(&bond_netdev_notifier);
 out:
 	return res;
 err:
@@ -4889,7 +4912,7 @@ err_link:
 
 static void __exit bonding_exit(void)
 {
-	unregister_netdevice_notifier_rh(&bond_netdev_notifier);
+	unregister_netdevice_notifier(&bond_netdev_notifier);
 
 	bond_destroy_debugfs();
 

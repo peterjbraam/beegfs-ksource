@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __PERF_EVSEL_H
 #define __PERF_EVSEL_H 1
 
@@ -44,11 +45,11 @@ enum term_type {
 	PERF_EVSEL__CONFIG_TERM_CALLGRAPH,
 	PERF_EVSEL__CONFIG_TERM_STACK_USER,
 	PERF_EVSEL__CONFIG_TERM_INHERIT,
+	PERF_EVSEL__CONFIG_TERM_MAX_STACK,
 	PERF_EVSEL__CONFIG_TERM_MAX_EVENTS,
 	PERF_EVSEL__CONFIG_TERM_OVERWRITE,
 	PERF_EVSEL__CONFIG_TERM_DRV_CFG,
 	PERF_EVSEL__CONFIG_TERM_BRANCH,
-	PERF_EVSEL__CONFIG_TERM_PERCORE,
 };
 
 struct perf_evsel_config_term {
@@ -61,11 +62,11 @@ struct perf_evsel_config_term {
 		char	*callgraph;
 		char	*drv_cfg;
 		u64	stack_user;
+		int	max_stack;
 		bool	inherit;
 		bool	overwrite;
 		char	*branch;
 		unsigned long max_events;
-		bool	percore;
 	} val;
 	bool weak;
 };
@@ -101,10 +102,11 @@ struct perf_evsel {
 	int			idx;
 	u32			ids;
 	unsigned long		max_events;
+	unsigned long		nr_events_printed;
 	char			*name;
 	double			scale;
 	const char		*unit;
-	struct event_format	*tp_format;
+	struct tep_event	*tp_format;
 	off_t			id_offset;
 	struct perf_stat_evsel  *stats;
 	void			*priv;
@@ -148,7 +150,6 @@ struct perf_evsel {
 	struct perf_evsel	**metric_events;
 	bool			collect_stat;
 	bool			weak_group;
-	bool			percore;
 	const char		*pmu_name;
 };
 
@@ -215,7 +216,7 @@ static inline struct perf_evsel *perf_evsel__newtp(const char *sys, const char *
 
 struct perf_evsel *perf_evsel__new_cycles(bool precise);
 
-struct event_format *event_format__new(const char *sys, const char *name);
+struct tep_event *event_format__new(const char *sys, const char *name);
 
 void perf_evsel__init(struct perf_evsel *evsel,
 		      struct perf_event_attr *attr, int idx);
@@ -300,11 +301,11 @@ static inline char *perf_evsel__strval(struct perf_evsel *evsel,
 	return perf_evsel__rawptr(evsel, sample, name);
 }
 
-struct format_field;
+struct tep_format_field;
 
-u64 format_field__intval(struct format_field *field, struct perf_sample *sample, bool needs_swap);
+u64 format_field__intval(struct tep_format_field *field, struct perf_sample *sample, bool needs_swap);
 
-struct format_field *perf_evsel__field(struct perf_evsel *evsel, const char *name);
+struct tep_format_field *perf_evsel__field(struct perf_evsel *evsel, const char *name);
 
 #define perf_evsel__match(evsel, t, c)		\
 	(evsel->attr.type == PERF_TYPE_##t &&	\

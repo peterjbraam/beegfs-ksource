@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /*
  * Userspace API for hardware time stamping of network packets
  *
@@ -21,15 +22,12 @@ enum {
 	SOF_TIMESTAMPING_SOFTWARE = (1<<4),
 	SOF_TIMESTAMPING_SYS_HARDWARE = (1<<5),
 	SOF_TIMESTAMPING_RAW_HARDWARE = (1<<6),
-	/* RH: remember to update the check in sock_setsockopt()
-	 * if these values become used.
-	 */
-	__RH_RESERVED_SOF_TIMESTAMPING_OPT_ID = (1<<7),
-	__RH_RESERVED_SOF_TIMESTAMPING_TX_SCHED = (1<<8),
-	__RH_RESERVED_SOF_TIMESTAMPING_TX_ACK = (1<<9),
+	SOF_TIMESTAMPING_OPT_ID = (1<<7),
+	SOF_TIMESTAMPING_TX_SCHED = (1<<8),
+	SOF_TIMESTAMPING_TX_ACK = (1<<9),
 	SOF_TIMESTAMPING_OPT_CMSG = (1<<10),
-	__RH_RESERVED_SOF_TIMESTAMPING_OPT_TSONLY = (1<<11),
-	__RH_RESERVED_SOF_TIMESTAMPING_OPT_STATS = (1<<12),
+	SOF_TIMESTAMPING_OPT_TSONLY = (1<<11),
+	SOF_TIMESTAMPING_OPT_STATS = (1<<12),
 	SOF_TIMESTAMPING_OPT_PKTINFO = (1<<13),
 	SOF_TIMESTAMPING_OPT_TX_SWHW = (1<<14),
 
@@ -37,6 +35,16 @@ enum {
 	SOF_TIMESTAMPING_MASK = (SOF_TIMESTAMPING_LAST - 1) |
 				 SOF_TIMESTAMPING_LAST
 };
+
+/*
+ * SO_TIMESTAMPING flags are either for recording a packet timestamp or for
+ * reporting the timestamp to user space.
+ * Recording flags can be set both via socket options and control messages.
+ */
+#define SOF_TIMESTAMPING_TX_RECORD_MASK	(SOF_TIMESTAMPING_TX_HARDWARE | \
+					 SOF_TIMESTAMPING_TX_SOFTWARE | \
+					 SOF_TIMESTAMPING_TX_SCHED | \
+					 SOF_TIMESTAMPING_TX_ACK)
 
 /**
  * struct hwtstamp_config - %SIOCGHWTSTAMP and %SIOCSHWTSTAMP parameter
@@ -131,6 +139,24 @@ struct scm_ts_pktinfo {
 	__u32 if_index;
 	__u32 pkt_length;
 	__u32 reserved[2];
+};
+
+/*
+ * SO_TXTIME gets a struct sock_txtime with flags being an integer bit
+ * field comprised of these values.
+ */
+enum txtime_flags {
+	SOF_TXTIME_DEADLINE_MODE = (1 << 0),
+	SOF_TXTIME_REPORT_ERRORS = (1 << 1),
+
+	SOF_TXTIME_FLAGS_LAST = SOF_TXTIME_REPORT_ERRORS,
+	SOF_TXTIME_FLAGS_MASK = (SOF_TXTIME_FLAGS_LAST - 1) |
+				 SOF_TXTIME_FLAGS_LAST
+};
+
+struct sock_txtime {
+	__kernel_clockid_t	clockid;/* reference clockid */
+	__u32			flags;	/* as defined by enum txtime_flags */
 };
 
 #endif /* _NET_TIMESTAMPING_H */

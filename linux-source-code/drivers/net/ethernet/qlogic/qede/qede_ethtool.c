@@ -174,7 +174,6 @@ static const struct {
 	QEDE_STAT(coalesced_bytes),
 
 	QEDE_STAT(link_change_count),
-	QEDE_STAT(ptp_skip_txts),
 };
 
 #define QEDE_NUM_STATS	ARRAY_SIZE(qede_stats_arr)
@@ -228,7 +227,6 @@ static void qede_get_strings_stats_txq(struct qede_dev *edev,
 		else
 			sprintf(*buf, "%d_%d: %s", txq->index, txq->cos,
 				qede_tqstats_arr[i].string);
-
 		*buf += ETH_GSTRING_LEN;
 	}
 }
@@ -654,9 +652,9 @@ static void qede_get_drvinfo(struct net_device *ndev,
 {
 	char mfw[ETHTOOL_FWVERS_LEN], storm[ETHTOOL_FWVERS_LEN];
 	struct qede_dev *edev = netdev_priv(ndev);
+	char mbi[ETHTOOL_FWVERS_LEN];
 
 	strlcpy(info->driver, "qede", sizeof(info->driver));
-	strlcpy(info->version, DRV_MODULE_VERSION, sizeof(info->version));
 
 	snprintf(storm, ETHTOOL_FWVERS_LEN, "%d.%d.%d.%d",
 		 edev->dev_info.common.fw_major,
@@ -670,13 +668,27 @@ static void qede_get_drvinfo(struct net_device *ndev,
 		 (edev->dev_info.common.mfw_rev >> 8) & 0xFF,
 		 edev->dev_info.common.mfw_rev & 0xFF);
 
-	if ((strlen(storm) + strlen(mfw) + strlen("mfw storm  ")) <
-	    sizeof(info->fw_version)) {
+	if ((strlen(storm) + strlen(DRV_MODULE_VERSION) + strlen("[storm]  ")) <
+	    sizeof(info->version))
+		snprintf(info->version, sizeof(info->version),
+			 "%s [storm %s]", DRV_MODULE_VERSION, storm);
+	else
+		snprintf(info->version, sizeof(info->version),
+			 "%s %s", DRV_MODULE_VERSION, storm);
+
+	if (edev->dev_info.common.mbi_version) {
+		snprintf(mbi, ETHTOOL_FWVERS_LEN, "%d.%d.%d",
+			 (edev->dev_info.common.mbi_version &
+			  QED_MBI_VERSION_2_MASK) >> QED_MBI_VERSION_2_OFFSET,
+			 (edev->dev_info.common.mbi_version &
+			  QED_MBI_VERSION_1_MASK) >> QED_MBI_VERSION_1_OFFSET,
+			 (edev->dev_info.common.mbi_version &
+			  QED_MBI_VERSION_0_MASK) >> QED_MBI_VERSION_0_OFFSET);
 		snprintf(info->fw_version, sizeof(info->fw_version),
-			 "mfw %s storm %s", mfw, storm);
+			 "mbi %s [mfw %s]", mbi, mfw);
 	} else {
 		snprintf(info->fw_version, sizeof(info->fw_version),
-			 "%s %s", mfw, storm);
+			 "mfw %s", mfw);
 	}
 
 	strlcpy(info->bus_info, pci_name(edev->pdev), sizeof(info->bus_info));
@@ -1665,8 +1677,11 @@ static int qede_selftest_run_loopback(struct qede_dev *edev, u32 loopback_mode)
 	/* Wait for loopback configuration to apply */
 	msleep_interruptible(500);
 
-	/* prepare the loopback packet */
-	pkt_size = edev->ndev->mtu + ETH_HLEN;
+	/* Setting max packet size to 1.5K to avoid data being split over
+	 * multiple BDs in cases where MTU > PAGE_SIZE.
+	 */
+	pkt_size = (((edev->ndev->mtu < ETH_DATA_LEN) ?
+		     edev->ndev->mtu : ETH_DATA_LEN) + ETH_HLEN);
 
 	skb = netdev_alloc_skb(edev->ndev, pkt_size);
 	if (!skb) {

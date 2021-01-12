@@ -48,7 +48,7 @@
 #include <linux/cdev.h>
 #include <linux/vmalloc.h>
 #include <linux/io.h>
-#include <linux/aio.h>
+#include <linux/sched/mm.h>
 #include <linux/bitmap.h>
 
 #include <rdma/ib.h>
@@ -73,9 +73,8 @@
  */
 static int hfi1_file_open(struct inode *inode, struct file *fp);
 static int hfi1_file_close(struct inode *inode, struct file *fp);
-static ssize_t hfi1_aio_write(struct kiocb *kiocb, const struct iovec *iovec,
-			      unsigned long dim, loff_t offset);
-static unsigned int hfi1_poll(struct file *fp, struct poll_table_struct *pt);
+static ssize_t hfi1_write_iter(struct kiocb *kiocb, struct iov_iter *from);
+static __poll_t hfi1_poll(struct file *fp, struct poll_table_struct *pt);
 static int hfi1_file_mmap(struct file *fp, struct vm_area_struct *vma);
 
 static u64 kvirt_to_phys(void *addr);
@@ -103,21 +102,21 @@ static int allocate_ctxt(struct hfi1_filedata *fd, struct hfi1_devdata *dd,
 			 struct hfi1_user_info *uinfo,
 			 struct hfi1_ctxtdata **cd);
 static void deallocate_ctxt(struct hfi1_ctxtdata *uctxt);
-static unsigned int poll_urgent(struct file *fp, struct poll_table_struct *pt);
-static unsigned int poll_next(struct file *fp, struct poll_table_struct *pt);
+static __poll_t poll_urgent(struct file *fp, struct poll_table_struct *pt);
+static __poll_t poll_next(struct file *fp, struct poll_table_struct *pt);
 static int user_event_ack(struct hfi1_ctxtdata *uctxt, u16 subctxt,
 			  unsigned long arg);
 static int set_ctxt_pkey(struct hfi1_ctxtdata *uctxt, unsigned long arg);
 static int ctxt_reset(struct hfi1_ctxtdata *uctxt);
 static int manage_rcvq(struct hfi1_ctxtdata *uctxt, u16 subctxt,
 		       unsigned long arg);
-static int vma_fault(struct vm_area_struct *vma, struct vm_fault *vmf);
+static vm_fault_t vma_fault(struct vm_fault *vmf);
 static long hfi1_file_ioctl(struct file *fp, unsigned int cmd,
 			    unsigned long arg);
 
 static const struct file_operations hfi1_file_ops = {
 	.owner = THIS_MODULE,
-	.aio_write = hfi1_aio_write,
+	.write_iter = hfi1_write_iter,
 	.open = hfi1_file_open,
 	.release = hfi1_file_close,
 	.unlocked_ioctl = hfi1_file_ioctl,
@@ -204,7 +203,7 @@ static int hfi1_file_open(struct inode *inode, struct file *fp)
 	if (fd) {
 		fd->rec_cpu_num = -1; /* no cpu affinity by default */
 		fd->mm = current->mm;
-		atomic_inc(&fd->mm->mm_count);
+		mmgrab(fd->mm);
 		fd->dd = dd;
 		kobject_get(&fd->dd->kobj);
 		fp->private_data = fd;
@@ -299,18 +298,18 @@ static long hfi1_file_ioctl(struct file *fp, unsigned int cmd,
 	return ret;
 }
 
-static ssize_t hfi1_aio_write(struct kiocb *kiocb, const struct iovec *iovec,
-			      unsigned long dim, loff_t offset)
+static ssize_t hfi1_write_iter(struct kiocb *kiocb, struct iov_iter *from)
 {
 	struct hfi1_filedata *fd = kiocb->ki_filp->private_data;
 	struct hfi1_user_sdma_pkt_q *pq = fd->pq;
 	struct hfi1_user_sdma_comp_q *cq = fd->cq;
 	int done = 0, reqs = 0;
+	unsigned long dim = from->nr_segs;
 
 	if (!cq || !pq)
 		return -EIO;
 
-	if (!dim)
+	if (!iter_is_iovec(from) || !dim)
 		return -EINVAL;
 
 	trace_hfi1_sdma_request(fd->dd, fd->uctxt->ctxt, fd->subctxt, dim);
@@ -323,7 +322,7 @@ static ssize_t hfi1_aio_write(struct kiocb *kiocb, const struct iovec *iovec,
 		unsigned long count = 0;
 
 		ret = hfi1_user_sdma_process_request(
-			fd, (struct iovec *)(iovec + done),
+			fd, (struct iovec *)(from->iov + done),
 			dim, &count);
 		if (ret) {
 			reqs = ret;
@@ -592,7 +591,7 @@ done:
  * Local (non-chip) user memory is not mapped right away but as it is
  * accessed by the user-level code.
  */
-static int vma_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
+static vm_fault_t vma_fault(struct vm_fault *vmf)
 {
 	struct page *page;
 
@@ -606,20 +605,20 @@ static int vma_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 	return 0;
 }
 
-static unsigned int hfi1_poll(struct file *fp, struct poll_table_struct *pt)
+static __poll_t hfi1_poll(struct file *fp, struct poll_table_struct *pt)
 {
 	struct hfi1_ctxtdata *uctxt;
-	unsigned pollflag;
+	__poll_t pollflag;
 
 	uctxt = ((struct hfi1_filedata *)fp->private_data)->uctxt;
 	if (!uctxt)
-		pollflag = POLLERR;
+		pollflag = EPOLLERR;
 	else if (uctxt->poll_type == HFI1_POLL_TYPE_URGENT)
 		pollflag = poll_urgent(fp, pt);
 	else  if (uctxt->poll_type == HFI1_POLL_TYPE_ANYRCV)
 		pollflag = poll_next(fp, pt);
 	else /* invalid */
-		pollflag = POLLERR;
+		pollflag = EPOLLERR;
 
 	return pollflag;
 }
@@ -1160,7 +1159,7 @@ static int get_ctxt_info(struct hfi1_filedata *fd, unsigned long arg, u32 len)
 	cinfo.sdma_ring_size = fd->cq->nentries;
 	cinfo.rcvegr_size = uctxt->egrbufs.rcvtid_size;
 
-	trace_hfi1_ctxt_info(uctxt->dd, uctxt->ctxt, fd->subctxt, cinfo);
+	trace_hfi1_ctxt_info(uctxt->dd, uctxt->ctxt, fd->subctxt, &cinfo);
 	if (copy_to_user((void __user *)arg, &cinfo, len))
 		return -EFAULT;
 
@@ -1430,19 +1429,19 @@ static int user_exp_rcv_invalid(struct hfi1_filedata *fd, unsigned long arg,
 	return ret;
 }
 
-static unsigned int poll_urgent(struct file *fp,
+static __poll_t poll_urgent(struct file *fp,
 				struct poll_table_struct *pt)
 {
 	struct hfi1_filedata *fd = fp->private_data;
 	struct hfi1_ctxtdata *uctxt = fd->uctxt;
 	struct hfi1_devdata *dd = uctxt->dd;
-	unsigned pollflag;
+	__poll_t pollflag;
 
 	poll_wait(fp, &uctxt->wait, pt);
 
 	spin_lock_irq(&dd->uctxt_lock);
 	if (uctxt->urgent != uctxt->urgent_poll) {
-		pollflag = POLLIN | POLLRDNORM;
+		pollflag = EPOLLIN | EPOLLRDNORM;
 		uctxt->urgent_poll = uctxt->urgent;
 	} else {
 		pollflag = 0;
@@ -1453,13 +1452,13 @@ static unsigned int poll_urgent(struct file *fp,
 	return pollflag;
 }
 
-static unsigned int poll_next(struct file *fp,
+static __poll_t poll_next(struct file *fp,
 			      struct poll_table_struct *pt)
 {
 	struct hfi1_filedata *fd = fp->private_data;
 	struct hfi1_ctxtdata *uctxt = fd->uctxt;
 	struct hfi1_devdata *dd = uctxt->dd;
-	unsigned pollflag;
+	__poll_t pollflag;
 
 	poll_wait(fp, &uctxt->wait, pt);
 
@@ -1469,7 +1468,7 @@ static unsigned int poll_next(struct file *fp,
 		hfi1_rcvctrl(dd, HFI1_RCVCTRL_INTRAVAIL_ENB, uctxt);
 		pollflag = 0;
 	} else {
-		pollflag = POLLIN | POLLRDNORM;
+		pollflag = EPOLLIN | EPOLLRDNORM;
 	}
 	spin_unlock_irq(&dd->uctxt_lock);
 

@@ -7,35 +7,43 @@
 # command after changing this file, to see if there are
 # any tracked files which get ignored after the change.
 #
-# Normal rules
+# Normal rules (sorted alphabetically)
 #
 .*
-*-asn1.[ch]
+*.a
+*.asn1.[ch]
+*.bin
+*.bz2
+*.c.[012]*.*
+*.dtb
+*.dtb.S
+*.dwo
+*.elf
+*.gcno
+*.gz
+*.i
+*.ko
+*.lex.c
+*.ll
+*.lst
+*.lz4
+*.lzma
+*.lzo
+*.mod.c
 *.o
 *.o.*
-*.a
+*.order
+*.patch
 *.s
-*.ko
-*.ko.unsigned
-*.ko.digest
-*.ko.digest.sig
 *.so
 *.so.dbg
-*.mod.c
-*.i
-*.lst
+*.su
 *.symtypes
-*.order
-modules.builtin
-*.elf
-*.bin
-*.gz
-*.bz2
-*.lzma
+*.tab.[ch]
+*.tar
 *.xz
-*.lzo
-*.patch
-*.gcno
+Module.symvers
+modules.builtin
 
 #
 # Top-level generic files
@@ -44,10 +52,16 @@ modules.builtin
 /TAGS
 /linux
 /vmlinux
+/vmlinux.32
+/vmlinux-gdb.py
 /vmlinuz
 /System.map
 /Module.markers
-/Module.symvers
+
+#
+# RPM spec file (make rpm-pkg)
+#
+/*.spec
 
 #
 # Debian directory (make deb-pkg)
@@ -55,16 +69,29 @@ modules.builtin
 /debian/
 
 #
-# git files that we don't want to ignore even it they are dot-files
+# Snap directory (make snap-pkg)
+#
+/snap/
+
+#
+# tar directory (make tar*-pkg)
+#
+/tar-install/
+
+#
+# git files that we don't want to ignore even if they are dot-files
 #
 !.gitignore
 !.mailmap
+!.cocciconfig
+!.clang-format
 
 #
 # Generated include files
 #
 include/config
 include/generated
+include/ksym
 arch/*/include/generated
 
 # stgit generated dirs
@@ -84,6 +111,9 @@ GRTAGS
 GSYMS
 GTAGS
 
+# id-utils files
+ID
+
 *.orig
 *~
 \#*#
@@ -92,18 +122,19 @@ GTAGS
 # Leavings from module signing
 #
 extra_certificates
+signing_key.pem
 signing_key.priv
 signing_key.x509
 x509.genkey
+
+# Kconfig presets
+all.config
+
+# Kdevelop4
+*.kdev4
 
 #
 # Red Hat
 #
 configs/*.config
 localversion
-
-# configuration file for rh- targets
-.rhel7git.mk
-
-# Red Hat key security
-kernel/x509_certificate_list

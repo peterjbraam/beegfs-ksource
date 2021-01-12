@@ -1,19 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (C) 2010 Red Hat, Inc.
  * All Rights Reserved.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it would be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write the Free Software Foundation,
- * Inc.,  51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
 #include "xfs.h"
 #include "xfs_format.h"
@@ -140,7 +128,7 @@ next_extent:
 	}
 
 out_del_cursor:
-	xfs_btree_del_cursor(cur, error ? XFS_BTREE_ERROR : XFS_BTREE_NOERROR);
+	xfs_btree_del_cursor(cur, error);
 	xfs_buf_relse(agbp);
 out_put_perag:
 	xfs_perag_put(pag);
@@ -222,34 +210,5 @@ xfs_ioc_trim(
 	range.len = XFS_FSB_TO_B(mp, blocks_trimmed);
 	if (copy_to_user(urange, &range, sizeof(range)))
 		return -EFAULT;
-	return 0;
-}
-
-int
-xfs_discard_extents(
-	struct xfs_mount	*mp,
-	struct list_head	*list)
-{
-	struct xfs_extent_busy	*busyp;
-	int			error = 0;
-
-	list_for_each_entry(busyp, list, list) {
-		trace_xfs_discard_extent(mp, busyp->agno, busyp->bno,
-					 busyp->length);
-
-		error = blkdev_issue_discard(mp->m_ddev_targp->bt_bdev,
-				XFS_AGB_TO_DADDR(mp, busyp->agno, busyp->bno),
-				XFS_FSB_TO_BB(mp, busyp->length),
-				GFP_NOFS, 0);
-		if (error && error != -EOPNOTSUPP) {
-			xfs_info(mp,
-	 "discard failed for extent [0x%llx,%u], error %d",
-				 (unsigned long long)busyp->bno,
-				 busyp->length,
-				 error);
-			return error;
-		}
-	}
-
 	return 0;
 }

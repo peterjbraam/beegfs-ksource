@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __NET_TC_GACT_H
 #define __NET_TC_GACT_H
 
@@ -21,7 +22,7 @@ static inline bool __is_tcf_gact_act(const struct tc_action *a, int act,
 #ifdef CONFIG_NET_CLS_ACT
 	struct tcf_gact *gact;
 
-	if (a->ops && a->ops->type != TCA_ACT_GACT)
+	if (a->ops && a->ops->id != TCA_ID_GACT)
 		return false;
 
 	gact = to_gact(a);

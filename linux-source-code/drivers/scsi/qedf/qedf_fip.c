@@ -208,7 +208,7 @@ void qedf_fip_recv(struct qedf_ctx *qedf, struct sk_buff *skb)
 	}
 
 	/* Handle FIP VLAN resp in the driver */
-	if (op == FIP_OP_VLAN && sub == FIP_SC_VL_REP) {
+	if (op == FIP_OP_VLAN && sub == FIP_SC_VL_NOTE) {
 		qedf_fcoe_process_vlan_resp(qedf, skb);
 		kfree_skb(skb);
 	} else if (op == FIP_OP_CTRL && sub == FIP_SC_CLR_VLINK) {

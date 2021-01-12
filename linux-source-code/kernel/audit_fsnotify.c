@@ -95,7 +95,7 @@ struct audit_fsnotify_mark *audit_alloc_mark(struct audit_krule *krule, char *pa
 	if (IS_ERR(dentry))
 		return (void *)dentry; /* returning an error */
 	inode = path.dentry->d_inode;
-	mutex_unlock(&inode->i_mutex);
+	inode_unlock(inode);
 
 	audit_mark = kzalloc(sizeof(*audit_mark), GFP_KERNEL);
 	if (unlikely(!audit_mark)) {
@@ -187,7 +187,7 @@ static int audit_mark_handle_event(struct fsnotify_group *group,
 	default:
 		BUG();
 		return 0;
-	};
+	}
 
 	if (mask & (FS_CREATE|FS_MOVED_TO|FS_DELETE|FS_MOVED_FROM)) {
 		if (audit_compare_dname_path(dname, audit_mark->path, AUDIT_NAME_FULL))

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef MIGRATE_MODE_H_INCLUDED
 #define MIGRATE_MODE_H_INCLUDED
 /*
@@ -15,8 +16,7 @@ enum migrate_mode {
 	MIGRATE_ASYNC,
 	MIGRATE_SYNC_LIGHT,
 	MIGRATE_SYNC,
+	MIGRATE_SYNC_NO_COPY,
 };
-
-#define MIGRATE_SYNC_NO_COPY (MIGRATE_SYNC + 1)
 
 #endif		/* MIGRATE_MODE_H_INCLUDED */

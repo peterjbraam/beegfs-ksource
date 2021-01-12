@@ -249,10 +249,10 @@ struct e1000_adapter {
 	u32 tx_hwtstamp_skipped;
 
 	/* Rx */
-	bool (*clean_rx) (struct e1000_ring *ring, int *work_done,
-			  int work_to_do) ____cacheline_aligned_in_smp;
-	void (*alloc_rx_buf) (struct e1000_ring *ring, int cleaned_count,
-			      gfp_t gfp);
+	bool (*clean_rx)(struct e1000_ring *ring, int *work_done,
+			 int work_to_do) ____cacheline_aligned_in_smp;
+	void (*alloc_rx_buf)(struct e1000_ring *ring, int cleaned_count,
+			     gfp_t gfp);
 	struct e1000_ring *rx_ring;
 
 	u32 rx_int_delay;
@@ -393,7 +393,7 @@ s32 e1000e_get_base_timinca(struct e1000_adapter *adapter, u32 *timinca);
 #define FLAG_HAS_FLASH                    BIT(1)
 #define FLAG_HAS_HW_VLAN_FILTER           BIT(2)
 #define FLAG_HAS_WOL                      BIT(3)
-/* reserved bit4 */
+/* reserved BIT(4) */
 #define FLAG_HAS_CTRLEXT_ON_LOAD          BIT(5)
 #define FLAG_HAS_SWSM_ON_LOAD             BIT(6)
 #define FLAG_HAS_JUMBO_FRAMES             BIT(7)
@@ -504,6 +504,9 @@ extern const struct e1000_info e1000_es2_info;
 
 void e1000e_ptp_init(struct e1000_adapter *adapter);
 void e1000e_ptp_remove(struct e1000_adapter *adapter);
+
+u64 e1000e_read_systim(struct e1000_adapter *adapter,
+		       struct ptp_system_timestamp *sts);
 
 static inline s32 e1000_phy_hw_reset(struct e1000_hw *hw)
 {

@@ -32,7 +32,6 @@
  * SOFTWARE.
  */
 
-#include <linux/init.h>
 #include <linux/delay.h>
 #include "cxgb4.h"
 #include "t4_regs.h"
@@ -199,7 +198,7 @@ static void t4_report_fw_error(struct adapter *adap)
 	if (pcie_fw & PCIE_FW_ERR_F) {
 		dev_err(adap->pdev_dev, "Firmware reports adapter error: %s\n",
 			reason[PCIE_FW_EVAL_G(pcie_fw)]);
-		adap->flags &= ~FW_OK;
+		adap->flags &= ~CXGB4_FW_OK;
 	}
 }
 
@@ -3039,7 +3038,7 @@ static int flash_wait_op(struct adapter *adapter, int attempts, int delay)
  *	Read the specified number of 32-bit words from the serial flash.
  *	If @byte_oriented is set the read data is stored as a byte array
  *	(i.e., big-endian), otherwise as 32-bit words in the platform's
- *	natural endianess.
+ *	natural endianness.
  */
 int t4_read_flash(struct adapter *adapter, unsigned int addr,
 		  unsigned int nwords, u32 *data, int byte_oriented)
@@ -5244,7 +5243,7 @@ int t4_read_rss(struct adapter *adapter, u16 *map)
 
 static unsigned int t4_use_ldst(struct adapter *adap)
 {
-	return (adap->flags & FW_OK) && !adap->use_bd;
+	return (adap->flags & CXGB4_FW_OK) && !adap->use_bd;
 }
 
 /**
@@ -6133,7 +6132,7 @@ unsigned int t4_get_mps_bg_map(struct adapter *adapter, int pidx)
 	 *        ( MPSBGMAP[Port 1] <<  8 ) |
 	 *        ( MPSBGMAP[Port 0] <<  0 ))
 	 */
-	if (adapter->flags & FW_OK) {
+	if (adapter->flags & CXGB4_FW_OK) {
 		u32 param, val;
 		int ret;
 
@@ -6720,6 +6719,47 @@ int t4_sge_ctxt_flush(struct adapter *adap, unsigned int mbox, int ctxt_type)
 }
 
 /**
+ *	t4_read_sge_dbqtimers - reag SGE Doorbell Queue Timer values
+ *	@adap - the adapter
+ *	@ndbqtimers: size of the provided SGE Doorbell Queue Timer table
+ *	@dbqtimers: SGE Doorbell Queue Timer table
+ *
+ *	Reads the SGE Doorbell Queue Timer values into the provided table.
+ *	Returns 0 on success (Firmware and Hardware support this feature),
+ *	an error on failure.
+ */
+int t4_read_sge_dbqtimers(struct adapter *adap, unsigned int ndbqtimers,
+			  u16 *dbqtimers)
+{
+	int ret, dbqtimerix;
+
+	ret = 0;
+	dbqtimerix = 0;
+	while (dbqtimerix < ndbqtimers) {
+		int nparams, param;
+		u32 params[7], vals[7];
+
+		nparams = ndbqtimers - dbqtimerix;
+		if (nparams > ARRAY_SIZE(params))
+			nparams = ARRAY_SIZE(params);
+
+		for (param = 0; param < nparams; param++)
+			params[param] =
+			  (FW_PARAMS_MNEM_V(FW_PARAMS_MNEM_DEV) |
+			   FW_PARAMS_PARAM_X_V(FW_PARAMS_PARAM_DEV_DBQ_TIMER) |
+			   FW_PARAMS_PARAM_Y_V(dbqtimerix + param));
+		ret = t4_query_params(adap, adap->mbox, adap->pf, 0,
+				      nparams, params, vals);
+		if (ret)
+			break;
+
+		for (param = 0; param < nparams; param++)
+			dbqtimers[dbqtimerix++] = vals[param];
+	}
+	return ret;
+}
+
+/**
  *      t4_fw_hello - establish communication with FW
  *      @adap: the adapter
  *      @mbox: mailbox to use for the FW command
@@ -7053,10 +7093,10 @@ int t4_fw_upgrade(struct adapter *adap, unsigned int mbox,
 	if (!t4_fw_matches_chip(adap, fw_hdr))
 		return -EINVAL;
 
-	/* Disable FW_OK flag so that mbox commands with FW_OK flag set
-	 * wont be sent when we are flashing FW.
+	/* Disable CXGB4_FW_OK flag so that mbox commands with CXGB4_FW_OK flag
+	 * set wont be sent when we are flashing FW.
 	 */
-	adap->flags &= ~FW_OK;
+	adap->flags &= ~CXGB4_FW_OK;
 
 	ret = t4_fw_halt(adap, mbox, force);
 	if (ret < 0 && !force)
@@ -7095,7 +7135,7 @@ int t4_fw_upgrade(struct adapter *adap, unsigned int mbox,
 	 */
 	(void)t4_init_devlog_params(adap);
 out:
-	adap->flags |= FW_OK;
+	adap->flags |= CXGB4_FW_OK;
 	return ret;
 }
 
@@ -7277,7 +7317,7 @@ int t4_fixup_host_params(struct adapter *adap, unsigned int page_size,
 	 * For the single-MTU buffers in unpacked mode we need to include
 	 * space for the SGE Control Packet Shift, 14 byte Ethernet header,
 	 * possible 4 byte VLAN tag, all rounded up to the next Ingress Packet
-	 * Padding boundry.  All of these are accommodated in the Factory
+	 * Padding boundary.  All of these are accommodated in the Factory
 	 * Default Firmware Configuration File but we need to adjust it for
 	 * this host's cache line size.
 	 */
@@ -9318,7 +9358,7 @@ int t4_init_tp_params(struct adapter *adap, bool sleep_ok)
 							   FRAGMENTATION_F);
 
 	/* If TP_INGRESS_CONFIG.VNID == 0, then TP_VLAN_PRI_MAP.VNIC_ID
-	 * represents the presense of an Outer VLAN instead of a VNIC ID.
+	 * represents the presence of an Outer VLAN instead of a VNIC ID.
 	 */
 	if ((adap->params.tp.ingress_config & VNIC_F) == 0)
 		adap->params.tp.vnic_shift = -1;

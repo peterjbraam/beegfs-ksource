@@ -1,19 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (c) 2008, Christoph Hellwig
  * All Rights Reserved.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it would be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write the Free Software Foundation,
- * Inc.,  51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
 #include "xfs.h"
 #include "xfs_format.h"
@@ -125,15 +113,11 @@ struct posix_acl *
 xfs_get_acl(struct inode *inode, int type)
 {
 	struct xfs_inode *ip = XFS_I(inode);
-	struct posix_acl *acl;
+	struct posix_acl *acl = NULL;
 	struct xfs_acl *xfs_acl;
 	unsigned char *ea_name;
 	int error;
 	int len;
-
-	acl = get_cached_acl(inode, type);
-	if (acl != ACL_NOT_CACHED)
-		return acl;
 
 	trace_xfs_get_acl(ip);
 
@@ -162,37 +146,24 @@ xfs_get_acl(struct inode *inode, int type)
 	if (error) {
 		/*
 		 * If the attribute doesn't exist make sure we have a negative
-		 * cache entry, for any other error assume it is transient and
-		 * leave the cache entry as ACL_NOT_CACHED.
+		 * cache entry, for any other error assume it is transient.
 		 */
-		if (error == -ENOATTR) {
-			acl = NULL;
-			goto out_update_cache;
-		}
-		acl = ERR_PTR(error);
-		goto out;
+		if (error != -ENOATTR)
+			acl = ERR_PTR(error);
+	} else  {
+		acl = xfs_acl_from_disk(xfs_acl, len,
+					XFS_ACL_MAX_ENTRIES(ip->i_mount));
 	}
-
-	acl = xfs_acl_from_disk(xfs_acl, len, XFS_ACL_MAX_ENTRIES(ip->i_mount));
-	if (IS_ERR(acl))
-		goto out;
-
-out_update_cache:
-	set_cached_acl(inode, type, acl);
-out:
 	kmem_free(xfs_acl);
 	return acl;
 }
 
-STATIC int
-xfs_set_acl(struct inode *inode, int type, struct posix_acl *acl)
+int
+__xfs_set_acl(struct inode *inode, struct posix_acl *acl, int type)
 {
 	struct xfs_inode *ip = XFS_I(inode);
 	unsigned char *ea_name;
 	int error;
-
-	if (S_ISLNK(inode->i_mode))
-		return -EOPNOTSUPP;
 
 	switch (type) {
 	case ACL_TYPE_ACCESS:
@@ -253,7 +224,7 @@ xfs_set_mode(struct inode *inode, umode_t mode)
 
 		iattr.ia_valid = ATTR_MODE | ATTR_CTIME;
 		iattr.ia_mode = mode;
-		iattr.ia_ctime = current_fs_time(inode->i_sb);
+		iattr.ia_ctime = current_time(inode);
 
 		error = xfs_setattr_nonsize(XFS_I(inode), &iattr, XFS_ATTR_NOACL);
 	}
@@ -261,161 +232,39 @@ xfs_set_mode(struct inode *inode, umode_t mode)
 	return error;
 }
 
-/*
- * No need for i_mutex because the inode is not yet exposed to the VFS.
- */
 int
-xfs_inherit_acl(struct inode *inode, struct posix_acl *acl)
+xfs_set_acl(struct inode *inode, struct posix_acl *acl, int type)
 {
-	umode_t mode = inode->i_mode;
-	int error = 0, inherit = 0;
-
-	if (S_ISDIR(inode->i_mode)) {
-		error = xfs_set_acl(inode, ACL_TYPE_DEFAULT, acl);
-		if (error)
-			goto out;
-	}
-
-	error = posix_acl_create(&acl, GFP_KERNEL, &mode);
-	if (error < 0)
-		return error;
-
-	/*
-	 * If posix_acl_create returns a positive value we need to
-	 * inherit a permission that can't be represented using the Unix
-	 * mode bits and we actually need to set an ACL.
-	 */
-	if (error > 0)
-		inherit = 1;
-
-	error = xfs_set_mode(inode, mode);
-	if (error)
-		goto out;
-
-	if (inherit)
-		error = xfs_set_acl(inode, ACL_TYPE_ACCESS, acl);
-
-out:
-	posix_acl_release(acl);
-	return error;
-}
-
-int
-xfs_acl_chmod(struct inode *inode)
-{
-	struct posix_acl *acl;
-	int error;
-
-	if (S_ISLNK(inode->i_mode))
-		return -EOPNOTSUPP;
-
-	acl = xfs_get_acl(inode, ACL_TYPE_ACCESS);
-	if (IS_ERR(acl) || !acl)
-		return PTR_ERR(acl);
-
-	error = posix_acl_chmod(&acl, GFP_KERNEL, inode->i_mode);
-	if (error)
-		return error;
-
-	error = xfs_set_acl(inode, ACL_TYPE_ACCESS, acl);
-	posix_acl_release(acl);
-	return error;
-}
-
-static int
-xfs_xattr_acl_get(struct dentry *dentry, const char *name,
-		void *value, size_t size, int type)
-{
-	struct posix_acl *acl;
-	int error;
-
-	acl = xfs_get_acl(dentry->d_inode, type);
-	if (IS_ERR(acl))
-		return PTR_ERR(acl);
-	if (acl == NULL)
-		return -ENODATA;
-
-	error = posix_acl_to_xattr(&init_user_ns, acl, value, size);
-	posix_acl_release(acl);
-
-	return error;
-}
-
-static int
-xfs_xattr_acl_set(struct dentry *dentry, const char *name,
-		const void *value, size_t size, int flags, int type)
-{
-	struct inode *inode = dentry->d_inode;
-	struct posix_acl *acl = NULL, *real_acl = NULL;
 	umode_t mode;
 	bool set_mode = false;
 	int error = 0;
 
-	if (flags & XATTR_CREATE)
-		return -EINVAL;
-	if (type == ACL_TYPE_DEFAULT && !S_ISDIR(inode->i_mode))
-		return value ? -EACCES : 0;
-	if (!inode_owner_or_capable(inode))
-		return -EPERM;
-
-	if (!value)
+	if (!acl)
 		goto set_acl;
-
-	acl = posix_acl_from_xattr(&init_user_ns, value, size);
-	if (!acl) {
-		/*
-		 * acl_set_file(3) may request that we set default ACLs with
-		 * zero length -- defend (gracefully) against that here.
-		 */
-		goto out;
-	}
-	if (IS_ERR(acl)) {
-		error = PTR_ERR(acl);
-		goto out;
-	}
-
-	error = posix_acl_valid(inode->i_sb->s_user_ns, acl);
-	if (error)
-		goto out_release;
 
 	error = -E2BIG;
 	if (acl->a_count > XFS_ACL_MAX_ENTRIES(XFS_M(inode->i_sb)))
-		goto out_release;
+		return error;
 
-	real_acl = acl;
 	if (type == ACL_TYPE_ACCESS) {
-		error = posix_acl_update_mode(inode, &mode, &real_acl);
+		error = posix_acl_update_mode(inode, &mode, &acl);
 		if (error)
-			goto out_release;
+			return error;
 		set_mode = true;
 	}
 
  set_acl:
-	error = xfs_set_acl(inode, type, real_acl);
+	error =  __xfs_set_acl(inode, acl, type);
+	if (error)
+		return error;
+
 	/*
 	 * We set the mode after successfully updating the ACL xattr because the
 	 * xattr update can fail at ENOSPC and we don't want to change the mode
 	 * if the ACL update hasn't been applied.
 	 */
-	if (!error && set_mode)
+	if (set_mode)
 		error = xfs_set_mode(inode, mode);
 
- out_release:
-	posix_acl_release(acl);
- out:
 	return error;
 }
-
-const struct xattr_handler xfs_xattr_acl_access_handler = {
-	.prefix	= POSIX_ACL_XATTR_ACCESS,
-	.flags	= ACL_TYPE_ACCESS,
-	.get	= xfs_xattr_acl_get,
-	.set	= xfs_xattr_acl_set,
-};
-
-const struct xattr_handler xfs_xattr_acl_default_handler = {
-	.prefix	= POSIX_ACL_XATTR_DEFAULT,
-	.flags	= ACL_TYPE_DEFAULT,
-	.get	= xfs_xattr_acl_get,
-	.set	= xfs_xattr_acl_set,
-};

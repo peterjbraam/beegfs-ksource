@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (c) 2014-2016 Christoph Hellwig.
  */
@@ -8,7 +9,9 @@
 #include <linux/pr.h>
 
 #include <linux/nfsd/debug.h>
-#include <scsi/scsi.h>
+#include <scsi/scsi_proto.h>
+#include <scsi/scsi_common.h>
+#include <scsi/scsi_request.h>
 
 #include "blocklayoutxdr.h"
 #include "pnfs.h"
@@ -22,7 +25,7 @@ nfsd4_block_proc_layoutget(struct inode *inode, const struct svc_fh *fhp,
 {
 	struct nfsd4_layout_seg *seg = &args->lg_seg;
 	struct super_block *sb = inode->i_sb;
-	u32 block_size = (1 << inode->i_blkbits);
+	u32 block_size = i_blocksize(inode);
 	struct pnfs_block_extent *bex;
 	struct iomap iomap;
 	u32 device_generation = 0;
@@ -118,13 +121,15 @@ nfsd4_block_commit_blocks(struct inode *inode, struct nfsd4_layoutcommit *lcp,
 {
 	loff_t new_size = lcp->lc_last_wr + 1;
 	struct iattr iattr = { .ia_valid = 0 };
+	struct timespec ts;
 	int error;
 
+	ts = timespec64_to_timespec(inode->i_mtime);
 	if (lcp->lc_mtime.tv_nsec == UTIME_NOW ||
-	    timespec_compare(&lcp->lc_mtime, &inode->i_mtime) < 0)
-		lcp->lc_mtime = current_fs_time(inode->i_sb);
+	    timespec_compare(&lcp->lc_mtime, &ts) < 0)
+		lcp->lc_mtime = timespec64_to_timespec(current_time(inode));
 	iattr.ia_valid |= ATTR_ATIME | ATTR_CTIME | ATTR_MTIME;
-	iattr.ia_atime = iattr.ia_ctime = iattr.ia_mtime = lcp->lc_mtime;
+	iattr.ia_atime = iattr.ia_ctime = iattr.ia_mtime = timespec_to_timespec64(lcp->lc_mtime);
 
 	if (new_size > i_size_read(inode)) {
 		iattr.ia_valid |= ATTR_SIZE;
@@ -162,6 +167,7 @@ nfsd4_block_get_device_info_simple(struct super_block *sb,
 
 static __be32
 nfsd4_block_proc_getdeviceinfo(struct super_block *sb,
+		struct svc_rqst *rqstp,
 		struct nfs4_client *clp,
 		struct nfsd4_getdeviceinfo *gdp)
 {
@@ -178,7 +184,7 @@ nfsd4_block_proc_layoutcommit(struct inode *inode,
 	int nr_iomaps;
 
 	nr_iomaps = nfsd4_block_decode_layoutupdate(lcp->lc_up_layout,
-			lcp->lc_up_len, &iomaps, 1 << inode->i_blkbits);
+			lcp->lc_up_len, &iomaps, i_blocksize(inode));
 	if (nr_iomaps < 0)
 		return nfserrno(nr_iomaps);
 
@@ -211,6 +217,7 @@ static int nfsd4_scsi_identify_device(struct block_device *bdev,
 {
 	struct request_queue *q = bdev->bd_disk->queue;
 	struct request *rq;
+	struct scsi_request *req;
 	/*
 	 * The allocation length (passed in bytes 3 and 4 of the INQUIRY
 	 * command descriptor block) specifies the number of bytes that have
@@ -230,28 +237,29 @@ again:
 	if (!buf)
 		return -ENOMEM;
 
-	rq = blk_get_request(q, READ, GFP_KERNEL);
+	rq = blk_get_request(q, REQ_OP_SCSI_IN, 0);
 	if (IS_ERR(rq)) {
 		error = -ENOMEM;
 		goto out_free_buf;
 	}
-	blk_rq_set_block_pc(rq);
+	req = scsi_req(rq);
 
 	error = blk_rq_map_kern(q, rq, buf, bufflen, GFP_KERNEL);
 	if (error)
 		goto out_put_request;
 
-	rq->cmd[0] = INQUIRY;
-	rq->cmd[1] = 1;
-	rq->cmd[2] = 0x83;
-	rq->cmd[3] = bufflen >> 8;
-	rq->cmd[4] = bufflen & 0xff;
-	rq->cmd_len = COMMAND_SIZE(INQUIRY);
+	req->cmd[0] = INQUIRY;
+	req->cmd[1] = 1;
+	req->cmd[2] = 0x83;
+	req->cmd[3] = bufflen >> 8;
+	req->cmd[4] = bufflen & 0xff;
+	req->cmd_len = COMMAND_SIZE(INQUIRY);
 
-	error = blk_execute_rq(rq->q, NULL, rq, 1);
-	if (error) {
+	blk_execute_rq(rq->q, NULL, rq, 1);
+	if (req->result) {
 		pr_err("pNFS: INQUIRY 0x83 failed with: %x\n",
-			rq->errors);
+			req->result);
+		error = -EIO;
 		goto out_put_request;
 	}
 
@@ -307,7 +315,7 @@ out_free_buf:
 	return error;
 }
 
-#define NFSD_MDS_PR_KEY		0x0100000000000000
+#define NFSD_MDS_PR_KEY		0x0100000000000000ULL
 
 /*
  * We use the client ID as a unique key for the reservations.
@@ -371,6 +379,7 @@ nfsd4_block_get_device_info_scsi(struct super_block *sb,
 
 static __be32
 nfsd4_scsi_proc_getdeviceinfo(struct super_block *sb,
+		struct svc_rqst *rqstp,
 		struct nfs4_client *clp,
 		struct nfsd4_getdeviceinfo *gdp)
 {
@@ -386,7 +395,7 @@ nfsd4_scsi_proc_layoutcommit(struct inode *inode,
 	int nr_iomaps;
 
 	nr_iomaps = nfsd4_scsi_decode_layoutupdate(lcp->lc_up_layout,
-			lcp->lc_up_len, &iomaps, 1 << inode->i_blkbits);
+			lcp->lc_up_len, &iomaps, i_blocksize(inode));
 	if (nr_iomaps < 0)
 		return nfserrno(nr_iomaps);
 

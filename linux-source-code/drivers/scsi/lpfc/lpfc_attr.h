@@ -89,6 +89,14 @@ lpfc_vport_param_show(name)\
 lpfc_vport_param_init(name, defval, minval, maxval)\
 static DEVICE_ATTR(lpfc_##name, S_IRUGO, lpfc_##name##_show, NULL)
 
+#define LPFC_VPORT_ULL_ATTR_R(name, defval, minval, maxval, desc) \
+static uint64_t lpfc_##name = defval;\
+module_param(lpfc_##name, ullong, S_IRUGO);\
+MODULE_PARM_DESC(lpfc_##name, desc);\
+lpfc_vport_param_show(name)\
+lpfc_vport_param_init(name, defval, minval, maxval)\
+static DEVICE_ATTR(lpfc_##name, S_IRUGO, lpfc_##name##_show, NULL)
+
 #define LPFC_VPORT_ATTR_RW(name, defval, minval, maxval, desc) \
 static uint lpfc_##name = defval;\
 module_param(lpfc_##name, uint, S_IRUGO);\

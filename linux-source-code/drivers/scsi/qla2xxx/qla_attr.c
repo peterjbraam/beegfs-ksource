@@ -176,7 +176,6 @@ qla2x00_sysfs_read_nvram(struct file *filp, struct kobject *kobj,
 
 	faddr = ha->flt_region_nvram;
 	if (IS_QLA28XX(ha)) {
-		qla28xx_get_aux_images(vha, &active_regions);
 		if (active_regions.aux.vpd_nvram == QLA27XX_SECONDARY_IMAGE)
 			faddr = ha->flt_region_nvram_sec;
 	}
@@ -380,10 +379,10 @@ qla2x00_sysfs_write_optrom_ctl(struct file *filp, struct kobject *kobj,
 		}
 
 		ha->optrom_region_start = start;
-		ha->optrom_region_size = size;
+		ha->optrom_region_size = start + size;
 
 		ha->optrom_state = QLA_SREADING;
-		ha->optrom_buffer = vzalloc(ha->optrom_region_size);
+		ha->optrom_buffer = vmalloc(ha->optrom_region_size);
 		if (ha->optrom_buffer == NULL) {
 			ql_log(ql_log_warn, vha, 0x7062,
 			    "Unable to allocate memory for optrom retrieval "
@@ -405,6 +404,7 @@ qla2x00_sysfs_write_optrom_ctl(struct file *filp, struct kobject *kobj,
 		    "Reading flash region -- 0x%x/0x%x.\n",
 		    ha->optrom_region_start, ha->optrom_region_size);
 
+		memset(ha->optrom_buffer, 0, ha->optrom_region_size);
 		ha->isp_ops->read_optrom(vha, ha->optrom_buffer,
 		    ha->optrom_region_start, ha->optrom_region_size);
 		break;
@@ -433,15 +433,16 @@ qla2x00_sysfs_write_optrom_ctl(struct file *filp, struct kobject *kobj,
 		 * 	0x000000 -> 0x07ffff -- Boot code.
 		 * 	0x080000 -> 0x0fffff -- Firmware.
 		 * 	0x120000 -> 0x12ffff -- VPD and HBA parameters.
-		 *
-		 * > ISP25xx type boards:
-		 *
-		 *      None -- should go through BSG.
 		 */
 		valid = 0;
 		if (ha->optrom_size == OPTROM_SIZE_2300 && start == 0)
 			valid = 1;
-		else if (IS_QLA24XX_TYPE(ha) || IS_QLA25XX(ha))
+		else if (start == (ha->flt_region_boot * 4) ||
+		    start == (ha->flt_region_fw * 4))
+			valid = 1;
+		else if (IS_QLA24XX_TYPE(ha) || IS_QLA25XX(ha)
+			|| IS_CNA_CAPABLE(ha) || IS_QLA2031(ha)
+			|| IS_QLA27XX(ha) || IS_QLA28XX(ha))
 			valid = 1;
 		if (!valid) {
 			ql_log(ql_log_warn, vha, 0x7065,
@@ -451,10 +452,10 @@ qla2x00_sysfs_write_optrom_ctl(struct file *filp, struct kobject *kobj,
 		}
 
 		ha->optrom_region_start = start;
-		ha->optrom_region_size = size;
+		ha->optrom_region_size = start + size;
 
 		ha->optrom_state = QLA_SWRITING;
-		ha->optrom_buffer = vzalloc(ha->optrom_region_size);
+		ha->optrom_buffer = vmalloc(ha->optrom_region_size);
 		if (ha->optrom_buffer == NULL) {
 			ql_log(ql_log_warn, vha, 0x7066,
 			    "Unable to allocate memory for optrom update "
@@ -469,6 +470,7 @@ qla2x00_sysfs_write_optrom_ctl(struct file *filp, struct kobject *kobj,
 		    "Staging flash region write -- 0x%x/0x%x.\n",
 		    ha->optrom_region_start, ha->optrom_region_size);
 
+		memset(ha->optrom_buffer, 0, ha->optrom_region_size);
 		break;
 	case 3:
 		if (ha->optrom_state != QLA_SWRITING) {
@@ -487,10 +489,8 @@ qla2x00_sysfs_write_optrom_ctl(struct file *filp, struct kobject *kobj,
 		    "Writing flash region -- 0x%x/0x%x.\n",
 		    ha->optrom_region_start, ha->optrom_region_size);
 
-		rval = ha->isp_ops->write_optrom(vha, ha->optrom_buffer,
+		ha->isp_ops->write_optrom(vha, ha->optrom_buffer,
 		    ha->optrom_region_start, ha->optrom_region_size);
-		if (rval)
-			rval = -EIO;
 		break;
 	default:
 		rval = -EINVAL;
@@ -672,7 +672,6 @@ qla2x00_sysfs_write_reset(struct file *filp, struct kobject *kobj,
 	int type;
 	uint32_t idc_control;
 	uint8_t *tmp_data = NULL;
-
 	if (off != 0)
 		return -EINVAL;
 
@@ -803,7 +802,6 @@ qla2x00_issue_logo(struct file *filp, struct kobject *kobj,
 	struct scsi_qla_host *vha = shost_priv(dev_to_shost(container_of(kobj,
 	    struct device, kobj)));
 	int type;
-	int rval = 0;
 	port_id_t did;
 
 	if (!capable(CAP_SYS_ADMIN))
@@ -826,7 +824,7 @@ qla2x00_issue_logo(struct file *filp, struct kobject *kobj,
 
 	ql_log(ql_log_info, vha, 0x70e4, "%s: %d\n", __func__, type);
 
-	rval = qla24xx_els_dcmd_iocb(vha, ELS_DCMD_LOGO, did);
+	qla24xx_els_dcmd_iocb(vha, ELS_DCMD_LOGO, did);
 	return count;
 }
 
@@ -887,7 +885,7 @@ do_read:
 		count = 0;
 	}
 
-	count = actual_size > count ? count : actual_size;
+	count = actual_size > count ? count: actual_size;
 	memcpy(buf, ha->xgmac_data, count);
 
 	return count;
@@ -1079,7 +1077,6 @@ qla2x00_isp_name_show(struct device *dev, struct device_attribute *attr,
 		      char *buf)
 {
 	scsi_qla_host_t *vha = shost_priv(class_to_shost(dev));
-
 	return scnprintf(buf, PAGE_SIZE, "ISP%04X\n", vha->hw->pdev->device);
 }
 
@@ -1113,7 +1110,6 @@ qla2x00_model_desc_show(struct device *dev, struct device_attribute *attr,
 			char *buf)
 {
 	scsi_qla_host_t *vha = shost_priv(class_to_shost(dev));
-
 	return scnprintf(buf, PAGE_SIZE, "%s\n", vha->hw->model_desc);
 }
 
@@ -1326,7 +1322,6 @@ qla2x00_optrom_bios_version_show(struct device *dev,
 {
 	scsi_qla_host_t *vha = shost_priv(class_to_shost(dev));
 	struct qla_hw_data *ha = vha->hw;
-
 	return scnprintf(buf, PAGE_SIZE, "%d.%02d\n", ha->bios_revision[1],
 	    ha->bios_revision[0]);
 }
@@ -1337,7 +1332,6 @@ qla2x00_optrom_efi_version_show(struct device *dev,
 {
 	scsi_qla_host_t *vha = shost_priv(class_to_shost(dev));
 	struct qla_hw_data *ha = vha->hw;
-
 	return scnprintf(buf, PAGE_SIZE, "%d.%02d\n", ha->efi_revision[1],
 	    ha->efi_revision[0]);
 }
@@ -1348,7 +1342,6 @@ qla2x00_optrom_fcode_version_show(struct device *dev,
 {
 	scsi_qla_host_t *vha = shost_priv(class_to_shost(dev));
 	struct qla_hw_data *ha = vha->hw;
-
 	return scnprintf(buf, PAGE_SIZE, "%d.%02d\n", ha->fcode_revision[1],
 	    ha->fcode_revision[0]);
 }
@@ -1359,7 +1352,6 @@ qla2x00_optrom_fw_version_show(struct device *dev,
 {
 	scsi_qla_host_t *vha = shost_priv(class_to_shost(dev));
 	struct qla_hw_data *ha = vha->hw;
-
 	return scnprintf(buf, PAGE_SIZE, "%d.%02d.%02d %d\n",
 	    ha->fw_revision[0], ha->fw_revision[1], ha->fw_revision[2],
 	    ha->fw_revision[3]);
@@ -1386,7 +1378,6 @@ qla2x00_total_isp_aborts_show(struct device *dev,
 			      struct device_attribute *attr, char *buf)
 {
 	scsi_qla_host_t *vha = shost_priv(class_to_shost(dev));
-
 	return scnprintf(buf, PAGE_SIZE, "%d\n",
 	    vha->qla_stats.total_isp_aborts);
 }
@@ -1709,8 +1700,6 @@ qla2x00_port_speed_store(struct device *dev, struct device_attribute *attr,
 	}
 
 	rval = kstrtol(buf, 10, &type);
-	if (rval)
-		return rval;
 	speed = type;
 	if (type == 40 || type == 80 || type == 160 ||
 	    type == 320) {
@@ -2809,8 +2798,8 @@ qla24xx_vport_create(struct fc_vport *fc_vport, bool disable)
 
 	/* initialized vport states */
 	atomic_set(&vha->loop_state, LOOP_DOWN);
-	vha->vp_err_state = VP_ERR_PORTDWN;
-	vha->vp_prev_err_state = VP_ERR_UNKWN;
+	vha->vp_err_state=  VP_ERR_PORTDWN;
+	vha->vp_prev_err_state=  VP_ERR_UNKWN;
 	/* Check if physical ha port is Up */
 	if (atomic_read(&base_vha->loop_state) == LOOP_DOWN ||
 	    atomic_read(&base_vha->loop_state) == LOOP_DEAD) {
@@ -2825,7 +2814,6 @@ qla24xx_vport_create(struct fc_vport *fc_vport, bool disable)
 	if (IS_T10_PI_CAPABLE(ha) && ql2xenabledif) {
 		if (ha->fw_attributes & BIT_4) {
 			int prot = 0, guard;
-
 			vha->flags.difdix_supported = 1;
 			ql_dbg(ql_dbg_user, vha, 0x7082,
 			    "Registered for DIF/DIX type 1 and 3 protection.\n");

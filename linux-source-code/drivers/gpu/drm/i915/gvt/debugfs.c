@@ -204,7 +204,7 @@ int intel_gvt_debugfs_add_vgpu(struct intel_vgpu *vgpu)
 		return -ENOMEM;
 
 	ent = debugfs_create_bool("active", 0444, vgpu->debugfs,
-				  (u32 *)&vgpu->active);
+				  &vgpu->active);
 	if (!ent)
 		return -ENOMEM;
 

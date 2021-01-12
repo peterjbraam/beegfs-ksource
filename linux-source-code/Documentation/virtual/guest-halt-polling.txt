@@ -8,7 +8,7 @@ This provides the following benefits to host side polling:
 
 	1) The POLL flag is set while polling is performed, which allows
 	   a remote vCPU to avoid sending an IPI (and the associated
- 	   cost of handling the IPI) when performing a wakeup.
+	   cost of handling the IPI) when performing a wakeup.
 
 	2) The VM-exit cost can be avoided.
 
@@ -76,4 +76,3 @@ Further Notes
 - Care should be taken when setting the guest_halt_poll_ns parameter as a
 large value has the potential to drive the cpu usage to 100% on a machine which
 would be almost entirely idle otherwise.
-

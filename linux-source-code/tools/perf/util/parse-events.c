@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <linux/hw_breakpoint.h>
 #include <linux/err.h>
 #include <dirent.h>
@@ -603,7 +604,7 @@ static int add_tracepoint_multi_sys(struct list_head *list, int *idx,
 }
 
 struct __add_bpf_event_param {
-	struct parse_events_state *data;
+	struct parse_events_state *parse_state;
 	struct list_head *list;
 	struct list_head *head_config;
 };
@@ -613,7 +614,7 @@ static int add_bpf_event(const char *group, const char *event, int fd,
 {
 	LIST_HEAD(new_evsels);
 	struct __add_bpf_event_param *param = _param;
-	struct parse_events_state *evlist = param->data;
+	struct parse_events_state *parse_state = param->parse_state;
 	struct list_head *list = param->list;
 	struct perf_evsel *pos;
 	int err;
@@ -621,8 +622,8 @@ static int add_bpf_event(const char *group, const char *event, int fd,
 	pr_debug("add bpf event %s:%s and attach bpf program %d\n",
 		 group, event, fd);
 
-	err = parse_events_add_tracepoint(&new_evsels, &evlist->idx, group,
-					  event, evlist->error,
+	err = parse_events_add_tracepoint(&new_evsels, &parse_state->idx, group,
+					  event, parse_state->error,
 					  param->head_config);
 	if (err) {
 		struct perf_evsel *evsel, *tmp;
@@ -646,14 +647,14 @@ static int add_bpf_event(const char *group, const char *event, int fd,
 	return 0;
 }
 
-int parse_events_load_bpf_obj(struct parse_events_state *data,
+int parse_events_load_bpf_obj(struct parse_events_state *parse_state,
 			      struct list_head *list,
 			      struct bpf_object *obj,
 			      struct list_head *head_config)
 {
 	int err;
 	char errbuf[BUFSIZ];
-	struct __add_bpf_event_param param = {data, list, head_config};
+	struct __add_bpf_event_param param = {parse_state, list, head_config};
 	static bool registered_unprobe_atexit = false;
 
 	if (IS_ERR(obj) || !obj) {
@@ -694,13 +695,13 @@ int parse_events_load_bpf_obj(struct parse_events_state *data,
 
 	return 0;
 errout:
-	data->error->help = strdup("(add -v to see detail)");
-	data->error->str = strdup(errbuf);
+	parse_state->error->help = strdup("(add -v to see detail)");
+	parse_state->error->str = strdup(errbuf);
 	return err;
 }
 
 static int
-parse_events_config_bpf(struct parse_events_state *data,
+parse_events_config_bpf(struct parse_events_state *parse_state,
 			struct bpf_object *obj,
 			struct list_head *head_config)
 {
@@ -719,28 +720,28 @@ parse_events_config_bpf(struct parse_events_state *data,
 				 "Invalid config term for BPF object");
 			errbuf[BUFSIZ - 1] = '\0';
 
-			data->error->idx = term->err_term;
-			data->error->str = strdup(errbuf);
+			parse_state->error->idx = term->err_term;
+			parse_state->error->str = strdup(errbuf);
 			return -EINVAL;
 		}
 
-		err = bpf__config_obj(obj, term, data->evlist, &error_pos);
+		err = bpf__config_obj(obj, term, parse_state->evlist, &error_pos);
 		if (err) {
-			bpf__strerror_config_obj(obj, term, data->evlist,
+			bpf__strerror_config_obj(obj, term, parse_state->evlist,
 						 &error_pos, err, errbuf,
 						 sizeof(errbuf));
-			data->error->help = strdup(
+			parse_state->error->help = strdup(
 "Hint:\tValid config terms:\n"
 "     \tmap:[<arraymap>].value<indices>=[value]\n"
 "     \tmap:[<eventmap>].event<indices>=[event]\n"
 "\n"
 "     \twhere <indices> is something like [0,3...5] or [all]\n"
 "     \t(add -v to see detail)");
-			data->error->str = strdup(errbuf);
+			parse_state->error->str = strdup(errbuf);
 			if (err == -BPF_LOADER_ERRNO__OBJCONF_MAP_VALUE)
-				data->error->idx = term->err_val;
+				parse_state->error->idx = term->err_val;
 			else
-				data->error->idx = term->err_term + error_pos;
+				parse_state->error->idx = term->err_term + error_pos;
 			return err;
 		}
 	}
@@ -776,7 +777,7 @@ split_bpf_config_terms(struct list_head *evt_head_config,
 			list_move_tail(&term->list, obj_head_config);
 }
 
-int parse_events_load_bpf(struct parse_events_state *data,
+int parse_events_load_bpf(struct parse_events_state *parse_state,
 			  struct list_head *list,
 			  char *bpf_file_name,
 			  bool source,
@@ -804,15 +805,15 @@ int parse_events_load_bpf(struct parse_events_state *data,
 						   -err, errbuf,
 						   sizeof(errbuf));
 
-		data->error->help = strdup("(add -v to see detail)");
-		data->error->str = strdup(errbuf);
+		parse_state->error->help = strdup("(add -v to see detail)");
+		parse_state->error->str = strdup(errbuf);
 		return err;
 	}
 
-	err = parse_events_load_bpf_obj(data, list, obj, head_config);
+	err = parse_events_load_bpf_obj(parse_state, list, obj, head_config);
 	if (err)
 		return err;
-	err = parse_events_config_bpf(data, obj, &obj_head_config);
+	err = parse_events_config_bpf(parse_state, obj, &obj_head_config);
 
 	/*
 	 * Caller doesn't know anything about obj_head_config,
@@ -924,11 +925,11 @@ static const char *config_term_names[__PARSE_EVENTS__TERM_TYPE_NR] = {
 	[PARSE_EVENTS__TERM_TYPE_STACKSIZE]		= "stack-size",
 	[PARSE_EVENTS__TERM_TYPE_NOINHERIT]		= "no-inherit",
 	[PARSE_EVENTS__TERM_TYPE_INHERIT]		= "inherit",
+	[PARSE_EVENTS__TERM_TYPE_MAX_STACK]		= "max-stack",
 	[PARSE_EVENTS__TERM_TYPE_MAX_EVENTS]		= "nr",
 	[PARSE_EVENTS__TERM_TYPE_OVERWRITE]		= "overwrite",
 	[PARSE_EVENTS__TERM_TYPE_NOOVERWRITE]		= "no-overwrite",
 	[PARSE_EVENTS__TERM_TYPE_DRV_CFG]		= "driver-config",
-	[PARSE_EVENTS__TERM_TYPE_PERCORE]		= "percore",
 };
 
 static bool config_term_shrinked;
@@ -949,7 +950,6 @@ config_term_avail(int term_type, struct parse_events_error *err)
 	case PARSE_EVENTS__TERM_TYPE_CONFIG2:
 	case PARSE_EVENTS__TERM_TYPE_NAME:
 	case PARSE_EVENTS__TERM_TYPE_SAMPLE_PERIOD:
-	case PARSE_EVENTS__TERM_TYPE_PERCORE:
 		return true;
 	default:
 		if (!err)
@@ -1035,16 +1035,11 @@ do {									   \
 	case PARSE_EVENTS__TERM_TYPE_NAME:
 		CHECK_TYPE_VAL(STR);
 		break;
-	case PARSE_EVENTS__TERM_TYPE_MAX_EVENTS:
+	case PARSE_EVENTS__TERM_TYPE_MAX_STACK:
 		CHECK_TYPE_VAL(NUM);
 		break;
-	case PARSE_EVENTS__TERM_TYPE_PERCORE:
+	case PARSE_EVENTS__TERM_TYPE_MAX_EVENTS:
 		CHECK_TYPE_VAL(NUM);
-		if ((unsigned int)term->val.num > 1) {
-			err->str = strdup("expected 0 or 1");
-			err->idx = term->err_val;
-			return -EINVAL;
-		}
 		break;
 	default:
 		err->str = strdup("unknown term");
@@ -1092,6 +1087,7 @@ static int config_term_tracepoint(struct perf_event_attr *attr,
 	case PARSE_EVENTS__TERM_TYPE_STACKSIZE:
 	case PARSE_EVENTS__TERM_TYPE_INHERIT:
 	case PARSE_EVENTS__TERM_TYPE_NOINHERIT:
+	case PARSE_EVENTS__TERM_TYPE_MAX_STACK:
 	case PARSE_EVENTS__TERM_TYPE_MAX_EVENTS:
 	case PARSE_EVENTS__TERM_TYPE_OVERWRITE:
 	case PARSE_EVENTS__TERM_TYPE_NOOVERWRITE:
@@ -1168,6 +1164,9 @@ do {								\
 		case PARSE_EVENTS__TERM_TYPE_NOINHERIT:
 			ADD_CONFIG_TERM(INHERIT, inherit, term->val.num ? 0 : 1);
 			break;
+		case PARSE_EVENTS__TERM_TYPE_MAX_STACK:
+			ADD_CONFIG_TERM(MAX_STACK, max_stack, term->val.num);
+			break;
 		case PARSE_EVENTS__TERM_TYPE_MAX_EVENTS:
 			ADD_CONFIG_TERM(MAX_EVENTS, max_events, term->val.num);
 			break;
@@ -1179,10 +1178,6 @@ do {								\
 			break;
 		case PARSE_EVENTS__TERM_TYPE_DRV_CFG:
 			ADD_CONFIG_TERM(DRV_CFG, drv_cfg, term->val.str);
-			break;
-		case PARSE_EVENTS__TERM_TYPE_PERCORE:
-			ADD_CONFIG_TERM(PERCORE, percore,
-					term->val.num ? true : false);
 			break;
 		default:
 			break;
@@ -1236,18 +1231,6 @@ int parse_events_add_numeric(struct parse_events_state *parse_state,
 
 	return add_event(list, &parse_state->idx, &attr,
 			 get_config_name(head_config), &config_terms);
-}
-
-static bool config_term_percore(struct list_head *config_terms)
-{
-	struct perf_evsel_config_term *term;
-
-	list_for_each_entry(term, config_terms, list) {
-		if (term->type == PERF_EVSEL__CONFIG_TERM_PERCORE)
-			return term->val.percore;
-	}
-
-	return false;
 }
 
 int parse_events_add_pmu(struct parse_events_state *parse_state,
@@ -1322,7 +1305,6 @@ int parse_events_add_pmu(struct parse_events_state *parse_state,
 		evsel->metric_name = info.metric_name;
 		evsel->pmu_name = name;
 		evsel->use_uncore_alias = use_uncore_alias;
-		evsel->percore = config_term_percore(&evsel->config_terms);
 	}
 
 	return evsel ? 0 : -ENOMEM;
@@ -2315,7 +2297,7 @@ void print_sdt_events(const char *subsys_glob, const char *event_glob,
 		return;
 	}
 	strlist__for_each_entry(nd, bidlist) {
-		pcache = probe_cache__new(nd->s);
+		pcache = probe_cache__new(nd->s, NULL);
 		if (!pcache)
 			continue;
 		list_for_each_entry(ent, &pcache->entries, node) {
@@ -2480,7 +2462,7 @@ restart:
 		if (!name_only && strlen(syms->alias))
 			snprintf(name, MAX_NAME_LEN, "%s OR %s", syms->symbol, syms->alias);
 		else
-			strncpy(name, syms->symbol, MAX_NAME_LEN);
+			strlcpy(name, syms->symbol, MAX_NAME_LEN);
 
 		evt_list[evt_i] = strdup(name);
 		if (evt_list[evt_i] == NULL)
@@ -2695,7 +2677,7 @@ void parse_events_terms__purge(struct list_head *terms)
 
 	list_for_each_entry_safe(term, h, terms, list) {
 		if (term->array.nr_ranges)
-			free(term->array.ranges);
+			zfree(&term->array.ranges);
 		list_del_init(&term->list);
 		free(term);
 	}
@@ -2711,7 +2693,7 @@ void parse_events_terms__delete(struct list_head *terms)
 
 void parse_events__clear_array(struct parse_events_array *a)
 {
-	free(a->ranges);
+	zfree(&a->ranges);
 }
 
 void parse_events_evlist_error(struct parse_events_state *parse_state,

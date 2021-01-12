@@ -618,6 +618,8 @@ static unsigned int refill_fl(struct adapter *adapter, struct sge_fl *fl,
 	 */
 	BUG_ON(fl->avail + n > fl->size - FL_PER_EQ_UNIT);
 
+	gfp |= __GFP_NOWARN;
+
 	/*
 	 * If we support large pages, prefer large buffers and fail over to
 	 * small pages if we can't allocate large pages to satisfy the refill.
@@ -628,8 +630,7 @@ static unsigned int refill_fl(struct adapter *adapter, struct sge_fl *fl,
 		goto alloc_small_pages;
 
 	while (n) {
-		page = alloc_pages(gfp | __GFP_COMP | __GFP_NOWARN,
-				   s->fl_pg_order);
+		page = __dev_alloc_pages(gfp, s->fl_pg_order);
 		if (unlikely(!page)) {
 			/*
 			 * We've failed inour attempt to allocate a "large
@@ -673,7 +674,7 @@ static unsigned int refill_fl(struct adapter *adapter, struct sge_fl *fl,
 
 alloc_small_pages:
 	while (n--) {
-		page = __skb_alloc_page(gfp | __GFP_NOWARN, NULL);
+		page = __dev_alloc_page(gfp);
 		if (unlikely(!page)) {
 			fl->alloc_failed++;
 			break;
@@ -867,7 +868,7 @@ static inline unsigned int calc_tx_flits(const struct sk_buff *skb)
 	 * Write Header (incorporated as part of the cpl_tx_pkt_lso and
 	 * cpl_tx_pkt structures), followed by either a TX Packet Write CPL
 	 * message or, if we're doing a Large Send Offload, an LSO CPL message
-	 * with an embeded TX Packet Write CPL message.
+	 * with an embedded TX Packet Write CPL message.
 	 */
 	flits = sgl_len(skb_shinfo(skb)->nr_frags + 1);
 	if (skb_shinfo(skb)->gso_size)
@@ -1892,7 +1893,7 @@ static int napi_rx_handler(struct napi_struct *napi, int budget)
 	u32 val;
 
 	if (likely(work_done < budget)) {
-		napi_complete(napi);
+		napi_complete_done(napi, work_done);
 		intr_params = rspq->next_intr_params;
 		rspq->next_intr_params = rspq->intr_params;
 	} else
@@ -2043,8 +2044,9 @@ static irqreturn_t t4vf_intr_msi(int irq, void *cookie)
  */
 irq_handler_t t4vf_intr_handler(struct adapter *adapter)
 {
-	BUG_ON((adapter->flags & (USING_MSIX|USING_MSI)) == 0);
-	if (adapter->flags & USING_MSIX)
+	BUG_ON((adapter->flags &
+	       (CXGB4VF_USING_MSIX | CXGB4VF_USING_MSI)) == 0);
+	if (adapter->flags & CXGB4VF_USING_MSIX)
 		return t4vf_sge_intr_msix;
 	else
 		return t4vf_intr_msi;
@@ -2083,7 +2085,7 @@ static void sge_rx_timer_cb(struct timer_list *t)
 			struct sge_fl *fl = s->egr_map[id];
 
 			clear_bit(id, s->starving_fl);
-			smp_mb__after_clear_bit();
+			smp_mb__after_atomic();
 
 			/*
 			 * Since we are accessing fl without a lock there's a
@@ -2208,7 +2210,7 @@ int t4vf_sge_alloc_rxq(struct adapter *adapter, struct sge_rspq *rspq,
 	struct port_info *pi = netdev_priv(dev);
 	struct fw_iq_cmd cmd, rpl;
 	int ret, iqandst, flsz = 0;
-	int relaxed = !(adapter->flags & ROOT_NO_RELAXED_ORDERING);
+	int relaxed = !(adapter->flags & CXGB4VF_ROOT_NO_RELAXED_ORDERING);
 
 	/*
 	 * If we're using MSI interrupts and we're not initializing the
@@ -2217,7 +2219,8 @@ int t4vf_sge_alloc_rxq(struct adapter *adapter, struct sge_rspq *rspq,
 	 * the Forwarded Interrupt Queue must be set up before any other
 	 * ingress queue ...
 	 */
-	if ((adapter->flags & USING_MSI) && rspq != &adapter->sge.intrq) {
+	if ((adapter->flags & CXGB4VF_USING_MSI) &&
+	    rspq != &adapter->sge.intrq) {
 		iqandst = SGE_INTRDST_IQ;
 		intr_dest = adapter->sge.intrq.abs_id;
 	} else
@@ -2267,7 +2270,7 @@ int t4vf_sge_alloc_rxq(struct adapter *adapter, struct sge_rspq *rspq,
 	cmd.iqaddr = cpu_to_be64(rspq->phys_addr);
 
 	if (fl) {
-		enum chip_type chip =
+		unsigned int chip_ver =
 			CHELSIO_CHIP_VERSION(adapter->params.chip);
 		/*
 		 * Allocate the ring for the hardware free list (with space
@@ -2318,10 +2321,10 @@ int t4vf_sge_alloc_rxq(struct adapter *adapter, struct sge_rspq *rspq,
 		 */
 		cmd.fl0dcaen_to_fl0cidxfthresh =
 			cpu_to_be16(
-				FW_IQ_CMD_FL0FBMIN_V(chip <= CHELSIO_T5 ?
-						     FETCHBURSTMIN_128B_X :
-						     FETCHBURSTMIN_64B_X) |
-				FW_IQ_CMD_FL0FBMAX_V((chip <= CHELSIO_T5) ?
+				FW_IQ_CMD_FL0FBMIN_V(chip_ver <= CHELSIO_T5
+						     ? FETCHBURSTMIN_128B_X
+						     : FETCHBURSTMIN_64B_T6_X) |
+				FW_IQ_CMD_FL0FBMAX_V((chip_ver <= CHELSIO_T5) ?
 						     FETCHBURSTMAX_512B_X :
 						     FETCHBURSTMAX_256B_X));
 		cmd.fl0size = cpu_to_be16(flsz);
@@ -2410,10 +2413,11 @@ int t4vf_sge_alloc_eth_txq(struct adapter *adapter, struct sge_eth_txq *txq,
 			   struct net_device *dev, struct netdev_queue *devq,
 			   unsigned int iqid)
 {
+	unsigned int chip_ver = CHELSIO_CHIP_VERSION(adapter->params.chip);
+	struct port_info *pi = netdev_priv(dev);
+	struct fw_eq_eth_cmd cmd, rpl;
 	struct sge *s = &adapter->sge;
 	int ret, nentries;
-	struct fw_eq_eth_cmd cmd, rpl;
-	struct port_info *pi = netdev_priv(dev);
 
 	/*
 	 * Calculate the size of the hardware TX Queue (including the Status
@@ -2447,17 +2451,19 @@ int t4vf_sge_alloc_eth_txq(struct adapter *adapter, struct sge_eth_txq *txq,
 	cmd.alloc_to_len16 = cpu_to_be32(FW_EQ_ETH_CMD_ALLOC_F |
 					 FW_EQ_ETH_CMD_EQSTART_F |
 					 FW_LEN16(cmd));
-	cmd.viid_pkd = cpu_to_be32(FW_EQ_ETH_CMD_AUTOEQUEQE_F |
-				   FW_EQ_ETH_CMD_VIID_V(pi->viid));
+	cmd.autoequiqe_to_viid = cpu_to_be32(FW_EQ_ETH_CMD_AUTOEQUEQE_F |
+					     FW_EQ_ETH_CMD_VIID_V(pi->viid));
 	cmd.fetchszm_to_iqid =
 		cpu_to_be32(FW_EQ_ETH_CMD_HOSTFCMODE_V(SGE_HOSTFCMODE_STPG) |
 			    FW_EQ_ETH_CMD_PCIECHN_V(pi->port_id) |
 			    FW_EQ_ETH_CMD_IQID_V(iqid));
 	cmd.dcaen_to_eqsize =
-		cpu_to_be32(FW_EQ_ETH_CMD_FBMIN_V(SGE_FETCHBURSTMIN_64B) |
-			    FW_EQ_ETH_CMD_FBMAX_V(SGE_FETCHBURSTMAX_512B) |
+		cpu_to_be32(FW_EQ_ETH_CMD_FBMIN_V(chip_ver <= CHELSIO_T5
+						  ? FETCHBURSTMIN_64B_X
+						  : FETCHBURSTMIN_64B_T6_X) |
+			    FW_EQ_ETH_CMD_FBMAX_V(FETCHBURSTMAX_512B_X) |
 			    FW_EQ_ETH_CMD_CIDXFTHRESH_V(
-						SGE_CIDXFLUSHTHRESH_32) |
+						CIDXFLUSHTHRESH_32_X) |
 			    FW_EQ_ETH_CMD_EQSIZE_V(nentries));
 	cmd.eqaddr = cpu_to_be64(txq->q.phys_addr);
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Driver for s390 eadm subchannels
  *
@@ -6,6 +7,7 @@
  */
 
 #include <linux/kernel_stat.h>
+#include <linux/completion.h>
 #include <linux/workqueue.h>
 #include <linux/spinlock.h>
 #include <linux/device.h>
@@ -30,7 +32,7 @@
 MODULE_DESCRIPTION("driver for s390 eadm subchannels");
 MODULE_LICENSE("GPL");
 
-#define EADM_TIMEOUT (5 * HZ)
+#define EADM_TIMEOUT (7 * HZ)
 static DEFINE_SPINLOCK(list_lock);
 static LIST_HEAD(eadm_list);
 
@@ -42,13 +44,7 @@ static debug_info_t *eadm_debug;
 
 static void EADM_LOG_HEX(int level, void *data, int length)
 {
-	if (level > eadm_debug->level)
-		return;
-	while (length > 0) {
-		debug_event(eadm_debug, level, data, length);
-		length -= eadm_debug->buf_size;
-		data += eadm_debug->buf_size;
-	}
+	debug_event(eadm_debug, level, data, length);
 }
 
 static void orb_init(union orb *orb)
@@ -99,9 +95,10 @@ static int eadm_subchannel_clear(struct subchannel *sch)
 	return 0;
 }
 
-static void eadm_subchannel_timeout(unsigned long data)
+static void eadm_subchannel_timeout(struct timer_list *t)
 {
-	struct subchannel *sch = (struct subchannel *) data;
+	struct eadm_private *private = from_timer(private, t, timer);
+	struct subchannel *sch = private->sch;
 
 	spin_lock_irq(sch->lock);
 	EADM_LOG(1, "timeout");
@@ -123,8 +120,6 @@ static void eadm_subchannel_set_timeout(struct subchannel *sch, int expires)
 		if (mod_timer(&private->timer, jiffies + expires))
 			return;
 	}
-	private->timer.function = eadm_subchannel_timeout;
-	private->timer.data = (unsigned long) sch;
 	private->timer.expires = jiffies + expires;
 	add_timer(&private->timer);
 }
@@ -133,8 +128,8 @@ static void eadm_subchannel_irq(struct subchannel *sch)
 {
 	struct eadm_private *private = get_eadm_private(sch);
 	struct eadm_scsw *scsw = &sch->schib.scsw.eadm;
-	struct irb *irb = (struct irb *)&S390_lowcore.irb;
-	int error = 0;
+	struct irb *irb = this_cpu_ptr(&cio_irb);
+	blk_status_t error = BLK_STS_OK;
 
 	EADM_LOG(6, "irq");
 	EADM_LOG_HEX(6, irb, sizeof(*irb));
@@ -143,10 +138,10 @@ static void eadm_subchannel_irq(struct subchannel *sch)
 
 	if ((scsw->stctl & (SCSW_STCTL_ALERT_STATUS | SCSW_STCTL_STATUS_PEND))
 	    && scsw->eswf == 1 && irb->esw.eadm.erw.r)
-		error = -EIO;
+		error = BLK_STS_IOERR;
 
 	if (scsw->fctl & SCSW_FCTL_CLEAR_FUNC)
-		error = -ETIMEDOUT;
+		error = BLK_STS_TIMEOUT;
 
 	eadm_subchannel_set_timeout(sch, 0);
 
@@ -159,6 +154,9 @@ static void eadm_subchannel_irq(struct subchannel *sch)
 	}
 	scm_irq_handler((struct aob *)(unsigned long)scsw->aob, error);
 	private->state = EADM_IDLE;
+
+	if (private->completion)
+		complete(private->completion);
 }
 
 static struct subchannel *eadm_get_idle_sch(void)
@@ -226,7 +224,7 @@ static int eadm_subchannel_probe(struct subchannel *sch)
 		return -ENOMEM;
 
 	INIT_LIST_HEAD(&private->head);
-	init_timer(&private->timer);
+	timer_setup(&private->timer, eadm_subchannel_timeout, 0);
 
 	spin_lock_irq(sch->lock);
 	set_eadm_private(sch, private);
@@ -256,13 +254,32 @@ out:
 
 static void eadm_quiesce(struct subchannel *sch)
 {
+	struct eadm_private *private = get_eadm_private(sch);
+	DECLARE_COMPLETION_ONSTACK(completion);
 	int ret;
 
+	spin_lock_irq(sch->lock);
+	if (private->state != EADM_BUSY)
+		goto disable;
+
+	if (eadm_subchannel_clear(sch))
+		goto disable;
+
+	private->completion = &completion;
+	spin_unlock_irq(sch->lock);
+
+	wait_for_completion_io(&completion);
+
+	spin_lock_irq(sch->lock);
+	private->completion = NULL;
+
+disable:
+	eadm_subchannel_set_timeout(sch, 0);
 	do {
-		spin_lock_irq(sch->lock);
 		ret = cio_disable_subchannel(sch);
-		spin_unlock_irq(sch->lock);
 	} while (ret == -EBUSY);
+
+	spin_unlock_irq(sch->lock);
 }
 
 static int eadm_subchannel_remove(struct subchannel *sch)
@@ -313,7 +330,6 @@ static int eadm_subchannel_sch_event(struct subchannel *sch, int process)
 {
 	struct eadm_private *private;
 	unsigned long flags;
-	int ret = 0;
 
 	spin_lock_irqsave(sch->lock, flags);
 	if (!device_is_registered(&sch->dev))
@@ -333,7 +349,7 @@ static int eadm_subchannel_sch_event(struct subchannel *sch, int process)
 out_unlock:
 	spin_unlock_irqrestore(sch->lock, flags);
 
-	return ret;
+	return 0;
 }
 
 static struct css_device_id eadm_subchannel_ids[] = {

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Copyright (C) 1995, 1996, 1997 Olaf Kirch <okir@monad.swb.de>
  *
@@ -10,6 +11,7 @@
 #include <linux/crc32.h>
 #include <linux/sunrpc/svc.h>
 #include <uapi/linux/nfsd/nfsfh.h>
+#include <linux/iversion.h>
 
 static inline __u32 ino_t_to_u32(ino_t ino)
 {
@@ -240,6 +242,29 @@ fh_clear_wcc(struct svc_fh *fhp)
 	fhp->fh_pre_saved = false;
 }
 
+/*
+ * We could use i_version alone as the change attribute.  However,
+ * i_version can go backwards after a reboot.  On its own that doesn't
+ * necessarily cause a problem, but if i_version goes backwards and then
+ * is incremented again it could reuse a value that was previously used
+ * before boot, and a client who queried the two values might
+ * incorrectly assume nothing changed.
+ *
+ * By using both ctime and the i_version counter we guarantee that as
+ * long as time doesn't go backwards we never reuse an old value.
+ */
+static inline u64 nfsd4_change_attribute(struct kstat *stat,
+					 struct inode *inode)
+{
+	u64 chattr;
+
+	chattr =  stat->ctime.tv_sec;
+	chattr <<= 30;
+	chattr += stat->ctime.tv_nsec;
+	chattr += inode_query_iversion(inode);
+	return chattr;
+}
+
 extern void fill_pre_wcc(struct svc_fh *fhp);
 extern void fill_post_wcc(struct svc_fh *fhp);
 #else
@@ -270,8 +295,8 @@ fh_lock_nested(struct svc_fh *fhp, unsigned int subclass)
 		return;
 	}
 
-	inode = dentry->d_inode;
-	mutex_lock_nested(&inode->i_mutex, subclass);
+	inode = d_inode(dentry);
+	inode_lock_nested(inode, subclass);
 	fill_pre_wcc(fhp);
 	fhp->fh_locked = true;
 }
@@ -290,7 +315,7 @@ fh_unlock(struct svc_fh *fhp)
 {
 	if (fhp->fh_locked) {
 		fill_post_wcc(fhp);
-		mutex_unlock(&fhp->fh_dentry->d_inode->i_mutex);
+		inode_unlock(d_inode(fhp->fh_dentry));
 		fhp->fh_locked = false;
 	}
 }

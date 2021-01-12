@@ -75,9 +75,15 @@ EXPORT_SYMBOL_GPL(genphy_c45_pma_setup_forced);
  */
 int genphy_c45_an_disable_aneg(struct phy_device *phydev)
 {
+	int val;
 
-	return phy_clear_bits_mmd(phydev, MDIO_MMD_AN, MDIO_CTRL1,
-				  MDIO_AN_CTRL1_ENABLE | MDIO_AN_CTRL1_RESTART);
+	val = phy_read_mmd(phydev, MDIO_MMD_AN, MDIO_CTRL1);
+	if (val < 0)
+		return val;
+
+	val &= ~(MDIO_AN_CTRL1_ENABLE | MDIO_AN_CTRL1_RESTART);
+
+	return phy_write_mmd(phydev, MDIO_MMD_AN, MDIO_CTRL1, val);
 }
 EXPORT_SYMBOL_GPL(genphy_c45_an_disable_aneg);
 
@@ -91,8 +97,15 @@ EXPORT_SYMBOL_GPL(genphy_c45_an_disable_aneg);
  */
 int genphy_c45_restart_aneg(struct phy_device *phydev)
 {
-	return phy_set_bits_mmd(phydev, MDIO_MMD_AN, MDIO_CTRL1,
-				MDIO_AN_CTRL1_ENABLE | MDIO_AN_CTRL1_RESTART);
+	int val;
+
+	val = phy_read_mmd(phydev, MDIO_MMD_AN, MDIO_CTRL1);
+	if (val < 0)
+		return val;
+
+	val |= MDIO_AN_CTRL1_ENABLE | MDIO_AN_CTRL1_RESTART;
+
+	return phy_write_mmd(phydev, MDIO_MMD_AN, MDIO_CTRL1, val);
 }
 EXPORT_SYMBOL_GPL(genphy_c45_restart_aneg);
 
@@ -150,11 +163,11 @@ int genphy_c45_read_link(struct phy_device *phydev, u32 mmd_mask)
 EXPORT_SYMBOL_GPL(genphy_c45_read_link);
 
 /**
- * genphy_c45_read_lpa - read the link partner advertisment and pause
+ * genphy_c45_read_lpa - read the link partner advertisement and pause
  * @phydev: target phy_device struct
  *
  * Read the Clause 45 defined base (7.19) and 10G (7.33) status registers,
- * filling in the link partner advertisment, pause and asym_pause members
+ * filling in the link partner advertisement, pause and asym_pause members
  * in @phydev.  This assumes that the auto-negotiation MMD is present, and
  * the backplane bit (7.48.0) is clear.  Clause 45 PHY drivers are expected
  * to fill in the remainder of the link partner advert from vendor registers.
@@ -163,22 +176,23 @@ int genphy_c45_read_lpa(struct phy_device *phydev)
 {
 	int val;
 
-	/* Read the link partner's base page advertisment */
+	/* Read the link partner's base page advertisement */
 	val = phy_read_mmd(phydev, MDIO_MMD_AN, MDIO_AN_LPA);
 	if (val < 0)
 		return val;
 
-	phydev->lp_advertising = mii_lpa_to_ethtool_lpa_t(val);
+	mii_lpa_to_linkmode_lpa_t(phydev->lp_advertising, val);
 	phydev->pause = val & LPA_PAUSE_CAP ? 1 : 0;
 	phydev->asym_pause = val & LPA_PAUSE_ASYM ? 1 : 0;
 
-	/* Read the link partner's 10G advertisment */
+	/* Read the link partner's 10G advertisement */
 	val = phy_read_mmd(phydev, MDIO_MMD_AN, MDIO_AN_10GBT_STAT);
 	if (val < 0)
 		return val;
 
 	if (val & MDIO_AN_10GBT_STAT_LP10G)
-		phydev->lp_advertising |= ADVERTISED_10000baseT_Full;
+		linkmode_set_bit(ETHTOOL_LINK_MODE_10000baseT_Full_BIT,
+				 phydev->lp_advertising);
 
 	return 0;
 }
@@ -219,3 +233,109 @@ int genphy_c45_read_pma(struct phy_device *phydev)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(genphy_c45_read_pma);
+
+/**
+ * genphy_c45_read_mdix - read mdix status from PMA
+ * @phydev: target phy_device struct
+ */
+int genphy_c45_read_mdix(struct phy_device *phydev)
+{
+	int val;
+
+	if (phydev->speed == SPEED_10000) {
+		val = phy_read_mmd(phydev, MDIO_MMD_PMAPMD,
+				   MDIO_PMA_10GBT_SWAPPOL);
+		if (val < 0)
+			return val;
+
+		switch (val) {
+		case MDIO_PMA_10GBT_SWAPPOL_ABNX | MDIO_PMA_10GBT_SWAPPOL_CDNX:
+			phydev->mdix = ETH_TP_MDI;
+			break;
+
+		case 0:
+			phydev->mdix = ETH_TP_MDI_X;
+			break;
+
+		default:
+			phydev->mdix = ETH_TP_MDI_INVALID;
+			break;
+		}
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(genphy_c45_read_mdix);
+
+/* The gen10g_* functions are the old Clause 45 stub */
+
+int gen10g_config_aneg(struct phy_device *phydev)
+{
+	return 0;
+}
+EXPORT_SYMBOL_GPL(gen10g_config_aneg);
+
+int gen10g_read_status(struct phy_device *phydev)
+{
+	u32 mmd_mask = phydev->c45_ids.devices_in_package;
+	int ret;
+
+	/* For now just lie and say it's 10G all the time */
+	phydev->speed = SPEED_10000;
+	phydev->duplex = DUPLEX_FULL;
+
+	/* Avoid reading the vendor MMDs */
+	mmd_mask &= ~(BIT(MDIO_MMD_VEND1) | BIT(MDIO_MMD_VEND2));
+
+	ret = genphy_c45_read_link(phydev, mmd_mask);
+
+	phydev->link = ret > 0 ? 1 : 0;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(gen10g_read_status);
+
+int gen10g_no_soft_reset(struct phy_device *phydev)
+{
+	/* Do nothing for now */
+	return 0;
+}
+EXPORT_SYMBOL_GPL(gen10g_no_soft_reset);
+
+int gen10g_config_init(struct phy_device *phydev)
+{
+	/* Temporarily just say we support everything */
+	linkmode_zero(phydev->supported);
+
+	linkmode_set_bit(ETHTOOL_LINK_MODE_10000baseT_Full_BIT,
+			 phydev->supported);
+	linkmode_copy(phydev->advertising, phydev->supported);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(gen10g_config_init);
+
+int gen10g_suspend(struct phy_device *phydev)
+{
+	return 0;
+}
+EXPORT_SYMBOL_GPL(gen10g_suspend);
+
+int gen10g_resume(struct phy_device *phydev)
+{
+	return 0;
+}
+EXPORT_SYMBOL_GPL(gen10g_resume);
+
+struct phy_driver genphy_10g_driver = {
+	.phy_id         = 0xffffffff,
+	.phy_id_mask    = 0xffffffff,
+	.name           = "Generic 10G PHY",
+	.soft_reset	= gen10g_no_soft_reset,
+	.config_init    = gen10g_config_init,
+	.features       = PHY_10GBIT_FEATURES,
+	.config_aneg    = gen10g_config_aneg,
+	.read_status    = gen10g_read_status,
+	.suspend        = gen10g_suspend,
+	.resume         = gen10g_resume,
+};

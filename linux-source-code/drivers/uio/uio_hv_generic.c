@@ -17,6 +17,7 @@
  * # echo -n "ed963694-e847-4b2a-85af-bc9cfc11d6f3" \
  *    > /sys/bus/vmbus/drivers/uio_hv_generic/bind
  */
+#define DEBUG 1
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/device.h>
@@ -82,7 +83,7 @@ hv_uio_irqcontrol(struct uio_info *info, s32 irq_state)
 	struct hv_device *dev = pdata->device;
 
 	dev->channel->inbound.ring_buffer->interrupt_mask = !irq_state;
-	mb();
+	virt_mb();
 
 	return 0;
 }
@@ -97,7 +98,7 @@ static void hv_uio_channel_cb(void *context)
 	struct hv_uio_private_data *pdata = hv_get_drvdata(hv_dev);
 
 	chan->inbound.ring_buffer->interrupt_mask = 1;
-	mb();
+	virt_mb();
 
 	uio_event_notify(&pdata->info);
 }
@@ -380,8 +381,6 @@ static struct hv_driver hv_uio_drv = {
 static int __init
 hyperv_module_init(void)
 {
-	mark_tech_preview("Hyper-V UIO generic driver", THIS_MODULE);
-
 	return vmbus_driver_register(&hv_uio_drv);
 }
 

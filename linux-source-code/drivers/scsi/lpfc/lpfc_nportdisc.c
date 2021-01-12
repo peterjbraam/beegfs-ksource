@@ -1,7 +1,7 @@
 /*******************************************************************
  * This file is part of the Emulex Linux Device Driver for         *
  * Fibre Channel Host Bus Adapters.                                *
- * Copyright (C) 2017-2018 Broadcom. All Rights Reserved. The term *
+ * Copyright (C) 2017-2019 Broadcom. All Rights Reserved. The term *
  * “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.     *
  * Copyright (C) 2004-2016 Emulex.  All rights reserved.           *
  * EMULEX and SLI are trademarks of Emulex.                        *
@@ -826,7 +826,7 @@ lpfc_rcv_prli(struct lpfc_vport *vport, struct lpfc_nodelist *ndlp,
 			"rport rolechg:   role:x%x did:x%x flg:x%x",
 			roles, ndlp->nlp_DID, ndlp->nlp_flag);
 
-		if (phba->cfg_enable_fc4_type != LPFC_ENABLE_NVME)
+		if (vport->cfg_enable_fc4_type != LPFC_ENABLE_NVME)
 			fc_remote_port_rolechg(rport, roles);
 	}
 }
@@ -1661,6 +1661,7 @@ lpfc_rcv_logo_reglogin_issue(struct lpfc_vport *vport,
 	LPFC_MBOXQ_t	  *mb;
 	LPFC_MBOXQ_t	  *nextmb;
 	struct lpfc_dmabuf *mp;
+	struct lpfc_nodelist *ns_ndlp;
 
 	cmdiocb = (struct lpfc_iocbq *) arg;
 
@@ -1692,6 +1693,13 @@ lpfc_rcv_logo_reglogin_issue(struct lpfc_vport *vport,
 		}
 	}
 	spin_unlock_irq(&phba->hbalock);
+
+	/* software abort if any GID_FT is outstanding */
+	if (vport->cfg_enable_fc4_type != LPFC_ENABLE_FCP) {
+		ns_ndlp = lpfc_findnode_did(vport, NameServer_DID);
+		if (ns_ndlp && NLP_CHK_NODE_ACT(ns_ndlp))
+			lpfc_els_abort(phba, ns_ndlp);
+	}
 
 	lpfc_rcv_logo(vport, ndlp, cmdiocb, ELS_CMD_LOGO);
 	return ndlp->nlp_state;
@@ -1789,8 +1797,8 @@ lpfc_cmpl_reglogin_reglogin_issue(struct lpfc_vport *vport,
 			 * is configured try it.
 			 */
 			ndlp->nlp_fc4_type |= NLP_FC4_FCP;
-			if ((phba->cfg_enable_fc4_type == LPFC_ENABLE_BOTH) ||
-			     (phba->cfg_enable_fc4_type == LPFC_ENABLE_NVME)) {
+			if ((vport->cfg_enable_fc4_type == LPFC_ENABLE_BOTH) ||
+			    (vport->cfg_enable_fc4_type == LPFC_ENABLE_NVME)) {
 				ndlp->nlp_fc4_type |= NLP_FC4_NVME;
 				/* We need to update the localport also */
 				lpfc_nvme_update_localport(vport);
@@ -1804,7 +1812,7 @@ lpfc_cmpl_reglogin_reglogin_issue(struct lpfc_vport *vport,
 			 * should just issue PRLI for FCP. Otherwise issue
 			 * GFT_ID to determine if remote port supports NVME.
 			 */
-			if (phba->cfg_enable_fc4_type != LPFC_ENABLE_FCP) {
+			if (vport->cfg_enable_fc4_type != LPFC_ENABLE_FCP) {
 				lpfc_ns_cmd(vport, SLI_CTNS_GFT_ID, 0,
 					    ndlp->nlp_DID);
 				return ndlp->nlp_state;

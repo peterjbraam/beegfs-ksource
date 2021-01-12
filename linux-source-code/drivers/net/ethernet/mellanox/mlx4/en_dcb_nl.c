@@ -254,7 +254,7 @@ static u8 mlx4_en_dcbnl_set_state(struct net_device *dev, u8 state)
  * otherwise returns 0 as the invalid user priority bitmap to
  * indicate an error.
  */
-static u8 mlx4_en_dcbnl_getapp(struct net_device *netdev, u8 idtype, u16 id)
+static int mlx4_en_dcbnl_getapp(struct net_device *netdev, u8 idtype, u16 id)
 {
 	struct mlx4_en_priv *priv = netdev_priv(netdev);
 	struct dcb_app app = {
@@ -267,7 +267,7 @@ static u8 mlx4_en_dcbnl_getapp(struct net_device *netdev, u8 idtype, u16 id)
 	return dcb_getapp(netdev, &app);
 }
 
-static u8 mlx4_en_dcbnl_setapp(struct net_device *netdev, u8 idtype,
+static int mlx4_en_dcbnl_setapp(struct net_device *netdev, u8 idtype,
 				u16 id, u8 up)
 {
 	struct mlx4_en_priv *priv = netdev_priv(netdev);
@@ -712,6 +712,9 @@ const struct dcbnl_rtnl_ops mlx4_en_dcbnl_ops = {
 	.ieee_setets		= mlx4_en_dcbnl_ieee_setets,
 	.ieee_getmaxrate	= mlx4_en_dcbnl_ieee_getmaxrate,
 	.ieee_setmaxrate	= mlx4_en_dcbnl_ieee_setmaxrate,
+	.ieee_getqcn		= mlx4_en_dcbnl_ieee_getqcn,
+	.ieee_setqcn		= mlx4_en_dcbnl_ieee_setqcn,
+	.ieee_getqcnstats	= mlx4_en_dcbnl_ieee_getqcnstats,
 	.ieee_getpfc		= mlx4_en_dcbnl_ieee_getpfc,
 	.ieee_setpfc		= mlx4_en_dcbnl_ieee_setpfc,
 
@@ -729,12 +732,6 @@ const struct dcbnl_rtnl_ops mlx4_en_dcbnl_ops = {
 
 	.getdcbx	= mlx4_en_dcbnl_getdcbx,
 	.setdcbx	= mlx4_en_dcbnl_setdcbx,
-};
-
-const struct dcbnl_rtnl_ops_ext mlx4_en_dcbnl_ops_ext = {
-	.ieee_getqcn	= mlx4_en_dcbnl_ieee_getqcn,
-	.ieee_setqcn	= mlx4_en_dcbnl_ieee_setqcn,
-	.ieee_getqcnstats = mlx4_en_dcbnl_ieee_getqcnstats,
 };
 
 const struct dcbnl_rtnl_ops mlx4_en_dcbnl_pfc_ops = {

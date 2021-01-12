@@ -1,20 +1,23 @@
+# SPDX-License-Identifier: GPL-2.0
 FILES=                                          \
          test-all.bin                           \
          test-backtrace.bin                     \
          test-bionic.bin                        \
          test-dwarf.bin                         \
          test-dwarf_getlocations.bin            \
+         test-eventfd.bin                       \
          test-fortify-source.bin                \
          test-sync-compare-and-swap.bin         \
-         test-get_current_dir_name.bin          \
          test-glibc.bin                         \
          test-gtk2.bin                          \
          test-gtk2-infobar.bin                  \
          test-hello.bin                         \
          test-libaudit.bin                      \
          test-libbfd.bin                        \
-         test-liberty.bin                       \
-         test-liberty-z.bin                     \
+         test-disassembler-four-args.bin        \
+         test-reallocarray.bin			\
+         test-libbfd-liberty.bin                \
+         test-libbfd-liberty-z.bin              \
          test-cplus-demangle.bin                \
          test-libelf.bin                        \
          test-libelf-getphdrnum.bin             \
@@ -54,9 +57,11 @@ FILES=                                          \
          test-jvmti-cmlr.bin			\
          test-sched_getcpu.bin			\
          test-setns.bin				\
+         test-libopencsd.bin			\
          test-clang.bin				\
          test-llvm.bin				\
-         test-llvm-version.bin
+         test-llvm-version.bin			\
+         test-libaio.bin
 
 FILES := $(addprefix $(OUTPUT),$(FILES))
 
@@ -99,7 +104,7 @@ $(OUTPUT)test-bionic.bin:
 $(OUTPUT)test-libelf.bin:
 	$(BUILD) -lelf
 
-$(OUTPUT)test-get_current_dir_name.bin:
+$(OUTPUT)test-eventfd.bin:
 	$(BUILD)
 
 $(OUTPUT)test-glibc.bin:
@@ -110,6 +115,10 @@ $(OUTPUT)test-sched_getcpu.bin:
 
 $(OUTPUT)test-setns.bin:
 	$(BUILD)
+
+$(OUTPUT)test-libopencsd.bin:
+	$(BUILD) # -lopencsd_c_api -lopencsd provided by
+		 # $(FEATURE_CHECK_LDFLAGS-libopencsd)
 
 DWARFLIBS := -ldw
 ifeq ($(findstring -static,${LDFLAGS}),-static)
@@ -197,12 +206,18 @@ $(OUTPUT)test-libpython-version.bin:
 	$(BUILD)
 
 $(OUTPUT)test-libbfd.bin:
-	$(BUILD) -DPACKAGE='"perf"' -lbfd -lz -liberty -ldl
+	$(BUILD) -DPACKAGE='"perf"' -lbfd -ldl
 
-$(OUTPUT)test-liberty.bin:
+$(OUTPUT)test-disassembler-four-args.bin:
+	$(BUILD) -DPACKAGE='"perf"' -lbfd -lopcodes
+
+$(OUTPUT)test-reallocarray.bin:
+	$(BUILD)
+
+$(OUTPUT)test-libbfd-liberty.bin:
 	$(CC) $(CFLAGS) -Wall -Werror -o $@ test-libbfd.c -DPACKAGE='"perf"' $(LDFLAGS) -lbfd -ldl -liberty
 
-$(OUTPUT)test-liberty-z.bin:
+$(OUTPUT)test-libbfd-liberty-z.bin:
 	$(CC) $(CFLAGS) -Wall -Werror -o $@ test-libbfd.c -DPACKAGE='"perf"' $(LDFLAGS) -lbfd -ldl -liberty -lz
 
 $(OUTPUT)test-cplus-demangle.bin:
@@ -235,10 +250,10 @@ $(OUTPUT)test-zlib.bin:
 $(OUTPUT)test-lzma.bin:
 	$(BUILD) -llzma
 
-$(OUTPUT)test-bpf.bin:
+$(OUTPUT)test-get_cpuid.bin:
 	$(BUILD)
 
-$(OUTPUT)test-get_cpuid.bin:
+$(OUTPUT)test-bpf.bin:
 	$(BUILD)
 
 $(OUTPUT)test-sdt.bin:
@@ -278,6 +293,9 @@ $(OUTPUT)test-clang.bin:
 		> $(@:.bin=.make.output) 2>&1
 
 -include $(OUTPUT)*.d
+
+$(OUTPUT)test-libaio.bin:
+	$(BUILD) -lrt
 
 ###############################
 

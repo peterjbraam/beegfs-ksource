@@ -490,7 +490,6 @@ static void ch341_update_status(struct usb_serial_port *port,
 	unsigned long flags;
 	u8 status;
 	u8 delta;
-	int ret;
 
 	if (len < 4)
 		return;
@@ -521,12 +520,6 @@ static void ch341_update_status(struct usb_serial_port *port,
 			usb_serial_handle_dcd_change(port, tty,
 						status & CH341_BIT_DCD);
 			tty_kref_put(tty);
-		}
-
-		ret = ch341_get_status(port->serial->dev, priv);
-		if (ret < 0) {
-			dev_err(&port->dev, "failed to read modem status: %d\n",
-				ret);
 		}
 	}
 
@@ -595,14 +588,29 @@ static int ch341_tiocmget(struct tty_struct *tty)
 
 static int ch341_reset_resume(struct usb_serial *serial)
 {
-	struct ch341_private *priv;
-
-	priv = usb_get_serial_port_data(serial->port[0]);
+	struct usb_serial_port *port = serial->port[0];
+	struct ch341_private *priv = usb_get_serial_port_data(port);
+	int ret;
 
 	/* reconfigure ch341 serial port after bus-reset */
 	ch341_configure(serial->dev, priv);
 
-	return 0;
+	if (tty_port_initialized(&port->port)) {
+		ret = usb_submit_urb(port->interrupt_in_urb, GFP_NOIO);
+		if (ret) {
+			dev_err(&port->dev, "failed to submit interrupt urb: %d\n",
+				ret);
+			return ret;
+		}
+
+		ret = ch341_get_status(port->serial->dev, priv);
+		if (ret < 0) {
+			dev_err(&port->dev, "failed to read modem status: %d\n",
+				ret);
+		}
+	}
+
+	return usb_serial_generic_resume(serial);
 }
 
 static struct usb_serial_driver ch341_device = {

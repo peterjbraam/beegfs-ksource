@@ -5,7 +5,6 @@
 #include <linux/preempt.h>
 #include <asm/processor.h>
 #include <asm/cpufeature.h>
-#include <asm/kaiser.h>
 
 /*
  * Ensure that a core serializing instruction is issued before returning
@@ -15,7 +14,7 @@
 static inline void sync_core_before_usermode(void)
 {
 	/* With PTI, we unconditionally serialize before running user code. */
-	if (kaiser_active())
+	if (static_cpu_has(X86_FEATURE_PTI))
 		return;
 	/*
 	 * Return from interrupt and NMI is done through iret, which is core

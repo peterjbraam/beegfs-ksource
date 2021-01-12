@@ -64,6 +64,9 @@ struct ipoib_mcast_iter {
 	unsigned int       send_only;
 };
 
+/* join state that allows creating mcg with sendonly member request */
+#define SENDONLY_FULLMEMBER_JOIN	8
+
 /*
  * This should be called with the priv->lock held
  */

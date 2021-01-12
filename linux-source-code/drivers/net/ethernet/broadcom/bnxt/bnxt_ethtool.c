@@ -3090,11 +3090,11 @@ bnxt_fill_coredump_record(struct bnxt *bp, struct bnxt_coredump_record *record,
 			  time64_t start, s16 start_utc, u16 total_segs,
 			  int status)
 {
-	time64_t end = get_seconds();
+	time64_t end = ktime_get_real_seconds();
 	u32 os_ver_major = 0, os_ver_minor = 0;
 	struct tm tm;
 
-	time_to_tm(start, 0, &tm);
+	time64_to_tm(start, 0, &tm);
 	memset(record, 0, sizeof(*record));
 	memcpy(record->signature, "cOrE", 4);
 	record->flags = 0;
@@ -3118,7 +3118,7 @@ bnxt_fill_coredump_record(struct bnxt *bp, struct bnxt_coredump_record *record,
 	record->os_ver_minor = cpu_to_le32(os_ver_minor);
 
 	strlcpy(record->os_name, utsname()->sysname, 32);
-	time_to_tm(end, 0, &tm);
+	time64_to_tm(end, 0, &tm);
 	record->end_year = cpu_to_le16(tm.tm_year + 1900);
 	record->end_month = cpu_to_le16(tm.tm_mon + 1);
 	record->end_day = cpu_to_le16(tm.tm_mday);
@@ -3146,7 +3146,7 @@ static int bnxt_get_coredump(struct bnxt *bp, void *buf, u32 *dump_len)
 	u16 start_utc;
 	int rc = 0, i;
 
-	start_time = get_seconds();
+	start_time = ktime_get_real_seconds();
 	start_utc = sys_tz.tz_minuteswest * 60;
 	seg_hdr_len = sizeof(seg_hdr);
 

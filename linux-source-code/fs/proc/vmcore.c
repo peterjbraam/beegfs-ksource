@@ -20,13 +20,13 @@
 #include <linux/init.h>
 #include <linux/crash_dump.h>
 #include <linux/list.h>
+#include <linux/moduleparam.h>
 #include <linux/mutex.h>
 #include <linux/vmalloc.h>
 #include <linux/pagemap.h>
-#include <linux/moduleparam.h>
+#include <linux/uaccess.h>
 #include <linux/mem_encrypt.h>
 #include <asm/pgtable.h>
-#include <asm/uaccess.h>
 #include <asm/io.h>
 #include "internal.h"
 
@@ -48,7 +48,7 @@ static size_t elfnotes_orig_sz;
 /* Total size of vmcore file. */
 static u64 vmcore_size;
 
-static struct proc_dir_entry *proc_vmcore = NULL;
+static struct proc_dir_entry *proc_vmcore;
 
 #ifdef CONFIG_PROC_VMCORE_DEVICE_DUMP
 /* Device Dump list and mutex to synchronize access to list */
@@ -103,9 +103,9 @@ static int pfn_is_ram(unsigned long pfn)
 }
 
 /* Reads a page from the oldmem device from given offset. */
-ssize_t read_from_oldmem(char *buf, size_t count,
-			u64 *ppos, int userbuf,
-			bool encrypted)
+static ssize_t read_from_oldmem(char *buf, size_t count,
+				u64 *ppos, int userbuf,
+				bool encrypted)
 {
 	unsigned long pfn, offset;
 	size_t nr_bytes;
@@ -129,12 +129,12 @@ ssize_t read_from_oldmem(char *buf, size_t count,
 		else {
 			if (encrypted)
 				tmp = copy_oldmem_page_encrypted(pfn, buf,
-								nr_bytes,
-								offset,
-								userbuf);
+								 nr_bytes,
+								 offset,
+								 userbuf);
 			else
 				tmp = copy_oldmem_page(pfn, buf, nr_bytes,
-						      offset, userbuf);
+						       offset, userbuf);
 
 			if (tmp < 0)
 				return tmp;
@@ -169,7 +169,7 @@ void __weak elfcorehdr_free(unsigned long long addr)
  */
 ssize_t __weak elfcorehdr_read(char *buf, size_t count, u64 *ppos)
 {
-	return read_from_oldmem(buf, count, ppos, 0, false);
+	return read_from_oldmem(buf, count, ppos, 0, sev_active());
 }
 
 /*
@@ -370,10 +370,12 @@ static ssize_t __read_vmcore(char *buffer, size_t buflen, loff_t *fpos,
 
 	list_for_each_entry(m, &vmcore_list, list) {
 		if (*fpos < m->offset + m->size) {
-			tsz = min_t(size_t, m->offset + m->size - *fpos, buflen);
+			tsz = (size_t)min_t(unsigned long long,
+					    m->offset + m->size - *fpos,
+					    buflen);
 			start = m->paddr + *fpos - m->offset;
 			tmp = read_from_oldmem(buffer, tsz, &start,
-					      userbuf, mem_encrypt_active());
+					       userbuf, mem_encrypt_active());
 			if (tmp < 0)
 				return tmp;
 			buflen -= tsz;
@@ -403,10 +405,10 @@ static ssize_t read_vmcore(struct file *file, char __user *buffer,
  * On s390 the fault handler is used for memory regions that can't be mapped
  * directly with remap_pfn_range().
  */
-static int mmap_vmcore_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
+static int mmap_vmcore_fault(struct vm_fault *vmf)
 {
 #ifdef CONFIG_S390
-	struct address_space *mapping = vma->vm_file->f_mapping;
+	struct address_space *mapping = vmf->vma->vm_file->f_mapping;
 	pgoff_t index = vmf->pgoff;
 	struct page *page;
 	loff_t offset;
@@ -417,12 +419,12 @@ static int mmap_vmcore_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 	if (!page)
 		return VM_FAULT_OOM;
 	if (!PageUptodate(page)) {
-		offset = (loff_t) index << PAGE_CACHE_SHIFT;
+		offset = (loff_t) index << PAGE_SHIFT;
 		buf = __va((page_to_pfn(page) << PAGE_SHIFT));
 		rc = __read_vmcore(buf, PAGE_SIZE, &offset, 0);
 		if (rc < 0) {
 			unlock_page(page);
-			page_cache_release(page);
+			put_page(page);
 			return (rc == -ENOMEM) ? VM_FAULT_OOM : VM_FAULT_SIGBUS;
 		}
 		SetPageUptodate(page);
@@ -466,6 +468,82 @@ static inline char *vmcore_alloc_buf(size_t size)
  * virtually contiguous user-space in ELF layout.
  */
 #ifdef CONFIG_MMU
+/*
+ * remap_oldmem_pfn_checked - do remap_oldmem_pfn_range replacing all pages
+ * reported as not being ram with the zero page.
+ *
+ * @vma: vm_area_struct describing requested mapping
+ * @from: start remapping from
+ * @pfn: page frame number to start remapping to
+ * @size: remapping size
+ * @prot: protection bits
+ *
+ * Returns zero on success, -EAGAIN on failure.
+ */
+static int remap_oldmem_pfn_checked(struct vm_area_struct *vma,
+				    unsigned long from, unsigned long pfn,
+				    unsigned long size, pgprot_t prot)
+{
+	unsigned long map_size;
+	unsigned long pos_start, pos_end, pos;
+	unsigned long zeropage_pfn = my_zero_pfn(0);
+	size_t len = 0;
+
+	pos_start = pfn;
+	pos_end = pfn + (size >> PAGE_SHIFT);
+
+	for (pos = pos_start; pos < pos_end; ++pos) {
+		if (!pfn_is_ram(pos)) {
+			/*
+			 * We hit a page which is not ram. Remap the continuous
+			 * region between pos_start and pos-1 and replace
+			 * the non-ram page at pos with the zero page.
+			 */
+			if (pos > pos_start) {
+				/* Remap continuous region */
+				map_size = (pos - pos_start) << PAGE_SHIFT;
+				if (remap_oldmem_pfn_range(vma, from + len,
+							   pos_start, map_size,
+							   prot))
+					goto fail;
+				len += map_size;
+			}
+			/* Remap the zero page */
+			if (remap_oldmem_pfn_range(vma, from + len,
+						   zeropage_pfn,
+						   PAGE_SIZE, prot))
+				goto fail;
+			len += PAGE_SIZE;
+			pos_start = pos + 1;
+		}
+	}
+	if (pos > pos_start) {
+		/* Remap the rest */
+		map_size = (pos - pos_start) << PAGE_SHIFT;
+		if (remap_oldmem_pfn_range(vma, from + len, pos_start,
+					   map_size, prot))
+			goto fail;
+	}
+	return 0;
+fail:
+	do_munmap(vma->vm_mm, from, len, NULL);
+	return -EAGAIN;
+}
+
+static int vmcore_remap_oldmem_pfn(struct vm_area_struct *vma,
+			    unsigned long from, unsigned long pfn,
+			    unsigned long size, pgprot_t prot)
+{
+	/*
+	 * Check if oldmem_pfn_is_ram was registered to avoid
+	 * looping over all pages without a reason.
+	 */
+	if (oldmem_pfn_is_ram)
+		return remap_oldmem_pfn_checked(vma, from, pfn, size, prot);
+	else
+		return remap_oldmem_pfn_range(vma, from, pfn, size, prot);
+}
+
 static int mmap_vmcore(struct file *file, struct vm_area_struct *vma)
 {
 	size_t size = vma->vm_end - vma->vm_start;
@@ -558,11 +636,12 @@ static int mmap_vmcore(struct file *file, struct vm_area_struct *vma)
 		if (start < m->offset + m->size) {
 			u64 paddr = 0;
 
-			tsz = min_t(size_t, m->offset + m->size - start, size);
+			tsz = (size_t)min_t(unsigned long long,
+					    m->offset + m->size - start, size);
 			paddr = m->paddr + start - m->offset;
-			if (remap_oldmem_pfn_range(vma, vma->vm_start + len,
-						   paddr >> PAGE_SHIFT, tsz,
-						   vma->vm_page_prot))
+			if (vmcore_remap_oldmem_pfn(vma, vma->vm_start + len,
+						    paddr >> PAGE_SHIFT, tsz,
+						    vma->vm_page_prot))
 				goto fail;
 			size -= tsz;
 			start += tsz;
@@ -643,8 +722,8 @@ static int __init update_note_header_size_elf64(const Elf64_Ehdr *ehdr_ptr)
 		nhdr_ptr = notes_section;
 		while (nhdr_ptr->n_namesz != 0) {
 			sz = sizeof(Elf64_Nhdr) +
-				((nhdr_ptr->n_namesz + 3) & ~3) +
-				((nhdr_ptr->n_descsz + 3) & ~3);
+				(((u64)nhdr_ptr->n_namesz + 3) & ~3) +
+				(((u64)nhdr_ptr->n_descsz + 3) & ~3);
 			if ((real_sz + sz) > max_sz) {
 				pr_warn("Warning: Exceeded p_memsz, dropping PT_NOTE entry n_namesz=0x%x, n_descsz=0x%x\n",
 					nhdr_ptr->n_namesz, nhdr_ptr->n_descsz);
@@ -834,8 +913,8 @@ static int __init update_note_header_size_elf32(const Elf32_Ehdr *ehdr_ptr)
 		nhdr_ptr = notes_section;
 		while (nhdr_ptr->n_namesz != 0) {
 			sz = sizeof(Elf32_Nhdr) +
-				((nhdr_ptr->n_namesz + 3) & ~3) +
-				((nhdr_ptr->n_descsz + 3) & ~3);
+				(((u64)nhdr_ptr->n_namesz + 3) & ~3) +
+				(((u64)nhdr_ptr->n_descsz + 3) & ~3);
 			if ((real_sz + sz) > max_sz) {
 				pr_warn("Warning: Exceeded p_memsz, dropping PT_NOTE entry n_namesz=0x%x, n_descsz=0x%x\n",
 					nhdr_ptr->n_namesz, nhdr_ptr->n_descsz);
@@ -1175,7 +1254,7 @@ static int __init parse_crash_elf32_headers(void)
 	/* Do some basic Verification. */
 	if (memcmp(ehdr.e_ident, ELFMAG, SELFMAG) != 0 ||
 		(ehdr.e_type != ET_CORE) ||
-		!elf_check_arch(&ehdr) ||
+		!vmcore_elf32_check_arch(&ehdr) ||
 		ehdr.e_ident[EI_CLASS] != ELFCLASS32||
 		ehdr.e_ident[EI_VERSION] != EV_CURRENT ||
 		ehdr.e_version != EV_CURRENT ||
@@ -1478,23 +1557,21 @@ static int __init vmcore_init(void)
 		proc_vmcore->size = vmcore_size;
 	return 0;
 }
-module_init(vmcore_init)
+fs_initcall(vmcore_init);
 
 /* Cleanup function for vmcore module. */
 void vmcore_cleanup(void)
 {
-	struct list_head *pos, *next;
-
 	if (proc_vmcore) {
 		proc_remove(proc_vmcore);
 		proc_vmcore = NULL;
 	}
 
 	/* clear the vmcore list. */
-	list_for_each_safe(pos, next, &vmcore_list) {
+	while (!list_empty(&vmcore_list)) {
 		struct vmcore *m;
 
-		m = list_entry(pos, struct vmcore, list);
+		m = list_first_entry(&vmcore_list, struct vmcore, list);
 		list_del(&m->list);
 		kfree(m);
 	}
@@ -1503,4 +1580,3 @@ void vmcore_cleanup(void)
 	/* clear vmcore device dump list */
 	vmcore_free_device_dumps();
 }
-EXPORT_SYMBOL_GPL(vmcore_cleanup);

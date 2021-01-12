@@ -69,7 +69,7 @@
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/ucs2_string.h>
-#include <linux/mutex.h>
+#include <linux/compat.h>
 
 #define EFIVARS_VERSION "0.08"
 #define EFIVARS_DATE "2004-May-17"
@@ -78,6 +78,7 @@ MODULE_AUTHOR("Matt Domsch <Matt_Domsch@Dell.com>");
 MODULE_DESCRIPTION("sysfs interface to EFI Variables");
 MODULE_LICENSE("GPL");
 MODULE_VERSION(EFIVARS_VERSION);
+MODULE_ALIAS("platform:efivars");
 
 LIST_HEAD(efivar_sysfs_list);
 EXPORT_SYMBOL_GPL(efivar_sysfs_list);
@@ -86,6 +87,15 @@ static struct kset *efivars_kset;
 
 static struct bin_attribute *efivars_new_var;
 static struct bin_attribute *efivars_del_var;
+
+struct compat_efi_variable {
+	efi_char16_t  VariableName[EFI_VAR_NAME_LEN/sizeof(efi_char16_t)];
+	efi_guid_t    VendorGuid;
+	__u32         DataSize;
+	__u8          Data[1024];
+	__u32         Status;
+	__u32         Attributes;
+} __packed;
 
 struct efivar_attribute {
 	struct attribute attr;
@@ -134,14 +144,9 @@ efivar_attr_read(struct efivar_entry *entry, char *buf)
 	if (!entry || !buf)
 		return -EINVAL;
 
-	mutex_lock(&entry->var_data_mutex);
-
 	var->DataSize = 1024;
-	if (efivar_entry_get(entry, &var->Attributes,
-			     &var->DataSize, var->Data)) {
-		mutex_unlock(&entry->var_data_mutex);
+	if (efivar_entry_get(entry, &var->Attributes, &var->DataSize, var->Data))
 		return -EIO;
-	}
 
 	if (var->Attributes & EFI_VARIABLE_NON_VOLATILE)
 		str += sprintf(str, "EFI_VARIABLE_NON_VOLATILE\n");
@@ -160,8 +165,6 @@ efivar_attr_read(struct efivar_entry *entry, char *buf)
 			"EFI_VARIABLE_TIME_BASED_AUTHENTICATED_WRITE_ACCESS\n");
 	if (var->Attributes & EFI_VARIABLE_APPEND_WRITE)
 		str += sprintf(str, "EFI_VARIABLE_APPEND_WRITE\n");
-
-	mutex_unlock(&entry->var_data_mutex);
 	return str - buf;
 }
 
@@ -174,18 +177,11 @@ efivar_size_read(struct efivar_entry *entry, char *buf)
 	if (!entry || !buf)
 		return -EINVAL;
 
-	mutex_lock(&entry->var_data_mutex);
-
 	var->DataSize = 1024;
-	if (efivar_entry_get(entry, &var->Attributes,
-			     &var->DataSize, var->Data)) {
-		mutex_unlock(&entry->var_data_mutex);
+	if (efivar_entry_get(entry, &var->Attributes, &var->DataSize, var->Data))
 		return -EIO;
-	}
 
 	str += sprintf(str, "0x%lx\n", var->DataSize);
-
-	mutex_unlock(&entry->var_data_mutex);
 	return str - buf;
 }
 
@@ -193,52 +189,22 @@ static ssize_t
 efivar_data_read(struct efivar_entry *entry, char *buf)
 {
 	struct efi_variable *var = &entry->var;
-	ssize_t ret;
 
 	if (!entry || !buf)
 		return -EINVAL;
 
-	mutex_lock(&entry->var_data_mutex);
-
 	var->DataSize = 1024;
-	if (efivar_entry_get(entry, &var->Attributes,
-			     &var->DataSize, var->Data)) {
-		mutex_unlock(&entry->var_data_mutex);
+	if (efivar_entry_get(entry, &var->Attributes, &var->DataSize, var->Data))
 		return -EIO;
-	}
 
 	memcpy(buf, var->Data, var->DataSize);
-	ret = var->DataSize;
-
-	mutex_unlock(&entry->var_data_mutex);
-	return ret;
+	return var->DataSize;
 }
-/*
- * We allow each variable to be edited via rewriting the
- * entire efi variable structure.
- */
-static ssize_t
-efivar_store_raw(struct efivar_entry *entry, const char *buf, size_t count)
+
+static inline int
+sanity_check(struct efi_variable *var, efi_char16_t *name, efi_guid_t vendor,
+	     unsigned long size, u32 attributes, u8 *data)
 {
-	struct efi_variable *new_var, *var = &entry->var;
-	efi_char16_t *name;
-	unsigned long size;
-	efi_guid_t vendor;
-	u32 attributes;
-	u8 *data;
-	int err;
-
-	if (count != sizeof(struct efi_variable))
-		return -EINVAL;
-
-	new_var = (struct efi_variable *)buf;
-
-	attributes = new_var->Attributes;
-	vendor = new_var->VendorGuid;
-	name = new_var->VariableName;
-	size = new_var->DataSize;
-	data = new_var->Data;
-
 	/*
 	 * If only updating the variable data, then the name
 	 * and guid should remain the same
@@ -260,11 +226,81 @@ efivar_store_raw(struct efivar_entry *entry, const char *buf, size_t count)
 		return -EINVAL;
 	}
 
-	mutex_lock(&entry->var_data_mutex);
-	memcpy(&entry->var, new_var, count);
+	return 0;
+}
+
+static inline bool is_compat(void)
+{
+	if (IS_ENABLED(CONFIG_COMPAT) && in_compat_syscall())
+		return true;
+
+	return false;
+}
+
+static void
+copy_out_compat(struct efi_variable *dst, struct compat_efi_variable *src)
+{
+	memcpy(dst->VariableName, src->VariableName, EFI_VAR_NAME_LEN);
+	memcpy(dst->Data, src->Data, sizeof(src->Data));
+
+	dst->VendorGuid = src->VendorGuid;
+	dst->DataSize = src->DataSize;
+	dst->Attributes = src->Attributes;
+}
+
+/*
+ * We allow each variable to be edited via rewriting the
+ * entire efi variable structure.
+ */
+static ssize_t
+efivar_store_raw(struct efivar_entry *entry, const char *buf, size_t count)
+{
+	struct efi_variable *new_var, *var = &entry->var;
+	efi_char16_t *name;
+	unsigned long size;
+	efi_guid_t vendor;
+	u32 attributes;
+	u8 *data;
+	int err;
+
+	if (is_compat()) {
+		struct compat_efi_variable *compat;
+
+		if (count != sizeof(*compat))
+			return -EINVAL;
+
+		compat = (struct compat_efi_variable *)buf;
+		attributes = compat->Attributes;
+		vendor = compat->VendorGuid;
+		name = compat->VariableName;
+		size = compat->DataSize;
+		data = compat->Data;
+
+		err = sanity_check(var, name, vendor, size, attributes, data);
+		if (err)
+			return err;
+
+		copy_out_compat(&entry->var, compat);
+	} else {
+		if (count != sizeof(struct efi_variable))
+			return -EINVAL;
+
+		new_var = (struct efi_variable *)buf;
+
+		attributes = new_var->Attributes;
+		vendor = new_var->VendorGuid;
+		name = new_var->VariableName;
+		size = new_var->DataSize;
+		data = new_var->Data;
+
+		err = sanity_check(var, name, vendor, size, attributes, data);
+		if (err)
+			return err;
+
+		memcpy(&entry->var, new_var, count);
+	}
 
 	err = efivar_entry_set(entry, attributes, size, data, NULL);
-	mutex_unlock(&entry->var_data_mutex);
 	if (err) {
 		printk(KERN_WARNING "efivars: set_variable() failed: status=%d\n", err);
 		return -EIO;
@@ -277,23 +313,34 @@ static ssize_t
 efivar_show_raw(struct efivar_entry *entry, char *buf)
 {
 	struct efi_variable *var = &entry->var;
+	struct compat_efi_variable *compat;
+	size_t size;
 
 	if (!entry || !buf)
 		return 0;
 
-	mutex_lock(&entry->var_data_mutex);
-
 	var->DataSize = 1024;
 	if (efivar_entry_get(entry, &entry->var.Attributes,
-			     &entry->var.DataSize, entry->var.Data)) {
-		mutex_unlock(&entry->var_data_mutex);
+			     &entry->var.DataSize, entry->var.Data))
 		return -EIO;
+
+	if (is_compat()) {
+		compat = (struct compat_efi_variable *)buf;
+
+		size = sizeof(*compat);
+		memcpy(compat->VariableName, var->VariableName,
+			EFI_VAR_NAME_LEN);
+		memcpy(compat->Data, var->Data, sizeof(compat->Data));
+
+		compat->VendorGuid = var->VendorGuid;
+		compat->DataSize = var->DataSize;
+		compat->Attributes = var->Attributes;
+	} else {
+		size = sizeof(*var);
+		memcpy(buf, var, size);
 	}
 
-	memcpy(buf, var, sizeof(*var));
-
-	mutex_unlock(&entry->var_data_mutex);
-	return sizeof(*var);
+	return size;
 }
 
 /*
@@ -339,7 +386,7 @@ static const struct sysfs_ops efivar_attr_ops = {
 
 static void efivar_release(struct kobject *kobj)
 {
-	struct efivar_entry *var = container_of(kobj, struct efivar_entry, kobj);
+	struct efivar_entry *var = to_efivar_entry(kobj);
 	kfree(var);
 }
 
@@ -368,8 +415,10 @@ static ssize_t efivar_create(struct file *filp, struct kobject *kobj,
 			     struct bin_attribute *bin_attr,
 			     char *buf, loff_t pos, size_t count)
 {
+	struct compat_efi_variable *compat = (struct compat_efi_variable *)buf;
 	struct efi_variable *new_var = (struct efi_variable *)buf;
 	struct efivar_entry *new_entry;
+	bool need_compat = is_compat();
 	efi_char16_t *name;
 	unsigned long size;
 	u32 attributes;
@@ -379,13 +428,23 @@ static ssize_t efivar_create(struct file *filp, struct kobject *kobj,
 	if (!capable(CAP_SYS_ADMIN))
 		return -EACCES;
 
-	if (count != sizeof(*new_var))
-		return -EINVAL;
+	if (need_compat) {
+		if (count != sizeof(*compat))
+			return -EINVAL;
 
-	attributes = new_var->Attributes;
-	name = new_var->VariableName;
-	size = new_var->DataSize;
-	data = new_var->Data;
+		attributes = compat->Attributes;
+		name = compat->VariableName;
+		size = compat->DataSize;
+		data = compat->Data;
+	} else {
+		if (count != sizeof(*new_var))
+			return -EINVAL;
+
+		attributes = new_var->Attributes;
+		name = new_var->VariableName;
+		size = new_var->DataSize;
+		data = new_var->Data;
+	}
 
 	if ((attributes & ~EFI_VARIABLE_MASK) != 0 ||
 	    efivar_validate(new_var->VendorGuid, name, data,
@@ -398,15 +457,11 @@ static ssize_t efivar_create(struct file *filp, struct kobject *kobj,
 	if (!new_entry)
 		return -ENOMEM;
 
-	memcpy(&new_entry->var, new_var, sizeof(*new_var));
+	if (need_compat)
+		copy_out_compat(&new_entry->var, compat);
+	else
+		memcpy(&new_entry->var, new_var, sizeof(*new_var));
 
-	mutex_init(&new_entry->var_data_mutex);
-
-	/*
-	 * No need to take the var_data_mutex since new_entry is not visible
-	 * to other threads until inserted into the efivar_sysfs_list by
-	 * efivar_create_sysfs_entry().
-	 */
 	err = efivar_entry_set(new_entry, attributes, size,
 			       data, &efivar_sysfs_list);
 	if (err) {
@@ -431,6 +486,7 @@ static ssize_t efivar_delete(struct file *filp, struct kobject *kobj,
 			     char *buf, loff_t pos, size_t count)
 {
 	struct efi_variable *del_var = (struct efi_variable *)buf;
+	struct compat_efi_variable *compat;
 	struct efivar_entry *entry;
 	efi_char16_t *name;
 	efi_guid_t vendor;
@@ -439,11 +495,20 @@ static ssize_t efivar_delete(struct file *filp, struct kobject *kobj,
 	if (!capable(CAP_SYS_ADMIN))
 		return -EACCES;
 
-	if (count != sizeof(*del_var))
-		return -EINVAL;
+	if (is_compat()) {
+		if (count != sizeof(*compat))
+			return -EINVAL;
 
-	name = del_var->VariableName;
-	vendor = del_var->VendorGuid;
+		compat = (struct compat_efi_variable *)buf;
+		name = compat->VariableName;
+		vendor = compat->VendorGuid;
+	} else {
+		if (count != sizeof(*del_var))
+			return -EINVAL;
+
+		name = del_var->VariableName;
+		vendor = del_var->VendorGuid;
+	}
 
 	if (efivar_entry_iter_begin())
 		return -EINTR;
@@ -472,50 +537,43 @@ static ssize_t efivar_delete(struct file *filp, struct kobject *kobj,
  * efivar_create_sysfs_entry - create a new entry in sysfs
  * @new_var: efivar entry to create
  *
- * Returns 1 on failure, 0 on success
+ * Returns 0 on success, negative error code on failure
  */
 static int
 efivar_create_sysfs_entry(struct efivar_entry *new_var)
 {
-	int i, short_name_size;
+	int short_name_size;
 	char *short_name;
-	unsigned long variable_name_size;
-	efi_char16_t *variable_name;
-
-	variable_name = new_var->var.VariableName;
-	variable_name_size = ucs2_strlen(variable_name) * sizeof(efi_char16_t);
+	unsigned long utf8_name_size;
+	efi_char16_t *variable_name = new_var->var.VariableName;
+	int ret;
 
 	/*
-	 * Length of the variable bytes in ASCII, plus the '-' separator,
+	 * Length of the variable bytes in UTF8, plus the '-' separator,
 	 * plus the GUID, plus trailing NUL
 	 */
-	short_name_size = variable_name_size / sizeof(efi_char16_t)
-				+ 1 + EFI_VARIABLE_GUID_LEN + 1;
+	utf8_name_size = ucs2_utf8size(variable_name);
+	short_name_size = utf8_name_size + 1 + EFI_VARIABLE_GUID_LEN + 1;
 
-	short_name = kzalloc(short_name_size, GFP_KERNEL);
-
+	short_name = kmalloc(short_name_size, GFP_KERNEL);
 	if (!short_name)
-		return 1;
+		return -ENOMEM;
 
-	/* Convert Unicode to normal chars (assume top bits are 0),
-	   ala UTF-8 */
-	for (i=0; i < (int)(variable_name_size / sizeof(efi_char16_t)); i++) {
-		short_name[i] = variable_name[i] & 0xFF;
-	}
+	ucs2_as_utf8(short_name, variable_name, short_name_size);
+
 	/* This is ugly, but necessary to separate one vendor's
 	   private variables from another's.         */
-
-	*(short_name + strlen(short_name)) = '-';
+	short_name[utf8_name_size] = '-';
 	efi_guid_to_str(&new_var->var.VendorGuid,
-			 short_name + strlen(short_name));
+			 short_name + utf8_name_size + 1);
 
 	new_var->kobj.kset = efivars_kset;
 
-	i = kobject_init_and_add(&new_var->kobj, &efivar_ktype,
+	ret = kobject_init_and_add(&new_var->kobj, &efivar_ktype,
 				   NULL, "%s", short_name);
 	kfree(short_name);
-	if (i)
-		return 1;
+	if (ret)
+		return ret;
 
 	kobject_uevent(&new_var->kobj, KOBJ_ADD);
 	if (efivar_entry_add(new_var, &efivar_sysfs_list)) {
@@ -606,13 +664,6 @@ static void efivar_update_sysfs_entries(struct work_struct *work)
 		if (!entry)
 			return;
 
-		mutex_init(&entry->var_data_mutex);
-
-		/*
-		 * No need to take the var_data_mutex since new_entry is
-		 * not visible to other threads until inserted into the
-		 * efivar_sysfs_list by efivar_create_sysfs_entry().
-		 */
 		err = efivar_init(efivar_update_sysfs_entry, entry,
 				  false, &efivar_sysfs_list);
 		if (!err)
@@ -636,13 +687,6 @@ static int efivars_sysfs_callback(efi_char16_t *name, efi_guid_t vendor,
 	memcpy(entry->var.VariableName, name, name_size);
 	memcpy(&(entry->var.VendorGuid), &vendor, sizeof(efi_guid_t));
 
-	mutex_init(&entry->var_data_mutex);
-
-	/*
-	 * No need to take the var_data_mutex since new_entry is not visible
-	 * to other threads until inserted into the efivar_sysfs_list by
-	 * efivar_create_sysfs_entry().
-	 */
 	efivar_create_sysfs_entry(entry);
 
 	return 0;

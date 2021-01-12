@@ -18,60 +18,79 @@
  */
 
 #include <linux/gfp.h>
+#include <linux/acpi.h>
+#include <linux/bootmem.h>
+#include <linux/cache.h>
 #include <linux/export.h>
 #include <linux/slab.h>
-#include <linux/dma-mapping.h>
+#include <linux/genalloc.h>
+#include <linux/dma-direct.h>
+#include <linux/dma-noncoherent.h>
+#include <linux/dma-contiguous.h>
+#include <linux/dma-iommu.h>
 #include <linux/vmalloc.h>
 #include <linux/swiotlb.h>
+#include <linux/pci.h>
 
 #include <asm/cacheflush.h>
 
-struct dma_map_ops *dma_ops;
-EXPORT_SYMBOL(dma_ops);
-
-static void *arm64_swiotlb_alloc_coherent(struct device *dev, size_t size,
-					  dma_addr_t *dma_handle, gfp_t flags,
-					  struct dma_attrs *attrs)
+pgprot_t arch_dma_mmap_pgprot(struct device *dev, pgprot_t prot,
+		unsigned long attrs)
 {
-	if (IS_ENABLED(CONFIG_ZONE_DMA32) &&
-	    dev->coherent_dma_mask <= DMA_BIT_MASK(32))
-		flags |= GFP_DMA32;
-	return swiotlb_alloc_coherent(dev, size, dma_handle, flags);
+	if (!dev_is_dma_coherent(dev) || (attrs & DMA_ATTR_WRITE_COMBINE))
+		return pgprot_writecombine(prot);
+	return prot;
 }
 
-static void arm64_swiotlb_free_coherent(struct device *dev, size_t size,
-					void *vaddr, dma_addr_t dma_handle,
-					struct dma_attrs *attrs)
+void arch_sync_dma_for_device(struct device *dev, phys_addr_t paddr,
+		size_t size, enum dma_data_direction dir)
 {
-	swiotlb_free_coherent(dev, size, vaddr, dma_handle);
+	__dma_map_area(phys_to_virt(paddr), size, dir);
 }
 
-static struct dma_map_ops arm64_swiotlb_dma_ops = {
-	.alloc = arm64_swiotlb_alloc_coherent,
-	.free = arm64_swiotlb_free_coherent,
-	.map_page = swiotlb_map_page,
-	.unmap_page = swiotlb_unmap_page,
-	.map_sg = swiotlb_map_sg_attrs,
-	.unmap_sg = swiotlb_unmap_sg_attrs,
-	.sync_single_for_cpu = swiotlb_sync_single_for_cpu,
-	.sync_single_for_device = swiotlb_sync_single_for_device,
-	.sync_sg_for_cpu = swiotlb_sync_sg_for_cpu,
-	.sync_sg_for_device = swiotlb_sync_sg_for_device,
-	.dma_supported = swiotlb_dma_supported,
-	.mapping_error = swiotlb_dma_mapping_error,
-};
-
-void __init arm64_swiotlb_init(void)
+void arch_sync_dma_for_cpu(struct device *dev, phys_addr_t paddr,
+		size_t size, enum dma_data_direction dir)
 {
-	dma_ops = &arm64_swiotlb_dma_ops;
-	swiotlb_init(1);
+	__dma_unmap_area(phys_to_virt(paddr), size, dir);
 }
 
-#define PREALLOC_DMA_DEBUG_ENTRIES	4096
-
-static int __init dma_debug_do_init(void)
+void arch_dma_prep_coherent(struct page *page, size_t size)
 {
-	dma_debug_init(PREALLOC_DMA_DEBUG_ENTRIES);
-	return 0;
+	__dma_flush_area(page_address(page), size);
 }
-fs_initcall(dma_debug_do_init);
+
+static int __init arm64_dma_init(void)
+{
+	return dma_atomic_pool_init(GFP_DMA32, __pgprot(PROT_NORMAL_NC));
+}
+arch_initcall(arm64_dma_init);
+
+#ifdef CONFIG_IOMMU_DMA
+void arch_teardown_dma_ops(struct device *dev)
+{
+	dev->dma_ops = NULL;
+}
+#endif
+
+void arch_setup_dma_ops(struct device *dev, u64 dma_base, u64 size,
+			const struct iommu_ops *iommu, bool coherent)
+{
+	int cls = cache_line_size_of_cpu();
+
+	WARN_TAINT(!coherent && cls > ARCH_DMA_MINALIGN,
+		   TAINT_CPU_OUT_OF_SPEC,
+		   "%s %s: ARCH_DMA_MINALIGN smaller than CTR_EL0.CWG (%d < %d)",
+		   dev_driver_string(dev), dev_name(dev),
+		   ARCH_DMA_MINALIGN, cls);
+
+	dev->dma_coherent = coherent;
+	if (iommu)
+		iommu_setup_dma_ops(dev, dma_base, size);
+
+#ifdef CONFIG_XEN
+	if (xen_initial_domain()) {
+		dev->archdata.dev_dma_ops = dev->dma_ops;
+		dev->dma_ops = xen_dma_ops;
+	}
+#endif
+}

@@ -35,6 +35,7 @@
 #include <linux/pm_runtime.h>
 #include <acpi/video.h>
 #include <linux/module.h>
+#include <asm/set_memory.h>
 
 static struct drm_driver driver;
 static int psb_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent);
@@ -467,8 +468,7 @@ static const struct file_operations psb_gem_fops = {
 };
 
 static struct drm_driver driver = {
-	.driver_features = DRIVER_HAVE_IRQ | DRIVER_IRQ_SHARED | \
-			   DRIVER_MODESET | DRIVER_GEM,
+	.driver_features = DRIVER_MODESET | DRIVER_GEM,
 	.load = psb_driver_load,
 	.unload = psb_driver_unload,
 	.lastclose = drm_fb_helper_lastclose,

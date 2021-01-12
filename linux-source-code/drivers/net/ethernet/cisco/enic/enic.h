@@ -29,7 +29,6 @@
 #include "vnic_stats.h"
 #include "vnic_nic.h"
 #include "vnic_rss.h"
-#include "enic_res.h"
 #include <linux/irq.h>
 
 #define DRV_NAME		"enic"

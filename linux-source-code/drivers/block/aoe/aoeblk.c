@@ -1,4 +1,4 @@
-/* Copyright (c) 2012 Coraid, Inc.  See COPYING for GPL terms. */
+/* Copyright (c) 2013 Coraid, Inc.  See COPYING for GPL terms. */
 /*
  * aoeblk.c
  * block device routines
@@ -6,7 +6,7 @@
 
 #include <linux/kernel.h>
 #include <linux/hdreg.h>
-#include <linux/blkdev.h>
+#include <linux/blk-mq.h>
 #include <linux/backing-dev.h>
 #include <linux/fs.h>
 #include <linux/ioctl.h>
@@ -17,11 +17,13 @@
 #include <linux/mutex.h>
 #include <linux/export.h>
 #include <linux/moduleparam.h>
+#include <linux/debugfs.h>
 #include <scsi/sg.h>
 #include "aoe.h"
 
 static DEFINE_MUTEX(aoeblk_mutex);
 static struct kmem_cache *buf_pool_cache;
+static struct dentry *aoe_debugfs_dir;
 
 /* GPFS needs a larger value than the default. */
 static int aoe_maxsectors;
@@ -108,14 +110,63 @@ static ssize_t aoedisk_show_payload(struct device *dev,
 	return snprintf(page, PAGE_SIZE, "%lu\n", d->maxbcnt);
 }
 
-static DEVICE_ATTR(state, S_IRUGO, aoedisk_show_state, NULL);
-static DEVICE_ATTR(mac, S_IRUGO, aoedisk_show_mac, NULL);
-static DEVICE_ATTR(netif, S_IRUGO, aoedisk_show_netif, NULL);
+static int aoedisk_debugfs_show(struct seq_file *s, void *ignored)
+{
+	struct aoedev *d;
+	struct aoetgt **t, **te;
+	struct aoeif *ifp, *ife;
+	unsigned long flags;
+	char c;
+
+	d = s->private;
+	seq_printf(s, "rttavg: %d rttdev: %d\n",
+		d->rttavg >> RTTSCALE,
+		d->rttdev >> RTTDSCALE);
+	seq_printf(s, "nskbpool: %d\n", skb_queue_len(&d->skbpool));
+	seq_printf(s, "kicked: %ld\n", d->kicked);
+	seq_printf(s, "maxbcnt: %ld\n", d->maxbcnt);
+	seq_printf(s, "ref: %ld\n", d->ref);
+
+	spin_lock_irqsave(&d->lock, flags);
+	t = d->targets;
+	te = t + d->ntargets;
+	for (; t < te && *t; t++) {
+		c = '\t';
+		seq_printf(s, "falloc: %ld\n", (*t)->falloc);
+		seq_printf(s, "ffree: %p\n",
+			list_empty(&(*t)->ffree) ? NULL : (*t)->ffree.next);
+		seq_printf(s, "%pm:%d:%d:%d\n", (*t)->addr, (*t)->nout,
+			(*t)->maxout, (*t)->nframes);
+		seq_printf(s, "\tssthresh:%d\n", (*t)->ssthresh);
+		seq_printf(s, "\ttaint:%d\n", (*t)->taint);
+		seq_printf(s, "\tr:%d\n", (*t)->rpkts);
+		seq_printf(s, "\tw:%d\n", (*t)->wpkts);
+		ifp = (*t)->ifs;
+		ife = ifp + ARRAY_SIZE((*t)->ifs);
+		for (; ifp->nd && ifp < ife; ifp++) {
+			seq_printf(s, "%c%s", c, ifp->nd->name);
+			c = ',';
+		}
+		seq_puts(s, "\n");
+	}
+	spin_unlock_irqrestore(&d->lock, flags);
+
+	return 0;
+}
+
+static int aoe_debugfs_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, aoedisk_debugfs_show, inode->i_private);
+}
+
+static DEVICE_ATTR(state, 0444, aoedisk_show_state, NULL);
+static DEVICE_ATTR(mac, 0444, aoedisk_show_mac, NULL);
+static DEVICE_ATTR(netif, 0444, aoedisk_show_netif, NULL);
 static struct device_attribute dev_attr_firmware_version = {
-	.attr = { .name = "firmware-version", .mode = S_IRUGO },
+	.attr = { .name = "firmware-version", .mode = 0444 },
 	.show = aoedisk_show_fwver,
 };
-static DEVICE_ATTR(payload, S_IRUGO, aoedisk_show_payload, NULL);
+static DEVICE_ATTR(payload, 0444, aoedisk_show_payload, NULL);
 
 static struct attribute *aoe_attrs[] = {
 	&dev_attr_state.attr,
@@ -126,14 +177,58 @@ static struct attribute *aoe_attrs[] = {
 	NULL,
 };
 
-static const struct attribute_group aoe_attr_group = {
+static const struct attribute_group attr_group = {
 	.attrs = aoe_attrs,
 };
 
-static const struct attribute_group *aoe_attr_groups[] = {
-	&aoe_attr_group,
-	NULL,
+static const struct file_operations aoe_debugfs_fops = {
+	.open = aoe_debugfs_open,
+	.read = seq_read,
+	.llseek = seq_lseek,
+	.release = single_release,
 };
+
+static void
+aoedisk_add_debugfs(struct aoedev *d)
+{
+	struct dentry *entry;
+	char *p;
+
+	if (aoe_debugfs_dir == NULL)
+		return;
+	p = strchr(d->gd->disk_name, '/');
+	if (p == NULL)
+		p = d->gd->disk_name;
+	else
+		p++;
+	BUG_ON(*p == '\0');
+	entry = debugfs_create_file(p, 0444, aoe_debugfs_dir, d,
+				    &aoe_debugfs_fops);
+	if (IS_ERR_OR_NULL(entry)) {
+		pr_info("aoe: cannot create debugfs file for %s\n",
+			d->gd->disk_name);
+		return;
+	}
+	BUG_ON(d->debugfs);
+	d->debugfs = entry;
+}
+void
+aoedisk_rm_debugfs(struct aoedev *d)
+{
+	debugfs_remove(d->debugfs);
+	d->debugfs = NULL;
+}
+
+static int
+aoedisk_add_sysfs(struct aoedev *d)
+{
+	return sysfs_create_group(&disk_to_dev(d->gd)->kobj, &attr_group);
+}
+void
+aoedisk_rm_sysfs(struct aoedev *d)
+{
+	sysfs_remove_group(&disk_to_dev(d->gd)->kobj, &attr_group);
+}
 
 static int
 aoeblk_open(struct block_device *bdev, fmode_t mode)
@@ -179,23 +274,25 @@ aoeblk_release(struct gendisk *disk, fmode_t mode)
 	spin_unlock_irqrestore(&d->lock, flags);
 }
 
-static void
-aoeblk_request(struct request_queue *q)
+static blk_status_t aoeblk_queue_rq(struct blk_mq_hw_ctx *hctx,
+				    const struct blk_mq_queue_data *bd)
 {
-	struct aoedev *d;
-	struct request *rq;
+	struct aoedev *d = hctx->queue->queuedata;
 
-	d = q->queuedata;
+	spin_lock_irq(&d->lock);
+
 	if ((d->flags & DEVFL_UP) == 0) {
 		pr_info_ratelimited("aoe: device %ld.%d is not up\n",
 			d->aoemajor, d->aoeminor);
-		while ((rq = blk_peek_request(q))) {
-			blk_start_request(rq);
-			aoe_end_request(d, rq, 1);
-		}
-		return;
+		spin_unlock_irq(&d->lock);
+		blk_mq_start_request(bd->rq);
+		return BLK_STS_IOERR;
 	}
+
+	list_add_tail(&bd->rq->queuelist, &d->rq_list);
 	aoecmd_work(d);
+	spin_unlock_irq(&d->lock);
+	return BLK_STS_OK;
 }
 
 static int
@@ -250,6 +347,10 @@ static const struct block_device_operations aoe_bdops = {
 	.owner = THIS_MODULE,
 };
 
+static const struct blk_mq_ops aoeblk_mq_ops = {
+	.queue_rq	= aoeblk_queue_rq,
+};
+
 /* alloc_disk and add_disk can sleep */
 void
 aoeblk_gdalloc(void *vp)
@@ -258,9 +359,11 @@ aoeblk_gdalloc(void *vp)
 	struct gendisk *gd;
 	mempool_t *mp;
 	struct request_queue *q;
+	struct blk_mq_tag_set *set;
 	enum { KB = 1024, MB = KB * KB, READ_AHEAD = 2 * MB, };
 	ulong flags;
 	int late = 0;
+	int err;
 
 	spin_lock_irqsave(&d->lock, flags);
 	if (d->flags & DEVFL_GDALLOC
@@ -287,10 +390,26 @@ aoeblk_gdalloc(void *vp)
 			d->aoemajor, d->aoeminor);
 		goto err_disk;
 	}
-	q = blk_init_queue(aoeblk_request, &d->lock);
-	if (q == NULL) {
+
+	set = &d->tag_set;
+	set->ops = &aoeblk_mq_ops;
+	set->cmd_size = sizeof(struct aoe_req);
+	set->nr_hw_queues = 1;
+	set->queue_depth = 128;
+	set->numa_node = NUMA_NO_NODE;
+	set->flags = BLK_MQ_F_SHOULD_MERGE;
+	err = blk_mq_alloc_tag_set(set);
+	if (err) {
+		pr_err("aoe: cannot allocate tag set for %ld.%d\n",
+			d->aoemajor, d->aoeminor);
+		goto err_mempool;
+	}
+
+	q = blk_mq_init_queue(set);
+	if (IS_ERR(q)) {
 		pr_err("aoe: cannot allocate block queue for %ld.%d\n",
 			d->aoemajor, d->aoeminor);
+		blk_mq_free_tag_set(set);
 		goto err_mempool;
 	}
 
@@ -301,8 +420,8 @@ aoeblk_gdalloc(void *vp)
 	WARN_ON(d->gd);
 	WARN_ON(d->flags & DEVFL_UP);
 	blk_queue_max_hw_sectors(q, BLK_DEF_MAX_SECTORS);
-	q->backing_dev_info.name = "aoe";
-	q->backing_dev_info.ra_pages = READ_AHEAD / PAGE_CACHE_SIZE;
+	q->backing_dev_info->name = "aoe";
+	q->backing_dev_info->ra_pages = READ_AHEAD / PAGE_SIZE;
 	d->bufpool = mp;
 	d->blkq = gd->queue = q;
 	q->queuedata = d;
@@ -322,7 +441,9 @@ aoeblk_gdalloc(void *vp)
 
 	spin_unlock_irqrestore(&d->lock, flags);
 
-	add_disk_with_attributes(gd, aoe_attr_groups);
+	add_disk(gd);
+	aoedisk_add_sysfs(d);
+	aoedisk_add_debugfs(d);
 
 	spin_lock_irqsave(&d->lock, flags);
 	WARN_ON(!(d->flags & DEVFL_GD_NOW));
@@ -344,6 +465,8 @@ err:
 void
 aoeblk_exit(void)
 {
+	debugfs_remove_recursive(aoe_debugfs_dir);
+	aoe_debugfs_dir = NULL;
 	kmem_cache_destroy(buf_pool_cache);
 }
 
@@ -355,7 +478,11 @@ aoeblk_init(void)
 					   0, 0, NULL);
 	if (buf_pool_cache == NULL)
 		return -ENOMEM;
-
+	aoe_debugfs_dir = debugfs_create_dir("aoe", NULL);
+	if (IS_ERR_OR_NULL(aoe_debugfs_dir)) {
+		pr_info("aoe: cannot create debugfs directory\n");
+		aoe_debugfs_dir = NULL;
+	}
 	return 0;
 }
 

@@ -78,7 +78,7 @@ static int svc_rdma_has_wspace(struct svc_xprt *xprt);
 static void svc_rdma_secure_port(struct svc_rqst *);
 static void svc_rdma_kill_temp_xprt(struct svc_xprt *);
 
-static struct svc_xprt_ops svc_rdma_ops = {
+static const struct svc_xprt_ops svc_rdma_ops = {
 	.xpo_create = svc_rdma_create,
 	.xpo_recvfrom = svc_rdma_recvfrom,
 	.xpo_sendto = svc_rdma_sendto,
@@ -105,7 +105,7 @@ static struct svc_xprt *svc_rdma_bc_create(struct svc_serv *, struct net *,
 static void svc_rdma_bc_detach(struct svc_xprt *);
 static void svc_rdma_bc_free(struct svc_xprt *);
 
-static struct svc_xprt_ops svc_rdma_bc_ops = {
+static const struct svc_xprt_ops svc_rdma_bc_ops = {
 	.xpo_create = svc_rdma_bc_create,
 	.xpo_detach = svc_rdma_bc_detach,
 	.xpo_free = svc_rdma_bc_free,
@@ -267,14 +267,9 @@ static void handle_connect_req(struct rdma_cm_id *new_cma_id,
 	/* Save client advertised inbound read limit for use later in accept. */
 	newxprt->sc_ord = param->initiator_depth;
 
+	/* Set the local and remote addresses in the transport */
 	sa = (struct sockaddr *)&newxprt->sc_cm_id->route.addr.dst_addr;
 	svc_xprt_set_remote(&newxprt->sc_xprt, sa, svc_addr_len(sa));
-	/* The remote port is arbitrary and not under the control of the
-	 * client ULP. Set it to a fixed value so that the DRC continues
-	 * to be effective after a reconnect.
-	 */
-	rpc_set_port((struct sockaddr *)&newxprt->sc_xprt.xpt_remote, 0);
-
 	sa = (struct sockaddr *)&newxprt->sc_cm_id->route.addr.src_addr;
 	svc_xprt_set_local(&newxprt->sc_xprt, sa, svc_addr_len(sa));
 
@@ -488,7 +483,6 @@ static struct svc_xprt *svc_rdma_accept(struct svc_xprt *xprt)
 	newxprt->sc_max_bc_requests = svcrdma_max_bc_requests;
 	rq_depth = newxprt->sc_max_requests + newxprt->sc_max_bc_requests;
 	if (rq_depth > dev->attrs.max_qp_wr) {
-		gmb();
 		pr_warn("svcrdma: reducing receive depth to %d\n",
 			dev->attrs.max_qp_wr);
 		rq_depth = dev->attrs.max_qp_wr;

@@ -2376,19 +2376,19 @@ fib_free_out:
 	goto out;
 }
 
-int aac_send_safw_hostttime(struct aac_dev *dev, struct timeval *now)
+int aac_send_safw_hostttime(struct aac_dev *dev, struct timespec64 *now)
 {
 	struct tm cur_tm;
 	char wellness_str[] = "<HW>TD\010\0\0\0\0\0\0\0\0\0DW\0\0ZZ";
 	u32 datasize = sizeof(wellness_str);
-	unsigned long local_time;
+	time64_t local_time;
 	int ret = -ENODEV;
 
 	if (!dev->sa_firmware)
 		goto out;
 
-	local_time = (u32)(now->tv_sec - (sys_tz.tz_minuteswest * 60));
-	time_to_tm(local_time, 0, &cur_tm);
+	local_time = (now->tv_sec - (sys_tz.tz_minuteswest * 60));
+	time64_to_tm(local_time, 0, &cur_tm);
 	cur_tm.tm_mon += 1;
 	cur_tm.tm_year += 1900;
 	wellness_str[8] = bin2bcd(cur_tm.tm_hour);
@@ -2405,7 +2405,7 @@ out:
 	return ret;
 }
 
-int aac_send_hosttime(struct aac_dev *dev, struct timeval *now)
+int aac_send_hosttime(struct aac_dev *dev, struct timespec64 *now)
 {
 	int ret = -ENOMEM;
 	struct fib *fibptr;
@@ -2417,7 +2417,7 @@ int aac_send_hosttime(struct aac_dev *dev, struct timeval *now)
 
 	aac_fib_init(fibptr);
 	info = (__le32 *)fib_data(fibptr);
-	*info = cpu_to_le32(now->tv_sec);
+	*info = cpu_to_le32(now->tv_sec); /* overflow in y2106 */
 	ret = aac_fib_send(SendHostTime, fibptr, sizeof(*info), FsaNormal,
 					1, 1, NULL, NULL);
 
@@ -2489,7 +2489,7 @@ int aac_command_thread(void *data)
 		}
 		if (!time_before(next_check_jiffies,next_jiffies)
 		 && ((difference = next_jiffies - jiffies) <= 0)) {
-			struct timeval now;
+			struct timespec64 now;
 			int ret;
 
 			/* Don't even try to talk to adapter if its sick */
@@ -2499,15 +2499,15 @@ int aac_command_thread(void *data)
 			next_check_jiffies = jiffies
 					   + ((long)(unsigned)check_interval)
 					   * HZ;
-			do_gettimeofday(&now);
+			ktime_get_real_ts64(&now);
 
 			/* Synchronize our watches */
-			if (((1000000 - (1000000 / HZ)) > now.tv_usec)
-			 && (now.tv_usec > (1000000 / HZ)))
-				difference = (((1000000 - now.tv_usec) * HZ)
-				  + 500000) / 1000000;
+			if (((NSEC_PER_SEC - (NSEC_PER_SEC / HZ)) > now.tv_nsec)
+			 && (now.tv_nsec > (NSEC_PER_SEC / HZ)))
+				difference = HZ + HZ / 2 -
+					     now.tv_nsec / (NSEC_PER_SEC / HZ);
 			else {
-				if (now.tv_usec > 500000)
+				if (now.tv_nsec > NSEC_PER_SEC / 2)
 					++now.tv_sec;
 
 				if (dev->sa_firmware)
@@ -2529,6 +2529,10 @@ int aac_command_thread(void *data)
 		if (kthread_should_stop())
 			break;
 
+		/*
+		 * we probably want usleep_range() here instead of the
+		 * jiffies computation
+		 */
 		schedule_timeout(difference);
 
 		if (kthread_should_stop())
@@ -2545,30 +2549,22 @@ int aac_acquire_irq(struct aac_dev *dev)
 	int i;
 	int j;
 	int ret = 0;
-	int cpu;
 
-	cpu = cpumask_first(cpu_online_mask);
 	if (!dev->sync_mode && dev->msi_enabled && dev->max_msix > 1) {
 		for (i = 0; i < dev->max_msix; i++) {
 			dev->aac_msix[i].vector_no = i;
 			dev->aac_msix[i].dev = dev;
-			if (request_irq(dev->msixentry[i].vector,
+			if (request_irq(pci_irq_vector(dev->pdev, i),
 					dev->a_ops.adapter_intr,
 					0, "aacraid", &(dev->aac_msix[i]))) {
 				printk(KERN_ERR "%s%d: Failed to register IRQ for vector %d.\n",
 						dev->name, dev->id, i);
 				for (j = 0 ; j < i ; j++)
-					free_irq(dev->msixentry[j].vector,
+					free_irq(pci_irq_vector(dev->pdev, j),
 						 &(dev->aac_msix[j]));
 				pci_disable_msix(dev->pdev);
 				ret = -1;
 			}
-			if (irq_set_affinity_hint(dev->msixentry[i].vector,
-							get_cpu_mask(cpu))) {
-				printk(KERN_ERR "%s%d: Failed to set IRQ affinity for cpu %d\n",
-					    dev->name, dev->id, cpu);
-			}
-			cpu = cpumask_next(cpu, cpu_online_mask);
 		}
 	} else {
 		dev->aac_msix[0].vector_no = 0;
@@ -2595,16 +2591,9 @@ void aac_free_irq(struct aac_dev *dev)
 	cpu = cpumask_first(cpu_online_mask);
 	if (aac_is_src(dev)) {
 		if (dev->max_msix > 1) {
-			for (i = 0; i < dev->max_msix; i++) {
-				if (irq_set_affinity_hint(
-					dev->msixentry[i].vector, NULL)) {
-					printk(KERN_ERR "%s%d: Failed to reset IRQ affinity for cpu %d\n",
-					    dev->name, dev->id, cpu);
-				}
-				cpu = cpumask_next(cpu, cpu_online_mask);
-				free_irq(dev->msixentry[i].vector,
-						&(dev->aac_msix[i]));
-			}
+			for (i = 0; i < dev->max_msix; i++)
+				free_irq(pci_irq_vector(dev->pdev, i),
+					 &(dev->aac_msix[i]));
 		} else {
 			free_irq(dev->pdev->irq, &(dev->aac_msix[0]));
 		}

@@ -49,7 +49,8 @@
 
 /* File state */
 enum file_state {
-	MEI_FILE_INITIALIZING = 0,
+	MEI_FILE_UNINITIALIZED = 0,
+	MEI_FILE_INITIALIZING,
 	MEI_FILE_CONNECTING,
 	MEI_FILE_CONNECTED,
 	MEI_FILE_DISCONNECTING,
@@ -102,10 +103,14 @@ enum mei_cb_file_ops {
  *
  * @MEI_CL_IO_TX_BLOCKING: send is blocking
  * @MEI_CL_IO_TX_INTERNAL: internal communication between driver and FW
+ *
+ * @MEI_CL_IO_RX_NONBLOCK: recv is non-blocking
  */
 enum mei_cl_io_mode {
 	MEI_CL_IO_TX_BLOCKING = BIT(0),
 	MEI_CL_IO_TX_INTERNAL = BIT(1),
+
+	MEI_CL_IO_RX_NONBLOCK = BIT(2),
 };
 
 /*
@@ -205,6 +210,7 @@ struct mei_cl_cb {
  * @timer_count:  watchdog timer for operation completion
  * @notify_en: notification - enabled/disabled
  * @notify_ev: pending notification event
+ * @tx_cb_queued: number of tx callbacks in queue
  * @writing_state: state of the tx
  * @rd_pending: pending read credits
  * @rd_completed: completed read
@@ -229,12 +235,17 @@ struct mei_cl {
 	u8 timer_count;
 	u8 notify_en;
 	u8 notify_ev;
+	u8 tx_cb_queued;
 	enum mei_file_transaction_states writing_state;
 	struct list_head rd_pending;
 	struct list_head rd_completed;
 
 	struct mei_cl_device *cldev;
 };
+
+#define MEI_TX_QUEUE_LIMIT_DEFAULT 50
+#define MEI_TX_QUEUE_LIMIT_MAX 255
+#define MEI_TX_QUEUE_LIMIT_MIN 30
 
 /**
  * struct mei_hw_ops - hw specific ops
@@ -254,6 +265,7 @@ struct mei_cl {
  * @intr_clear       : clear pending interrupts
  * @intr_enable      : enable interrupts
  * @intr_disable     : disable interrupts
+ * @synchronize_irq  : synchronize irqs
  *
  * @hbuf_free_slots  : query for write buffer empty slots
  * @hbuf_is_ready    : query if write buffer is empty
@@ -275,7 +287,6 @@ struct mei_hw_ops {
 	int (*hw_start)(struct mei_device *dev);
 	void (*hw_config)(struct mei_device *dev);
 
-
 	int (*fw_status)(struct mei_device *dev, struct mei_fw_status *fw_sts);
 	enum mei_pg_state (*pg_state)(struct mei_device *dev);
 	bool (*pg_in_transition)(struct mei_device *dev);
@@ -284,14 +295,14 @@ struct mei_hw_ops {
 	void (*intr_clear)(struct mei_device *dev);
 	void (*intr_enable)(struct mei_device *dev);
 	void (*intr_disable)(struct mei_device *dev);
+	void (*synchronize_irq)(struct mei_device *dev);
 
 	int (*hbuf_free_slots)(struct mei_device *dev);
 	bool (*hbuf_is_ready)(struct mei_device *dev);
 	size_t (*hbuf_max_len)(const struct mei_device *dev);
-
 	int (*write)(struct mei_device *dev,
 		     struct mei_msg_hdr *hdr,
-		     unsigned char *buf);
+		     const unsigned char *buf);
 
 	int (*rdbuf_full_slots)(struct mei_device *dev);
 
@@ -305,7 +316,8 @@ void mei_cl_bus_rescan_work(struct work_struct *work);
 void mei_cl_bus_dev_fixup(struct mei_cl_device *dev);
 ssize_t __mei_cl_send(struct mei_cl *cl, u8 *buf, size_t length,
 		      unsigned int mode);
-ssize_t __mei_cl_recv(struct mei_cl *cl, u8 *buf, size_t length);
+ssize_t __mei_cl_recv(struct mei_cl *cl, u8 *buf, size_t length,
+		      unsigned int mode);
 bool mei_cl_bus_rx_event(struct mei_cl *cl);
 bool mei_cl_bus_notify_event(struct mei_cl *cl);
 void mei_cl_bus_remove_devices(struct mei_device *bus);
@@ -353,6 +365,7 @@ const char *mei_pg_state_str(enum mei_pg_state state);
  * @write_waiting_list : write completion list
  * @ctrl_wr_list : pending control write list
  * @ctrl_rd_list : pending control read list
+ * @tx_queue_limit: tx queues per client linit
  *
  * @file_list   : list of opened handles
  * @open_handle_count: number of opened handles
@@ -417,6 +430,7 @@ struct mei_device {
 	struct list_head write_waiting_list;
 	struct list_head ctrl_wr_list;
 	struct list_head ctrl_rd_list;
+	u8 tx_queue_limit;
 
 	struct list_head file_list;
 	long open_handle_count;
@@ -469,7 +483,7 @@ struct mei_device {
 	DECLARE_BITMAP(me_clients_map, MEI_CLIENTS_MAX);
 	DECLARE_BITMAP(host_clients_map, MEI_CLIENTS_MAX);
 
-	u32 allow_fixed_address;
+	bool allow_fixed_address;
 	bool override_fixed_address;
 
 	struct work_struct reset_work;
@@ -592,6 +606,11 @@ static inline void mei_disable_interrupts(struct mei_device *dev)
 	dev->ops->intr_disable(dev);
 }
 
+static inline void mei_synchronize_irq(struct mei_device *dev)
+{
+	dev->ops->synchronize_irq(dev);
+}
+
 static inline bool mei_host_is_ready(struct mei_device *dev)
 {
 	return dev->ops->host_is_ready(dev);
@@ -617,7 +636,7 @@ static inline size_t mei_hbuf_max_len(const struct mei_device *dev)
 }
 
 static inline int mei_write_message(struct mei_device *dev,
-			struct mei_msg_hdr *hdr, void *buf)
+				    struct mei_msg_hdr *hdr, const void *buf)
 {
 	return dev->ops->write(dev, hdr, buf);
 }

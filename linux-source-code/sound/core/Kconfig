@@ -12,6 +12,9 @@ config SND_PCM_ELD
 config SND_PCM_IEC958
 	bool
 
+config SND_DMAENGINE_PCM
+	tristate
+
 config SND_HWDEP
 	tristate
 
@@ -45,7 +48,7 @@ config SND_MIXER_OSS
 	depends on SND_OSSEMUL
 	help
 	  To enable OSS mixer API emulation (/dev/mixer*), say Y here
-	  and read <file:Documentation/sound/alsa/OSS-Emulation.txt>.
+	  and read <file:Documentation/sound/designs/oss-emulation.rst>.
 
 	  Many programs still use the OSS API, so say Y.
 
@@ -58,7 +61,7 @@ config SND_PCM_OSS
 	select SND_PCM
 	help
 	  To enable OSS digital audio (PCM) emulation (/dev/dsp*), say Y
-	  here and read <file:Documentation/sound/alsa/OSS-Emulation.txt>.
+	  here and read <file:Documentation/sound/designs/oss-emulation.rst>.
 
 	  Many programs still use the OSS API, so say Y.
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *	linux/mm/madvise.c
  *
@@ -18,8 +19,10 @@
 #include <linux/fs.h>
 #include <linux/file.h>
 #include <linux/blkdev.h>
+#include <linux/backing-dev.h>
 #include <linux/swap.h>
 #include <linux/swapops.h>
+#include <linux/shmem_fs.h>
 #include <linux/mmu_notifier.h>
 
 #include <asm/tlb.h>
@@ -49,11 +52,11 @@ static int madvise_need_mmap_write(int behavior)
  * We can potentially split a vm area into separate
  * areas, each area with its own behavior.
  */
-static long madvise_behavior(struct vm_area_struct * vma,
+static long madvise_behavior(struct vm_area_struct *vma,
 		     struct vm_area_struct **prev,
 		     unsigned long start, unsigned long end, int behavior)
 {
-	struct mm_struct * mm = vma->vm_mm;
+	struct mm_struct *mm = vma->vm_mm;
 	int error = 0;
 	pgoff_t pgoff;
 	unsigned long new_flags = vma->vm_flags;
@@ -207,16 +210,16 @@ static int swapin_walk_pmd_entry(pmd_t *pmd, unsigned long start,
 		pte = *(orig_pte + ((index - start) / PAGE_SIZE));
 		pte_unmap_unlock(orig_pte, ptl);
 
-		if (pte_present(pte) || pte_none(pte) || pte_file(pte))
+		if (pte_present(pte) || pte_none(pte))
 			continue;
 		entry = pte_to_swp_entry(pte);
 		if (unlikely(non_swap_entry(entry)))
 			continue;
 
 		page = read_swap_cache_async(entry, GFP_HIGHUSER_MOVABLE,
-								vma, index);
+							vma, index, false);
 		if (page)
-			page_cache_release(page);
+			put_page(page);
 	}
 
 	return 0;
@@ -247,17 +250,17 @@ static void force_shm_swapin_readahead(struct vm_area_struct *vma,
 	for (; start < end; start += PAGE_SIZE) {
 		index = ((start - vma->vm_start) >> PAGE_SHIFT) + vma->vm_pgoff;
 
-		page = __find_get_page(mapping, index);
-		if (!radix_tree_exceptional_entry(page)) {
+		page = find_get_entry(mapping, index);
+		if (!xa_is_value(page)) {
 			if (page)
-				page_cache_release(page);
+				put_page(page);
 			continue;
 		}
 		swap = radix_to_swp_entry(page);
 		page = read_swap_cache_async(swap, GFP_HIGHUSER_MOVABLE,
-								NULL, 0);
+							NULL, 0, false);
 		if (page)
-			page_cache_release(page);
+			put_page(page);
 	}
 
 	lru_add_drain();	/* Push any new pages onto the LRU now */
@@ -267,26 +270,28 @@ static void force_shm_swapin_readahead(struct vm_area_struct *vma,
 /*
  * Schedule all required I/O operations.  Do not wait for completion.
  */
-static long madvise_willneed(struct vm_area_struct * vma,
-			     struct vm_area_struct ** prev,
+static long madvise_willneed(struct vm_area_struct *vma,
+			     struct vm_area_struct **prev,
 			     unsigned long start, unsigned long end)
 {
 	struct file *file = vma->vm_file;
 
 	*prev = vma;
 #ifdef CONFIG_SWAP
-	if (!file || mapping_cap_swap_backed(file->f_mapping)) {
-		if (!file)
-			force_swapin_readahead(vma, start, end);
-		else
-			force_shm_swapin_readahead(vma, start, end,
-						file->f_mapping);
+	if (!file) {
+		force_swapin_readahead(vma, start, end);
 		return 0;
 	}
-#endif
 
+	if (shmem_mapping(file->f_mapping)) {
+		force_shm_swapin_readahead(vma, start, end,
+					file->f_mapping);
+		return 0;
+	}
+#else
 	if (!file)
 		return -EBADF;
+#endif
 
 	if (IS_DAX(file_inode(file))) {
 		/* no bad return value, but ignore advice */
@@ -313,11 +318,17 @@ static int madvise_free_pte_range(pmd_t *pmd, unsigned long addr,
 	pte_t *orig_pte, *pte, ptent;
 	struct page *page;
 	int nr_swap = 0;
+	unsigned long next;
 
-	split_huge_page_pmd(vma, addr, pmd);
+	next = pmd_addr_end(addr, end);
+	if (pmd_trans_huge(*pmd))
+		if (madvise_free_huge_pmd(tlb, vma, pmd, addr, next))
+			goto next;
+
 	if (pmd_trans_unstable(pmd))
 		return 0;
 
+	tlb_remove_check_page_size_change(tlb, PAGE_SIZE);
 	orig_pte = pte = pte_offset_map_lock(mm, pmd, addr, &ptl);
 	flush_tlb_batched_pending(mm);
 	arch_enter_lazy_mmu_mode();
@@ -343,7 +354,7 @@ static int madvise_free_pte_range(pmd_t *pmd, unsigned long addr,
 			continue;
 		}
 
-		page = vm_normal_page(vma, addr, ptent);
+		page = _vm_normal_page(vma, addr, ptent, true);
 		if (!page)
 			continue;
 
@@ -411,10 +422,9 @@ static int madvise_free_pte_range(pmd_t *pmd, unsigned long addr,
 			ptent = pte_mkold(ptent);
 			ptent = pte_mkclean(ptent);
 			set_pte_at(mm, addr, pte, ptent);
-			if (PageActive(page))
-				deactivate_page(page);
 			tlb_remove_tlb_entry(tlb, pte, addr);
 		}
+		mark_page_lazyfree(page);
 	}
 out:
 	if (nr_swap) {
@@ -426,6 +436,7 @@ out:
 	arch_leave_lazy_mmu_mode();
 	pte_unmap_unlock(orig_pte, ptl);
 	cond_resched();
+next:
 	return 0;
 }
 
@@ -451,9 +462,6 @@ static int madvise_free_single_vma(struct vm_area_struct *vma,
 	struct mm_struct *mm = vma->vm_mm;
 	struct mmu_gather tlb;
 
-	if (vma->vm_flags & (VM_LOCKED|VM_HUGETLB|VM_PFNMAP))
-		return -EINVAL;
-
 	/* MADV_FREE works for only anon vma at the moment */
 	if (!vma_is_anonymous(vma))
 		return -EINVAL;
@@ -477,14 +485,6 @@ static int madvise_free_single_vma(struct vm_area_struct *vma,
 	return 0;
 }
 
-static long madvise_free(struct vm_area_struct *vma,
-			     struct vm_area_struct **prev,
-			     unsigned long start, unsigned long end)
-{
-	*prev = vma;
-	return madvise_free_single_vma(vma, start, end);
-}
-
 /*
  * Application no longer needs these pages.  If the pages are dirty,
  * it's OK to just throw them away.  The app will be more careful about
@@ -504,12 +504,20 @@ static long madvise_free(struct vm_area_struct *vma,
  * An interface that causes the system to free clean pages and flush
  * dirty pages is already available as msync(MS_INVALIDATE).
  */
-static long madvise_dontneed(struct vm_area_struct * vma,
-			     struct vm_area_struct ** prev,
-			     unsigned long start, unsigned long end)
+static long madvise_dontneed_single_vma(struct vm_area_struct *vma,
+					unsigned long start, unsigned long end)
+{
+	zap_page_range(vma, start, end - start);
+	return 0;
+}
+
+static long madvise_dontneed_free(struct vm_area_struct *vma,
+				  struct vm_area_struct **prev,
+				  unsigned long start, unsigned long end,
+				  int behavior)
 {
 	*prev = vma;
-	if (vma->vm_flags & (VM_LOCKED|VM_HUGETLB|VM_PFNMAP))
+	if (!can_madv_dontneed_vma(vma))
 		return -EINVAL;
 
 	if (!userfaultfd_remove(vma, start, end)) {
@@ -526,18 +534,19 @@ static long madvise_dontneed(struct vm_area_struct * vma,
 			 * is also < vma->vm_end. If start <
 			 * vma->vm_start it means an hole materialized
 			 * in the user address space within the
-			 * virtual range passed to MADV_DONTNEED.
+			 * virtual range passed to MADV_DONTNEED
+			 * or MADV_FREE.
 			 */
 			return -ENOMEM;
 		}
-		if (vma->vm_flags & (VM_LOCKED|VM_HUGETLB|VM_PFNMAP))
+		if (!can_madv_dontneed_vma(vma))
 			return -EINVAL;
 		if (end > vma->vm_end) {
 			/*
 			 * Don't fail if end > vma->vm_end. If the old
 			 * vma was splitted while the mmap_sem was
 			 * released the effect of the concurrent
-			 * operation may not cause MADV_DONTNEED to
+			 * operation may not cause madvise() to
 			 * have an undefined result. There may be an
 			 * adjacent next vma that we'll walk
 			 * next. userfaultfd_remove() will generate an
@@ -549,23 +558,18 @@ static long madvise_dontneed(struct vm_area_struct * vma,
 		}
 		VM_WARN_ON(start >= end);
 	}
-	if (unlikely(vma->vm_flags & VM_NONLINEAR)) {
-		struct zap_details details = {
-			.nonlinear_vma = vma,
-			.last_index = ULONG_MAX,
-		};
-		zap_page_range(vma, start, end - start, &details);
-	} else
-		zap_page_range(vma, start, end - start, NULL);
-	return 0;
+
+	if (behavior == MADV_DONTNEED)
+		return madvise_dontneed_single_vma(vma, start, end);
+	else if (behavior == MADV_FREE)
+		return madvise_free_single_vma(vma, start, end);
+	else
+		return -EINVAL;
 }
 
 /*
  * Application wants to free up the pages and associated backing store.
  * This is effectively punching a hole into the middle of a file.
- *
- * NOTE: Currently, only shmfs/tmpfs is supported for this operation.
- * Other filesystems return -ENOSYS.
  */
 static long madvise_remove(struct vm_area_struct *vma,
 				struct vm_area_struct **prev,
@@ -577,7 +581,7 @@ static long madvise_remove(struct vm_area_struct *vma,
 
 	*prev = NULL;	/* tell sys_madvise we drop mmap_sem */
 
-	if (vma->vm_flags & (VM_LOCKED|VM_NONLINEAR|VM_HUGETLB))
+	if (vma->vm_flags & VM_LOCKED)
 		return -EINVAL;
 
 	f = vma->vm_file;
@@ -615,48 +619,58 @@ static long madvise_remove(struct vm_area_struct *vma,
 /*
  * Error injection support for memory error handling.
  */
-static int madvise_hwpoison(int bhv, unsigned long start, unsigned long end)
+static int madvise_inject_error(int behavior,
+		unsigned long start, unsigned long end)
 {
-	struct page *p;
-	int ret = 0;
+	struct page *page;
+	struct zone *zone;
+	unsigned int order;
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
-	for (; start < end; start += PAGE_SIZE <<
-				compound_order(compound_head(p))) {
-		unsigned long pfn;
-		int ret = get_user_pages_fast(start, 1, 0, &p);
+
+
+	for (; start < end; start += PAGE_SIZE << order) {
+		int ret;
+
+		ret = get_user_pages_fast(start, 1, 0, &page);
 		if (ret != 1)
 			return ret;
-		if (PageHWPoison(p)) {
-			put_page(p);
-			continue;
-		}
-		pfn = page_to_pfn(p);
-		if (bhv == MADV_SOFT_OFFLINE) {
-			printk(KERN_INFO "Soft offlining page %lx at %lx\n",
-				pfn, start);
-			ret = soft_offline_page(p, MF_COUNT_INCREASED);
-			if (ret)
-				break;
-			continue;
-		}
-
-		printk(KERN_INFO "Injecting memory failure for page %lx at %lx\n",
-		       pfn, start);
 
 		/*
-		 * Drop the page reference taken by get_user_pages_fast(). In
-		 * the absence of MF_COUNT_INCREASED the memory_failure()
-		 * routine is responsible for pinning the page to prevent it
-		 * from being released back to the page allocator.
+		 * When soft offlining hugepages, after migrating the page
+		 * we dissolve it, therefore in the second loop "page" will
+		 * no longer be a compound page, and order will be 0.
 		 */
-		put_page(p);
-		ret = memory_failure(pfn, 0, 0);
+		order = compound_order(compound_head(page));
+
+		if (PageHWPoison(page)) {
+			put_page(page);
+			continue;
+		}
+
+		if (behavior == MADV_SOFT_OFFLINE) {
+			pr_info("Soft offlining pfn %#lx at process virtual address %#lx\n",
+						page_to_pfn(page), start);
+
+			ret = soft_offline_page(page, MF_COUNT_INCREASED);
+			if (ret)
+				return ret;
+			continue;
+		}
+		pr_info("Injecting memory failure for pfn %#lx at process virtual address %#lx\n",
+						page_to_pfn(page), start);
+
+		ret = memory_failure(page_to_pfn(page), MF_COUNT_INCREASED);
 		if (ret)
 			return ret;
 	}
-	return ret;
+
+	/* Ensure that all poisoned pages are removed from per-cpu lists */
+	for_each_populated_zone(zone)
+		drain_all_pages(zone);
+
+	return 0;
 }
 #endif
 
@@ -670,21 +684,14 @@ madvise_vma(struct vm_area_struct *vma, struct vm_area_struct **prev,
 	case MADV_WILLNEED:
 		return madvise_willneed(vma, prev, start, end);
 	case MADV_FREE:
-		/*
-		 * XXX: In this implementation, MADV_FREE works like
-		 * MADV_DONTNEED on swapless system or full swap.
-		 */
-		if (get_nr_swap_pages() > 0)
-			return madvise_free(vma, prev, start, end);
-		/* passthrough */
 	case MADV_DONTNEED:
-		return madvise_dontneed(vma, prev, start, end);
+		return madvise_dontneed_free(vma, prev, start, end, behavior);
 	default:
 		return madvise_behavior(vma, prev, start, end, behavior);
 	}
 }
 
-static int
+static bool
 madvise_behavior_valid(int behavior)
 {
 	switch (behavior) {
@@ -709,10 +716,14 @@ madvise_behavior_valid(int behavior)
 	case MADV_DODUMP:
 	case MADV_WIPEONFORK:
 	case MADV_KEEPONFORK:
-		return 1;
+#ifdef CONFIG_MEMORY_FAILURE
+	case MADV_SOFT_OFFLINE:
+	case MADV_HWPOISON:
+#endif
+		return true;
 
 	default:
-		return 0;
+		return false;
 	}
 }
 
@@ -738,20 +749,39 @@ madvise_behavior_valid(int behavior)
  *		some pages ahead.
  *  MADV_DONTNEED - the application is finished with the given range,
  *		so the kernel can free resources associated with it.
+ *  MADV_FREE - the application marks pages in the given range as lazy free,
+ *		where actual purges are postponed until memory pressure happens.
  *  MADV_REMOVE - the application wants to free up the given range of
  *		pages and associated backing store.
  *  MADV_DONTFORK - omit this area from child's address space when forking:
  *		typically, to avoid COWing pages pinned by get_user_pages().
  *  MADV_DOFORK - cancel MADV_DONTFORK: no longer omit this area when forking.
+ *  MADV_WIPEONFORK - present the child process with zero-filled memory in this
+ *              range after a fork.
+ *  MADV_KEEPONFORK - undo the effect of MADV_WIPEONFORK
+ *  MADV_HWPOISON - trigger memory error handler as if the given memory range
+ *		were corrupted by unrecoverable hardware memory failure.
+ *  MADV_SOFT_OFFLINE - try to soft-offline the given range of memory.
  *  MADV_MERGEABLE - the application recommends that KSM try to merge pages in
  *		this area with pages of identical content from other such areas.
  *  MADV_UNMERGEABLE- cancel MADV_MERGEABLE: no longer merge pages with others.
+ *  MADV_HUGEPAGE - the application wants to back the given range by transparent
+ *		huge pages in the future. Existing pages might be coalesced and
+ *		new pages might be allocated as THP.
+ *  MADV_NOHUGEPAGE - mark the given range as not worth being backed by
+ *		transparent huge pages so the existing pages will not be
+ *		coalesced into THP and new pages will not be allocated as THP.
+ *  MADV_DONTDUMP - the application wants to prevent pages in the given range
+ *		from being included in its core dump.
+ *  MADV_DODUMP - cancel MADV_DONTDUMP: no longer exclude from core dump.
  *
  * return values:
  *  zero    - success
  *  -EINVAL - start + len < 0, start is not page-aligned,
  *		"behavior" is not a valid value, or application
- *		is attempting to release locked or shared pages.
+ *		is attempting to release locked or shared pages,
+ *		or the specified address range includes file, Huge TLB,
+ *		MAP_SHARED or VMPFNMAP range.
  *  -ENOMEM - addresses in the specified range are not currently
  *		mapped, or are outside the AS of the process.
  *  -EIO    - an I/O error occurred while paging in data.
@@ -761,17 +791,13 @@ madvise_behavior_valid(int behavior)
 SYSCALL_DEFINE3(madvise, unsigned long, start, size_t, len_in, int, behavior)
 {
 	unsigned long end, tmp;
-	struct vm_area_struct * vma, *prev;
+	struct vm_area_struct *vma, *prev;
 	int unmapped_error = 0;
 	int error = -EINVAL;
 	int write;
 	size_t len;
 	struct blk_plug plug;
 
-#ifdef CONFIG_MEMORY_FAILURE
-	if (behavior == MADV_HWPOISON || behavior == MADV_SOFT_OFFLINE)
-		return madvise_hwpoison(behavior, start, start+len_in);
-#endif
 	if (!madvise_behavior_valid(behavior))
 		return error;
 
@@ -791,11 +817,18 @@ SYSCALL_DEFINE3(madvise, unsigned long, start, size_t, len_in, int, behavior)
 	if (end == start)
 		return error;
 
+#ifdef CONFIG_MEMORY_FAILURE
+	if (behavior == MADV_HWPOISON || behavior == MADV_SOFT_OFFLINE)
+		return madvise_inject_error(behavior, start, start + len_in);
+#endif
+
 	write = madvise_need_mmap_write(behavior);
-	if (write)
-		down_write(&current->mm->mmap_sem);
-	else
+	if (write) {
+		if (down_write_killable(&current->mm->mmap_sem))
+			return -EINTR;
+	} else {
 		down_read(&current->mm->mmap_sem);
+	}
 
 	/*
 	 * If the interval [start,end) covers some unmapped address

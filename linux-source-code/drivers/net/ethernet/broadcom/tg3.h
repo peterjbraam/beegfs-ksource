@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /* $Id: tg3.h,v 1.37.2.32 2002/03/11 12:18:18 davem Exp $
  * tg3.h: Definitions for Broadcom Tigon3 ethernet driver.
  *
@@ -6,6 +7,8 @@
  * Copyright (C) 2004 Sun Microsystems Inc.
  * Copyright (C) 2007-2016 Broadcom Corporation.
  * Copyright (C) 2016-2017 Broadcom Limited.
+ * Copyright (C) 2018 Broadcom. All Rights Reserved. The term "Broadcom"
+ * refers to Broadcom Inc. and/or its subsidiaries.
  */
 
 #ifndef _T3_H
@@ -2870,7 +2873,7 @@ struct tg3_tx_ring_info {
 struct tg3_link_config {
 	/* Describes what we're trying to get. */
 	u32				advertising;
-	u16				speed;
+	u32				speed;
 	u8				duplex;
 	u8				autoneg;
 	u8				flowctrl;
@@ -2879,7 +2882,7 @@ struct tg3_link_config {
 	u8				active_flowctrl;
 
 	u8				active_duplex;
-	u16				active_speed;
+	u32				active_speed;
 	u32				rmt_adv;
 };
 
@@ -3269,7 +3272,6 @@ struct tg3 {
 	int				pcie_readrq;
 
 	struct mii_bus			*mdio_bus;
-	int				mdio_irq[PHY_MAX_ADDR];
 	int				old_link;
 
 	u8				phy_addr;

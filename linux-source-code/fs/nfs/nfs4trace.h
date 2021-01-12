@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Copyright (c) 2013 Trond Myklebust <Trond.Myklebust@netapp.com>
  */
@@ -433,7 +434,7 @@ DECLARE_EVENT_CLASS(nfs4_open_event,
 				__entry->fileid = 0;
 				__entry->fhandle = 0;
 			}
-			__entry->dir = NFS_FILEID(ctx->dentry->d_parent->d_inode);
+			__entry->dir = NFS_FILEID(d_inode(ctx->dentry->d_parent));
 			__assign_str(name, ctx->dentry->d_name.name);
 		),
 
@@ -887,6 +888,35 @@ DEFINE_NFS4_LOOKUP_EVENT(nfs4_remove);
 DEFINE_NFS4_LOOKUP_EVENT(nfs4_get_fs_locations);
 DEFINE_NFS4_LOOKUP_EVENT(nfs4_secinfo);
 
+TRACE_EVENT(nfs4_lookupp,
+		TP_PROTO(
+			const struct inode *inode,
+			int error
+		),
+
+		TP_ARGS(inode, error),
+
+		TP_STRUCT__entry(
+			__field(dev_t, dev)
+			__field(u64, ino)
+			__field(int, error)
+		),
+
+		TP_fast_assign(
+			__entry->dev = inode->i_sb->s_dev;
+			__entry->ino = NFS_FILEID(inode);
+			__entry->error = error;
+		),
+
+		TP_printk(
+			"error=%d (%s) inode=%02x:%02x:%llu",
+			__entry->error,
+			show_nfsv4_errors(__entry->error),
+			MAJOR(__entry->dev), MINOR(__entry->dev),
+			(unsigned long long)__entry->ino
+		)
+);
+
 TRACE_EVENT(nfs4_rename,
 		TP_PROTO(
 			const struct inode *olddir,
@@ -1107,7 +1137,7 @@ DECLARE_EVENT_CLASS(nfs4_inode_callback_event,
 		TP_fast_assign(
 			__entry->error = error;
 			__entry->fhandle = nfs_fhandle_hash(fhandle);
-			if (!IS_ERR_OR_NULL(inode)) {
+			if (inode != NULL) {
 				__entry->fileid = NFS_FILEID(inode);
 				__entry->dev = inode->i_sb->s_dev;
 			} else {
@@ -1164,7 +1194,7 @@ DECLARE_EVENT_CLASS(nfs4_inode_stateid_callback_event,
 		TP_fast_assign(
 			__entry->error = error;
 			__entry->fhandle = nfs_fhandle_hash(fhandle);
-			if (!IS_ERR_OR_NULL(inode)) {
+			if (inode != NULL) {
 				__entry->fileid = NFS_FILEID(inode);
 				__entry->dev = inode->i_sb->s_dev;
 			} else {
@@ -1225,8 +1255,8 @@ DECLARE_EVENT_CLASS(nfs4_idmap_event,
 				len = 0;
 			__entry->error = error < 0 ? error : 0;
 			__entry->id = id;
-			memcpy(__get_dynamic_array(name), name, len);
-			((char *)__get_dynamic_array(name))[len] = 0;
+			memcpy(__get_str(name), name, len);
+			__get_str(name)[len] = 0;
 		),
 
 		TP_printk(
@@ -1453,7 +1483,7 @@ TRACE_EVENT(nfs4_layoutget,
 		),
 
 		TP_fast_assign(
-			const struct inode *inode = ctx->dentry->d_inode;
+			const struct inode *inode = d_inode(ctx->dentry);
 			const struct nfs4_state *state = ctx->state;
 			__entry->dev = inode->i_sb->s_dev;
 			__entry->fileid = NFS_FILEID(inode);

@@ -42,13 +42,11 @@ unsigned int (*nf_nat_irc_hook)(struct sk_buff *skb,
 				struct nf_conntrack_expect *exp) __read_mostly;
 EXPORT_SYMBOL_GPL(nf_nat_irc_hook);
 
-#define HELPER_NAME "irc"
-
 MODULE_AUTHOR("Harald Welte <laforge@netfilter.org>");
 MODULE_DESCRIPTION("IRC (DCC) connection tracking helper");
 MODULE_LICENSE("GPL");
 MODULE_ALIAS("ip_conntrack_irc");
-MODULE_ALIAS_NFCT_HELPER(HELPER_NAME);
+MODULE_ALIAS_NFCT_HELPER("irc");
 
 module_param_array(ports, ushort, &ports_c, 0400);
 MODULE_PARM_DESC(ports, "port numbers of IRC servers");
@@ -234,14 +232,18 @@ static int help(struct sk_buff *skb, unsigned int protoff,
 static struct nf_conntrack_helper irc[MAX_PORTS] __read_mostly;
 static struct nf_conntrack_expect_policy irc_exp_policy;
 
-static void nf_conntrack_irc_fini(void);
-
 static int __init nf_conntrack_irc_init(void)
 {
 	int i, ret;
 
 	if (max_dcc_channels < 1) {
 		pr_err("max_dcc_channels must not be zero\n");
+		return -EINVAL;
+	}
+
+	if (max_dcc_channels > NF_CT_EXPECT_MAX_CNT) {
+		pr_err("max_dcc_channels must not be more than %u\n",
+		       NF_CT_EXPECT_MAX_CNT);
 		return -EINVAL;
 	}
 
@@ -257,9 +259,9 @@ static int __init nf_conntrack_irc_init(void)
 		ports[ports_c++] = IRC_PORT;
 
 	for (i = 0; i < ports_c; i++) {
-		nf_ct_helper_init(&irc[i], AF_INET, IPPROTO_TCP, HELPER_NAME,
+		nf_ct_helper_init(&irc[i], AF_INET, IPPROTO_TCP, "irc",
 				  IRC_PORT, ports[i], i, &irc_exp_policy,
-				  0, 0, help, NULL, THIS_MODULE);
+				  0, help, NULL, THIS_MODULE);
 	}
 
 	ret = nf_conntrack_helpers_register(&irc[0], ports_c);
@@ -272,9 +274,7 @@ static int __init nf_conntrack_irc_init(void)
 	return 0;
 }
 
-/* This function is intentionally _NOT_ defined as __exit, because
- * it is needed by the init function */
-static void nf_conntrack_irc_fini(void)
+static void __exit nf_conntrack_irc_fini(void)
 {
 	nf_conntrack_helpers_unregister(irc, ports_c);
 	kfree(irc_buffer);

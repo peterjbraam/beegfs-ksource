@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * Copyright IBM Corp. 2006, 2012
  * Author(s): Cornelia Huck <cornelia.huck@de.ibm.com>
@@ -7,27 +8,13 @@
  *	      Holger Dengler <hd@linux.vnet.ibm.com>
  *
  * Adjunct processor bus.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #define KMSG_COMPONENT "ap"
 #define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
 
 #include <linux/kernel_stat.h>
-#include <linux/module.h>
+#include <linux/moduleparam.h>
 #include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/err.h>
@@ -38,7 +25,6 @@
 #include <linux/kthread.h>
 #include <linux/mutex.h>
 #include <linux/suspend.h>
-#include <asm/reset.h>
 #include <asm/airq.h>
 #include <linux/atomic.h>
 #include <asm/isc.h>
@@ -51,29 +37,19 @@
 #include <linux/ctype.h>
 
 #include "ap_bus.h"
-#include "ap_asm.h"
 #include "ap_debug.h"
 
 /*
- * Module description.
- */
-MODULE_AUTHOR("IBM Corporation");
-MODULE_DESCRIPTION("Adjunct Processor Bus driver, " \
-		   "Copyright IBM Corp. 2006, 2012");
-MODULE_LICENSE("GPL");
-MODULE_ALIAS_CRYPTO("z90crypt");
-
-/*
- * Module parameter
+ * Module parameters; note though this file itself isn't modular.
  */
 int ap_domain_index = -1;	/* Adjunct Processor Domain Index */
 static DEFINE_SPINLOCK(ap_domain_lock);
-module_param_named(domain, ap_domain_index, int, S_IRUSR|S_IRGRP);
+module_param_named(domain, ap_domain_index, int, 0440);
 MODULE_PARM_DESC(domain, "domain index for ap devices");
 EXPORT_SYMBOL(ap_domain_index);
 
-static int ap_thread_flag = 0;
-module_param_named(poll_thread, ap_thread_flag, int, S_IRUSR|S_IRGRP);
+static int ap_thread_flag;
+module_param_named(poll_thread, ap_thread_flag, int, 0440);
 MODULE_PARM_DESC(poll_thread, "Turn on/off poll thread, default is 0 (off).");
 
 static char *apm_str;
@@ -98,10 +74,6 @@ EXPORT_SYMBOL(ap_perms_mutex);
 static struct ap_config_info *ap_configuration;
 static bool initialised;
 
-#define set_bit_inv(_n, _p) set_bit((_n) ^ (BITS_PER_LONG - 1), _p)
-#define clear_bit_inv(_n, _p) clear_bit((_n) ^ (BITS_PER_LONG - 1), _p)
-#define test_bit_inv(_n, _p) test_bit((_n) ^ (BITS_PER_LONG - 1), _p)
-
 /*
  * AP bus related debug feature things.
  */
@@ -121,26 +93,30 @@ static DECLARE_WORK(ap_scan_work, ap_scan_bus);
 static void ap_tasklet_fn(unsigned long);
 static DECLARE_TASKLET(ap_tasklet, ap_tasklet_fn, 0);
 static DECLARE_WAIT_QUEUE_HEAD(ap_poll_wait);
-static struct task_struct *ap_poll_kthread = NULL;
+static struct task_struct *ap_poll_kthread;
 static DEFINE_MUTEX(ap_poll_thread_mutex);
 static DEFINE_SPINLOCK(ap_poll_timer_lock);
 static struct hrtimer ap_poll_timer;
-/* In LPAR poll with 4kHz frequency. Poll every 250000 nanoseconds.
- * If z/VM change to 1500000 nanoseconds to adjust to z/VM polling.*/
+/*
+ * In LPAR poll with 4kHz frequency. Poll every 250000 nanoseconds.
+ * If z/VM change to 1500000 nanoseconds to adjust to z/VM polling.
+ */
 static unsigned long long poll_timeout = 250000;
 
 /* Suspend flag */
 static int ap_suspend_flag;
 /* Maximum domain id */
 static int ap_max_domain_id;
-/* Flag to check if domain was set through module parameter domain=. This is
+/*
+ * Flag to check if domain was set through module parameter domain=. This is
  * important when supsend and resume is done in a z/VM environment where the
- * domain might change. */
-static int user_set_domain = 0;
+ * domain might change.
+ */
+static int user_set_domain;
 static struct bus_type ap_bus_type;
 
 /* Adapter interrupt definitions */
-static void ap_interrupt_handler(struct airq_struct *airq);
+static void ap_interrupt_handler(struct airq_struct *airq, bool floating);
 
 static int ap_airq_flag;
 
@@ -179,7 +155,7 @@ void *ap_airq_ptr(void)
  */
 static int ap_interrupts_available(void)
 {
-	return test_facility(2) && test_facility(65);
+	return test_facility(65);
 }
 
 /**
@@ -190,7 +166,7 @@ static int ap_interrupts_available(void)
  */
 static int ap_configuration_available(void)
 {
-	return test_facility(2) && test_facility(12);
+	return test_facility(12);
 }
 
 /**
@@ -216,24 +192,6 @@ static inline int ap_qact_available(void)
 	return 0;
 }
 
-/**
- * ap_test_queue(): Test adjunct processor queue.
- * @qid: The AP queue number
- * @tbit: Test facilities bit
- * @info: Pointer to queue descriptor
- *
- * Returns AP queue status structure.
- */
-struct ap_queue_status ap_test_queue(ap_qid_t qid,
-				     int tbit,
-				     unsigned long *info)
-{
-	if (tbit)
-		qid |= 1UL << 23; /* set T bit*/
-	return ap_tapq(qid, info);
-}
-EXPORT_SYMBOL(ap_test_queue);
-
 /*
  * ap_query_configuration(): Fetch cryptographic config info
  *
@@ -242,7 +200,7 @@ EXPORT_SYMBOL(ap_test_queue);
  * is returned, e.g. if the PQAP(QCI) instruction is not
  * available, the return value will be -EOPNOTSUPP.
  */
-int ap_query_configuration(struct ap_config_info *info)
+static inline int ap_query_configuration(struct ap_config_info *info)
 {
 	if (!ap_configuration_available())
 		return -EOPNOTSUPP;
@@ -360,7 +318,7 @@ static int ap_query_queue(ap_qid_t qid, int *queue_depth, int *device_type,
 			ap_max_domain_id = 15;
 		switch (*device_type) {
 			/* For CEX2 and CEX3 the available functions
-			 * are not refrected by the facilities bits.
+			 * are not reflected by the facilities bits.
 			 * Instead it is coded into the type. So here
 			 * modify the function bits based on the type.
 			 */
@@ -407,7 +365,7 @@ void ap_wait(enum ap_wait wait)
 	case AP_WAIT_TIMEOUT:
 		spin_lock_bh(&ap_poll_timer_lock);
 		if (!hrtimer_is_queued(&ap_poll_timer)) {
-			hr_time = ktime_set(0, poll_timeout);
+			hr_time = poll_timeout;
 			hrtimer_forward_now(&ap_poll_timer, hr_time);
 			hrtimer_restart(&ap_poll_timer);
 		}
@@ -421,13 +379,13 @@ void ap_wait(enum ap_wait wait)
 
 /**
  * ap_request_timeout(): Handling of request timeouts
- * @data: Holds the AP device.
+ * @t: timer making this callback
  *
  * Handles request timeouts.
  */
-void ap_request_timeout(unsigned long data)
+void ap_request_timeout(struct timer_list *t)
 {
-	struct ap_queue *aq = (struct ap_queue *) data;
+	struct ap_queue *aq = from_timer(aq, t, timeout);
 
 	if (ap_suspend_flag)
 		return;
@@ -453,7 +411,7 @@ static enum hrtimer_restart ap_poll_timeout(struct hrtimer *unused)
  * ap_interrupt_handler() - Schedule ap_tasklet on interrupt
  * @airq: pointer to adapter interrupt descriptor
  */
-static void ap_interrupt_handler(struct airq_struct *airq)
+static void ap_interrupt_handler(struct airq_struct *airq, bool floating)
 {
 	inc_irq_stat(IRQIO_APB);
 	if (!ap_suspend_flag)
@@ -524,7 +482,7 @@ static int ap_poll_thread(void *data)
 {
 	DECLARE_WAITQUEUE(wait, current);
 
-	set_user_nice(current, 19);
+	set_user_nice(current, MAX_NICE);
 	set_freezable();
 	while (!kthread_should_stop()) {
 		add_wait_queue(&ap_poll_wait, &wait);
@@ -554,7 +512,7 @@ static int ap_poll_thread_start(void)
 		return 0;
 	mutex_lock(&ap_poll_thread_mutex);
 	ap_poll_kthread = kthread_run(ap_poll_thread, NULL, "appoll");
-	rc = PTR_RET(ap_poll_kthread);
+	rc = PTR_ERR_OR_ZERO(ap_poll_kthread);
 	if (rc)
 		ap_poll_kthread = NULL;
 	mutex_unlock(&ap_poll_thread_mutex);
@@ -611,7 +569,7 @@ static int ap_bus_match(struct device *dev, struct device_driver *drv)
  * It sets up a single environment variable DEV_TYPE which contains the
  * hardware device type.
  */
-static int ap_uevent (struct device *dev, struct kobj_uevent_env *env)
+static int ap_uevent(struct device *dev, struct kobj_uevent_env *env)
 {
 	struct ap_device *ap_dev = to_ap_dev(dev);
 	int retval = 0;
@@ -630,7 +588,7 @@ static int ap_uevent (struct device *dev, struct kobj_uevent_env *env)
 	return retval;
 }
 
-static int ap_dev_suspend(struct device *dev, pm_message_t state)
+static int ap_dev_suspend(struct device *dev)
 {
 	struct ap_device *ap_dev = to_ap_dev(dev);
 
@@ -650,7 +608,7 @@ static int ap_dev_resume(struct device *dev)
 
 static void ap_bus_suspend(void)
 {
-	AP_DBF(DBF_DEBUG, "ap_bus_suspend running\n");
+	AP_DBF(DBF_DEBUG, "%s running\n", __func__);
 
 	ap_suspend_flag = 1;
 	/*
@@ -687,7 +645,7 @@ static void ap_bus_resume(void)
 {
 	int rc;
 
-	AP_DBF(DBF_DEBUG, "ap_bus_resume running\n");
+	AP_DBF(DBF_DEBUG, "%s running\n", __func__);
 
 	/* remove all queue devices */
 	bus_for_each_dev(&ap_bus_type, NULL, NULL,
@@ -737,12 +695,13 @@ static struct notifier_block ap_power_notifier = {
 	.notifier_call = ap_power_event,
 };
 
+static SIMPLE_DEV_PM_OPS(ap_bus_pm_ops, ap_dev_suspend, ap_dev_resume);
+
 static struct bus_type ap_bus_type = {
 	.name = "ap",
 	.match = &ap_bus_match,
 	.uevent = &ap_uevent,
-	.suspend = ap_dev_suspend,
-	.resume = ap_dev_resume,
+	.pm = &ap_bus_pm_ops,
 };
 
 static int __ap_revise_reserved(struct device *dev, void *dummy)
@@ -835,6 +794,8 @@ static int ap_device_probe(struct device *dev)
 		drvres = ap_drv->flags & AP_DRIVER_FLAG_DEFAULT;
 		if (!!devres != !!drvres)
 			return -ENODEV;
+		/* (re-)init queue's state machine */
+		ap_queue_reinit_state(to_ap_queue(dev));
 	}
 
 	/* Add queue/card to list of active queues/cards */
@@ -867,8 +828,17 @@ static int ap_device_remove(struct device *dev)
 	struct ap_device *ap_dev = to_ap_dev(dev);
 	struct ap_driver *ap_drv = ap_dev->drv;
 
+	/* prepare ap queue device removal */
+	if (is_queue_dev(dev))
+		ap_queue_prepare_remove(to_ap_queue(dev));
+
+	/* driver's chance to clean up gracefully */
 	if (ap_drv->remove)
 		ap_drv->remove(ap_dev);
+
+	/* now do the ap queue device remove */
+	if (is_queue_dev(dev))
+		ap_queue_remove(to_ap_queue(dev));
 
 	/* Remove queue/card from list of active queues/cards */
 	spin_lock_bh(&ap_list_lock);
@@ -914,6 +884,16 @@ void ap_bus_force_rescan(void)
 	flush_work(&ap_scan_work);
 }
 EXPORT_SYMBOL(ap_bus_force_rescan);
+
+/*
+* A config change has happened, force an ap bus rescan.
+*/
+void ap_bus_cfg_chg(void)
+{
+	AP_DBF(DBF_INFO, "%s config change, forcing bus rescan\n", __func__);
+
+	ap_bus_force_rescan();
+}
 
 /*
  * hex2bitmap() - parse hex mask string and set bitmap.
@@ -1065,7 +1045,7 @@ static ssize_t ap_domain_store(struct bus_type *bus,
 	return count;
 }
 
-static BUS_ATTR(ap_domain, 0644, ap_domain_show, ap_domain_store);
+static BUS_ATTR_RW(ap_domain);
 
 static ssize_t ap_control_domain_mask_show(struct bus_type *bus, char *buf)
 {
@@ -1080,8 +1060,7 @@ static ssize_t ap_control_domain_mask_show(struct bus_type *bus, char *buf)
 			ap_configuration->adm[6], ap_configuration->adm[7]);
 }
 
-static BUS_ATTR(ap_control_domain_mask, 0444,
-		ap_control_domain_mask_show, NULL);
+static BUS_ATTR_RO(ap_control_domain_mask);
 
 static ssize_t ap_usage_domain_mask_show(struct bus_type *bus, char *buf)
 {
@@ -1096,13 +1075,22 @@ static ssize_t ap_usage_domain_mask_show(struct bus_type *bus, char *buf)
 			ap_configuration->aqm[6], ap_configuration->aqm[7]);
 }
 
-static BUS_ATTR(ap_usage_domain_mask, 0444,
-		ap_usage_domain_mask_show, NULL);
+static BUS_ATTR_RO(ap_usage_domain_mask);
 
-static ssize_t ap_config_time_show(struct bus_type *bus, char *buf)
+static ssize_t ap_adapter_mask_show(struct bus_type *bus, char *buf)
 {
-	return snprintf(buf, PAGE_SIZE, "%d\n", ap_config_time);
+	if (!ap_configuration)	/* QCI not supported */
+		return snprintf(buf, PAGE_SIZE, "not supported\n");
+
+	return snprintf(buf, PAGE_SIZE,
+			"0x%08x%08x%08x%08x%08x%08x%08x%08x\n",
+			ap_configuration->apm[0], ap_configuration->apm[1],
+			ap_configuration->apm[2], ap_configuration->apm[3],
+			ap_configuration->apm[4], ap_configuration->apm[5],
+			ap_configuration->apm[6], ap_configuration->apm[7]);
 }
+
+static BUS_ATTR_RO(ap_adapter_mask);
 
 static ssize_t ap_interrupts_show(struct bus_type *bus, char *buf)
 {
@@ -1110,10 +1098,15 @@ static ssize_t ap_interrupts_show(struct bus_type *bus, char *buf)
 			ap_using_interrupts() ? 1 : 0);
 }
 
-static BUS_ATTR(ap_interrupts, 0444, ap_interrupts_show, NULL);
+static BUS_ATTR_RO(ap_interrupts);
 
-static ssize_t ap_config_time_store(struct bus_type *bus,
-				    const char *buf, size_t count)
+static ssize_t config_time_show(struct bus_type *bus, char *buf)
+{
+	return snprintf(buf, PAGE_SIZE, "%d\n", ap_config_time);
+}
+
+static ssize_t config_time_store(struct bus_type *bus,
+				 const char *buf, size_t count)
 {
 	int time;
 
@@ -1124,15 +1117,15 @@ static ssize_t ap_config_time_store(struct bus_type *bus,
 	return count;
 }
 
-static BUS_ATTR(config_time, 0644, ap_config_time_show, ap_config_time_store);
+static BUS_ATTR_RW(config_time);
 
-static ssize_t ap_poll_thread_show(struct bus_type *bus, char *buf)
+static ssize_t poll_thread_show(struct bus_type *bus, char *buf)
 {
 	return snprintf(buf, PAGE_SIZE, "%d\n", ap_poll_kthread ? 1 : 0);
 }
 
-static ssize_t ap_poll_thread_store(struct bus_type *bus,
-				    const char *buf, size_t count)
+static ssize_t poll_thread_store(struct bus_type *bus,
+				 const char *buf, size_t count)
 {
 	int flag, rc;
 
@@ -1147,7 +1140,7 @@ static ssize_t ap_poll_thread_store(struct bus_type *bus,
 	return count;
 }
 
-static BUS_ATTR(poll_thread, 0644, ap_poll_thread_show, ap_poll_thread_store);
+static BUS_ATTR_RW(poll_thread);
 
 static ssize_t poll_timeout_show(struct bus_type *bus, char *buf)
 {
@@ -1165,7 +1158,7 @@ static ssize_t poll_timeout_store(struct bus_type *bus, const char *buf,
 	    time > 120000000000ULL)
 		return -EINVAL;
 	poll_timeout = time;
-	hr_time = ktime_set(0, poll_timeout);
+	hr_time = poll_timeout;
 
 	spin_lock_bh(&ap_poll_timer_lock);
 	hrtimer_cancel(&ap_poll_timer);
@@ -1176,7 +1169,7 @@ static ssize_t poll_timeout_store(struct bus_type *bus, const char *buf,
 	return count;
 }
 
-static BUS_ATTR(poll_timeout, 0644, poll_timeout_show, poll_timeout_store);
+static BUS_ATTR_RW(poll_timeout);
 
 static ssize_t ap_max_domain_id_show(struct bus_type *bus, char *buf)
 {
@@ -1189,7 +1182,7 @@ static ssize_t ap_max_domain_id_show(struct bus_type *bus, char *buf)
 	return snprintf(buf, PAGE_SIZE, "%d\n", max_domain_id);
 }
 
-static BUS_ATTR(ap_max_domain_id, 0444, ap_max_domain_id_show, NULL);
+static BUS_ATTR_RO(ap_max_domain_id);
 
 static ssize_t apmask_show(struct bus_type *bus, char *buf)
 {
@@ -1257,6 +1250,7 @@ static struct bus_attribute *const ap_bus_attrs[] = {
 	&bus_attr_ap_domain,
 	&bus_attr_ap_control_domain_mask,
 	&bus_attr_ap_usage_domain_mask,
+	&bus_attr_ap_adapter_mask,
 	&bus_attr_config_time,
 	&bus_attr_poll_thread,
 	&bus_attr_ap_interrupts,
@@ -1310,7 +1304,7 @@ static void ap_select_domain(void)
 			best_domain = i;
 		}
 	}
-	if (best_domain >= 0){
+	if (best_domain >= 0) {
 		ap_domain_index = best_domain;
 		AP_DBF(DBF_DEBUG, "new ap_domain_index=%d\n", ap_domain_index);
 	}
@@ -1339,7 +1333,7 @@ static int ap_get_compatible_type(ap_qid_t qid, int rawtype, unsigned int func)
 	 */
 	if (ap_qact_available()) {
 		struct ap_queue_status status;
-		struct ap_qact_ap_info apinfo = {0};
+		union ap_qact_ap_info apinfo = {0};
 
 		apinfo.mode = (func >> 26) & 0x07;
 		apinfo.cat = AP_DEVICE_TYPE_CEX6;
@@ -1359,7 +1353,7 @@ static int ap_get_compatible_type(ap_qid_t qid, int rawtype, unsigned int func)
 }
 
 /*
- * helper function to be used with bus_find_dev
+ * Helper function to be used with bus_find_dev
  * matches for the card device with the given id
  */
 static int __match_card_device_with_id(struct device *dev, void *data)
@@ -1367,12 +1361,177 @@ static int __match_card_device_with_id(struct device *dev, void *data)
 	return is_card_dev(dev) && to_ap_card(dev)->id == (int)(long) data;
 }
 
-/* helper function to be used with bus_find_dev
+/*
+ * Helper function to be used with bus_find_dev
  * matches for the queue device with a given qid
  */
 static int __match_queue_device_with_qid(struct device *dev, void *data)
 {
 	return is_queue_dev(dev) && to_ap_queue(dev)->qid == (int)(long) data;
+}
+
+/*
+ * Helper function to be used with bus_find_dev
+ * matches any queue device with given queue id
+ */
+static int __match_queue_device_with_queue_id(struct device *dev, void *data)
+{
+	return is_queue_dev(dev)
+		&& AP_QID_QUEUE(to_ap_queue(dev)->qid) == (int)(long) data;
+}
+
+/*
+ * Helper function for ap_scan_bus().
+ * Does the scan bus job for the given adapter id.
+ */
+static void _ap_scan_bus_adapter(int id)
+{
+	ap_qid_t qid;
+	unsigned int func;
+	struct ap_card *ac;
+	struct device *dev;
+	struct ap_queue *aq;
+	int rc, dom, depth, type, comp_type, borked;
+
+	/* check if there is a card device registered with this id */
+	dev = bus_find_device(&ap_bus_type, NULL,
+			      (void *)(long) id,
+			      __match_card_device_with_id);
+	ac = dev ? to_ap_card(dev) : NULL;
+	if (!ap_test_config_card_id(id)) {
+		if (dev) {
+			/* Card device has been removed from configuration */
+			bus_for_each_dev(&ap_bus_type, NULL,
+					 (void *)(long) id,
+					 __ap_queue_devices_with_id_unregister);
+			device_unregister(dev);
+			put_device(dev);
+		}
+		return;
+	}
+
+	/*
+	 * This card id is enabled in the configuration. If we already have
+	 * a card device with this id, check if type and functions are still
+	 * the very same. Also verify that at least one queue is available.
+	 */
+	if (ac) {
+		/* find the first valid queue */
+		for (dom = 0; dom < AP_DOMAINS; dom++) {
+			qid = AP_MKQID(id, dom);
+			if (ap_query_queue(qid, &depth, &type, &func) == 0)
+				break;
+		}
+		borked = 0;
+		if (dom >= AP_DOMAINS) {
+			/* no accessible queue on this card */
+			borked = 1;
+		} else if (ac->raw_hwtype != type) {
+			/* card type has changed */
+			AP_DBF(DBF_INFO, "card=%02x type changed.\n", id);
+			borked = 1;
+		} else if (ac->functions != func) {
+			/* card functions have changed */
+			AP_DBF(DBF_INFO, "card=%02x functions changed.\n", id);
+			borked = 1;
+		}
+		if (borked) {
+			/* unregister card device and associated queues */
+			bus_for_each_dev(&ap_bus_type, NULL,
+					 (void *)(long) id,
+					 __ap_queue_devices_with_id_unregister);
+			device_unregister(dev);
+			put_device(dev);
+			/* go back if there is no valid queue on this card */
+			if (dom >= AP_DOMAINS)
+				return;
+			ac = NULL;
+		}
+	}
+
+	/*
+	 * Go through all possible queue ids. Check and maybe create or release
+	 * queue devices for this card. If there exists no card device yet,
+	 * create a card device also.
+	 */
+	for (dom = 0; dom < AP_DOMAINS; dom++) {
+		qid = AP_MKQID(id, dom);
+		dev = bus_find_device(&ap_bus_type, NULL,
+				      (void *)(long) qid,
+				      __match_queue_device_with_qid);
+		aq = dev ? to_ap_queue(dev) : NULL;
+		if (!ap_test_config_usage_domain(dom)) {
+			if (dev) {
+				/* Queue device exists but has been
+				 * removed from configuration.
+				 */
+				device_unregister(dev);
+				put_device(dev);
+			}
+			continue;
+		}
+		/* try to fetch infos about this queue */
+		rc = ap_query_queue(qid, &depth, &type, &func);
+		if (dev) {
+			if (rc == -ENODEV)
+				borked = 1;
+			else {
+				spin_lock_bh(&aq->lock);
+				borked = aq->state == AP_STATE_BORKED;
+				spin_unlock_bh(&aq->lock);
+			}
+			if (borked) {
+				/* Remove broken device */
+				AP_DBF(DBF_DEBUG,
+				       "removing broken queue=%02x.%04x\n",
+				       id, dom);
+				device_unregister(dev);
+			}
+			put_device(dev);
+			continue;
+		}
+		if (rc)
+			continue;
+		/* a new queue device is needed, check out comp type */
+		comp_type = ap_get_compatible_type(qid, type, func);
+		if (!comp_type)
+			continue;
+		/* maybe a card device needs to be created first */
+		if (!ac) {
+			ac = ap_card_create(id, depth, type, comp_type, func);
+			if (!ac)
+				continue;
+			ac->ap_dev.device.bus = &ap_bus_type;
+			ac->ap_dev.device.parent = ap_root_device;
+			dev_set_name(&ac->ap_dev.device, "card%02x", id);
+			/* Register card device with AP bus */
+			rc = device_register(&ac->ap_dev.device);
+			if (rc) {
+				put_device(&ac->ap_dev.device);
+				ac = NULL;
+				break;
+			}
+			/* get it and thus adjust reference counter */
+			get_device(&ac->ap_dev.device);
+		}
+		/* now create the new queue device */
+		aq = ap_queue_create(qid, comp_type);
+		if (!aq)
+			continue;
+		aq->card = ac;
+		aq->ap_dev.device.bus = &ap_bus_type;
+		aq->ap_dev.device.parent = &ac->ap_dev.device;
+		dev_set_name(&aq->ap_dev.device, "%02x.%04x", id, dom);
+		/* Register queue device */
+		rc = device_register(&aq->ap_dev.device);
+		if (rc) {
+			put_device(&aq->ap_dev.device);
+			continue;
+		}
+	} /* end domain loop */
+
+	if (ac)
+		put_device(&ac->ap_dev.device);
 }
 
 /**
@@ -1381,182 +1540,42 @@ static int __match_queue_device_with_qid(struct device *dev, void *data)
  */
 static void ap_scan_bus(struct work_struct *unused)
 {
-	struct ap_queue *aq;
-	struct ap_card *ac;
-	struct device *dev;
-	ap_qid_t qid;
-	int comp_type, depth = 0, type = 0;
-	unsigned int func = 0;
-	int rc, id, dom, borked, domains, defdomdevs = 0;
+	int id;
 
-	AP_DBF(DBF_DEBUG, "ap_scan_bus running\n");
+	AP_DBF(DBF_DEBUG, "%s running\n", __func__);
 
 	ap_query_configuration(ap_configuration);
 	ap_select_domain();
 
-	for (id = 0; id < AP_DEVICES; id++) {
-		/* check if device is registered */
-		dev = bus_find_device(&ap_bus_type, NULL,
-				      (void *)(long) id,
-				      __match_card_device_with_id);
-		ac = dev ? to_ap_card(dev) : NULL;
-		if (!ap_test_config_card_id(id)) {
-			if (dev) {
-				/* Card device has been removed from
-				 * configuration, remove the belonging
-				 * queue devices.
-				 */
-				bus_for_each_dev(&ap_bus_type, NULL,
-					(void *)(long) id,
-					__ap_queue_devices_with_id_unregister);
-				/* now remove the card device */
-				device_unregister(dev);
-				put_device(dev);
-			}
-			continue;
-		}
-		/* According to the configuration there should be a card
-		 * device, so check if there is at least one valid queue
-		 * and maybe create queue devices and the card device.
-		 */
-		domains = 0;
-		for (dom = 0; dom < AP_DOMAINS; dom++) {
-			qid = AP_MKQID(id, dom);
-			dev = bus_find_device(&ap_bus_type, NULL,
-					      (void *)(long) qid,
-					      __match_queue_device_with_qid);
-			aq = dev ? to_ap_queue(dev) : NULL;
-			if (!ap_test_config_usage_domain(dom)) {
-				if (dev) {
-					/* Queue device exists but has been
-					 * removed from configuration.
-					 */
-					device_unregister(dev);
-					put_device(dev);
-				}
-				continue;
-			}
-			rc = ap_query_queue(qid, &depth, &type, &func);
-			if (dev) {
-				spin_lock_bh(&aq->lock);
-				if (rc == -ENODEV ||
-				    /* adapter reconfiguration */
-				    (ac && ac->functions != func))
-					aq->state = AP_STATE_BORKED;
-				borked = aq->state == AP_STATE_BORKED;
-				spin_unlock_bh(&aq->lock);
-				if (borked)	/* Remove broken device */
-					device_unregister(dev);
-				put_device(dev);
-				if (!borked) {
-					domains++;
-					if (dom == ap_domain_index)
-						defdomdevs++;
-					continue;
-				}
-			}
-			if (rc)
-				continue;
-			/* a new queue device is needed, check out comp type */
-			comp_type = ap_get_compatible_type(qid, type, func);
-			if (!comp_type)
-				continue;
-			/* maybe a card device needs to be created first */
-			if (!ac) {
-				ac = ap_card_create(id, depth, type,
-						    comp_type, func);
-				if (!ac)
-					continue;
-				ac->ap_dev.device.bus = &ap_bus_type;
-				ac->ap_dev.device.parent = ap_root_device;
-				dev_set_name(&ac->ap_dev.device,
-					     "card%02x", id);
-				/* Register card with AP bus */
-				rc = device_register(&ac->ap_dev.device);
-				if (rc) {
-					put_device(&ac->ap_dev.device);
-					ac = NULL;
-					break;
-				}
-				/* get it and thus adjust reference counter */
-				get_device(&ac->ap_dev.device);
-			}
-			/* now create the new queue device */
-			aq = ap_queue_create(qid, comp_type);
-			if (!aq)
-				continue;
-			aq->card = ac;
-			aq->ap_dev.device.bus = &ap_bus_type;
-			aq->ap_dev.device.parent = &ac->ap_dev.device;
-			dev_set_name(&aq->ap_dev.device,
-				     "%02x.%04x", id, dom);
-			/* Start with a device reset */
-			spin_lock_bh(&aq->lock);
-			ap_wait(ap_sm_event(aq, AP_EVENT_POLL));
-			spin_unlock_bh(&aq->lock);
-			/* Register device */
-			rc = device_register(&aq->ap_dev.device);
-			if (rc) {
-				put_device(&aq->ap_dev.device);
-				continue;
-			}
-			domains++;
-			if (dom == ap_domain_index)
-				defdomdevs++;
-		} /* end domain loop */
-		if (ac) {
-			/* remove card dev if there are no queue devices */
-			if (!domains)
-				device_unregister(&ac->ap_dev.device);
-			put_device(&ac->ap_dev.device);
-		}
-	} /* end device loop */
+	/* loop over all possible adapters */
+	for (id = 0; id < AP_DEVICES; id++)
+		_ap_scan_bus_adapter(id);
 
-	if (ap_domain_index >= 0 && defdomdevs < 1)
-		AP_DBF(DBF_INFO, "no queue device with default domain %d available\n",
-		       ap_domain_index);
+	/* check if there is at least one queue available with default domain */
+	if (ap_domain_index >= 0) {
+		struct device *dev =
+			bus_find_device(&ap_bus_type, NULL,
+					(void *)(long) ap_domain_index,
+					__match_queue_device_with_queue_id);
+		if (dev)
+			put_device(dev);
+		else
+			AP_DBF(DBF_INFO,
+			       "no queue device with default domain %d available\n",
+			       ap_domain_index);
+	}
 
 	mod_timer(&ap_config_timer, jiffies + ap_config_time * HZ);
 }
 
-static void ap_config_timeout(unsigned long ptr)
+static void ap_config_timeout(struct timer_list *unused)
 {
 	if (ap_suspend_flag)
 		return;
 	queue_work(system_long_wq, &ap_scan_work);
 }
 
-static void ap_reset_domain(void)
-{
-	int i;
-
-	if (ap_domain_index == -1
-	    || !ap_test_config_usage_domain(ap_domain_index))
-		return;
-	for (i = 0; i < AP_DEVICES; i++)
-		ap_rapq(AP_MKQID(i, ap_domain_index));
-}
-
-static void ap_reset_all(void)
-{
-	int i, j;
-
-	for (i = 0; i < AP_DOMAINS; i++) {
-		if (!ap_test_config_usage_domain(i))
-			continue;
-		for (j = 0; j < AP_DEVICES; j++) {
-			if (!ap_test_config_card_id(j))
-				continue;
-			ap_rapq(AP_MKQID(j, i));
-		}
-	}
-}
-
-static struct reset_call ap_reset_call = {
-	.fn = ap_reset_all,
-};
-
-int __init ap_debug_init(void)
+static int __init ap_debug_init(void)
 {
 	ap_dbf_info = debug_register("ap", 1, 1,
 				     DBF_MAX_SPRINTF_ARGS * sizeof(long));
@@ -1564,11 +1583,6 @@ int __init ap_debug_init(void)
 	debug_set_level(ap_dbf_info, DBF_ERR);
 
 	return 0;
-}
-
-void ap_debug_exit(void)
-{
-	debug_unregister(ap_dbf_info);
 }
 
 static void __init ap_perms_init(void)
@@ -1598,7 +1612,7 @@ static void __init ap_perms_init(void)
  *
  * Initializes the module.
  */
-int __init ap_module_init(void)
+static int __init ap_module_init(void)
 {
 	int max_domain_id;
 	int rc, i;
@@ -1607,7 +1621,7 @@ int __init ap_module_init(void)
 	if (rc)
 		return rc;
 
-	if (ap_instructions_available() != 0) {
+	if (!ap_instructions_available()) {
 		pr_warn("The hardware system does not support AP instructions\n");
 		return -ENODEV;
 	}
@@ -1641,8 +1655,6 @@ int __init ap_module_init(void)
 		ap_airq_flag = (rc == 0);
 	}
 
-	register_reset_call(&ap_reset_call);
-
 	/* Create /sys/bus/ap. */
 	rc = bus_register(&ap_bus_type);
 	if (rc)
@@ -1655,12 +1667,12 @@ int __init ap_module_init(void)
 
 	/* Create /sys/devices/ap. */
 	ap_root_device = root_device_register("ap");
-	rc = IS_ERR(ap_root_device) ? PTR_ERR(ap_root_device) : 0;
+	rc = PTR_ERR_OR_ZERO(ap_root_device);
 	if (rc)
 		goto out_bus;
 
 	/* Setup the AP bus rescan timer. */
-	setup_timer(&ap_config_timer, ap_config_timeout, 0);
+	timer_setup(&ap_config_timer, ap_config_timeout, 0);
 
 	/*
 	 * Setup the high resultion poll timer.
@@ -1698,49 +1710,9 @@ out_bus:
 		bus_remove_file(&ap_bus_type, ap_bus_attrs[i]);
 	bus_unregister(&ap_bus_type);
 out:
-	unregister_reset_call(&ap_reset_call);
 	if (ap_using_interrupts())
 		unregister_adapter_interrupt(&ap_airq);
 	kfree(ap_configuration);
 	return rc;
 }
-
-/**
- * ap_modules_exit(): The module termination code
- *
- * Terminates the module.
- */
-void ap_module_exit(void)
-{
-	int i;
-
-	initialised = false;
-	ap_reset_domain();
-	ap_poll_thread_stop();
-	del_timer_sync(&ap_config_timer);
-	hrtimer_cancel(&ap_poll_timer);
-	tasklet_kill(&ap_tasklet);
-
-	/* first remove queue devices */
-	bus_for_each_dev(&ap_bus_type, NULL, NULL,
-			 __ap_queue_devices_unregister);
-	/* now remove the card devices */
-	bus_for_each_dev(&ap_bus_type, NULL, NULL,
-			 __ap_card_devices_unregister);
-
-	/* remove bus attributes */
-	for (i = 0; ap_bus_attrs[i]; i++)
-		bus_remove_file(&ap_bus_type, ap_bus_attrs[i]);
-	unregister_pm_notifier(&ap_power_notifier);
-	root_device_unregister(ap_root_device);
-	bus_unregister(&ap_bus_type);
-	kfree(ap_configuration);
-	unregister_reset_call(&ap_reset_call);
-	if (ap_using_interrupts())
-		unregister_adapter_interrupt(&ap_airq);
-
-	ap_debug_exit();
-}
-
-module_init(ap_module_init);
-module_exit(ap_module_exit);
+device_initcall(ap_module_init);

@@ -265,18 +265,14 @@ mwifiex_wmm_setup_queue_priorities(struct mwifiex_private *priv,
 	for (i = 0; i < num_ac; i++) {
 		for (j = 1; j < num_ac - i; j++) {
 			if (tmp[j - 1] > tmp[j]) {
-				gmb();
 				swap(tmp[j - 1], tmp[j]);
 				swap(priv->wmm.queue_priority[j - 1],
 				     priv->wmm.queue_priority[j]);
 			} else if (tmp[j - 1] == tmp[j]) {
-				gmb();
 				if (priv->wmm.queue_priority[j - 1]
-				    < priv->wmm.queue_priority[j]) {
-					gmb();
+				    < priv->wmm.queue_priority[j])
 					swap(priv->wmm.queue_priority[j - 1],
 					     priv->wmm.queue_priority[j]);
-				}
 			}
 		}
 	}
@@ -363,7 +359,8 @@ static enum mwifiex_wmm_ac_e
 mwifiex_wmm_convert_tos_to_ac(struct mwifiex_adapter *adapter, u32 tos)
 {
 	/* Map of TOS UP values to WMM AC */
-	const enum mwifiex_wmm_ac_e tos_to_ac[] = { WMM_AC_BE,
+	static const enum mwifiex_wmm_ac_e tos_to_ac[] = {
+		WMM_AC_BE,
 		WMM_AC_BK,
 		WMM_AC_BK,
 		WMM_AC_BE,
@@ -602,7 +599,7 @@ mwifiex_clean_txrx(struct mwifiex_private *priv)
 	memcpy(tos_to_tid, ac_to_tid, sizeof(tos_to_tid));
 
 	if (priv->adapter->if_ops.clean_pcie_ring &&
-	    !priv->adapter->surprise_removed)
+	    !test_bit(MWIFIEX_SURPRISE_REMOVED, &priv->adapter->work_flags))
 		priv->adapter->if_ops.clean_pcie_ring(priv->adapter);
 	spin_unlock_irqrestore(&priv->wmm.ra_list_spinlock, flags);
 

@@ -71,9 +71,7 @@ ENTRY(get_sev_encryption_bit)
 ENDPROC(get_sev_encryption_bit)
 
 	.code64
-ENTRY(get_sev_encryption_mask)
-	xor	%rax, %rax
-
+ENTRY(set_sev_encryption_mask)
 #ifdef CONFIG_AMD_MEM_ENCRYPT
 	push	%rbp
 	push	%rdx
@@ -84,9 +82,7 @@ ENTRY(get_sev_encryption_mask)
 	testl	%eax, %eax
 	jz	.Lno_sev_mask
 
-	xor	%rdx, %rdx
-	bts	%rax, %rdx		/* Create the encryption mask */
-	mov	%rdx, %rax		/* ... and return it */
+	bts	%rax, sme_me_mask(%rip)	/* Create the encryption mask */
 
 .Lno_sev_mask:
 	movq	%rbp, %rsp		/* Restore original stack pointer */
@@ -95,5 +91,14 @@ ENTRY(get_sev_encryption_mask)
 	pop	%rbp
 #endif
 
+	xor	%rax, %rax
 	ret
-ENDPROC(get_sev_encryption_mask)
+ENDPROC(set_sev_encryption_mask)
+
+	.data
+
+#ifdef CONFIG_AMD_MEM_ENCRYPT
+	.balign	8
+GLOBAL(sme_me_mask)
+	.quad	0
+#endif

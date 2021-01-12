@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _LINUX_DAX_H
 #define _LINUX_DAX_H
 
@@ -16,11 +17,18 @@ struct dax_operations {
 	 */
 	long (*direct_access)(struct dax_device *, pgoff_t, long,
 			void **, pfn_t *);
-	/* memcpy_fromiovecend: required operation for fs-dax direct-i/o */
-	int (*memcpy_fromiovecend)(struct dax_device *, pgoff_t, void *,
-				   const struct iovec *, int, int);
-	int (*memcpy_toiovecend)(struct dax_device *, pgoff_t,
-				 const struct iovec *, void *, int, int);
+	/*
+	 * Validate whether this device is usable as an fsdax backing
+	 * device.
+	 */
+	bool (*dax_supported)(struct dax_device *, struct block_device *, int,
+			sector_t, sector_t);
+	/* copy_from_iter: required operation for fs-dax direct-i/o */
+	size_t (*copy_from_iter)(struct dax_device *, pgoff_t, void *, size_t,
+			struct iov_iter *);
+	/* copy_to_iter: required operation for fs-dax direct-i/o */
+	size_t (*copy_to_iter)(struct dax_device *, pgoff_t, void *, size_t,
+			struct iov_iter *);
 };
 
 extern struct attribute_group dax_attribute_group;
@@ -71,6 +79,17 @@ static inline bool bdev_dax_supported(struct block_device *bdev, int blocksize)
 	return __bdev_dax_supported(bdev, blocksize);
 }
 
+bool __generic_fsdax_supported(struct dax_device *dax_dev,
+		struct block_device *bdev, int blocksize, sector_t start,
+		sector_t sectors);
+static inline bool generic_fsdax_supported(struct dax_device *dax_dev,
+		struct block_device *bdev, int blocksize, sector_t start,
+		sector_t sectors)
+{
+	return __generic_fsdax_supported(dax_dev, bdev, blocksize, start,
+			sectors);
+}
+
 static inline struct dax_device *fs_dax_get_by_host(const char *host)
 {
 	return dax_get_by_host(host);
@@ -86,11 +105,16 @@ int dax_writeback_mapping_range(struct address_space *mapping,
 		struct block_device *bdev, struct writeback_control *wbc);
 
 struct page *dax_layout_busy_page(struct address_space *mapping);
-bool dax_lock_mapping_entry(struct page *page);
-void dax_unlock_mapping_entry(struct page *page);
 #else
 static inline bool bdev_dax_supported(struct block_device *bdev,
 		int blocksize)
+{
+	return false;
+}
+
+static inline bool generic_fsdax_supported(struct dax_device *dax_dev,
+		struct block_device *bdev, int blocksize, sector_t start,
+		sector_t sectors)
 {
 	return false;
 }
@@ -119,17 +143,6 @@ static inline int dax_writeback_mapping_range(struct address_space *mapping,
 {
 	return -EOPNOTSUPP;
 }
-
-static inline bool dax_lock_mapping_entry(struct page *page)
-{
-	if (IS_DAX(page->mapping->host))
-		return true;
-	return false;
-}
-
-static inline void dax_unlock_mapping_entry(struct page *page)
-{
-}
 #endif
 
 int dax_read_lock(void);
@@ -138,20 +151,20 @@ bool dax_alive(struct dax_device *dax_dev);
 void *dax_get_private(struct dax_device *dax_dev);
 long dax_direct_access(struct dax_device *dax_dev, pgoff_t pgoff, long nr_pages,
 		void **kaddr, pfn_t *pfn);
-int dax_memcpy_fromiovecend(struct dax_device *dax_dev, pgoff_t pgoff,
-		void *addr, const struct iovec *iov, int offset, int len);
-int dax_memcpy_toiovecend(struct dax_device *dax_dev, pgoff_t pgoff,
-		const struct iovec *iov, void *addr, int offset, int len);
+bool dax_supported(struct dax_device *dax_dev, struct block_device *bdev,
+		int blocksize, sector_t start, sector_t len);
+size_t dax_copy_from_iter(struct dax_device *dax_dev, pgoff_t pgoff, void *addr,
+		size_t bytes, struct iov_iter *i);
+size_t dax_copy_to_iter(struct dax_device *dax_dev, pgoff_t pgoff, void *addr,
+		size_t bytes, struct iov_iter *i);
 void dax_flush(struct dax_device *dax_dev, void *addr, size_t size);
 
-ssize_t dax_iomap_rw(int rw, struct kiocb *iocb, const struct iovec *iov,
-		unsigned long nr_segs, loff_t pos,
-		size_t count, const struct iomap_ops *ops);
-int dax_iomap_fault(struct vm_fault *vmf, enum page_entry_size pe_size,
-		pfn_t *pfnp, int *errp, const struct iomap_ops *ops);
-int dax_fault(struct vm_area_struct *, struct vm_fault *, get_block_t);
-int dax_finish_sync_fault(struct vm_fault *vmf, enum page_entry_size pe_size,
-			  pfn_t pfn);
+ssize_t dax_iomap_rw(struct kiocb *iocb, struct iov_iter *iter,
+		const struct iomap_ops *ops);
+vm_fault_t dax_iomap_fault(struct vm_fault *vmf, enum page_entry_size pe_size,
+		    pfn_t *pfnp, int *errp, const struct iomap_ops *ops);
+vm_fault_t dax_finish_sync_fault(struct vm_fault *vmf,
+		enum page_entry_size pe_size, pfn_t pfn);
 int dax_delete_mapping_entry(struct address_space *mapping, pgoff_t index);
 int dax_invalidate_mapping_entry_sync(struct address_space *mapping,
 				      pgoff_t index);

@@ -50,7 +50,6 @@
 #include <linux/mm.h>
 #include <asm/pgtable.h>
 #include "mmap.h"
-#include <linux/shm.h>
 
 /**
  * rvt_mmap_init - init link list and lock for mem map

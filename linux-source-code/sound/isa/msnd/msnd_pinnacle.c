@@ -73,17 +73,19 @@
 #ifdef MSND_CLASSIC
 #  include "msnd_classic.h"
 #  define LOGNAME			"msnd_classic"
+#  define DEV_NAME			"msnd-classic"
 #else
 #  include "msnd_pinnacle.h"
 #  define LOGNAME			"snd_msnd_pinnacle"
+#  define DEV_NAME			"msnd-pinnacle"
 #endif
 
 static void set_default_audio_parameters(struct snd_msnd *chip)
 {
-	chip->play_sample_size = DEFSAMPLESIZE;
+	chip->play_sample_size = snd_pcm_format_width(DEFSAMPLESIZE);
 	chip->play_sample_rate = DEFSAMPLERATE;
 	chip->play_channels = DEFCHANNELS;
-	chip->capture_sample_size = DEFSAMPLESIZE;
+	chip->capture_sample_size = snd_pcm_format_width(DEFSAMPLESIZE);
 	chip->capture_sample_rate = DEFSAMPLERATE;
 	chip->capture_channels = DEFCHANNELS;
 }
@@ -167,24 +169,25 @@ static void snd_msnd_eval_dsp_msg(struct snd_msnd *chip, u16 wMessage)
 static irqreturn_t snd_msnd_interrupt(int irq, void *dev_id)
 {
 	struct snd_msnd *chip = dev_id;
-	void *pwDSPQData = chip->mappedbase + DSPQ_DATA_BUFF;
+	void __iomem *pwDSPQData = chip->mappedbase + DSPQ_DATA_BUFF;
+	u16 head, tail, size;
 
 	/* Send ack to DSP */
 	/* inb(chip->io + HP_RXL); */
 
 	/* Evaluate queued DSP messages */
-	while (readw(chip->DSPQ + JQS_wTail) != readw(chip->DSPQ + JQS_wHead)) {
-		u16 wTmp;
-
-		snd_msnd_eval_dsp_msg(chip,
-			readw(pwDSPQData + 2 * readw(chip->DSPQ + JQS_wHead)));
-
-		wTmp = readw(chip->DSPQ + JQS_wHead) + 1;
-		if (wTmp > readw(chip->DSPQ + JQS_wSize))
-			writew(0, chip->DSPQ + JQS_wHead);
-		else
-			writew(wTmp, chip->DSPQ + JQS_wHead);
+	head = readw(chip->DSPQ + JQS_wHead);
+	tail = readw(chip->DSPQ + JQS_wTail);
+	size = readw(chip->DSPQ + JQS_wSize);
+	if (head > size || tail > size)
+		goto out;
+	while (head != tail) {
+		snd_msnd_eval_dsp_msg(chip, readw(pwDSPQData + 2 * head));
+		if (++head > size)
+			head = 0;
+		writew(head, chip->DSPQ + JQS_wHead);
 	}
+ out:
 	/* Send ack to DSP */
 	inb(chip->io + HP_RXL);
 	return IRQ_HANDLED;
@@ -580,7 +583,7 @@ static int snd_msnd_attach(struct snd_card *card)
 	if (err < 0)
 		goto err_release_region;
 
-	err = snd_msnd_pcm(card, 0, NULL);
+	err = snd_msnd_pcm(card, 0);
 	if (err < 0) {
 		printk(KERN_ERR LOGNAME ": error creating new PCM device\n");
 		goto err_release_region;
@@ -798,22 +801,22 @@ MODULE_LICENSE("GPL");
 MODULE_FIRMWARE(INITCODEFILE);
 MODULE_FIRMWARE(PERMCODEFILE);
 
-module_param_array(io, long, NULL, 0444);
+module_param_hw_array(io, long, ioport, NULL, 0444);
 MODULE_PARM_DESC(io, "IO port #");
-module_param_array(irq, int, NULL, 0444);
-module_param_array(mem, long, NULL, 0444);
+module_param_hw_array(irq, int, irq, NULL, 0444);
+module_param_hw_array(mem, long, iomem, NULL, 0444);
 module_param_array(write_ndelay, int, NULL, 0444);
 module_param(calibrate_signal, int, 0444);
 #ifndef MSND_CLASSIC
 module_param_array(digital, int, NULL, 0444);
-module_param_array(cfg, long, NULL, 0444);
-module_param_array(reset, int, 0, 0444);
-module_param_array(mpu_io, long, NULL, 0444);
-module_param_array(mpu_irq, int, NULL, 0444);
-module_param_array(ide_io0, long, NULL, 0444);
-module_param_array(ide_io1, long, NULL, 0444);
-module_param_array(ide_irq, int, NULL, 0444);
-module_param_array(joystick_io, long, NULL, 0444);
+module_param_hw_array(cfg, long, ioport, NULL, 0444);
+module_param_array(reset, int, NULL, 0444);
+module_param_hw_array(mpu_io, long, ioport, NULL, 0444);
+module_param_hw_array(mpu_irq, int, irq, NULL, 0444);
+module_param_hw_array(ide_io0, long, ioport, NULL, 0444);
+module_param_hw_array(ide_io1, long, ioport, NULL, 0444);
+module_param_hw_array(ide_irq, int, irq, NULL, 0444);
+module_param_hw_array(joystick_io, long, ioport, NULL, 0444);
 #endif
 
 
@@ -1062,11 +1065,8 @@ cfg_error:
 static int snd_msnd_isa_remove(struct device *pdev, unsigned int dev)
 {
 	snd_msnd_unload(dev_get_drvdata(pdev));
-	dev_set_drvdata(pdev, NULL);
 	return 0;
 }
-
-#define DEV_NAME "msnd-pinnacle"
 
 static struct isa_driver snd_msnd_driver = {
 	.match		= snd_msnd_isa_match,
@@ -1192,7 +1192,7 @@ static void snd_msnd_pnp_remove(struct pnp_card_link *pcard)
 static int isa_registered;
 static int pnp_registered;
 
-static struct pnp_card_device_id msnd_pnpids[] = {
+static const struct pnp_card_device_id msnd_pnpids[] = {
 	/* Pinnacle PnP */
 	{ .id = "BVJ0440", .devs = { { "TBS0000" }, { "TBS0001" } } },
 	{ .id = "" }	/* end */

@@ -31,7 +31,7 @@
 #include <asm/hardware/dec21285.h>
 #include <asm/io.h>
 #include <asm/mach-types.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 /*****************************************************************************/
 #include <asm/nwflash.h>
@@ -167,7 +167,7 @@ static ssize_t flash_write(struct file *file, const char __user *buf,
 	if (count > gbFlashSize - p)
 		count = gbFlashSize - p;
 			
-	if (!access_ok(VERIFY_READ, buf, count))
+	if (!access_ok(buf, count))
 		return -EFAULT;
 
 	/*

@@ -10,12 +10,28 @@
  *	TCPv4 GSO/GRO support
  */
 
+#include <linux/indirect_call_wrapper.h>
 #include <linux/skbuff.h>
 #include <net/tcp.h>
 #include <net/protocol.h>
 
-struct sk_buff *tcp4_gso_segment(struct sk_buff *skb,
-				 netdev_features_t features)
+static void tcp_gso_tstamp(struct sk_buff *skb, unsigned int ts_seq,
+			   unsigned int seq, unsigned int mss)
+{
+	while (skb) {
+		if (before(ts_seq, seq + mss)) {
+			skb_shinfo(skb)->tx_flags |= SKBTX_SW_TSTAMP;
+			skb_shinfo(skb)->tskey = ts_seq;
+			return;
+		}
+
+		skb = skb->next;
+		seq += mss;
+	}
+}
+
+static struct sk_buff *tcp4_gso_segment(struct sk_buff *skb,
+					netdev_features_t features)
 {
 	if (!(skb_shinfo(skb)->gso_type & SKB_GSO_TCPV4))
 		return ERR_PTR(-EINVAL);
@@ -103,6 +119,9 @@ struct sk_buff *tcp_gso_segment(struct sk_buff *skb,
 	th = tcp_hdr(skb);
 	seq = ntohl(th->seq);
 
+	if (unlikely(skb_shinfo(gso_skb)->tx_flags & SKBTX_SW_TSTAMP))
+		tcp_gso_tstamp(segs, skb_shinfo(gso_skb)->tskey, seq, mss);
+
 	newcheck = ~csum_fold((__force __wsum)((__force u32)th->check +
 					       (__force u32)delta));
 
@@ -134,11 +153,19 @@ struct sk_buff *tcp_gso_segment(struct sk_buff *skb,
 	 * is freed by GSO engine
 	 */
 	if (copy_destructor) {
+		int delta;
+
 		swap(gso_skb->sk, skb->sk);
 		swap(gso_skb->destructor, skb->destructor);
 		sum_truesize += skb->truesize;
-		atomic_add(sum_truesize - gso_skb->truesize,
-			   &skb->sk->sk_wmem_alloc);
+		delta = sum_truesize - gso_skb->truesize;
+		/* In some pathological cases, delta can be negative.
+		 * We need to either use refcount_add() or refcount_sub_and_test()
+		 */
+		if (likely(delta >= 0))
+			refcount_add(delta, &skb->sk->sk_wmem_alloc);
+		else
+			WARN_ON_ONCE(refcount_sub_and_test(-delta, &skb->sk->sk_wmem_alloc));
 	}
 
 	delta = htonl(oldlen + (skb_tail_pointer(skb) -
@@ -236,14 +263,15 @@ found:
 
 	flush |= (len - 1) >= mss;
 	flush |= (ntohl(th2->seq) + skb_gro_len(p)) ^ ntohl(th->seq);
+#ifdef CONFIG_TLS_DEVICE
+	flush |= p->decrypted ^ skb->decrypted;
+#endif
 
 	if (flush || skb_gro_receive(head, skb)) {
 		mss = 1;
 		goto out_check_final;
 	}
 
-	p = *head;
-	th2 = tcp_hdr(p);
 	tcp_flag_word(th2) |= flags & (TCP_FLAG_FIN | TCP_FLAG_PSH);
 
 out_check_final:
@@ -278,7 +306,8 @@ int tcp_gro_complete(struct sk_buff *skb)
 }
 EXPORT_SYMBOL(tcp_gro_complete);
 
-static struct sk_buff **tcp4_gro_receive(struct sk_buff **head, struct sk_buff *skb)
+INDIRECT_CALLABLE_SCOPE
+struct sk_buff **tcp4_gro_receive(struct sk_buff **head, struct sk_buff *skb)
 {
 	/* Don't bother verifying checksum if we're going to flush anyway. */
 	if (!NAPI_GRO_CB(skb)->flush &&
@@ -291,7 +320,7 @@ static struct sk_buff **tcp4_gro_receive(struct sk_buff **head, struct sk_buff *
 	return tcp_gro_receive(head, skb);
 }
 
-static int tcp4_gro_complete(struct sk_buff *skb, int thoff)
+INDIRECT_CALLABLE_SCOPE int tcp4_gro_complete(struct sk_buff *skb, int thoff)
 {
 	const struct iphdr *iph = ip_hdr(skb);
 	struct tcphdr *th = tcp_hdr(skb);

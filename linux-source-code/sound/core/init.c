@@ -338,9 +338,9 @@ static int snd_disconnect_release(struct inode *inode, struct file *file)
 	panic("%s(%p, %p) failed!", __func__, inode, file);
 }
 
-static unsigned int snd_disconnect_poll(struct file * file, poll_table * wait)
+static __poll_t snd_disconnect_poll(struct file * file, poll_table * wait)
 {
-	return POLLERR | POLLNVAL;
+	return EPOLLERR | EPOLLNVAL;
 }
 
 static long snd_disconnect_ioctl(struct file *file,
@@ -1008,7 +1008,7 @@ EXPORT_SYMBOL(snd_card_file_remove);
  */
 int snd_power_wait(struct snd_card *card, unsigned int power_state)
 {
-	wait_queue_t wait;
+	wait_queue_entry_t wait;
 	int result = 0;
 
 	/* fastpath */

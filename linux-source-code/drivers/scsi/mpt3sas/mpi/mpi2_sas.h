@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Copyright 2000-2020 Broadcom Inc. All rights reserved.
  *

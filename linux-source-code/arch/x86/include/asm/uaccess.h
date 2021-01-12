@@ -1,19 +1,16 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_X86_UACCESS_H
 #define _ASM_X86_UACCESS_H
 /*
  * User space memory access functions
  */
-#include <linux/errno.h>
 #include <linux/compiler.h>
-#include <linux/thread_info.h>
+#include <linux/kasan-checks.h>
 #include <linux/string.h>
-#include <linux/preempt_mask.h>
 #include <asm/asm.h>
 #include <asm/page.h>
 #include <asm/smap.h>
-
-#define VERIFY_READ 0
-#define VERIFY_WRITE 1
+#include <asm/extable.h>
 
 /*
  * The fs value determines whether argument validity checking should be
@@ -29,34 +26,47 @@
 #define USER_DS 	MAKE_MM_SEG(TASK_SIZE_MAX)
 
 #define get_ds()	(KERNEL_DS)
-#define get_fs()	(current_thread_info()->addr_limit)
-#define set_fs(x)	(current_thread_info()->addr_limit = (x))
+#define get_fs()	(current->thread.addr_limit)
+static inline void set_fs(mm_segment_t fs)
+{
+	current->thread.addr_limit = fs;
+	/* On user-mode return, check fs is correct */
+	set_thread_flag(TIF_FSCHECK);
+}
 
 #define segment_eq(a, b)	((a).seg == (b).seg)
 
-#define user_addr_max() (current_thread_info()->addr_limit.seg)
+#define user_addr_max() (current->thread.addr_limit.seg)
 #define __addr_ok(addr) 	\
 	((unsigned long __force)(addr) < user_addr_max())
 
 /*
  * Test whether a block of memory is a valid user space address.
  * Returns 0 if the range is valid, nonzero otherwise.
- *
- * This is equivalent to the following test:
- * (u33)addr + (u33)size > (u33)current->addr_limit.seg (u65 for x86_64)
- *
- * This needs 33-bit (65-bit for x86_64) arithmetic. We have a carry...
  */
+static inline bool __chk_range_not_ok(unsigned long addr, unsigned long size, unsigned long limit)
+{
+	/*
+	 * If we have used "sizeof()" for the size,
+	 * we know it won't overflow the limit (but
+	 * it might overflow the 'addr', so it's
+	 * important to subtract the size from the
+	 * limit, not add it to the address).
+	 */
+	if (__builtin_constant_p(size))
+		return unlikely(addr > limit - size);
+
+	/* Arbitrary sizes? Be careful about overflow */
+	addr += size;
+	if (unlikely(addr < size))
+		return true;
+	return unlikely(addr > limit);
+}
 
 #define __range_not_ok(addr, size, limit)				\
 ({									\
-	unsigned long flag, roksum;					\
 	__chk_user_ptr(addr);						\
-	asm("add %3,%1 ; sbb %0,%0 ; cmp %1,%4 ; sbb $0,%0"		\
-	    : "=&r" (flag), "=r" (roksum)				\
-	    : "1" (addr), "g" ((long)(size)),				\
-	      "rm" (limit));						\
-	flag;								\
+	__chk_range_not_ok((unsigned long __force)(addr), size, limit); \
 })
 
 #ifdef CONFIG_DEBUG_ATOMIC_SLEEP
@@ -67,9 +77,6 @@
 
 /**
  * access_ok: - Checks if a user space pointer is valid
- * @type: Type of access: %VERIFY_READ or %VERIFY_WRITE.  Note that
- *        %VERIFY_WRITE is a superset of %VERIFY_READ - if it is safe
- *        to write to a block, it is always safe to read from it.
  * @addr: User space pointer to start of block to check
  * @size: Size of block to check
  *
@@ -85,45 +92,11 @@
  * checks that the pointer is in the user space range - after calling
  * this function, memory access functions may still return -EFAULT.
  */
-#define access_ok(type, addr, size) \
+#define access_ok(addr, size)					\
 ({									\
 	WARN_ON_IN_IRQ();						\
 	likely(!__range_not_ok(addr, size, user_addr_max()));		\
 })
-
-/*
- * The exception table consists of pairs of addresses relative to the
- * exception table enty itself: the first is the address of an
- * instruction that is allowed to fault, and the second is the address
- * at which the program should continue.  No registers are modified,
- * so it is entirely up to the continuation code to figure out what to
- * do.
- *
- * All the routines below use bits of fixup code that are out of line
- * with the main instruction path.  This means when everything is well,
- * we don't even have to jump over them.  Further, they do not intrude
- * on our cache or tlb entries.
- */
-
-struct exception_table_entry {
-	int insn, fixup;
-};
-
-/*
- * Special exception table used for memcpy_mcsafe()
- */
-struct mc_exception_table_entry {
-	int insn, fixup, handler;
-};
-extern int mc_fixup_exception(struct pt_regs *regs, int trapnr);
-extern bool ex_has_fault_handler(unsigned long ip);
-
-/* This is not the generic standard exception_table_entry format */
-#define ARCH_HAS_SORT_EXTABLE
-#define ARCH_HAS_SEARCH_EXTABLE
-
-extern int fixup_exception(struct pt_regs *regs);
-extern int early_fixup_exception(unsigned long *ip);
 
 /*
  * These are the main single-value transfer routines.  They automatically
@@ -183,21 +156,24 @@ __typeof__(__builtin_choose_expr(sizeof(x) > sizeof(0UL), 0ULL, 0UL))
  * Careful: we have to cast the result to the type of the pointer
  * for sign reasons.
  *
- * The use of %edx as the register specifier is a bit of a
+ * The use of _ASM_DX as the register specifier is a bit of a
  * simplification, as gcc only cares about it as the starting point
  * and not size: for a 64-bit value it will use %ecx:%edx on 32 bits
  * (%ecx being the next register in gcc's x86 register sequence), and
  * %rdx on 64 bits.
+ *
+ * Clang/LLVM cares about the size of the register, but still wants
+ * the base register for something that ends up being a pair.
  */
 #define get_user(x, ptr)						\
 ({									\
 	int __ret_gu;							\
-	register __inttype(*(ptr)) __val_gu asm("%edx");		\
-	register void *__sp asm(_ASM_SP);				\
+	register __inttype(*(ptr)) __val_gu asm("%"_ASM_DX);		\
 	__chk_user_ptr(ptr);						\
 	might_fault();							\
 	asm volatile("call __get_user_%P4"				\
-		     : "=a" (__ret_gu), "=r" (__val_gu), "+r" (__sp)	\
+		     : "=a" (__ret_gu), "=r" (__val_gu),		\
+			ASM_CALL_CONSTRAINT				\
 		     : "0" (ptr), "i" (sizeof(*(ptr))));		\
 	(x) = (__force __typeof__(*(ptr))) __val_gu;			\
 	__builtin_expect(__ret_gu, 0);					\
@@ -348,7 +324,26 @@ do {									\
 } while (0)
 
 #ifdef CONFIG_X86_32
-#define __get_user_asm_u64(x, ptr, retval, errret)	(x) = __get_user_bad()
+#define __get_user_asm_u64(x, ptr, retval, errret)			\
+({									\
+	__typeof__(ptr) __ptr = (ptr);					\
+	asm volatile("\n"					\
+		     "1:	movl %2,%%eax\n"			\
+		     "2:	movl %3,%%edx\n"			\
+		     "3:\n"				\
+		     ".section .fixup,\"ax\"\n"				\
+		     "4:	mov %4,%0\n"				\
+		     "	xorl %%eax,%%eax\n"				\
+		     "	xorl %%edx,%%edx\n"				\
+		     "	jmp 3b\n"					\
+		     ".previous\n"					\
+		     _ASM_EXTABLE(1b, 4b)				\
+		     _ASM_EXTABLE(2b, 4b)				\
+		     : "=r" (retval), "=&A"(x)				\
+		     : "m" (__m(__ptr)), "m" __m(((u32 __user *)(__ptr)) + 1),	\
+		       "i" (errret), "0" (retval));			\
+})
+
 #define __get_user_asm_ex_u64(x, ptr)			(x) = __get_user_bad()
 #else
 #define __get_user_asm_u64(x, ptr, retval, errret) \
@@ -392,6 +387,18 @@ do {									\
 		     : "=r" (err), ltype(x)				\
 		     : "m" (__m(addr)), "i" (errret), "0" (err))
 
+#define __get_user_asm_nozero(x, addr, err, itype, rtype, ltype, errret)	\
+	asm volatile("\n"						\
+		     "1:	mov"itype" %2,%"rtype"1\n"		\
+		     "2:\n"						\
+		     ".section .fixup,\"ax\"\n"				\
+		     "3:	mov %3,%0\n"				\
+		     "	jmp 2b\n"					\
+		     ".previous\n"					\
+		     _ASM_EXTABLE(1b, 3b)				\
+		     : "=r" (err), ltype(x)				\
+		     : "m" (__m(addr)), "i" (errret), "0" (err))
+
 /*
  * This doesn't do __uaccess_begin/end - the exception handling
  * around it must do that.
@@ -420,7 +427,11 @@ do {									\
 #define __get_user_asm_ex(x, addr, itype, rtype, ltype)			\
 	asm volatile("1:	mov"itype" %1,%"rtype"0\n"		\
 		     "2:\n"						\
-		     _ASM_EXTABLE_EX(1b, 2b)				\
+		     ".section .fixup,\"ax\"\n"				\
+                     "3:xor"itype" %"rtype"0,%"rtype"0\n"		\
+		     "  jmp 2b\n"					\
+		     ".previous\n"					\
+		     _ASM_EXTABLE_EX(1b, 3b)				\
 		     : ltype(x) : "m" (__m(addr)))
 
 #define __put_user_nocheck(x, ptr, size)			\
@@ -435,7 +446,7 @@ do {									\
 #define __get_user_nocheck(x, ptr, size)				\
 ({									\
 	int __gu_err;							\
-	unsigned long __gu_val;						\
+	__inttype(*(ptr)) __gu_val;					\
 	__uaccess_begin_nospec();					\
 	__get_user_size(__gu_val, (ptr), (size), __gu_err, -EFAULT);	\
 	__uaccess_end();						\
@@ -474,17 +485,17 @@ struct __large_struct { unsigned long buf[100]; };
  * uaccess_try and catch
  */
 #define uaccess_try	do {						\
-	current_thread_info()->uaccess_err = 0;				\
+	current->thread.uaccess_err = 0;				\
 	__uaccess_begin();						\
 	barrier();
 
 #define uaccess_try_nospec do {						\
-	current_thread_info()->uaccess_err = 0;				\
+	current->thread.uaccess_err = 0;				\
 	__uaccess_begin_nospec();					\
 
 #define uaccess_catch(err)						\
 	__uaccess_end();						\
-	(err) |= (current_thread_info()->uaccess_err ? -EFAULT : 0);	\
+	(err) |= (current->thread.uaccess_err ? -EFAULT : 0);		\
 } while (0)
 
 /**
@@ -536,9 +547,6 @@ struct __large_struct { unsigned long buf[100]; };
 #define __put_user(x, ptr)						\
 	__put_user_nocheck((__typeof__(*(ptr)))(x), (ptr), sizeof(*(ptr)))
 
-#define __get_user_unaligned __get_user
-#define __put_user_unaligned __put_user
-
 /*
  * {get|put}_user_try and catch
  *
@@ -566,7 +574,6 @@ copy_from_user_nmi(void *to, const void __user *from, unsigned long n);
 extern __must_check long
 strncpy_from_user(char *dst, const char __user *src, long count);
 
-extern __must_check long strlen_user(const char __user *str);
 extern __must_check long strnlen_user(const char __user *str, long n);
 
 unsigned long __must_check clear_user(void __user *mem, unsigned long len);
@@ -660,7 +667,7 @@ extern void __cmpxchg_wrong_size(void)
 
 #define user_atomic_cmpxchg_inatomic(uval, ptr, old, new)		\
 ({									\
-	access_ok(VERIFY_WRITE, (ptr), sizeof(*(ptr))) ?		\
+	access_ok((ptr), sizeof(*(ptr))) ?		\
 		__user_atomic_cmpxchg_inatomic((uval), (ptr),		\
 				(old), (new), sizeof(*(ptr))) :		\
 		-EFAULT;						\
@@ -682,6 +689,48 @@ extern struct movsl_mask {
 #else
 # include <asm/uaccess_64.h>
 #endif
+
+/*
+ * We rely on the nested NMI work to allow atomic faults from the NMI path; the
+ * nested NMI paths are careful to preserve CR2.
+ *
+ * Caller must use pagefault_enable/disable, or run in interrupt context,
+ * and also do a uaccess_ok() check
+ */
+#define __copy_from_user_nmi __copy_from_user_inatomic
+
+/*
+ * The "unsafe" user accesses aren't really "unsafe", but the naming
+ * is a big fat warning: you have to not only do the access_ok()
+ * checking before using them, but you have to surround them with the
+ * user_access_begin/end() pair.
+ */
+static __must_check inline bool user_access_begin(const void __user *ptr, size_t len)
+{
+	if (unlikely(!access_ok(ptr,len)))
+		return 0;
+	__uaccess_begin_nospec();
+	return 1;
+}
+#define user_access_begin(a,b)	user_access_begin(a,b)
+#define user_access_end()	__uaccess_end()
+
+#define unsafe_put_user(x, ptr, err_label)					\
+do {										\
+	int __pu_err;								\
+	__typeof__(*(ptr)) __pu_val = (x);					\
+	__put_user_size(__pu_val, (ptr), sizeof(*(ptr)), __pu_err, -EFAULT);	\
+	if (unlikely(__pu_err)) goto err_label;					\
+} while (0)
+
+#define unsafe_get_user(x, ptr, err_label)					\
+do {										\
+	int __gu_err;								\
+	__inttype(*(ptr)) __gu_val;						\
+	__get_user_size(__gu_val, (ptr), sizeof(*(ptr)), __gu_err, -EFAULT);	\
+	(x) = (__force __typeof__(*(ptr)))__gu_val;				\
+	if (unlikely(__gu_err)) goto err_label;					\
+} while (0)
 
 #endif /* _ASM_X86_UACCESS_H */
 

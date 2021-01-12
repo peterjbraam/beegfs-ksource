@@ -134,12 +134,18 @@ static int allocate_doorbell(struct qcm_process_device *qpd, struct queue *q)
 		 */
 		q->doorbell_id = q->properties.queue_id;
 	} else if (q->properties.type == KFD_QUEUE_TYPE_SDMA) {
-		/* For SDMA queues on SOC15, use static doorbell
-		 * assignments based on the engine and queue.
+		/* For SDMA queues on SOC15 with 8-byte doorbell, use static
+		 * doorbell assignments based on the engine and queue id.
+		 * The doobell index distance between RLC (2*i) and (2*i+1)
+		 * for a SDMA engine is 512.
 		 */
-		q->doorbell_id = dev->shared_resources.sdma_doorbell
-			[q->properties.sdma_engine_id]
-			[q->properties.sdma_queue_id];
+		uint32_t *idx_offset =
+				dev->shared_resources.sdma_doorbell_idx;
+
+		q->doorbell_id = idx_offset[q->properties.sdma_engine_id]
+			+ (q->properties.sdma_queue_id & 1)
+			* KFD_QUEUE_DOORBELL_MIRROR_OFFSET
+			+ (q->properties.sdma_queue_id >> 1);
 	} else {
 		/* For CP queues on SOC15 reserve a free doorbell ID */
 		unsigned int found;
@@ -1263,12 +1269,17 @@ int amdkfd_fence_wait_timeout(unsigned int *fence_addr,
 	return 0;
 }
 
-static int unmap_sdma_queues(struct device_queue_manager *dqm,
-				unsigned int sdma_engine)
+static int unmap_sdma_queues(struct device_queue_manager *dqm)
 {
-	return pm_send_unmap_queue(&dqm->packets, KFD_QUEUE_TYPE_SDMA,
-			KFD_UNMAP_QUEUES_FILTER_DYNAMIC_QUEUES, 0, false,
-			sdma_engine);
+	int i, retval = 0;
+
+	for (i = 0; i < dqm->dev->device_info->num_sdma_engines; i++) {
+		retval = pm_send_unmap_queue(&dqm->packets, KFD_QUEUE_TYPE_SDMA,
+			KFD_UNMAP_QUEUES_FILTER_DYNAMIC_QUEUES, 0, false, i);
+		if (retval)
+			return retval;
+	}
+	return retval;
 }
 
 /* dqm->lock mutex has to be locked before calling this function */
@@ -1307,10 +1318,8 @@ static int unmap_queues_cpsch(struct device_queue_manager *dqm,
 	pr_debug("Before destroying queues, sdma queue count is : %u\n",
 		dqm->sdma_queue_count);
 
-	if (dqm->sdma_queue_count > 0) {
-		unmap_sdma_queues(dqm, 0);
-		unmap_sdma_queues(dqm, 1);
-	}
+	if (dqm->sdma_queue_count > 0)
+		unmap_sdma_queues(dqm);
 
 	retval = pm_send_unmap_queue(&dqm->packets, KFD_QUEUE_TYPE_COMPUTE,
 			filter, filter_param, false, 0);

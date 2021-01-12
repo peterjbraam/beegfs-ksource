@@ -274,7 +274,7 @@ enclosure_component_find_by_name(struct enclosure_device *edev,
 	return NULL;
 }
 
-static const struct attribute_group *enclosure_groups[];
+static const struct attribute_group *enclosure_component_groups[];
 
 /**
  * enclosure_component_alloc - prepare a new enclosure component
@@ -328,7 +328,7 @@ enclosure_component_alloc(struct enclosure_device *edev,
 		dev_set_name(cdev, "%u", number);
 
 	cdev->release = enclosure_component_release;
-	cdev->groups = enclosure_groups;
+	cdev->groups = enclosure_component_groups;
 
 	return ecomp;
 }
@@ -433,14 +433,14 @@ EXPORT_SYMBOL_GPL(enclosure_remove_device);
  * sysfs pieces below
  */
 
-static ssize_t enclosure_show_components(struct device *cdev,
-					 struct device_attribute *attr,
-					 char *buf)
+static ssize_t components_show(struct device *cdev,
+			       struct device_attribute *attr, char *buf)
 {
 	struct enclosure_device *edev = to_enclosure_device(cdev);
 
 	return snprintf(buf, 40, "%d\n", edev->components);
 }
+static DEVICE_ATTR_RO(components);
 
 static ssize_t id_show(struct device *cdev,
 				 struct device_attribute *attr,
@@ -452,21 +452,23 @@ static ssize_t id_show(struct device *cdev,
 		return edev->cb->show_id(edev, buf);
 	return -EINVAL;
 }
+static DEVICE_ATTR_RO(id);
 
-static struct device_attribute enclosure_attrs[] = {
-	__ATTR(components, S_IRUGO, enclosure_show_components, NULL),
-	__ATTR(id, S_IRUGO, id_show, NULL),
-	__ATTR_NULL
+static struct attribute *enclosure_class_attrs[] = {
+	&dev_attr_components.attr,
+	&dev_attr_id.attr,
+	NULL,
 };
+ATTRIBUTE_GROUPS(enclosure_class);
 
 static struct class enclosure_class = {
 	.name			= "enclosure",
 	.owner			= THIS_MODULE,
 	.dev_release		= enclosure_release,
-	.dev_attrs		= enclosure_attrs,
+	.dev_groups		= enclosure_class_groups,
 };
 
-static const char *const enclosure_status [] = {
+static const char *const enclosure_status[] = {
 	[ENCLOSURE_STATUS_UNSUPPORTED] = "unsupported",
 	[ENCLOSURE_STATUS_OK] = "OK",
 	[ENCLOSURE_STATUS_CRITICAL] = "critical",
@@ -478,7 +480,7 @@ static const char *const enclosure_status [] = {
 	[ENCLOSURE_STATUS_MAX] = NULL,
 };
 
-static const char *const enclosure_type [] = {
+static const char *const enclosure_type[] = {
 	[ENCLOSURE_COMPONENT_DEVICE] = "device",
 	[ENCLOSURE_COMPONENT_ARRAY_DEVICE] = "array device",
 };
@@ -674,25 +676,11 @@ static struct attribute *enclosure_component_attrs[] = {
 	&dev_attr_slot.attr,
 	NULL
 };
-
-static struct attribute_group enclosure_group = {
-	.attrs = enclosure_component_attrs,
-};
-
-static const struct attribute_group *enclosure_groups[] = {
-	&enclosure_group,
-	NULL
-};
+ATTRIBUTE_GROUPS(enclosure_component);
 
 static int __init enclosure_init(void)
 {
-	int err;
-
-	err = class_register(&enclosure_class);
-	if (err)
-		return err;
-
-	return 0;
+	return class_register(&enclosure_class);
 }
 
 static void __exit enclosure_exit(void)

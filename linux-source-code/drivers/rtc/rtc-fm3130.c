@@ -47,7 +47,7 @@
 
 struct fm3130 {
 	u8			reg_addr_time;
-	u8 			reg_addr_alarm;
+	u8			reg_addr_alarm;
 	u8			regs[15];
 	struct i2c_msg		msg[4];
 	struct i2c_client	*client;
@@ -136,8 +136,7 @@ static int fm3130_get_time(struct device *dev, struct rtc_time *t)
 		t->tm_hour, t->tm_mday,
 		t->tm_mon, t->tm_year, t->tm_wday);
 
-	/* initial clock setting can be undefined */
-	return rtc_valid_tm(t);
+	return 0;
 }
 
 
@@ -520,18 +519,11 @@ exit_free:
 	return err;
 }
 
-static int fm3130_remove(struct i2c_client *client)
-{
-	return 0;
-}
-
 static struct i2c_driver fm3130_driver = {
 	.driver = {
 		.name	= "rtc-fm3130",
-		.owner	= THIS_MODULE,
 	},
 	.probe		= fm3130_probe,
-	.remove		= fm3130_remove,
 	.id_table	= fm3130_id,
 };
 

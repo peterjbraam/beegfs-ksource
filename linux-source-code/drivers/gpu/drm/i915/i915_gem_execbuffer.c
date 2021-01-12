@@ -31,7 +31,6 @@
 #include <linux/sync_file.h>
 #include <linux/uaccess.h>
 
-#include <drm/drmP.h>
 #include <drm/drm_syncobj.h>
 #include <drm/i915_drm.h>
 
@@ -756,6 +755,68 @@ static int eb_select_context(struct i915_execbuffer *eb)
 	return 0;
 }
 
+static struct i915_request *__eb_wait_for_ring(struct intel_ring *ring)
+{
+	struct i915_request *rq;
+
+	/*
+	 * Completely unscientific finger-in-the-air estimates for suitable
+	 * maximum user request size (to avoid blocking) and then backoff.
+	 */
+	if (intel_ring_update_space(ring) >= PAGE_SIZE)
+		return NULL;
+
+	/*
+	 * Find a request that after waiting upon, there will be at least half
+	 * the ring available. The hysteresis allows us to compete for the
+	 * shared ring and should mean that we sleep less often prior to
+	 * claiming our resources, but not so long that the ring completely
+	 * drains before we can submit our next request.
+	 */
+	list_for_each_entry(rq, &ring->request_list, ring_link) {
+		if (__intel_ring_space(rq->postfix,
+				       ring->emit, ring->size) > ring->size / 2)
+			break;
+	}
+	if (&rq->ring_link == &ring->request_list)
+		return NULL; /* weird, we will check again later for real */
+
+	return i915_request_get(rq);
+}
+
+static int eb_wait_for_ring(const struct i915_execbuffer *eb)
+{
+	const struct intel_context *ce;
+	struct i915_request *rq;
+	int ret = 0;
+
+	/*
+	 * Apply a light amount of backpressure to prevent excessive hogs
+	 * from blocking waiting for space whilst holding struct_mutex and
+	 * keeping all of their resources pinned.
+	 */
+
+	ce = to_intel_context(eb->ctx, eb->engine);
+	if (!ce->ring) /* first use, assume empty! */
+		return 0;
+
+	rq = __eb_wait_for_ring(ce->ring);
+	if (rq) {
+		mutex_unlock(&eb->i915->drm.struct_mutex);
+
+		if (i915_request_wait(rq,
+				      I915_WAIT_INTERRUPTIBLE,
+				      MAX_SCHEDULE_TIMEOUT) < 0)
+			ret = -EINTR;
+
+		i915_request_put(rq);
+
+		mutex_lock(&eb->i915->drm.struct_mutex);
+	}
+
+	return ret;
+}
+
 static int eb_lookup_vmas(struct i915_execbuffer *eb)
 {
 	struct radix_tree_root *handles_vma = &eb->ctx->handles_vma;
@@ -1382,7 +1443,7 @@ eb_relocate_entry(struct i915_execbuffer *eb,
 		 * batchbuffers.
 		 */
 		if (reloc->write_domain == I915_GEM_DOMAIN_INSTRUCTION &&
-		    IS_GEN6(eb->i915)) {
+		    IS_GEN(eb->i915, 6)) {
 			err = i915_vma_bind(target, target->obj->cache_level,
 					    PIN_GLOBAL);
 			if (WARN_ONCE(err,
@@ -1449,7 +1510,7 @@ static int eb_relocate_vma(struct i915_execbuffer *eb, struct i915_vma *vma)
 	 * to read. However, if the array is not writable the user loses
 	 * the updated relocation values.
 	 */
-	if (unlikely(!access_ok(VERIFY_READ, urelocs, remain*sizeof(*urelocs))))
+	if (unlikely(!access_ok(urelocs, remain*sizeof(*urelocs))))
 		return -EFAULT;
 
 	do {
@@ -1556,7 +1617,7 @@ static int check_relocations(const struct drm_i915_gem_exec_object2 *entry)
 
 	addr = u64_to_user_ptr(entry->relocs_ptr);
 	size *= sizeof(struct drm_i915_gem_relocation_entry);
-	if (!access_ok(VERIFY_READ, addr, size))
+	if (!access_ok(addr, size))
 		return -EFAULT;
 
 	end = addr + size;
@@ -1626,7 +1687,8 @@ end_user:
 		 * happened we would make the mistake of assuming that the
 		 * relocations were valid.
 		 */
-		user_access_begin();
+		if (!user_access_begin(urelocs, size))
+			goto end_user;
 
 		for (copied = 0; copied < nreloc; copied++)
 			unsafe_put_user(-1,
@@ -1730,15 +1792,6 @@ repeat:
 
 	list_for_each_entry(vma, &eb->relocs, reloc_link) {
 		if (!have_copy) {
-			/* Backport note:  This is going to be splatty on
-			 * our creaky old 3.10 kernel because of lack of
-			 * 8bcbde5480f9777f8b74d71493722c663e22c21b
-			 *
-			 * But not sure that is a sane thing to backport.
-			 * So probably the best thing to do if you get
-			 * might_sleep() splats in this path is to ignore
-			 * them and close bz as WONTFIX.
-			 */
 			pagefault_disable();
 			err = eb_relocate_vma(eb, vma);
 			pagefault_enable();
@@ -1906,7 +1959,7 @@ static int i915_reset_gen7_sol_offsets(struct i915_request *rq)
 	u32 *cs;
 	int i;
 
-	if (!IS_GEN7(rq->i915) || rq->engine->id != RCS) {
+	if (!IS_GEN(rq->i915, 7) || rq->engine->id != RCS) {
 		DRM_DEBUG("sol reset is gen7/rcs only\n");
 		return -EINVAL;
 	}
@@ -2039,6 +2092,18 @@ static int eb_submit(struct i915_execbuffer *eb)
 			return err;
 	}
 
+	/*
+	 * After we completed waiting for other engines (using HW semaphores)
+	 * then we can signal that this request/batch is ready to run. This
+	 * allows us to determine if the batch is still waiting on the GPU
+	 * or actually running by checking the breadcrumb.
+	 */
+	if (eb->engine->emit_init_breadcrumb) {
+		err = eb->engine->emit_init_breadcrumb(eb->request);
+		if (err)
+			return err;
+	}
+
 	err = eb->engine->emit_bb_start(eb->request,
 					eb->batch->node.start +
 					eb->batch_start_offset,
@@ -2155,7 +2220,7 @@ get_fence_array(struct drm_i915_gem_execbuffer2 *args,
 		return ERR_PTR(-EINVAL);
 
 	user = u64_to_user_ptr(args->cliprects_ptr);
-	if (!access_ok(VERIFY_READ, user, nfences * sizeof(*user)))
+	if (!access_ok(user, nfences * sizeof(*user)))
 		return ERR_PTR(-EFAULT);
 
 	fences = kvmalloc_array(nfences, sizeof(*fences),
@@ -2266,6 +2331,7 @@ i915_gem_do_execbuffer(struct drm_device *dev,
 	struct i915_execbuffer eb;
 	struct dma_fence *in_fence = NULL;
 	struct sync_file *out_fence = NULL;
+	intel_wakeref_t wakeref;
 	int out_fence_fd = -1;
 	int err;
 
@@ -2343,11 +2409,15 @@ i915_gem_do_execbuffer(struct drm_device *dev,
 	 * wakeref that we hold until the GPU has been idle for at least
 	 * 100ms.
 	 */
-	intel_runtime_pm_get(eb.i915);
+	wakeref = intel_runtime_pm_get(eb.i915);
 
 	err = i915_mutex_lock_interruptible(dev);
 	if (err)
 		goto err_rpm;
+
+	err = eb_wait_for_ring(&eb); /* may temporarily drop struct_mutex */
+	if (unlikely(err))
+		goto err_unlock;
 
 	err = eb_relocate(&eb);
 	if (err) {
@@ -2478,9 +2548,10 @@ err_batch_unpin:
 err_vma:
 	if (eb.exec)
 		eb_release_vmas(&eb);
+err_unlock:
 	mutex_unlock(&dev->struct_mutex);
 err_rpm:
-	intel_runtime_pm_put(eb.i915);
+	intel_runtime_pm_put(eb.i915, wakeref);
 	i915_gem_context_put(eb.ctx);
 err_destroy:
 	eb_destroy(&eb);
@@ -2670,7 +2741,8 @@ i915_gem_execbuffer2_ioctl(struct drm_device *dev, void *data,
 		 * And this range already got effectively checked earlier
 		 * when we did the "copy_from_user()" above.
 		 */
-		user_access_begin();
+		if (!user_access_begin(user_exec_list, count * sizeof(*user_exec_list)))
+			goto end_user;
 
 		for (i = 0; i < args->buffer_count; i++) {
 			if (!(exec2_list[i].offset & UPDATE))

@@ -18,6 +18,7 @@
 #include <linux/vmalloc.h>
 #include <linux/log2.h>
 #include <linux/dm-kcopyd.h>
+#include <linux/semaphore.h>
 
 #include "dm.h"
 
@@ -88,7 +89,7 @@ struct dm_snapshot {
 	 */
 	struct rb_root out_of_order_tree;
 
-	mempool_t *pending_pool;
+	mempool_t pending_pool;
 
 	struct dm_exception_table pending;
 	struct dm_exception_table complete;
@@ -106,8 +107,8 @@ struct dm_snapshot {
 	/* The on disk metadata handler */
 	struct dm_exception_store *store;
 
-	unsigned in_progress;
-	wait_queue_head_t in_progress_wait;
+	/* Maximum number of in-flight COW jobs. */
+	struct semaphore cow_count;
 
 	struct dm_kcopyd_client *kcopyd_client;
 
@@ -161,8 +162,8 @@ struct dm_snapshot {
  */
 #define DEFAULT_COW_THRESHOLD 2048
 
-static unsigned cow_threshold = DEFAULT_COW_THRESHOLD;
-module_param_named(snapshot_cow_threshold, cow_threshold, uint, 0644);
+static int cow_threshold = DEFAULT_COW_THRESHOLD;
+module_param_named(snapshot_cow_threshold, cow_threshold, int, 0644);
 MODULE_PARM_DESC(snapshot_cow_threshold, "Maximum number of chunks being copied on write");
 
 DECLARE_DM_KCOPYD_THROTTLE_WITH_MODULE_PARM(snapshot_copy_throttle,
@@ -324,6 +325,7 @@ struct origin {
 struct dm_origin {
 	struct dm_dev *dev;
 	struct dm_target *ti;
+	unsigned split_boundary;
 	struct list_head hash_list;
 };
 
@@ -345,8 +347,8 @@ static int init_origin_hash(void)
 {
 	int i;
 
-	_origins = kmalloc(ORIGIN_HASH_SIZE * sizeof(struct list_head),
-			   GFP_KERNEL);
+	_origins = kmalloc_array(ORIGIN_HASH_SIZE, sizeof(struct list_head),
+				 GFP_KERNEL);
 	if (!_origins) {
 		DMERR("unable to allocate memory for _origins");
 		return -ENOMEM;
@@ -354,8 +356,9 @@ static int init_origin_hash(void)
 	for (i = 0; i < ORIGIN_HASH_SIZE; i++)
 		INIT_LIST_HEAD(_origins + i);
 
-	_dm_origins = kmalloc(ORIGIN_HASH_SIZE * sizeof(struct list_head),
-			      GFP_KERNEL);
+	_dm_origins = kmalloc_array(ORIGIN_HASH_SIZE,
+				    sizeof(struct list_head),
+				    GFP_KERNEL);
 	if (!_dm_origins) {
 		DMERR("unable to allocate memory for _dm_origins");
 		kfree(_origins);
@@ -733,7 +736,7 @@ static void free_completed_exception(struct dm_exception *e)
 
 static struct dm_snap_pending_exception *alloc_pending_exception(struct dm_snapshot *s)
 {
-	struct dm_snap_pending_exception *pe = mempool_alloc(s->pending_pool,
+	struct dm_snap_pending_exception *pe = mempool_alloc(&s->pending_pool,
 							     GFP_NOIO);
 
 	atomic_inc(&s->pending_exceptions_count);
@@ -746,8 +749,8 @@ static void free_pending_exception(struct dm_snap_pending_exception *pe)
 {
 	struct dm_snapshot *s = pe->snap;
 
-	mempool_free(pe, s->pending_pool);
-	smp_mb__before_atomic_dec();
+	mempool_free(pe, &s->pending_pool);
+	smp_mb__before_atomic();
 	atomic_dec(&s->pending_exceptions_count);
 }
 
@@ -912,7 +915,7 @@ static int init_hash_tables(struct dm_snapshot *s)
 static void merge_shutdown(struct dm_snapshot *s)
 {
 	clear_bit_unlock(RUNNING_MERGE, &s->state_bits);
-	smp_mb__after_clear_bit();
+	smp_mb__after_atomic();
 	wake_up_bit(&s->state_bits, RUNNING_MERGE);
 }
 
@@ -1324,7 +1327,7 @@ static int snapshot_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 		goto bad_hash_tables;
 	}
 
-	init_waitqueue_head(&s->in_progress_wait);
+	sema_init(&s->cow_count, (cow_threshold > 0) ? cow_threshold : INT_MAX);
 
 	s->kcopyd_client = dm_kcopyd_client_create(&dm_kcopyd_throttle);
 	if (IS_ERR(s->kcopyd_client)) {
@@ -1333,10 +1336,9 @@ static int snapshot_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 		goto bad_kcopyd;
 	}
 
-	s->pending_pool = mempool_create_slab_pool(MIN_IOS, pending_cache);
-	if (!s->pending_pool) {
+	r = mempool_init_slab_pool(&s->pending_pool, MIN_IOS, pending_cache);
+	if (r) {
 		ti->error = "Could not allocate mempool for pending exceptions";
-		r = -ENOMEM;
 		goto bad_pending_pool;
 	}
 
@@ -1397,7 +1399,7 @@ static int snapshot_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 bad_read_metadata:
 	unregister_snapshot(s);
 bad_load_and_register:
-	mempool_destroy(s->pending_pool);
+	mempool_exit(&s->pending_pool);
 bad_pending_pool:
 	dm_kcopyd_client_destroy(s->kcopyd_client);
 bad_kcopyd:
@@ -1487,7 +1489,7 @@ static void snapshot_dtr(struct dm_target *ti)
 	while (atomic_read(&s->pending_exceptions_count))
 		msleep(1);
 	/*
-	 * Ensure instructions in mempool_destroy aren't reordered
+	 * Ensure instructions in mempool_exit aren't reordered
 	 * before atomic_read.
 	 */
 	smp_mb();
@@ -1499,7 +1501,7 @@ static void snapshot_dtr(struct dm_target *ti)
 
 	__free_exceptions(s);
 
-	mempool_destroy(s->pending_pool);
+	mempool_exit(&s->pending_pool);
 
 	dm_exception_store_destroy(s->store);
 
@@ -1507,54 +1509,7 @@ static void snapshot_dtr(struct dm_target *ti)
 
 	dm_put_device(ti, s->origin);
 
-	WARN_ON(s->in_progress);
-
 	kfree(s);
-}
-
-static void account_start_copy(struct dm_snapshot *s)
-{
-	spin_lock(&s->in_progress_wait.lock);
-	s->in_progress++;
-	spin_unlock(&s->in_progress_wait.lock);
-}
-
-static void account_end_copy(struct dm_snapshot *s)
-{
-	spin_lock(&s->in_progress_wait.lock);
-	BUG_ON(!s->in_progress);
-	s->in_progress--;
-	if (likely(s->in_progress <= cow_threshold) &&
-	    unlikely(waitqueue_active(&s->in_progress_wait)))
-		wake_up_locked(&s->in_progress_wait);
-	spin_unlock(&s->in_progress_wait.lock);
-}
-
-static bool wait_for_in_progress(struct dm_snapshot *s, bool unlock_origins)
-{
-	if (unlikely(s->in_progress > cow_threshold)) {
-		spin_lock(&s->in_progress_wait.lock);
-		if (likely(s->in_progress > cow_threshold)) {
-			/*
-			 * NOTE: this throttle doesn't account for whether
-			 * the caller is servicing an IO that will trigger a COW
-			 * so excess throttling may result for chunks not required
-			 * to be COW'd.  But if cow_threshold was reached, extra
-			 * throttling is unlikely to negatively impact performance.
-			 */
-			DECLARE_WAITQUEUE(wait, current);
-			__add_wait_queue(&s->in_progress_wait, &wait);
-			__set_current_state(TASK_UNINTERRUPTIBLE);
-			spin_unlock(&s->in_progress_wait.lock);
-			if (unlock_origins)
-				up_read(&_origins_lock);
-			io_schedule();
-			remove_wait_queue(&s->in_progress_wait, &wait);
-			return false;
-		}
-		spin_unlock(&s->in_progress_wait.lock);
-	}
-	return true;
 }
 
 /*
@@ -1572,7 +1527,7 @@ static void flush_bios(struct bio *bio)
 	}
 }
 
-static int do_origin(struct dm_dev *origin, struct bio *bio, bool limit);
+static int do_origin(struct dm_dev *origin, struct bio *bio);
 
 /*
  * Flush a list of buffers.
@@ -1585,7 +1540,7 @@ static void retry_origin_bios(struct dm_snapshot *s, struct bio *bio)
 	while (bio) {
 		n = bio->bi_next;
 		bio->bi_next = NULL;
-		r = do_origin(s->origin, bio, false);
+		r = do_origin(s->origin, bio);
 		if (r == DM_MAPIO_REMAPPED)
 			generic_make_request(bio);
 		bio = n;
@@ -1711,7 +1666,7 @@ out:
 		error_bios(snapshot_bios);
 	} else {
 		if (full_bio)
-			bio_endio(full_bio, 0);
+			bio_endio(full_bio);
 		flush_bios(snapshot_bios);
 	}
 
@@ -1777,7 +1732,7 @@ static void copy_callback(int read_err, unsigned long write_err, void *context)
 		rb_link_node(&pe->out_of_order_node, parent, p);
 		rb_insert_color(&pe->out_of_order_node, &s->out_of_order_tree);
 	}
-	account_end_copy(s);
+	up(&s->cow_count);
 }
 
 /*
@@ -1801,15 +1756,15 @@ static void start_copy(struct dm_snap_pending_exception *pe)
 	dest.count = src.count;
 
 	/* Hand over to kcopyd */
-	account_start_copy(s);
+	down(&s->cow_count);
 	dm_kcopyd_copy(s->kcopyd_client, &src, 1, &dest, 0, copy_callback, pe);
 }
 
-static void full_bio_end_io(struct bio *bio, int error)
+static void full_bio_end_io(struct bio *bio)
 {
 	void *callback_data = bio->bi_private;
 
-	dm_kcopyd_do_callback(callback_data, 0, error ? 1 : 0);
+	dm_kcopyd_do_callback(callback_data, 0, bio->bi_status ? 1 : 0);
 }
 
 static void start_full_bio(struct dm_snap_pending_exception *pe,
@@ -1821,7 +1776,7 @@ static void start_full_bio(struct dm_snap_pending_exception *pe,
 	pe->full_bio = bio;
 	pe->full_bio_end_io = bio->bi_end_io;
 
-	account_start_copy(s);
+	down(&s->cow_count);
 	callback_data = dm_kcopyd_prepare_callback(s->kcopyd_client,
 						   copy_callback, pe);
 
@@ -1899,12 +1854,11 @@ __find_pending_exception(struct dm_snapshot *s,
 static void remap_exception(struct dm_snapshot *s, struct dm_exception *e,
 			    struct bio *bio, chunk_t chunk)
 {
-	bio->bi_bdev = s->cow->bdev;
-	bio->bi_sector = chunk_to_sector(s->store,
-					 dm_chunk_number(e->new_chunk) +
-					 (chunk - e->old_chunk)) +
-					 (bio->bi_sector &
-					  s->store->chunk_mask);
+	bio_set_dev(bio, s->cow->bdev);
+	bio->bi_iter.bi_sector =
+		chunk_to_sector(s->store, dm_chunk_number(e->new_chunk) +
+				(chunk - e->old_chunk)) +
+		(bio->bi_iter.bi_sector & s->store->chunk_mask);
 }
 
 static void zero_callback(int read_err, unsigned long write_err, void *context)
@@ -1912,8 +1866,9 @@ static void zero_callback(int read_err, unsigned long write_err, void *context)
 	struct bio *bio = context;
 	struct dm_snapshot *s = bio->bi_private;
 
-	account_end_copy(s);
-	bio_endio(bio, write_err ? -EIO : 0);
+	up(&s->cow_count);
+	bio->bi_status = write_err ? BLK_STS_IOERR : 0;
+	bio_endio(bio);
 }
 
 static void zero_exception(struct dm_snapshot *s, struct dm_exception *e,
@@ -1922,10 +1877,10 @@ static void zero_exception(struct dm_snapshot *s, struct dm_exception *e,
 	struct dm_io_region dest;
 
 	dest.bdev = s->cow->bdev;
-	dest.sector = bio->bi_sector;
+	dest.sector = bio->bi_iter.bi_sector;
 	dest.count = s->store->chunk_size;
 
-	account_start_copy(s);
+	down(&s->cow_count);
 	WARN_ON_ONCE(bio->bi_private);
 	bio->bi_private = s;
 	dm_kcopyd_zero(s->kcopyd_client, 1, &dest, 0, zero_callback, bio);
@@ -1933,7 +1888,8 @@ static void zero_exception(struct dm_snapshot *s, struct dm_exception *e,
 
 static bool io_overlaps_chunk(struct dm_snapshot *s, struct bio *bio)
 {
-	return bio->bi_size == (s->store->chunk_size << SECTOR_SHIFT);
+	return bio->bi_iter.bi_size ==
+		(s->store->chunk_size << SECTOR_SHIFT);
 }
 
 static int snapshot_map(struct dm_target *ti, struct bio *bio)
@@ -1947,29 +1903,25 @@ static int snapshot_map(struct dm_target *ti, struct bio *bio)
 
 	init_tracked_chunk(bio);
 
-	if (bio->bi_rw & REQ_FLUSH) {
-		bio->bi_bdev = s->cow->bdev;
+	if (bio->bi_opf & REQ_PREFLUSH) {
+		bio_set_dev(bio, s->cow->bdev);
 		return DM_MAPIO_REMAPPED;
 	}
 
-	chunk = sector_to_chunk(s->store, bio->bi_sector);
+	chunk = sector_to_chunk(s->store, bio->bi_iter.bi_sector);
 	dm_exception_table_lock_init(s, chunk, &lock);
 
 	/* Full snapshots are not usable */
 	/* To get here the table must be live so s->active is always set. */
 	if (!s->valid)
-		return -EIO;
-
-	if (bio_data_dir(bio) == WRITE) {
-		while (unlikely(!wait_for_in_progress(s, false)))
-			; /* wait_for_in_progress() has slept */
-	}
+		return DM_MAPIO_KILL;
 
 	down_read(&s->lock);
 	dm_exception_table_lock(&lock);
 
-	if (!s->valid || (unlikely(s->snapshot_overflowed) && bio_rw(bio) == WRITE)) {
-		r = -EIO;
+	if (!s->valid || (unlikely(s->snapshot_overflowed) &&
+	    bio_data_dir(bio) == WRITE)) {
+		r = DM_MAPIO_KILL;
 		goto out_unlock;
 	}
 
@@ -1981,7 +1933,7 @@ static int snapshot_map(struct dm_target *ti, struct bio *bio)
 			 * defeat the goal of freeing space in origin that is
 			 * implied by the "discard_passdown_origin" feature)
 			 */
-			bio->bi_bdev = s->origin->bdev;
+			bio_set_dev(bio, s->origin->bdev);
 			track_chunk(s, bio, chunk);
 			goto out_unlock;
 		}
@@ -2008,7 +1960,7 @@ static int snapshot_map(struct dm_target *ti, struct bio *bio)
 		 * If no exception exists, complete discard immediately
 		 * otherwise it'll trigger copy-out.
 		 */
-		bio_endio(bio, 0);
+		bio_endio(bio);
 		r = DM_MAPIO_SUBMITTED;
 		goto out_unlock;
 	}
@@ -2018,7 +1970,7 @@ static int snapshot_map(struct dm_target *ti, struct bio *bio)
 	 * flags so we should only get this if we are
 	 * writeable.
 	 */
-	if (bio_rw(bio) == WRITE) {
+	if (bio_data_dir(bio) == WRITE) {
 		pe = __lookup_pending_exception(s, chunk);
 		if (!pe) {
 			dm_exception_table_unlock(&lock);
@@ -2048,7 +2000,7 @@ static int snapshot_map(struct dm_target *ti, struct bio *bio)
 					__invalidate_snapshot(s, -ENOMEM);
 				up_write(&s->lock);
 
-				r = -EIO;
+				r = DM_MAPIO_KILL;
 				goto out;
 			}
 		}
@@ -2080,7 +2032,7 @@ static int snapshot_map(struct dm_target *ti, struct bio *bio)
 			goto out;
 		}
 	} else {
-		bio->bi_bdev = s->origin->bdev;
+		bio_set_dev(bio, s->origin->bdev);
 		track_chunk(s, bio, chunk);
 	}
 
@@ -2112,21 +2064,21 @@ static int snapshot_merge_map(struct dm_target *ti, struct bio *bio)
 
 	init_tracked_chunk(bio);
 
-	if (bio->bi_rw & REQ_FLUSH) {
+	if (bio->bi_opf & REQ_PREFLUSH) {
 		if (!dm_bio_get_target_bio_nr(bio))
-			bio->bi_bdev = s->origin->bdev;
+			bio_set_dev(bio, s->origin->bdev);
 		else
-			bio->bi_bdev = s->cow->bdev;
+			bio_set_dev(bio, s->cow->bdev);
 		return DM_MAPIO_REMAPPED;
 	}
 
 	if (unlikely(bio_op(bio) == REQ_OP_DISCARD)) {
 		/* Once merging, discards no longer effect change */
-		bio_endio(bio, 0);
+		bio_endio(bio);
 		return DM_MAPIO_SUBMITTED;
 	}
 
-	chunk = sector_to_chunk(s->store, bio->bi_sector);
+	chunk = sector_to_chunk(s->store, bio->bi_iter.bi_sector);
 
 	down_write(&s->lock);
 
@@ -2138,11 +2090,11 @@ static int snapshot_merge_map(struct dm_target *ti, struct bio *bio)
 	e = dm_lookup_exception(&s->complete, chunk);
 	if (e) {
 		/* Queue writes overlapping with chunks being merged */
-		if (bio_rw(bio) == WRITE &&
+		if (bio_data_dir(bio) == WRITE &&
 		    chunk >= s->first_merging_chunk &&
 		    chunk < (s->first_merging_chunk +
 			     s->num_merging_chunks)) {
-			bio->bi_bdev = s->origin->bdev;
+			bio_set_dev(bio, s->origin->bdev);
 			bio_list_add(&s->bios_queued_during_merge, bio);
 			r = DM_MAPIO_SUBMITTED;
 			goto out_unlock;
@@ -2150,17 +2102,17 @@ static int snapshot_merge_map(struct dm_target *ti, struct bio *bio)
 
 		remap_exception(s, e, bio, chunk);
 
-		if (bio_rw(bio) == WRITE)
+		if (bio_data_dir(bio) == WRITE)
 			track_chunk(s, bio, chunk);
 		goto out_unlock;
 	}
 
 redirect_to_origin:
-	bio->bi_bdev = s->origin->bdev;
+	bio_set_dev(bio, s->origin->bdev);
 
-	if (bio_rw(bio) == WRITE) {
+	if (bio_data_dir(bio) == WRITE) {
 		up_write(&s->lock);
-		return do_origin(s->origin, bio, false);
+		return do_origin(s->origin, bio);
 	}
 
 out_unlock:
@@ -2169,14 +2121,15 @@ out_unlock:
 	return r;
 }
 
-static int snapshot_end_io(struct dm_target *ti, struct bio *bio, int error)
+static int snapshot_end_io(struct dm_target *ti, struct bio *bio,
+		blk_status_t *error)
 {
 	struct dm_snapshot *s = ti->private;
 
 	if (is_bio_tracked(bio))
 		stop_tracking_chunk(s, bio);
 
-	return 0;
+	return DM_ENDIO_DONE;
 }
 
 static void snapshot_merge_presuspend(struct dm_target *ti)
@@ -2534,24 +2487,15 @@ next_snapshot:
 /*
  * Called on a write from the origin driver.
  */
-static int do_origin(struct dm_dev *origin, struct bio *bio, bool limit)
+static int do_origin(struct dm_dev *origin, struct bio *bio)
 {
 	struct origin *o;
 	int r = DM_MAPIO_REMAPPED;
 
-again:
 	down_read(&_origins_lock);
 	o = __lookup_origin(origin->bdev);
-	if (o) {
-		if (limit) {
-			struct dm_snapshot *s;
-			list_for_each_entry(s, &o->snapshots, list)
-				if (unlikely(!wait_for_in_progress(s, true)))
-					goto again;
-		}
-
-		r = __origin_write(&o->snapshots, bio->bi_sector, bio);
-	}
+	if (o)
+		r = __origin_write(&o->snapshots, bio->bi_iter.bi_sector, bio);
 	up_read(&_origins_lock);
 
 	return r;
@@ -2647,13 +2591,24 @@ static void origin_dtr(struct dm_target *ti)
 static int origin_map(struct dm_target *ti, struct bio *bio)
 {
 	struct dm_origin *o = ti->private;
-	bio->bi_bdev = o->dev->bdev;
+	unsigned available_sectors;
 
-	if (bio->bi_rw & REQ_FLUSH)
+	bio_set_dev(bio, o->dev->bdev);
+
+	if (unlikely(bio->bi_opf & REQ_PREFLUSH))
 		return DM_MAPIO_REMAPPED;
 
+	if (bio_data_dir(bio) != WRITE)
+		return DM_MAPIO_REMAPPED;
+
+	available_sectors = o->split_boundary -
+		((unsigned)bio->bi_iter.bi_sector & (o->split_boundary - 1));
+
+	if (bio_sectors(bio) > available_sectors)
+		dm_accept_partial_bio(bio, available_sectors);
+
 	/* Only tell snapshots if this is a write */
-	return (bio_rw(bio) == WRITE) ? do_origin(o->dev, bio, true) : DM_MAPIO_REMAPPED;
+	return do_origin(o->dev, bio);
 }
 
 /*
@@ -2664,7 +2619,7 @@ static void origin_resume(struct dm_target *ti)
 {
 	struct dm_origin *o = ti->private;
 
-	ti->max_io_len = get_origin_minimum_chunksize(o->dev->bdev);
+	o->split_boundary = get_origin_minimum_chunksize(o->dev->bdev);
 
 	down_write(&_origins_lock);
 	__insert_dm_origin(o);
@@ -2696,20 +2651,6 @@ static void origin_status(struct dm_target *ti, status_type_t type,
 	}
 }
 
-static int origin_merge(struct dm_target *ti, struct bvec_merge_data *bvm,
-			struct bio_vec *biovec, int max_size)
-{
-	struct dm_origin *o = ti->private;
-	struct request_queue *q = bdev_get_queue(o->dev->bdev);
-
-	if (!q->merge_bvec_fn)
-		return max_size;
-
-	bvm->bi_bdev = o->dev->bdev;
-
-	return min(max_size, q->merge_bvec_fn(q, bvm, biovec));
-}
-
 static int origin_iterate_devices(struct dm_target *ti,
 				  iterate_devices_callout_fn fn, void *data)
 {
@@ -2728,7 +2669,6 @@ static struct target_type origin_target = {
 	.resume  = origin_resume,
 	.postsuspend = origin_postsuspend,
 	.status  = origin_status,
-	.merge	 = origin_merge,
 	.iterate_devices = origin_iterate_devices,
 };
 
@@ -2773,24 +2713,6 @@ static int __init dm_snapshot_init(void)
 		return r;
 	}
 
-	r = dm_register_target(&snapshot_target);
-	if (r < 0) {
-		DMERR("snapshot target register failed %d", r);
-		goto bad_register_snapshot_target;
-	}
-
-	r = dm_register_target(&origin_target);
-	if (r < 0) {
-		DMERR("Origin target register failed %d", r);
-		goto bad_register_origin_target;
-	}
-
-	r = dm_register_target(&merge_target);
-	if (r < 0) {
-		DMERR("Merge target register failed %d", r);
-		goto bad_register_merge_target;
-	}
-
 	r = init_origin_hash();
 	if (r) {
 		DMERR("init_origin_hash failed.");
@@ -2811,19 +2733,37 @@ static int __init dm_snapshot_init(void)
 		goto bad_pending_cache;
 	}
 
+	r = dm_register_target(&snapshot_target);
+	if (r < 0) {
+		DMERR("snapshot target register failed %d", r);
+		goto bad_register_snapshot_target;
+	}
+
+	r = dm_register_target(&origin_target);
+	if (r < 0) {
+		DMERR("Origin target register failed %d", r);
+		goto bad_register_origin_target;
+	}
+
+	r = dm_register_target(&merge_target);
+	if (r < 0) {
+		DMERR("Merge target register failed %d", r);
+		goto bad_register_merge_target;
+	}
+
 	return 0;
 
-bad_pending_cache:
-	kmem_cache_destroy(exception_cache);
-bad_exception_cache:
-	exit_origin_hash();
-bad_origin_hash:
-	dm_unregister_target(&merge_target);
 bad_register_merge_target:
 	dm_unregister_target(&origin_target);
 bad_register_origin_target:
 	dm_unregister_target(&snapshot_target);
 bad_register_snapshot_target:
+	kmem_cache_destroy(pending_cache);
+bad_pending_cache:
+	kmem_cache_destroy(exception_cache);
+bad_exception_cache:
+	exit_origin_hash();
+bad_origin_hash:
 	dm_exception_store_exit();
 
 	return r;

@@ -14,7 +14,7 @@
 #include <linux/sysctl.h>
 #include <linux/module.h>
 
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <linux/sunrpc/types.h>
 #include <linux/sunrpc/sched.h>
 #include <linux/sunrpc/stats.h>
@@ -89,7 +89,7 @@ proc_dodebug(struct ctl_table *table, int write,
 	left = *lenp;
 
 	if (write) {
-		if (!access_ok(VERIFY_READ, buffer, left))
+		if (!access_ok(buffer, left))
 			return -EFAULT;
 		p = buffer;
 		while (left && __get_user(c, p) >= 0 && isspace(c))

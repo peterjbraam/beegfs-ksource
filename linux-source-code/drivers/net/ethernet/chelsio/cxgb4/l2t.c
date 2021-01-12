@@ -423,7 +423,7 @@ struct l2t_entry *cxgb4_l2t_get(struct l2t_data *d, struct neighbour *neigh,
 	u8 lport;
 	u16 vlan;
 	struct l2t_entry *e;
-	int addr_len = neigh->tbl->key_len;
+	unsigned int addr_len = neigh->tbl->key_len;
 	u32 *addr = (u32 *)neigh->primary_key;
 	int ifidx = neigh->dev->ifindex;
 	int hash = addr_hash(d, addr, addr_len, ifidx);
@@ -536,7 +536,7 @@ void t4_l2t_update(struct adapter *adap, struct neighbour *neigh)
 	struct l2t_entry *e;
 	struct sk_buff_head *arpq = NULL;
 	struct l2t_data *d = adap->l2t;
-	int addr_len = neigh->tbl->key_len;
+	unsigned int addr_len = neigh->tbl->key_len;
 	u32 *addr = (u32 *) neigh->primary_key;
 	int ifidx = neigh->dev->ifindex;
 	int hash = addr_hash(d, addr, addr_len, ifidx);
@@ -646,7 +646,7 @@ struct l2t_data *t4_init_l2t(unsigned int l2t_start, unsigned int l2t_end)
 	if (l2t_size < L2T_MIN_HASH_BUCKETS)
 		return NULL;
 
-	d = kvzalloc(struct_size(d, l2tab, l2t_size), GFP_KERNEL);
+	d = kvzalloc(sizeof(*d) + l2t_size * sizeof(struct l2t_entry), GFP_KERNEL);
 	if (!d)
 		return NULL;
 

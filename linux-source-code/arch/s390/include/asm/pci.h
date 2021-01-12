@@ -1,15 +1,17 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __ASM_S390_PCI_H
 #define __ASM_S390_PCI_H
 
-/* must be set before including asm-generic/pci.h */
-#define PCI_DMA_BUS_IS_PHYS (0)
 /* must be set before including pci_clp.h */
 #define PCI_BAR_COUNT	6
 
 #include <linux/pci.h>
+#include <linux/mutex.h>
+#include <linux/iommu.h>
 #include <asm-generic/pci.h>
 #include <asm/pci_clp.h>
 #include <asm/pci_debug.h>
+#include <asm/sclp.h>
 
 #define PCIBIOS_MIN_IO		0x1000
 #define PCIBIOS_MIN_MEM		0x10000000
@@ -23,6 +25,9 @@ int pci_proc_domain(struct pci_bus *);
 
 #define ZPCI_BUS_NR			0	/* default bus number */
 #define ZPCI_DEVFN			0	/* default device number */
+
+#define ZPCI_NR_DMA_SPACES		1
+#define ZPCI_NR_DEVICES			CONFIG_PCI_NR_FUNCTIONS
 
 /* PCI Function Controls */
 #define ZPCI_FC_FN_ENABLED		0x80
@@ -67,16 +72,6 @@ struct zpci_fmb {
 	};
 } __packed __aligned(128);
 
-struct msi_map {
-	unsigned long irq;
-	struct msi_desc *msi;
-	struct hlist_node msi_chain;
-};
-
-#define ZPCI_MSI_VEC_BITS	10
-#define ZPCI_MSI_VEC_MAX	(1 << ZPCI_MSI_VEC_BITS)
-#define ZPCI_MSI_VEC_MASK	(ZPCI_MSI_VEC_MAX - 1)
-
 enum zpci_state {
 	ZPCI_FN_STATE_STANDBY = 0,
 	ZPCI_FN_STATE_CONFIGURED = 1,
@@ -86,10 +81,14 @@ enum zpci_state {
 
 struct zpci_bar_struct {
 	struct resource *res;		/* bus resource */
+	void __iomem	*mio_wb;
+	void __iomem	*mio_wt;
 	u32		val;		/* bar start & 3 flag bits */
 	u16		map_idx;	/* index into bar mapping array */
 	u8		size;		/* order 2 exponent */
 };
+
+struct s390_domain;
 
 /* Private data per function */
 struct zpci_dev {
@@ -105,14 +104,16 @@ struct zpci_dev {
 	u8		pft;		/* pci function type */
 	u16		domain;
 
+	struct mutex lock;
 	u8 pfip[CLP_PFIP_NR_SEGMENTS];	/* pci function internal path */
 	u32 uid;			/* user defined id */
 	u8 util_str[CLP_UTIL_STR_LEN];	/* utility string */
 
 	/* IRQ stuff */
 	u64		msi_addr;	/* MSI address */
-	struct zdev_irq_map *irq_map;
-	struct msi_map *msi_map;
+	unsigned int	max_msi;	/* maximum number of MSI's */
+	unsigned int	msi_first_bit;
+	unsigned int	msi_nr_irqs;
 	struct airq_iv *aibv;		/* adapter interrupt bit vector */
 	unsigned long	aisb;		/* number of the summary bit */
 
@@ -128,7 +129,10 @@ struct zpci_dev {
 	unsigned long	iommu_pages;
 	unsigned int	next_bit;
 
+	struct iommu_device iommu_dev;  /* IOMMU core handle */
+
 	char res_name[16];
+	bool mio_capable;
 	struct zpci_bar_struct bars[PCI_BAR_COUNT];
 
 	u64		start_dma;	/* Start of available DMA addresses */
@@ -148,6 +152,8 @@ struct zpci_dev {
 
 	struct dentry	*debugfs_dev;
 	struct dentry	*debugfs_perf;
+
+	struct s390_domain *s390_domain; /* s390 IOMMU domain data */
 };
 
 static inline bool zdev_enabled(struct zpci_dev *zdev)
@@ -156,6 +162,7 @@ static inline bool zdev_enabled(struct zpci_dev *zdev)
 }
 
 extern const struct attribute_group *zpci_attr_groups[];
+extern unsigned int s390_pci_force_floating __initdata;
 
 /* -----------------------------------------------------------------------------
   Prototypes
@@ -178,13 +185,9 @@ int clp_enable_fh(struct zpci_dev *, u8);
 int clp_disable_fh(struct zpci_dev *);
 int clp_get_state(u32 fid, enum zpci_state *state);
 
-/* MSI */
-struct msi_desc *__irq_get_msi_desc(unsigned int);
-int zpci_msi_set_mask_bits(struct msi_desc *, u32, u32);
-int zpci_setup_msi_irq(struct zpci_dev *, struct msi_desc *, unsigned int, int);
-void zpci_teardown_msi_irq(struct zpci_dev *, struct msi_desc *, int);
-int zpci_msihash_init(void);
-void zpci_msihash_exit(void);
+/* IOMMU Interface */
+int zpci_init_iommu(struct zpci_dev *zdev);
+void zpci_destroy_iommu(struct zpci_dev *zdev);
 
 #ifdef CONFIG_PCI
 /* Error handling and recovery */
@@ -210,12 +213,19 @@ static inline void zpci_exit_slot(struct zpci_dev *zdev) {}
 #endif /* CONFIG_HOTPLUG_PCI_S390 */
 
 /* Helpers */
-struct zpci_dev *get_zdev(struct pci_dev *);
+static inline struct zpci_dev *to_zpci(struct pci_dev *pdev)
+{
+	return pdev->sysdata;
+}
+
 struct zpci_dev *get_zdev_by_fid(u32);
 
 /* DMA */
 int zpci_dma_init(void);
 void zpci_dma_exit(void);
+
+int __init zpci_irq_init(void);
+void __init zpci_irq_exit(void);
 
 /* FMB */
 int zpci_fmb_enable_device(struct zpci_dev *);
@@ -227,5 +237,24 @@ void zpci_debug_exit(void);
 void zpci_debug_init_device(struct zpci_dev *, const char *);
 void zpci_debug_exit_device(struct zpci_dev *);
 void zpci_debug_info(struct zpci_dev *, struct seq_file *);
+
+/* Error reporting */
+int zpci_report_error(struct pci_dev *, struct zpci_report_error_header *);
+
+#ifdef CONFIG_NUMA
+
+/* Returns the node based on PCI bus */
+static inline int __pcibus_to_node(const struct pci_bus *bus)
+{
+	return NUMA_NO_NODE;
+}
+
+static inline const struct cpumask *
+cpumask_of_pcibus(const struct pci_bus *bus)
+{
+	return cpu_online_mask;
+}
+
+#endif /* CONFIG_NUMA */
 
 #endif

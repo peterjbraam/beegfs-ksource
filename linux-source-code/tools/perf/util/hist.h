@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __PERF_HIST_H
 #define __PERF_HIST_H
 
@@ -30,6 +31,7 @@ enum hist_column {
 	HISTC_DSO,
 	HISTC_THREAD,
 	HISTC_COMM,
+	HISTC_CGROUP_ID,
 	HISTC_PARENT,
 	HISTC_CPU,
 	HISTC_SOCKET,
@@ -60,6 +62,7 @@ enum hist_column {
 	HISTC_TRACE,
 	HISTC_SYM_SIZE,
 	HISTC_DSO_SIZE,
+	HISTC_SYMBOL_IPC,
 	HISTC_NR_COLS, /* Last entry */
 };
 

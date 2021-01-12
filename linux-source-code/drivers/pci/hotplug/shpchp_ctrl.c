@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * Standard Hot Plug Controller Driver
  *
@@ -7,21 +8,6 @@
  * Copyright (C) 2003-2004 Intel Corporation
  *
  * All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or (at
- * your option) any later version.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE, GOOD TITLE or
- * NON INFRINGEMENT.  See the GNU General Public License for more
- * details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  *
  * Send feedback to <greg@kroah.com>, <kristen.c.accardi@intel.com>
  *
@@ -460,23 +446,12 @@ void shpchp_queue_pushbutton_work(struct work_struct *work)
 	mutex_unlock(&p_slot->lock);
 }
 
-static int update_slot_info (struct slot *slot)
+static void update_slot_info(struct slot *slot)
 {
-	struct hotplug_slot_info *info;
-	int result;
-
-	info = kmalloc(sizeof(*info), GFP_KERNEL);
-	if (!info)
-		return -ENOMEM;
-
-	slot->hpc_ops->get_power_status(slot, &(info->power_status));
-	slot->hpc_ops->get_attention_status(slot, &(info->attention_status));
-	slot->hpc_ops->get_latch_status(slot, &(info->latch_status));
-	slot->hpc_ops->get_adapter_status(slot, &(info->adapter_status));
-
-	result = pci_hp_change_slot_info(slot->hotplug_slot, info);
-	kfree (info);
-	return result;
+	slot->hpc_ops->get_power_status(slot, &slot->pwr_save);
+	slot->hpc_ops->get_attention_status(slot, &slot->attention_save);
+	slot->hpc_ops->get_latch_status(slot, &slot->latch_save);
+	slot->hpc_ops->get_adapter_status(slot, &slot->presence_save);
 }
 
 /*
@@ -668,6 +643,7 @@ int shpchp_sysfs_enable_slot(struct slot *p_slot)
 	switch (p_slot->state) {
 	case BLINKINGON_STATE:
 		cancel_delayed_work(&p_slot->work);
+		/* fall through */
 	case STATIC_STATE:
 		p_slot->state = POWERON_STATE;
 		mutex_unlock(&p_slot->lock);
@@ -703,6 +679,7 @@ int shpchp_sysfs_disable_slot(struct slot *p_slot)
 	switch (p_slot->state) {
 	case BLINKINGOFF_STATE:
 		cancel_delayed_work(&p_slot->work);
+		/* fall through */
 	case STATIC_STATE:
 		p_slot->state = POWEROFF_STATE;
 		mutex_unlock(&p_slot->lock);

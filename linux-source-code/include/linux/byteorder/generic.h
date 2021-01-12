@@ -1,8 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _LINUX_BYTEORDER_GENERIC_H
 #define _LINUX_BYTEORDER_GENERIC_H
 
 /*
- * linux/byteorder_generic.h
+ * linux/byteorder/generic.h
  * Generic Byte-reordering support
  *
  * The "... p" macros, like le64_to_cpup, can be used with pointers
@@ -153,6 +154,23 @@ static inline void le32_add_cpu(__le32 *var, u32 val)
 static inline void le64_add_cpu(__le64 *var, u64 val)
 {
 	*var = cpu_to_le64(le64_to_cpu(*var) + val);
+}
+
+/* XXX: this stuff can be optimized */
+static inline void le32_to_cpu_array(u32 *buf, unsigned int words)
+{
+	while (words--) {
+		__le32_to_cpus(buf);
+		buf++;
+	}
+}
+
+static inline void cpu_to_le32_array(u32 *buf, unsigned int words)
+{
+	while (words--) {
+		__cpu_to_le32s(buf);
+		buf++;
+	}
 }
 
 static inline void be16_add_cpu(__be16 *var, u16 val)

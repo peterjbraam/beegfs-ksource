@@ -150,7 +150,7 @@ static int vfio_user_config_read(struct pci_dev *pdev, int offset,
 
 	*val = cpu_to_le32(tmp_val);
 
-	return pcibios_err_to_errno(ret);
+	return ret;
 }
 
 static int vfio_user_config_write(struct pci_dev *pdev, int offset,
@@ -171,7 +171,7 @@ static int vfio_user_config_write(struct pci_dev *pdev, int offset,
 		break;
 	}
 
-	return pcibios_err_to_errno(ret);
+	return ret;
 }
 
 static int vfio_default_config_read(struct vfio_pci_device *vdev, int pos,
@@ -255,7 +255,7 @@ static int vfio_direct_config_read(struct vfio_pci_device *vdev, int pos,
 
 	ret = vfio_user_config_read(vdev->pdev, pos, val, count);
 	if (ret)
-		return pcibios_err_to_errno(ret);
+		return ret;
 
 	if (pos >= PCI_CFG_SPACE_SIZE) { /* Extended cap header mangling */
 		if (offset < 4)
@@ -293,7 +293,7 @@ static int vfio_raw_config_read(struct vfio_pci_device *vdev, int pos,
 
 	ret = vfio_user_config_read(vdev->pdev, pos, val, count);
 	if (ret)
-		return pcibios_err_to_errno(ret);
+		return ret;
 
 	return count;
 }
@@ -480,12 +480,17 @@ static void vfio_bar_fixup(struct vfio_pci_device *vdev)
 	bar = (__le32 *)&vdev->vconfig[PCI_ROM_ADDRESS];
 
 	/*
-	 * NB. we expose the actual BAR size here, regardless of whether
-	 * we can read it.  When we report the REGION_INFO for the ROM
-	 * we report what PCI tells us is the actual ROM size.
+	 * NB. REGION_INFO will have reported zero size if we weren't able
+	 * to read the ROM, but we still return the actual BAR size here if
+	 * it exists (or the shadow ROM space).
 	 */
 	if (pci_resource_start(pdev, PCI_ROM_RESOURCE)) {
 		mask = ~(pci_resource_len(pdev, PCI_ROM_RESOURCE) - 1);
+		mask |= PCI_ROM_ADDRESS_ENABLE;
+		*bar &= cpu_to_le32((u32)mask);
+	} else if (pdev->resource[PCI_ROM_RESOURCE].flags &
+					IORESOURCE_ROM_SHADOW) {
+		mask = ~(0x20000 - 1);
 		mask |= PCI_ROM_ADDRESS_ENABLE;
 		*bar &= cpu_to_le32((u32)mask);
 	} else
@@ -686,7 +691,7 @@ static int vfio_pm_config_write(struct vfio_pci_device *vdev, int pos,
 			break;
 		}
 
-		pci_set_power_state(vdev->pdev, state);
+		vfio_pci_set_power_state(vdev, state);
 	}
 
 	return count;
@@ -1107,7 +1112,7 @@ static int vfio_msi_config_write(struct vfio_pci_device *vdev, int pos,
 						 start + PCI_MSI_FLAGS,
 						 flags);
 		if (ret)
-			return pcibios_err_to_errno(ret);
+			return ret;
 	}
 
 	return count;

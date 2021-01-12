@@ -30,6 +30,7 @@
 #include <linux/pid_namespace.h>
 #include <net/genetlink.h>
 #include <linux/atomic.h>
+#include <linux/sched/cputime.h>
 
 /*
  * Maximum length of a cpumask that can be specified in
@@ -49,7 +50,11 @@ static const struct nla_policy taskstats_cmd_get_policy[TASKSTATS_CMD_ATTR_MAX+1
 	[TASKSTATS_CMD_ATTR_REGISTER_CPUMASK] = { .type = NLA_STRING },
 	[TASKSTATS_CMD_ATTR_DEREGISTER_CPUMASK] = { .type = NLA_STRING },};
 
-static const struct nla_policy cgroupstats_cmd_get_policy[CGROUPSTATS_CMD_ATTR_MAX+1] = {
+/*
+ * We have to use TASKSTATS_CMD_ATTR_MAX here, it is the maxattr in the family.
+ * Make sure they are always aligned.
+ */
+static const struct nla_policy cgroupstats_cmd_get_policy[TASKSTATS_CMD_ATTR_MAX+1] = {
 	[CGROUPSTATS_CMD_ATTR_FD] = { .type = NLA_U32 },
 };
 
@@ -189,11 +194,7 @@ static int fill_stats_for_pid(pid_t pid, struct taskstats *stats)
 {
 	struct task_struct *tsk;
 
-	rcu_read_lock();
-	tsk = find_task_by_vpid(pid);
-	if (tsk)
-		get_task_struct(tsk);
-	rcu_read_unlock();
+	tsk = find_get_task_by_vpid(pid);
 	if (!tsk)
 		return -ESRCH;
 	fill_stats(current_user_ns(), task_active_pid_ns(current), tsk, stats);
@@ -206,6 +207,8 @@ static int fill_stats_for_tgid(pid_t tgid, struct taskstats *stats)
 	struct task_struct *tsk, *first;
 	unsigned long flags;
 	int rc = -ESRCH;
+	u64 delta, utime, stime;
+	u64 start_time;
 
 	/*
 	 * Add additional stats from live tasks except zombie thread group
@@ -223,6 +226,7 @@ static int fill_stats_for_tgid(pid_t tgid, struct taskstats *stats)
 		memset(stats, 0, sizeof(*stats));
 
 	tsk = first;
+	start_time = ktime_get_ns();
 	do {
 		if (tsk->exit_state)
 			continue;
@@ -233,6 +237,16 @@ static int fill_stats_for_tgid(pid_t tgid, struct taskstats *stats)
 		 *	per-task-foo(stats, tsk);
 		 */
 		delayacct_add_tsk(stats, tsk);
+
+		/* calculate task elapsed time in nsec */
+		delta = start_time - tsk->start_time;
+		/* Convert to micro seconds */
+		do_div(delta, NSEC_PER_USEC);
+		stats->ac_etime += delta;
+
+		task_cputime(tsk, &utime, &stime);
+		stats->ac_utime += div_u64(utime, NSEC_PER_USEC);
+		stats->ac_stime += div_u64(stime, NSEC_PER_USEC);
 
 		stats->nvcsw += tsk->nvcsw;
 		stats->nivcsw += tsk->nivcsw;
@@ -276,6 +290,7 @@ static int add_del_listener(pid_t pid, const struct cpumask *mask, int isadd)
 	struct listener_list *listeners;
 	struct listener *s, *tmp, *s2;
 	unsigned int cpu;
+	int ret = 0;
 
 	if (!cpumask_subset(mask, cpu_possible_mask))
 		return -EINVAL;
@@ -290,9 +305,10 @@ static int add_del_listener(pid_t pid, const struct cpumask *mask, int isadd)
 		for_each_cpu(cpu, mask) {
 			s = kmalloc_node(sizeof(struct listener),
 					GFP_KERNEL, cpu_to_node(cpu));
-			if (!s)
+			if (!s) {
+				ret = -ENOMEM;
 				goto cleanup;
-
+			}
 			s->pid = pid;
 			s->valid = 1;
 
@@ -325,7 +341,7 @@ cleanup:
 		}
 		up_write(&listeners->sem);
 	}
-	return 0;
+	return ret;
 }
 
 static int parse(struct nlattr *na, struct cpumask *mask)
@@ -417,7 +433,7 @@ static int cgroupstats_user_cmd(struct sk_buff *skb, struct genl_info *info)
 	stats = nla_data(na);
 	memset(stats, 0, sizeof(*stats));
 
-	rc = cgroupstats_build(stats, f.file->f_dentry);
+	rc = cgroupstats_build(stats, f.file->f_path.dentry);
 	if (rc < 0) {
 		nlmsg_free(rep_skb);
 		goto err;
@@ -595,7 +611,7 @@ void taskstats_exit(struct task_struct *tsk, int group_dead)
 		fill_tgid_exit(tsk);
 	}
 
-	listeners = __this_cpu_ptr(&listener_array);
+	listeners = raw_cpu_ptr(&listener_array);
 	if (list_empty(&listeners->list))
 		return;
 
@@ -644,7 +660,7 @@ static const struct genl_ops taskstats_ops[] = {
 	},
 };
 
-static struct genl_family family = {
+static struct genl_family family __ro_after_init = {
 	.name		= TASKSTATS_GENL_NAME,
 	.version	= TASKSTATS_GENL_VERSION,
 	.maxattr	= TASKSTATS_CMD_ATTR_MAX,

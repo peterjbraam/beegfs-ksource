@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Copyright (C) 1995-1997 Olaf Kirch <okir@monad.swb.de>
  */
@@ -36,7 +37,7 @@
 /*
  * Callback function for readdir
  */
-typedef int (*nfsd_dirop_t)(struct inode *, struct dentry *, int, int);
+typedef int (*nfsd_filldir_t)(void *, const char *, int, loff_t, u64, unsigned);
 
 /* nfsd/vfs.c */
 int		nfsd_racache_init(int);
@@ -52,9 +53,6 @@ __be32		nfsd_setattr(struct svc_rqst *, struct svc_fh *,
 				struct iattr *, int, time_t);
 int nfsd_mountpoint(struct dentry *, struct svc_export *);
 #ifdef CONFIG_NFSD_V4
-__be32          nfsd4_set_nfs4_acl(struct svc_rqst *, struct svc_fh *,
-                    struct nfs4_acl *);
-int             nfsd4_get_nfs4_acl(struct svc_rqst *, struct dentry *, struct nfs4_acl **);
 __be32          nfsd4_set_nfs4_label(struct svc_rqst *, struct svc_fh *,
 		    struct xdr_netobj *);
 __be32		nfsd4_vfs_fallocate(struct svc_rqst *, struct svc_fh *,
@@ -62,6 +60,9 @@ __be32		nfsd4_vfs_fallocate(struct svc_rqst *, struct svc_fh *,
 __be32		nfsd4_clone_file_range(struct file *, u64, struct file *,
 			u64, u64);
 #endif /* CONFIG_NFSD_V4 */
+__be32		nfsd_create_locked(struct svc_rqst *, struct svc_fh *,
+				char *name, int len, struct iattr *attrs,
+				int type, dev_t rdev, struct svc_fh *res);
 __be32		nfsd_create(struct svc_rqst *, struct svc_fh *,
 				char *name, int len, struct iattr *attrs,
 				int type, dev_t rdev, struct svc_fh *res);
@@ -77,10 +78,13 @@ __be32		nfsd_commit(struct svc_rqst *, struct svc_fh *,
 __be32		nfsd_open(struct svc_rqst *, struct svc_fh *, umode_t,
 				int, struct file **);
 struct raparms;
-__be32		nfsd_splice_read(struct svc_rqst *,
-				struct file *, loff_t, unsigned long *);
-__be32		nfsd_readv(struct file *, loff_t, struct kvec *, int,
-				unsigned long *);
+__be32		nfsd_splice_read(struct svc_rqst *rqstp, struct svc_fh *fhp,
+				struct file *file, loff_t offset,
+				unsigned long *count);
+__be32		nfsd_readv(struct svc_rqst *rqstp, struct svc_fh *fhp,
+				struct file *file, loff_t offset,
+				struct kvec *vec, int vlen,
+				unsigned long *count);
 __be32 		nfsd_read(struct svc_rqst *, struct svc_fh *,
 				loff_t, struct kvec *, int, unsigned long *);
 __be32 		nfsd_write(struct svc_rqst *, struct svc_fh *, loff_t,
@@ -96,13 +100,15 @@ __be32		nfsd_symlink(struct svc_rqst *, struct svc_fh *,
 				struct svc_fh *res);
 __be32		nfsd_link(struct svc_rqst *, struct svc_fh *,
 				char *, int, struct svc_fh *);
+ssize_t		nfsd_copy_file_range(struct file *, u64,
+				     struct file *, u64, u64);
 __be32		nfsd_rename(struct svc_rqst *,
 				struct svc_fh *, char *, int,
 				struct svc_fh *, char *, int);
 __be32		nfsd_unlink(struct svc_rqst *, struct svc_fh *, int type,
 				char *name, int len);
 __be32		nfsd_readdir(struct svc_rqst *, struct svc_fh *,
-			     loff_t *, struct readdir_cd *, filldir_t);
+			     loff_t *, struct readdir_cd *, nfsd_filldir_t);
 __be32		nfsd_statfs(struct svc_rqst *, struct svc_fh *,
 				struct kstatfs *, int access);
 
@@ -111,11 +117,6 @@ __be32		nfsd_permission(struct svc_rqst *, struct svc_export *,
 
 struct raparms *nfsd_init_raparms(struct file *file);
 void		nfsd_put_raparams(struct file *file, struct raparms *ra);
-
-#if defined(CONFIG_NFSD_V2_ACL) || defined(CONFIG_NFSD_V3_ACL)
-struct posix_acl *nfsd_get_posix_acl(struct svc_fh *, int);
-int nfsd_set_posix_acl(struct svc_fh *, int, struct posix_acl *);
-#endif
 
 static inline int fh_want_write(struct svc_fh *fh)
 {
@@ -138,7 +139,14 @@ static inline __be32 fh_getattr(struct svc_fh *fh, struct kstat *stat)
 {
 	struct path p = {.mnt = fh->fh_export->ex_path.mnt,
 			 .dentry = fh->fh_dentry};
-	return nfserrno(vfs_getattr(&p, stat));
+	return nfserrno(vfs_getattr(&p, stat, STATX_BASIC_STATS,
+				    AT_STATX_SYNC_AS_STAT));
+}
+
+static inline int nfsd_create_is_exclusive(int createmode)
+{
+	return createmode == NFS3_CREATE_EXCLUSIVE
+	       || createmode == NFS4_CREATE_EXCLUSIVE4_1;
 }
 
 static inline bool nfsd_eof_on_read(long requested, long read,
@@ -158,12 +166,6 @@ static inline bool nfsd_eof_on_read(long requested, long read,
 	 * That case was fixed by the addition of the above check.
 	 */
 	return (offset + read >= size);
-}
-
-static inline int nfsd_create_is_exclusive(int createmode)
-{
-	return createmode == NFS3_CREATE_EXCLUSIVE
-	       || createmode == NFS4_CREATE_EXCLUSIVE4_1;
 }
 
 #endif /* LINUX_NFSD_VFS_H */

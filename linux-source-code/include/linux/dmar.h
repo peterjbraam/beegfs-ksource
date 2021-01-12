@@ -26,7 +26,7 @@
 #include <linux/msi.h>
 #include <linux/irqreturn.h>
 #include <linux/rwsem.h>
-#include <linux/rcupdate.h>
+#include <linux/rculist.h>
 
 struct acpi_dmar_header;
 
@@ -39,6 +39,7 @@ struct acpi_dmar_header;
 /* DMAR Flags */
 #define DMAR_INTR_REMAP		0x1
 #define DMAR_X2APIC_OPT_OUT	0x2
+#define DMAR_PLATFORM_OPT_IN	0x4
 
 struct intel_iommu;
 
@@ -170,6 +171,8 @@ static inline int dmar_ir_hotplug(struct dmar_drhd_unit *dmaru, bool insert)
 { return 0; }
 #endif /* CONFIG_IRQ_REMAP */
 
+extern bool dmar_platform_optin(void);
+
 #else /* CONFIG_DMAR_TABLE */
 
 static inline int dmar_device_add(void *handle)
@@ -180,6 +183,11 @@ static inline int dmar_device_add(void *handle)
 static inline int dmar_device_remove(void *handle)
 {
 	return 0;
+}
+
+static inline bool dmar_platform_optin(void)
+{
+	return false;
 }
 
 #endif /* CONFIG_DMAR_TABLE */
@@ -275,6 +283,7 @@ extern void dmar_msi_read(int irq, struct msi_msg *msg);
 extern void dmar_msi_write(int irq, struct msi_msg *msg);
 extern int dmar_set_interrupt(struct intel_iommu *iommu);
 extern irqreturn_t dmar_fault(int irq, void *dev_id);
-extern int arch_setup_dmar_msi(unsigned int irq);
+extern int dmar_alloc_hwirq(int id, int node, void *arg);
+extern void dmar_free_hwirq(int irq);
 
 #endif /* __DMAR_H__ */

@@ -34,14 +34,19 @@
 #include <linux/mutex.h>
 #include <linux/workqueue.h>
 #include <net/genetlink.h>
-#include <asm/unaligned.h>
+#include <scsi/scsi_common.h>
+#include <scsi/scsi_proto.h>
 #include <target/target_core_base.h>
 #include <target/target_core_fabric.h>
 #include <target/target_core_backend.h>
 
 #include <linux/target_core_user.h>
 
-/*
+/**
+ * DOC: Userspace I/O
+ * Userspace I/O
+ * -------------
+ *
  * Define a shared-memory interface for LIO to pass SCSI commands and
  * data to userspace for processing. This is to allow backends that
  * are too complex for in-kernel support to be possible.
@@ -52,7 +57,7 @@
  * See the .h file for how the ring is laid out. Note that while the
  * command ring is defined, the particulars of the data area are
  * not. Offset values in the command entry point to other locations
- * internal to the mmap()ed area. There is separate space outside the
+ * internal to the mmap-ed area. There is separate space outside the
  * command ring for data buffers. This leaves maximum flexibility for
  * moving buffer allocations, or even page flipping or other
  * allocation techniques, without altering the command ring layout.
@@ -78,6 +83,7 @@
 #define DATA_BLOCK_SIZE PAGE_SIZE
 #define DATA_BLOCK_SHIFT PAGE_SHIFT
 #define DATA_BLOCK_BITS_DEF (256 * 1024)
+
 #define TCMU_MBS_TO_BLOCKS(_mbs) (_mbs << (20 - DATA_BLOCK_SHIFT))
 #define TCMU_BLOCKS_TO_MBS(_blocks) (_blocks >> (20 - DATA_BLOCK_SHIFT))
 
@@ -365,7 +371,7 @@ static int tcmu_genl_cmd_done(struct genl_info *info, int completed_cmd)
 	    !info->attrs[TCMU_ATTR_DEVICE_ID]) {
 		printk(KERN_ERR "TCMU_ATTR_CMD_STATUS or TCMU_ATTR_DEVICE_ID not set, doing nothing\n");
 		return -EINVAL;
-	}
+        }
 
 	dev_id = nla_get_u32(info->attrs[TCMU_ATTR_DEVICE_ID]);
 	rc = nla_get_s32(info->attrs[TCMU_ATTR_CMD_STATUS]);
@@ -460,7 +466,7 @@ static const struct genl_ops tcmu_genl_ops[] = {
 };
 
 /* Our generic netlink family */
-static struct genl_family tcmu_genl_family = {
+static struct genl_family tcmu_genl_family __ro_after_init = {
 	.module = THIS_MODULE,
 	.hdrsize = 0,
 	.name = "TCM-USER",
@@ -741,7 +747,7 @@ static void scatter_data_area(struct tcmu_dev *udev,
 }
 
 static void gather_data_area(struct tcmu_dev *udev, struct tcmu_cmd *cmd,
-			     bool bidi)
+			     bool bidi, uint32_t read_len)
 {
 	struct se_cmd *se_cmd = cmd->se_cmd;
 	int i, dbi;
@@ -774,7 +780,7 @@ static void gather_data_area(struct tcmu_dev *udev, struct tcmu_cmd *cmd,
 	for_each_sg(data_sg, sg, data_nents, i) {
 		int sg_remaining = sg->length;
 		to = kmap_atomic(sg_page(sg)) + sg->offset;
-		while (sg_remaining > 0) {
+		while (sg_remaining > 0 && read_len > 0) {
 			if (block_remaining == 0) {
 				if (from)
 					kunmap_atomic(from);
@@ -786,6 +792,8 @@ static void gather_data_area(struct tcmu_dev *udev, struct tcmu_cmd *cmd,
 			}
 			copy_bytes = min_t(size_t, sg_remaining,
 					block_remaining);
+			if (read_len < copy_bytes)
+				copy_bytes = read_len;
 			offset = DATA_BLOCK_SIZE - block_remaining;
 			tcmu_flush_dcache_range(from, copy_bytes);
 			memcpy(to + sg->length - sg_remaining, from + offset,
@@ -793,8 +801,11 @@ static void gather_data_area(struct tcmu_dev *udev, struct tcmu_cmd *cmd,
 
 			sg_remaining -= copy_bytes;
 			block_remaining -= copy_bytes;
+			read_len -= copy_bytes;
 		}
 		kunmap_atomic(to - sg->offset);
+		if (read_len == 0)
+			break;
 	}
 	if (from)
 		kunmap_atomic(from);
@@ -1131,6 +1142,8 @@ static void tcmu_handle_completion(struct tcmu_cmd *cmd, struct tcmu_cmd_entry *
 {
 	struct se_cmd *se_cmd = cmd->se_cmd;
 	struct tcmu_dev *udev = cmd->tcmu_dev;
+	bool read_len_valid = false;
+	uint32_t read_len = se_cmd->data_length;
 
 	/*
 	 * cmd has been completed already from timeout, just reclaim
@@ -1147,13 +1160,28 @@ static void tcmu_handle_completion(struct tcmu_cmd *cmd, struct tcmu_cmd_entry *
 		pr_warn("TCMU: Userspace set UNKNOWN_OP flag on se_cmd %p\n",
 			cmd->se_cmd);
 		entry->rsp.scsi_status = SAM_STAT_CHECK_CONDITION;
-	} else if (entry->rsp.scsi_status == SAM_STAT_CHECK_CONDITION) {
+		goto done;
+	}
+
+	if (se_cmd->data_direction == DMA_FROM_DEVICE &&
+	    (entry->hdr.uflags & TCMU_UFLAG_READ_LEN) && entry->rsp.read_len) {
+		read_len_valid = true;
+		if (entry->rsp.read_len < read_len)
+			read_len = entry->rsp.read_len;
+	}
+
+	if (entry->rsp.scsi_status == SAM_STAT_CHECK_CONDITION) {
 		transport_copy_sense_to_cmd(se_cmd, entry->rsp.sense_buffer);
-	} else if (se_cmd->se_cmd_flags & SCF_BIDI) {
+		if (!read_len_valid )
+			goto done;
+		else
+			se_cmd->se_cmd_flags |= SCF_TREAT_READ_AS_NORMAL;
+	}
+	if (se_cmd->se_cmd_flags & SCF_BIDI) {
 		/* Get Data-In buffer before clean up */
-		gather_data_area(udev, cmd, true);
+		gather_data_area(udev, cmd, true, read_len);
 	} else if (se_cmd->data_direction == DMA_FROM_DEVICE) {
-		gather_data_area(udev, cmd, false);
+		gather_data_area(udev, cmd, false, read_len);
 	} else if (se_cmd->data_direction == DMA_TO_DEVICE) {
 		/* TODO: */
 	} else if (se_cmd->data_direction != DMA_NONE) {
@@ -1161,7 +1189,13 @@ static void tcmu_handle_completion(struct tcmu_cmd *cmd, struct tcmu_cmd_entry *
 			se_cmd->data_direction);
 	}
 
-	target_complete_cmd(cmd->se_cmd, entry->rsp.scsi_status);
+done:
+	if (read_len_valid) {
+		pr_debug("read_len = %d\n", read_len);
+		target_complete_cmd_with_length(cmd->se_cmd,
+					entry->rsp.scsi_status, read_len);
+	} else
+		target_complete_cmd(cmd->se_cmd, entry->rsp.scsi_status);
 
 out:
 	cmd->se_cmd = NULL;
@@ -1202,7 +1236,7 @@ static unsigned int tcmu_handle_completions(struct tcmu_dev *udev)
 	mb = udev->mb_addr;
 	tcmu_flush_dcache_range(mb, sizeof(*mb));
 
-	while (udev->cmdr_last_cleaned != ACCESS_ONCE(mb->cmd_tail)) {
+	while (udev->cmdr_last_cleaned != READ_ONCE(mb->cmd_tail)) {
 
 		struct tcmu_cmd_entry *entry = (void *) mb + CMDR_OFF + udev->cmdr_last_cleaned;
 
@@ -1216,9 +1250,7 @@ static unsigned int tcmu_handle_completions(struct tcmu_dev *udev)
 		}
 		WARN_ON(tcmu_hdr_get_op(entry->hdr.len_op) != TCMU_OP_CMD);
 
-		cmd = idr_find(&udev->commands, entry->hdr.cmd_id);
-		if (cmd)
-			idr_remove(&udev->commands, cmd->cmd_id);
+		cmd = idr_remove(&udev->commands, entry->hdr.cmd_id);
 		if (!cmd) {
 			pr_err("cmd_id %u not found, ring is broken\n",
 			       entry->hdr.cmd_id);
@@ -1285,12 +1317,13 @@ static int tcmu_check_expired_cmd(int id, void *p, void *data)
 		 * target_complete_cmd will translate this to LUN COMM FAILURE
 		 */
 		scsi_status = SAM_STAT_CHECK_CONDITION;
+		list_del_init(&cmd->queue_entry);
 	} else {
+		list_del_init(&cmd->queue_entry);
 		idr_remove(&udev->commands, id);
 		tcmu_free_cmd(cmd);
 		scsi_status = SAM_STAT_TASK_SET_FULL;
 	}
-	list_del_init(&cmd->queue_entry);
 
 	pr_debug("Timing out cmd %u on dev %s that is %s.\n",
 		 id, udev->name, is_running ? "inflight" : "queued");
@@ -1309,17 +1342,17 @@ static void tcmu_device_timedout(struct tcmu_dev *udev)
 	schedule_delayed_work(&tcmu_unmap_work, 0);
 }
 
-static void tcmu_cmd_timedout(unsigned long data)
+static void tcmu_cmd_timedout(struct timer_list *t)
 {
-	struct tcmu_dev *udev = (struct tcmu_dev *)data;
+	struct tcmu_dev *udev = from_timer(udev, t, cmd_timer);
 
 	pr_debug("%s cmd timeout has expired\n", udev->name);
 	tcmu_device_timedout(udev);
 }
 
-static void tcmu_qfull_timedout(unsigned long data)
+static void tcmu_qfull_timedout(struct timer_list *t)
 {
-	struct tcmu_dev *udev = (struct tcmu_dev *)data;
+	struct tcmu_dev *udev = from_timer(udev, t, qfull_timer);
 
 	pr_debug("%s qfull timeout has expired\n", udev->name);
 	tcmu_device_timedout(udev);
@@ -1373,10 +1406,8 @@ static struct se_device *tcmu_alloc_device(struct se_hba *hba, const char *name)
 	INIT_LIST_HEAD(&udev->inflight_queue);
 	idr_init(&udev->commands);
 
-	setup_timer(&udev->qfull_timer, tcmu_qfull_timedout,
-		    (unsigned long)udev);
-	setup_timer(&udev->cmd_timer, tcmu_cmd_timedout,
-		    (unsigned long)udev);
+	timer_setup(&udev->qfull_timer, tcmu_qfull_timedout, 0);
+	timer_setup(&udev->cmd_timer, tcmu_cmd_timedout, 0);
 
 	INIT_RADIX_TREE(&udev->data_blocks, GFP_KERNEL);
 
@@ -1499,15 +1530,15 @@ static struct page *tcmu_try_get_block_page(struct tcmu_dev *udev, uint32_t dbi)
 	return page;
 }
 
-static int tcmu_vma_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
+static vm_fault_t tcmu_vma_fault(struct vm_fault *vmf)
 {
-	struct tcmu_dev *udev = vma->vm_private_data;
+	struct tcmu_dev *udev = vmf->vma->vm_private_data;
 	struct uio_info *info = &udev->uio_info;
 	struct page *page;
 	unsigned long offset;
 	void *addr;
 
-	int mi = tcmu_find_mem_index(vma);
+	int mi = tcmu_find_mem_index(vmf->vma);
 	if (mi < 0)
 		return VM_FAULT_SIGBUS;
 
@@ -1632,7 +1663,7 @@ static void tcmu_dev_kref_release(struct kref *kref)
 	WARN_ON(!all_expired);
 
 	tcmu_blocks_release(&udev->data_blocks, 0, udev->dbi_max + 1);
-	kfree(udev->data_bitmap);
+	bitmap_free(udev->data_bitmap);
 	mutex_unlock(&udev->cmdr_lock);
 
 	call_rcu(&dev->rcu_head, tcmu_dev_call_rcu);
@@ -1710,8 +1741,9 @@ static int tcmu_wait_genl_cmd_reply(struct tcmu_dev *udev)
 	return ret;
 }
 
-static int tcmu_netlink_event(struct tcmu_dev *udev, enum tcmu_genl_cmd cmd,
-			      int reconfig_attr, const void *reconfig_data)
+static int tcmu_netlink_event_init(struct tcmu_dev *udev,
+				   enum tcmu_genl_cmd cmd,
+				   struct sk_buff **buf, void **hdr)
 {
 	struct sk_buff *skb;
 	void *msg_header;
@@ -1737,27 +1769,20 @@ static int tcmu_netlink_event(struct tcmu_dev *udev, enum tcmu_genl_cmd cmd,
 	if (ret < 0)
 		goto free_skb;
 
-	if (cmd == TCMU_CMD_RECONFIG_DEVICE) {
-		switch (reconfig_attr) {
-		case TCMU_ATTR_DEV_CFG:
-			ret = nla_put_string(skb, reconfig_attr, reconfig_data);
-			break;
-		case TCMU_ATTR_DEV_SIZE:
-			ret = nla_put_u64_64bit(skb, reconfig_attr,
-						*((u64 *)reconfig_data),
-						TCMU_ATTR_PAD);
-			break;
-		case TCMU_ATTR_WRITECACHE:
-			ret = nla_put_u8(skb, reconfig_attr,
-					  *((u8 *)reconfig_data));
-			break;
-		default:
-			BUG();
-		}
+	*buf = skb;
+	*hdr = msg_header;
+	return ret;
 
-		if (ret < 0)
-			goto free_skb;
-	}
+free_skb:
+	nlmsg_free(skb);
+	return ret;
+}
+
+static int tcmu_netlink_event_send(struct tcmu_dev *udev,
+				   enum tcmu_genl_cmd cmd,
+				   struct sk_buff *skb, void *msg_header)
+{
+	int ret;
 
 	genlmsg_end(skb, msg_header);
 
@@ -1768,17 +1793,42 @@ static int tcmu_netlink_event(struct tcmu_dev *udev, enum tcmu_genl_cmd cmd,
 	}
 
 	ret = genlmsg_multicast_allns(&tcmu_genl_family, skb, 0,
-				TCMU_MCGRP_CONFIG, GFP_KERNEL);
-	/* We don't care if no one is listening */
-	if (ret == -ESRCH)
-		ret = 0;
-	if (!ret)
-		ret = tcmu_wait_genl_cmd_reply(udev);
+				      TCMU_MCGRP_CONFIG, GFP_KERNEL);
+
+	/* Wait during an add as the listener may not be up yet */
+	if (ret == 0 ||
+	   (ret == -ESRCH && cmd == TCMU_CMD_ADDED_DEVICE))
+		return tcmu_wait_genl_cmd_reply(udev);
 
 	return ret;
-free_skb:
-	nlmsg_free(skb);
-	return ret;
+}
+
+static int tcmu_send_dev_add_event(struct tcmu_dev *udev)
+{
+	struct sk_buff *skb = NULL;
+	void *msg_header = NULL;
+	int ret = 0;
+
+	ret = tcmu_netlink_event_init(udev, TCMU_CMD_ADDED_DEVICE, &skb,
+				      &msg_header);
+	if (ret < 0)
+		return ret;
+	return tcmu_netlink_event_send(udev, TCMU_CMD_ADDED_DEVICE, skb,
+				       msg_header);
+}
+
+static int tcmu_send_dev_remove_event(struct tcmu_dev *udev)
+{
+	struct sk_buff *skb = NULL;
+	void *msg_header = NULL;
+	int ret = 0;
+
+	ret = tcmu_netlink_event_init(udev, TCMU_CMD_REMOVED_DEVICE,
+				      &skb, &msg_header);
+	if (ret < 0)
+		return ret;
+	return tcmu_netlink_event_send(udev, TCMU_CMD_REMOVED_DEVICE,
+				       skb, msg_header);
 }
 
 static int tcmu_update_uio_info(struct tcmu_dev *udev)
@@ -1821,8 +1871,7 @@ static int tcmu_configure_device(struct se_device *dev)
 	info = &udev->uio_info;
 
 	mutex_lock(&udev->cmdr_lock);
-	udev->data_bitmap = kzalloc(BITS_TO_LONGS(udev->max_blocks) *
-				    sizeof(unsigned long), GFP_KERNEL);
+	udev->data_bitmap = bitmap_zalloc(udev->max_blocks, GFP_KERNEL);
 	mutex_unlock(&udev->cmdr_lock);
 	if (!udev->data_bitmap) {
 		ret = -ENOMEM;
@@ -1844,7 +1893,7 @@ static int tcmu_configure_device(struct se_device *dev)
 	/* Initialise the mailbox of the ring buffer */
 	mb = udev->mb_addr;
 	mb->version = TCMU_MAILBOX_VERSION;
-	mb->flags = TCMU_MAILBOX_FLAG_CAP_OOOC;
+	mb->flags = TCMU_MAILBOX_FLAG_CAP_OOOC | TCMU_MAILBOX_FLAG_CAP_READ_LEN;
 	mb->cmdr_off = CMDR_OFF;
 	mb->cmdr_size = udev->cmdr_size;
 
@@ -1892,7 +1941,7 @@ static int tcmu_configure_device(struct se_device *dev)
 	 */
 	kref_get(&udev->kref);
 
-	ret = tcmu_netlink_event(udev, TCMU_CMD_ADDED_DEVICE, 0, NULL);
+	ret = tcmu_send_dev_add_event(udev);
 	if (ret)
 		goto err_netlink;
 
@@ -1909,7 +1958,7 @@ err_register:
 	vfree(udev->mb_addr);
 	udev->mb_addr = NULL;
 err_vzalloc:
-	kfree(udev->data_bitmap);
+	bitmap_free(udev->data_bitmap);
 	udev->data_bitmap = NULL;
 err_bitmap_alloc:
 	kfree(info->name);
@@ -1937,7 +1986,7 @@ static void tcmu_destroy_device(struct se_device *dev)
 	list_del(&udev->node);
 	mutex_unlock(&root_udev_mutex);
 
-	tcmu_netlink_event(udev, TCMU_CMD_REMOVED_DEVICE, 0, NULL);
+	tcmu_send_dev_remove_event(udev);
 
 	uio_unregister_device(&udev->uio_info);
 
@@ -2227,7 +2276,7 @@ static ssize_t tcmu_qfull_time_out_store(struct config_item *item,
 					 const char *page, size_t count)
 {
 	struct se_dev_attrib *da = container_of(to_config_group(item),
-						struct se_dev_attrib, da_group);
+					struct se_dev_attrib, da_group);
 	struct tcmu_dev *udev = TCMU_DEV(da->da_dev);
 	s32 val;
 	int ret;
@@ -2248,6 +2297,17 @@ static ssize_t tcmu_qfull_time_out_store(struct config_item *item,
 }
 CONFIGFS_ATTR(tcmu_, qfull_time_out);
 
+static ssize_t tcmu_max_data_area_mb_show(struct config_item *item, char *page)
+{
+	struct se_dev_attrib *da = container_of(to_config_group(item),
+						struct se_dev_attrib, da_group);
+	struct tcmu_dev *udev = TCMU_DEV(da->da_dev);
+
+	return snprintf(page, PAGE_SIZE, "%u\n",
+			TCMU_BLOCKS_TO_MBS(udev->max_blocks));
+}
+CONFIGFS_ATTR_RO(tcmu_, max_data_area_mb);
+
 static ssize_t tcmu_dev_config_show(struct config_item *item, char *page)
 {
 	struct se_dev_attrib *da = container_of(to_config_group(item),
@@ -2256,6 +2316,27 @@ static ssize_t tcmu_dev_config_show(struct config_item *item, char *page)
 
 	return snprintf(page, PAGE_SIZE, "%s\n", udev->dev_config);
 }
+
+static int tcmu_send_dev_config_event(struct tcmu_dev *udev,
+				      const char *reconfig_data)
+{
+	struct sk_buff *skb = NULL;
+	void *msg_header = NULL;
+	int ret = 0;
+
+	ret = tcmu_netlink_event_init(udev, TCMU_CMD_RECONFIG_DEVICE,
+				      &skb, &msg_header);
+	if (ret < 0)
+		return ret;
+	ret = nla_put_string(skb, TCMU_ATTR_DEV_CFG, reconfig_data);
+	if (ret < 0) {
+		nlmsg_free(skb);
+		return ret;
+	}
+	return tcmu_netlink_event_send(udev, TCMU_CMD_RECONFIG_DEVICE,
+				       skb, msg_header);
+}
+
 
 static ssize_t tcmu_dev_config_store(struct config_item *item, const char *page,
 				     size_t count)
@@ -2271,8 +2352,7 @@ static ssize_t tcmu_dev_config_store(struct config_item *item, const char *page,
 
 	/* Check if device has been configured before */
 	if (target_dev_configured(&udev->se_dev)) {
-		ret = tcmu_netlink_event(udev, TCMU_CMD_RECONFIG_DEVICE,
-					 TCMU_ATTR_DEV_CFG, page);
+		ret = tcmu_send_dev_config_event(udev, page);
 		if (ret) {
 			pr_err("Unable to reconfigure device\n");
 			return ret;
@@ -2299,6 +2379,26 @@ static ssize_t tcmu_dev_size_show(struct config_item *item, char *page)
 	return snprintf(page, PAGE_SIZE, "%llu\n", udev->dev_size);
 }
 
+static int tcmu_send_dev_size_event(struct tcmu_dev *udev, u64 size)
+{
+	struct sk_buff *skb = NULL;
+	void *msg_header = NULL;
+	int ret = 0;
+
+	ret = tcmu_netlink_event_init(udev, TCMU_CMD_RECONFIG_DEVICE,
+				      &skb, &msg_header);
+	if (ret < 0)
+		return ret;
+	ret = nla_put_u64_64bit(skb, TCMU_ATTR_DEV_SIZE,
+				size, TCMU_ATTR_PAD);
+	if (ret < 0) {
+		nlmsg_free(skb);
+		return ret;
+	}
+	return tcmu_netlink_event_send(udev, TCMU_CMD_RECONFIG_DEVICE,
+				       skb, msg_header);
+}
+
 static ssize_t tcmu_dev_size_store(struct config_item *item, const char *page,
 				   size_t count)
 {
@@ -2314,14 +2414,12 @@ static ssize_t tcmu_dev_size_store(struct config_item *item, const char *page,
 
 	/* Check if device has been configured before */
 	if (target_dev_configured(&udev->se_dev)) {
-		ret = tcmu_netlink_event(udev, TCMU_CMD_RECONFIG_DEVICE,
-					 TCMU_ATTR_DEV_SIZE, &val);
+		ret = tcmu_send_dev_size_event(udev, val);
 		if (ret) {
 			pr_err("Unable to reconfigure device\n");
 			return ret;
 		}
 	}
-
 	udev->dev_size = val;
 	return count;
 }
@@ -2364,6 +2462,25 @@ static ssize_t tcmu_emulate_write_cache_show(struct config_item *item,
 	return snprintf(page, PAGE_SIZE, "%i\n", da->emulate_write_cache);
 }
 
+static int tcmu_send_emulate_write_cache(struct tcmu_dev *udev, u8 val)
+{
+	struct sk_buff *skb = NULL;
+	void *msg_header = NULL;
+	int ret = 0;
+
+	ret = tcmu_netlink_event_init(udev, TCMU_CMD_RECONFIG_DEVICE,
+				      &skb, &msg_header);
+	if (ret < 0)
+		return ret;
+	ret = nla_put_u8(skb, TCMU_ATTR_WRITECACHE, val);
+	if (ret < 0) {
+		nlmsg_free(skb);
+		return ret;
+	}
+	return tcmu_netlink_event_send(udev, TCMU_CMD_RECONFIG_DEVICE,
+				       skb, msg_header);
+}
+
 static ssize_t tcmu_emulate_write_cache_store(struct config_item *item,
 					      const char *page, size_t count)
 {
@@ -2379,8 +2496,7 @@ static ssize_t tcmu_emulate_write_cache_store(struct config_item *item,
 
 	/* Check if device has been configured before */
 	if (target_dev_configured(&udev->se_dev)) {
-		ret = tcmu_netlink_event(udev, TCMU_CMD_RECONFIG_DEVICE,
-					 TCMU_ATTR_WRITECACHE, &val);
+		ret = tcmu_send_emulate_write_cache(udev, val);
 		if (ret) {
 			pr_err("Unable to reconfigure device\n");
 			return ret;
@@ -2391,17 +2507,6 @@ static ssize_t tcmu_emulate_write_cache_store(struct config_item *item,
 	return count;
 }
 CONFIGFS_ATTR(tcmu_, emulate_write_cache);
-
-static ssize_t tcmu_max_data_area_mb_show(struct config_item *item, char *page)
-{
-	struct se_dev_attrib *da = container_of(to_config_group(item),
-						struct se_dev_attrib, da_group);
-	struct tcmu_dev *udev = TCMU_DEV(da->da_dev);
-
-	return snprintf(page, PAGE_SIZE, "%u\n",
-			TCMU_BLOCKS_TO_MBS(udev->max_blocks));
-}
-CONFIGFS_ATTR_RO(tcmu_, max_data_area_mb);
 
 static ssize_t tcmu_block_dev_show(struct config_item *item, char *page)
 {

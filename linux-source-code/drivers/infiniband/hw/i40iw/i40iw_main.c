@@ -1397,7 +1397,7 @@ static void i40iw_register_notifiers(void)
 	register_inetaddr_notifier(&i40iw_inetaddr_notifier);
 	register_inet6addr_notifier(&i40iw_inetaddr6_notifier);
 	register_netevent_notifier(&i40iw_net_notifier);
-	register_netdevice_notifier_rh(&i40iw_netdevice_notifier);
+	register_netdevice_notifier(&i40iw_netdevice_notifier);
 }
 
 /**
@@ -1409,7 +1409,7 @@ static void i40iw_unregister_notifiers(void)
 	unregister_netevent_notifier(&i40iw_net_notifier);
 	unregister_inetaddr_notifier(&i40iw_inetaddr_notifier);
 	unregister_inet6addr_notifier(&i40iw_inetaddr6_notifier);
-	unregister_netdevice_notifier_rh(&i40iw_netdevice_notifier);
+	unregister_netdevice_notifier(&i40iw_netdevice_notifier);
 }
 
 /**
@@ -1962,12 +1962,11 @@ static int i40iw_virtchnl_receive(struct i40e_info *ldev,
 bool i40iw_vf_clear_to_send(struct i40iw_sc_dev *dev)
 {
 	struct i40iw_device *iwdev;
-	wait_queue_t wait;
+	wait_queue_entry_t wait;
 
 	iwdev = dev->back_dev;
 
-	smp_mb();
-	if (!waitqueue_active(&dev->vf_reqs) &&
+	if (!wq_has_sleeper(&dev->vf_reqs) &&
 	    (atomic_read(&iwdev->vchnl_msgs) == 0))
 		return true; /* virtual channel is clear */
 

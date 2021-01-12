@@ -36,9 +36,9 @@
 #include <linux/mlx5/vport.h>
 #include <linux/mlx5/fs.h>
 #include "mlx5_core.h"
+#include "lib/eq.h"
 #include "eswitch.h"
 #include "fs_core.h"
-#include "lib/eq.h"
 
 #define UPLINK_VPORT 0xFFFF
 
@@ -840,8 +840,8 @@ static void esw_vport_change_handler(struct work_struct *work)
 	mutex_unlock(&esw->state_lock);
 }
 
-int esw_vport_enable_egress_acl(struct mlx5_eswitch *esw,
-				struct mlx5_vport *vport)
+static int esw_vport_enable_egress_acl(struct mlx5_eswitch *esw,
+				       struct mlx5_vport *vport)
 {
 	int inlen = MLX5_ST_SZ_BYTES(create_flow_group_in);
 	struct mlx5_flow_group *vlan_grp = NULL;
@@ -924,8 +924,8 @@ out:
 	return err;
 }
 
-void esw_vport_cleanup_egress_rules(struct mlx5_eswitch *esw,
-				    struct mlx5_vport *vport)
+static void esw_vport_cleanup_egress_rules(struct mlx5_eswitch *esw,
+					   struct mlx5_vport *vport)
 {
 	if (!IS_ERR_OR_NULL(vport->egress.allowed_vlan))
 		mlx5_del_flow_rules(vport->egress.allowed_vlan);
@@ -937,8 +937,8 @@ void esw_vport_cleanup_egress_rules(struct mlx5_eswitch *esw,
 	vport->egress.drop_rule = NULL;
 }
 
-void esw_vport_disable_egress_acl(struct mlx5_eswitch *esw,
-				  struct mlx5_vport *vport)
+static void esw_vport_disable_egress_acl(struct mlx5_eswitch *esw,
+					 struct mlx5_vport *vport)
 {
 	if (IS_ERR_OR_NULL(vport->egress.acl))
 		return;
@@ -954,8 +954,8 @@ void esw_vport_disable_egress_acl(struct mlx5_eswitch *esw,
 	vport->egress.acl = NULL;
 }
 
-int esw_vport_enable_ingress_acl(struct mlx5_eswitch *esw,
-				 struct mlx5_vport *vport)
+static int esw_vport_enable_ingress_acl(struct mlx5_eswitch *esw,
+					struct mlx5_vport *vport)
 {
 	int inlen = MLX5_ST_SZ_BYTES(create_flow_group_in);
 	struct mlx5_core_dev *dev = esw->dev;
@@ -1086,8 +1086,8 @@ out:
 	return err;
 }
 
-void esw_vport_cleanup_ingress_rules(struct mlx5_eswitch *esw,
-				     struct mlx5_vport *vport)
+static void esw_vport_cleanup_ingress_rules(struct mlx5_eswitch *esw,
+					    struct mlx5_vport *vport)
 {
 	if (!IS_ERR_OR_NULL(vport->ingress.drop_rule))
 		mlx5_del_flow_rules(vport->ingress.drop_rule);
@@ -1099,8 +1099,8 @@ void esw_vport_cleanup_ingress_rules(struct mlx5_eswitch *esw,
 	vport->ingress.allow_rule = NULL;
 }
 
-void esw_vport_disable_ingress_acl(struct mlx5_eswitch *esw,
-				   struct mlx5_vport *vport)
+static void esw_vport_disable_ingress_acl(struct mlx5_eswitch *esw,
+					  struct mlx5_vport *vport)
 {
 	if (IS_ERR_OR_NULL(vport->ingress.acl))
 		return;
@@ -1456,7 +1456,6 @@ static void esw_apply_vport_conf(struct mlx5_eswitch *esw,
 				 struct mlx5_vport *vport)
 {
 	int vport_num = vport->vport;
-	int flags;
 
 	if (!vport_num)
 		return;
@@ -1467,10 +1466,8 @@ static void esw_apply_vport_conf(struct mlx5_eswitch *esw,
 				      vport->info.link_state);
 	mlx5_modify_nic_vport_mac_address(esw->dev, vport_num, vport->info.mac);
 	mlx5_modify_nic_vport_node_guid(esw->dev, vport_num, vport->info.node_guid);
-	flags = (vport->info.vlan || vport->info.qos) ?
-		SET_VLAN_STRIP | SET_VLAN_INSERT : 0;
 	modify_esw_vport_cvlan(esw->dev, vport_num, vport->info.vlan, vport->info.qos,
-			       flags);
+			       (vport->info.vlan || vport->info.qos));
 
 	/* Only legacy mode needs ACLs */
 	if (esw->mode == SRIOV_LEGACY) {
@@ -1562,7 +1559,6 @@ static void esw_disable_vport(struct mlx5_eswitch *esw, int vport_num)
 	/* Mark this vport as disabled to discard new events */
 	vport->enabled = false;
 
-	mlx5_eq_synchronize_async_irq(esw->dev);
 	/* Wait for current already scheduled events to complete */
 	flush_workqueue(esw->work_queue);
 	/* Disable events from this vport */
@@ -1588,9 +1584,24 @@ static void esw_disable_vport(struct mlx5_eswitch *esw, int vport_num)
 	mutex_unlock(&esw->state_lock);
 }
 
+static int eswitch_vport_event(struct notifier_block *nb,
+			       unsigned long type, void *data)
+{
+	struct mlx5_eswitch *esw = mlx5_nb_cof(nb, struct mlx5_eswitch, nb);
+	struct mlx5_eqe *eqe = data;
+	struct mlx5_vport *vport;
+	u16 vport_num;
+
+	vport_num = be16_to_cpu(eqe->data.vport_change.vport_num);
+	vport = &esw->vports[vport_num];
+	if (vport->enabled)
+		queue_work(esw->work_queue, &vport->vport_change_handler);
+
+	return NOTIFY_OK;
+}
+
 /* Public E-Switch API */
 #define ESW_ALLOWED(esw) ((esw) && MLX5_ESWITCH_MANAGER((esw)->dev))
-
 
 int mlx5_eswitch_enable_sriov(struct mlx5_eswitch *esw, int nvfs, int mode)
 {
@@ -1610,6 +1621,7 @@ int mlx5_eswitch_enable_sriov(struct mlx5_eswitch *esw, int nvfs, int mode)
 		esw_warn(esw->dev, "E-Switch engress ACL is not supported by FW\n");
 
 	esw_info(esw->dev, "E-Switch enable SRIOV: nvfs(%d) mode (%d)\n", nvfs, mode);
+
 	esw->mode = mode;
 
 	mlx5_lag_update(esw->dev);
@@ -1617,10 +1629,9 @@ int mlx5_eswitch_enable_sriov(struct mlx5_eswitch *esw, int nvfs, int mode)
 	if (mode == SRIOV_LEGACY) {
 		err = esw_create_legacy_fdb_table(esw);
 	} else {
+		mlx5_reload_interface(esw->dev, MLX5_INTERFACE_PROTOCOL_ETH);
 		mlx5_reload_interface(esw->dev, MLX5_INTERFACE_PROTOCOL_IB);
-
-		err = esw_offloads_init(esw, nvfs,
-					nvfs + 1);
+		err = esw_offloads_init(esw, nvfs + 1);
 	}
 
 	if (err)
@@ -1638,6 +1649,11 @@ int mlx5_eswitch_enable_sriov(struct mlx5_eswitch *esw, int nvfs, int mode)
 	for (i = 0; i <= nvfs; i++)
 		esw_enable_vport(esw, i, enabled_events);
 
+	if (mode == SRIOV_LEGACY) {
+		MLX5_NB_INIT(&esw->nb, eswitch_vport_event, NIC_VPORT_CHANGE);
+		mlx5_eq_notifier_register(esw->dev, &esw->nb);
+	}
+
 	esw_info(esw->dev, "SRIOV enabled: active vports(%d)\n",
 		 esw->enabled_vports);
 	return 0;
@@ -1645,8 +1661,10 @@ int mlx5_eswitch_enable_sriov(struct mlx5_eswitch *esw, int nvfs, int mode)
 abort:
 	esw->mode = SRIOV_NONE;
 
-	if (mode == SRIOV_OFFLOADS)
+	if (mode == SRIOV_OFFLOADS) {
 		mlx5_reload_interface(esw->dev, MLX5_INTERFACE_PROTOCOL_IB);
+		mlx5_reload_interface(esw->dev, MLX5_INTERFACE_PROTOCOL_ETH);
+	}
 
 	return err;
 }
@@ -1655,6 +1673,7 @@ void mlx5_eswitch_disable_sriov(struct mlx5_eswitch *esw)
 {
 	struct esw_mc_addr *mc_promisc;
 	int old_mode;
+	int nvports;
 	int i;
 
 	if (!ESW_ALLOWED(esw) || esw->mode == SRIOV_NONE)
@@ -1664,6 +1683,10 @@ void mlx5_eswitch_disable_sriov(struct mlx5_eswitch *esw)
 		 esw->enabled_vports, esw->mode);
 
 	mc_promisc = &esw->mc_promisc;
+	nvports = esw->enabled_vports;
+
+	if (esw->mode == SRIOV_LEGACY)
+		mlx5_eq_notifier_unregister(esw->dev, &esw->nb);
 
 	for (i = 0; i < esw->total_vports; i++)
 		esw_disable_vport(esw, i);
@@ -1676,15 +1699,17 @@ void mlx5_eswitch_disable_sriov(struct mlx5_eswitch *esw)
 	if (esw->mode == SRIOV_LEGACY)
 		esw_destroy_legacy_fdb_table(esw);
 	else if (esw->mode == SRIOV_OFFLOADS)
-		esw_offloads_cleanup(esw);
+		esw_offloads_cleanup(esw, nvports);
 
 	old_mode = esw->mode;
 	esw->mode = SRIOV_NONE;
 
 	mlx5_lag_update(esw->dev);
 
-	if (old_mode == SRIOV_OFFLOADS)
+	if (old_mode == SRIOV_OFFLOADS) {
 		mlx5_reload_interface(esw->dev, MLX5_INTERFACE_PROTOCOL_IB);
+		mlx5_reload_interface(esw->dev, MLX5_INTERFACE_PROTOCOL_ETH);
+	}
 }
 
 int mlx5_eswitch_init(struct mlx5_core_dev *dev)
@@ -1744,6 +1769,11 @@ int mlx5_eswitch_init(struct mlx5_core_dev *dev)
 	esw->enabled_vports = 0;
 	esw->mode = SRIOV_NONE;
 	esw->offloads.inline_mode = MLX5_INLINE_MODE_NONE;
+	if (MLX5_CAP_ESW_FLOWTABLE_FDB(dev, reformat) &&
+	    MLX5_CAP_ESW_FLOWTABLE_FDB(dev, decap))
+		esw->offloads.encap = DEVLINK_ESWITCH_ENCAP_MODE_BASIC;
+	else
+		esw->offloads.encap = DEVLINK_ESWITCH_ENCAP_MODE_NONE;
 
 	dev->priv.eswitch = esw;
 	return 0;
@@ -1770,23 +1800,6 @@ void mlx5_eswitch_cleanup(struct mlx5_eswitch *esw)
 	kfree(esw);
 }
 
-void mlx5_eswitch_vport_event(struct mlx5_eswitch *esw, struct mlx5_eqe *eqe)
-{
-	struct mlx5_eqe_vport_change *vc_eqe = &eqe->data.vport_change;
-	u16 vport_num = be16_to_cpu(vc_eqe->vport_num);
-	struct mlx5_vport *vport;
-
-	if (!esw) {
-		pr_warn("MLX5 E-Switch: vport %d got an event while eswitch is not initialized\n",
-			vport_num);
-		return;
-	}
-
-	vport = &esw->vports[vport_num];
-	if (vport->enabled)
-		queue_work(esw->work_queue, &vport->vport_change_handler);
-}
-
 /* Vport Administration */
 #define LEGAL_VPORT(esw, vport) (vport >= 0 && vport < esw->total_vports)
 
@@ -1797,7 +1810,7 @@ int mlx5_eswitch_set_vport_mac(struct mlx5_eswitch *esw,
 	u64 node_guid;
 	int err = 0;
 
-	if (!esw || !MLX5_CAP_GEN(esw->dev, vport_group_manager))
+	if (!MLX5_CAP_GEN(esw->dev, vport_group_manager))
 		return -EPERM;
 	if (!LEGAL_VPORT(esw, vport) || is_multicast_ether_addr(mac))
 		return -EINVAL;
@@ -1832,7 +1845,6 @@ int mlx5_eswitch_set_vport_mac(struct mlx5_eswitch *esw,
 
 unlock:
 	mutex_unlock(&esw->state_lock);
-
 	return err;
 }
 
@@ -1872,7 +1884,7 @@ int mlx5_eswitch_get_vport_config(struct mlx5_eswitch *esw,
 {
 	struct mlx5_vport *evport;
 
-	if (!esw || !MLX5_CAP_GEN(esw->dev, vport_group_manager))
+	if (!MLX5_CAP_GEN(esw->dev, vport_group_manager))
 		return -EPERM;
 	if (!LEGAL_VPORT(esw, vport))
 		return -EINVAL;
@@ -2045,24 +2057,19 @@ static int normalize_vports_min_rate(struct mlx5_eswitch *esw, u32 divider)
 int mlx5_eswitch_set_vport_rate(struct mlx5_eswitch *esw, int vport,
 				u32 max_rate, u32 min_rate)
 {
+	u32 fw_max_bw_share = MLX5_CAP_QOS(esw->dev, max_tsar_bw_share);
+	bool min_rate_supported = MLX5_CAP_QOS(esw->dev, esw_bw_share) &&
+					fw_max_bw_share >= MLX5_MIN_BW_SHARE;
+	bool max_rate_supported = MLX5_CAP_QOS(esw->dev, esw_rate_limit);
 	struct mlx5_vport *evport;
-	u32 fw_max_bw_share;
 	u32 previous_min_rate;
 	u32 divider;
-	bool min_rate_supported;
-	bool max_rate_supported;
 	int err = 0;
 
 	if (!ESW_ALLOWED(esw))
 		return -EPERM;
 	if (!LEGAL_VPORT(esw, vport))
 		return -EINVAL;
-
-	fw_max_bw_share = MLX5_CAP_QOS(esw->dev, max_tsar_bw_share);
-	min_rate_supported = MLX5_CAP_QOS(esw->dev, esw_bw_share) &&
-				fw_max_bw_share >= MLX5_MIN_BW_SHARE;
-	max_rate_supported = MLX5_CAP_QOS(esw->dev, esw_rate_limit);
-
 	if ((min_rate && !min_rate_supported) || (max_rate && !max_rate_supported))
 		return -EOPNOTSUPP;
 
@@ -2229,4 +2236,11 @@ bool mlx5_esw_lag_prereq(struct mlx5_core_dev *dev0, struct mlx5_core_dev *dev1)
 		return true;
 
 	return false;
+}
+
+bool mlx5_esw_multipath_prereq(struct mlx5_core_dev *dev0,
+			       struct mlx5_core_dev *dev1)
+{
+	return (dev0->priv.eswitch->mode == SRIOV_OFFLOADS &&
+		dev1->priv.eswitch->mode == SRIOV_OFFLOADS);
 }

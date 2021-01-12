@@ -1947,9 +1947,9 @@ snd_hdspm_midi_input_trigger(struct snd_rawmidi_substream *substream, int up)
 	spin_unlock_irqrestore (&hdspm->lock, flags);
 }
 
-static void snd_hdspm_midi_output_timer(unsigned long data)
+static void snd_hdspm_midi_output_timer(struct timer_list *t)
 {
-	struct hdspm_midi *hmidi = (struct hdspm_midi *) data;
+	struct hdspm_midi *hmidi = from_timer(hmidi, t, timer);
 	unsigned long flags;
 
 	snd_hdspm_midi_output_write(hmidi);
@@ -1977,8 +1977,8 @@ snd_hdspm_midi_output_trigger(struct snd_rawmidi_substream *substream, int up)
 	spin_lock_irqsave (&hmidi->lock, flags);
 	if (up) {
 		if (!hmidi->istimer) {
-			setup_timer(&hmidi->timer, snd_hdspm_midi_output_timer,
-				    (unsigned long) hmidi);
+			timer_setup(&hmidi->timer,
+				    snd_hdspm_midi_output_timer, 0);
 			mod_timer(&hmidi->timer, 1 + jiffies);
 			hmidi->istimer++;
 		}
@@ -6513,7 +6513,7 @@ static int snd_hdspm_create_alsa_devices(struct snd_card *card,
 	dev_dbg(card->dev, "Update mixer controls...\n");
 	hdspm_update_simple_mixer_controls(hdspm);
 
-	dev_dbg(card->dev, "Initializeing complete ???\n");
+	dev_dbg(card->dev, "Initializing complete?\n");
 
 	err = snd_card_register(card);
 	if (err < 0) {

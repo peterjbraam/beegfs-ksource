@@ -19,7 +19,9 @@
 #include <linux/io.h>
 #include <linux/dma-mapping.h>
 
-#include <asm/cacheflush.h>
+#ifdef CONFIG_X86
+#include <asm/set_memory.h>
+#endif
 
 #include "intel_th.h"
 #include "msu.h"
@@ -1164,7 +1166,7 @@ static void msc_mmap_close(struct vm_area_struct *vma)
 	if (!atomic_dec_and_mutex_lock(&msc->mmap_count, &msc->buf_mutex))
 		return;
 
-	/* drop page _counts */
+	/* drop page _refcounts */
 	for (pg = 0; pg < msc->nr_pages; pg++) {
 		struct page *page = msc_buffer_get_page(msc, pg);
 
@@ -1180,9 +1182,9 @@ static void msc_mmap_close(struct vm_area_struct *vma)
 	mutex_unlock(&msc->buf_mutex);
 }
 
-static int msc_mmap_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
+static int msc_mmap_fault(struct vm_fault *vmf)
 {
-	struct msc_iter *iter = vma->vm_file->private_data;
+	struct msc_iter *iter = vmf->vma->vm_file->private_data;
 	struct msc *msc = iter->msc;
 
 	vmf->page = msc_buffer_get_page(msc, vmf->pgoff);
@@ -1190,7 +1192,7 @@ static int msc_mmap_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 		return VM_FAULT_SIGBUS;
 
 	get_page(vmf->page);
-	vmf->page->mapping = vma->vm_file->f_mapping;
+	vmf->page->mapping = vmf->vma->vm_file->f_mapping;
 	vmf->page->index = vmf->pgoff;
 
 	return 0;
@@ -1421,8 +1423,7 @@ nr_pages_store(struct device *dev, struct device_attribute *attr,
 		if (!end)
 			break;
 
-		/* consume the number and the following comma, hence +1 */
-		len -= end - p + 1;
+		len -= end - p;
 		p = end + 1;
 	} while (len);
 

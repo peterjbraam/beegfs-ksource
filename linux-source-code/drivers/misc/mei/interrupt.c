@@ -115,7 +115,6 @@ static int mei_cl_irq_read_msg(struct mei_cl *cl,
 
 	if (!mei_cl_is_connected(cl)) {
 		cl_dbg(dev, cl, "not connected\n");
-		list_move_tail(&cb->list, cmpl_list);
 		cb->status = -ENODEV;
 		goto discard;
 	}
@@ -125,7 +124,6 @@ static int mei_cl_irq_read_msg(struct mei_cl *cl,
 	if (buf_sz < cb->buf_idx) {
 		cl_err(dev, cl, "message is too big len %d idx %zu\n",
 		       mei_hdr->length, cb->buf_idx);
-		list_move_tail(&cb->list, cmpl_list);
 		cb->status = -EMSGSIZE;
 		goto discard;
 	}
@@ -133,8 +131,6 @@ static int mei_cl_irq_read_msg(struct mei_cl *cl,
 	if (cb->buf.size < buf_sz) {
 		cl_dbg(dev, cl, "message overflow. size %zu len %d idx %zu\n",
 			cb->buf.size, mei_hdr->length, cb->buf_idx);
-
-		list_move_tail(&cb->list, cmpl_list);
 		cb->status = -EMSGSIZE;
 		goto discard;
 	}
@@ -154,6 +150,8 @@ static int mei_cl_irq_read_msg(struct mei_cl *cl,
 	return 0;
 
 discard:
+	if (cb)
+		list_move_tail(&cb->list, cmpl_list);
 	mei_irq_discard_msg(dev, mei_hdr);
 	return 0;
 }
@@ -312,8 +310,11 @@ int mei_irq_read_handler(struct mei_device *dev,
 	if (&cl->link == &dev->file_list) {
 		/* A message for not connected fixed address clients
 		 * should be silently discarded
+		 * On power down client may be force cleaned,
+		 * silently discard such messages
 		 */
-		if (hdr_is_fixed(mei_hdr)) {
+		if (hdr_is_fixed(mei_hdr) ||
+		    dev->dev_state == MEI_DEV_POWER_DOWN) {
 			mei_irq_discard_msg(dev, mei_hdr);
 			ret = 0;
 			goto reset_slots;

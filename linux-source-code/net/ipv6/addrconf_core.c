@@ -134,8 +134,47 @@ static int eafnosupport_ipv6_dst_lookup(struct net *net, struct sock *u1,
 	return -EAFNOSUPPORT;
 }
 
+static struct fib6_table *eafnosupport_fib6_get_table(struct net *net, u32 id)
+{
+	return NULL;
+}
+
+static struct fib6_info *
+eafnosupport_fib6_table_lookup(struct net *net, struct fib6_table *table,
+			       int oif, struct flowi6 *fl6, int flags)
+{
+	return NULL;
+}
+
+static struct fib6_info *
+eafnosupport_fib6_lookup(struct net *net, int oif, struct flowi6 *fl6,
+			 int flags)
+{
+	return NULL;
+}
+
+static struct fib6_info *
+eafnosupport_fib6_multipath_select(const struct net *net, struct fib6_info *f6i,
+				   struct flowi6 *fl6, int oif,
+				   const struct sk_buff *skb, int strict)
+{
+	return f6i;
+}
+
+static u32
+eafnosupport_ip6_mtu_from_fib6(struct fib6_info *f6i, struct in6_addr *daddr,
+			       struct in6_addr *saddr)
+{
+	return 0;
+}
+
 const struct ipv6_stub *ipv6_stub __read_mostly = &(struct ipv6_stub) {
-	.ipv6_dst_lookup = eafnosupport_ipv6_dst_lookup,
+	.ipv6_dst_lookup   = eafnosupport_ipv6_dst_lookup,
+	.fib6_get_table    = eafnosupport_fib6_get_table,
+	.fib6_table_lookup = eafnosupport_fib6_table_lookup,
+	.fib6_lookup       = eafnosupport_fib6_lookup,
+	.fib6_multipath_select = eafnosupport_fib6_multipath_select,
+	.ip6_mtu_from_fib6 = eafnosupport_ip6_mtu_from_fib6,
 };
 EXPORT_SYMBOL_GPL(ipv6_stub);
 
@@ -159,7 +198,15 @@ static void snmp6_free_dev(struct inet6_dev *idev)
 {
 	kfree(idev->stats.icmpv6msgdev);
 	kfree(idev->stats.icmpv6dev);
-	snmp_mib_free((void __percpu **)idev->stats.ipv6);
+	free_percpu(idev->stats.ipv6);
+}
+
+static void in6_dev_finish_destroy_rcu(struct rcu_head *head)
+{
+	struct inet6_dev *idev = container_of(head, struct inet6_dev, rcu);
+
+	snmp6_free_dev(idev);
+	kfree(idev);
 }
 
 /* Nobody refers to this device, we may destroy it. */
@@ -169,7 +216,7 @@ void in6_dev_finish_destroy(struct inet6_dev *idev)
 	struct net_device *dev = idev->dev;
 
 	WARN_ON(!list_empty(&idev->addr_list));
-	WARN_ON(idev->mc_list != NULL);
+	WARN_ON(idev->mc_list);
 	WARN_ON(timer_pending(&idev->rs_timer));
 
 #ifdef NET_REFCNT_DEBUG
@@ -180,7 +227,6 @@ void in6_dev_finish_destroy(struct inet6_dev *idev)
 		pr_warn("Freeing alive inet6 device %p\n", idev);
 		return;
 	}
-	snmp6_free_dev(idev);
-	kfree_rcu(idev, rcu);
+	call_rcu(&idev->rcu, in6_dev_finish_destroy_rcu);
 }
 EXPORT_SYMBOL(in6_dev_finish_destroy);

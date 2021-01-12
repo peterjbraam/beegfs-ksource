@@ -23,6 +23,7 @@
 #include <linux/ndctl.h>
 #include <linux/fs.h>
 #include <linux/nd.h>
+#include <linux/backing-dev.h>
 #include "btt.h"
 #include "nd.h"
 
@@ -540,9 +541,9 @@ static int arena_clear_freelist_error(struct arena_info *arena, u32 lane)
 
 static int btt_freelist_init(struct arena_info *arena)
 {
-	int old, new, ret;
-	u32 i, map_entry;
-	struct log_entry log_new, log_old;
+	int new, ret;
+	struct log_entry log_new;
+	u32 i, map_entry, log_oldmap, log_newmap;
 
 	arena->freelist = kcalloc(arena->nfree, sizeof(struct free_entry),
 					GFP_KERNEL);
@@ -550,24 +551,26 @@ static int btt_freelist_init(struct arena_info *arena)
 		return -ENOMEM;
 
 	for (i = 0; i < arena->nfree; i++) {
-		old = btt_log_read(arena, i, &log_old, LOG_OLD_ENT);
-		if (old < 0)
-			return old;
-
 		new = btt_log_read(arena, i, &log_new, LOG_NEW_ENT);
 		if (new < 0)
 			return new;
 
+		/* old and new map entries with any flags stripped out */
+		log_oldmap = ent_lba(le32_to_cpu(log_new.old_map));
+		log_newmap = ent_lba(le32_to_cpu(log_new.new_map));
+
 		/* sub points to the next one to be overwritten */
 		arena->freelist[i].sub = 1 - new;
 		arena->freelist[i].seq = nd_inc_seq(le32_to_cpu(log_new.seq));
-		arena->freelist[i].block = le32_to_cpu(log_new.old_map);
+		arena->freelist[i].block = log_oldmap;
 
 		/*
 		 * FIXME: if error clearing fails during init, we want to make
 		 * the BTT read-only
 		 */
-		if (ent_e_flag(log_new.old_map)) {
+		if (ent_e_flag(log_new.old_map) &&
+				!ent_normal(log_new.old_map)) {
+			arena->freelist[i].has_err = 1;
 			ret = arena_clear_freelist_error(arena, i);
 			if (ret)
 				dev_err_ratelimited(to_dev(arena),
@@ -575,7 +578,7 @@ static int btt_freelist_init(struct arena_info *arena)
 		}
 
 		/* This implies a newly created or untouched flog entry */
-		if (log_new.old_map == log_new.new_map)
+		if (log_oldmap == log_newmap)
 			continue;
 
 		/* Check if map recovery is needed */
@@ -583,8 +586,15 @@ static int btt_freelist_init(struct arena_info *arena)
 				NULL, NULL, 0);
 		if (ret)
 			return ret;
-		if ((le32_to_cpu(log_new.new_map) != map_entry) &&
-				(le32_to_cpu(log_new.old_map) == map_entry)) {
+
+		/*
+		 * The map_entry from btt_read_map is stripped of any flag bits,
+		 * so use the stripped out versions from the log as well for
+		 * testing whether recovery is needed. For restoration, use the
+		 * 'raw' version of the log entries as that captured what we
+		 * were going to write originally.
+		 */
+		if ((log_newmap != map_entry) && (log_oldmap == map_entry)) {
 			/*
 			 * Last transaction wrote the flog, but wasn't able
 			 * to complete the map write. So fix up the map.
@@ -1051,6 +1061,11 @@ static int btt_meta_init(struct btt *btt)
 	return ret;
 }
 
+static u32 btt_meta_size(struct btt *btt)
+{
+	return btt->lbasize - btt->sector_size;
+}
+
 /*
  * This function calculates the arena in which the given LBA lies
  * by doing a linear walk. This is acceptable since we expect only
@@ -1130,41 +1145,40 @@ static void zero_fill_data(struct page *page, unsigned int off, u32 len)
 	kunmap_atomic(mem);
 }
 
-#ifdef CONFIG_BLK_DEV_INTEGRITY__BROKEN__
-static u32 btt_meta_size(struct btt *btt)
-{
-	return btt->lbasize - btt->sector_size;
-}
-
+#ifdef CONFIG_BLK_DEV_INTEGRITY
 static int btt_rw_integrity(struct btt *btt, struct bio_integrity_payload *bip,
 			struct arena_info *arena, u32 postmap, int rw)
 {
 	unsigned int len = btt_meta_size(btt);
 	u64 meta_nsoff;
-	int ret = 0, i;
-	struct bio_vec *bv;
+	int ret = 0;
 
 	if (bip == NULL)
 		return 0;
 
 	meta_nsoff = to_namespace_offset(arena, postmap) + btt->sector_size;
 
-	bip_for_each_vec(bv, bip, i) {
+	while (len) {
 		unsigned int cur_len;
+		struct bio_vec bv;
 		void *mem;
 
-		if (!len)
-			break;
+		bv = bvec_iter_bvec(bip->bip_vec, bip->bip_iter);
+		/*
+		 * The 'bv' obtained from bvec_iter_bvec has its .bv_len and
+		 * .bv_offset already adjusted for iter->bi_bvec_done, and we
+		 * can use those directly
+		 */
 
-		cur_len = min(len, bv->bv_len);
-		mem = kmap_atomic(bv->bv_page);
+		cur_len = min(len, bv.bv_len);
+		mem = kmap_atomic(bv.bv_page);
 		if (rw)
 			ret = arena_write_bytes(arena, meta_nsoff,
-					mem + bv->bv_offset, cur_len,
+					mem + bv.bv_offset, cur_len,
 					NVDIMM_IO_ATOMIC);
 		else
 			ret = arena_read_bytes(arena, meta_nsoff,
-					mem + bv->bv_offset, cur_len,
+					mem + bv.bv_offset, cur_len,
 					NVDIMM_IO_ATOMIC);
 
 		kunmap_atomic(mem);
@@ -1173,8 +1187,9 @@ static int btt_rw_integrity(struct btt *btt, struct bio_integrity_payload *bip,
 
 		len -= cur_len;
 		meta_nsoff += cur_len;
+		if (!bvec_iter_advance(bip->bip_vec, &bip->bip_iter, cur_len))
+			return -EIO;
 	}
-	BUG_ON(len);
 
 	return ret;
 }
@@ -1417,11 +1432,11 @@ static int btt_write_pg(struct btt *btt, struct bio_integrity_payload *bip,
 
 static int btt_do_bvec(struct btt *btt, struct bio_integrity_payload *bip,
 			struct page *page, unsigned int len, unsigned int off,
-			int rw, sector_t sector)
+			unsigned int op, sector_t sector)
 {
 	int ret;
 
-	if (rw == READ) {
+	if (!op_is_write(op)) {
 		ret = btt_read_pg(btt, bip, page, off, sector, len);
 		flush_dcache_page(page);
 	} else {
@@ -1432,66 +1447,61 @@ static int btt_do_bvec(struct btt *btt, struct bio_integrity_payload *bip,
 	return ret;
 }
 
-static void btt_make_request(struct request_queue *q, struct bio *bio)
+static blk_qc_t btt_make_request(struct request_queue *q, struct bio *bio)
 {
-	struct bio_integrity_payload *bip = bio->bi_integrity;
+	struct bio_integrity_payload *bip = bio_integrity(bio);
 	struct btt *btt = q->queuedata;
-	struct bio_vec *bvec;
+	struct bvec_iter iter;
 	unsigned long start;
-	int err = 0, rw, i;
+	struct bio_vec bvec;
+	int err = 0;
 	bool do_acct;
-	sector_t sector = bio->bi_sector;
 
-	/*
-	 * bio_integrity_enabled also checks if the bio already has an
-	 * integrity payload attached. If it does, we *don't* do a
-	 * bio_integrity_prep here - the payload has been generated by
-	 * another kernel subsystem, and we just pass it through.
-	 */
-	if (bio_integrity_enabled(bio) && bio_integrity_prep(bio)) {
-		err = -EIO;
-		goto out;
-	}
+	if (!bio_integrity_prep(bio))
+		return BLK_QC_T_NONE;
 
 	do_acct = nd_iostat_start(bio, &start);
-	rw = bio_data_dir(bio);
-	bio_for_each_segment(bvec, bio, i) {
-		unsigned int len = bvec->bv_len;
+	bio_for_each_segment(bvec, bio, iter) {
+		unsigned int len = bvec.bv_len;
 
 		if (len > PAGE_SIZE || len < btt->sector_size ||
 				len % btt->sector_size) {
 			dev_err_ratelimited(&btt->nd_btt->dev,
 				"unaligned bio segment (len: %d)\n", len);
-			err = -EIO;
+			bio->bi_status = BLK_STS_IOERR;
 			break;
 		}
-		err = btt_do_bvec(btt, bip, bvec->bv_page, len, bvec->bv_offset,
-				rw, sector);
+
+		err = btt_do_bvec(btt, bip, bvec.bv_page, len, bvec.bv_offset,
+				  bio_op(bio), iter.bi_sector);
 		if (err) {
 			dev_err(&btt->nd_btt->dev,
 					"io error in %s sector %lld, len %d,\n",
-					(rw == READ) ? "READ" : "WRITE",
-					(unsigned long long) sector, len);
+					(op_is_write(bio_op(bio))) ? "WRITE" :
+					"READ",
+					(unsigned long long) iter.bi_sector, len);
+			bio->bi_status = errno_to_blk_status(err);
 			break;
 		}
-		sector += len >> SECTOR_SHIFT;
 	}
 	if (do_acct)
 		nd_iostat_end(bio, start);
 
-out:
-	bio_endio(bio, err);
+	bio_endio(bio);
+	return BLK_QC_T_NONE;
 }
 
 static int btt_rw_page(struct block_device *bdev, sector_t sector,
-		struct page *page, int rw)
+		struct page *page, unsigned int op)
 {
 	struct btt *btt = bdev->bd_disk->private_data;
 	int rc;
+	unsigned int len;
 
-	rc = btt_do_bvec(btt, NULL, page, PAGE_CACHE_SIZE, 0, rw, sector);
+	len = hpage_nr_pages(page) * PAGE_SIZE;
+	rc = btt_do_bvec(btt, NULL, page, len, 0, op, sector);
 	if (rc == 0)
-		page_endio(page, rw & WRITE, 0);
+		page_endio(page, op_is_write(op), 0);
 
 	return rc;
 }
@@ -1530,45 +1540,40 @@ static int btt_blk_init(struct btt *btt)
 	}
 
 	nvdimm_namespace_disk_name(ndns, btt->btt_disk->disk_name);
-	btt->btt_disk->driverfs_dev = &btt->nd_btt->dev;
 	btt->btt_disk->first_minor = 0;
 	btt->btt_disk->fops = &btt_fops;
 	btt->btt_disk->private_data = btt;
 	btt->btt_disk->queue = btt->btt_queue;
 	btt->btt_disk->flags = GENHD_FL_EXT_DEVT;
+	btt->btt_disk->queue->backing_dev_info->capabilities |=
+			BDI_CAP_SYNCHRONOUS_IO;
 
 	blk_queue_make_request(btt->btt_queue, btt_make_request);
 	blk_queue_logical_block_size(btt->btt_queue, btt->sector_size);
 	blk_queue_max_hw_sectors(btt->btt_queue, UINT_MAX);
-	blk_queue_bounce_limit(btt->btt_queue, BLK_BOUNCE_ANY);
-	queue_flag_set_unlocked(QUEUE_FLAG_NONROT, btt->btt_queue);
+	blk_queue_flag_set(QUEUE_FLAG_NONROT, btt->btt_queue);
 	btt->btt_queue->queuedata = btt;
 
-	set_capacity(btt->btt_disk, btt->nlba * btt->sector_size >> 9);
-	btt->nd_btt->size = btt->nlba * (u64)btt->sector_size;
-	add_disk(btt->btt_disk);
-	/*
-	 * The btt driver from RHEL 7.5 onward does not support DIF/DIX.
-	 * If there is an existing btt devices with a non-standard sector
-	 * size, allow the admin to read the data from it.  Writes would
-	 * also be possible, but we wouldn't write protection information,
-	 * which would result in check errors when reading under an older
-	 * (or upstream) kernel.  Note that the admin can still override
-	 * the read-only setting at his or her own peril.
-	 */
-	if (!btt_lbasize_is_supported(nd_btt->lbasize)) {
-		set_disk_ro(btt->btt_disk, 1);
-		dev_warn(&nd_btt->dev, "Unsupported sector size: %lu. Integrity "
-			 "checking is disabled.  Marking device read-only.\n",
-			 nd_btt->lbasize);
+	if (btt_meta_size(btt)) {
+		int rc = nd_integrity_init(btt->btt_disk, btt_meta_size(btt));
+
+		if (rc) {
+			del_gendisk(btt->btt_disk);
+			put_disk(btt->btt_disk);
+			blk_cleanup_queue(btt->btt_queue);
+			return rc;
+		}
 	}
+	set_capacity(btt->btt_disk, btt->nlba * btt->sector_size >> 9);
+	device_add_disk(&btt->nd_btt->dev, btt->btt_disk, NULL);
+	btt->nd_btt->size = btt->nlba * (u64)btt->sector_size;
+	revalidate_disk(btt->btt_disk);
 
 	return 0;
 }
 
 static void btt_blk_cleanup(struct btt *btt)
 {
-	blk_integrity_unregister(btt->btt_disk);
 	del_gendisk(btt->btt_disk);
 	put_disk(btt->btt_disk);
 	blk_cleanup_queue(btt->btt_queue);

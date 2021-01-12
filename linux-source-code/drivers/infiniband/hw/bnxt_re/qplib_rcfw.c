@@ -136,13 +136,6 @@ static int __send_message(struct bnxt_qplib_rcfw *rcfw, struct cmdq_base *req,
 		spin_unlock_irqrestore(&cmdq->lock, flags);
 		return -EBUSY;
 	}
-
-	size = req->cmd_size;
-	/* change the cmd_size to the number of 16byte cmdq unit.
-	 * req->cmd_size is modified here
-	 */
-	bnxt_qplib_set_cmd_slots(req);
-
 	memset(resp, 0, sizeof(*resp));
 	crsqe->resp = (struct creq_qp_event *)resp;
 	crsqe->resp->cookie = req->cookie;
@@ -157,6 +150,7 @@ static int __send_message(struct bnxt_qplib_rcfw *rcfw, struct cmdq_base *req,
 
 	cmdq_ptr = (struct bnxt_qplib_cmdqe **)cmdq->pbl_ptr;
 	preq = (u8 *)req;
+	size = req->cmd_size * BNXT_QPLIB_CMDQE_UNITS;
 	do {
 		/* Locate the next cmdq slot */
 		sw_prod = HWQ_CMP(cmdq->prod, cmdq);
@@ -702,8 +696,7 @@ int bnxt_qplib_enable_rcfw_channel(struct pci_dev *pdev,
 	/* General */
 	rcfw->seq_num = 0;
 	set_bit(FIRMWARE_FIRST_FLAG, &rcfw->flags);
-	bmap_size = BITS_TO_LONGS(rcfw->cmdq_depth *
-				  sizeof(unsigned long));
+	bmap_size = BITS_TO_LONGS(rcfw->cmdq_depth) * sizeof(unsigned long);
 	rcfw->cmdq_bitmap = kzalloc(bmap_size, GFP_KERNEL);
 	if (!rcfw->cmdq_bitmap)
 		return -ENOMEM;

@@ -44,6 +44,8 @@
 #define ent_e_flag(ent) (!!(ent & MAP_ERR_MASK))
 #define ent_z_flag(ent) (!!(ent & MAP_TRIM_MASK))
 #define set_e_flag(ent) (ent |= MAP_ERR_MASK)
+/* 'normal' is both e and z flags set */
+#define ent_normal(ent) (ent_e_flag(ent) && ent_z_flag(ent))
 
 enum btt_init_state {
 	INIT_UNCHECKED = 0,
@@ -242,5 +244,5 @@ struct btt {
 bool nd_btt_arena_is_valid(struct nd_btt *nd_btt, struct btt_sb *super);
 int nd_btt_version(struct nd_btt *nd_btt, struct nd_namespace_common *ndns,
 		struct btt_sb *btt_sb);
-bool btt_lbasize_is_supported(unsigned long lbasize);
+
 #endif

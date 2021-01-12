@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _LINUX_IF_LINK_H
 #define _LINUX_IF_LINK_H
 
@@ -21,12 +22,12 @@ struct ifla_vf_info {
 	__u8 mac[32];
 	__u32 vlan;
 	__u32 qos;
-	RH_KABI_REPLACE(__u32 tx_rate, __u32 max_tx_rate)
 	__u32 spoofchk;
 	__u32 linkstate;
-	RH_KABI_EXTEND(__u32 min_tx_rate)
-	RH_KABI_EXTEND(__u32 rss_query_en)
-	RH_KABI_EXTEND(__u32 trusted)
-	RH_KABI_EXTEND(__be16 vlan_proto)
+	__u32 min_tx_rate;
+	__u32 max_tx_rate;
+	__u32 rss_query_en;
+	__u32 trusted;
+	__be16 vlan_proto;
 };
 #endif /* _LINUX_IF_LINK_H */

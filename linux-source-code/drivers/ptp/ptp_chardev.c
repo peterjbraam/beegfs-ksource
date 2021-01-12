@@ -89,14 +89,10 @@ int ptp_set_pinfunc(struct ptp_clock *ptp, unsigned int pin,
 			return -EINVAL;
 		break;
 	case PTP_PF_PHYSYNC:
-		pr_err("sorry, cannot reassign the calibration pin\n");
-		return -EINVAL;
+		if (chan != 0)
+			return -EINVAL;
+		break;
 	default:
-		return -EINVAL;
-	}
-
-	if (pin2->func == PTP_PF_PHYSYNC) {
-		pr_err("sorry, cannot reprogram the calibration pin\n");
 		return -EINVAL;
 	}
 
@@ -138,7 +134,6 @@ long ptp_ioctl(struct posix_clock *pc, unsigned int cmd, unsigned long arg)
 	unsigned int i, pin_index;
 	struct ptp_pin_desc pd;
 	struct timespec64 ts;
-	struct timespec t2;
 	int enable, err = 0;
 
 	switch (cmd) {
@@ -203,6 +198,7 @@ long ptp_ioctl(struct posix_clock *pc, unsigned int cmd, unsigned long arg)
 		if (err)
 			break;
 
+		memset(&precise_offset, 0, sizeof(precise_offset));
 		ts = ktime_to_timespec64(xtstamp.device);
 		precise_offset.device.sec = ts.tv_sec;
 		precise_offset.device.nsec = ts.tv_nsec;
@@ -249,14 +245,10 @@ long ptp_ioctl(struct posix_clock *pc, unsigned int cmd, unsigned long arg)
 		break;
 
 	case PTP_SYS_OFFSET:
-		sysoff = kmalloc(sizeof(*sysoff), GFP_KERNEL);
-		if (!sysoff) {
-			err = -ENOMEM;
-			break;
-		}
-		if (copy_from_user(sysoff, (void __user *)arg,
-				   sizeof(*sysoff))) {
-			err = -EFAULT;
+		sysoff = memdup_user((void __user *)arg, sizeof(*sysoff));
+		if (IS_ERR(sysoff)) {
+			err = PTR_ERR(sysoff);
+			sysoff = NULL;
 			break;
 		}
 		if (sysoff->n_samples > PTP_MAX_SAMPLES) {
@@ -265,25 +257,21 @@ long ptp_ioctl(struct posix_clock *pc, unsigned int cmd, unsigned long arg)
 		}
 		pct = &sysoff->ts[0];
 		for (i = 0; i < sysoff->n_samples; i++) {
-			getnstimeofday64(&ts);
+			ktime_get_real_ts64(&ts);
 			pct->sec = ts.tv_sec;
 			pct->nsec = ts.tv_nsec;
 			pct++;
-			if (ops->gettimex64) {
+			if (ops->gettimex64)
 				err = ops->gettimex64(ops, &ts, NULL);
-			} else if (ops->gettime64) {
+			else
 				err = ops->gettime64(ops, &ts);
-			} else {
-				err = ptp->info->gettime(ptp->info, &t2);
-				ts = timespec_to_timespec64(t2);
-			}
 			if (err)
 				goto out;
 			pct->sec = ts.tv_sec;
 			pct->nsec = ts.tv_nsec;
 			pct++;
 		}
-		getnstimeofday64(&ts);
+		ktime_get_real_ts64(&ts);
 		pct->sec = ts.tv_sec;
 		pct->nsec = ts.tv_nsec;
 		if (copy_to_user((void __user *)arg, sysoff, sizeof(*sysoff)))
@@ -337,13 +325,13 @@ out:
 	return err;
 }
 
-unsigned int ptp_poll(struct posix_clock *pc, struct file *fp, poll_table *wait)
+__poll_t ptp_poll(struct posix_clock *pc, struct file *fp, poll_table *wait)
 {
 	struct ptp_clock *ptp = container_of(pc, struct ptp_clock, clock);
 
 	poll_wait(fp, &ptp->tsev_wq, wait);
 
-	return queue_cnt(&ptp->tsevq) ? POLLIN : 0;
+	return queue_cnt(&ptp->tsevq) ? EPOLLIN : 0;
 }
 
 #define EXTTS_BUFSIZE (PTP_BUF_TIMESTAMPS * sizeof(struct ptp_extts_event))

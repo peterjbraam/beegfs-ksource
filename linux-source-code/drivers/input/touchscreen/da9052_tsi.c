@@ -26,7 +26,6 @@ struct da9052_tsi {
 	struct da9052 *da9052;
 	struct input_dev *dev;
 	struct delayed_work ts_pen_work;
-	struct mutex mutex;
 	bool stopped;
 	bool adc_on;
 };
@@ -329,8 +328,6 @@ static int  da9052_ts_remove(struct platform_device *pdev)
 	input_unregister_device(tsi->dev);
 	kfree(tsi);
 
-	platform_set_drvdata(pdev, NULL);
-
 	return 0;
 }
 
@@ -339,7 +336,6 @@ static struct platform_driver da9052_tsi_driver = {
 	.remove	= da9052_ts_remove,
 	.driver	= {
 		.name	= "da9052-tsi",
-		.owner	= THIS_MODULE,
 	},
 };
 

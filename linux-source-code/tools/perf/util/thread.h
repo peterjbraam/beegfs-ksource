@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __PERF_THREAD_H
 #define __PERF_THREAD_H
 
@@ -7,6 +8,7 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include "symbol.h"
+#include "map.h"
 #include <strlist.h>
 #include <intlist.h>
 #include "rwsem.h"
@@ -28,12 +30,16 @@ struct thread {
 	bool			comm_set;
 	int			comm_len;
 	bool			dead; /* if set thread has exited */
+	struct list_head	namespaces_list;
+	struct rw_semaphore	namespaces_lock;
 	struct list_head	comm_list;
 	struct rw_semaphore	comm_lock;
 	u64			db_id;
 
 	void			*priv;
 	struct thread_stack	*ts;
+	struct nsinfo		*nsinfo;
+	struct srccode_state	srccode_state;
 #ifdef HAVE_LIBUNWIND_SUPPORT
 	void				*addr_space;
 	struct unwind_libunwind_ops	*unwind_libunwind_ops;
@@ -43,6 +49,7 @@ struct thread {
 };
 
 struct machine;
+struct namespaces;
 struct comm;
 
 struct thread *thread__new(pid_t pid, pid_t tid);
@@ -64,6 +71,10 @@ static inline void thread__exited(struct thread *thread)
 {
 	thread->dead = true;
 }
+
+struct namespaces *thread__namespaces(const struct thread *thread);
+int thread__set_namespaces(struct thread *thread, u64 timestamp,
+			   struct namespaces_event *event);
 
 int __thread__set_comm(struct thread *thread, const char *comm, u64 timestamp,
 		       bool exec);
@@ -87,9 +98,13 @@ struct thread *thread__main_thread(struct machine *machine, struct thread *threa
 
 struct map *thread__find_map(struct thread *thread, u8 cpumode, u64 addr,
 			     struct addr_location *al);
+struct map *thread__find_map_fb(struct thread *thread, u8 cpumode, u64 addr,
+				struct addr_location *al);
 
 struct symbol *thread__find_symbol(struct thread *thread, u8 cpumode,
 				   u64 addr, struct addr_location *al);
+struct symbol *thread__find_symbol_fb(struct thread *thread, u8 cpumode,
+				      u64 addr, struct addr_location *al);
 
 void thread__find_cpumode_addr_location(struct thread *thread, u64 addr,
 					struct addr_location *al);

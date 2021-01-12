@@ -87,7 +87,7 @@ static inline bool ib_nl_is_good_ip_resp(const struct nlmsghdr *nlh)
 		return false;
 
 	ret = nla_parse(tb, LS_NLA_TYPE_MAX - 1, nlmsg_data(nlh),
-			nlmsg_len(nlh), ib_nl_addr_policy);
+			nlmsg_len(nlh), ib_nl_addr_policy, NULL);
 	if (ret)
 		return false;
 
@@ -128,7 +128,8 @@ static void ib_nl_process_good_ip_rsep(const struct nlmsghdr *nlh)
 }
 
 int ib_nl_handle_ip_res_resp(struct sk_buff *skb,
-			     struct nlmsghdr *nlh)
+			     struct nlmsghdr *nlh,
+			     struct netlink_ext_ack *extack)
 {
 	if ((nlh->nlmsg_flags & NLM_F_REQUEST) ||
 	    !(NETLINK_CB(skb).sk))
@@ -335,7 +336,7 @@ static int dst_fetch_ha(const struct dst_entry *dst,
 		neigh_event_send(n, NULL);
 		ret = -ENODATA;
 	} else {
-		neigh_ha_snapshot(dev_addr->dst_dev_addr, n, dst->dev);
+		memcpy(dev_addr->dst_dev_addr, n->ha, MAX_ADDR_LEN);
 	}
 
 	neigh_release(n);

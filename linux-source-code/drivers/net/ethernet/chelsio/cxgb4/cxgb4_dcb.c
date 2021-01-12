@@ -833,23 +833,19 @@ static int __cxgb4_getapp(struct net_device *dev, u8 app_idtype, u16 app_id,
 }
 
 /* Return the Application User Priority Map associated with the specified
- * Application ID.  Since this routine is prototyped to return "u8" we can't
- * return errors ...
+ * Application ID.
  */
-static u8 cxgb4_getapp(struct net_device *dev, u8 app_idtype, u16 app_id)
+static int cxgb4_getapp(struct net_device *dev, u8 app_idtype, u16 app_id)
 {
 	/* Convert app_idtype to firmware format before querying */
 	return __cxgb4_getapp(dev, app_idtype == DCB_APP_IDTYPE_ETHTYPE ?
 			      app_idtype : 3, app_id, 0);
 }
 
-/* Write a new Application User Priority Map for the specified Application ID.
- * This routine is prototyped to return "u8" but other instantiations of the
- * DCB NetLink Operations "setapp" routines return negative errnos for errors.
- * We follow their lead.
+/* Write a new Application User Priority Map for the specified Application ID
  */
-static u8 __cxgb4_setapp(struct net_device *dev, u8 app_idtype, u16 app_id,
-		       u8 app_prio)
+static int __cxgb4_setapp(struct net_device *dev, u8 app_idtype, u16 app_id,
+			  u8 app_prio)
 {
 	struct fw_port_cmd pcmd;
 	struct port_info *pi = netdev2pinfo(dev);
@@ -913,7 +909,7 @@ static u8 __cxgb4_setapp(struct net_device *dev, u8 app_idtype, u16 app_id,
 }
 
 /* Priority for CEE inside dcb_app is bitmask, with 0 being an invalid value */
-static u8 cxgb4_setapp(struct net_device *dev, u8 app_idtype, u16 app_id,
+static int cxgb4_setapp(struct net_device *dev, u8 app_idtype, u16 app_id,
 			u8 app_prio)
 {
 	int ret;

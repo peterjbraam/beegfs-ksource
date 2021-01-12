@@ -35,6 +35,7 @@
 
 #include <linux/list.h>
 #include <linux/spinlock.h>
+#include <linux/cgroup_rdma.h>
 
 #include <rdma/ib_verbs.h>
 #include <rdma/opa_addr.h>
@@ -52,35 +53,6 @@ struct pkey_index_qp_list {
 	spinlock_t          qp_list_lock;
 	struct list_head    qp_list;
 };
-
-#if IS_ENABLED(CONFIG_INFINIBAND_ADDR_TRANS_CONFIGFS)
-int cma_configfs_init(void);
-void cma_configfs_exit(void);
-#else
-static inline int cma_configfs_init(void)
-{
-	return 0;
-}
-
-static inline void cma_configfs_exit(void)
-{
-}
-#endif
-struct cma_device;
-void cma_ref_dev(struct cma_device *cma_dev);
-void cma_deref_dev(struct cma_device *cma_dev);
-typedef bool (*cma_device_filter)(struct ib_device *, void *);
-struct cma_device *cma_enum_devices_by_ibdev(cma_device_filter	filter,
-					     void		*cookie);
-int cma_get_default_gid_type(struct cma_device *cma_dev,
-			     unsigned int port);
-int cma_set_default_gid_type(struct cma_device *cma_dev,
-			     unsigned int port,
-			     enum ib_gid_type default_gid_type);
-int cma_get_default_roce_tos(struct cma_device *cma_dev, unsigned int port);
-int cma_set_default_roce_tos(struct cma_device *a_dev, unsigned int port,
-			     u8 default_roce_tos);
-struct ib_device *cma_get_ib_dev(struct cma_device *cma_dev);
 
 int  ib_device_register_sysfs(struct ib_device *device,
 			      int (*port_callback)(struct ib_device *,
@@ -144,6 +116,35 @@ int ib_cache_setup_one(struct ib_device *device);
 void ib_cache_cleanup_one(struct ib_device *device);
 void ib_cache_release_one(struct ib_device *device);
 
+#ifdef CONFIG_CGROUP_RDMA
+int ib_device_register_rdmacg(struct ib_device *device);
+void ib_device_unregister_rdmacg(struct ib_device *device);
+
+int ib_rdmacg_try_charge(struct ib_rdmacg_object *cg_obj,
+			 struct ib_device *device,
+			 enum rdmacg_resource_type resource_index);
+
+void ib_rdmacg_uncharge(struct ib_rdmacg_object *cg_obj,
+			struct ib_device *device,
+			enum rdmacg_resource_type resource_index);
+#else
+static inline int ib_device_register_rdmacg(struct ib_device *device)
+{ return 0; }
+
+static inline void ib_device_unregister_rdmacg(struct ib_device *device)
+{ }
+
+static inline int ib_rdmacg_try_charge(struct ib_rdmacg_object *cg_obj,
+				       struct ib_device *device,
+				       enum rdmacg_resource_type resource_index)
+{ return 0; }
+
+static inline void ib_rdmacg_uncharge(struct ib_rdmacg_object *cg_obj,
+				      struct ib_device *device,
+				      enum rdmacg_resource_type resource_index)
+{ }
+#endif
+
 static inline bool rdma_is_upper_dev_rcu(struct net_device *dev,
 					 struct net_device *upper)
 {
@@ -163,11 +164,14 @@ int rdma_nl_init(void);
 void rdma_nl_exit(void);
 
 int ib_nl_handle_resolve_resp(struct sk_buff *skb,
-			      struct nlmsghdr *nlh);
+			      struct nlmsghdr *nlh,
+			      struct netlink_ext_ack *extack);
 int ib_nl_handle_set_timeout(struct sk_buff *skb,
-			     struct nlmsghdr *nlh);
+			     struct nlmsghdr *nlh,
+			     struct netlink_ext_ack *extack);
 int ib_nl_handle_ip_res_resp(struct sk_buff *skb,
-			     struct nlmsghdr *nlh);
+			     struct nlmsghdr *nlh,
+			     struct netlink_ext_ack *extack);
 
 int ib_get_cached_subnet_prefix(struct ib_device *device,
 				u8                port_num,
@@ -212,10 +216,10 @@ static inline int ib_security_modify_qp(struct ib_qp *qp,
 					int qp_attr_mask,
 					struct ib_udata *udata)
 {
-	return qp->device->modify_qp(qp->real_qp,
-				     qp_attr,
-				     qp_attr_mask,
-				     udata);
+	return qp->device->ops.modify_qp(qp->real_qp,
+					 qp_attr,
+					 qp_attr_mask,
+					 udata);
 }
 
 static inline int ib_create_qp_security(struct ib_qp *qp,
@@ -268,7 +272,6 @@ static inline void ib_mad_agent_security_change(void)
 #endif
 
 struct ib_device *ib_device_get_by_index(u32 ifindex);
-void ib_device_put(struct ib_device *device);
 /* RDMA device netlink */
 void nldev_init(void);
 void nldev_exit(void);
@@ -281,17 +284,16 @@ static inline struct ib_qp *_ib_create_qp(struct ib_device *dev,
 {
 	struct ib_qp *qp;
 
-	if (!dev->create_qp)
+	if (!dev->ops.create_qp)
 		return ERR_PTR(-EOPNOTSUPP);
 
-	qp = dev->create_qp(pd, attr, udata);
+	qp = dev->ops.create_qp(pd, attr, udata);
 	if (IS_ERR(qp))
 		return qp;
 
 	qp->device = dev;
 	qp->pd = pd;
 	qp->uobject = uobj;
-	qp->real_qp = qp;
 	/*
 	 * We don't track XRC QPs for now, because they don't have PD
 	 * and more importantly they are created internaly by driver,
@@ -299,7 +301,10 @@ static inline struct ib_qp *_ib_create_qp(struct ib_device *dev,
 	 */
 	if (attr->qp_type < IB_QPT_XRC_INI) {
 		qp->res.type = RDMA_RESTRACK_QP;
-		rdma_restrack_add(&qp->res);
+		if (uobj)
+			rdma_restrack_uadd(&qp->res);
+		else
+			rdma_restrack_kadd(&qp->res);
 	} else
 		qp->res.valid = false;
 

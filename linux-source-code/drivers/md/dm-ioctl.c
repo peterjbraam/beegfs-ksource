@@ -10,6 +10,7 @@
 #include <linux/module.h>
 #include <linux/vmalloc.h>
 #include <linux/miscdevice.h>
+#include <linux/sched/mm.h>
 #include <linux/init.h>
 #include <linux/wait.h>
 #include <linux/slab.h>
@@ -17,7 +18,7 @@
 #include <linux/hdreg.h>
 #include <linux/compat.h>
 
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 #define DM_MSG_PREFIX "ioctl"
 #define DM_DRIVER_EMAIL "dm-devel@redhat.com"
@@ -1343,7 +1344,8 @@ static int table_load(struct file *filp, struct dm_ioctl *param, size_t param_si
 			goto err_unlock_md_type;
 		}
 	} else if (!is_valid_type(dm_get_md_type(md), dm_table_get_type(t))) {
-		DMWARN("can't change device type after initial table load.");
+		DMWARN("can't change device type (old=%u vs new=%u) after initial table load.",
+		       dm_get_md_type(md), dm_table_get_type(t));
 		r = -EINVAL;
 		goto err_unlock_md_type;
 	}
@@ -1594,7 +1596,7 @@ static int target_message(struct file *filp, struct dm_ioctl *param, size_t para
 		DMWARN("Target message sector outside device.");
 		r = -EINVAL;
 	} else if (ti->type->message)
-		r = ti->type->message(ti, argc, argv);
+		r = ti->type->message(ti, argc, argv, result, maxlen);
 	else {
 		DMWARN("Target type does not support messages");
 		r = -EINVAL;
@@ -1922,15 +1924,15 @@ static int dm_release(struct inode *inode, struct file *filp)
 	return 0;
 }
 
-static unsigned dm_poll(struct file *filp, poll_table *wait)
+static __poll_t dm_poll(struct file *filp, poll_table *wait)
 {
 	struct dm_file *priv = filp->private_data;
-	unsigned mask = 0;
+	__poll_t mask = 0;
 
 	poll_wait(filp, &dm_global_eventq, wait);
 
 	if ((int)(atomic_read(&dm_global_event_nr) - priv->global_event_nr) > 0)
-		mask |= POLLIN;
+		mask |= EPOLLIN;
 
 	return mask;
 }
@@ -1981,9 +1983,7 @@ int __init dm_interface_init(void)
 
 void dm_interface_exit(void)
 {
-	if (misc_deregister(&_dm_misc) < 0)
-		DMERR("misc_deregister failed for control device");
-
+	misc_deregister(&_dm_misc);
 	dm_hash_exit();
 }
 

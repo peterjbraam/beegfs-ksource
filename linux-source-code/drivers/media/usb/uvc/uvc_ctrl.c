@@ -227,7 +227,8 @@ static struct uvc_control_info uvc_ctrls[] = {
 		.size		= 4,
 		.flags		= UVC_CTRL_FLAG_SET_CUR
 				| UVC_CTRL_FLAG_GET_RANGE
-				| UVC_CTRL_FLAG_RESTORE,
+				| UVC_CTRL_FLAG_RESTORE
+				| UVC_CTRL_FLAG_AUTO_UPDATE,
 	},
 	{
 		.entity		= UVC_GUID_UVC_CAMERA,
@@ -309,9 +310,8 @@ static struct uvc_control_info uvc_ctrls[] = {
 		.selector	= UVC_CT_PANTILT_RELATIVE_CONTROL,
 		.index		= 12,
 		.size		= 4,
-		.flags		= UVC_CTRL_FLAG_SET_CUR | UVC_CTRL_FLAG_GET_MIN
-				| UVC_CTRL_FLAG_GET_MAX | UVC_CTRL_FLAG_GET_RES
-				| UVC_CTRL_FLAG_GET_DEF
+		.flags		= UVC_CTRL_FLAG_SET_CUR
+				| UVC_CTRL_FLAG_GET_RANGE
 				| UVC_CTRL_FLAG_AUTO_UPDATE,
 	},
 	{
@@ -389,6 +389,35 @@ static void uvc_ctrl_set_zoom(struct uvc_control_mapping *mapping,
 {
 	data[0] = value == 0 ? 0 : (value > 0) ? 1 : 0xff;
 	data[2] = min((int)abs(value), 0xff);
+}
+
+static s32 uvc_ctrl_get_rel_speed(struct uvc_control_mapping *mapping,
+	u8 query, const u8 *data)
+{
+	unsigned int first = mapping->offset / 8;
+	s8 rel = (s8)data[first];
+
+	switch (query) {
+	case UVC_GET_CUR:
+		return (rel == 0) ? 0 : (rel > 0 ? data[first+1]
+						 : -data[first+1]);
+	case UVC_GET_MIN:
+		return -data[first+1];
+	case UVC_GET_MAX:
+	case UVC_GET_RES:
+	case UVC_GET_DEF:
+	default:
+		return data[first+1];
+	}
+}
+
+static void uvc_ctrl_set_rel_speed(struct uvc_control_mapping *mapping,
+	s32 value, u8 *data)
+{
+	unsigned int first = mapping->offset / 8;
+
+	data[first] = value == 0 ? 0 : (value > 0) ? 1 : 0xff;
+	data[first+1] = min_t(int, abs(value), 0xff);
 }
 
 static struct uvc_control_mapping uvc_ctrl_mappings[] = {
@@ -664,7 +693,7 @@ static struct uvc_control_mapping uvc_ctrl_mappings[] = {
 		.size		= 32,
 		.offset		= 0,
 		.v4l2_type	= V4L2_CTRL_TYPE_INTEGER,
-		.data_type	= UVC_CTRL_DATA_TYPE_UNSIGNED,
+		.data_type	= UVC_CTRL_DATA_TYPE_SIGNED,
 	},
 	{
 		.id		= V4L2_CID_TILT_ABSOLUTE,
@@ -674,7 +703,31 @@ static struct uvc_control_mapping uvc_ctrl_mappings[] = {
 		.size		= 32,
 		.offset		= 32,
 		.v4l2_type	= V4L2_CTRL_TYPE_INTEGER,
-		.data_type	= UVC_CTRL_DATA_TYPE_UNSIGNED,
+		.data_type	= UVC_CTRL_DATA_TYPE_SIGNED,
+	},
+	{
+		.id		= V4L2_CID_PAN_SPEED,
+		.name		= "Pan (Speed)",
+		.entity		= UVC_GUID_UVC_CAMERA,
+		.selector	= UVC_CT_PANTILT_RELATIVE_CONTROL,
+		.size		= 16,
+		.offset		= 0,
+		.v4l2_type	= V4L2_CTRL_TYPE_INTEGER,
+		.data_type	= UVC_CTRL_DATA_TYPE_SIGNED,
+		.get		= uvc_ctrl_get_rel_speed,
+		.set		= uvc_ctrl_set_rel_speed,
+	},
+	{
+		.id		= V4L2_CID_TILT_SPEED,
+		.name		= "Tilt (Speed)",
+		.entity		= UVC_GUID_UVC_CAMERA,
+		.selector	= UVC_CT_PANTILT_RELATIVE_CONTROL,
+		.size		= 16,
+		.offset		= 16,
+		.v4l2_type	= V4L2_CTRL_TYPE_INTEGER,
+		.data_type	= UVC_CTRL_DATA_TYPE_SIGNED,
+		.get		= uvc_ctrl_get_rel_speed,
+		.set		= uvc_ctrl_set_rel_speed,
 	},
 	{
 		.id		= V4L2_CID_PRIVACY,
@@ -966,10 +1019,10 @@ static int __uvc_query_v4l2_ctrl(struct uvc_video_chain *chain,
 	struct uvc_menu_info *menu;
 	unsigned int i;
 
-	memset(v4l2_ctrl, 0, sizeof *v4l2_ctrl);
+	memset(v4l2_ctrl, 0, sizeof(*v4l2_ctrl));
 	v4l2_ctrl->id = mapping->id;
 	v4l2_ctrl->type = mapping->v4l2_type;
-	strlcpy(v4l2_ctrl->name, mapping->name, sizeof v4l2_ctrl->name);
+	strlcpy(v4l2_ctrl->name, mapping->name, sizeof(v4l2_ctrl->name));
 	v4l2_ctrl->flags = 0;
 
 	if (!(ctrl->info.flags & UVC_CTRL_FLAG_GET_CUR))
@@ -1072,7 +1125,7 @@ done:
 }
 
 /*
- * Mapping V4L2 controls to UVC controls can be straightforward if done well.
+ * Mapping V4L2 controls to UVC controls can be straighforward if done well.
  * Most of the UVC controls exist in V4L2, and can be mapped directly. Some
  * must be grouped (for instance the Red Balance, Blue Balance and Do White
  * Balance V4L2 controls use the White Balance Component UVC control) or
@@ -1129,7 +1182,7 @@ int uvc_query_v4l2_menu(struct uvc_video_chain *chain,
 		}
 	}
 
-	strlcpy(query_menu->name, menu_info->name, sizeof query_menu->name);
+	strlcpy(query_menu->name, menu_info->name, sizeof(query_menu->name));
 
 done:
 	mutex_unlock(&chain->ctrl_mutex);
@@ -1176,9 +1229,9 @@ static void uvc_ctrl_send_event(struct uvc_fh *handle,
 	uvc_ctrl_fill_event(handle->chain, &ev, ctrl, mapping, value, changes);
 
 	list_for_each_entry(sev, &mapping->ev_subs, node) {
-		if (sev->fh != &handle->vfh ||
+		if (sev->fh && (sev->fh != &handle->vfh ||
 		    (sev->flags & V4L2_EVENT_SUB_FL_ALLOW_FEEDBACK) ||
-		    (changes & V4L2_EVENT_CTRL_CH_FLAGS))
+		    (changes & V4L2_EVENT_CTRL_CH_FLAGS)))
 			v4l2_event_queue_fh(sev->fh, &ev);
 	}
 }
@@ -1815,7 +1868,7 @@ done:
  * - Handle restore order (Auto-Exposure Mode should be restored before
  *   Exposure Time).
  */
-int uvc_ctrl_resume_device(struct uvc_device *dev)
+int uvc_ctrl_restore_values(struct uvc_device *dev)
 {
 	struct uvc_control *ctrl;
 	struct uvc_entity *entity;
@@ -1973,6 +2026,13 @@ int uvc_ctrl_add_mapping(struct uvc_video_chain *chain,
 	ret = uvc_ctrl_init_xu_ctrl(dev, ctrl);
 	if (ret < 0) {
 		ret = -ENOENT;
+		goto done;
+	}
+
+	/* Validate the user-provided bit-size and offset */
+	if (mapping->size > 32 ||
+	    mapping->offset + mapping->size > ctrl->info.size * 8) {
+		ret = -EINVAL;
 		goto done;
 	}
 

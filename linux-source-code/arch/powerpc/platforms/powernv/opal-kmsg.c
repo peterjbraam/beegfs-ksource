@@ -14,6 +14,7 @@
 #include <linux/kmsg_dump.h>
 
 #include <asm/opal.h>
+#include <asm/opal-api.h>
 
 /*
  * Console output is controlled by OPAL firmware.  The kernel regularly calls

@@ -1,45 +1,11 @@
+// SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0
 /******************************************************************************
  *
  * Module Name: evregion - Operation Region support
  *
+ * Copyright (C) 2000 - 2018, Intel Corp.
+ *
  *****************************************************************************/
-
-/*
- * Copyright (C) 2000 - 2013, Intel Corp.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions, and the following disclaimer,
- *    without modification.
- * 2. Redistributions in binary form must reproduce at minimum a disclaimer
- *    substantially similar to the "NO WARRANTY" disclaimer below
- *    ("Disclaimer") and any redistribution must be conditioned upon
- *    including a substantially similar Disclaimer requirement for further
- *    binary redistribution.
- * 3. Neither the names of the above-listed copyright holders nor the names
- *    of any contributors may be used to endorse or promote products derived
- *    from this software without specific prior written permission.
- *
- * Alternatively, this software may be distributed under the terms of the
- * GNU General Public License ("GPL") version 2 as published by the Free
- * Software Foundation.
- *
- * NO WARRANTY
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTIBILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * HOLDERS OR CONTRIBUTORS BE LIABLE FOR SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
- * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGES.
- */
 
 #include <acpi/acpi.h>
 #include "accommon.h"
@@ -97,14 +63,11 @@ acpi_status acpi_ev_initialize_op_regions(void)
 		if (acpi_ev_has_default_handler(acpi_gbl_root_node,
 						acpi_gbl_default_address_spaces
 						[i])) {
-			status =
-			    acpi_ev_execute_reg_methods(acpi_gbl_root_node,
-							acpi_gbl_default_address_spaces
-							[i]);
+			acpi_ev_execute_reg_methods(acpi_gbl_root_node,
+						    acpi_gbl_default_address_spaces
+						    [i], ACPI_REG_CONNECT);
 		}
 	}
-
-	acpi_gbl_reg_methods_executed = TRUE;
 
 	(void)acpi_ut_release_mutex(ACPI_MTX_NAMESPACE);
 	return_ACPI_STATUS(status);
@@ -127,6 +90,12 @@ acpi_status acpi_ev_initialize_op_regions(void)
  * DESCRIPTION: Dispatch an address space or operation region access to
  *              a previously installed handler.
  *
+ * NOTE: During early initialization, we always install the default region
+ * handlers for Memory, I/O and PCI_Config. This ensures that these operation
+ * region address spaces are always available as per the ACPI specification.
+ * This is especially needed in order to support the execution of
+ * module-level AML code during loading of the ACPI tables.
+ *
  ******************************************************************************/
 
 acpi_status
@@ -142,6 +111,7 @@ acpi_ev_address_space_dispatch(union acpi_operand_object *region_obj,
 	union acpi_operand_object *region_obj2;
 	void *region_context = NULL;
 	struct acpi_connection_info *context;
+	acpi_physical_address address;
 
 	ACPI_FUNCTION_TRACE(ev_address_space_dispatch);
 
@@ -217,16 +187,11 @@ acpi_ev_address_space_dispatch(union acpi_operand_object *region_obj,
 		if (!(region_obj->region.flags & AOPOBJ_SETUP_COMPLETE)) {
 			region_obj->region.flags |= AOPOBJ_SETUP_COMPLETE;
 
-			if (region_obj2->extra.region_context) {
-
-				/* The handler for this region was already installed */
-
-				ACPI_FREE(region_context);
-			} else {
-				/*
-				 * Save the returned context for use in all accesses to
-				 * this particular region
-				 */
+			/*
+			 * Save the returned context for use in all accesses to
+			 * the handler for this particular region
+			 */
+			if (!(region_obj2->extra.region_context)) {
 				region_obj2->extra.region_context =
 				    region_context;
 			}
@@ -236,25 +201,23 @@ acpi_ev_address_space_dispatch(union acpi_operand_object *region_obj,
 	/* We have everything we need, we can invoke the address space handler */
 
 	handler = handler_desc->address_space.handler;
-
-	ACPI_DEBUG_PRINT((ACPI_DB_OPREGION,
-			  "Handler %p (@%p) Address %8.8X%8.8X [%s]\n",
-			  &region_obj->region.handler->address_space, handler,
-			  ACPI_FORMAT_NATIVE_UINT(region_obj->region.address +
-						  region_offset),
-			  acpi_ut_get_region_name(region_obj->region.
-						  space_id)));
+	address = (region_obj->region.address + region_offset);
 
 	/*
 	 * Special handling for generic_serial_bus and general_purpose_io:
 	 * There are three extra parameters that must be passed to the
 	 * handler via the context:
-	 *   1) Connection buffer, a resource template from Connection() op.
-	 *   2) Length of the above buffer.
-	 *   3) Actual access length from the access_as() op.
+	 *   1) Connection buffer, a resource template from Connection() op
+	 *   2) Length of the above buffer
+	 *   3) Actual access length from the access_as() op
+	 *
+	 * In addition, for general_purpose_io, the Address and bit_width fields
+	 * are defined as follows:
+	 *   1) Address is the pin number index of the field (bit offset from
+	 *      the previous Connection)
+	 *   2) bit_width is the actual bit length of the field (number of pins)
 	 */
-	if (((region_obj->region.space_id == ACPI_ADR_SPACE_GSBUS) ||
-	     (region_obj->region.space_id == ACPI_ADR_SPACE_GPIO)) &&
+	if ((region_obj->region.space_id == ACPI_ADR_SPACE_GSBUS) &&
 	    context && field_obj) {
 
 		/* Get the Connection (resource_template) buffer */
@@ -263,6 +226,24 @@ acpi_ev_address_space_dispatch(union acpi_operand_object *region_obj,
 		context->length = field_obj->field.resource_length;
 		context->access_length = field_obj->field.access_length;
 	}
+	if ((region_obj->region.space_id == ACPI_ADR_SPACE_GPIO) &&
+	    context && field_obj) {
+
+		/* Get the Connection (resource_template) buffer */
+
+		context->connection = field_obj->field.resource_buffer;
+		context->length = field_obj->field.resource_length;
+		context->access_length = field_obj->field.access_length;
+		address = field_obj->field.pin_number_index;
+		bit_width = field_obj->field.bit_length;
+	}
+
+	ACPI_DEBUG_PRINT((ACPI_DB_OPREGION,
+			  "Handler %p (@%p) Address %8.8X%8.8X [%s]\n",
+			  &region_obj->region.handler->address_space, handler,
+			  ACPI_FORMAT_UINT64(address),
+			  acpi_ut_get_region_name(region_obj->region.
+						  space_id)));
 
 	if (!(handler_desc->address_space.handler_flags &
 	      ACPI_ADDR_HANDLER_DEFAULT_INSTALLED)) {
@@ -276,15 +257,23 @@ acpi_ev_address_space_dispatch(union acpi_operand_object *region_obj,
 
 	/* Call the handler */
 
-	status = handler(function,
-			 (region_obj->region.address + region_offset),
-			 bit_width, value, context,
+	status = handler(function, address, bit_width, value, context,
 			 region_obj2->extra.region_context);
 
 	if (ACPI_FAILURE(status)) {
 		ACPI_EXCEPTION((AE_INFO, status, "Returned by Handler for [%s]",
 				acpi_ut_get_region_name(region_obj->region.
 							space_id)));
+
+		/*
+		 * Special case for an EC timeout. These are seen so frequently
+		 * that an additional error message is helpful
+		 */
+		if ((region_obj->region.space_id == ACPI_ADR_SPACE_EC) &&
+		    (status == AE_TIME)) {
+			ACPI_ERROR((AE_INFO,
+				    "Timeout from EC hardware or EC device driver"));
+		}
 	}
 
 	if (!(handler_desc->address_space.handler_flags &
@@ -319,6 +308,7 @@ acpi_ev_detach_region(union acpi_operand_object *region_obj,
 {
 	union acpi_operand_object *handler_obj;
 	union acpi_operand_object *obj_desc;
+	union acpi_operand_object *start_desc;
 	union acpi_operand_object **last_obj_ptr;
 	acpi_adr_space_setup region_setup;
 	void **region_context;
@@ -346,6 +336,7 @@ acpi_ev_detach_region(union acpi_operand_object *region_obj,
 	/* Find this region in the handler's list */
 
 	obj_desc = handler_obj->address_space.region_list;
+	start_desc = obj_desc;
 	last_obj_ptr = &handler_obj->address_space.region_list;
 
 	while (obj_desc) {
@@ -402,6 +393,14 @@ acpi_ev_detach_region(union acpi_operand_object *region_obj,
 						 handler_obj->address_space.
 						 context, region_context);
 
+				/*
+				 * region_context should have been released by the deactivate
+				 * operation. We don't need access to it anymore here.
+				 */
+				if (region_context) {
+					*region_context = NULL;
+				}
+
 				/* Init routine may fail, Just ignore errors */
 
 				if (ACPI_FAILURE(status)) {
@@ -435,6 +434,15 @@ acpi_ev_detach_region(union acpi_operand_object *region_obj,
 
 		last_obj_ptr = &obj_desc->region.next;
 		obj_desc = obj_desc->region.next;
+
+		/* Prevent infinite loop if list is corrupted */
+
+		if (obj_desc == start_desc) {
+			ACPI_ERROR((AE_INFO,
+				    "Circular handler list in region object %p",
+				    region_obj));
+			return_VOID;
+		}
 	}
 
 	/* If we get here, the region was not in the handler's region list */
@@ -469,6 +477,12 @@ acpi_ev_attach_region(union acpi_operand_object *handler_obj,
 
 	ACPI_FUNCTION_TRACE(ev_attach_region);
 
+	/* Install the region's handler */
+
+	if (region_obj->region.handler) {
+		return_ACPI_STATUS(AE_ALREADY_EXISTS);
+	}
+
 	ACPI_DEBUG_PRINT((ACPI_DB_OPREGION,
 			  "Adding Region [%4.4s] %p to address handler %p [%s]\n",
 			  acpi_ut_get_node_name(region_obj->region.node),
@@ -480,13 +494,6 @@ acpi_ev_attach_region(union acpi_operand_object *handler_obj,
 
 	region_obj->region.next = handler_obj->address_space.region_list;
 	handler_obj->address_space.region_list = region_obj;
-
-	/* Install the region's handler */
-
-	if (region_obj->region.handler) {
-		return_ACPI_STATUS(AE_ALREADY_EXISTS);
-	}
-
 	region_obj->region.handler = handler_obj;
 	acpi_ut_add_reference(handler_obj);
 
@@ -512,16 +519,51 @@ acpi_ev_execute_reg_method(union acpi_operand_object *region_obj, u32 function)
 	struct acpi_evaluate_info *info;
 	union acpi_operand_object *args[3];
 	union acpi_operand_object *region_obj2;
+	const acpi_name *reg_name_ptr =
+	    ACPI_CAST_PTR(acpi_name, METHOD_NAME__REG);
+	struct acpi_namespace_node *method_node;
+	struct acpi_namespace_node *node;
 	acpi_status status;
 
 	ACPI_FUNCTION_TRACE(ev_execute_reg_method);
+
+	if (!acpi_gbl_namespace_initialized ||
+	    region_obj->region.handler == NULL) {
+		return_ACPI_STATUS(AE_OK);
+	}
 
 	region_obj2 = acpi_ns_get_secondary_object(region_obj);
 	if (!region_obj2) {
 		return_ACPI_STATUS(AE_NOT_EXIST);
 	}
 
+	/*
+	 * Find any "_REG" method associated with this region definition.
+	 * The method should always be updated as this function may be
+	 * invoked after a namespace change.
+	 */
+	node = region_obj->region.node->parent;
+	status =
+	    acpi_ns_search_one_scope(*reg_name_ptr, node, ACPI_TYPE_METHOD,
+				     &method_node);
+	if (ACPI_SUCCESS(status)) {
+		/*
+		 * The _REG method is optional and there can be only one per
+		 * region definition. This will be executed when the handler is
+		 * attached or removed.
+		 */
+		region_obj2->extra.method_REG = method_node;
+	}
 	if (region_obj2->extra.method_REG == NULL) {
+		return_ACPI_STATUS(AE_OK);
+	}
+
+	/* _REG(DISCONNECT) should be paired with _REG(CONNECT) */
+
+	if ((function == ACPI_REG_CONNECT &&
+	     region_obj->common.flags & AOPOBJ_REG_CONNECTED) ||
+	    (function == ACPI_REG_DISCONNECT &&
+	     !(region_obj->common.flags & AOPOBJ_REG_CONNECTED))) {
 		return_ACPI_STATUS(AE_OK);
 	}
 
@@ -570,10 +612,20 @@ acpi_ev_execute_reg_method(union acpi_operand_object *region_obj, u32 function)
 	status = acpi_ns_evaluate(info);
 	acpi_ut_remove_reference(args[1]);
 
-      cleanup2:
+	if (ACPI_FAILURE(status)) {
+		goto cleanup2;
+	}
+
+	if (function == ACPI_REG_CONNECT) {
+		region_obj->common.flags |= AOPOBJ_REG_CONNECTED;
+	} else {
+		region_obj->common.flags &= ~AOPOBJ_REG_CONNECTED;
+	}
+
+cleanup2:
 	acpi_ut_remove_reference(args[0]);
 
-      cleanup1:
+cleanup1:
 	ACPI_FREE(info);
 	return_ACPI_STATUS(status);
 }
@@ -584,21 +636,30 @@ acpi_ev_execute_reg_method(union acpi_operand_object *region_obj, u32 function)
  *
  * PARAMETERS:  node            - Namespace node for the device
  *              space_id        - The address space ID
+ *              function        - Passed to _REG: On (1) or Off (0)
  *
- * RETURN:      Status
+ * RETURN:      None
  *
  * DESCRIPTION: Run all _REG methods for the input Space ID;
  *              Note: assumes namespace is locked, or system init time.
  *
  ******************************************************************************/
 
-acpi_status
+void
 acpi_ev_execute_reg_methods(struct acpi_namespace_node *node,
-			    acpi_adr_space_type space_id)
+			    acpi_adr_space_type space_id, u32 function)
 {
-	acpi_status status;
+	struct acpi_reg_walk_info info;
 
 	ACPI_FUNCTION_TRACE(ev_execute_reg_methods);
+
+	info.space_id = space_id;
+	info.function = function;
+	info.reg_run_count = 0;
+
+	ACPI_DEBUG_PRINT_RAW((ACPI_DB_NAMES,
+			      "    Running _REG methods for SpaceId %s\n",
+			      acpi_ut_get_region_name(info.space_id)));
 
 	/*
 	 * Run all _REG methods for all Operation Regions for this space ID. This
@@ -606,9 +667,9 @@ acpi_ev_execute_reg_methods(struct acpi_namespace_node *node,
 	 * regions and _REG methods. (i.e. handlers must be installed for all
 	 * regions of this Space ID before we can run any _REG methods)
 	 */
-	status = acpi_ns_walk_namespace(ACPI_TYPE_ANY, node, ACPI_UINT32_MAX,
-					ACPI_NS_WALK_UNLOCK, acpi_ev_reg_run,
-					NULL, &space_id, NULL);
+	(void)acpi_ns_walk_namespace(ACPI_TYPE_ANY, node, ACPI_UINT32_MAX,
+				     ACPI_NS_WALK_UNLOCK, acpi_ev_reg_run, NULL,
+				     &info, NULL);
 
 	/* Special case for EC: handle "orphan" _REG methods with no region */
 
@@ -616,7 +677,12 @@ acpi_ev_execute_reg_methods(struct acpi_namespace_node *node,
 		acpi_ev_orphan_ec_reg_method(node);
 	}
 
-	return_ACPI_STATUS(status);
+	ACPI_DEBUG_PRINT_RAW((ACPI_DB_NAMES,
+			      "    Executed %u _REG methods for SpaceId %s\n",
+			      info.reg_run_count,
+			      acpi_ut_get_region_name(info.space_id)));
+
+	return_VOID;
 }
 
 /*******************************************************************************
@@ -635,10 +701,10 @@ acpi_ev_reg_run(acpi_handle obj_handle,
 {
 	union acpi_operand_object *obj_desc;
 	struct acpi_namespace_node *node;
-	acpi_adr_space_type space_id;
 	acpi_status status;
+	struct acpi_reg_walk_info *info;
 
-	space_id = *ACPI_CAST_PTR(acpi_adr_space_type, context);
+	info = ACPI_CAST_PTR(struct acpi_reg_walk_info, context);
 
 	/* Convert and validate the device handle */
 
@@ -667,14 +733,15 @@ acpi_ev_reg_run(acpi_handle obj_handle,
 
 	/* Object is a Region */
 
-	if (obj_desc->region.space_id != space_id) {
+	if (obj_desc->region.space_id != info->space_id) {
 
 		/* This region is for a different address space, just ignore it */
 
 		return (AE_OK);
 	}
 
-	status = acpi_ev_execute_reg_method(obj_desc, ACPI_REG_CONNECT);
+	info->reg_run_count++;
+	status = acpi_ev_execute_reg_method(obj_desc, info->function);
 	return (status);
 }
 
@@ -758,7 +825,7 @@ acpi_ev_orphan_ec_reg_method(struct acpi_namespace_node *ec_device_node)
 
 	status = acpi_evaluate_object(reg_method, NULL, &args, NULL);
 
-      exit:
+exit:
 	/* We ignore all errors from above, don't care */
 
 	status = acpi_ut_acquire_mutex(ACPI_MTX_NAMESPACE);

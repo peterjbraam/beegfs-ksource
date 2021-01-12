@@ -57,8 +57,8 @@ static int __hw_addr_add_ex(struct netdev_hw_addr_list *list,
 		return -EINVAL;
 
 	list_for_each_entry(ha, &list->list, list) {
-		if (!memcmp(ha->addr, addr, addr_len) &&
-		    ha->type == addr_type) {
+		if (ha->type == addr_type &&
+		    !memcmp(ha->addr, addr, addr_len)) {
 			if (global) {
 				/* check if addr is already used as global */
 				if (ha->global_use)
@@ -278,8 +278,8 @@ int __hw_addr_sync_dev(struct netdev_hw_addr_list *list,
 EXPORT_SYMBOL(__hw_addr_sync_dev);
 
 /**
- *  __hw_addr_unsync_dev - Remove synchonized addresses from device
- *  @list: address list to remove syncronized addresses from
+ *  __hw_addr_unsync_dev - Remove synchronized addresses from device
+ *  @list: address list to remove synchronized addresses from
  *  @dev:  device to sync
  *  @unsync: function to call if address should be removed
  *
@@ -401,6 +401,9 @@ int dev_addr_add(struct net_device *dev, const unsigned char *addr,
 
 	ASSERT_RTNL();
 
+	err = dev_pre_changeaddr_notify(dev, addr, NULL);
+	if (err)
+		return err;
 	err = __hw_addr_add(&dev->dev_addrs, addr, dev->addr_len, addr_type);
 	if (!err)
 		call_netdevice_notifiers(NETDEV_CHANGEADDR, dev);
@@ -744,7 +747,7 @@ int dev_mc_del_global(struct net_device *dev, const unsigned char *addr)
 EXPORT_SYMBOL(dev_mc_del_global);
 
 /**
- *	dev_mc_sync - Synchronize device's unicast list to another device
+ *	dev_mc_sync - Synchronize device's multicast list to another device
  *	@to: destination device
  *	@from: source device
  *
@@ -772,7 +775,7 @@ int dev_mc_sync(struct net_device *to, struct net_device *from)
 EXPORT_SYMBOL(dev_mc_sync);
 
 /**
- *	dev_mc_sync_multiple - Synchronize device's unicast list to another
+ *	dev_mc_sync_multiple - Synchronize device's multicast list to another
  *	device, but allow for multiple calls to sync to multiple devices.
  *	@to: destination device
  *	@from: source device
@@ -839,7 +842,7 @@ void dev_mc_flush(struct net_device *dev)
 EXPORT_SYMBOL(dev_mc_flush);
 
 /**
- *	dev_mc_flush - Init multicast address list
+ *	dev_mc_init - Init multicast address list
  *	@dev: device
  *
  *	Init multicast address list.

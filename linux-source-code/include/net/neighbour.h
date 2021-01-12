@@ -1,7 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _NET_NEIGHBOUR_H
 #define _NET_NEIGHBOUR_H
 
 #include <linux/neighbour.h>
+
+#include <linux/rh_kabi.h>
 
 /*
  *	Generic neighbour manipulation
@@ -17,6 +20,7 @@
  */
 
 #include <linux/atomic.h>
+#include <linux/refcount.h>
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
 #include <linux/rcupdate.h>
@@ -42,6 +46,7 @@ enum {
 	NEIGH_VAR_MCAST_PROBES,
 	NEIGH_VAR_UCAST_PROBES,
 	NEIGH_VAR_APP_PROBES,
+	NEIGH_VAR_MCAST_REPROBES,
 	NEIGH_VAR_RETRANS_TIME,
 	NEIGH_VAR_BASE_REACHABLE_TIME,
 	NEIGH_VAR_DELAY_PROBE_TIME,
@@ -67,7 +72,7 @@ enum {
 struct neigh_parms {
 	possible_net_t net;
 	struct net_device *dev;
-	struct neigh_parms *next;
+	struct list_head list;
 	int	(*neigh_setup)(struct neighbour *);
 	void	(*neigh_cleanup)(struct neighbour *);
 	struct neigh_table *tbl;
@@ -75,7 +80,7 @@ struct neigh_parms {
 	void	*sysctl_table;
 
 	int dead;
-	atomic_t refcnt;
+	refcount_t refcnt;
 	struct rcu_head rcu_head;
 
 	int	reachable_time;
@@ -90,6 +95,11 @@ static inline void neigh_var_set(struct neigh_parms *p, int index, int val)
 }
 
 #define NEIGH_VAR(p, attr) ((p)->data[NEIGH_VAR_ ## attr])
+
+/* In ndo_neigh_setup, NEIGH_VAR_INIT should be used.
+ * In other cases, NEIGH_VAR_SET should be used.
+ */
+#define NEIGH_VAR_INIT(p, attr, val) (NEIGH_VAR(p, attr) = val)
 #define NEIGH_VAR_SET(p, attr, val) neigh_var_set(p, NEIGH_VAR_ ## attr, val)
 
 static inline void neigh_parms_data_state_setall(struct neigh_parms *p)
@@ -119,6 +129,7 @@ struct neigh_statistics {
 	unsigned long forced_gc_runs;	/* number of forced GC runs */
 
 	unsigned long unres_discards;	/* number of unresolved drops */
+	unsigned long table_fulls;      /* times even gc couldn't help */
 };
 
 #define NEIGH_CACHE_STAT_INC(tbl, field) this_cpu_inc((tbl)->stats->field)
@@ -130,7 +141,7 @@ struct neighbour {
 	unsigned long		confirmed;
 	unsigned long		updated;
 	rwlock_t		lock;
-	atomic_t		refcnt;
+	refcount_t		refcnt;
 	struct sk_buff_head	arp_queue;
 	unsigned int		arp_queue_len_bytes;
 	struct timer_list	timer;
@@ -147,8 +158,11 @@ struct neighbour {
 	const struct neigh_ops	*ops;
 	struct rcu_head		rcu;
 	struct net_device	*dev;
+
+	RH_KABI_RESERVE(1)
+	RH_KABI_RESERVE(2)
 	u8			primary_key[0];
-};
+} __randomize_layout;
 
 struct neigh_ops {
 	int			family;
@@ -181,20 +195,21 @@ struct neigh_hash_table {
 
 
 struct neigh_table {
-	struct neigh_table	*next;
 	int			family;
-	int			entry_size;
-	int			key_len;
+	unsigned int		entry_size;
+	unsigned int		key_len;
+	__be16			protocol;
 	__u32			(*hash)(const void *pkey,
 					const struct net_device *dev,
 					__u32 *hash_rnd);
+	bool			(*key_eq)(const struct neighbour *, const void *pkey);
 	int			(*constructor)(struct neighbour *);
 	int			(*pconstructor)(struct pneigh_entry *);
 	void			(*pdestructor)(struct pneigh_entry *);
 	void			(*proxy_redo)(struct sk_buff *skb);
 	char			*id;
 	struct neigh_parms	parms;
-	/* HACK. gc_* should follow parms without a gap! */
+	struct list_head	parms_list;
 	int			gc_interval;
 	int			gc_thresh1;
 	int			gc_thresh2;
@@ -216,6 +231,7 @@ enum {
 	NEIGH_ND_TABLE = 1,
 	NEIGH_DN_TABLE = 2,
 	NEIGH_NR_TABLES,
+	NEIGH_LINK_TABLE = NEIGH_NR_TABLES /* Pseudo table for neigh_xmit */
 };
 
 static inline int neigh_parms_family(struct neigh_parms *p)
@@ -235,8 +251,60 @@ static inline void *neighbour_priv(const struct neighbour *n)
 #define NEIGH_UPDATE_F_OVERRIDE			0x00000001
 #define NEIGH_UPDATE_F_WEAK_OVERRIDE		0x00000002
 #define NEIGH_UPDATE_F_OVERRIDE_ISROUTER	0x00000004
+#define NEIGH_UPDATE_F_EXT_LEARNED		0x20000000
 #define NEIGH_UPDATE_F_ISROUTER			0x40000000
 #define NEIGH_UPDATE_F_ADMIN			0x80000000
+
+
+static inline bool neigh_key_eq16(const struct neighbour *n, const void *pkey)
+{
+	return *(const u16 *)n->primary_key == *(const u16 *)pkey;
+}
+
+static inline bool neigh_key_eq32(const struct neighbour *n, const void *pkey)
+{
+	return *(const u32 *)n->primary_key == *(const u32 *)pkey;
+}
+
+static inline bool neigh_key_eq128(const struct neighbour *n, const void *pkey)
+{
+	const u32 *n32 = (const u32 *)n->primary_key;
+	const u32 *p32 = pkey;
+
+	return ((n32[0] ^ p32[0]) | (n32[1] ^ p32[1]) |
+		(n32[2] ^ p32[2]) | (n32[3] ^ p32[3])) == 0;
+}
+
+static inline struct neighbour *___neigh_lookup_noref(
+	struct neigh_table *tbl,
+	bool (*key_eq)(const struct neighbour *n, const void *pkey),
+	__u32 (*hash)(const void *pkey,
+		      const struct net_device *dev,
+		      __u32 *hash_rnd),
+	const void *pkey,
+	struct net_device *dev)
+{
+	struct neigh_hash_table *nht = rcu_dereference_bh(tbl->nht);
+	struct neighbour *n;
+	u32 hash_val;
+
+	hash_val = hash(pkey, dev, nht->hash_rnd) >> (32 - nht->hash_shift);
+	for (n = rcu_dereference_bh(nht->hash_buckets[hash_val]);
+	     n != NULL;
+	     n = rcu_dereference_bh(n->next)) {
+		if (n->dev == dev && key_eq(n, pkey))
+			return n;
+	}
+
+	return NULL;
+}
+
+static inline struct neighbour *__neigh_lookup_noref(struct neigh_table *tbl,
+						     const void *pkey,
+						     struct net_device *dev)
+{
+	return ___neigh_lookup_noref(tbl, tbl->key_eq, tbl->hash, pkey, dev);
+}
 
 void neigh_table_init(int index, struct neigh_table *tbl);
 int neigh_table_clear(int index, struct neigh_table *tbl);
@@ -262,7 +330,6 @@ void neigh_changeaddr(struct neigh_table *tbl, struct net_device *dev);
 int neigh_ifdown(struct neigh_table *tbl, struct net_device *dev);
 int neigh_resolve_output(struct neighbour *neigh, struct sk_buff *skb);
 int neigh_connected_output(struct neighbour *neigh, struct sk_buff *skb);
-int neigh_compat_output(struct neighbour *neigh, struct sk_buff *skb);
 int neigh_direct_output(struct neighbour *neigh, struct sk_buff *skb);
 struct neighbour *neigh_event_ns(struct neigh_table *tbl,
 						u8 *lladdr, void *saddr,
@@ -300,6 +367,7 @@ void neigh_for_each(struct neigh_table *tbl,
 		    void (*cb)(struct neighbour *, void *), void *cookie);
 void __neigh_for_each_release(struct neigh_table *tbl,
 			      int (*cb)(struct neighbour *));
+int neigh_xmit(int fam, struct net_device *, const void *, struct sk_buff *);
 void pneigh_for_each(struct neigh_table *tbl,
 		     void (*cb)(struct pneigh_entry *));
 
@@ -335,12 +403,12 @@ void neigh_sysctl_unregister(struct neigh_parms *p);
 
 static inline void __neigh_parms_put(struct neigh_parms *parms)
 {
-	atomic_dec(&parms->refcnt);
+	refcount_dec(&parms->refcnt);
 }
 
 static inline struct neigh_parms *neigh_parms_clone(struct neigh_parms *parms)
 {
-	atomic_inc(&parms->refcnt);
+	refcount_inc(&parms->refcnt);
 	return parms;
 }
 
@@ -350,18 +418,18 @@ static inline struct neigh_parms *neigh_parms_clone(struct neigh_parms *parms)
 
 static inline void neigh_release(struct neighbour *neigh)
 {
-	if (atomic_dec_and_test(&neigh->refcnt))
+	if (refcount_dec_and_test(&neigh->refcnt))
 		neigh_destroy(neigh);
 }
 
 static inline struct neighbour * neigh_clone(struct neighbour *neigh)
 {
 	if (neigh)
-		atomic_inc(&neigh->refcnt);
+		refcount_inc(&neigh->refcnt);
 	return neigh;
 }
 
-#define neigh_hold(n)	atomic_inc(&(n)->refcnt)
+#define neigh_hold(n)	refcount_inc(&(n)->refcnt)
 
 static inline int neigh_event_send(struct neighbour *neigh, struct sk_buff *skb)
 {
@@ -390,9 +458,9 @@ static inline int neigh_hh_bridge(struct hh_cache *hh, struct sk_buff *skb)
 
 static inline int neigh_hh_output(const struct hh_cache *hh, struct sk_buff *skb)
 {
-	int hh_alen = 0;
+	unsigned int hh_alen = 0;
 	unsigned int seq;
-	int hh_len;
+	unsigned int hh_len;
 
 	do {
 		seq = read_seqbegin(&hh->hh_lock);
@@ -426,6 +494,16 @@ static inline int neigh_hh_output(const struct hh_cache *hh, struct sk_buff *skb
 
 	__skb_push(skb, hh_len);
 	return dev_queue_xmit(skb);
+}
+
+static inline int neigh_output(struct neighbour *n, struct sk_buff *skb)
+{
+	const struct hh_cache *hh = &n->hh;
+
+	if ((n->nud_state & NUD_CONNECTED) && hh->hh_len)
+		return neigh_hh_output(hh, skb);
+	else
+		return n->output(n, skb);
 }
 
 static inline struct neighbour *
@@ -470,5 +548,23 @@ static inline void neigh_ha_snapshot(char *dst, const struct neighbour *n,
 		seq = read_seqbegin(&n->ha_lock);
 		memcpy(dst, n->ha, dev->addr_len);
 	} while (read_seqretry(&n->ha_lock, seq));
+}
+
+static inline void neigh_update_ext_learned(struct neighbour *neigh, u32 flags,
+					    int *notify)
+{
+	u8 ndm_flags = 0;
+
+	if (!(flags & NEIGH_UPDATE_F_ADMIN))
+		return;
+
+	ndm_flags |= (flags & NEIGH_UPDATE_F_EXT_LEARNED) ? NTF_EXT_LEARNED : 0;
+	if ((neigh->flags ^ ndm_flags) & NTF_EXT_LEARNED) {
+		if (ndm_flags & NTF_EXT_LEARNED)
+			neigh->flags |= NTF_EXT_LEARNED;
+		else
+			neigh->flags &= ~NTF_EXT_LEARNED;
+		*notify = 1;
+	}
 }
 #endif

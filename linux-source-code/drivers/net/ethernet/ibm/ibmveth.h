@@ -12,8 +12,7 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
+ * along with this program; if not, see <http://www.gnu.org/licenses/>.
  *
  * Copyright (C) IBM Corporation, 2003, 2010
  *
@@ -147,7 +146,6 @@ struct ibmveth_adapter {
     struct vio_dev *vdev;
     struct net_device *netdev;
     struct napi_struct napi;
-    struct net_device_stats stats;
     unsigned int mcastFilterSize;
     void * buffer_list_addr;
     void * filter_list_addr;
@@ -158,6 +156,7 @@ struct ibmveth_adapter {
     int pool_config;
     int rx_csum;
     int large_send;
+    bool is_active_trunk;
     void *bounce_buffer;
     dma_addr_t bounce_buffer_dma;
 

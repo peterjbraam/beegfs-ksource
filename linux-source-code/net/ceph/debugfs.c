@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <linux/ceph/ceph_debug.h>
 
 #include <linux/device.h>
@@ -191,12 +192,13 @@ static void dump_target(struct seq_file *s, struct ceph_osd_request_target *t)
 		seq_printf(s, "%s%d", (!i ? "" : ","), t->acting.osds[i]);
 	seq_printf(s, "]/%d\te%u\t", t->acting.primary, t->epoch);
 	if (t->target_oloc.pool_ns) {
-		seq_printf(s, "%.*s/%s\t0x%x",
+		seq_printf(s, "%*pE/%*pE\t0x%x",
 			(int)t->target_oloc.pool_ns->len,
 			t->target_oloc.pool_ns->str,
-			t->target_oid.name, t->flags);
+			t->target_oid.name_len, t->target_oid.name, t->flags);
 	} else {
-		seq_printf(s, "%s\t0x%x", t->target_oid.name, t->flags);
+		seq_printf(s, "%*pE\t0x%x", t->target_oid.name_len,
+			t->target_oid.name, t->flags);
 	}
 	if (t->paused)
 		seq_puts(s, "\tP");

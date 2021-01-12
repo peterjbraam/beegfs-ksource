@@ -33,9 +33,6 @@
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
 #include <linux/configfs.h>
-#include <scsi/scsi.h>
-#include <scsi/scsi_device.h>
-#include <scsi/scsi_host.h>
 
 #include <target/target_core_base.h>
 #include <target/target_core_backend.h>
@@ -99,7 +96,7 @@ static struct configfs_attribute *target_stat_scsi_dev_attrs[] = {
 	NULL,
 };
 
-static struct config_item_type target_stat_scsi_dev_cit = {
+static const struct config_item_type target_stat_scsi_dev_cit = {
 	.ct_attrs		= target_stat_scsi_dev_attrs,
 	.ct_owner		= THIS_MODULE,
 };
@@ -196,7 +193,7 @@ static struct configfs_attribute *target_stat_scsi_tgt_dev_attrs[] = {
 	NULL,
 };
 
-static struct config_item_type target_stat_scsi_tgt_dev_cit = {
+static const struct config_item_type target_stat_scsi_tgt_dev_cit = {
 	.ct_attrs		= target_stat_scsi_tgt_dev_attrs,
 	.ct_owner		= THIS_MODULE,
 };
@@ -249,43 +246,25 @@ static ssize_t target_stat_lu_lu_name_show(struct config_item *item, char *page)
 static ssize_t target_stat_lu_vend_show(struct config_item *item, char *page)
 {
 	struct se_device *dev = to_stat_lu_dev(item);
-	int i;
-	char str[sizeof(dev->t10_wwn.vendor)+1];
 
-	/* scsiLuVendorId */
-	for (i = 0; i < sizeof(dev->t10_wwn.vendor); i++)
-		str[i] = ISPRINT(dev->t10_wwn.vendor[i]) ?
-			dev->t10_wwn.vendor[i] : ' ';
-	str[i] = '\0';
-	return snprintf(page, PAGE_SIZE, "%s\n", str);
+	return snprintf(page, PAGE_SIZE, "%-" __stringify(INQUIRY_VENDOR_LEN)
+			"s\n", dev->t10_wwn.vendor);
 }
 
 static ssize_t target_stat_lu_prod_show(struct config_item *item, char *page)
 {
 	struct se_device *dev = to_stat_lu_dev(item);
-	int i;
-	char str[sizeof(dev->t10_wwn.model)+1];
 
-	/* scsiLuProductId */
-	for (i = 0; i < sizeof(dev->t10_wwn.model); i++)
-		str[i] = ISPRINT(dev->t10_wwn.model[i]) ?
-			dev->t10_wwn.model[i] : ' ';
-	str[i] = '\0';
-	return snprintf(page, PAGE_SIZE, "%s\n", str);
+	return snprintf(page, PAGE_SIZE, "%-" __stringify(INQUIRY_MODEL_LEN)
+			"s\n", dev->t10_wwn.model);
 }
 
 static ssize_t target_stat_lu_rev_show(struct config_item *item, char *page)
 {
 	struct se_device *dev = to_stat_lu_dev(item);
-	int i;
-	char str[sizeof(dev->t10_wwn.revision)+1];
 
-	/* scsiLuRevisionId */
-	for (i = 0; i < sizeof(dev->t10_wwn.revision); i++)
-		str[i] = ISPRINT(dev->t10_wwn.revision[i]) ?
-			dev->t10_wwn.revision[i] : ' ';
-	str[i] = '\0';
-	return snprintf(page, PAGE_SIZE, "%s\n", str);
+	return snprintf(page, PAGE_SIZE, "%-" __stringify(INQUIRY_REVISION_LEN)
+			"s\n", dev->t10_wwn.revision);
 }
 
 static ssize_t target_stat_lu_dev_type_show(struct config_item *item, char *page)
@@ -417,7 +396,7 @@ static struct configfs_attribute *target_stat_scsi_lu_attrs[] = {
 	NULL,
 };
 
-static struct config_item_type target_stat_scsi_lu_cit = {
+static const struct config_item_type target_stat_scsi_lu_cit = {
 	.ct_attrs		= target_stat_scsi_lu_attrs,
 	.ct_owner		= THIS_MODULE,
 };
@@ -543,7 +522,7 @@ static struct configfs_attribute *target_stat_scsi_port_attrs[] = {
 	NULL,
 };
 
-static struct config_item_type target_stat_scsi_port_cit = {
+static const struct config_item_type target_stat_scsi_port_cit = {
 	.ct_attrs		= target_stat_scsi_port_attrs,
 	.ct_owner		= THIS_MODULE,
 };
@@ -727,7 +706,7 @@ static struct configfs_attribute *target_stat_scsi_tgt_port_attrs[] = {
 	NULL,
 };
 
-static struct config_item_type target_stat_scsi_tgt_port_cit = {
+static const struct config_item_type target_stat_scsi_tgt_port_cit = {
 	.ct_attrs		= target_stat_scsi_tgt_port_attrs,
 	.ct_owner		= THIS_MODULE,
 };
@@ -816,11 +795,12 @@ static ssize_t target_stat_transport_dev_name_show(struct config_item *item,
 	return ret;
 }
 
-static ssize_t target_stat_transport_proto_id_show(struct config_item *item, char *page)
+static ssize_t target_stat_transport_proto_id_show(struct config_item *item,
+		char *page)
 {
 	struct se_lun *lun = to_transport_stat(item);
-	struct se_portal_group *tpg = lun->lun_tpg;
 	struct se_device *dev;
+	struct se_portal_group *tpg = lun->lun_tpg;
 	ssize_t ret = -ENODEV;
 
 	rcu_read_lock();
@@ -846,7 +826,7 @@ static struct configfs_attribute *target_stat_scsi_transport_attrs[] = {
 	NULL,
 };
 
-static struct config_item_type target_stat_scsi_transport_cit = {
+static const struct config_item_type target_stat_scsi_transport_cit = {
 	.ct_attrs		= target_stat_scsi_transport_attrs,
 	.ct_owner		= THIS_MODULE,
 };
@@ -1208,7 +1188,7 @@ static struct configfs_attribute *target_stat_scsi_auth_intr_attrs[] = {
 	NULL,
 };
 
-static struct config_item_type target_stat_scsi_auth_intr_cit = {
+static const struct config_item_type target_stat_scsi_auth_intr_cit = {
 	.ct_attrs		= target_stat_scsi_auth_intr_attrs,
 	.ct_owner		= THIS_MODULE,
 };
@@ -1380,7 +1360,7 @@ static struct configfs_attribute *target_stat_scsi_ath_intr_port_attrs[] = {
 	NULL,
 };
 
-static struct config_item_type target_stat_scsi_att_intr_port_cit = {
+static const struct config_item_type target_stat_scsi_att_intr_port_cit = {
 	.ct_attrs		= target_stat_scsi_ath_intr_port_attrs,
 	.ct_owner		= THIS_MODULE,
 };

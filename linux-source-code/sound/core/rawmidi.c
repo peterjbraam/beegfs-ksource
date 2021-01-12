@@ -22,7 +22,7 @@
 #include <sound/core.h>
 #include <linux/major.h>
 #include <linux/init.h>
-#include <linux/sched.h>
+#include <linux/sched/signal.h>
 #include <linux/slab.h>
 #include <linux/time.h>
 #include <linux/wait.h>
@@ -377,7 +377,7 @@ static int snd_rawmidi_open(struct inode *inode, struct file *file)
 	int err;
 	struct snd_rawmidi *rmidi;
 	struct snd_rawmidi_file *rawmidi_file = NULL;
-	wait_queue_t wait;
+	wait_queue_entry_t wait;
 
 	if ((file->f_flags & O_APPEND) && !(file->f_flags & O_NONBLOCK))
 		return -EINVAL;		/* invalid combination */
@@ -1019,7 +1019,7 @@ static ssize_t snd_rawmidi_read(struct file *file, char __user *buf, size_t coun
 	while (count > 0) {
 		spin_lock_irq(&runtime->lock);
 		while (!snd_rawmidi_ready(substream)) {
-			wait_queue_t wait;
+			wait_queue_entry_t wait;
 
 			if ((file->f_flags & O_NONBLOCK) != 0 || result > 0) {
 				spin_unlock_irq(&runtime->lock);
@@ -1346,7 +1346,7 @@ static ssize_t snd_rawmidi_write(struct file *file, const char __user *buf,
 	while (count > 0) {
 		spin_lock_irq(&runtime->lock);
 		while (!snd_rawmidi_ready_append(substream, count)) {
-			wait_queue_t wait;
+			wait_queue_entry_t wait;
 
 			if (file->f_flags & O_NONBLOCK) {
 				spin_unlock_irq(&runtime->lock);
@@ -1379,7 +1379,7 @@ static ssize_t snd_rawmidi_write(struct file *file, const char __user *buf,
 	if (file->f_flags & O_DSYNC) {
 		spin_lock_irq(&runtime->lock);
 		while (runtime->avail != runtime->buffer_size) {
-			wait_queue_t wait;
+			wait_queue_entry_t wait;
 			unsigned int last_avail = runtime->avail;
 
 			init_waitqueue_entry(&wait, current);
@@ -1399,11 +1399,11 @@ static ssize_t snd_rawmidi_write(struct file *file, const char __user *buf,
 	return result;
 }
 
-static unsigned int snd_rawmidi_poll(struct file *file, poll_table * wait)
+static __poll_t snd_rawmidi_poll(struct file *file, poll_table *wait)
 {
 	struct snd_rawmidi_file *rfile;
 	struct snd_rawmidi_runtime *runtime;
-	unsigned int mask;
+	__poll_t mask;
 
 	rfile = file->private_data;
 	if (rfile->input != NULL) {
@@ -1418,11 +1418,11 @@ static unsigned int snd_rawmidi_poll(struct file *file, poll_table * wait)
 	mask = 0;
 	if (rfile->input != NULL) {
 		if (snd_rawmidi_ready(rfile->input))
-			mask |= POLLIN | POLLRDNORM;
+			mask |= EPOLLIN | EPOLLRDNORM;
 	}
 	if (rfile->output != NULL) {
 		if (snd_rawmidi_ready(rfile->output))
-			mask |= POLLOUT | POLLWRNORM;
+			mask |= EPOLLOUT | EPOLLWRNORM;
 	}
 	return mask;
 }

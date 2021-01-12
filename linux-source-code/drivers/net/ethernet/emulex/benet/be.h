@@ -37,7 +37,7 @@
 #include "be_hw.h"
 #include "be_roce.h"
 
-#define DRV_VER			"12.0.0.0r"
+#define DRV_VER			"12.0.0.0"
 #define DRV_NAME		"be2net"
 #define BE_NAME			"Emulex BladeEngine2"
 #define BE3_NAME		"Emulex BladeEngine3"
@@ -196,6 +196,7 @@ struct be_eq_obj {
 } ____cacheline_aligned_in_smp;
 
 struct be_aic_obj {		/* Adaptive interrupt coalescing (AIC) info */
+	bool enable;
 	u32 min_eqd;		/* in usecs */
 	u32 max_eqd;		/* in usecs */
 	u32 prev_eqd;		/* in usecs */
@@ -592,7 +593,6 @@ struct be_adapter {
 
 	struct be_drv_stats drv_stats;
 	struct be_aic_obj aic_obj[MAX_EVT_QS];
-	bool aic_enabled;
 	u8 vlan_prio_bmap;	/* Available Priority BitMap */
 	u16 recommended_prio_bits;/* Recommended Priority bits in vlan tag */
 	struct be_dma_mem rx_filter; /* Cmd DMA mem for rx-filter */
@@ -753,17 +753,33 @@ static inline u16 be_max_any_irqs(struct be_adapter *adapter)
 /* Is BE in QNQ multi-channel mode */
 #define be_is_qnq_mode(adapter)		(adapter->function_mode & QNQ_MODE)
 
+#ifdef CONFIG_BE2NET_LANCER
 #define lancer_chip(adapter)	(adapter->pdev->device == OC_DEVICE_ID3 || \
 				 adapter->pdev->device == OC_DEVICE_ID4)
+#else
+#define lancer_chip(adapter)	(0)
+#endif /* CONFIG_BE2NET_LANCER */
 
+#ifdef CONFIG_BE2NET_SKYHAWK
 #define skyhawk_chip(adapter)	(adapter->pdev->device == OC_DEVICE_ID5 || \
 				 adapter->pdev->device == OC_DEVICE_ID6)
+#else
+#define skyhawk_chip(adapter)	(0)
+#endif /* CONFIG_BE2NET_SKYHAWK */
 
+#ifdef CONFIG_BE2NET_BE3
 #define BE3_chip(adapter)	(adapter->pdev->device == BE_DEVICE_ID2 || \
 				 adapter->pdev->device == OC_DEVICE_ID2)
+#else
+#define BE3_chip(adapter)	(0)
+#endif /* CONFIG_BE2NET_BE3 */
 
+#ifdef CONFIG_BE2NET_BE2
 #define BE2_chip(adapter)	(adapter->pdev->device == BE_DEVICE_ID1 || \
 				 adapter->pdev->device == OC_DEVICE_ID1)
+#else
+#define BE2_chip(adapter)	(0)
+#endif /* CONFIG_BE2NET_BE2 */
 
 #define BEx_chip(adapter)	(BE3_chip(adapter) || BE2_chip(adapter))
 

@@ -8,7 +8,9 @@
 #include <linux/stat.h>
 #include <linux/sysctl.h>
 #include <linux/slab.h>
+#include <linux/cred.h>
 #include <linux/hash.h>
+#include <linux/kmemleak.h>
 #include <linux/user_namespace.h>
 
 #define UCOUNTS_HASHTABLE_BITS 10
@@ -24,7 +26,7 @@ static DEFINE_SPINLOCK(ucounts_lock);
 
 #ifdef CONFIG_SYSCTL
 static struct ctl_table_set *
-set_lookup(struct ctl_table_root *root, struct nsproxy *dummy)
+set_lookup(struct ctl_table_root *root)
 {
 	return &current_user_ns()->set;
 }
@@ -57,7 +59,7 @@ static struct ctl_table_root set_root = {
 
 static int zero = 0;
 static int int_max = INT_MAX;
-#define UCOUNT_ENTRY(name) 				\
+#define UCOUNT_ENTRY(name)				\
 	{						\
 		.procname	= name,			\
 		.maxlen		= sizeof(int),		\
@@ -73,6 +75,17 @@ static struct ctl_table user_table[] = {
 	UCOUNT_ENTRY("max_ipc_namespaces"),
 	UCOUNT_ENTRY("max_net_namespaces"),
 	UCOUNT_ENTRY("max_mnt_namespaces"),
+	UCOUNT_ENTRY("max_cgroup_namespaces"),
+#ifdef CONFIG_INOTIFY_USER
+	UCOUNT_ENTRY("max_inotify_instances"),
+	UCOUNT_ENTRY("max_inotify_watches"),
+#endif
+	{}, /* UCOUNT_KABI_RESERVE_1 */
+	{}, /* UCOUNT_KABI_RESERVE_1 */
+	{}, /* UCOUNT_KABI_RESERVE_2 */
+	{}, /* UCOUNT_KABI_RESERVE_3 */
+	{}, /* UCOUNT_KABI_RESERVE_4 */
+	{}, /* UCOUNT_KABI_RESERVE_5 */
 	{}, /* UCOUNT_KABI_RESERVE_6 */
 	{}, /* UCOUNT_KABI_RESERVE_7 */
 	{}, /* UCOUNT_KABI_RESERVE_8 */
@@ -91,7 +104,6 @@ bool setup_userns_sysctls(struct user_namespace *ns)
 {
 #ifdef CONFIG_SYSCTL
 	struct ctl_table *tbl;
-	BUILD_BUG_ON(ARRAY_SIZE(user_table) != (UCOUNT_COUNTS + 1));
 	setup_sysctl_set(&ns->set, &set_root, set_is_seen);
 	tbl = kmemdup(user_table, sizeof(user_table), GFP_KERNEL);
 	if (tbl) {
@@ -241,11 +253,10 @@ static __init int user_namespace_sysctl_init(void)
 	 * properly.
 	 */
 	user_header = register_sysctl("user", empty);
+	kmemleak_ignore(user_header);
 	BUG_ON(!user_header);
 	BUG_ON(!setup_userns_sysctls(&init_user_ns));
 #endif
 	return 0;
 }
 subsys_initcall(user_namespace_sysctl_init);
-
-

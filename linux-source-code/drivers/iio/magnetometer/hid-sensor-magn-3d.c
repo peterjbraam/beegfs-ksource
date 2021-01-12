@@ -167,7 +167,7 @@ static int magn_3d_read_raw(struct iio_dev *indio_dev,
 	*val = 0;
 	*val2 = 0;
 	switch (mask) {
-	case 0:
+	case IIO_CHAN_INFO_RAW:
 		hid_sensor_power_state(&magn_state->magn_flux_attributes, true);
 		report_id =
 			magn_state->magn[chan->address].report_id;
@@ -282,7 +282,6 @@ static int magn_3d_write_raw(struct iio_dev *indio_dev,
 }
 
 static const struct iio_info magn_3d_info = {
-	.driver_module = THIS_MODULE,
 	.read_raw = &magn_3d_read_raw,
 	.write_raw = &magn_3d_write_raw,
 };
@@ -600,7 +599,6 @@ static struct platform_driver hid_magn_3d_platform_driver = {
 	.id_table = hid_magn_3d_ids,
 	.driver = {
 		.name	= KBUILD_MODNAME,
-		.owner	= THIS_MODULE,
 		.pm	= &hid_sensor_pm_ops,
 	},
 	.probe		= hid_magn_3d_probe,

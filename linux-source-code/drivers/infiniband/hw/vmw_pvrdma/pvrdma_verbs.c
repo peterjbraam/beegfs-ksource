@@ -70,6 +70,8 @@ int pvrdma_query_device(struct ib_device *ibdev,
 	if (uhw->inlen || uhw->outlen)
 		return -EINVAL;
 
+	memset(props, 0, sizeof(*props));
+
 	props->fw_ver = dev->dsr->caps.fw_ver;
 	props->sys_image_guid = dev->dsr->caps.sys_image_guid;
 	props->max_mr_size = dev->dsr->caps.max_mr_size;
@@ -338,7 +340,12 @@ struct ib_ucontext *pvrdma_alloc_ucontext(struct ib_device *ibdev,
 
 	/* get ctx_handle from host */
 	memset(cmd, 0, sizeof(*cmd));
-	cmd->pfn = context->uar.pfn;
+
+	if (vdev->dsr_version < PVRDMA_PPN64_VERSION)
+		cmd->pfn = context->uar.pfn;
+	else
+		cmd->pfn64 = context->uar.pfn;
+
 	cmd->hdr.cmd = PVRDMA_CMD_CREATE_UC;
 	ret = pvrdma_cmd_post(vdev, &req, &rsp, PVRDMA_CMD_CREATE_UC_RESP);
 	if (ret < 0) {
@@ -531,11 +538,12 @@ int pvrdma_dealloc_pd(struct ib_pd *pd)
  * @pd: the protection domain
  * @ah_attr: the attributes of the AH
  * @udata: user data blob
+ * @flags: create address handle flags (see enum rdma_create_ah_flags)
  *
  * @return: the ib_ah pointer on success, otherwise errno.
  */
 struct ib_ah *pvrdma_create_ah(struct ib_pd *pd, struct rdma_ah_attr *ah_attr,
-			       struct ib_udata *udata)
+			       u32 flags, struct ib_udata *udata)
 {
 	struct pvrdma_dev *dev = to_vdev(pd->device);
 	struct pvrdma_ah *ah;
@@ -579,10 +587,11 @@ struct ib_ah *pvrdma_create_ah(struct ib_pd *pd, struct rdma_ah_attr *ah_attr,
 /**
  * pvrdma_destroy_ah - destroy an address handle
  * @ah: the address handle to destroyed
+ * @flags: destroy address handle flags (see enum rdma_destroy_ah_flags)
  *
  * @return: 0 on success.
  */
-int pvrdma_destroy_ah(struct ib_ah *ah)
+int pvrdma_destroy_ah(struct ib_ah *ah, u32 flags)
 {
 	struct pvrdma_dev *dev = to_vdev(ah->device);
 

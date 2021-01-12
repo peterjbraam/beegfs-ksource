@@ -238,7 +238,6 @@ int __init client_init_data(void)
 
 static struct snd_seq_client *seq_create_client1(int client_index, int poolsize)
 {
-	unsigned long flags;
 	int c;
 	struct snd_seq_client *client;
 
@@ -259,7 +258,7 @@ static struct snd_seq_client *seq_create_client1(int client_index, int poolsize)
 	mutex_init(&client->ioctl_mutex);
 
 	/* find free slot in the client table */
-	spin_lock_irqsave(&clients_lock, flags);
+	spin_lock_irq(&clients_lock);
 	if (client_index < 0) {
 		for (c = SNDRV_SEQ_DYNAMIC_CLIENTS_BEGIN;
 		     c < SNDRV_SEQ_MAX_CLIENTS;
@@ -267,17 +266,17 @@ static struct snd_seq_client *seq_create_client1(int client_index, int poolsize)
 			if (clienttab[c] || clienttablock[c])
 				continue;
 			clienttab[client->number = c] = client;
-			spin_unlock_irqrestore(&clients_lock, flags);
+			spin_unlock_irq(&clients_lock);
 			return client;
 		}
 	} else {
 		if (clienttab[client_index] == NULL && !clienttablock[client_index]) {
 			clienttab[client->number = client_index] = client;
-			spin_unlock_irqrestore(&clients_lock, flags);
+			spin_unlock_irq(&clients_lock);
 			return client;
 		}
 	}
-	spin_unlock_irqrestore(&clients_lock, flags);
+	spin_unlock_irq(&clients_lock);
 	snd_seq_pool_delete(&client->pool);
 	kfree(client);
 	return NULL;	/* no free slot found or busy, return failure code */
@@ -286,23 +285,21 @@ static struct snd_seq_client *seq_create_client1(int client_index, int poolsize)
 
 static int seq_free_client1(struct snd_seq_client *client)
 {
-	unsigned long flags;
-
 	if (!client)
 		return 0;
-	spin_lock_irqsave(&clients_lock, flags);
+	spin_lock_irq(&clients_lock);
 	clienttablock[client->number] = 1;
 	clienttab[client->number] = NULL;
-	spin_unlock_irqrestore(&clients_lock, flags);
+	spin_unlock_irq(&clients_lock);
 	snd_seq_delete_all_ports(client);
 	snd_seq_queue_client_leave(client->number);
 	snd_use_lock_sync(&client->use_lock);
 	snd_seq_queue_client_termination(client->number);
 	if (client->pool)
 		snd_seq_pool_delete(&client->pool);
-	spin_lock_irqsave(&clients_lock, flags);
+	spin_lock_irq(&clients_lock);
 	clienttablock[client->number] = 0;
-	spin_unlock_irqrestore(&clients_lock, flags);
+	spin_unlock_irq(&clients_lock);
 	return 0;
 }
 
@@ -428,7 +425,7 @@ static ssize_t snd_seq_read(struct file *file, char __user *buf, size_t count,
 	if (!(snd_seq_file_flags(file) & SNDRV_SEQ_LFLG_INPUT))
 		return -ENXIO;
 
-	if (!access_ok(VERIFY_WRITE, buf, count))
+	if (!access_ok(buf, count))
 		return -EFAULT;
 
 	/* check client structures are in place */
@@ -1039,7 +1036,7 @@ static ssize_t snd_seq_write(struct file *file, const char __user *buf,
 {
 	struct snd_seq_client *client = file->private_data;
 	int written = 0, len;
-	int err, handled;
+	int err;
 	struct snd_seq_event event;
 
 	if (!(snd_seq_file_flags(file) & SNDRV_SEQ_LFLG_OUTPUT))
@@ -1052,8 +1049,6 @@ static ssize_t snd_seq_write(struct file *file, const char __user *buf,
 	if (!client->accept_output || client->pool == NULL)
 		return -ENXIO;
 
- repeat:
-	handled = 0;
 	/* allocate the pool now if the pool is not allocated yet */ 
 	mutex_lock(&client->ioctl_mutex);
 	if (client->pool->size > 0 && !snd_seq_write_pool_allocated(client)) {
@@ -1113,19 +1108,12 @@ static ssize_t snd_seq_write(struct file *file, const char __user *buf,
 						   0, 0, &client->ioctl_mutex);
 		if (err < 0)
 			break;
-		handled++;
 
 	__skip_event:
 		/* Update pointers and counts */
 		count -= len;
 		buf += len;
 		written += len;
-
-		/* let's have a coffee break if too many events are queued */
-		if (++handled >= 200) {
-			mutex_unlock(&client->ioctl_mutex);
-			goto repeat;
-		}
 	}
 
  out:
@@ -1137,21 +1125,21 @@ static ssize_t snd_seq_write(struct file *file, const char __user *buf,
 /*
  * handle polling
  */
-static unsigned int snd_seq_poll(struct file *file, poll_table * wait)
+static __poll_t snd_seq_poll(struct file *file, poll_table * wait)
 {
 	struct snd_seq_client *client = file->private_data;
-	unsigned int mask = 0;
+	__poll_t mask = 0;
 
 	/* check client structures are in place */
 	if (snd_BUG_ON(!client))
-		return POLLERR;
+		return EPOLLERR;
 
 	if ((snd_seq_file_flags(file) & SNDRV_SEQ_LFLG_INPUT) &&
 	    client->data.user.fifo) {
 
 		/* check if data is available in the outqueue */
 		if (snd_seq_fifo_poll_wait(client->data.user.fifo, file, wait))
-			mask |= POLLIN | POLLRDNORM;
+			mask |= EPOLLIN | EPOLLRDNORM;
 	}
 
 	if (snd_seq_file_flags(file) & SNDRV_SEQ_LFLG_OUTPUT) {
@@ -1159,7 +1147,7 @@ static unsigned int snd_seq_poll(struct file *file, poll_table * wait)
 		/* check if data is available in the pool */
 		if (!snd_seq_write_pool_allocated(client) ||
 		    snd_seq_pool_poll_wait(client->pool, file, wait))
-			mask |= POLLOUT | POLLWRNORM;
+			mask |= EPOLLOUT | EPOLLWRNORM;
 	}
 
 	return mask;
@@ -1853,7 +1841,8 @@ static int snd_seq_ioctl_get_client_pool(struct snd_seq_client *client,
 	if (cptr->type == USER_CLIENT) {
 		info->input_pool = cptr->data.user.fifo_pool_size;
 		info->input_free = info->input_pool;
-		info->input_free = snd_seq_fifo_unused_cells(cptr->data.user.fifo);
+		if (cptr->data.user.fifo)
+			info->input_free = snd_seq_unused_cells(cptr->data.user.fifo->pool);
 	} else {
 		info->input_pool = 0;
 		info->input_free = 0;

@@ -189,7 +189,7 @@ static void qedf_rrq_compl(struct qedf_els_cb_arg *cb_arg)
 	    rrq_req->event != QEDF_IOREQ_EV_ELS_ERR_DETECT)
 		cancel_delayed_work_sync(&orig_io_req->timeout_work);
 
-	refcount = atomic_read(&orig_io_req->refcount.refcount);
+	refcount = kref_read(&orig_io_req->refcount);
 	QEDF_INFO(&(qedf->dbg_ctx), QEDF_LOG_ELS, "rrq_compl: orig io = %p,"
 		   " orig xid = 0x%x, rrq_xid = 0x%x, refcount=%d\n",
 		   orig_io_req, orig_io_req->xid, rrq_req->xid, refcount);
@@ -381,14 +381,14 @@ void qedf_restart_rport(struct qedf_rport *fcport)
 		port_id = rdata->ids.port_id;
 		QEDF_ERR(&(fcport->qedf->dbg_ctx),
 		    "LOGO port_id=%x.\n", port_id);
-		lport->tt.rport_logoff(rdata);
-		kref_put(&rdata->kref, lport->tt.rport_destroy);
+		fc_rport_logoff(rdata);
+		kref_put(&rdata->kref, fc_rport_destroy);
 		mutex_lock(&lport->disc.disc_mutex);
 		/* Recreate the rport and log back in */
-		rdata = lport->tt.rport_create(lport, port_id);
+		rdata = fc_rport_create(lport, port_id);
 		if (rdata) {
 			mutex_unlock(&lport->disc.disc_mutex);
-			lport->tt.rport_login(rdata);
+			fc_rport_login(rdata);
 			fcport->rdata = rdata;
 		} else {
 			mutex_unlock(&lport->disc.disc_mutex);
@@ -544,14 +544,14 @@ static void qedf_srr_compl(struct qedf_els_cb_arg *cb_arg)
 	    srr_req->event != QEDF_IOREQ_EV_ELS_ERR_DETECT)
 		cancel_delayed_work_sync(&orig_io_req->timeout_work);
 
-	refcount = atomic_read(&orig_io_req->refcount.refcount);
+	refcount = kref_read(&orig_io_req->refcount);
 	QEDF_INFO(&(qedf->dbg_ctx), QEDF_LOG_ELS, "Entered: orig_io=%p,"
 		   " orig_io_xid=0x%x, rec_xid=0x%x, refcount=%d\n",
 		   orig_io_req, orig_io_req->xid, srr_req->xid, refcount);
 
 	/* If a SRR times out, simply free resources */
 	if (srr_req->event == QEDF_IOREQ_EV_ELS_TMO)
-		goto out_free;
+		goto out_put;
 
 	/* Normalize response data into struct fc_frame */
 	mp_req = &(srr_req->mp_req);
@@ -563,7 +563,7 @@ static void qedf_srr_compl(struct qedf_els_cb_arg *cb_arg)
 	if (!fp) {
 		QEDF_ERR(&(qedf->dbg_ctx),
 		    "fc_frame_alloc failure.\n");
-		goto out_free;
+		goto out_put;
 	}
 
 	/* Copy frame header from firmware into fp */
@@ -588,9 +588,10 @@ static void qedf_srr_compl(struct qedf_els_cb_arg *cb_arg)
 	}
 
 	fc_frame_free(fp);
-out_free:
+out_put:
 	/* Put reference for original command since SRR completed */
 	kref_put(&orig_io_req->refcount, qedf_release_cmd);
+out_free:
 	kfree(cb_arg);
 }
 
@@ -834,14 +835,14 @@ static void qedf_rec_compl(struct qedf_els_cb_arg *cb_arg)
 	    rec_req->event != QEDF_IOREQ_EV_ELS_ERR_DETECT)
 		cancel_delayed_work_sync(&orig_io_req->timeout_work);
 
-	refcount = atomic_read(&orig_io_req->refcount.refcount);
+	refcount = kref_read(&orig_io_req->refcount);
 	QEDF_INFO(&(qedf->dbg_ctx), QEDF_LOG_ELS, "Entered: orig_io=%p,"
 		   " orig_io_xid=0x%x, rec_xid=0x%x, refcount=%d\n",
 		   orig_io_req, orig_io_req->xid, rec_req->xid, refcount);
 
 	/* If a REC times out, free resources */
 	if (rec_req->event == QEDF_IOREQ_EV_ELS_TMO)
-		goto out_free;
+		goto out_put;
 
 	/* Normalize response data into struct fc_frame */
 	mp_req = &(rec_req->mp_req);
@@ -853,7 +854,7 @@ static void qedf_rec_compl(struct qedf_els_cb_arg *cb_arg)
 	if (!fp) {
 		QEDF_ERR(&(qedf->dbg_ctx),
 		    "fc_frame_alloc failure.\n");
-		goto out_free;
+		goto out_put;
 	}
 
 	/* Copy frame header from firmware into fp */
@@ -945,9 +946,10 @@ static void qedf_rec_compl(struct qedf_els_cb_arg *cb_arg)
 
 out_free_frame:
 	fc_frame_free(fp);
-out_free:
+out_put:
 	/* Put reference for original command since REC completed */
 	kref_put(&orig_io_req->refcount, qedf_release_cmd);
+out_free:
 	kfree(cb_arg);
 }
 

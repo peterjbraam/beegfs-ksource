@@ -52,8 +52,11 @@
 #include "debug.h"
 #include <subcmd/parse-options.h>
 
+#include "cs-etm.h"
 #include "intel-pt.h"
 #include "intel-bts.h"
+#include "arm-spe.h"
+#include "s390-cpumsf.h"
 
 #include "sane_ctype.h"
 #include "symbol/kallsyms.h"
@@ -916,6 +919,12 @@ int perf_event__process_auxtrace_info(struct perf_session *session,
 		return intel_pt_process_auxtrace_info(event, session);
 	case PERF_AUXTRACE_INTEL_BTS:
 		return intel_bts_process_auxtrace_info(event, session);
+	case PERF_AUXTRACE_ARM_SPE:
+		return arm_spe_process_auxtrace_info(event, session);
+	case PERF_AUXTRACE_CS_ETM:
+		return cs_etm__process_auxtrace_info(event, session);
+	case PERF_AUXTRACE_S390_CPUMSF:
+		return s390_cpumsf_process_auxtrace_info(event, session);
 	case PERF_AUXTRACE_UNKNOWN:
 	default:
 		return -EINVAL;
@@ -1974,17 +1983,14 @@ static int find_dso_sym(struct dso *dso, const char *sym_name, u64 *start,
 
 static int addr_filter__entire_dso(struct addr_filter *filt, struct dso *dso)
 {
-	struct symbol *first_sym = dso__first_symbol(dso);
-	struct symbol *last_sym = dso__last_symbol(dso);
-
-	if (!first_sym || !last_sym) {
-		pr_err("Failed to determine filter for %s\nNo symbols found.\n",
+	if (dso__data_file_size(dso, NULL)) {
+		pr_err("Failed to determine filter for %s\nCannot determine file size.\n",
 		       filt->filename);
 		return -EINVAL;
 	}
 
-	filt->addr = first_sym->start;
-	filt->size = last_sym->end - first_sym->start;
+	filt->addr = 0;
+	filt->size = dso->data.file_size;
 
 	return 0;
 }

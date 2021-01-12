@@ -84,8 +84,7 @@ static inline struct eeh_dev *__eeh_addr_cache_get_device(unsigned long addr)
  * @addr: mmio (PIO) phys address or i/o port number
  *
  * Given an mmio phys address, or a port number, find a pci device
- * that implements this address.  Be sure to pci_dev_put the device
- * when finished.  I/O port numbers are assumed to be offset
+ * that implements this address.  I/O port numbers are assumed to be offset
  * from zero (that is, they do *not* have pci_io_addr added in).
  * It is safe to call this function within an interrupt.
  */
@@ -114,9 +113,9 @@ static void eeh_addr_cache_print(struct pci_io_addr_cache *cache)
 	while (n) {
 		struct pci_io_addr_range *piar;
 		piar = rb_entry(n, struct pci_io_addr_range, rb_node);
-		pr_debug("PCI: %s addr range %d [%lx-%lx]: %s\n",
+		pr_debug("PCI: %s addr range %d [%pap-%pap]: %s\n",
 		       (piar->flags & IORESOURCE_IO) ? "i/o" : "mem", cnt,
-		       piar->addr_lo, piar->addr_hi, pci_name(piar->pcidev));
+		       &piar->addr_lo, &piar->addr_hi, pci_name(piar->pcidev));
 		cnt++;
 		n = rb_next(n);
 	}
@@ -159,8 +158,8 @@ eeh_addr_cache_insert(struct pci_dev *dev, resource_size_t alo,
 	piar->flags = flags;
 
 #ifdef DEBUG
-	pr_debug("PIAR: insert range=[%lx:%lx] dev=%s\n",
-	                  alo, ahi, pci_name(dev));
+	pr_debug("PIAR: insert range=[%pap:%pap] dev=%s\n",
+		 &alo, &ahi, pci_name(dev));
 #endif
 
 	rb_link_node(&piar->rb_node, parent, p);

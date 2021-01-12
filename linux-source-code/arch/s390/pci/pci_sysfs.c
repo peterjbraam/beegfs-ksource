@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright IBM Corp. 2012
  *
@@ -5,8 +6,8 @@
  *   Jan Glauber <jang@linux.vnet.ibm.com>
  */
 
-#define COMPONENT "zPCI"
-#define pr_fmt(fmt) COMPONENT ": " fmt
+#define KMSG_COMPONENT "zpci"
+#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
 
 #include <linux/kernel.h>
 #include <linux/stat.h>
@@ -18,7 +19,7 @@
 static ssize_t name##_show(struct device *dev,				\
 			   struct device_attribute *attr, char *buf)	\
 {									\
-	struct zpci_dev *zdev = get_zdev(to_pci_dev(dev));		\
+	struct zpci_dev *zdev = to_zpci(to_pci_dev(dev));		\
 									\
 	return sprintf(buf, fmt, zdev->member);				\
 }									\
@@ -36,11 +37,15 @@ zpci_attr(segment1, "0x%02x\n", pfip[1]);
 zpci_attr(segment2, "0x%02x\n", pfip[2]);
 zpci_attr(segment3, "0x%02x\n", pfip[3]);
 
-static void recover_callback(struct device *dev)
+static ssize_t recover_store(struct device *dev, struct device_attribute *attr,
+			     const char *buf, size_t count)
 {
 	struct pci_dev *pdev = to_pci_dev(dev);
-	struct zpci_dev *zdev = get_zdev(pdev);
+	struct zpci_dev *zdev = to_zpci(pdev);
 	int ret;
+
+	if (!device_remove_file_self(dev, attr))
+		return count;
 
 	pci_lock_rescan_remove();
 	pci_stop_and_remove_bus_device(pdev);
@@ -53,15 +58,13 @@ static void recover_callback(struct device *dev)
 		goto error;
 
 	pci_rescan_bus(zdev->bus);
+	pci_unlock_rescan_remove();
+
+	return count;
+
 error:
 	pci_unlock_rescan_remove();
-}
-
-static ssize_t recover_store(struct device *dev, struct device_attribute *attr,
-			     const char *buf, size_t count)
-{
-	int rc = device_schedule_callback(dev, recover_callback);
-	return rc ? rc : count;
+	return ret;
 }
 static DEVICE_ATTR_WO(recover);
 
@@ -71,7 +74,7 @@ static ssize_t util_string_read(struct file *filp, struct kobject *kobj,
 {
 	struct device *dev = kobj_to_dev(kobj);
 	struct pci_dev *pdev = to_pci_dev(dev);
-	struct zpci_dev *zdev = get_zdev(pdev);
+	struct zpci_dev *zdev = to_zpci(pdev);
 
 	return memory_read_from_buffer(buf, count, &off, zdev->util_str,
 				       sizeof(zdev->util_str));
@@ -85,7 +88,7 @@ static ssize_t report_error_write(struct file *filp, struct kobject *kobj,
 	struct zpci_report_error_header *report = (void *) buf;
 	struct device *dev = kobj_to_dev(kobj);
 	struct pci_dev *pdev = to_pci_dev(dev);
-	struct zpci_dev *zdev = get_zdev(pdev);
+	struct zpci_dev *zdev = to_zpci(pdev);
 	int ret;
 
 	if (off || (count < sizeof(*report)))

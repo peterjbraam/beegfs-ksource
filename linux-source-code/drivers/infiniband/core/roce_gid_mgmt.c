@@ -480,6 +480,7 @@ static void enum_all_gids_of_dev_cb(struct ib_device *ib_dev,
 	 * our feet
 	 */
 	rtnl_lock();
+	down_read(&net_rwsem);
 	for_each_net(net)
 		for_each_netdev(net, ndev) {
 			/*
@@ -495,6 +496,7 @@ static void enum_all_gids_of_dev_cb(struct ib_device *ib_dev,
 							 rdma_ndev, ndev))
 				_add_netdev_ips(ib_dev, port, ndev);
 		}
+	up_read(&net_rwsem);
 	rtnl_unlock();
 }
 
@@ -533,10 +535,8 @@ static int netdev_upper_walk(struct net_device *upper, void *data)
 	struct upper_list *entry = kmalloc(sizeof(*entry), GFP_ATOMIC);
 	struct list_head *upper_list = data;
 
-	if (!entry) {
-		pr_info("roce_gid_mgmt: couldn't allocate entry to delete ndev\n");
+	if (!entry)
 		return 0;
-	}
 
 	list_add_tail(&entry->list, upper_list);
 	dev_hold(upper);
@@ -904,7 +904,7 @@ int __init roce_gid_mgmt_init(void)
 	 * last to make sure we will not miss any IP add/del
 	 * callbacks.
 	 */
-	register_netdevice_notifier_rh(&nb_netdevice);
+	register_netdevice_notifier(&nb_netdevice);
 
 	return 0;
 }
@@ -914,7 +914,7 @@ void __exit roce_gid_mgmt_cleanup(void)
 	if (IS_ENABLED(CONFIG_IPV6))
 		unregister_inet6addr_notifier(&nb_inet6addr);
 	unregister_inetaddr_notifier(&nb_inetaddr);
-	unregister_netdevice_notifier_rh(&nb_netdevice);
+	unregister_netdevice_notifier(&nb_netdevice);
 	/* Ensure all gid deletion tasks complete before we go down,
 	 * to avoid any reference to free'd memory. By the time
 	 * ib-core is removed, all physical devices have been removed,

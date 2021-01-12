@@ -105,7 +105,7 @@ struct snd_pcm_ops {
 #define SNDRV_PCM_IOCTL1_RESET		0
 /* 1 is absent slot. */
 #define SNDRV_PCM_IOCTL1_CHANNEL_INFO	2
-#define SNDRV_PCM_IOCTL1_GSTATE		3
+/* 3 is absent slot. */
 #define SNDRV_PCM_IOCTL1_FIFO_SIZE	4
 
 #define SNDRV_PCM_TRIGGER_STOP		0
@@ -527,6 +527,7 @@ struct snd_pcm {
 	void (*private_free) (struct snd_pcm *pcm);
 	bool internal; /* pcm is for internal use only */
 	bool nonatomic; /* whole PCM operations are in non-atomic context */
+	bool no_device_suspend; /* don't invoke device PM suspend */
 #if IS_ENABLED(CONFIG_SND_PCM_OSS)
 	struct snd_pcm_oss oss;
 #endif
@@ -570,13 +571,8 @@ int snd_pcm_stop(struct snd_pcm_substream *substream, snd_pcm_state_t status);
 int snd_pcm_drain_done(struct snd_pcm_substream *substream);
 int snd_pcm_stop_xrun(struct snd_pcm_substream *substream);
 #ifdef CONFIG_PM
-int snd_pcm_suspend(struct snd_pcm_substream *substream);
 int snd_pcm_suspend_all(struct snd_pcm *pcm);
 #else
-static inline int snd_pcm_suspend(struct snd_pcm_substream *substream)
-{
-	return 0;
-}
 static inline int snd_pcm_suspend_all(struct snd_pcm *pcm)
 {
 	return 0;
@@ -1079,14 +1075,14 @@ static inline snd_pcm_sframes_t
 snd_pcm_lib_write(struct snd_pcm_substream *substream,
 		  const void __user *buf, snd_pcm_uframes_t frames)
 {
-	return __snd_pcm_lib_xfer(substream, (void *)buf, true, frames, false);
+	return __snd_pcm_lib_xfer(substream, (void __force *)buf, true, frames, false);
 }
 
 static inline snd_pcm_sframes_t
 snd_pcm_lib_read(struct snd_pcm_substream *substream,
 		 void __user *buf, snd_pcm_uframes_t frames)
 {
-	return __snd_pcm_lib_xfer(substream, (void *)buf, true, frames, false);
+	return __snd_pcm_lib_xfer(substream, (void __force *)buf, true, frames, false);
 }
 
 static inline snd_pcm_sframes_t

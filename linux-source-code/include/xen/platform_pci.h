@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _XEN_PLATFORM_PCI_H
 #define _XEN_PLATFORM_PCI_H
 
@@ -45,8 +46,6 @@ static inline int xen_must_unplug_disks(void) {
         return 0;
 #endif
 }
-
-extern int xen_platform_pci_unplug;
 
 #if defined(CONFIG_XEN_PVHVM)
 extern bool xen_has_pv_devices(void);

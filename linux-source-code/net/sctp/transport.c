@@ -24,16 +24,12 @@
  * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with GNU CC; see the file COPYING.  If not, write to
- * the Free Software Foundation, 59 Temple Place - Suite 330,
- * Boston, MA 02111-1307, USA.
+ * along with GNU CC; see the file COPYING.  If not, see
+ * <http://www.gnu.org/licenses/>.
  *
  * Please send any bug reports or fixes you make to the
  * email address(es):
- *    lksctp developers <lksctp-developers@lists.sourceforge.net>
- *
- * Or submit a bug report through the following website:
- *    http://www.sf.net/projects/lksctp
+ *    lksctp developers <linux-sctp@vger.kernel.org>
  *
  * Written or modified by:
  *    La Monte H.P. Yarroll <piggy@acm.org>
@@ -43,9 +39,6 @@
  *    Hui Huang             <hui.huang@nokia.com>
  *    Sridhar Samudrala	    <sri@us.ibm.com>
  *    Ardelle Fan	    <ardelle.fan@intel.com>
- *
- * Any bugs reported given to us we will try to fix... any fixes shared will
- * be incorporated into the next SCTP release.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -65,8 +58,8 @@ static struct sctp_transport *sctp_transport_init(struct net *net,
 						  gfp_t gfp)
 {
 	/* Copy in the address.  */
-	peer->ipaddr = *addr;
 	peer->af_specific = sctp_get_af_specific(addr->sa.sa_family);
+	memcpy(&peer->ipaddr, addr, peer->af_specific->sockaddr_len);
 	memset(&peer->saddr, 0, sizeof(union sctp_addr));
 
 	peer->sack_generation = 0;
@@ -79,7 +72,7 @@ static struct sctp_transport *sctp_transport_init(struct net *net,
 	 */
 	peer->rto = msecs_to_jiffies(net->sctp.rto_initial);
 
-	peer->last_time_heard = ktime_set(0, 0);
+	peer->last_time_heard = 0;
 	peer->last_time_ecne_reduced = jiffies;
 
 	peer->param_flags = SPP_HB_DISABLE |
@@ -94,17 +87,16 @@ static struct sctp_transport *sctp_transport_init(struct net *net,
 	INIT_LIST_HEAD(&peer->send_ready);
 	INIT_LIST_HEAD(&peer->transports);
 
-	setup_timer(&peer->T3_rtx_timer, sctp_generate_t3_rtx_event,
-			(unsigned long)peer);
-	setup_timer(&peer->hb_timer, sctp_generate_heartbeat_event,
-			(unsigned long)peer);
-	setup_timer(&peer->proto_unreach_timer,
-		    sctp_generate_proto_unreach_event, (unsigned long)peer);
+	timer_setup(&peer->T3_rtx_timer, sctp_generate_t3_rtx_event, 0);
+	timer_setup(&peer->hb_timer, sctp_generate_heartbeat_event, 0);
+	timer_setup(&peer->reconf_timer, sctp_generate_reconf_event, 0);
+	timer_setup(&peer->proto_unreach_timer,
+		    sctp_generate_proto_unreach_event, 0);
 
 	/* Initialize the 64-bit random nonce sent with heartbeat. */
 	get_random_bytes(&peer->hb_nonce, sizeof(peer->hb_nonce));
 
-	atomic_set(&peer->refcnt, 1);
+	refcount_set(&peer->refcnt, 1);
 
 	return peer;
 }
@@ -151,6 +143,9 @@ void sctp_transport_free(struct sctp_transport *transport)
 	if (del_timer(&transport->T3_rtx_timer))
 		sctp_transport_put(transport);
 
+	if (del_timer(&transport->reconf_timer))
+		sctp_transport_put(transport);
+
 	/* Delete the ICMP proto unreachable timer if it's active. */
 	if (del_timer(&transport->proto_unreach_timer))
 		sctp_association_put(transport->asoc);
@@ -174,7 +169,7 @@ static void sctp_transport_destroy_rcu(struct rcu_head *head)
  */
 static void sctp_transport_destroy(struct sctp_transport *transport)
 {
-	if (unlikely(atomic_read(&transport->refcnt))) {
+	if (unlikely(refcount_read(&transport->refcnt))) {
 		WARN(1, "Attempt to destroy undead transport %p!\n", transport);
 		return;
 	}
@@ -219,6 +214,14 @@ void sctp_transport_reset_hb_timer(struct sctp_transport *transport)
 		sctp_transport_hold(transport);
 }
 
+void sctp_transport_reset_reconf_timer(struct sctp_transport *transport)
+{
+	if (!timer_pending(&transport->reconf_timer))
+		if (!mod_timer(&transport->reconf_timer,
+			       jiffies + transport->rto))
+			sctp_transport_hold(transport);
+}
+
 /* This transport has been assigned to an association.
  * Initialize fields from the association or from the sock itself.
  * Register the reference count in the association.
@@ -240,9 +243,18 @@ void sctp_transport_pmtu(struct sctp_transport *transport, struct sock *sk)
 						&transport->fl, sk);
 	}
 
-	if (transport->dst) {
-		transport->pathmtu = SCTP_TRUNC4(dst_mtu(transport->dst));
-	} else
+	if (transport->param_flags & SPP_PMTUD_DISABLE) {
+		struct sctp_association *asoc = transport->asoc;
+
+		if (!transport->pathmtu && asoc && asoc->pathmtu)
+			transport->pathmtu = asoc->pathmtu;
+		if (transport->pathmtu)
+			return;
+	}
+
+	if (transport->dst)
+		transport->pathmtu = sctp_dst_mtu(transport->dst);
+	else
 		transport->pathmtu = SCTP_DEFAULT_MAXSEGMENT;
 }
 
@@ -279,8 +291,7 @@ bool sctp_transport_update_pmtu(struct sctp_transport *t, u32 pmtu)
 
 	if (dst) {
 		/* Re-fetch, as under layers may have a higher minimum size */
-		pmtu = SCTP_TRUNC4(max_t(__u32, dst_mtu(dst),
-					 SCTP_DEFAULT_MINSEGMENT));
+		pmtu = sctp_dst_mtu(dst);
 		change = t->pathmtu != pmtu;
 	}
 	t->pathmtu = pmtu;
@@ -297,6 +308,7 @@ void sctp_transport_route(struct sctp_transport *transport,
 	struct sctp_association *asoc = transport->asoc;
 	struct sctp_af *af = transport->af_specific;
 
+	sctp_transport_dst_release(transport);
 	af->get_dst(transport, saddr, &transport->fl, sctp_opt2sk(opt));
 
 	if (saddr)
@@ -304,27 +316,20 @@ void sctp_transport_route(struct sctp_transport *transport,
 	else
 		af->get_saddr(opt, transport, &transport->fl);
 
-	if ((transport->param_flags & SPP_PMTUD_DISABLE) && transport->pathmtu) {
-		return;
-	}
-	if (transport->dst) {
-		transport->pathmtu = SCTP_TRUNC4(dst_mtu(transport->dst));
+	sctp_transport_pmtu(transport, sctp_opt2sk(opt));
 
-		/* Initialize sk->sk_rcv_saddr, if the transport is the
-		 * association's active path for getsockname().
-		 */
-		if (asoc && (!asoc->peer.primary_path ||
-				(transport == asoc->peer.active_path)))
-			opt->pf->to_sk_saddr(&transport->saddr,
-					     asoc->base.sk);
-	} else
-		transport->pathmtu = SCTP_DEFAULT_MAXSEGMENT;
+	/* Initialize sk->sk_rcv_saddr, if the transport is the
+	 * association's active path for getsockname().
+	 */
+	if (transport->dst && asoc &&
+	    (!asoc->peer.primary_path || transport == asoc->peer.active_path))
+		opt->pf->to_sk_saddr(&transport->saddr, asoc->base.sk);
 }
 
 /* Hold a reference to a transport.  */
 int sctp_transport_hold(struct sctp_transport *transport)
 {
-	return atomic_add_unless(&transport->refcnt, 1, 0);
+	return refcount_inc_not_zero(&transport->refcnt);
 }
 
 /* Release a reference to a transport and clean up
@@ -332,7 +337,7 @@ int sctp_transport_hold(struct sctp_transport *transport)
  */
 void sctp_transport_put(struct sctp_transport *transport)
 {
-	if (atomic_dec_and_test(&transport->refcnt))
+	if (refcount_dec_and_test(&transport->refcnt))
 		sctp_transport_destroy(transport);
 }
 
@@ -357,7 +362,7 @@ void sctp_transport_update_rto(struct sctp_transport *tp, __u32 rtt)
 		 * 1/8, rto_alpha would be expressed as 3.
 		 */
 		tp->rttvar = tp->rttvar - (tp->rttvar >> net->sctp.rto_beta)
-			+ (((__u32)abs64((__s64)tp->srtt - (__s64)rtt)) >> net->sctp.rto_beta);
+			+ (((__u32)abs((__s64)tp->srtt - (__s64)rtt)) >> net->sctp.rto_beta);
 		tp->srtt = tp->srtt - (tp->srtt >> net->sctp.rto_alpha)
 			+ (rtt >> net->sctp.rto_alpha);
 	} else {
@@ -503,7 +508,7 @@ void sctp_transport_raise_cwnd(struct sctp_transport *transport,
  * detected.
  */
 void sctp_transport_lower_cwnd(struct sctp_transport *transport,
-			       sctp_lower_cwnd_t reason)
+			       enum sctp_lower_cwnd reason)
 {
 	struct sctp_association *asoc = transport->asoc;
 
@@ -663,9 +668,7 @@ void sctp_transport_reset(struct sctp_transport *t)
 	t->srtt = 0;
 	t->rttvar = 0;
 
-	/* Reset these additional varibles so that we have a clean
-	 * slate.
-	 */
+	/* Reset these additional variables so that we have a clean slate. */
 	t->partial_bytes_acked = 0;
 	t->flight_size = 0;
 	t->error_count = 0;
@@ -691,7 +694,6 @@ void sctp_transport_immediate_rtx(struct sctp_transport *t)
 		if (!mod_timer(&t->T3_rtx_timer, jiffies + t->rto))
 			sctp_transport_hold(t);
 	}
-	return;
 }
 
 /* Drop dst */

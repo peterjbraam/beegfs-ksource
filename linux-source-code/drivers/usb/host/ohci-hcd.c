@@ -788,7 +788,7 @@ static void io_watchdog_func(struct timer_list *t)
 		}
 
 		/* find the last TD processed by the controller. */
-		head = hc32_to_cpu(ohci, ACCESS_ONCE(ed->hwHeadP)) & TD_MASK;
+		head = hc32_to_cpu(ohci, READ_ONCE(ed->hwHeadP)) & TD_MASK;
 		td_start = td;
 		td_next = list_prepare_entry(td, &ed->td_list, td_list);
 		list_for_each_entry_continue(td_next, &ed->td_list, td_list) {
@@ -1245,11 +1245,6 @@ MODULE_LICENSE ("GPL");
 #define TMIO_OHCI_DRIVER	ohci_hcd_tmio_driver
 #endif
 
-#ifdef CONFIG_TILE_USB
-#include "ohci-tilegx.c"
-#define PLATFORM_DRIVER		ohci_hcd_tilegx_driver
-#endif
-
 static int __init ohci_hcd_mod_init(void)
 {
 	int retval = 0;
@@ -1258,7 +1253,7 @@ static int __init ohci_hcd_mod_init(void)
 		return -ENODEV;
 
 	printk(KERN_INFO "%s: " DRIVER_DESC "\n", hcd_name);
-	pr_debug ("%s: block sizes: ed %Zd td %Zd\n", hcd_name,
+	pr_debug ("%s: block sizes: ed %zd td %zd\n", hcd_name,
 		sizeof (struct ed), sizeof (struct td));
 	set_bit(USB_OHCI_LOADED, &usb_hcds_loaded);
 
@@ -1268,12 +1263,6 @@ static int __init ohci_hcd_mod_init(void)
 	retval = ps3_ohci_driver_register(&PS3_SYSTEM_BUS_DRIVER);
 	if (retval < 0)
 		goto error_ps3;
-#endif
-
-#ifdef PLATFORM_DRIVER
-	retval = platform_driver_register(&PLATFORM_DRIVER);
-	if (retval < 0)
-		goto error_platform;
 #endif
 
 #ifdef OF_PLATFORM_DRIVER
@@ -1319,10 +1308,6 @@ static int __init ohci_hcd_mod_init(void)
 	platform_driver_unregister(&OF_PLATFORM_DRIVER);
  error_of_platform:
 #endif
-#ifdef PLATFORM_DRIVER
-	platform_driver_unregister(&PLATFORM_DRIVER);
- error_platform:
-#endif
 #ifdef PS3_SYSTEM_BUS_DRIVER
 	ps3_ohci_driver_unregister(&PS3_SYSTEM_BUS_DRIVER);
  error_ps3:
@@ -1348,9 +1333,6 @@ static void __exit ohci_hcd_mod_exit(void)
 #endif
 #ifdef OF_PLATFORM_DRIVER
 	platform_driver_unregister(&OF_PLATFORM_DRIVER);
-#endif
-#ifdef PLATFORM_DRIVER
-	platform_driver_unregister(&PLATFORM_DRIVER);
 #endif
 #ifdef PS3_SYSTEM_BUS_DRIVER
 	ps3_ohci_driver_unregister(&PS3_SYSTEM_BUS_DRIVER);

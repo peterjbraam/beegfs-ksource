@@ -694,7 +694,7 @@ static void hv_page_online_one(struct hv_hotadd_state *has, struct page *pg)
 	__online_page_increment_counters(pg);
 	__online_page_free(pg);
 
-	WARN_ON_ONCE(!spin_is_locked(&dm_device.ha_lock));
+	lockdep_assert_held(&dm_device.ha_lock);
 	dm_device.num_pages_onlined++;
 }
 
@@ -737,7 +737,7 @@ static void hv_mem_hot_add(unsigned long start, unsigned long size,
 		spin_unlock_irqrestore(&dm_device.ha_lock, flags);
 
 		init_completion(&dm_device.ol_waitevent);
-		dm_device.ha_waiting = true; /* memhp_auto_online is missing in RHEL */
+		dm_device.ha_waiting = !memhp_auto_online;
 
 		nid = memory_add_physaddr_to_nid(PFN_PHYS(start_pfn));
 		ret = add_memory(nid, PFN_PHYS((start_pfn)),
@@ -776,7 +776,7 @@ static void hv_mem_hot_add(unsigned long start, unsigned long size,
 	}
 }
 
-static void hv_online_page(struct page *pg)
+static void hv_online_page(struct page *pg, unsigned int order)
 {
 	struct hv_hotadd_state *has;
 	unsigned long flags;
@@ -785,10 +785,11 @@ static void hv_online_page(struct page *pg)
 	spin_lock_irqsave(&dm_device.ha_lock, flags);
 	list_for_each_entry(has, &dm_device.ha_region_list, list) {
 		/* The page belongs to a different HAS. */
-		if ((pfn < has->start_pfn) || (pfn >= has->end_pfn))
+		if ((pfn < has->start_pfn) ||
+				(pfn + (1UL << order) > has->end_pfn))
 			continue;
 
-		hv_page_online_one(has, pg);
+		hv_bring_pgs_online(has, pfn, 1UL << order);
 		break;
 	}
 	spin_unlock_irqrestore(&dm_device.ha_lock, flags);
@@ -893,12 +894,14 @@ static unsigned long handle_pg_range(unsigned long pg_start,
 			pfn_cnt -= pgs_ol;
 			/*
 			 * Check if the corresponding memory block is already
-			 * online by checking its last previously backed page.
-			 * In case it is we need to bring rest (which was not
-			 * backed previously) online too.
+			 * online. It is possible to observe struct pages still
+			 * being uninitialized here so check section instead.
+			 * In case the section is online we need to bring the
+			 * rest of pfns (which were not backed previously)
+			 * online too.
 			 */
 			if (start_pfn > has->start_pfn &&
-			    !PageReserved(pfn_to_page(start_pfn - 1)))
+			    online_section_nr(pfn_to_section_nr(start_pfn)))
 				hv_bring_pgs_online(has, start_pfn, pgs_ol);
 
 		}
@@ -1775,6 +1778,9 @@ static  struct hv_driver balloon_drv = {
 	.id_table = id_table,
 	.probe =  balloon_probe,
 	.remove =  balloon_remove,
+	.driver = {
+		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
+	},
 };
 
 static int __init init_balloon_drv(void)

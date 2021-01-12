@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _XFRM_HASH_H
 #define _XFRM_HASH_H
 
@@ -54,8 +55,8 @@ static inline unsigned int __xfrm4_dpref_spref_hash(const xfrm_address_t *daddr,
 static inline unsigned int __xfrm6_pref_hash(const xfrm_address_t *addr,
 					     __u8 prefixlen)
 {
-	int pdw;
-	int pbi;
+	unsigned int pdw;
+	unsigned int pbi;
 	u32 initval = 0;
 
 	pdw = prefixlen >> 5;     /* num of whole u32 in prefix */
@@ -186,7 +187,7 @@ static inline unsigned int __addr_hash(const xfrm_address_t *daddr,
 	return h & hmask;
 }
 
-extern struct hlist_head *xfrm_hash_alloc(unsigned int sz);
-extern void xfrm_hash_free(struct hlist_head *n, unsigned int sz);
+struct hlist_head *xfrm_hash_alloc(unsigned int sz);
+void xfrm_hash_free(struct hlist_head *n, unsigned int sz);
 
 #endif /* _XFRM_HASH_H */

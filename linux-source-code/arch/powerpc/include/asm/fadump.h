@@ -43,11 +43,14 @@
 #define MIN_BOOT_MEM	(((RMA_END < (0x1UL << 28)) ? (0x1UL << 28) : RMA_END) \
 			+ (0x1UL << 26))
 
+/* The upper limit percentage for user specified boot memory size (25%) */
+#define MAX_BOOT_MEM_RATIO			4
+
 #define memblock_num_regions(memblock_type)	(memblock.memblock_type.cnt)
 
-#ifndef ELF_CORE_EFLAGS
-#define ELF_CORE_EFLAGS 0
-#endif
+/* Alignement per CMA requirement. */
+#define FADUMP_CMA_ALIGNMENT	(PAGE_SIZE <<				\
+			max_t(unsigned long, MAX_ORDER - 1, pageblock_order))
 
 /* Firmware provided dump sections */
 #define FADUMP_CPU_STATE_DATA	0x0001
@@ -142,6 +145,7 @@ struct fw_dump {
 	unsigned long	fadump_supported:1;
 	unsigned long	dump_active:1;
 	unsigned long	dump_registered:1;
+	unsigned long	nocma:1;
 };
 
 /*
@@ -193,7 +197,7 @@ struct fadump_crash_info_header {
 	u64		elfcorehdr_addr;
 	u32		crashing_cpu;
 	struct pt_regs	regs;
-	struct cpumask	cpu_online_mask;
+	struct cpumask	online_mask;
 };
 
 struct fad_crash_memory_ranges {
@@ -201,22 +205,19 @@ struct fad_crash_memory_ranges {
 	unsigned long long	size;
 };
 
-extern int is_fadump_boot_memory_area(u64 addr, ulong size);
+extern int is_fadump_memory_area(u64 addr, ulong size);
 extern int early_init_dt_scan_fw_dump(unsigned long node,
 		const char *uname, int depth, void *data);
 extern int fadump_reserve_mem(void);
 extern int setup_fadump(void);
-extern unsigned long long fadump_default_reserve_size(void);
-extern int is_fadump_enabled(void);
 extern int is_fadump_active(void);
+extern int should_fadump_crash(void);
 extern void crash_fadump(struct pt_regs *, const char *);
 extern void fadump_cleanup(void);
 
-extern void vmcore_cleanup(void);
 #else	/* CONFIG_FA_DUMP */
-static inline unsigned long long fadump_default_reserve_size(void) { return 0; }
-static inline int is_fadump_enabled(void) { return 0; }
 static inline int is_fadump_active(void) { return 0; }
+static inline int should_fadump_crash(void) { return 0; }
 static inline void crash_fadump(struct pt_regs *regs, const char *str) { }
 #endif
 #endif

@@ -29,13 +29,13 @@
 #include <linux/sysctl.h>
 #include <linux/slab.h>
 #include <linux/acpi.h>
-#include <acpi/acpi_bus.h>
 #include <linux/completion.h>
 #include <linux/hyperv.h>
 #include <linux/kernel_stat.h>
 #include <linux/clockchips.h>
 #include <linux/cpu.h>
-#include <asm/hyperv.h>
+#include <linux/sched/task_stack.h>
+
 #include <asm/mshyperv.h>
 #include <linux/notifier.h>
 #include <linux/ptrace.h>
@@ -54,6 +54,9 @@ static struct acpi_device  *hv_acpi_dev;
 
 static struct completion probe_event;
 
+static int hyperv_cpuhp_online;
+
+static void *hv_panic_page;
 
 static int hyperv_panic_event(struct notifier_block *nb, unsigned long val,
 			      void *args)
@@ -87,11 +90,6 @@ static const char *fb_mmio_name = "fb_range";
 static struct resource *fb_mmio;
 static struct resource *hyperv_mmio;
 static DEFINE_SEMAPHORE(hyperv_mmio_lock);
-
-struct hv_device_info {
-	struct hv_ring_buffer_debug_info inbound;
-	struct hv_ring_buffer_debug_info outbound;
-};
 
 static int vmbus_exists(void)
 {
@@ -212,6 +210,20 @@ static ssize_t modalias_show(struct device *dev,
 }
 static DEVICE_ATTR_RO(modalias);
 
+#ifdef CONFIG_NUMA
+static ssize_t numa_node_show(struct device *dev,
+			      struct device_attribute *attr, char *buf)
+{
+	struct hv_device *hv_dev = device_to_hv_device(dev);
+
+	if (!hv_dev->channel)
+		return -ENODEV;
+
+	return sprintf(buf, "%d\n", hv_dev->channel->numa_node);
+}
+static DEVICE_ATTR_RO(numa_node);
+#endif
+
 static ssize_t server_monitor_pending_show(struct device *dev,
 					   struct device_attribute *dev_attr,
 					   char *buf)
@@ -222,7 +234,7 @@ static ssize_t server_monitor_pending_show(struct device *dev,
 		return -ENODEV;
 	return sprintf(buf, "%d\n",
 		       channel_pending(hv_dev->channel,
-				       vmbus_connection.monitor_pages[1]));
+				       vmbus_connection.monitor_pages[0]));
 }
 static DEVICE_ATTR_RO(server_monitor_pending);
 
@@ -593,6 +605,9 @@ static struct attribute *vmbus_dev_attrs[] = {
 	&dev_attr_class_id.attr,
 	&dev_attr_device_id.attr,
 	&dev_attr_modalias.attr,
+#ifdef CONFIG_NUMA
+	&dev_attr_numa_node.attr,
+#endif
 	&dev_attr_server_monitor_pending.attr,
 	&dev_attr_client_monitor_pending.attr,
 	&dev_attr_server_monitor_latency.attr,
@@ -639,38 +654,28 @@ static int vmbus_uevent(struct device *device, struct kobj_uevent_env *env)
 	return ret;
 }
 
-static const uuid_le null_guid;
-
-static inline bool is_null_guid(const uuid_le *guid)
-{
-	if (uuid_le_cmp(*guid, null_guid))
-		return false;
-	return true;
-}
-
 static const struct hv_vmbus_device_id *
-hv_vmbus_dev_match(const struct hv_vmbus_device_id *id, const uuid_le *guid)
-
+hv_vmbus_dev_match(const struct hv_vmbus_device_id *id, const guid_t *guid)
 {
 	if (id == NULL)
 		return NULL; /* empty device table */
 
-	for (; !is_null_guid(&id->guid); id++)
-		if (!uuid_le_cmp(id->guid, *guid))
+	for (; !guid_is_null(&id->guid); id++)
+		if (guid_equal(&id->guid, guid))
 			return id;
 
 	return NULL;
 }
 
 static const struct hv_vmbus_device_id *
-hv_vmbus_dynid_match(struct hv_driver *drv, const uuid_le *guid)
+hv_vmbus_dynid_match(struct hv_driver *drv, const guid_t *guid)
 {
 	const struct hv_vmbus_device_id *id = NULL;
 	struct vmbus_dynid *dynid;
 
 	spin_lock(&drv->dynids.lock);
 	list_for_each_entry(dynid, &drv->dynids.list, node) {
-		if (!uuid_le_cmp(dynid->id.guid, *guid)) {
+		if (guid_equal(&dynid->id.guid, guid)) {
 			id = &dynid->id;
 			break;
 		}
@@ -680,9 +685,7 @@ hv_vmbus_dynid_match(struct hv_driver *drv, const uuid_le *guid)
 	return id;
 }
 
-static const struct hv_vmbus_device_id vmbus_device_null = {
-	.guid = NULL_UUID_LE,
-};
+static const struct hv_vmbus_device_id vmbus_device_null;
 
 /*
  * Return a matching hv_vmbus_device_id pointer.
@@ -691,7 +694,7 @@ static const struct hv_vmbus_device_id vmbus_device_null = {
 static const struct hv_vmbus_device_id *hv_vmbus_get_id(struct hv_driver *drv,
 							struct hv_device *dev)
 {
-	const uuid_le *guid = &dev->dev_type;
+	const guid_t *guid = &dev->dev_type;
 	const struct hv_vmbus_device_id *id;
 
 	/* When driver_override is set, only bind to the matching driver */
@@ -711,7 +714,7 @@ static const struct hv_vmbus_device_id *hv_vmbus_get_id(struct hv_driver *drv,
 }
 
 /* vmbus_add_dynid - add a new device ID to this driver and re-probe devices */
-static int vmbus_add_dynid(struct hv_driver *drv, uuid_le *guid)
+static int vmbus_add_dynid(struct hv_driver *drv, guid_t *guid)
 {
 	struct vmbus_dynid *dynid;
 
@@ -749,10 +752,10 @@ static ssize_t new_id_store(struct device_driver *driver, const char *buf,
 			    size_t count)
 {
 	struct hv_driver *drv = drv_to_hv_drv(driver);
-	uuid_le guid;
+	guid_t guid;
 	ssize_t retval;
 
-	retval = uuid_le_to_bin(buf, &guid);
+	retval = guid_parse(buf, &guid);
 	if (retval)
 		return retval;
 
@@ -776,10 +779,10 @@ static ssize_t remove_id_store(struct device_driver *driver, const char *buf,
 {
 	struct hv_driver *drv = drv_to_hv_drv(driver);
 	struct vmbus_dynid *dynid, *n;
-	uuid_le guid;
+	guid_t guid;
 	ssize_t retval;
 
-	retval = uuid_le_to_bin(buf, &guid);
+	retval = guid_parse(buf, &guid);
 	if (retval)
 		return retval;
 
@@ -788,7 +791,7 @@ static ssize_t remove_id_store(struct device_driver *driver, const char *buf,
 	list_for_each_entry_safe(dynid, n, &drv->dynids.list, node) {
 		struct hv_vmbus_device_id *id = &dynid->id;
 
-		if (!uuid_le_cmp(id->guid, guid)) {
+		if (guid_equal(&id->guid, &guid)) {
 			list_del(&dynid->node);
 			kfree(dynid);
 			retval = count;
@@ -1149,48 +1152,71 @@ static void vmbus_isr(void)
 	add_interrupt_randomness(HYPERVISOR_CALLBACK_VECTOR, 0);
 }
 
-static void hv_synic_init_oncpu(void *arg)
+/*
+ * Boolean to control whether to report panic messages over Hyper-V.
+ *
+ * It can be set via /proc/sys/kernel/hyperv/record_panic_msg
+ */
+static int sysctl_record_panic_msg = 1;
+
+/*
+ * Callback from kmsg_dump. Grab as much as possible from the end of the kmsg
+ * buffer and call into Hyper-V to transfer the data.
+ */
+static void hv_kmsg_dump(struct kmsg_dumper *dumper,
+			 enum kmsg_dump_reason reason)
 {
-	int cpu = get_cpu();
-	hv_synic_init(cpu);
-	put_cpu();
+	size_t bytes_written;
+	phys_addr_t panic_pa;
+
+	/* We are only interested in panics. */
+	if ((reason != KMSG_DUMP_PANIC) || (!sysctl_record_panic_msg))
+		return;
+
+	panic_pa = virt_to_phys(hv_panic_page);
+
+	/*
+	 * Write dump contents to the page. No need to synchronize; panic should
+	 * be single-threaded.
+	 */
+	kmsg_dump_get_buffer(dumper, true, hv_panic_page, PAGE_SIZE,
+			     &bytes_written);
+	if (bytes_written)
+		hyperv_report_panic_msg(panic_pa, bytes_written);
 }
 
-static void hv_synic_cleanup_oncpu(void *arg)
-{
-	int cpu = get_cpu();
-	hv_synic_cleanup(cpu);
-	put_cpu();
-}
+static struct kmsg_dumper hv_kmsg_dumper = {
+	.dump = hv_kmsg_dump,
+};
 
-static int hv_cpuhp_callback(struct notifier_block *nfb,
-			     unsigned long action, void *hcpu)
-{
-	unsigned int cpu = (unsigned long) hcpu;
+static struct ctl_table_header *hv_ctl_table_hdr;
+static int zero;
+static int one = 1;
 
-	switch (action & ~CPU_TASKS_FROZEN) {
-	case CPU_STARTING:
-		hv_synic_init(cpu);
-		break;
-	case CPU_DYING:
-		hv_synic_cleanup(cpu);
-		break;
-	case CPU_DOWN_PREPARE:
-		if (hv_synic_cpu_used(cpu))
-			return NOTIFY_BAD;
-		hv_clockevents_unbind(cpu);
-		break;
-	case CPU_DOWN_FAILED:
-		hv_clockevents_bind(cpu);
-		break;
-	}
+/*
+ * sysctl option to allow the user to control whether kmsg data should be
+ * reported to Hyper-V on panic.
+ */
+static struct ctl_table hv_ctl_table[] = {
+	{
+		.procname       = "hyperv_record_panic_msg",
+		.data           = &sysctl_record_panic_msg,
+		.maxlen         = sizeof(int),
+		.mode           = 0644,
+		.proc_handler   = proc_dointvec_minmax,
+		.extra1		= &zero,
+		.extra2		= &one
+	},
+	{}
+};
 
-	return NOTIFY_OK;
-}
-
-static struct notifier_block hv_cpuhp_notifier __refdata = {
-       .notifier_call = hv_cpuhp_callback,
-       .priority = INT_MAX - 1, /* Run after hv_cpu_init() */
+static struct ctl_table hv_root_table[] = {
+	{
+		.procname	= "kernel",
+		.mode		= 0555,
+		.child		= hv_ctl_table
+	},
+	{}
 };
 
 /*
@@ -1203,7 +1229,7 @@ static struct notifier_block hv_cpuhp_notifier __refdata = {
  */
 static int vmbus_bus_init(void)
 {
-	int ret, cpu;
+	int ret;
 
 	/* Hypervisor initialization...setup hypercall page..etc */
 	ret = hv_init();
@@ -1225,10 +1251,11 @@ static int vmbus_bus_init(void)
 	 * Initialize the per-cpu interrupt state and
 	 * connect to the host.
 	 */
-	cpu_notifier_register_begin();
-	on_each_cpu(hv_synic_init_oncpu, NULL, 1);
-	__register_hotcpu_notifier(&hv_cpuhp_notifier);
-	cpu_notifier_register_done();
+	ret = cpuhp_setup_state(CPUHP_AP_ONLINE_DYN, "hyperv/vmbus:online",
+				hv_synic_init, hv_synic_cleanup);
+	if (ret < 0)
+		goto err_alloc;
+	hyperv_cpuhp_online = ret;
 
 	ret = vmbus_connect();
 	if (ret)
@@ -1238,6 +1265,32 @@ static int vmbus_bus_init(void)
 	 * Only register if the crash MSRs are available
 	 */
 	if (ms_hyperv.misc_features & HV_FEATURE_GUEST_CRASH_MSR_AVAILABLE) {
+		u64 hyperv_crash_ctl;
+		/*
+		 * Sysctl registration is not fatal, since by default
+		 * reporting is enabled.
+		 */
+		hv_ctl_table_hdr = register_sysctl_table(hv_root_table);
+		if (!hv_ctl_table_hdr)
+			pr_err("Hyper-V: sysctl table register error");
+
+		/*
+		 * Register for panic kmsg callback only if the right
+		 * capability is supported by the hypervisor.
+		 */
+		hv_get_crash_ctl(hyperv_crash_ctl);
+		if (hyperv_crash_ctl & HV_CRASH_CTL_CRASH_NOTIFY_MSG) {
+			hv_panic_page = (void *)get_zeroed_page(GFP_KERNEL);
+			if (hv_panic_page) {
+				ret = kmsg_dump_register(&hv_kmsg_dumper);
+				if (ret)
+					pr_err("Hyper-V: kmsg dump register "
+						"error 0x%x\n", ret);
+			} else
+				pr_err("Hyper-V: panic message page memory "
+					"allocation failed");
+		}
+
 		register_die_notifier(&hyperv_die_block);
 		atomic_notifier_chain_register(&panic_notifier_list,
 					       &hyperv_panic_block);
@@ -1248,19 +1301,15 @@ static int vmbus_bus_init(void)
 	return 0;
 
 err_connect:
-	cpu_notifier_register_begin();
-	__unregister_hotcpu_notifier(&hv_cpuhp_notifier);
-	for_each_online_cpu(cpu) {
-		hv_clockevents_unbind(cpu);
-		smp_call_function_single(cpu, hv_synic_cleanup_oncpu, NULL, 1);
-	}
-	cpu_notifier_register_done();
+	cpuhp_remove_state(hyperv_cpuhp_online);
 err_alloc:
 	hv_synic_free();
 	hv_remove_vmbus_irq();
 
 	bus_unregister(&hv_bus);
-
+	free_page((unsigned long)hv_panic_page);
+	unregister_sysctl_table(hv_ctl_table_hdr);
+	hv_ctl_table_hdr = NULL;
 	return ret;
 }
 
@@ -1435,6 +1484,38 @@ static ssize_t channel_events_show(const struct vmbus_channel *channel, char *bu
 }
 static VMBUS_CHAN_ATTR(events, S_IRUGO, channel_events_show, NULL);
 
+static ssize_t channel_intr_in_full_show(const struct vmbus_channel *channel,
+					 char *buf)
+{
+	return sprintf(buf, "%llu\n",
+		       (unsigned long long)channel->intr_in_full);
+}
+static VMBUS_CHAN_ATTR(intr_in_full, 0444, channel_intr_in_full_show, NULL);
+
+static ssize_t channel_intr_out_empty_show(const struct vmbus_channel *channel,
+					   char *buf)
+{
+	return sprintf(buf, "%llu\n",
+		       (unsigned long long)channel->intr_out_empty);
+}
+static VMBUS_CHAN_ATTR(intr_out_empty, 0444, channel_intr_out_empty_show, NULL);
+
+static ssize_t channel_out_full_first_show(const struct vmbus_channel *channel,
+					   char *buf)
+{
+	return sprintf(buf, "%llu\n",
+		       (unsigned long long)channel->out_full_first);
+}
+static VMBUS_CHAN_ATTR(out_full_first, 0444, channel_out_full_first_show, NULL);
+
+static ssize_t channel_out_full_total_show(const struct vmbus_channel *channel,
+					   char *buf)
+{
+	return sprintf(buf, "%llu\n",
+		       (unsigned long long)channel->out_full_total);
+}
+static VMBUS_CHAN_ATTR(out_full_total, 0444, channel_out_full_total_show, NULL);
+
 static ssize_t subchannel_monitor_id_show(const struct vmbus_channel *channel,
 					  char *buf)
 {
@@ -1460,6 +1541,10 @@ static struct attribute *vmbus_chan_attrs[] = {
 	&chan_attr_latency.attr,
 	&chan_attr_interrupts.attr,
 	&chan_attr_events.attr,
+	&chan_attr_intr_in_full.attr,
+	&chan_attr_intr_out_empty.attr,
+	&chan_attr_out_full_first.attr,
+	&chan_attr_out_full_total.attr,
 	&chan_attr_monitor_id.attr,
 	&chan_attr_subchannel_id.attr,
 	NULL
@@ -1495,8 +1580,8 @@ int vmbus_add_channel_kobj(struct hv_device *dev, struct vmbus_channel *channel)
  * vmbus_device_create - Creates and registers a new child device
  * on the vmbus.
  */
-struct hv_device *vmbus_device_create(const uuid_le *type,
-				      const uuid_le *instance,
+struct hv_device *vmbus_device_create(const guid_t *type,
+				      const guid_t *instance,
 				      struct vmbus_channel *channel)
 {
 	struct hv_device *child_device_obj;
@@ -1508,11 +1593,9 @@ struct hv_device *vmbus_device_create(const uuid_le *type,
 	}
 
 	child_device_obj->channel = channel;
-	memcpy(&child_device_obj->dev_type, type, sizeof(uuid_le));
-	memcpy(&child_device_obj->dev_instance, instance,
-	       sizeof(uuid_le));
+	guid_copy(&child_device_obj->dev_type, type);
+	guid_copy(&child_device_obj->dev_instance, instance);
 	child_device_obj->vendor_id = 0x1414; /* MSFT vendor ID */
-
 
 	return child_device_obj;
 }
@@ -1888,22 +1971,17 @@ static struct acpi_driver vmbus_acpi_driver = {
 
 static void hv_kexec_handler(void)
 {
-	int cpu;
-
 	hv_synic_clockevents_cleanup();
 	vmbus_initiate_unload(false);
 	vmbus_connection.conn_state = DISCONNECTED;
 	/* Make sure conn_state is set as hv_synic_cleanup checks for it */
 	mb();
-	for_each_online_cpu(cpu)
-		smp_call_function_single(cpu, hv_synic_cleanup_oncpu, NULL, 1);
+	cpuhp_remove_state(hyperv_cpuhp_online);
 	hyperv_cleanup();
 };
 
 static void hv_crash_handler(struct pt_regs *regs)
 {
-	int cpu = smp_processor_id();
-
 	vmbus_initiate_unload(true);
 	/*
 	 * In crash handler we can't schedule synic cleanup for all CPUs,
@@ -1911,8 +1989,7 @@ static void hv_crash_handler(struct pt_regs *regs)
 	 * for kdump.
 	 */
 	vmbus_connection.conn_state = DISCONNECTED;
-	hv_clockevents_unbind(cpu);
-	hv_synic_cleanup(cpu);
+	hv_synic_cleanup(smp_processor_id());
 	hyperv_cleanup();
 };
 
@@ -1973,18 +2050,18 @@ static void __exit vmbus_exit(void)
 	vmbus_free_channels();
 
 	if (ms_hyperv.misc_features & HV_FEATURE_GUEST_CRASH_MSR_AVAILABLE) {
+		kmsg_dump_unregister(&hv_kmsg_dumper);
 		unregister_die_notifier(&hyperv_die_block);
 		atomic_notifier_chain_unregister(&panic_notifier_list,
 						 &hyperv_panic_block);
 	}
+
+	free_page((unsigned long)hv_panic_page);
+	unregister_sysctl_table(hv_ctl_table_hdr);
+	hv_ctl_table_hdr = NULL;
 	bus_unregister(&hv_bus);
-	cpu_notifier_register_begin();
-	__unregister_hotcpu_notifier(&hv_cpuhp_notifier);
 
-	for_each_online_cpu(cpu)
-		smp_call_function_single(cpu, hv_synic_cleanup_oncpu, NULL, 1);
-
-	cpu_notifier_register_done();
+	cpuhp_remove_state(hyperv_cpuhp_online);
 	hv_synic_free();
 	acpi_bus_unregister_driver(&vmbus_acpi_driver);
 }

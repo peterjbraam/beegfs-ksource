@@ -232,9 +232,9 @@ static struct timespec64 hv_get_adj_host_time(void)
 
 static void hv_set_host_time(struct work_struct *work)
 {
-	struct timespec ts = timespec64_to_timespec(hv_get_adj_host_time());
+	struct timespec64 ts = hv_get_adj_host_time();
 
-	do_settimeofday(&ts);
+	do_settimeofday64(&ts);
 }
 
 /*
@@ -483,10 +483,13 @@ MODULE_DEVICE_TABLE(vmbus, id_table);
 
 /* The one and only one */
 static  struct hv_driver util_drv = {
-	.name = "hv_util",
+	.name = "hv_utils",
 	.id_table = id_table,
 	.probe =  util_probe,
 	.remove =  util_remove,
+	.driver = {
+		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
+	},
 };
 
 static int hv_ptp_enable(struct ptp_clock_info *info,

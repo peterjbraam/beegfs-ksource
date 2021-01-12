@@ -43,7 +43,7 @@
  * Allow hardware encryption to be disabled.
  */
 static bool modparam_nohwcrypt;
-module_param_named(nohwcrypt, modparam_nohwcrypt, bool, S_IRUGO);
+module_param_named(nohwcrypt, modparam_nohwcrypt, bool, 0444);
 MODULE_PARM_DESC(nohwcrypt, "Disable hardware encryption.");
 
 static bool rt2800usb_hwcrypt_disabled(struct rt2x00_dev *rt2x00dev)
@@ -161,10 +161,8 @@ static bool rt2800usb_tx_sta_fifo_read_completed(struct rt2x00_dev *rt2x00dev,
 
 	valid = rt2x00_get_field32(tx_status, TX_STA_FIFO_VALID);
 	if (valid) {
-		if (!kfifo_put(&rt2x00dev->txstatus_fifo, &tx_status)) {
-			gmb();
+		if (!kfifo_put(&rt2x00dev->txstatus_fifo, tx_status))
 			rt2x00_warn(rt2x00dev, "TX status FIFO overrun\n");
-		}
 
 		queue_work(rt2x00dev->workqueue, &rt2x00dev->txdone_work);
 
@@ -179,7 +177,7 @@ static bool rt2800usb_tx_sta_fifo_read_completed(struct rt2x00_dev *rt2x00dev,
 	if (rt2800usb_txstatus_pending(rt2x00dev)) {
 		/* Read register after 1 ms */
 		hrtimer_start(&rt2x00dev->txstatus_timer,
-			      ktime_set(0, TXSTATUS_READ_INTERVAL),
+			      TXSTATUS_READ_INTERVAL,
 			      HRTIMER_MODE_REL);
 		return false;
 	}
@@ -206,7 +204,7 @@ static void rt2800usb_async_read_tx_status(struct rt2x00_dev *rt2x00dev)
 
 	/* Read TX_STA_FIFO register after 2 ms */
 	hrtimer_start(&rt2x00dev->txstatus_timer,
-		      ktime_set(0, 2 * TXSTATUS_READ_INTERVAL),
+		      2 * TXSTATUS_READ_INTERVAL,
 		      HRTIMER_MODE_REL);
 }
 
@@ -799,8 +797,8 @@ static const struct ieee80211_ops rt2800usb_mac80211_ops = {
 	.get_stats		= rt2x00mac_get_stats,
 	.get_key_seq		= rt2800_get_key_seq,
 	.set_rts_threshold	= rt2800_set_rts_threshold,
-	.sta_add		= rt2x00mac_sta_add,
-	.sta_remove		= rt2x00mac_sta_remove,
+	.sta_add		= rt2800_sta_add,
+	.sta_remove		= rt2800_sta_remove,
 	.bss_info_changed	= rt2x00mac_bss_info_changed,
 	.conf_tx		= rt2800_conf_tx,
 	.get_tsf		= rt2800_get_tsf,
@@ -860,8 +858,6 @@ static const struct rt2x00lib_ops rt2800usb_rt2x00_ops = {
 	.config_erp		= rt2800_config_erp,
 	.config_ant		= rt2800_config_ant,
 	.config			= rt2800_config,
-	.sta_add		= rt2800_sta_add,
-	.sta_remove		= rt2800_sta_remove,
 };
 
 static void rt2800usb_queue_init(struct data_queue *queue)

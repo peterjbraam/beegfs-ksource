@@ -1,45 +1,11 @@
+/* SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0 */
 /******************************************************************************
  *
  * Name: actbl.h - Basic ACPI Table Definitions
  *
+ * Copyright (C) 2000 - 2018, Intel Corp.
+ *
  *****************************************************************************/
-
-/*
- * Copyright (C) 2000 - 2013, Intel Corp.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions, and the following disclaimer,
- *    without modification.
- * 2. Redistributions in binary form must reproduce at minimum a disclaimer
- *    substantially similar to the "NO WARRANTY" disclaimer below
- *    ("Disclaimer") and any redistribution must be conditioned upon
- *    including a substantially similar Disclaimer requirement for further
- *    binary redistribution.
- * 3. Neither the names of the above-listed copyright holders nor the names
- *    of any contributors may be used to endorse or promote products derived
- *    from this software without specific prior written permission.
- *
- * Alternatively, this software may be distributed under the terms of the
- * GNU General Public License ("GPL") version 2 as published by the Free
- * Software Foundation.
- *
- * NO WARRANTY
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTIBILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * HOLDERS OR CONTRIBUTORS BE LIABLE FOR SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
- * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGES.
- */
 
 #ifndef __ACTBL_H__
 #define __ACTBL_H__
@@ -65,6 +31,7 @@
 #define ACPI_SIG_DSDT           "DSDT"	/* Differentiated System Description Table */
 #define ACPI_SIG_FADT           "FACP"	/* Fixed ACPI Description Table */
 #define ACPI_SIG_FACS           "FACS"	/* Firmware ACPI Control Structure */
+#define ACPI_SIG_OSDT           "OSDT"	/* Override System Description Table */
 #define ACPI_SIG_PSDT           "PSDT"	/* Persistent System Description Table */
 #define ACPI_SIG_RSDP           "RSD PTR "	/* Root System Description Pointer */
 #define ACPI_SIG_RSDT           "RSDT"	/* Root System Description Table */
@@ -146,7 +113,24 @@ struct acpi_table_rsdp {
 	u8 reserved[3];		/* Reserved, must be zero */
 };
 
-#define ACPI_RSDP_REV0_SIZE     20	/* Size of original ACPI 1.0 RSDP */
+/* Standalone struct for the ACPI 1.0 RSDP */
+
+struct acpi_rsdp_common {
+	char signature[8];
+	u8 checksum;
+	char oem_id[ACPI_OEM_ID_SIZE];
+	u8 revision;
+	u32 rsdt_physical_address;
+};
+
+/* Standalone struct for the extended part of the RSDP (ACPI 2.0+) */
+
+struct acpi_rsdp_extension {
+	u32 length;
+	u64 xsdt_physical_address;
+	u8 extended_checksum;
+	u8 reserved[3];
+};
 
 /*******************************************************************************
  *
@@ -164,6 +148,9 @@ struct acpi_table_xsdt {
 	struct acpi_table_header header;	/* Common ACPI table header */
 	u64 table_offset_entry[1];	/* Array of pointers to ACPI tables */
 };
+
+#define ACPI_RSDT_ENTRY_SIZE        (sizeof (u32))
+#define ACPI_XSDT_ENTRY_SIZE        (sizeof (u64))
 
 /*******************************************************************************
  *
@@ -250,7 +237,8 @@ struct acpi_table_fadt {
 	u32 flags;		/* Miscellaneous flag bits (see below for individual flags) */
 	struct acpi_generic_address reset_register;	/* 64-bit address of the Reset register */
 	u8 reset_value;		/* Value to write to the reset_register port to reset the system */
-	u8 reserved4[3];	/* Reserved, must be zero */
+	u16 arm_boot_flags;	/* ARM-Specific Boot Flags (see below for individual flags) (ACPI 5.1) */
+	u8 minor_revision;	/* FADT Minor Revision (ACPI 5.1) */
 	u64 Xfacs;		/* 64-bit physical address of FACS */
 	u64 Xdsdt;		/* 64-bit physical address of DSDT */
 	struct acpi_generic_address xpm1a_event_block;	/* 64-bit Extended Power Mgt 1a Event Reg Blk address */
@@ -266,7 +254,7 @@ struct acpi_table_fadt {
 	u64 hypervisor_id;	/* Hypervisor Vendor ID (ACPI 6.0) */
 };
 
-/* Masks for FADT Boot Architecture Flags (boot_flags) [Vx]=Introduced in this FADT revision */
+/* Masks for FADT IA-PC Boot Architecture Flags (boot_flags) [Vx]=Introduced in this FADT revision */
 
 #define ACPI_FADT_LEGACY_DEVICES    (1)  	/* 00: [V2] System has LPC or ISA bus devices */
 #define ACPI_FADT_8042              (1<<1)	/* 01: [V3] System has an 8042 controller on port 60/64 */
@@ -276,6 +264,11 @@ struct acpi_table_fadt {
 #define ACPI_FADT_NO_CMOS_RTC       (1<<5)	/* 05: [V5] No CMOS real-time clock present */
 
 #define FADT2_REVISION_ID               3
+
+/* Masks for FADT ARM Boot Architecture Flags (arm_boot_flags) ACPI 5.1 */
+
+#define ACPI_FADT_PSCI_COMPLIANT    (1)	/* 00: [V5+] PSCI 0.2+ is implemented */
+#define ACPI_FADT_PSCI_USE_HVC      (1<<1)	/* 01: [V5+] HVC must be used instead of SMC as the PSCI conduit */
 
 /* Masks for FADT flags */
 
@@ -344,7 +337,22 @@ struct acpi_table_desc {
 	union acpi_name_union signature;
 	acpi_owner_id owner_id;
 	u8 flags;
+	u16 validation_count;
 };
+
+/*
+ * Maximum value of the validation_count field in struct acpi_table_desc.
+ * When reached, validation_count cannot be changed any more and the table will
+ * be permanently regarded as validated.
+ *
+ * This is to prevent situations in which unbalanced table get/put operations
+ * may cause premature table unmapping in the OS to happen.
+ *
+ * The maximum validation count can be defined to any value, but should be
+ * greater than the maximum number of OS early stage mapping slots to avoid
+ * leaking early stage table mappings to the late stage.
+ */
+#define ACPI_MAX_TABLE_VALIDATIONS          ACPI_UINT16_MAX
 
 /* Masks for Flags field above */
 
@@ -352,6 +360,7 @@ struct acpi_table_desc {
 #define ACPI_TABLE_ORIGIN_INTERNAL_PHYSICAL (1)	/* Physical address, internally mapped */
 #define ACPI_TABLE_ORIGIN_INTERNAL_VIRTUAL  (2)	/* Virtual address, internallly allocated */
 #define ACPI_TABLE_ORIGIN_MASK              (3)
+#define ACPI_TABLE_IS_VERIFIED              (4)
 #define ACPI_TABLE_IS_LOADED                (8)
 
 /*
@@ -381,7 +390,7 @@ struct acpi_table_desc {
  *     FADT V6 size: 0x114
  */
 #define ACPI_FADT_V1_SIZE       (u32) (ACPI_FADT_OFFSET (flags) + 4)
-#define ACPI_FADT_V2_SIZE       (u32) (ACPI_FADT_OFFSET (reserved4[0]) + 3)
+#define ACPI_FADT_V2_SIZE       (u32) (ACPI_FADT_OFFSET (minor_revision) + 1)
 #define ACPI_FADT_V3_SIZE       (u32) (ACPI_FADT_OFFSET (sleep_control))
 #define ACPI_FADT_V5_SIZE       (u32) (ACPI_FADT_OFFSET (hypervisor_id))
 #define ACPI_FADT_V6_SIZE       (u32) (sizeof (struct acpi_table_fadt))

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <dirent.h>
 #include <errno.h>
 #include <inttypes.h>
@@ -19,6 +20,7 @@
 #include <unistd.h>
 #include "unwind.h"
 #include "linux/hash.h"
+#include "asm/bug.h"
 
 #include "sane_ctype.h"
 #include <symbol/kallsyms.h>
@@ -135,7 +137,7 @@ struct machine *machine__new_kallsyms(void)
 	struct machine *machine = machine__new_host();
 	/*
 	 * FIXME:
-	 * 1) We should switch to machine__load_kallsyms(), i.e. not explicitely
+	 * 1) We should switch to machine__load_kallsyms(), i.e. not explicitly
 	 *    ask for not using the kcore parsing code, once this one is fixed
 	 *    to create a map per module.
 	 */
@@ -584,6 +586,37 @@ int machine__process_comm_event(struct machine *machine, union perf_event *event
 	return err;
 }
 
+int machine__process_namespaces_event(struct machine *machine __maybe_unused,
+				      union perf_event *event,
+				      struct perf_sample *sample __maybe_unused)
+{
+	struct thread *thread = machine__findnew_thread(machine,
+							event->namespaces.pid,
+							event->namespaces.tid);
+	int err = 0;
+
+	WARN_ONCE(event->namespaces.nr_namespaces > NR_NAMESPACES,
+		  "\nWARNING: kernel seems to support more namespaces than perf"
+		  " tool.\nTry updating the perf tool..\n\n");
+
+	WARN_ONCE(event->namespaces.nr_namespaces < NR_NAMESPACES,
+		  "\nWARNING: perf tool seems to support more namespaces than"
+		  " the kernel.\nTry updating the kernel..\n\n");
+
+	if (dump_trace)
+		perf_event__fprintf_namespaces(event, stdout);
+
+	if (thread == NULL ||
+	    thread__set_namespaces(thread, sample->time, &event->namespaces)) {
+		dump_printf("problem processing PERF_RECORD_NAMESPACES, skipping event.\n");
+		err = -1;
+	}
+
+	thread__put(thread);
+
+	return err;
+}
+
 int machine__process_lost_event(struct machine *machine __maybe_unused,
 				union perf_event *event, struct perf_sample *sample __maybe_unused)
 {
@@ -746,7 +779,8 @@ size_t machine__fprintf_vmlinux_path(struct machine *machine, FILE *fp)
 
 	if (kdso->has_build_id) {
 		char filename[PATH_MAX];
-		if (dso__build_id_filename(kdso, filename, sizeof(filename)))
+		if (dso__build_id_filename(kdso, filename, sizeof(filename),
+					   false))
 			printed += fprintf(fp, "[0] %s\n", filename);
 	}
 
@@ -1556,7 +1590,7 @@ int machine__process_mmap2_event(struct machine *machine,
 
 	map = map__new(machine, event->mmap2.start,
 			event->mmap2.len, event->mmap2.pgoff,
-			event->mmap2.pid, event->mmap2.maj,
+			event->mmap2.maj,
 			event->mmap2.min, event->mmap2.ino,
 			event->mmap2.ino_generation,
 			event->mmap2.prot,
@@ -1612,7 +1646,7 @@ int machine__process_mmap_event(struct machine *machine, union perf_event *event
 
 	map = map__new(machine, event->mmap.start,
 			event->mmap.len, event->mmap.pgoff,
-			event->mmap.pid, 0, 0, 0, 0, prot, 0,
+			0, 0, 0, 0, prot, 0,
 			event->mmap.filename,
 			thread);
 
@@ -1759,6 +1793,8 @@ int machine__process_event(struct machine *machine, union perf_event *event,
 		ret = machine__process_comm_event(machine, event, sample); break;
 	case PERF_RECORD_MMAP:
 		ret = machine__process_mmap_event(machine, event, sample); break;
+	case PERF_RECORD_NAMESPACES:
+		ret = machine__process_namespaces_event(machine, event, sample); break;
 	case PERF_RECORD_MMAP2:
 		ret = machine__process_mmap2_event(machine, event, sample); break;
 	case PERF_RECORD_FORK:
@@ -1969,7 +2005,7 @@ static void save_iterations(struct iterations *iter,
 {
 	int i;
 
-	iter->nr_loop_iter = nr;
+	iter->nr_loop_iter++;
 	iter->cycles = 0;
 
 	for (i = 0; i < nr; i++)
@@ -2457,15 +2493,13 @@ int machines__for_each_thread(struct machines *machines,
 int __machine__synthesize_threads(struct machine *machine, struct perf_tool *tool,
 				  struct target *target, struct thread_map *threads,
 				  perf_event__handler_t process, bool data_mmap,
-				  unsigned int proc_map_timeout,
 				  unsigned int nr_threads_synthesize)
 {
 	if (target__has_task(target))
-		return perf_event__synthesize_thread_map(tool, threads, process, machine, data_mmap, proc_map_timeout);
+		return perf_event__synthesize_thread_map(tool, threads, process, machine, data_mmap);
 	else if (target__has_cpu(target))
 		return perf_event__synthesize_threads(tool, process,
 						      machine, data_mmap,
-						      proc_map_timeout,
 						      nr_threads_synthesize);
 	/* command specified */
 	return 0;
@@ -2554,6 +2588,33 @@ int machine__get_kernel_start(struct machine *machine)
 			machine->kernel_start = map->start;
 	}
 	return err;
+}
+
+u8 machine__addr_cpumode(struct machine *machine, u8 cpumode, u64 addr)
+{
+	u8 addr_cpumode = cpumode;
+	bool kernel_ip;
+
+	if (!machine->single_address_space)
+		goto out;
+
+	kernel_ip = machine__kernel_ip(machine, addr);
+	switch (cpumode) {
+	case PERF_RECORD_MISC_KERNEL:
+	case PERF_RECORD_MISC_USER:
+		addr_cpumode = kernel_ip ? PERF_RECORD_MISC_KERNEL :
+					   PERF_RECORD_MISC_USER;
+		break;
+	case PERF_RECORD_MISC_GUEST_KERNEL:
+	case PERF_RECORD_MISC_GUEST_USER:
+		addr_cpumode = kernel_ip ? PERF_RECORD_MISC_GUEST_KERNEL :
+					   PERF_RECORD_MISC_GUEST_USER;
+		break;
+	default:
+		break;
+	}
+out:
+	return addr_cpumode;
 }
 
 struct dso *machine__findnew_dso(struct machine *machine, const char *filename)

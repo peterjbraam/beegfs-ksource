@@ -90,8 +90,8 @@ config CFG80211_CERTIFICATION_ONUS
 
 config CFG80211_REQUIRE_SIGNED_REGDB
 	bool "require regdb signature" if CFG80211_CERTIFICATION_ONUS
-	# select SYSTEM_DATA_VERIFICATION
-	default n
+	default y
+	select SYSTEM_DATA_VERIFICATION
 	help
 	  Require that in addition to the "regulatory.db" file a
 	  "regulatory.db.p7s" can be loaded with a valid PKCS#7
@@ -166,7 +166,7 @@ config CFG80211_DEFAULT_PS
 
 	  If this causes your applications to misbehave you should fix your
 	  applications instead -- they need to register their network
-	  latency requirement, see Documentation/power/pm_qos_interface.rst.
+	  latency requirement, see Documentation/power/pm_qos_interface.txt.
 
 config CFG80211_DEBUGFS
 	bool "cfg80211 DebugFS entries"
@@ -213,14 +213,12 @@ config LIB80211
 
 config LIB80211_CRYPT_WEP
 	tristate
-	select CRYPTO_LIB_ARC4
 
 config LIB80211_CRYPT_CCMP
 	tristate
 
 config LIB80211_CRYPT_TKIP
 	tristate
-	select CRYPTO_LIB_ARC4
 
 config LIB80211_DEBUG
 	bool "lib80211 debugging messages"

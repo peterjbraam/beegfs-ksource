@@ -1,19 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (C) 2008 Christoph Hellwig.
  * Portions Copyright (C) 2000-2008 Silicon Graphics, Inc.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it would be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write the Free Software Foundation,
- * Inc.,  51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
 
 #include "xfs.h"
@@ -32,14 +20,12 @@
 
 
 static int
-xfs_xattr_get(struct dentry *dentry, const char *name,
-		void *value, size_t size, int xflags)
+xfs_xattr_get(const struct xattr_handler *handler, struct dentry *unused,
+		struct inode *inode, const char *name, void *value, size_t size)
 {
-	struct xfs_inode *ip = XFS_I(dentry->d_inode);
+	int xflags = handler->flags;
+	struct xfs_inode *ip = XFS_I(inode);
 	int error, asize = size;
-
-	if (strcmp(name, "") == 0)
-		return -EINVAL;
 
 	/* Convert Linux syscall to XFS internal ATTR flags */
 	if (!size) {
@@ -76,14 +62,13 @@ xfs_forget_acl(
 }
 
 static int
-xfs_xattr_set(struct dentry *dentry, const char *name, const void *value,
-		size_t size, int flags, int xflags)
+xfs_xattr_set(const struct xattr_handler *handler, struct dentry *unused,
+		struct inode *inode, const char *name, const void *value,
+		size_t size, int flags)
 {
-	struct xfs_inode	*ip = XFS_I(dentry->d_inode);
+	int			xflags = handler->flags;
+	struct xfs_inode	*ip = XFS_I(inode);
 	int			error;
-
-	if (strcmp(name, "") == 0)
-		return -EINVAL;
 
 	/* Convert Linux syscall to XFS internal ATTR flags */
 	if (flags & XATTR_CREATE)
@@ -96,7 +81,7 @@ xfs_xattr_set(struct dentry *dentry, const char *name, const void *value,
 	error = xfs_attr_set(ip, (unsigned char *)name,
 				(void *)value, size, xflags);
 	if (!error)
-		xfs_forget_acl(dentry->d_inode, name, xflags);
+		xfs_forget_acl(inode, name, xflags);
 
 	return error;
 }
@@ -127,8 +112,8 @@ const struct xattr_handler *xfs_xattr_handlers[] = {
 	&xfs_xattr_trusted_handler,
 	&xfs_xattr_security_handler,
 #ifdef CONFIG_XFS_POSIX_ACL
-	&xfs_xattr_acl_access_handler,
-	&xfs_xattr_acl_default_handler,
+	&posix_acl_access_xattr_handler,
+	&posix_acl_default_xattr_handler,
 #endif
 	NULL
 };

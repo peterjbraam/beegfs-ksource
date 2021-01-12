@@ -2,7 +2,6 @@
 /* Copyright(c) 2018 Intel Corporation. */
 
 #include <linux/bpf_trace.h>
-#include <linux/refcount.h>
 #include <net/xdp_sock.h>
 #include <net/xdp.h>
 
@@ -74,13 +73,10 @@ static int ixgbe_xsk_umem_dma_map(struct ixgbe_adapter *adapter,
 	struct device *dev = &adapter->pdev->dev;
 	unsigned int i, j;
 	dma_addr_t dma;
-	DEFINE_DMA_ATTRS(attrs);
 
-	dma_set_attr(DMA_ATTR_SKIP_CPU_SYNC, &attrs);
-	dma_set_attr(DMA_ATTR_WEAK_ORDERING, &attrs);
 	for (i = 0; i < umem->npgs; i++) {
 		dma = dma_map_page_attrs(dev, umem->pgs[i], 0, PAGE_SIZE,
-					 DMA_BIDIRECTIONAL, &attrs);
+					 DMA_BIDIRECTIONAL, IXGBE_RX_DMA_ATTR);
 		if (dma_mapping_error(dev, dma))
 			goto out_unmap;
 
@@ -92,7 +88,7 @@ static int ixgbe_xsk_umem_dma_map(struct ixgbe_adapter *adapter,
 out_unmap:
 	for (j = 0; j < i; j++) {
 		dma_unmap_page_attrs(dev, umem->pages[i].dma, PAGE_SIZE,
-				     DMA_BIDIRECTIONAL, &attrs);
+				     DMA_BIDIRECTIONAL, IXGBE_RX_DMA_ATTR);
 		umem->pages[i].dma = 0;
 	}
 
@@ -104,13 +100,10 @@ static void ixgbe_xsk_umem_dma_unmap(struct ixgbe_adapter *adapter,
 {
 	struct device *dev = &adapter->pdev->dev;
 	unsigned int i;
-	DEFINE_DMA_ATTRS(attrs);
 
-	dma_set_attr(DMA_ATTR_SKIP_CPU_SYNC, &attrs);
-	dma_set_attr(DMA_ATTR_WEAK_ORDERING, &attrs);
 	for (i = 0; i < umem->npgs; i++) {
 		dma_unmap_page_attrs(dev, umem->pages[i].dma, PAGE_SIZE,
-				     DMA_BIDIRECTIONAL, &attrs);
+				     DMA_BIDIRECTIONAL, IXGBE_RX_DMA_ATTR);
 
 		umem->pages[i].dma = 0;
 	}
@@ -151,11 +144,19 @@ static int ixgbe_xsk_umem_enable(struct ixgbe_adapter *adapter,
 		ixgbe_txrx_ring_disable(adapter, qid);
 
 	err = ixgbe_add_xsk_umem(adapter, umem, qid);
+	if (err)
+		return err;
 
-	if (if_running)
+	if (if_running) {
 		ixgbe_txrx_ring_enable(adapter, qid);
 
-	return err;
+		/* Kick start the NAPI context so that receiving will start */
+		err = ixgbe_xsk_async_xmit(adapter->netdev, qid);
+		if (err)
+			return err;
+	}
+
+	return 0;
 }
 
 static int ixgbe_xsk_umem_disable(struct ixgbe_adapter *adapter, u16 qid)
@@ -178,23 +179,6 @@ static int ixgbe_xsk_umem_disable(struct ixgbe_adapter *adapter, u16 qid)
 	if (if_running)
 		ixgbe_txrx_ring_enable(adapter, qid);
 
-	return 0;
-}
-
-int ixgbe_xsk_umem_query(struct ixgbe_adapter *adapter, struct xdp_umem **umem,
-			 u16 qid)
-{
-	if (qid >= adapter->num_rx_queues)
-		return -EINVAL;
-
-	if (adapter->xsk_umems) {
-		if (qid >= adapter->num_xsk_umems)
-			return -EINVAL;
-		*umem = adapter->xsk_umems[qid];
-		return 0;
-	}
-
-	*umem = NULL;
 	return 0;
 }
 
@@ -641,7 +625,8 @@ static bool ixgbe_xmit_zc(struct ixgbe_ring *xdp_ring, unsigned int budget)
 	dma_addr_t dma;
 
 	while (budget-- > 0) {
-		if (unlikely(!ixgbe_desc_unused(xdp_ring))) {
+		if (unlikely(!ixgbe_desc_unused(xdp_ring)) ||
+		    !netif_carrier_ok(xdp_ring->netdev)) {
 			work_done = false;
 			break;
 		}

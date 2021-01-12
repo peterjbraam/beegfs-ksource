@@ -55,7 +55,7 @@ static const struct regmap_range_cfg rt5677_ranges[] = {
 	},
 };
 
-static const struct reg_default init_list[] = {
+static const struct reg_sequence init_list[] = {
 	{RT5677_ASRC_12,	0x0018},
 	{RT5677_PR_BASE + 0x3d,	0x364d},
 	{RT5677_PR_BASE + 0x17,	0x4fc0},
@@ -547,7 +547,7 @@ static bool rt5677_readable_register(struct device *dev, unsigned int reg)
  * @rt5677: Private Data.
  * @addr: Address index.
  * @value: Address data.
- *
+ * @opcode: opcode value
  *
  * Returns 0 for success or negative error code.
  */
@@ -602,7 +602,7 @@ err:
 
 /**
  * rt5677_dsp_mode_i2c_read_addr - Read value from address on DSP mode.
- * rt5677: Private Data.
+ * @rt5677: Private Data.
  * @addr: Address index.
  * @value: Address data.
  *
@@ -651,7 +651,7 @@ err:
 
 /**
  * rt5677_dsp_mode_i2c_write - Write register on DSP mode.
- * rt5677: Private Data.
+ * @rt5677: Private Data.
  * @reg: Register index.
  * @value: Register data.
  *
@@ -667,7 +667,7 @@ static int rt5677_dsp_mode_i2c_write(struct rt5677_priv *rt5677,
 
 /**
  * rt5677_dsp_mode_i2c_read - Read register on DSP mode.
- * @codec: SoC audio codec device.
+ * @rt5677: Private Data
  * @reg: Register index.
  * @value: Register data.
  *
@@ -4417,6 +4417,7 @@ static int rt5677_set_tdm_slot(struct snd_soc_dai *dai, unsigned int tx_mask,
 		break;
 	case 25:
 		slot_width_25 = 0x8080;
+		/* fall through */
 	case 24:
 		val |= (2 << 8);
 		break;
@@ -4666,7 +4667,7 @@ static void rt5677_init_gpio(struct i2c_client *i2c)
 
 	rt5677->gpio_chip = rt5677_template_chip;
 	rt5677->gpio_chip.ngpio = RT5677_GPIO_NUM;
-	rt5677->gpio_chip.dev = &i2c->dev;
+	rt5677->gpio_chip.parent = &i2c->dev;
 	rt5677->gpio_chip.base = -1;
 
 	ret = gpiochip_add_data(&rt5677->gpio_chip, rt5677);
@@ -5006,15 +5007,8 @@ static const struct regmap_config rt5677_regmap = {
 	.num_ranges = ARRAY_SIZE(rt5677_ranges),
 };
 
-static const struct i2c_device_id rt5677_i2c_id[] = {
-	{ "rt5677", RT5677 },
-	{ "rt5676", RT5676 },
-	{ }
-};
-MODULE_DEVICE_TABLE(i2c, rt5677_i2c_id);
-
 static const struct of_device_id rt5677_of_match[] = {
-	{ .compatible = "realtek,rt5677", RT5677 },
+	{ .compatible = "realtek,rt5677", .data = (const void *)RT5677 },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, rt5677_of_match);
@@ -5130,8 +5124,7 @@ static void rt5677_free_irq(struct i2c_client *i2c)
 		regmap_del_irq_chip(i2c->irq, rt5677->irq_data);
 }
 
-static int rt5677_i2c_probe(struct i2c_client *i2c,
-		    const struct i2c_device_id *id)
+static int rt5677_i2c_probe(struct i2c_client *i2c)
 {
 	struct rt5677_priv *rt5677;
 	int ret;
@@ -5278,9 +5271,8 @@ static struct i2c_driver rt5677_i2c_driver = {
 		.of_match_table = rt5677_of_match,
 		.acpi_match_table = ACPI_PTR(rt5677_acpi_match),
 	},
-	.probe = rt5677_i2c_probe,
+	.probe_new = rt5677_i2c_probe,
 	.remove   = rt5677_i2c_remove,
-	.id_table = rt5677_i2c_id,
 };
 module_i2c_driver(rt5677_i2c_driver);
 

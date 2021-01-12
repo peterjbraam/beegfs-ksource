@@ -536,7 +536,7 @@ static int ena_refill_rx_bufs(struct ena_ring *rx_ring, u32 num)
 
 
 		rc = ena_alloc_rx_page(rx_ring, rx_info,
-				       __GFP_COLD | GFP_ATOMIC | __GFP_COMP);
+				       GFP_ATOMIC | __GFP_COMP);
 		if (unlikely(rc < 0)) {
 			netif_warn(rx_ring->adapter, rx_err, rx_ring->netdev,
 				   "failed to alloc buffer for rx queue %d\n",
@@ -724,7 +724,6 @@ static int validate_tx_req_id(struct ena_ring *tx_ring, u16 req_id)
 	struct ena_tx_buffer *tx_info = NULL;
 
 	if (likely(req_id < tx_ring->ring_size)) {
-		gmb();
 		tx_info = &tx_ring->tx_buffer_info[req_id];
 		if (likely(tx_info->skb))
 			return 0;
@@ -1240,15 +1239,27 @@ static int ena_io_poll(struct napi_struct *napi, int budget)
 	tx_work_done = ena_clean_tx_irq(tx_ring, tx_budget);
 	rx_work_done = ena_clean_rx_irq(rx_ring, napi, budget);
 
-	if ((budget > rx_work_done) && (tx_budget > tx_work_done)) {
-		napi_complete_done(napi, rx_work_done);
+	/* If the device is about to reset or down, avoid unmask
+	 * the interrupt and return 0 so NAPI won't reschedule
+	 */
+	if (unlikely(!test_bit(ENA_FLAG_DEV_UP, &tx_ring->adapter->flags) ||
+		     test_bit(ENA_FLAG_TRIGGER_RESET, &tx_ring->adapter->flags))) {
+		napi_complete_done(napi, 0);
+		ret = 0;
 
+	} else if ((budget > rx_work_done) && (tx_budget > tx_work_done)) {
 		napi_comp_call = 1;
-		/* Tx and Rx share the same interrupt vector */
-		if (ena_com_get_adaptive_moderation_enabled(rx_ring->ena_dev))
-			ena_adjust_intr_moderation(rx_ring, tx_ring);
 
-		ena_unmask_interrupt(tx_ring, rx_ring);
+		/* Update numa and unmask the interrupt only when schedule
+		 * from the interrupt context (vs from sk_busy_loop)
+		 */
+		if (napi_complete_done(napi, rx_work_done)) {
+			/* Tx and Rx share the same interrupt vector */
+			if (ena_com_get_adaptive_moderation_enabled(rx_ring->ena_dev))
+				ena_adjust_intr_moderation(rx_ring, tx_ring);
+
+			ena_unmask_interrupt(tx_ring, rx_ring);
+		}
 
 		ena_update_ring_numa_node(tx_ring, rx_ring);
 
@@ -2248,7 +2259,8 @@ error_drop_packet:
 }
 
 static u16 ena_select_queue(struct net_device *dev, struct sk_buff *skb,
-			    void *accel_priv, select_queue_fallback_t fallback)
+			    struct net_device *sb_dev,
+			    select_queue_fallback_t fallback)
 {
 	u16 qid;
 	/* we suspect that this is good for in--kernel network services that
@@ -2258,7 +2270,7 @@ static u16 ena_select_queue(struct net_device *dev, struct sk_buff *skb,
 	if (skb_rx_queue_recorded(skb))
 		qid = skb_get_rx_queue(skb);
 	else
-		qid = fallback(dev, skb);
+		qid = fallback(dev, skb, NULL);
 
 	return qid;
 }
@@ -2406,14 +2418,13 @@ static void ena_get_stats64(struct net_device *netdev,
 }
 
 static const struct net_device_ops ena_netdev_ops = {
-	.ndo_size		= sizeof(struct net_device_ops),
 	.ndo_open		= ena_open,
 	.ndo_stop		= ena_close,
 	.ndo_start_xmit		= ena_start_xmit,
 	.ndo_select_queue	= ena_select_queue,
 	.ndo_get_stats64	= ena_get_stats64,
 	.ndo_tx_timeout		= ena_tx_timeout,
-	.extended.ndo_change_mtu		= ena_change_mtu,
+	.ndo_change_mtu		= ena_change_mtu,
 	.ndo_set_mac_address	= NULL,
 	.ndo_validate_addr	= eth_validate_addr,
 };
@@ -2975,9 +2986,9 @@ static void ena_update_host_info(struct ena_admin_host_info *host_info,
 		(netdev->features & GENMASK_ULL(63, 32)) >> 32;
 }
 
-static void ena_timer_service(unsigned long data)
+static void ena_timer_service(struct timer_list *t)
 {
-	struct ena_adapter *adapter = (struct ena_adapter *)data;
+	struct ena_adapter *adapter = from_timer(adapter, t, timer_service);
 	u8 *debug_area = adapter->ena_dev->host_attr.debug_area_virt_addr;
 	struct ena_admin_host_info *host_info =
 		adapter->ena_dev->host_attr.host_info;
@@ -3141,8 +3152,8 @@ static void ena_set_conf_feat_params(struct ena_adapter *adapter,
 	ena_set_dev_offloads(feat, netdev);
 
 	adapter->max_mtu = feat->dev_attr.max_mtu;
-	netdev->extended->max_mtu = adapter->max_mtu;
-	netdev->extended->min_mtu = ENA_MIN_MTU;
+	netdev->max_mtu = adapter->max_mtu;
+	netdev->min_mtu = ENA_MIN_MTU;
 }
 
 static int ena_rss_init_default(struct ena_adapter *adapter)
@@ -3421,8 +3432,7 @@ static int ena_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	ena_update_hints(adapter, &get_feat_ctx.hw_hints);
 
-	setup_timer(&adapter->timer_service, ena_timer_service,
-		    (unsigned long)adapter);
+	timer_setup(&adapter->timer_service, ena_timer_service, 0);
 	mod_timer(&adapter->timer_service, round_jiffies(jiffies + HZ));
 
 	if (ena_dev->tx_mem_queue_type == ENA_ADMIN_PLACEMENT_POLICY_HOST)
@@ -3467,32 +3477,6 @@ err_disable_device:
 	return rc;
 }
 
-/*****************************************************************************/
-static int ena_sriov_configure(struct pci_dev *dev, int numvfs)
-{
-	int rc;
-
-	if (numvfs > 0) {
-		rc = pci_enable_sriov(dev, numvfs);
-		if (rc != 0) {
-			dev_err(&dev->dev,
-				"pci_enable_sriov failed to enable: %d vfs with the error: %d\n",
-				numvfs, rc);
-			return rc;
-		}
-
-		return numvfs;
-	}
-
-	if (numvfs == 0) {
-		pci_disable_sriov(dev);
-		return 0;
-	}
-
-	return -EINVAL;
-}
-
-/*****************************************************************************/
 /*****************************************************************************/
 
 /* ena_remove - Device Removal Routine
@@ -3596,7 +3580,7 @@ static struct pci_driver ena_pci_driver = {
 	.suspend    = ena_suspend,
 	.resume     = ena_resume,
 #endif
-	.sriov_configure = ena_sriov_configure,
+	.sriov_configure = pci_sriov_configure_simple,
 };
 
 static int __init ena_init(void)

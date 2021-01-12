@@ -396,7 +396,7 @@ static int fsa9480_irq_init(struct fsa9480_usbsw *usbsw)
 				IRQF_TRIGGER_FALLING | IRQF_ONESHOT,
 				"fsa9480 micro USB", usbsw);
 		if (ret) {
-			dev_err(&client->dev, "failed to reqeust IRQ\n");
+			dev_err(&client->dev, "failed to request IRQ\n");
 			return ret;
 		}
 
@@ -465,6 +465,7 @@ fail1:
 static int fsa9480_remove(struct i2c_client *client)
 {
 	struct fsa9480_usbsw *usbsw = i2c_get_clientdata(client);
+
 	if (client->irq)
 		free_irq(client->irq, usbsw);
 

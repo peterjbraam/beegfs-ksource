@@ -163,7 +163,7 @@ struct nfs_client *nfs_alloc_client(const struct nfs_client_initdata *cl_init)
 
 	clp->rpc_ops = clp->cl_nfs_mod->rpc_ops;
 
-	atomic_set(&clp->cl_count, 1);
+	refcount_set(&clp->cl_count, 1);
 	clp->cl_cons_state = NFS_CS_INITING;
 
 	memcpy(&clp->cl_addr, cl_init->addr, cl_init->addrlen);
@@ -240,8 +240,6 @@ static void pnfs_init_server(struct nfs_server *server)
  */
 void nfs_free_client(struct nfs_client *clp)
 {
-	dprintk("--> nfs_free_client(%u)\n", clp->rpc_ops->version);
-
 	nfs_fscache_release_client_cookie(clp);
 
 	/* -EIO all pending I/O */
@@ -256,8 +254,6 @@ void nfs_free_client(struct nfs_client *clp)
 	kfree(clp->cl_hostname);
 	kfree(clp->cl_acceptor);
 	kfree(clp);
-
-	dprintk("<-- nfs_free_client()\n");
 }
 EXPORT_SYMBOL_GPL(nfs_free_client);
 
@@ -271,10 +267,9 @@ void nfs_put_client(struct nfs_client *clp)
 	if (!clp)
 		return;
 
-	dprintk("--> nfs_put_client({%d})\n", atomic_read(&clp->cl_count));
 	nn = net_generic(clp->cl_net, nfs_net_id);
 
-	if (atomic_dec_and_lock(&clp->cl_count, &nn->nfs_client_lock)) {
+	if (refcount_dec_and_lock(&clp->cl_count, &nn->nfs_client_lock)) {
 		list_del(&clp->cl_share_link);
 		nfs_cb_idr_remove_locked(clp);
 		spin_unlock(&nn->nfs_client_lock);
@@ -295,7 +290,6 @@ static struct nfs_client *nfs_match_client(const struct nfs_client_initdata *dat
 	struct nfs_client *clp;
 	const struct sockaddr *sap = data->addr;
 	struct nfs_net *nn = net_generic(data->net, nfs_net_id);
-	int error;
 
 again:
 	list_for_each_entry(clp, &nn->nfs_client_list, cl_share_link) {
@@ -306,13 +300,11 @@ again:
 
 		/* If a client is still initializing then we need to wait */
 		if (clp->cl_cons_state > NFS_CS_READY) {
-			atomic_inc(&clp->cl_count);
+			refcount_inc(&clp->cl_count);
 			spin_unlock(&nn->nfs_client_lock);
-			error = nfs_wait_client_init_complete(clp);
+			nfs_wait_client_init_complete(clp);
 			nfs_put_client(clp);
 			spin_lock(&nn->nfs_client_lock);
-			if (error < 0)
-				return ERR_PTR(error);
 			goto again;
 		}
 
@@ -333,7 +325,7 @@ again:
 							   sap))
 				continue;
 
-		atomic_inc(&clp->cl_count);
+		refcount_inc(&clp->cl_count);
 		return clp;
 	}
 	return NULL;
@@ -396,9 +388,6 @@ nfs_found_client(const struct nfs_client_initdata *cl_init,
 	}
 
 	smp_rmb();
-
-	dprintk("<-- %s found nfs_client %p for %s\n",
-		__func__, clp, cl_init->hostname ?: "");
 	return clp;
 }
 
@@ -406,9 +395,7 @@ nfs_found_client(const struct nfs_client_initdata *cl_init,
  * Look up a client by IP address and protocol version
  * - creates a new record if one doesn't yet exist
  */
-struct nfs_client *
-nfs_get_client(const struct nfs_client_initdata *cl_init,
-	       rpc_authflavor_t authflavour)
+struct nfs_client *nfs_get_client(const struct nfs_client_initdata *cl_init)
 {
 	struct nfs_client *clp, *new = NULL;
 	struct nfs_net *nn = net_generic(cl_init->net, nfs_net_id);
@@ -419,9 +406,6 @@ nfs_get_client(const struct nfs_client_initdata *cl_init,
 		return NULL;
 	}
 
-	dprintk("--> nfs_get_client(%s,v%u)\n",
-		cl_init->hostname, rpc_ops->version);
-
 	/* see if the client already exists */
 	do {
 		spin_lock(&nn->nfs_client_lock);
@@ -431,8 +415,6 @@ nfs_get_client(const struct nfs_client_initdata *cl_init,
 			spin_unlock(&nn->nfs_client_lock);
 			if (new)
 				new->rpc_ops->free_client(new);
-			if (IS_ERR(clp))
-				return clp;
 			return nfs_found_client(cl_init, clp);
 		}
 		if (new) {
@@ -448,8 +430,6 @@ nfs_get_client(const struct nfs_client_initdata *cl_init,
 		new = rpc_ops->alloc_client(cl_init);
 	} while (!IS_ERR(new));
 
-	dprintk("<-- nfs_get_client() Failed to find %s (%ld)\n",
-		cl_init->hostname, PTR_ERR(new));
 	return new;
 }
 EXPORT_SYMBOL_GPL(nfs_get_client);
@@ -479,7 +459,7 @@ void nfs_init_timeout_values(struct rpc_timeout *to, int proto,
 	case XPRT_TRANSPORT_RDMA:
 		if (retrans == NFS_UNSPEC_RETRANS)
 			to->to_retries = NFS_DEF_TCP_RETRANS;
-		if (timeo == NFS_UNSPEC_TIMEO || to->to_initval == 0)
+		if (timeo == NFS_UNSPEC_TIMEO || to->to_retries == 0)
 			to->to_initval = NFS_DEF_TCP_TIMEO * HZ / 10;
 		if (to->to_initval > NFS_MAX_TCP_TIMEOUT)
 			to->to_initval = NFS_MAX_TCP_TIMEOUT;
@@ -643,27 +623,21 @@ struct nfs_client *nfs_init_client(struct nfs_client *clp,
 {
 	int error;
 
-	if (clp->cl_cons_state == NFS_CS_READY) {
-		/* the client is already initialised */
-		dprintk("<-- nfs_init_client() = 0 [already %p]\n", clp);
+	/* the client is already initialised */
+	if (clp->cl_cons_state == NFS_CS_READY)
 		return clp;
-	}
 
 	/*
 	 * Create a client RPC handle for doing FSSTAT with UNIX auth only
 	 * - RFC 2623, sec 2.3.2
 	 */
 	error = nfs_create_rpc_client(clp, cl_init, RPC_AUTH_UNIX);
-	if (error < 0)
-		goto error;
-	nfs_mark_client_ready(clp, NFS_CS_READY);
+	nfs_mark_client_ready(clp, error == 0 ? NFS_CS_READY : error);
+	if (error < 0) {
+		nfs_put_client(clp);
+		clp = ERR_PTR(error);
+	}
 	return clp;
-
-error:
-	nfs_mark_client_ready(clp, error);
-	nfs_put_client(clp);
-	dprintk("<-- nfs_init_client() = xerror %d\n", error);
-	return ERR_PTR(error);
 }
 EXPORT_SYMBOL_GPL(nfs_init_client);
 
@@ -687,19 +661,15 @@ static int nfs_init_server(struct nfs_server *server,
 	struct nfs_client *clp;
 	int error;
 
-	dprintk("--> nfs_init_server()\n");
-
 	nfs_init_timeout_values(&timeparms, data->nfs_server.protocol,
 			data->timeo, data->retrans);
 	if (data->flags & NFS_MOUNT_NORESVPORT)
 		set_bit(NFS_CS_NORESVPORT, &cl_init.init_flags);
 
 	/* Allocate or find a client reference we can use */
-	clp = nfs_get_client(&cl_init, RPC_AUTH_UNIX);
-	if (IS_ERR(clp)) {
-		dprintk("<-- nfs_init_server() = error %ld\n", PTR_ERR(clp));
+	clp = nfs_get_client(&cl_init);
+	if (IS_ERR(clp))
 		return PTR_ERR(clp);
-	}
 
 	server->nfs_client = clp;
 
@@ -744,13 +714,11 @@ static int nfs_init_server(struct nfs_server *server,
 	server->mountd_protocol = data->mount_server.protocol;
 
 	server->namelen  = data->namlen;
-	dprintk("<-- nfs_init_server() = 0 [new %p]\n", clp);
 	return 0;
 
 error:
 	server->nfs_client = NULL;
 	nfs_put_client(clp);
-	dprintk("<-- nfs_init_server() = xerror %d\n", error);
 	return error;
 }
 
@@ -778,22 +746,19 @@ static void nfs_server_set_fsinfo(struct nfs_server *server,
 		server->rsize = max_rpc_payload;
 	if (server->rsize > NFS_MAX_FILE_IO_SIZE)
 		server->rsize = NFS_MAX_FILE_IO_SIZE;
-	server->rpages = (server->rsize + PAGE_CACHE_SIZE - 1) >> PAGE_CACHE_SHIFT;
-
-	server->backing_dev_info.name = "nfs";
-	server->backing_dev_info.ra_pages = server->rpages * NFS_MAX_READAHEAD;
+	server->rpages = (server->rsize + PAGE_SIZE - 1) >> PAGE_SHIFT;
 
 	if (server->wsize > max_rpc_payload)
 		server->wsize = max_rpc_payload;
 	if (server->wsize > NFS_MAX_FILE_IO_SIZE)
 		server->wsize = NFS_MAX_FILE_IO_SIZE;
-	server->wpages = (server->wsize + PAGE_CACHE_SIZE - 1) >> PAGE_CACHE_SHIFT;
+	server->wpages = (server->wsize + PAGE_SIZE - 1) >> PAGE_SHIFT;
 
 	server->wtmult = nfs_block_bits(fsinfo->wtmult, NULL);
 
 	server->dtsize = nfs_block_size(fsinfo->dtpref, NULL);
-	if (server->dtsize > PAGE_CACHE_SIZE * NFS_MAX_READDIR_PAGES)
-		server->dtsize = PAGE_CACHE_SIZE * NFS_MAX_READDIR_PAGES;
+	if (server->dtsize > PAGE_SIZE * NFS_MAX_READDIR_PAGES)
+		server->dtsize = PAGE_SIZE * NFS_MAX_READDIR_PAGES;
 	if (server->dtsize > server->rsize)
 		server->dtsize = server->rsize;
 
@@ -820,12 +785,10 @@ int nfs_probe_fsinfo(struct nfs_server *server, struct nfs_fh *mntfh, struct nfs
 	struct nfs_client *clp = server->nfs_client;
 	int error;
 
-	dprintk("--> nfs_probe_fsinfo()\n");
-
 	if (clp->rpc_ops->set_capabilities != NULL) {
 		error = clp->rpc_ops->set_capabilities(server, mntfh);
 		if (error < 0)
-			goto out_error;
+			return error;
 	}
 
 	fsinfo.fattr = fattr;
@@ -833,7 +796,7 @@ int nfs_probe_fsinfo(struct nfs_server *server, struct nfs_fh *mntfh, struct nfs
 	memset(fsinfo.layouttype, 0, sizeof(fsinfo.layouttype));
 	error = clp->rpc_ops->fsinfo(server, mntfh, &fsinfo);
 	if (error < 0)
-		goto out_error;
+		return error;
 
 	nfs_server_set_fsinfo(server, &fsinfo);
 
@@ -848,12 +811,7 @@ int nfs_probe_fsinfo(struct nfs_server *server, struct nfs_fh *mntfh, struct nfs
 			server->namelen = pathinfo.max_namelen;
 	}
 
-	dprintk("<-- nfs_probe_fsinfo() = 0\n");
 	return 0;
-
-out_error:
-	dprintk("nfs_probe_fsinfo: error = %d\n", -error);
-	return error;
 }
 EXPORT_SYMBOL_GPL(nfs_probe_fsinfo);
 
@@ -937,12 +895,6 @@ struct nfs_server *nfs_alloc_server(void)
 		return NULL;
 	}
 
-	if (bdi_init(&server->backing_dev_info)) {
-		nfs_free_iostats(server->io_stats);
-		kfree(server);
-		return NULL;
-	}
-
 	ida_init(&server->openowner_id);
 	ida_init(&server->lockowner_id);
 	pnfs_init_server(server);
@@ -957,8 +909,6 @@ EXPORT_SYMBOL_GPL(nfs_alloc_server);
  */
 void nfs_free_server(struct nfs_server *server)
 {
-	dprintk("--> nfs_free_server()\n");
-
 	nfs_server_remove_lists(server);
 
 	if (server->destroy != NULL)
@@ -974,10 +924,8 @@ void nfs_free_server(struct nfs_server *server)
 	ida_destroy(&server->lockowner_id);
 	ida_destroy(&server->openowner_id);
 	nfs_free_iostats(server->io_stats);
-	bdi_destroy(&server->backing_dev_info);
 	kfree(server);
 	nfs_release_automount_timer();
-	dprintk("<-- nfs_free_server()\n");
 }
 EXPORT_SYMBOL_GPL(nfs_free_server);
 
@@ -1021,7 +969,8 @@ struct nfs_server *nfs_create_server(struct nfs_mount_info *mount_info,
 	}
 
 	if (!(fattr->valid & NFS_ATTR_FATTR)) {
-		error = nfs_mod->rpc_ops->getattr(server, mount_info->mntfh, fattr, NULL);
+		error = nfs_mod->rpc_ops->getattr(server, mount_info->mntfh,
+				fattr, NULL, NULL);
 		if (error < 0) {
 			dprintk("nfs_create_server: getattr error = %d\n", -error);
 			goto error;
@@ -1057,10 +1006,6 @@ struct nfs_server *nfs_clone_server(struct nfs_server *source,
 	struct nfs_fattr *fattr_fsinfo;
 	int error;
 
-	dprintk("--> nfs_clone_server(,%llx:%llx,)\n",
-		(unsigned long long) fattr->fsid.major,
-		(unsigned long long) fattr->fsid.minor);
-
 	server = nfs_alloc_server();
 	if (!server)
 		return ERR_PTR(-ENOMEM);
@@ -1073,7 +1018,7 @@ struct nfs_server *nfs_clone_server(struct nfs_server *source,
 	/* Copy data from the source */
 	server->nfs_client = source->nfs_client;
 	server->destroy = source->destroy;
-	atomic_inc(&server->nfs_client->cl_count);
+	refcount_inc(&server->nfs_client->cl_count);
 	nfs_server_copy_userdata(server, source);
 
 	server->fsid = fattr->fsid;
@@ -1092,10 +1037,6 @@ struct nfs_server *nfs_clone_server(struct nfs_server *source,
 	if (server->namelen == 0 || server->namelen > NFS4_MAXNAMLEN)
 		server->namelen = NFS4_MAXNAMLEN;
 
-	dprintk("Cloned FSID: %llx:%llx\n",
-		(unsigned long long) server->fsid.major,
-		(unsigned long long) server->fsid.minor);
-
 	error = nfs_start_lockd(server);
 	if (error < 0)
 		goto out_free_server;
@@ -1104,13 +1045,11 @@ struct nfs_server *nfs_clone_server(struct nfs_server *source,
 	server->mount_time = jiffies;
 
 	nfs_free_fattr(fattr_fsinfo);
-	dprintk("<-- nfs_clone_server() = %p\n", server);
 	return server;
 
 out_free_server:
 	nfs_free_fattr(fattr_fsinfo);
 	nfs_free_server(server);
-	dprintk("<-- nfs_clone_server() = error %d\n", error);
 	return ERR_PTR(error);
 }
 EXPORT_SYMBOL_GPL(nfs_clone_server);
@@ -1125,11 +1064,10 @@ void nfs_clients_init(struct net *net)
 	idr_init(&nn->cb_ident_idr);
 #endif
 	spin_lock_init(&nn->nfs_client_lock);
-	nn->boot_time = CURRENT_TIME;
+	nn->boot_time = ktime_get_real();
 }
 
 #ifdef CONFIG_PROC_FS
-static int nfs_server_list_open(struct inode *inode, struct file *file);
 static void *nfs_server_list_start(struct seq_file *p, loff_t *pos);
 static void *nfs_server_list_next(struct seq_file *p, void *v, loff_t *pos);
 static void nfs_server_list_stop(struct seq_file *p, void *v);
@@ -1142,15 +1080,6 @@ static const struct seq_operations nfs_server_list_ops = {
 	.show	= nfs_server_list_show,
 };
 
-static const struct file_operations nfs_server_list_fops = {
-	.open		= nfs_server_list_open,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-	.release	= seq_release_net,
-	.owner		= THIS_MODULE,
-};
-
-static int nfs_volume_list_open(struct inode *inode, struct file *file);
 static void *nfs_volume_list_start(struct seq_file *p, loff_t *pos);
 static void *nfs_volume_list_next(struct seq_file *p, void *v, loff_t *pos);
 static void nfs_volume_list_stop(struct seq_file *p, void *v);
@@ -1162,24 +1091,6 @@ static const struct seq_operations nfs_volume_list_ops = {
 	.stop	= nfs_volume_list_stop,
 	.show	= nfs_volume_list_show,
 };
-
-static const struct file_operations nfs_volume_list_fops = {
-	.open		= nfs_volume_list_open,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-	.release	= seq_release_net,
-	.owner		= THIS_MODULE,
-};
-
-/*
- * open "/proc/fs/nfsfs/servers" which provides a summary of servers with which
- * we're dealing
- */
-static int nfs_server_list_open(struct inode *inode, struct file *file)
-{
-	return seq_open_net(inode, file, &nfs_server_list_ops,
-			   sizeof(struct seq_net_private));
-}
 
 /*
  * set up the iterator to start reading from the server list and return the first item
@@ -1241,20 +1152,11 @@ static int nfs_server_list_show(struct seq_file *m, void *v)
 		   clp->rpc_ops->version,
 		   rpc_peeraddr2str(clp->cl_rpcclient, RPC_DISPLAY_HEX_ADDR),
 		   rpc_peeraddr2str(clp->cl_rpcclient, RPC_DISPLAY_HEX_PORT),
-		   atomic_read(&clp->cl_count),
+		   refcount_read(&clp->cl_count),
 		   clp->cl_hostname);
 	rcu_read_unlock();
 
 	return 0;
-}
-
-/*
- * open "/proc/fs/nfsfs/volumes" which provides a summary of extant volumes
- */
-static int nfs_volume_list_open(struct inode *inode, struct file *file)
-{
-	return seq_open_net(inode, file, &nfs_volume_list_ops,
-			   sizeof(struct seq_net_private));
 }
 
 /*
@@ -1342,14 +1244,14 @@ int nfs_fs_proc_net_init(struct net *net)
 		goto error_0;
 
 	/* a file of servers with which we're dealing */
-	p = proc_create("servers", S_IFREG|S_IRUGO,
-			nn->proc_nfsfs, &nfs_server_list_fops);
+	p = proc_create_net("servers", S_IFREG|S_IRUGO, nn->proc_nfsfs,
+			&nfs_server_list_ops, sizeof(struct seq_net_private));
 	if (!p)
 		goto error_1;
 
 	/* a file of volumes that we have mounted */
-	p = proc_create("volumes", S_IFREG|S_IRUGO,
-			nn->proc_nfsfs, &nfs_volume_list_fops);
+	p = proc_create_net("volumes", S_IFREG|S_IRUGO, nn->proc_nfsfs,
+			&nfs_volume_list_ops, sizeof(struct seq_net_private));
 	if (!p)
 		goto error_1;
 	return 0;

@@ -15,15 +15,17 @@
  */
 #include <linux/module.h>
 #include <linux/mm.h>
+#include <linux/sched/debug.h>
+#include <linux/sched/task.h>
+#include <linux/sched/task_stack.h>
 #include <linux/slab.h>
 #include <linux/elfcore.h>
-#include <linux/kallsyms.h>
 #include <linux/fs.h>
 #include <linux/ftrace.h>
 #include <linux/hw_breakpoint.h>
 #include <linux/prefetch.h>
 #include <linux/stackprotector.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/mmu_context.h>
 #include <asm/fpu.h>
 #include <asm/syscalls.h>
@@ -34,8 +36,8 @@ void show_regs(struct pt_regs * regs)
 	printk("\n");
 	show_regs_print_info(KERN_DEFAULT);
 
-	print_symbol("PC is at %s\n", instruction_pointer(regs));
-	print_symbol("PR is at %s\n", regs->pr);
+	printk("PC is at %pS\n", (void *)instruction_pointer(regs));
+	printk("PR is at %pS\n", (void *)regs->pr);
 
 	printk("PC  : %08lx SP  : %08lx SR  : %08lx ",
 	       regs->pc, regs->regs[15], regs->sr);
@@ -75,13 +77,6 @@ void start_thread(struct pt_regs *regs, unsigned long new_pc,
 	free_thread_xstate(current);
 }
 EXPORT_SYMBOL(start_thread);
-
-/*
- * Free current thread data structures etc..
- */
-void exit_thread(void)
-{
-}
 
 void flush_thread(void)
 {
@@ -156,7 +151,7 @@ int copy_thread(unsigned long clone_flags, unsigned long usp,
 #endif
 		ti->addr_limit = KERNEL_DS;
 		ti->status &= ~TS_USEDFPU;
-		p->fpu_counter = 0;
+		p->thread.fpu_counter = 0;
 		return 0;
 	}
 	*childregs = *current_pt_regs();
@@ -182,14 +177,14 @@ __switch_to(struct task_struct *prev, struct task_struct *next)
 {
 	struct thread_struct *next_t = &next->thread;
 
-#if defined(CONFIG_CC_STACKPROTECTOR) && !defined(CONFIG_SMP)
+#if defined(CONFIG_STACKPROTECTOR) && !defined(CONFIG_SMP)
 	__stack_chk_guard = next->stack_canary;
 #endif
 
 	unlazy_fpu(prev, task_pt_regs(prev));
 
 	/* we're going to use this soon, after a few expensive things */
-	if (next->fpu_counter > 5)
+	if (next->thread.fpu_counter > 5)
 		prefetch(next_t->xstate);
 
 #ifdef CONFIG_MMU
@@ -207,7 +202,7 @@ __switch_to(struct task_struct *prev, struct task_struct *next)
 	 * restore of the math state immediately to avoid the trap; the
 	 * chances of needing FPU soon are obviously high now
 	 */
-	if (next->fpu_counter > 5)
+	if (next->thread.fpu_counter > 5)
 		__fpu_state_restore();
 
 	return prev;

@@ -23,10 +23,18 @@ int lowpan_register_netdevice(struct net_device *dev,
 {
 	int i, ret;
 
-	dev->addr_len = EUI64_ADDR_LEN;
+	switch (lltype) {
+	case LOWPAN_LLTYPE_IEEE802154:
+		dev->addr_len = EUI64_ADDR_LEN;
+		break;
+
+	case LOWPAN_LLTYPE_BTLE:
+		dev->addr_len = ETH_ALEN;
+		break;
+	}
+
 	dev->type = ARPHRD_6LOWPAN;
 	dev->mtu = IPV6_MIN_MTU;
-	dev->priv_flags |= IFF_NO_QUEUE;
 
 	lowpan_dev(dev)->lltype = lltype;
 
@@ -34,7 +42,7 @@ int lowpan_register_netdevice(struct net_device *dev,
 	for (i = 0; i < LOWPAN_IPHC_CTX_TABLE_SIZE; i++)
 		lowpan_dev(dev)->ctx.table[i].id = i;
 
-	dev->extended->ndisc_ops = &lowpan_ndisc_ops;
+	dev->ndisc_ops = &lowpan_ndisc_ops;
 
 	ret = register_netdevice(dev);
 	if (ret < 0)
@@ -154,7 +162,7 @@ static int __init lowpan_module_init(void)
 	if (ret < 0)
 		return ret;
 
-	ret = register_netdevice_notifier_rh(&lowpan_notifier);
+	ret = register_netdevice_notifier(&lowpan_notifier);
 	if (ret < 0) {
 		lowpan_debugfs_exit();
 		return ret;
@@ -174,7 +182,7 @@ static int __init lowpan_module_init(void)
 static void __exit lowpan_module_exit(void)
 {
 	lowpan_debugfs_exit();
-	unregister_netdevice_notifier_rh(&lowpan_notifier);
+	unregister_netdevice_notifier(&lowpan_notifier);
 }
 
 module_init(lowpan_module_init);

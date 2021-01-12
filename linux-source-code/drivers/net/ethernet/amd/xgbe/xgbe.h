@@ -1293,8 +1293,8 @@ struct xgbe_prv_data {
 
 	unsigned int debugfs_xi2c_reg;
 
-	u32 debugfs_an_cdr_workaround;
-	u32 debugfs_an_cdr_track_early;
+	bool debugfs_an_cdr_workaround;
+	bool debugfs_an_cdr_track_early;
 };
 
 /* Function prototypes*/

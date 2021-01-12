@@ -293,7 +293,7 @@ int qxl_fbdev_init(struct qxl_device *qdev)
 void qxl_fbdev_fini(struct qxl_device *qdev)
 {
 	struct fb_info *fbi = qdev->fb_helper.fbdev;
-	void *shadow = fbi ? fbi->screen_base : NULL;
+	void *shadow = fbi ? fbi->screen_buffer : NULL;
 
 	drm_fb_helper_fbdev_teardown(&qdev->ddev);
 	vfree(shadow);

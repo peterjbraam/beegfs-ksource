@@ -48,12 +48,13 @@ struct scsi_host_template qedi_host_template = {
 	.name = "QLogic QEDI 25/40/100Gb iSCSI Initiator Driver",
 	.proc_name = QEDI_MODULE_NAME,
 	.queuecommand = iscsi_queuecommand,
+	.eh_timed_out = iscsi_eh_cmd_timed_out,
 	.eh_abort_handler = iscsi_eh_abort,
 	.eh_device_reset_handler = iscsi_eh_device_reset,
 	.eh_target_reset_handler = iscsi_eh_recover_target,
 	.eh_host_reset_handler = qedi_eh_host_reset,
 	.target_alloc = iscsi_target_alloc,
-	.change_queue_depth = iscsi_change_queue_depth,
+	.change_queue_depth = scsi_change_queue_depth,
 	.can_queue = QEDI_MAX_ISCSI_TASK,
 	.this_id = -1,
 	.sg_tablesize = QEDI_ISCSI_MAX_BDS_PER_CMD,
@@ -809,6 +810,8 @@ qedi_ep_connect(struct Scsi_Host *shost, struct sockaddr *dst_addr,
 	struct qedi_endpoint *qedi_ep;
 	struct sockaddr_in *addr;
 	struct sockaddr_in6 *addr6;
+	struct qed_dev *cdev  =  NULL;
+	struct qedi_uio_dev *udev = NULL;
 	struct iscsi_path path_req;
 	u32 msg_type = ISCSI_KEVENT_IF_DOWN;
 	u32 iscsi_cid = QEDI_CID_RESERVED;
@@ -822,12 +825,14 @@ qedi_ep_connect(struct Scsi_Host *shost, struct sockaddr *dst_addr,
 		return ERR_PTR(ret);
 	}
 
-	if (do_not_recover) {
+	if (qedi_do_not_recover) {
 		ret = -ENOMEM;
 		return ERR_PTR(ret);
 	}
 
 	qedi = iscsi_host_priv(shost);
+	cdev = qedi->cdev;
+	udev = qedi->udev;
 
 	if (test_bit(QEDI_IN_OFFLINE, &qedi->flags) ||
 	    test_bit(QEDI_IN_RECOVERY, &qedi->flags)) {
@@ -944,7 +949,7 @@ static int qedi_ep_poll(struct iscsi_endpoint *ep, int timeout_ms)
 	struct qedi_endpoint *qedi_ep;
 	int ret = 0;
 
-	if (do_not_recover)
+	if (qedi_do_not_recover)
 		return 1;
 
 	qedi_ep = ep->dd_data;
@@ -1017,7 +1022,7 @@ static void qedi_ep_disconnect(struct iscsi_endpoint *ep)
 		}
 
 		if (test_bit(QEDI_IN_RECOVERY, &qedi->flags)) {
-			if (do_not_recover) {
+			if (qedi_do_not_recover) {
 				QEDI_INFO(&qedi->dbg_ctx, QEDI_LOG_INFO,
 					  "Do not recover cid=0x%x\n",
 					  qedi_ep->iscsi_cid);
@@ -1031,7 +1036,7 @@ static void qedi_ep_disconnect(struct iscsi_endpoint *ep)
 		}
 	}
 
-	if (do_not_recover)
+	if (qedi_do_not_recover)
 		goto ep_exit_recover;
 
 	switch (qedi_ep->state) {
@@ -1370,7 +1375,7 @@ static void qedi_cleanup_task(struct iscsi_task *task)
 {
 	if (!task->sc || task->state == ISCSI_TASK_PENDING) {
 		QEDI_INFO(NULL, QEDI_LOG_IO, "Returning ref_cnt=%d\n",
-			  atomic_read(&task->refcount));
+			  refcount_read(&task->refcount));
 		return;
 	}
 

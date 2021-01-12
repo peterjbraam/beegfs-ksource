@@ -8,7 +8,6 @@
  */
 
 #include <linux/kernel.h>
-#include <linux/kconfig.h>
 #include <linux/rmi.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
@@ -65,6 +64,8 @@ struct f01_basic_properties {
 #define RMI_F01_STATUS_CODE(status)		((status) & 0x0f)
 /* The device has lost its configuration for some reason. */
 #define RMI_F01_STATUS_UNCONFIGURED(status)	(!!((status) & 0x80))
+/* The device is in bootloader mode */
+#define RMI_F01_STATUS_BOOTLOADER(status)	((status) & 0x40)
 
 /* Control register bits */
 
@@ -337,6 +338,50 @@ static const struct attribute_group rmi_f01_attr_group = {
 	.attrs = rmi_f01_attrs,
 };
 
+#ifdef CONFIG_OF
+static int rmi_f01_of_probe(struct device *dev,
+				struct rmi_device_platform_data *pdata)
+{
+	int retval;
+	u32 val;
+
+	retval = rmi_of_property_read_u32(dev,
+			(u32 *)&pdata->power_management.nosleep,
+			"syna,nosleep-mode", 1);
+	if (retval)
+		return retval;
+
+	retval = rmi_of_property_read_u32(dev, &val,
+			"syna,wakeup-threshold", 1);
+	if (retval)
+		return retval;
+
+	pdata->power_management.wakeup_threshold = val;
+
+	retval = rmi_of_property_read_u32(dev, &val,
+			"syna,doze-holdoff-ms", 1);
+	if (retval)
+		return retval;
+
+	pdata->power_management.doze_holdoff = val * 100;
+
+	retval = rmi_of_property_read_u32(dev, &val,
+			"syna,doze-interval-ms", 1);
+	if (retval)
+		return retval;
+
+	pdata->power_management.doze_interval = val / 10;
+
+	return 0;
+}
+#else
+static inline int rmi_f01_of_probe(struct device *dev,
+					struct rmi_device_platform_data *pdata)
+{
+	return -ENODEV;
+}
+#endif
+
 static int rmi_f01_probe(struct rmi_function *fn)
 {
 	struct rmi_device *rmi_dev = fn->rmi_dev;
@@ -347,6 +392,12 @@ static int rmi_f01_probe(struct rmi_function *fn)
 	u16 ctrl_base_addr = fn->fd.control_base_addr;
 	u8 device_status;
 	u8 temp;
+
+	if (fn->dev.of_node) {
+		error = rmi_f01_of_probe(&fn->dev, pdata);
+		if (error)
+			return error;
+	}
 
 	f01 = devm_kzalloc(&fn->dev, sizeof(struct f01_data), GFP_KERNEL);
 	if (!f01)
@@ -528,6 +579,7 @@ static int rmi_f01_probe(struct rmi_function *fn)
 
 static void rmi_f01_remove(struct rmi_function *fn)
 {
+	/* Note that the bus device is used, not the F01 device */
 	sysfs_remove_group(&fn->rmi_dev->dev.kobj, &rmi_f01_attr_group);
 }
 
@@ -629,9 +681,9 @@ static int rmi_f01_resume(struct rmi_function *fn)
 	return 0;
 }
 
-static int rmi_f01_attention(struct rmi_function *fn,
-			     unsigned long *irq_bits)
+static irqreturn_t rmi_f01_attention(int irq, void *ctx)
 {
+	struct rmi_function *fn = ctx;
 	struct rmi_device *rmi_dev = fn->rmi_dev;
 	int error;
 	u8 device_status;
@@ -640,19 +692,23 @@ static int rmi_f01_attention(struct rmi_function *fn,
 	if (error) {
 		dev_err(&fn->dev,
 			"Failed to read device status: %d.\n", error);
-		return error;
+		return IRQ_RETVAL(error);
 	}
+
+	if (RMI_F01_STATUS_BOOTLOADER(device_status))
+		dev_warn(&fn->dev,
+			 "Device in bootloader mode, please update firmware\n");
 
 	if (RMI_F01_STATUS_UNCONFIGURED(device_status)) {
 		dev_warn(&fn->dev, "Device reset detected.\n");
 		error = rmi_dev->driver->reset_handler(rmi_dev);
 		if (error) {
 			dev_err(&fn->dev, "Device reset failed: %d\n", error);
-			return error;
+			return IRQ_RETVAL(error);
 		}
 	}
 
-	return 0;
+	return IRQ_HANDLED;
 }
 
 struct rmi_function_handler rmi_f01_handler = {

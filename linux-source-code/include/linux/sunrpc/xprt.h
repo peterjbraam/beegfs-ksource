@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  *  linux/include/linux/sunrpc/xprt.h
  *
@@ -138,6 +139,9 @@ struct rpc_xprt_ops {
 	void		(*release_request)(struct rpc_task *task);
 	void		(*close)(struct rpc_xprt *xprt);
 	void		(*destroy)(struct rpc_xprt *xprt);
+	void		(*set_connect_timeout)(struct rpc_xprt *xprt,
+					unsigned long connect_timeout,
+					unsigned long reconnect_timeout);
 	void		(*print_stats)(struct rpc_xprt *xprt, struct seq_file *seq);
 	int		(*enable_swap)(struct rpc_xprt *xprt);
 	void		(*disable_swap)(struct rpc_xprt *xprt);
@@ -172,7 +176,7 @@ enum xprt_transports {
 
 struct rpc_xprt {
 	struct kref		kref;		/* Reference count */
-	struct rpc_xprt_ops *	ops;		/* transport methods */
+	const struct rpc_xprt_ops *ops;		/* transport methods */
 
 	const struct rpc_timeout *timeout;	/* timeout parms */
 	struct sockaddr_storage	addr;		/* server address */
@@ -222,6 +226,7 @@ struct rpc_xprt {
 	struct timer_list	timer;
 	unsigned long		last_used,
 				idle_timeout,
+				connect_timeout,
 				max_reconnect_timeout;
 
 	/*
@@ -371,6 +376,7 @@ void			xprt_wait_for_buffer_space(struct rpc_task *task, rpc_action action);
 void			xprt_write_space(struct rpc_xprt *xprt);
 void			xprt_adjust_cwnd(struct rpc_xprt *xprt, struct rpc_task *task, int result);
 struct rpc_rqst *	xprt_lookup_rqst(struct rpc_xprt *xprt, __be32 xid);
+void			xprt_update_rtt(struct rpc_task *task);
 void			xprt_complete_rqst(struct rpc_task *task, int copied);
 void			xprt_pin_rqst(struct rpc_rqst *req);
 void			xprt_unpin_rqst(struct rpc_rqst *req);
@@ -421,9 +427,9 @@ static inline int xprt_test_and_clear_connected(struct rpc_xprt *xprt)
 
 static inline void xprt_clear_connecting(struct rpc_xprt *xprt)
 {
-	smp_mb__before_clear_bit();
+	smp_mb__before_atomic();
 	clear_bit(XPRT_CONNECTING, &xprt->state);
-	smp_mb__after_clear_bit();
+	smp_mb__after_atomic();
 }
 
 static inline int xprt_connecting(struct rpc_xprt *xprt)
@@ -453,9 +459,9 @@ static inline void xprt_clear_bound(struct rpc_xprt *xprt)
 
 static inline void xprt_clear_binding(struct rpc_xprt *xprt)
 {
-	smp_mb__before_clear_bit();
+	smp_mb__before_atomic();
 	clear_bit(XPRT_BINDING, &xprt->state);
-	smp_mb__after_clear_bit();
+	smp_mb__after_atomic();
 }
 
 static inline int xprt_test_and_set_binding(struct rpc_xprt *xprt)

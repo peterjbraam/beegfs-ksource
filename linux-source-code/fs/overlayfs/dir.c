@@ -24,6 +24,8 @@ module_param_named(redirect_max, ovl_redirect_max, ushort, 0644);
 MODULE_PARM_DESC(ovl_redirect_max,
 		 "Maximum length of absolute redirect xattr value");
 
+static int ovl_set_redirect(struct dentry *dentry, bool samedir);
+
 int ovl_cleanup(struct inode *wdir, struct dentry *wdentry)
 {
 	int err;
@@ -242,7 +244,7 @@ static int ovl_instantiate(struct dentry *dentry, struct inode *inode,
 		.newinode = inode,
 	};
 
-	ovl_dentry_version_inc(dentry->d_parent, false);
+	ovl_dir_modified(dentry->d_parent, false);
 	ovl_dentry_set_upper_alias(dentry);
 	if (!hardlink) {
 		/*
@@ -258,7 +260,7 @@ static int ovl_instantiate(struct dentry *dentry, struct inode *inode,
 		 * hashed directory inode aliases.
 		 */
 		inode = ovl_get_inode(dentry->d_sb, &oip);
-		if (WARN_ON(IS_ERR(inode)))
+		if (IS_ERR(inode))
 			return PTR_ERR(inode);
 	} else {
 		WARN_ON(ovl_inode_real(inode) != d_inode(newdentry));
@@ -349,7 +351,8 @@ static struct dentry *ovl_clear_empty(struct dentry *dentry,
 		goto out;
 
 	ovl_path_upper(dentry, &upperpath);
-	err = vfs_getattr(&upperpath, &stat);
+	err = vfs_getattr(&upperpath, &stat,
+			  STATX_BASIC_STATS, AT_STATX_SYNC_AS_STAT);
 	if (err)
 		goto out_unlock;
 
@@ -427,50 +430,6 @@ out_free:
 	return err;
 }
 
-static int ovl_posix_acl_create(struct inode *dir, umode_t *mode,
-				struct posix_acl **default_acl,
-				struct posix_acl **acl)
-{
-	struct posix_acl *p;
-	struct posix_acl *clone;
-	int ret;
-
-	*acl = NULL;
-	*default_acl = NULL;
-
-	if (S_ISLNK(*mode) || !IS_POSIXACL(dir))
-		return 0;
-
-	p = ovl_get_acl(dir, ACL_TYPE_DEFAULT);
-	if (!p || p == ERR_PTR(-EOPNOTSUPP)) {
-		*mode &= ~current_umask();
-		return 0;
-	}
-	if (IS_ERR(p))
-		return PTR_ERR(p);
-
-	clone = posix_acl_dup(p);
-	ret = posix_acl_create(&clone, GFP_NOFS, mode);
-	if (ret < 0)
-		goto err_release;
-
-	if (ret == 0)
-		posix_acl_release(clone);
-	else
-		*acl = clone;
-
-	if (!S_ISDIR(*mode))
-		posix_acl_release(p);
-	else
-		*default_acl = p;
-
-	return 0;
-
-err_release:
-	posix_acl_release(p);
-	return ret;
-}
-
 static int ovl_create_over_whiteout(struct dentry *dentry, struct inode *inode,
 				    struct ovl_cattr *cattr)
 {
@@ -481,15 +440,15 @@ static int ovl_create_over_whiteout(struct dentry *dentry, struct inode *inode,
 	struct dentry *upper;
 	struct dentry *newdentry;
 	int err;
-	struct posix_acl *uninitialized_var(acl), *uninitialized_var(default_acl);
+	struct posix_acl *acl, *default_acl;
 	bool hardlink = !!cattr->hardlink;
 
 	if (WARN_ON(!workdir))
 		return -EROFS;
 
 	if (!hardlink) {
-		err = ovl_posix_acl_create(dentry->d_parent->d_inode,
-					   &cattr->mode, &default_acl, &acl);
+		err = posix_acl_create(dentry->d_parent->d_inode,
+				       &cattr->mode, &default_acl, &acl);
 		if (err)
 			return err;
 	}
@@ -693,6 +652,18 @@ static int ovl_symlink(struct inode *dir, struct dentry *dentry,
 	return ovl_create_object(dentry, S_IFLNK, 0, link);
 }
 
+static int ovl_set_link_redirect(struct dentry *dentry)
+{
+	const struct cred *old_cred;
+	int err;
+
+	old_cred = ovl_override_creds(dentry->d_sb);
+	err = ovl_set_redirect(dentry, false);
+	revert_creds(old_cred);
+
+	return err;
+}
+
 static int ovl_link(struct dentry *old, struct inode *newdir,
 		    struct dentry *new)
 {
@@ -711,6 +682,12 @@ static int ovl_link(struct dentry *old, struct inode *newdir,
 	err = ovl_copy_up(new->d_parent);
 	if (err)
 		goto out_drop_write;
+
+	if (ovl_is_metacopy_dentry(old)) {
+		err = ovl_set_link_redirect(old);
+		if (err)
+			goto out_drop_write;
+	}
 
 	err = ovl_nlink_start(old, &locked);
 	if (err)
@@ -777,7 +754,7 @@ static int ovl_remove_and_whiteout(struct dentry *dentry,
 	if (err)
 		goto out_d_drop;
 
-	ovl_dentry_version_inc(dentry->d_parent, true);
+	ovl_dir_modified(dentry->d_parent, true);
 out_d_drop:
 	d_drop(dentry);
 out_dput_upper:
@@ -822,7 +799,7 @@ static int ovl_remove_upper(struct dentry *dentry, bool is_dir,
 		err = vfs_rmdir(dir, upper);
 	else
 		err = vfs_unlink(dir, upper, NULL);
-	ovl_dentry_version_inc(dentry->d_parent, ovl_type_origin(dentry));
+	ovl_dir_modified(dentry->d_parent, ovl_type_origin(dentry));
 
 	/*
 	 * Keeping this dentry hashed would mean having to release
@@ -852,6 +829,7 @@ static int ovl_do_remove(struct dentry *dentry, bool is_dir)
 	int err;
 	bool locked = false;
 	const struct cred *old_cred;
+	struct dentry *upperdentry;
 	bool lower_positive = ovl_lower_positive(dentry);
 	LIST_HEAD(list);
 
@@ -887,6 +865,17 @@ static int ovl_do_remove(struct dentry *dentry, bool is_dir)
 			drop_nlink(dentry->d_inode);
 	}
 	ovl_nlink_end(dentry, locked);
+
+	/*
+	 * Copy ctime
+	 *
+	 * Note: we fail to update ctime if there was no copy-up, only a
+	 * whiteout
+	 */
+	upperdentry = ovl_dentry_upper(dentry);
+	if (upperdentry)
+		ovl_copyattr(d_inode(upperdentry), d_inode(dentry));
+
 out_drop_write:
 	ovl_drop_write(dentry);
 out:
@@ -917,19 +906,19 @@ static bool ovl_can_move(struct dentry *dentry)
 		!d_is_dir(dentry) || !ovl_type_merge_or_lower(dentry);
 }
 
-static char *ovl_get_redirect(struct dentry *dentry, bool samedir)
+static char *ovl_get_redirect(struct dentry *dentry, bool abs_redirect)
 {
 	char *buf, *ret;
 	struct dentry *d, *tmp;
 	int buflen = ovl_redirect_max + 1;
 
-	if (samedir) {
+	if (!abs_redirect) {
 		ret = kstrndup(dentry->d_name.name, dentry->d_name.len,
 			       GFP_KERNEL);
 		goto out;
 	}
 
-	buf = ret = kmalloc(buflen, GFP_TEMPORARY);
+	buf = ret = kmalloc(buflen, GFP_KERNEL);
 	if (!buf)
 		goto out;
 
@@ -977,15 +966,43 @@ out:
 	return ret ? ret : ERR_PTR(-ENOMEM);
 }
 
+static bool ovl_need_absolute_redirect(struct dentry *dentry, bool samedir)
+{
+	struct dentry *lowerdentry;
+
+	if (!samedir)
+		return true;
+
+	if (d_is_dir(dentry))
+		return false;
+
+	/*
+	 * For non-dir hardlinked files, we need absolute redirects
+	 * in general as two upper hardlinks could be in different
+	 * dirs. We could put a relative redirect now and convert
+	 * it to absolute redirect later. But when nlink > 1 and
+	 * indexing is on, that means relative redirect needs to be
+	 * converted to absolute during copy up of another lower
+	 * hardllink as well.
+	 *
+	 * So without optimizing too much, just check if lower is
+	 * a hard link or not. If lower is hard link, put absolute
+	 * redirect.
+	 */
+	lowerdentry = ovl_dentry_lower(dentry);
+	return (d_inode(lowerdentry)->i_nlink > 1);
+}
+
 static int ovl_set_redirect(struct dentry *dentry, bool samedir)
 {
 	int err;
 	const char *redirect = ovl_dentry_get_redirect(dentry);
+	bool absolute_redirect = ovl_need_absolute_redirect(dentry, samedir);
 
-	if (redirect && (samedir || redirect[0] == '/'))
+	if (redirect && (!absolute_redirect || redirect[0] == '/'))
 		return 0;
 
-	redirect = ovl_get_redirect(dentry, samedir);
+	redirect = ovl_get_redirect(dentry, absolute_redirect);
 	if (IS_ERR(redirect))
 		return PTR_ERR(redirect);
 
@@ -1161,22 +1178,20 @@ static int ovl_rename(struct inode *olddir, struct dentry *old,
 		goto out_dput;
 
 	err = 0;
-	if (is_dir) {
-		if (ovl_type_merge_or_lower(old))
-			err = ovl_set_redirect(old, samedir);
-		else if (!old_opaque && ovl_type_merge(new->d_parent))
-			err = ovl_set_opaque_xerr(old, olddentry, -EXDEV);
-		if (err)
-			goto out_dput;
-	}
-	if (!overwrite && new_is_dir) {
-		if (ovl_type_merge_or_lower(new))
-			err = ovl_set_redirect(new, samedir);
-		else if (!new_opaque && ovl_type_merge(old->d_parent))
-			err = ovl_set_opaque_xerr(new, newdentry, -EXDEV);
-		if (err)
-			goto out_dput;
-	}
+	if (ovl_type_merge_or_lower(old))
+		err = ovl_set_redirect(old, samedir);
+	else if (is_dir && !old_opaque && ovl_type_merge(new->d_parent))
+		err = ovl_set_opaque_xerr(old, olddentry, -EXDEV);
+	if (err)
+		goto out_dput;
+
+	if (!overwrite && ovl_type_merge_or_lower(new))
+		err = ovl_set_redirect(new, samedir);
+	else if (!overwrite && new_is_dir && !new_opaque &&
+		 ovl_type_merge(old->d_parent))
+		err = ovl_set_opaque_xerr(new, newdentry, -EXDEV);
+	if (err)
+		goto out_dput;
 
 	err = ovl_do_rename(old_upperdir->d_inode, olddentry,
 			    new_upperdir->d_inode, newdentry, flags);
@@ -1193,10 +1208,15 @@ static int ovl_rename(struct inode *olddir, struct dentry *old,
 			drop_nlink(d_inode(new));
 	}
 
-	ovl_dentry_version_inc(old->d_parent, ovl_type_origin(old) ||
-			       (!overwrite && ovl_type_origin(new)));
-	ovl_dentry_version_inc(new->d_parent, ovl_type_origin(old) ||
-			       (d_inode(new) && ovl_type_origin(new)));
+	ovl_dir_modified(old->d_parent, ovl_type_origin(old) ||
+			 (!overwrite && ovl_type_origin(new)));
+	ovl_dir_modified(new->d_parent, ovl_type_origin(old) ||
+			 (d_inode(new) && ovl_type_origin(new)));
+
+	/* copy ctime: */
+	ovl_copyattr(d_inode(olddentry), d_inode(old));
+	if (d_inode(new) && ovl_dentry_upper(new))
+		ovl_copyattr(d_inode(newdentry), d_inode(new));
 
 out_dput:
 	dput(newdentry);
@@ -1215,32 +1235,20 @@ out:
 	return err;
 }
 
-static int ovl_rename_old(struct inode *olddir, struct dentry *old,
-		      struct inode *newdir, struct dentry *new)
-{
-	return ovl_rename(olddir, old, newdir, new, 0);
-}
-
-const struct inode_operations_wrapper ovl_dir_inode_operations = {
-	.ops = {
+const struct inode_operations ovl_dir_inode_operations = {
 	.lookup		= ovl_lookup,
 	.mkdir		= ovl_mkdir,
 	.symlink	= ovl_symlink,
 	.unlink		= ovl_unlink,
 	.rmdir		= ovl_rmdir,
-	.rename		= ovl_rename_old,
+	.rename		= ovl_rename,
 	.link		= ovl_link,
 	.setattr	= ovl_setattr,
 	.create		= ovl_create,
 	.mknod		= ovl_mknod,
 	.permission	= ovl_permission,
 	.getattr	= ovl_getattr,
-	.setxattr	= generic_setxattr,
-	.getxattr	= generic_getxattr,
 	.listxattr	= ovl_listxattr,
-	.removexattr	= generic_removexattr,
 	.get_acl	= ovl_get_acl,
 	.update_time	= ovl_update_time,
-	},
-	.rename2	= ovl_rename,
 };

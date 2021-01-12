@@ -1,9 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0
 
 #include <linux/ceph/ceph_debug.h>
 
 #include <linux/module.h>
 #include <linux/slab.h>
-#include <asm/div64.h>
 
 #include <linux/ceph/libceph.h>
 #include <linux/ceph/osdmap.h>
@@ -1299,8 +1299,9 @@ static int set_primary_affinity(struct ceph_osdmap *map, int osd, u32 aff)
 	if (!map->osd_primary_affinity) {
 		int i;
 
-		map->osd_primary_affinity = kmalloc(map->max_osd*sizeof(u32),
-						    GFP_NOFS);
+		map->osd_primary_affinity = kmalloc_array(map->max_osd,
+							  sizeof(u32),
+							  GFP_NOFS);
 		if (!map->osd_primary_affinity)
 			return -ENOMEM;
 
@@ -2140,51 +2141,15 @@ bool ceph_osds_changed(const struct ceph_osds *old_acting,
 }
 
 /*
- * Map a file extent to a stripe unit within an object.
- * Fill in objno, offset into object, and object extent length (i.e. the
- * number of bytes mapped, less than or equal to @l->stripe_unit).
- *
- * Example for stripe_count = 3, stripes_per_object = 4:
- *
- * blockno   |  0  3  6  9 |  1  4  7 10 |  2  5  8 11 | 12 15 18 21 | 13 16 19
- * stripeno  |  0  1  2  3 |  0  1  2  3 |  0  1  2  3 |  4  5  6  7 |  4  5  6
- * stripepos |      0      |      1      |      2      |      0      |      1
- * objno     |      0      |      1      |      2      |      3      |      4
- * objsetno  |                    0                    |                    1
- */
-void ceph_calc_file_object_mapping(struct ceph_file_layout *l,
-				   u64 off, u64 len,
-				   u64 *objno, u64 *objoff, u32 *xlen)
-{
-	u32 stripes_per_object = l->object_size / l->stripe_unit;
-	u64 blockno;	/* which su in the file (i.e. globally) */
-	u32 blockoff;	/* offset into su */
-	u64 stripeno;	/* which stripe */
-	u32 stripepos;	/* which su in the stripe,
-			   which object in the object set */
-	u64 objsetno;	/* which object set */
-	u32 objsetpos;	/* which stripe in the object set */
-
-	blockno = div_u64_rem(off, l->stripe_unit, &blockoff);
-	stripeno = div_u64_rem(blockno, l->stripe_count, &stripepos);
-	objsetno = div_u64_rem(stripeno, stripes_per_object, &objsetpos);
-
-	*objno = objsetno * l->stripe_count + stripepos;
-	*objoff = objsetpos * l->stripe_unit + blockoff;
-	*xlen = min_t(u64, len, l->stripe_unit - blockoff);
-}
-EXPORT_SYMBOL(ceph_calc_file_object_mapping);
-
-/*
  * Map an object into a PG.
  *
  * Should only be called with target_oid and target_oloc (as opposed to
  * base_oid and base_oloc), since tiering isn't taken into account.
  */
-int __ceph_object_locator_to_pg(struct ceph_pg_pool_info *pi,
-				const struct ceph_object_id *oid,
-				const struct ceph_object_locator *oloc,
-				struct ceph_pg *raw_pgid)
+void __ceph_object_locator_to_pg(struct ceph_pg_pool_info *pi,
+				 const struct ceph_object_id *oid,
+				 const struct ceph_object_locator *oloc,
+				 struct ceph_pg *raw_pgid)
 {
 	WARN_ON(pi->id != oloc->pool);
 
@@ -2200,11 +2165,8 @@ int __ceph_object_locator_to_pg(struct ceph_pg_pool_info *pi,
 		int nsl = oloc->pool_ns->len;
 		size_t total = nsl + 1 + oid->name_len;
 
-		if (total > sizeof(stack_buf)) {
-			buf = kmalloc(total, GFP_NOIO);
-			if (!buf)
-				return -ENOMEM;
-		}
+		if (total > sizeof(stack_buf))
+			buf = kmalloc(total, GFP_NOIO | __GFP_NOFAIL);
 		memcpy(buf, oloc->pool_ns->str, nsl);
 		buf[nsl] = '\037';
 		memcpy(buf + nsl + 1, oid->name, oid->name_len);
@@ -2216,7 +2178,6 @@ int __ceph_object_locator_to_pg(struct ceph_pg_pool_info *pi,
 		     oid->name, nsl, oloc->pool_ns->str,
 		     raw_pgid->pool, raw_pgid->seed);
 	}
-	return 0;
 }
 
 int ceph_object_locator_to_pg(struct ceph_osdmap *osdmap,
@@ -2230,7 +2191,8 @@ int ceph_object_locator_to_pg(struct ceph_osdmap *osdmap,
 	if (!pi)
 		return -ENOENT;
 
-	return __ceph_object_locator_to_pg(pi, oid, oloc, raw_pgid);
+	__ceph_object_locator_to_pg(pi, oid, oloc, raw_pgid);
+	return 0;
 }
 EXPORT_SYMBOL(ceph_object_locator_to_pg);
 

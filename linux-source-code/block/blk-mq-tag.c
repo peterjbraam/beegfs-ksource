@@ -9,7 +9,6 @@
 #include <linux/module.h>
 
 #include <linux/blk-mq.h>
-#include <linux/delay.h>
 #include "blk.h"
 #include "blk-mq.h"
 #include "blk-mq-tag.h"
@@ -24,6 +23,9 @@ bool blk_mq_has_free_tags(struct blk_mq_tags *tags)
 
 /*
  * If a previously inactive queue goes active, bump the active user count.
+ * We need to do this before try to allocate driver tag, then even if fail
+ * to get tag when first time, the other shared-tag users could reserve
+ * budget for it.
  */
 bool __blk_mq_tag_busy(struct blk_mq_hw_ctx *hctx)
 {
@@ -108,9 +110,8 @@ unsigned int blk_mq_get_tag(struct blk_mq_alloc_data *data)
 	struct blk_mq_tags *tags = blk_mq_tags_from_data(data);
 	struct sbitmap_queue *bt;
 	struct sbq_wait_state *ws;
-	DEFINE_WAIT(wait);
+	DEFINE_SBQ_WAIT(wait);
 	unsigned int tag_offset;
-	bool drop_ctx;
 	int tag;
 
 	if (data->flags & BLK_MQ_REQ_RESERVED) {
@@ -133,15 +134,8 @@ unsigned int blk_mq_get_tag(struct blk_mq_alloc_data *data)
 		return BLK_MQ_TAG_FAIL;
 
 	ws = bt_wait_ptr(bt, data->hctx);
-	drop_ctx = data->ctx == NULL;
 	do {
 		struct sbitmap_queue *bt_prev;
-
-		prepare_to_wait(&ws->wait, &wait, TASK_UNINTERRUPTIBLE);
-
-		tag = __blk_mq_get_tag(data, bt);
-		if (tag != -1)
-			break;
 
 		/*
 		 * We're out of tags on this hardware queue, kick any
@@ -158,21 +152,25 @@ unsigned int blk_mq_get_tag(struct blk_mq_alloc_data *data)
 		if (tag != -1)
 			break;
 
-		if (data->ctx)
-			blk_mq_put_ctx(data->ctx);
+		sbitmap_prepare_to_wait(bt, ws, &wait, TASK_UNINTERRUPTIBLE);
+
+		tag = __blk_mq_get_tag(data, bt);
+		if (tag != -1)
+			break;
 
 		bt_prev = bt;
 		io_schedule();
 
+		sbitmap_finish_wait(bt, ws, &wait);
+
 		data->ctx = blk_mq_get_ctx(data->q);
-		data->hctx = blk_mq_map_queue(data->q, data->ctx->cpu);
+		data->hctx = blk_mq_map_queue(data->q, data->cmd_flags,
+						data->ctx);
 		tags = blk_mq_tags_from_data(data);
 		if (data->flags & BLK_MQ_REQ_RESERVED)
 			bt = &tags->breserved_tags;
 		else
 			bt = &tags->bitmap_tags;
-
-		finish_wait(&ws->wait, &wait);
 
 		/*
 		 * If destination hw queue is changed, fake wake up on
@@ -185,10 +183,7 @@ unsigned int blk_mq_get_tag(struct blk_mq_alloc_data *data)
 		ws = bt_wait_ptr(bt, data->hctx);
 	} while (1);
 
-	if (drop_ctx && data->ctx)
-		blk_mq_put_ctx(data->ctx);
-
-	finish_wait(&ws->wait, &wait);
+	sbitmap_finish_wait(bt, ws, &wait);
 
 found_tag:
 	return tag + tag_offset;
@@ -232,7 +227,7 @@ static bool bt_iter(struct sbitmap *bitmap, unsigned int bitnr, void *data)
 	 * test and set the bit before assining ->rqs[].
 	 */
 	if (rq && rq->q == hctx->queue)
-		iter_data->fn(hctx, rq, iter_data->data, reserved);
+		return iter_data->fn(hctx, rq, iter_data->data, reserved);
 	return true;
 }
 
@@ -271,8 +266,8 @@ static bool bt_tags_iter(struct sbitmap *bitmap, unsigned int bitnr, void *data)
 	 * test and set the bit before assining ->rqs[].
 	 */
 	rq = tags->rqs[bitnr];
-	if (rq)
-		iter_data->fn(rq, iter_data->data, reserved);
+	if (rq && blk_mq_request_started(rq))
+		return iter_data->fn(rq, iter_data->data, reserved);
 
 	return true;
 }
@@ -310,35 +305,6 @@ void blk_mq_tagset_busy_iter(struct blk_mq_tag_set *tagset,
 	}
 }
 EXPORT_SYMBOL(blk_mq_tagset_busy_iter);
-
-int blk_mq_reinit_tagset(struct blk_mq_tag_set *set)
-{
-	int i, j, ret = 0;
-
-	if (!set->ops->aux_ops || !set->ops->aux_ops->reinit_request)
-		goto out;
-
-	for (i = 0; i < set->nr_hw_queues; i++) {
-		struct blk_mq_tags *tags = set->tags[i];
-
-		if (!tags)
-			continue;
-
-		for (j = 0; j < tags->nr_tags; j++) {
-			if (!tags->static_rqs[j])
-				continue;
-
-			ret = set->ops->aux_ops->reinit_request(set->driver_data,
-						tags->static_rqs[j]);
-			if (ret)
-				goto out;
-		}
-	}
-
-out:
-	return ret;
-}
-EXPORT_SYMBOL_GPL(blk_mq_reinit_tagset);
 
 void blk_mq_queue_tag_busy_iter(struct request_queue *q, busy_iter_fn *fn,
 		void *priv)
@@ -479,36 +445,6 @@ int blk_mq_tag_update_depth(struct blk_mq_hw_ctx *hctx,
 	return 0;
 }
 
-static void blk_mq_tagset_count_completed_rqs(struct request *rq,
-		void *data, bool reserved)
-{
-	unsigned *count = data;
-
-	if (blk_mq_request_started(rq) && blk_mq_request_completed(rq))
-		(*count)++;
-}
-
-/**
- * blk_mq_tagset_wait_completed_request - wait until all completed req's
- * complete funtion is run
- * @tagset:	Tag set to drain completed request
- *
- * Note: This function has to be run after all IO queues are shutdown
- */
-void blk_mq_tagset_wait_completed_request(struct blk_mq_tag_set *tagset)
-{
-	while (true) {
-		unsigned count = 0;
-
-		blk_mq_tagset_busy_iter(tagset,
-				blk_mq_tagset_count_completed_rqs, &count);
-		if (!count)
-			break;
-		msleep(5);
-	}
-}
-EXPORT_SYMBOL(blk_mq_tagset_wait_completed_request);
-
 /**
  * blk_mq_unique_tag() - return a tag that is unique queue-wide
  * @rq: request for which to compute a unique tag
@@ -523,16 +459,7 @@ EXPORT_SYMBOL(blk_mq_tagset_wait_completed_request);
  */
 u32 blk_mq_unique_tag(struct request *rq)
 {
-	struct request_queue *q = rq->q;
-	struct blk_mq_hw_ctx *hctx;
-	int hwq = 0;
-
-	if (q->mq_ops) {
-		hctx = blk_mq_map_queue(q, rq->mq_ctx->cpu);
-		hwq = hctx->queue_num;
-	}
-
-	return (hwq << BLK_MQ_UNIQUE_TAG_BITS) |
+	return (rq->mq_hctx->queue_num << BLK_MQ_UNIQUE_TAG_BITS) |
 		(rq->tag & BLK_MQ_UNIQUE_TAG_MASK);
 }
 EXPORT_SYMBOL(blk_mq_unique_tag);

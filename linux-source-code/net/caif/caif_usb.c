@@ -14,6 +14,7 @@
 #include <linux/mii.h>
 #include <linux/usb.h>
 #include <linux/usb/usbnet.h>
+#include <linux/etherdevice.h>
 #include <net/netns/generic.h>
 #include <net/caif/caif_dev.h>
 #include <net/caif/caif_layer.h>
@@ -86,13 +87,12 @@ static struct cflayer *cfusbl_create(int phyid, u8 ethaddr[ETH_ALEN],
 {
 	struct cfusbl *this = kmalloc(sizeof(struct cfusbl), GFP_ATOMIC);
 
-	if (!this) {
-		pr_warn("Out of memory\n");
+	if (!this)
 		return NULL;
-	}
+
 	caif_assert(offsetof(struct cfusbl, layer) == 0);
 
-	memset(this, 0, sizeof(struct cflayer));
+	memset(&this->layer, 0, sizeof(this->layer));
 	this->layer.receive = cfusbl_receive;
 	this->layer.transmit = cfusbl_transmit;
 	this->layer.ctrlcmd = cfusbl_ctrlcmd;
@@ -105,8 +105,8 @@ static struct cflayer *cfusbl_create(int phyid, u8 ethaddr[ETH_ALEN],
 	 *	5-11	source address
 	 *	12-13	protocol type
 	 */
-	memcpy(&this->tx_eth_hdr[ETH_ALEN], braddr, ETH_ALEN);
-	memcpy(&this->tx_eth_hdr[ETH_ALEN], ethaddr, ETH_ALEN);
+	ether_addr_copy(&this->tx_eth_hdr[ETH_ALEN], braddr);
+	ether_addr_copy(&this->tx_eth_hdr[ETH_ALEN], ethaddr);
 	this->tx_eth_hdr[12] = cpu_to_be16(ETH_P_802_EX1) & 0xff;
 	this->tx_eth_hdr[13] = (cpu_to_be16(ETH_P_802_EX1) >> 8) & 0xff;
 	pr_debug("caif ethernet TX-header dst:%pM src:%pM type:%02x%02x\n",
@@ -176,9 +176,7 @@ static int cfusbl_device_notify(struct notifier_block *me, unsigned long what,
 		dev_add_pack(&caif_usb_type);
 	pack_added = true;
 
-	strncpy(layer->name, dev->name,
-			sizeof(layer->name) - 1);
-	layer->name[sizeof(layer->name) - 1] = 0;
+	strlcpy(layer->name, dev->name, sizeof(layer->name));
 
 	return 0;
 }
@@ -190,12 +188,12 @@ static struct notifier_block caif_device_notifier = {
 
 static int __init cfusbl_init(void)
 {
-	return register_netdevice_notifier_rh(&caif_device_notifier);
+	return register_netdevice_notifier(&caif_device_notifier);
 }
 
 static void __exit cfusbl_exit(void)
 {
-	unregister_netdevice_notifier_rh(&caif_device_notifier);
+	unregister_netdevice_notifier(&caif_device_notifier);
 	dev_remove_pack(&caif_usb_type);
 }
 

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __PERF_DSO
 #define __PERF_DSO
 
@@ -10,6 +11,7 @@
 #include <linux/types.h>
 #include <linux/bitops.h>
 #include "map.h"
+#include "namespaces.h"
 #include "build-id.h"
 
 enum dso_binary_type {
@@ -20,6 +22,7 @@ enum dso_binary_type {
 	DSO_BINARY_TYPE__JAVA_JIT,
 	DSO_BINARY_TYPE__DEBUGLINK,
 	DSO_BINARY_TYPE__BUILD_ID_CACHE,
+	DSO_BINARY_TYPE__BUILD_ID_CACHE_DEBUGINFO,
 	DSO_BINARY_TYPE__FEDORA_DEBUGINFO,
 	DSO_BINARY_TYPE__UBUNTU_DEBUGINFO,
 	DSO_BINARY_TYPE__BUILDID_DEBUGINFO,
@@ -190,6 +193,7 @@ struct dso {
 		void	 *priv;
 		u64	 db_id;
 	};
+	struct nsinfo	*nsinfo;
 	refcount_t	 refcnt;
 	char		 name[0];
 };
@@ -318,6 +322,7 @@ int dso__data_get_fd(struct dso *dso, struct machine *machine);
 void dso__data_put_fd(struct dso *dso);
 void dso__data_close(struct dso *dso);
 
+int dso__data_file_size(struct dso *dso, struct machine *machine);
 off_t dso__data_size(struct dso *dso, struct machine *machine);
 ssize_t dso__data_read_offset(struct dso *dso, struct machine *machine,
 			      u64 offset, u8 *data, ssize_t size);

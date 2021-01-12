@@ -35,7 +35,6 @@
 #include <linux/udp.h>
 #include <net/udp.h>
 #include "en.h"
-#include "en/port.h"
 
 enum {
 	MLX5E_ST_LINK_STATE,
@@ -81,12 +80,22 @@ static int mlx5e_test_link_state(struct mlx5e_priv *priv)
 
 static int mlx5e_test_link_speed(struct mlx5e_priv *priv)
 {
-	u32 speed;
+	u32 out[MLX5_ST_SZ_DW(ptys_reg)];
+	u32 eth_proto_oper;
+	int i;
 
 	if (!netif_carrier_ok(priv->netdev))
 		return 1;
 
-	return mlx5e_port_linkspeed(priv->mdev, &speed);
+	if (mlx5_query_port_ptys(priv->mdev, out, sizeof(out), MLX5_PTYS_EN, 1))
+		return 1;
+
+	eth_proto_oper = MLX5_GET(ptys_reg, out, eth_proto_oper);
+	for (i = 0; i < MLX5E_LINK_MODES_NUMBER; i++) {
+		if (eth_proto_oper & MLX5E_PROT_MASK(i))
+			return 0;
+	}
+	return 1;
 }
 
 struct mlx5ehdr {
@@ -119,14 +128,14 @@ static struct sk_buff *mlx5e_test_get_udp_skb(struct mlx5e_priv *priv)
 	skb_reserve(skb, NET_IP_ALIGN);
 
 	/*  Reserve for ethernet and IP header  */
-	ethh = (struct ethhdr *)skb_push(skb, ETH_HLEN);
+	ethh = skb_push(skb, ETH_HLEN);
 	skb_reset_mac_header(skb);
 
 	skb_set_network_header(skb, skb->len);
-	iph = (struct iphdr *)skb_put(skb, sizeof(struct iphdr));
+	iph = skb_put(skb, sizeof(struct iphdr));
 
 	skb_set_transport_header(skb, skb->len);
-	udph = (struct udphdr *)skb_put(skb, sizeof(struct udphdr));
+	udph = skb_put(skb, sizeof(struct udphdr));
 
 	/* Fill ETH header */
 	ether_addr_copy(ethh->h_dest, priv->netdev->dev_addr);
@@ -155,7 +164,7 @@ static struct sk_buff *mlx5e_test_get_udp_skb(struct mlx5e_priv *priv)
 	ip_send_check(iph);
 
 	/* Fill test header and data */
-	mlxh = (struct mlx5ehdr *)skb_put(skb, sizeof(*mlxh));
+	mlxh = skb_put(skb, sizeof(*mlxh));
 	mlxh->version = 0;
 	mlxh->magic = cpu_to_be64(MLX5E_TEST_MAGIC);
 

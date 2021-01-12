@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <linux/ceph/ceph_debug.h>
 
 #include <linux/device.h>
@@ -83,7 +84,7 @@ static int mdsc_show(struct seq_file *s, void *p)
 				path = NULL;
 			spin_lock(&req->r_dentry->d_lock);
 			seq_printf(s, " #%llx/%pd (%s)",
-				   ceph_ino(req->r_dentry->d_parent->d_inode),
+				   ceph_ino(d_inode(req->r_dentry->d_parent)),
 				   req->r_dentry,
 				   path ? path : "");
 			spin_unlock(&req->r_dentry->d_lock);
@@ -250,7 +251,7 @@ int ceph_fs_debugfs_init(struct ceph_fs_client *fsc)
 		goto out;
 
 	snprintf(name, sizeof(name), "../../bdi/%s",
-		 dev_name(fsc->backing_dev_info.dev));
+		 dev_name(fsc->sb->s_bdi->dev));
 	fsc->debugfs_bdi =
 		debugfs_create_symlink("bdi",
 				       fsc->client->debugfs_dir,

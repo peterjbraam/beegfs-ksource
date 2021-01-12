@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _FS_CEPH_SUPER_H
 #define _FS_CEPH_SUPER_H
 
@@ -14,8 +15,13 @@
 #include <linux/writeback.h>
 #include <linux/slab.h>
 #include <linux/posix_acl.h>
+#include <linux/refcount.h>
 
 #include <linux/ceph/libceph.h>
+
+#ifdef CONFIG_CEPH_FSCACHE
+#include <linux/fscache.h>
+#endif
 
 /* f_type in struct statfs */
 #define CEPH_SUPER_MAGIC 0x00c36400
@@ -30,6 +36,7 @@
 #define CEPH_MOUNT_OPT_NOASYNCREADDIR  (1<<7) /* no dcache readdir */
 #define CEPH_MOUNT_OPT_INO32           (1<<8) /* 32 bit inos */
 #define CEPH_MOUNT_OPT_DCACHE          (1<<9) /* use dcache for readdir etc */
+#define CEPH_MOUNT_OPT_FSCACHE         (1<<10) /* use fscache */
 #define CEPH_MOUNT_OPT_NOPOOLPERM      (1<<11) /* no pool permission check */
 #define CEPH_MOUNT_OPT_MOUNTWAIT       (1<<12) /* mount waits if no mds is up */
 #define CEPH_MOUNT_OPT_NOQUOTADF       (1<<13) /* no root dir quota in statfs */
@@ -46,7 +53,7 @@
 /* osd has a configurable limitaion of max write size.
  * CEPH_MSG_MAX_DATA_LEN should be small enough. */
 #define CEPH_MAX_WRITE_SIZE		CEPH_MSG_MAX_DATA_LEN
-#define CEPH_RASIZE_DEFAULT            (8192*1024) /* readahead */
+#define CEPH_RASIZE_DEFAULT             (8192*1024)    /* max readahead */
 #define CEPH_MAX_READDIR_DEFAULT        1024
 #define CEPH_MAX_READDIR_BYTES_DEFAULT  (512*1024)
 #define CEPH_SNAPDIRNAME_DEFAULT        ".snap"
@@ -80,6 +87,7 @@ struct ceph_mount_options {
 	char *snapdir_name;   /* default ".snap" */
 	char *mds_namespace;  /* default NULL */
 	char *server_path;    /* default  "/" */
+	char *fscache_uniq;   /* default NULL */
 };
 
 struct ceph_fs_client {
@@ -100,14 +108,16 @@ struct ceph_fs_client {
 	struct workqueue_struct *trunc_wq;
 	atomic_long_t writeback_count;
 
-	struct backing_dev_info backing_dev_info;
-
 #ifdef CONFIG_DEBUG_FS
 	struct dentry *debugfs_dentry_lru, *debugfs_caps;
 	struct dentry *debugfs_congestion_kb;
 	struct dentry *debugfs_bdi;
 	struct dentry *debugfs_mdsc, *debugfs_mdsmap;
 	struct dentry *debugfs_mds_sessions;
+#endif
+
+#ifdef CONFIG_CEPH_FSCACHE
+	struct fscache_cookie *fscache;
 #endif
 };
 
@@ -166,7 +176,7 @@ struct ceph_cap_flush {
  * data before flushing the snapped state (tracked here) back to the MDS.
  */
 struct ceph_cap_snap {
-	atomic_t nref;
+	refcount_t nref;
 	struct list_head ci_item;
 
 	struct ceph_cap_flush cap_flush;
@@ -195,7 +205,7 @@ struct ceph_cap_snap {
 
 static inline void ceph_put_cap_snap(struct ceph_cap_snap *capsnap)
 {
-	if (atomic_dec_and_test(&capsnap->nref)) {
+	if (refcount_dec_and_test(&capsnap->nref)) {
 		if (capsnap->xattr_blob)
 			ceph_buffer_put(capsnap->xattr_blob);
 		kfree(capsnap);
@@ -253,7 +263,7 @@ struct ceph_dentry_info {
 	unsigned long lease_renew_after, lease_renew_from;
 	struct list_head lru;
 	struct dentry *dentry;
-	u64 time;
+	unsigned long time;
 	u64 offset;
 };
 
@@ -366,6 +376,10 @@ struct ceph_inode_info {
 
 	struct work_struct i_vmtruncate_work;
 
+#ifdef CONFIG_CEPH_FSCACHE
+	struct fscache_cookie *fscache;
+	u32 i_fscache_gen;
+#endif
 	struct inode vfs_inode; /* at end */
 };
 
@@ -866,20 +880,15 @@ static inline int ceph_do_getattr(struct inode *inode, int mask, bool force)
 	return __ceph_do_getattr(inode, NULL, mask, force);
 }
 extern int ceph_permission(struct inode *inode, int mask);
-extern int __ceph_setattr(struct dentry *dentry, struct iattr *attr);
+extern int __ceph_setattr(struct inode *inode, struct iattr *attr);
 extern int ceph_setattr(struct dentry *dentry, struct iattr *attr);
-extern int ceph_getattr(struct vfsmount *mnt, struct dentry *dentry,
-			struct kstat *stat);
+extern int ceph_getattr(const struct path *path, struct kstat *stat,
+			u32 request_mask, unsigned int flags);
 
 /* xattr.c */
-extern int ceph_setxattr(struct dentry *, const char *, const void *,
-			 size_t, int);
-int __ceph_setxattr(struct dentry *, const char *, const void *, size_t, int);
+int __ceph_setxattr(struct inode *, const char *, const void *, size_t, int);
 ssize_t __ceph_getxattr(struct inode *, const char *, void *, size_t);
-int __ceph_removexattr(struct dentry *, const char *);
-extern ssize_t ceph_getxattr(struct dentry *, const char *, void *, size_t);
 extern ssize_t ceph_listxattr(struct dentry *, char *, size_t);
-extern int ceph_removexattr(struct dentry *, const char *);
 extern void __ceph_build_xattrs_blob(struct ceph_inode_info *ci);
 extern void __ceph_destroy_xattrs(struct ceph_inode_info *ci);
 extern void __init ceph_xattr_init(void);
@@ -901,10 +910,6 @@ static inline bool ceph_security_xattr_wanted(struct inode *in)
 #endif
 
 /* acl.c */
-extern const struct xattr_handler ceph_xattr_acl_access_handler;
-extern const struct xattr_handler ceph_xattr_acl_default_handler;
-extern const struct xattr_handler *ceph_xattr_handlers[];
-
 struct ceph_acls_info {
 	void *default_acl;
 	void *acl;
@@ -914,7 +919,7 @@ struct ceph_acls_info {
 #ifdef CONFIG_CEPH_FS_POSIX_ACL
 
 struct posix_acl *ceph_get_acl(struct inode *, int);
-int ceph_acl_chmod(struct dentry *, struct inode *);
+int ceph_set_acl(struct inode *inode, struct posix_acl *acl, int type);
 int ceph_pre_init_acls(struct inode *dir, umode_t *mode,
 		       struct ceph_acls_info *info);
 void ceph_init_inode_acls(struct inode *inode, struct ceph_acls_info *info);
@@ -924,9 +929,11 @@ static inline void ceph_forget_all_cached_acls(struct inode *inode)
 {
        forget_all_cached_acls(inode);
 }
+
 #else
 
 #define ceph_get_acl NULL
+#define ceph_set_acl NULL
 
 static inline int ceph_pre_init_acls(struct inode *dir, umode_t *mode,
 				     struct ceph_acls_info *info)
@@ -1029,8 +1036,7 @@ extern const struct file_operations ceph_dir_fops;
 extern const struct file_operations ceph_snapdir_fops;
 extern const struct inode_operations ceph_dir_iops;
 extern const struct inode_operations ceph_snapdir_iops;
-extern const struct dentry_operations ceph_dentry_ops, ceph_snap_dentry_ops,
-	ceph_snapdir_dentry_ops;
+extern const struct dentry_operations ceph_dentry_ops;
 
 extern loff_t ceph_make_fpos(unsigned high, unsigned off, bool hash_order);
 extern int ceph_handle_notrace_create(struct inode *dir, struct dentry *dentry);
@@ -1045,13 +1051,6 @@ extern void ceph_dentry_lru_del(struct dentry *dn);
 extern void ceph_invalidate_dentry_lease(struct dentry *dentry);
 extern unsigned ceph_dentry_hash(struct inode *dir, struct dentry *dn);
 extern void ceph_readdir_cache_release(struct ceph_readdir_cache_control *ctl);
-
-/*
- * our d_ops vary depending on whether the inode is live,
- * snapshotted (read-only), or a virtual ".snap" directory.
- */
-int ceph_init_dentry(struct dentry *dentry);
-
 
 /* ioctl.c */
 extern long ceph_ioctl(struct file *file, unsigned int cmd, unsigned long arg);

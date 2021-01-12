@@ -34,7 +34,6 @@
 #include <linux/mlx4/cq.h>
 #include <linux/mlx4/qp.h>
 #include <linux/mlx4/cmd.h>
-#include <linux/interrupt.h>
 
 #include "mlx4_en.h"
 
@@ -55,11 +54,8 @@ int mlx4_en_create_cq(struct mlx4_en_priv *priv,
 
 	cq = kzalloc_node(sizeof(*cq), GFP_KERNEL, node);
 	if (!cq) {
-		cq = kzalloc(sizeof(*cq), GFP_KERNEL);
-		if (!cq) {
-			en_err(priv, "Failed to allocate CQ structure\n");
-			return -ENOMEM;
-		}
+		en_err(priv, "Failed to allocate CQ structure\n");
+		return -ENOMEM;
 	}
 
 	cq->size = entries;
@@ -121,11 +117,9 @@ int mlx4_en_activate_cq(struct mlx4_en_priv *priv, struct mlx4_en_cq *cq,
 			assigned_eq = true;
 		}
 
-#ifdef CONFIG_GENERIC_HARDIRQS
 		cq->irq_desc =
 			irq_to_desc(mlx4_eq_get_irq(mdev->dev,
 						    cq->vector));
-#endif
 	} else {
 		/* For TX we use the same irq per
 		ring we assigned for the RX    */
@@ -146,7 +140,7 @@ int mlx4_en_activate_cq(struct mlx4_en_priv *priv, struct mlx4_en_cq *cq,
 	cq->mcq.usage = MLX4_RES_USAGE_DRIVER;
 	err = mlx4_cq_alloc(mdev->dev, cq->size, &cq->wqres.mtt,
 			    &mdev->priv_uar, cq->wqres.db.dma, &cq->mcq,
-			    cq->vector, 0, timestamp_en);
+			    cq->vector, 0, timestamp_en, &cq->wqres.buf, false);
 	if (err)
 		goto free_eq;
 

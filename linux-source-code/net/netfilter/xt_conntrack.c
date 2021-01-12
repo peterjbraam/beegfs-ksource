@@ -232,10 +232,8 @@ conntrack_mt(const struct sk_buff *skb, struct xt_action_param *par,
 		return false;
 
 	if (info->match_flags & XT_CONNTRACK_EXPIRES) {
-		unsigned long expires = 0;
+		unsigned long expires = nf_ct_expires(ct) / HZ;
 
-		if (timer_pending(&ct->timeout))
-			expires = (ct->timeout.expires - jiffies) / HZ;
 		if ((expires >= info->expires_min &&
 		    expires <= info->expires_max) ^
 		    !(info->invert_flags & XT_CONNTRACK_EXPIRES))
@@ -272,16 +270,16 @@ static int conntrack_mt_check(const struct xt_mtchk_param *par)
 {
 	int ret;
 
-	ret = nf_ct_l3proto_try_module_get(par->family);
+	ret = nf_ct_netns_get(par->net, par->family);
 	if (ret < 0)
-		pr_info("cannot load conntrack support for proto=%u\n",
-			par->family);
+		pr_info_ratelimited("cannot load conntrack support for proto=%u\n",
+				    par->family);
 	return ret;
 }
 
 static void conntrack_mt_destroy(const struct xt_mtdtor_param *par)
 {
-	nf_ct_l3proto_module_put(par->family);
+	nf_ct_netns_put(par->net, par->family);
 }
 
 static struct xt_match conntrack_mt_reg[] __read_mostly = {

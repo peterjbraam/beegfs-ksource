@@ -58,7 +58,7 @@ static bool prefer_mbim = true;
 #else
 static bool prefer_mbim;
 #endif
-module_param(prefer_mbim, bool, S_IRUGO | S_IWUSR);
+module_param(prefer_mbim, bool, 0644);
 MODULE_PARM_DESC(prefer_mbim, "Prefer MBIM setting on dual NCM/MBIM functions");
 
 static void cdc_ncm_txpath_bh(unsigned long param);
@@ -281,10 +281,10 @@ static ssize_t cdc_ncm_store_tx_timer_usecs(struct device *d,  struct device_att
 	return len;
 }
 
-static DEVICE_ATTR(min_tx_pkt, S_IRUGO | S_IWUSR, cdc_ncm_show_min_tx_pkt, cdc_ncm_store_min_tx_pkt);
-static DEVICE_ATTR(rx_max, S_IRUGO | S_IWUSR, cdc_ncm_show_rx_max, cdc_ncm_store_rx_max);
-static DEVICE_ATTR(tx_max, S_IRUGO | S_IWUSR, cdc_ncm_show_tx_max, cdc_ncm_store_tx_max);
-static DEVICE_ATTR(tx_timer_usecs, S_IRUGO | S_IWUSR, cdc_ncm_show_tx_timer_usecs, cdc_ncm_store_tx_timer_usecs);
+static DEVICE_ATTR(min_tx_pkt, 0644, cdc_ncm_show_min_tx_pkt, cdc_ncm_store_min_tx_pkt);
+static DEVICE_ATTR(rx_max, 0644, cdc_ncm_show_rx_max, cdc_ncm_store_rx_max);
+static DEVICE_ATTR(tx_max, 0644, cdc_ncm_show_tx_max, cdc_ncm_store_tx_max);
+static DEVICE_ATTR(tx_timer_usecs, 0644, cdc_ncm_show_tx_timer_usecs, cdc_ncm_store_tx_timer_usecs);
 
 static ssize_t ndp_to_end_show(struct device *d, struct device_attribute *attr, char *buf)
 {
@@ -335,7 +335,7 @@ static ssize_t cdc_ncm_show_##name(struct device *d, struct device_attribute *at
 	struct cdc_ncm_ctx *ctx = (struct cdc_ncm_ctx *)dev->data[0]; \
 	return sprintf(buf, format "\n", tocpu(ctx->ncm_parm.name));	\
 } \
-static DEVICE_ATTR(name, S_IRUGO, cdc_ncm_show_##name, NULL)
+static DEVICE_ATTR(name, 0444, cdc_ncm_show_##name, NULL)
 
 NCM_PARM_ATTR(bmNtbFormatsSupported, "0x%04x", le16_to_cpu);
 NCM_PARM_ATTR(dwNtbInMaxSize, "%u", le32_to_cpu);
@@ -742,10 +742,6 @@ static void cdc_ncm_free(struct cdc_ncm_ctx *ctx)
 int cdc_ncm_change_mtu(struct net_device *net, int new_mtu)
 {
 	struct usbnet *dev = netdev_priv(net);
-	int maxmtu = cdc_ncm_max_dgram_size(dev) - cdc_ncm_eth_hlen(dev);
-
-	if (new_mtu <= 0 || new_mtu > maxmtu)
-		return -EINVAL;
 
 	net->mtu = new_mtu;
 	cdc_ncm_set_dgram_size(dev, new_mtu + cdc_ncm_eth_hlen(dev));
@@ -759,8 +755,8 @@ static const struct net_device_ops cdc_ncm_netdev_ops = {
 	.ndo_stop	     = usbnet_stop,
 	.ndo_start_xmit	     = usbnet_start_xmit,
 	.ndo_tx_timeout	     = usbnet_tx_timeout,
-	.ndo_change_mtu_rh74 = cdc_ncm_change_mtu,
 	.ndo_get_stats64     = usbnet_get_stats64,
+	.ndo_change_mtu	     = cdc_ncm_change_mtu,
 	.ndo_set_mac_address = eth_mac_addr,
 	.ndo_validate_addr   = eth_validate_addr,
 };
@@ -944,6 +940,7 @@ int cdc_ncm_bind_common(struct usbnet *dev, struct usb_interface *intf, u8 data_
 
 	/* must handle MTU changes */
 	dev->net->netdev_ops = &cdc_ncm_netdev_ops;
+	dev->net->max_mtu = cdc_ncm_max_dgram_size(dev) - cdc_ncm_eth_hlen(dev);
 
 	return 0;
 
@@ -1346,7 +1343,7 @@ static void cdc_ncm_tx_timeout_start(struct cdc_ncm_ctx *ctx)
 	/* start timer, if not already started */
 	if (!(hrtimer_active(&ctx->tx_timer) || atomic_read(&ctx->stop)))
 		hrtimer_start(&ctx->tx_timer,
-				ktime_set(0, ctx->timer_interval),
+				ctx->timer_interval,
 				HRTIMER_MODE_REL);
 }
 

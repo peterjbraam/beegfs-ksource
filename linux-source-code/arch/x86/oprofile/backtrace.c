@@ -92,7 +92,7 @@ x86_backtrace(struct pt_regs * const regs, unsigned int depth)
 {
 	struct stack_frame *head = (struct stack_frame *)frame_pointer(regs);
 
-	if (!user_mode_vm(regs)) {
+	if (!user_mode(regs)) {
 		struct unwind_state state;
 		unsigned long addr;
 

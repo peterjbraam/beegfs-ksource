@@ -84,7 +84,7 @@ struct amdgpu_mn {
 
 	/* objects protected by lock */
 	struct rw_semaphore	lock;
-	struct rb_root		objects;
+	struct rb_root_cached	objects;
 	struct mutex		read_lock;
 	atomic_t		recursion;
 };
@@ -120,7 +120,7 @@ static void amdgpu_mn_destroy(struct work_struct *work)
 	down_write(&amn->lock);
 	hash_del(&amn->node);
 	rbtree_postorder_for_each_entry_safe(node, next_node,
-					     &amn->objects, it.rb) {
+					     &amn->objects.rb_root, it.rb) {
 		list_for_each_entry_safe(bo, next_bo, &node->bos, mn_list) {
 			bo->mn = NULL;
 			list_del_init(&bo->mn_list);
@@ -243,31 +243,38 @@ static void amdgpu_mn_invalidate_node(struct amdgpu_mn_node *node,
  * Block for operations on BOs to finish and mark pages as accessed and
  * potentially dirty.
  */
-static void amdgpu_mn_invalidate_range_start_gfx(struct mmu_notifier *mn,
-						 struct mm_struct *mm,
-						 unsigned long start,
-						 unsigned long end)
+static int amdgpu_mn_invalidate_range_start_gfx(struct mmu_notifier *mn,
+			const struct mmu_notifier_range *range)
 {
 	struct amdgpu_mn *amn = container_of(mn, struct amdgpu_mn, mn);
 	struct interval_tree_node *it;
+	unsigned long end;
 
 	/* notification is exclusive, but interval is inclusive */
-	end -= 1;
+	end = range->end - 1;
 
 	/* TODO we should be able to split locking for interval tree and
 	 * amdgpu_mn_invalidate_node
 	 */
-	amdgpu_mn_read_lock(amn, true);
+	if (amdgpu_mn_read_lock(amn, range->blockable))
+		return -EAGAIN;
 
-	it = interval_tree_iter_first(&amn->objects, start, end);
+	it = interval_tree_iter_first(&amn->objects, range->start, end);
 	while (it) {
 		struct amdgpu_mn_node *node;
 
-		node = container_of(it, struct amdgpu_mn_node, it);
-		it = interval_tree_iter_next(it, start, end);
+		if (!range->blockable) {
+			amdgpu_mn_read_unlock(amn);
+			return -EAGAIN;
+		}
 
-		amdgpu_mn_invalidate_node(node, start, end);
+		node = container_of(it, struct amdgpu_mn_node, it);
+		it = interval_tree_iter_next(it, range->start, end);
+
+		amdgpu_mn_invalidate_node(node, range->start, end);
 	}
+
+	return 0;
 }
 
 /**
@@ -282,36 +289,43 @@ static void amdgpu_mn_invalidate_range_start_gfx(struct mmu_notifier *mn,
  * necessitates evicting all user-mode queues of the process. The BOs
  * are restorted in amdgpu_mn_invalidate_range_end_hsa.
  */
-static void amdgpu_mn_invalidate_range_start_hsa(struct mmu_notifier *mn,
-						 struct mm_struct *mm,
-						 unsigned long start,
-						 unsigned long end)
+static int amdgpu_mn_invalidate_range_start_hsa(struct mmu_notifier *mn,
+			const struct mmu_notifier_range *range)
 {
 	struct amdgpu_mn *amn = container_of(mn, struct amdgpu_mn, mn);
 	struct interval_tree_node *it;
+	unsigned long end;
 
 	/* notification is exclusive, but interval is inclusive */
-	end -= 1;
+	end = range->end - 1;
 
-	amdgpu_mn_read_lock(amn, true);
+	if (amdgpu_mn_read_lock(amn, range->blockable))
+		return -EAGAIN;
 
-	it = interval_tree_iter_first(&amn->objects, start, end);
+	it = interval_tree_iter_first(&amn->objects, range->start, end);
 	while (it) {
 		struct amdgpu_mn_node *node;
 		struct amdgpu_bo *bo;
 
+		if (!range->blockable) {
+			amdgpu_mn_read_unlock(amn);
+			return -EAGAIN;
+		}
+
 		node = container_of(it, struct amdgpu_mn_node, it);
-		it = interval_tree_iter_next(it, start, end);
+		it = interval_tree_iter_next(it, range->start, end);
 
 		list_for_each_entry(bo, &node->bos, mn_list) {
 			struct kgd_mem *mem = bo->kfd_bo;
 
 			if (amdgpu_ttm_tt_affect_userptr(bo->tbo.ttm,
-							 start,
+							 range->start,
 							 end))
-				amdgpu_amdkfd_evict_userptr(mem, mm);
+				amdgpu_amdkfd_evict_userptr(mem, range->mm);
 		}
 	}
+
+	return 0;
 }
 
 /**
@@ -325,9 +339,7 @@ static void amdgpu_mn_invalidate_range_start_hsa(struct mmu_notifier *mn,
  * Release the lock again to allow new command submissions.
  */
 static void amdgpu_mn_invalidate_range_end(struct mmu_notifier *mn,
-					   struct mm_struct *mm,
-					   unsigned long start,
-					   unsigned long end)
+			const struct mmu_notifier_range *range)
 {
 	struct amdgpu_mn *amn = container_of(mn, struct amdgpu_mn, mn);
 
@@ -390,7 +402,7 @@ struct amdgpu_mn *amdgpu_mn_get(struct amdgpu_device *adev,
 	init_rwsem(&amn->lock);
 	amn->type = type;
 	amn->mn.ops = &amdgpu_mn_ops[type];
-	amn->objects = RB_ROOT;
+	amn->objects = RB_ROOT_CACHED;
 	mutex_init(&amn->read_lock);
 	atomic_set(&amn->recursion, 0);
 

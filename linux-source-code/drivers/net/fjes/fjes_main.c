@@ -99,7 +99,6 @@ static struct acpi_driver fjes_acpi_driver = {
 static struct platform_driver fjes_driver = {
 	.driver = {
 		.name = DRV_NAME,
-		.owner = THIS_MODULE,
 	},
 	.probe = fjes_probe,
 	.remove = fjes_remove,
@@ -271,7 +270,7 @@ static const struct net_device_ops fjes_netdev_ops = {
 	.ndo_stop		= fjes_close,
 	.ndo_start_xmit		= fjes_xmit_frame,
 	.ndo_get_stats64	= fjes_get_stats64,
-	.ndo_change_mtu_rh74	= fjes_change_mtu,
+	.ndo_change_mtu		= fjes_change_mtu,
 	.ndo_tx_timeout		= fjes_tx_retry,
 	.ndo_vlan_rx_add_vid	= fjes_vlan_rx_add_vid,
 	.ndo_vlan_rx_kill_vid = fjes_vlan_rx_kill_vid,
@@ -1157,8 +1156,7 @@ static int fjes_poll(struct napi_struct *napi, int budget)
 				hw->ep_shm_info[cur_epid].net_stats
 							 .rx_errors += 1;
 			} else {
-				memcpy(skb_put(skb, frame_len),
-				       frame, frame_len);
+				skb_put_data(skb, frame, frame_len);
 				skb->protocol = eth_type_trans(skb, netdev);
 				skb->ip_summed = CHECKSUM_UNNECESSARY;
 
@@ -1189,7 +1187,7 @@ static int fjes_poll(struct napi_struct *napi, int budget)
 	}
 
 	if (work_done < budget) {
-		napi_complete(napi);
+		napi_complete_done(napi, work_done);
 
 		if (adapter->unset_rx_last) {
 			adapter->rx_last_jiffies = jiffies;
@@ -1229,7 +1227,7 @@ static int fjes_probe(struct platform_device *plat_dev)
 
 	err = -ENOMEM;
 	netdev = alloc_netdev_mq(sizeof(struct fjes_adapter), "es%d",
-				 fjes_netdev_setup,
+				 NET_NAME_UNKNOWN, fjes_netdev_setup,
 				 FJES_MAX_QUEUES);
 
 	if (!netdev)
@@ -1347,7 +1345,8 @@ static void fjes_netdev_setup(struct net_device *netdev)
 	netdev->netdev_ops = &fjes_netdev_ops;
 	fjes_set_ethtool_ops(netdev);
 	netdev->mtu = fjes_support_mtu[3];
-	netdev->flags |= IFF_BROADCAST;
+	netdev->min_mtu = fjes_support_mtu[0];
+	netdev->max_mtu = fjes_support_mtu[3];
 	netdev->features |= NETIF_F_HW_VLAN_CTAG_FILTER;
 }
 

@@ -26,9 +26,11 @@ endif
 
 ifneq ($(OUTPUT),)
 # check that the output directory actually exists
-OUTDIR := $(shell cd $(OUTPUT) && /bin/pwd)
+OUTDIR := $(shell cd $(OUTPUT) && pwd)
 $(if $(OUTDIR),, $(error output directory "$(OUTPUT)" does not exist))
 endif
+
+include ../../scripts/Makefile.arch
 
 # --- CONFIGURATION BEGIN ---
 
@@ -63,7 +65,7 @@ DESTDIR ?=
 # and _should_ modify the PACKAGE_BUGREPORT definition
 
 VERSION=			$(shell ./utils/version-gen.sh)
-LIB_MAJ=			0.0.0
+LIB_MAJ=			0.0.1
 LIB_MIN=			0
 
 PACKAGE =			cpupower
@@ -79,7 +81,11 @@ bindir ?=	/usr/bin
 sbindir ?=	/usr/sbin
 mandir ?=	/usr/man
 includedir ?=	/usr/include
+ifeq ($(IS_64_BIT), 1)
+libdir ?=	/usr/lib64
+else
 libdir ?=	/usr/lib
+endif
 localedir ?=	/usr/share/locale
 docdir ?=       /usr/share/doc/packages/cpupower
 confdir ?=      /etc/
@@ -123,10 +129,10 @@ WARNINGS += $(call cc-supports,-Wno-pointer-sign)
 WARNINGS += $(call cc-supports,-Wdeclaration-after-statement)
 WARNINGS += -Wshadow
 
-CFLAGS += -DVERSION=\"$(VERSION)\" -DPACKAGE=\"$(PACKAGE)\" \
+override CFLAGS += -DVERSION=\"$(VERSION)\" -DPACKAGE=\"$(PACKAGE)\" \
 		-DPACKAGE_BUGREPORT=\"$(PACKAGE_BUGREPORT)\" -D_GNU_SOURCE
 
-UTIL_OBJS =  utils/helpers/amd.o utils/helpers/topology.o utils/helpers/msr.o \
+UTIL_OBJS =  utils/helpers/amd.o utils/helpers/msr.o \
 	utils/helpers/sysfs.o utils/helpers/misc.o utils/helpers/cpuid.o \
 	utils/helpers/pci.o utils/helpers/bitmask.o \
 	utils/idle_monitor/nhm_idle.o utils/idle_monitor/snb_idle.o \
@@ -145,17 +151,17 @@ UTIL_HEADERS = utils/helpers/helpers.h utils/idle_monitor/cpupower-monitor.h \
 	utils/helpers/bitmask.h \
 	utils/idle_monitor/idle_monitors.h utils/idle_monitor/idle_monitors.def
 
-LIB_HEADERS = 	lib/cpufreq.h lib/sysfs.h
-LIB_SRC = 	lib/cpufreq.c lib/sysfs.c
-LIB_OBJS = 	lib/cpufreq.o lib/sysfs.o
+LIB_HEADERS = 	lib/cpufreq.h lib/cpupower.h lib/cpuidle.h
+LIB_SRC = 	lib/cpufreq.c lib/cpupower.c lib/cpuidle.c
+LIB_OBJS = 	lib/cpufreq.o lib/cpupower.o lib/cpuidle.o
 LIB_OBJS :=	$(addprefix $(OUTPUT),$(LIB_OBJS))
 
-CFLAGS +=	-pipe
+override CFLAGS +=	-pipe
 
 ifeq ($(strip $(NLS)),true)
 	INSTALL_NLS += install-gmo
 	COMPILE_NLS += create-gmo
-	CFLAGS += -DNLS
+	override CFLAGS += -DNLS
 endif
 
 ifeq ($(strip $(CPUFREQ_BENCH)),true)
@@ -169,7 +175,7 @@ ifeq ($(strip $(STATIC)),true)
         UTIL_SRC += $(LIB_SRC)
 endif
 
-CFLAGS += $(WARNINGS)
+override CFLAGS += $(WARNINGS)
 
 ifeq ($(strip $(V)),false)
 	QUIET=@
@@ -182,10 +188,10 @@ export QUIET ECHO
 
 # if DEBUG is enabled, then we do not strip or optimize
 ifeq ($(strip $(DEBUG)),true)
-	CFLAGS += -O1 -g -DDEBUG
+	override CFLAGS += -O1 -g -DDEBUG
 	STRIPCMD = /bin/true -Since_we_are_debugging
 else
-	CFLAGS += $(OPTIMIZATION) -fomit-frame-pointer
+	override CFLAGS += $(OPTIMIZATION) -fomit-frame-pointer
 	STRIPCMD = $(STRIP) -s --remove-section=.note --remove-section=.comment
 endif
 
@@ -277,6 +283,7 @@ install-lib:
 	$(CP) $(OUTPUT)libcpupower.so* $(DESTDIR)${libdir}/
 	$(INSTALL) -d $(DESTDIR)${includedir}
 	$(INSTALL_DATA) lib/cpufreq.h $(DESTDIR)${includedir}/cpufreq.h
+	$(INSTALL_DATA) lib/cpuidle.h $(DESTDIR)${includedir}/cpuidle.h
 
 install-tools:
 	$(INSTALL) -d $(DESTDIR)${bindir}
@@ -312,6 +319,7 @@ endif
 uninstall:
 	- rm -f $(DESTDIR)${libdir}/libcpupower.*
 	- rm -f $(DESTDIR)${includedir}/cpufreq.h
+	- rm -f $(DESTDIR)${includedir}/cpuidle.h
 	- rm -f $(DESTDIR)${bindir}/utils/cpupower
 	- rm -f $(DESTDIR)${mandir}/man1/cpupower.1
 	- rm -f $(DESTDIR)${mandir}/man1/cpupower-frequency-set.1

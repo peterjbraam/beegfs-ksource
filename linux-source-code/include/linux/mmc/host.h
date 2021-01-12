@@ -10,21 +10,19 @@
 #ifndef LINUX_MMC_HOST_H
 #define LINUX_MMC_HOST_H
 
-#include <linux/leds.h>
-#include <linux/mutex.h>
-#include <linux/timer.h>
 #include <linux/sched.h>
 #include <linux/device.h>
 #include <linux/fault-inject.h>
 
 #include <linux/mmc/core.h>
 #include <linux/mmc/card.h>
-#include <linux/mmc/mmc.h>
 #include <linux/mmc/pm.h>
+#include <linux/dma-direction.h>
 
 struct mmc_ios {
 	unsigned int	clock;			/* clock rate */
 	unsigned short	vdd;
+	unsigned int	power_delay_ms;		/* waiting for stable power */
 
 /* vdd stores the bit number of the selected voltage range from below. */
 
@@ -81,6 +79,8 @@ struct mmc_ios {
 
 	bool enhanced_strobe;			/* hs400es selection */
 };
+
+struct mmc_host;
 
 struct mmc_host_ops {
 	/*
@@ -162,9 +162,6 @@ struct mmc_host_ops {
 	int	(*multi_io_quirk)(struct mmc_card *card,
 				  unsigned int direction, int blk_size);
 };
-
-struct mmc_card;
-struct device;
 
 struct mmc_cqe_ops {
 	/* Allocate resources, and make the CQE operational */
@@ -252,6 +249,7 @@ struct mmc_context_info {
 };
 
 struct regulator;
+struct mmc_pwrseq;
 
 struct mmc_supply {
 	struct regulator *vmmc;		/* Card power supply */
@@ -267,6 +265,7 @@ struct mmc_host {
 	struct device		class_dev;
 	int			index;
 	const struct mmc_host_ops *ops;
+	struct mmc_pwrseq	*pwrseq;
 	unsigned int		f_min;
 	unsigned int		f_max;
 	unsigned int		f_init;
@@ -322,6 +321,9 @@ struct mmc_host {
 #define MMC_CAP_UHS_SDR50	(1 << 18)	/* Host supports UHS SDR50 mode */
 #define MMC_CAP_UHS_SDR104	(1 << 19)	/* Host supports UHS SDR104 mode */
 #define MMC_CAP_UHS_DDR50	(1 << 20)	/* Host supports UHS DDR50 mode */
+#define MMC_CAP_UHS		(MMC_CAP_UHS_SDR12 | MMC_CAP_UHS_SDR25 | \
+				 MMC_CAP_UHS_SDR50 | MMC_CAP_UHS_SDR104 | \
+				 MMC_CAP_UHS_DDR50)
 /* (1 << 21) is free for reuse */
 #define MMC_CAP_DRIVER_TYPE_A	(1 << 23)	/* Host supports Driver Type A */
 #define MMC_CAP_DRIVER_TYPE_C	(1 << 24)	/* Host supports Driver Type C */
@@ -347,6 +349,7 @@ struct mmc_host {
 #define MMC_CAP2_HS400_1_2V	(1 << 16)	/* Can support HS400 1.2V */
 #define MMC_CAP2_HS400		(MMC_CAP2_HS400_1_8V | \
 				 MMC_CAP2_HS400_1_2V)
+#define MMC_CAP2_HSX00_1_8V	(MMC_CAP2_HS200_1_8V_SDR | MMC_CAP2_HS400_1_8V)
 #define MMC_CAP2_HSX00_1_2V	(MMC_CAP2_HS200_1_2V_SDR | MMC_CAP2_HS400_1_2V)
 #define MMC_CAP2_SDIO_IRQ_NOTHREAD (1 << 17)
 #define MMC_CAP2_NO_WRITE_PROTECT (1 << 18)	/* No physical write protect pin, assume that card is always read-write */
@@ -356,6 +359,9 @@ struct mmc_host {
 #define MMC_CAP2_NO_MMC		(1 << 22)	/* Do not send (e)MMC commands during initialization */
 #define MMC_CAP2_CQE		(1 << 23)	/* Has eMMC command queue engine */
 #define MMC_CAP2_CQE_DCMD	(1 << 24)	/* CQE can issue a direct command */
+#define MMC_CAP2_AVOID_3_3V	(1 << 25)	/* Host must negotiate down from 3.3V */
+
+	int			fixed_drv_type;	/* fixed driver type for non-removable media */
 
 	mmc_pm_flag_t		pm_caps;	/* supported pm features */
 
@@ -382,6 +388,7 @@ struct mmc_host {
 	unsigned int		retune_now:1;	/* do re-tuning at next req */
 	unsigned int		retune_paused:1; /* re-tuning is temporarily disabled */
 	unsigned int		use_blk_mq:1;	/* use blk-mq */
+	unsigned int		retune_crc_disable:1; /* don't trigger retune upon crc */
 
 	int			rescan_disable;	/* disable card detection */
 	int			rescan_entered;	/* used with nonremovable devices */
@@ -448,11 +455,14 @@ struct mmc_host {
 	unsigned long		private[0] ____cacheline_aligned;
 };
 
+struct device_node;
+
 struct mmc_host *mmc_alloc_host(int extra, struct device *);
 int mmc_add_host(struct mmc_host *);
 void mmc_remove_host(struct mmc_host *);
 void mmc_free_host(struct mmc_host *);
 int mmc_of_parse(struct mmc_host *host);
+int mmc_of_parse_voltage(struct device_node *np, u32 *mask);
 
 static inline void *mmc_priv(struct mmc_host *host)
 {
@@ -511,6 +521,7 @@ static inline int mmc_regulator_set_vqmmc(struct mmc_host *mmc,
 }
 #endif
 
+u32 mmc_vddrange_to_ocrmask(int vdd_min, int vdd_max);
 int mmc_regulator_get_supply(struct mmc_host *mmc);
 
 static inline int mmc_card_is_removable(struct mmc_host *host)
@@ -554,5 +565,13 @@ static inline bool mmc_can_retune(struct mmc_host *host)
 {
 	return host->can_retune == 1;
 }
+
+static inline enum dma_data_direction mmc_get_dma_dir(struct mmc_data *data)
+{
+	return data->flags & MMC_DATA_WRITE ? DMA_TO_DEVICE : DMA_FROM_DEVICE;
+}
+
+int mmc_send_tuning(struct mmc_host *host, u32 opcode, int *cmd_error);
+int mmc_abort_tuning(struct mmc_host *host, u32 opcode);
 
 #endif /* LINUX_MMC_HOST_H */

@@ -119,10 +119,8 @@ enum i40e_dyn_idx_t {
 #define I40E_PACKET_HDR_PAD (ETH_HLEN + ETH_FCS_LEN + (VLAN_HLEN * 2))
 #define i40e_rx_desc i40e_32byte_rx_desc
 
-#if 0 /* cannot use combined I40E_RX_DMA_ATTR in RHEL7 */
 #define I40E_RX_DMA_ATTR \
 	(DMA_ATTR_SKIP_CPU_SYNC | DMA_ATTR_WEAK_ORDERING)
-#endif
 
 /* Attempt to maximize the headroom available for incoming frames.  We
  * use a 2K buffer for receives and need 1536/1534 to store the data for
@@ -523,7 +521,7 @@ static inline u32 i40e_get_head(struct i40e_ring *tx_ring)
  **/
 static inline int i40e_xmit_descriptor_count(struct sk_buff *skb)
 {
-	const skb_frag_t *frag = &skb_shinfo(skb)->frags[0];
+	const struct skb_frag_struct *frag = &skb_shinfo(skb)->frags[0];
 	unsigned int nr_frags = skb_shinfo(skb)->nr_frags;
 	int count = 0, size = skb_headlen(skb);
 

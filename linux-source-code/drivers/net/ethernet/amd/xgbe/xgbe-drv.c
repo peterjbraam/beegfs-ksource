@@ -2486,7 +2486,6 @@ static netdev_features_t xgbe_features_check(struct sk_buff *skb,
 }
 
 static const struct net_device_ops xgbe_netdev_ops = {
-	.ndo_size		= sizeof(struct net_device_ops),
 	.ndo_open		= xgbe_open,
 	.ndo_stop		= xgbe_close,
 	.ndo_start_xmit		= xgbe_xmit,
@@ -2494,7 +2493,7 @@ static const struct net_device_ops xgbe_netdev_ops = {
 	.ndo_set_mac_address	= xgbe_set_mac_address,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_do_ioctl		= xgbe_ioctl,
-	.extended.ndo_change_mtu = xgbe_change_mtu,
+	.ndo_change_mtu		= xgbe_change_mtu,
 	.ndo_tx_timeout		= xgbe_tx_timeout,
 	.ndo_get_stats64	= xgbe_get_stats64,
 	.ndo_vlan_rx_add_vid	= xgbe_vlan_rx_add_vid,
@@ -2502,11 +2501,11 @@ static const struct net_device_ops xgbe_netdev_ops = {
 #ifdef CONFIG_NET_POLL_CONTROLLER
 	.ndo_poll_controller	= xgbe_poll_controller,
 #endif
-	.extended.ndo_setup_tc_rh = xgbe_setup_tc,
+	.ndo_setup_tc		= xgbe_setup_tc,
 	.ndo_fix_features	= xgbe_fix_features,
 	.ndo_set_features	= xgbe_set_features,
-	.extended.ndo_udp_tunnel_add = xgbe_udp_tunnel_add,
-	.extended.ndo_udp_tunnel_del = xgbe_udp_tunnel_del,
+	.ndo_udp_tunnel_add	= xgbe_udp_tunnel_add,
+	.ndo_udp_tunnel_del	= xgbe_udp_tunnel_del,
 	.ndo_features_check	= xgbe_features_check,
 };
 

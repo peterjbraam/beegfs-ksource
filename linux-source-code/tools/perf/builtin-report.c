@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * builtin-report.c
  *
@@ -84,6 +85,7 @@ struct report {
 	int			socket_filter;
 	DECLARE_BITMAP(cpu_bitmap, MAX_NR_CPUS);
 	struct branch_type_stat	brtype_stat;
+	bool			symbol_ipc;
 };
 
 static int report__config(const char *var, const char *value, void *cb)
@@ -128,7 +130,7 @@ static int hist_iter__report_callback(struct hist_entry_iter *iter,
 	struct mem_info *mi;
 	struct branch_info *bi;
 
-	if (!ui__has_annotation())
+	if (!ui__has_annotation() && !rep->symbol_ipc)
 		return 0;
 
 	hist__account_cycles(sample->branch_stack, al, sample,
@@ -173,7 +175,7 @@ static int hist_iter__branch_callback(struct hist_entry_iter *iter,
 	struct perf_evsel *evsel = iter->evsel;
 	int err;
 
-	if (!ui__has_annotation())
+	if (!ui__has_annotation() && !rep->symbol_ipc)
 		return 0;
 
 	hist__account_cycles(sample->branch_stack, al, sample,
@@ -968,6 +970,7 @@ int cmd_report(int argc, const char **argv)
 			.mmap		 = perf_event__process_mmap,
 			.mmap2		 = perf_event__process_mmap2,
 			.comm		 = perf_event__process_comm,
+			.namespaces	 = perf_event__process_namespaces,
 			.exit		 = perf_event__process_exit,
 			.fork		 = perf_event__process_fork,
 			.lost		 = perf_event__process_lost,
@@ -983,7 +986,7 @@ int cmd_report(int argc, const char **argv)
 			.ordered_events	 = true,
 			.ordering_requires_timestamps = true,
 		},
-		.max_stack		 = sysctl_perf_event_max_stack,
+		.max_stack		 = PERF_MAX_STACK_DEPTH,
 		.pretty_printing_style	 = "normal",
 		.socket_filter		 = -1,
 		.annotation_opts	 = annotation__default_options,
@@ -1131,6 +1134,7 @@ int cmd_report(int argc, const char **argv)
 		.mode  = PERF_DATA_MODE_READ,
 	};
 	int ret = hists__init();
+	char sort_tmp[128];
 
 	if (ret < 0)
 		return ret;
@@ -1282,6 +1286,24 @@ repeat:
 	else
 		use_browser = 0;
 
+	if (sort_order && strstr(sort_order, "ipc")) {
+		parse_options_usage(report_usage, options, "s", 1);
+		goto error;
+	}
+
+	if (sort_order && strstr(sort_order, "symbol")) {
+		if (sort__mode == SORT_MODE__BRANCH) {
+			snprintf(sort_tmp, sizeof(sort_tmp), "%s,%s",
+				 sort_order, "ipc_lbr");
+			report.symbol_ipc = true;
+		} else {
+			snprintf(sort_tmp, sizeof(sort_tmp), "%s,%s",
+				 sort_order, "ipc_null");
+		}
+
+		sort_order = sort_tmp;
+	}
+
 	if (setup_sorting(session->evlist) < 0) {
 		if (sort_order)
 			parse_options_usage(report_usage, options, "s", 1);
@@ -1309,7 +1331,7 @@ repeat:
 	 * so don't allocate extra space that won't be used in the stdio
 	 * implementation.
 	 */
-	if (ui__has_annotation()) {
+	if (ui__has_annotation() || report.symbol_ipc) {
 		ret = symbol__annotation_init();
 		if (ret < 0)
 			goto error;
@@ -1367,9 +1389,9 @@ repeat:
 	}
 
 	if (session->tevent.pevent &&
-	    pevent_set_function_resolver(session->tevent.pevent,
-					 machine__resolve_kernel_addr,
-					 &session->machines.host) < 0) {
+	    tep_set_function_resolver(session->tevent.pevent,
+				      machine__resolve_kernel_addr,
+				      &session->machines.host) < 0) {
 		pr_err("%s: failed to set libtraceevent function resolver\n",
 		       __func__);
 		return -1;

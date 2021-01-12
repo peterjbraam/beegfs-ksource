@@ -244,7 +244,7 @@ static void mlx4_en_remove(struct mlx4_dev *dev, void *endev_ptr)
 	mlx4_uar_free(dev, &mdev->priv_uar);
 	mlx4_pd_free(dev, mdev->priv_pdn);
 	if (mdev->nb.notifier_call)
-		unregister_netdevice_notifier_rh(&mdev->nb);
+		unregister_netdevice_notifier(&mdev->nb);
 	kfree(mdev);
 }
 
@@ -262,7 +262,7 @@ static void mlx4_en_activate(struct mlx4_dev *dev, void *ctx)
 
 	/* register notifier */
 	mdev->nb.notifier_call = mlx4_en_netdev_event;
-	if (register_netdevice_notifier_rh(&mdev->nb)) {
+	if (register_netdevice_notifier(&mdev->nb)) {
 		mdev->nb.notifier_call = NULL;
 		mlx4_err(mdev, "Failed to create notifier\n");
 	}
@@ -333,8 +333,6 @@ static void *mlx4_en_add(struct mlx4_dev *dev)
 	 * mark the card state as up */
 	mutex_init(&mdev->state_lock);
 	mdev->device_up = true;
-
-	/* Setup ports */
 
 	return mdev;
 

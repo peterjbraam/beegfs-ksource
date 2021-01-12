@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Common code for low-level network console, dump, and debugger code
  *
@@ -11,6 +12,7 @@
 #include <linux/interrupt.h>
 #include <linux/rcupdate.h>
 #include <linux/list.h>
+#include <linux/refcount.h>
 
 union inet_addr {
 	__u32		all[4];
@@ -24,26 +26,20 @@ struct netpoll {
 	struct net_device *dev;
 	char dev_name[IFNAMSIZ];
 	const char *name;
-	void (*rx_hook)(struct netpoll *, int, char *, int);
 
 	union inet_addr local_ip, remote_ip;
 	bool ipv6;
 	u16 local_port, remote_port;
 	u8 remote_mac[ETH_ALEN];
 
-	struct list_head rx; /* rx_np list element */
 	struct work_struct cleanup_work;
 };
 
 struct netpoll_info {
-	atomic_t refcnt;
+	refcount_t refcnt;
 
-	unsigned long rx_flags;
-	spinlock_t rx_lock;
 	struct semaphore dev_lock;
-	struct list_head rx_np; /* netpolls that registered an rx_hook */
 
-	struct sk_buff_head neigh_tx; /* list of neigh requests to reply to */
 	struct sk_buff_head txq;
 
 	struct delayed_work tx_work;

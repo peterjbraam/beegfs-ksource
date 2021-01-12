@@ -95,7 +95,7 @@ static netdev_tx_t opa_netdev_start_xmit(struct sk_buff *skb,
 }
 
 static u16 opa_vnic_select_queue(struct net_device *netdev, struct sk_buff *skb,
-				 void *accel_priv,
+				 struct net_device *sb_dev,
 				 select_queue_fallback_t fallback)
 {
 	struct opa_vnic_adapter *adapter = opa_vnic_priv(netdev);
@@ -104,10 +104,10 @@ static u16 opa_vnic_select_queue(struct net_device *netdev, struct sk_buff *skb,
 
 	/* pass entropy and vl as metadata in skb */
 	mdata = skb_push(skb, sizeof(*mdata));
-	mdata->entropy =  opa_vnic_calc_entropy(adapter, skb);
+	mdata->entropy = opa_vnic_calc_entropy(skb);
 	mdata->vl = opa_vnic_get_vl(adapter, skb);
 	rc = adapter->rn_ops->ndo_select_queue(netdev, skb,
-					       accel_priv, fallback);
+					       sb_dev, fallback);
 	skb_pull(skb, sizeof(*mdata));
 	return rc;
 }
@@ -161,10 +161,10 @@ void opa_vnic_process_vema_config(struct opa_vnic_adapter *adapter)
 
 	/* Handle MTU limit change */
 	rtnl_lock();
-	netdev->extended->max_mtu = max_t(unsigned int, info->vesw.eth_mtu,
-				netdev->extended->min_mtu);
-	if (netdev->mtu > netdev->extended->max_mtu)
-		dev_set_mtu(netdev, netdev->extended->max_mtu);
+	netdev->max_mtu = max_t(unsigned int, info->vesw.eth_mtu,
+				netdev->min_mtu);
+	if (netdev->mtu > netdev->max_mtu)
+		dev_set_mtu(netdev, netdev->max_mtu);
 	rtnl_unlock();
 
 	/* Update flow to default port redirection table */
@@ -330,10 +330,10 @@ struct opa_vnic_adapter *opa_vnic_add_netdev(struct ib_device *ibdev,
 	struct rdma_netdev *rn;
 	int rc;
 
-	netdev = ibdev->alloc_rdma_netdev(ibdev, port_num,
-					  RDMA_NETDEV_OPA_VNIC,
-					  "veth%d", 0,	/* NET_NAME_UNKNOWN, */
-					  ether_setup);
+	netdev = ibdev->ops.alloc_rdma_netdev(ibdev, port_num,
+					      RDMA_NETDEV_OPA_VNIC,
+					      "veth%d", NET_NAME_UNKNOWN,
+					      ether_setup);
 	if (!netdev)
 		return ERR_PTR(-ENOMEM);
 	else if (IS_ERR(netdev))

@@ -1168,9 +1168,6 @@ static void e1000e_tx_hwtstamp_work(struct work_struct *work)
 						     tx_hwtstamp_work);
 	struct e1000_hw *hw = &adapter->hw;
 
-	if (!adapter->tx_hwtstamp_skb)
-		return;
-
 	if (er32(TSYNCTXCTL) & E1000_TSYNCTXCTL_VALID) {
 		struct sk_buff *skb = adapter->tx_hwtstamp_skb;
 		struct skb_shared_hwtstamps shhwtstamps;
@@ -2109,7 +2106,7 @@ static int e1000_request_msix(struct e1000_adapter *adapter)
 	if (strlen(netdev->name) < (IFNAMSIZ - 5))
 		snprintf(adapter->rx_ring->name,
 			 sizeof(adapter->rx_ring->name) - 1,
-			 "%s-rx-0", netdev->name);
+			 "%.14s-rx-0", netdev->name);
 	else
 		memcpy(adapter->rx_ring->name, netdev->name, IFNAMSIZ);
 	err = request_irq(adapter->msix_entries[vector].vector,
@@ -2125,7 +2122,7 @@ static int e1000_request_msix(struct e1000_adapter *adapter)
 	if (strlen(netdev->name) < (IFNAMSIZ - 5))
 		snprintf(adapter->tx_ring->name,
 			 sizeof(adapter->tx_ring->name) - 1,
-			 "%s-tx-0", netdev->name);
+			 "%.14s-tx-0", netdev->name);
 	else
 		memcpy(adapter->tx_ring->name, netdev->name, IFNAMSIZ);
 	err = request_irq(adapter->msix_entries[vector].vector,
@@ -4323,13 +4320,16 @@ void e1000e_reinit_locked(struct e1000_adapter *adapter)
 /**
  * e1000e_sanitize_systim - sanitize raw cycle counter reads
  * @hw: pointer to the HW structure
- * @systim: time value read, sanitized and returned
+ * @systim: PHC time value read, sanitized and returned
+ * @sts: structure to hold system time before and after reading SYSTIML,
+ * may be NULL
  *
  * Errata for 82574/82583 possible bad bits read from SYSTIMH/L:
  * check to see that the time is incrementing at a reasonable
  * rate and is a multiple of incvalue.
  **/
-static u64 e1000e_sanitize_systim(struct e1000_hw *hw, u64 systim)
+static u64 e1000e_sanitize_systim(struct e1000_hw *hw, u64 systim,
+				  struct ptp_system_timestamp *sts)
 {
 	u64 time_delta, rem, temp;
 	u64 systim_next;
@@ -4339,7 +4339,9 @@ static u64 e1000e_sanitize_systim(struct e1000_hw *hw, u64 systim)
 	incvalue = er32(TIMINCA) & E1000_TIMINCA_INCVALUE_MASK;
 	for (i = 0; i < E1000_MAX_82574_SYSTIM_REREADS; i++) {
 		/* latch SYSTIMH on read of SYSTIML */
+		ptp_read_system_prets(sts);
 		systim_next = (u64)er32(SYSTIML);
+		ptp_read_system_postts(sts);
 		systim_next |= (u64)er32(SYSTIMH) << 32;
 
 		time_delta = systim_next - systim;
@@ -4357,15 +4359,16 @@ static u64 e1000e_sanitize_systim(struct e1000_hw *hw, u64 systim)
 }
 
 /**
- * e1000e_cyclecounter_read - read raw cycle counter (used by time counter)
- * @cc: cyclecounter structure
+ * e1000e_read_systim - read SYSTIM register
+ * @adapter: board private structure
+ * @sts: structure which will contain system time before and after reading
+ * SYSTIML, may be NULL
  **/
-static u64 e1000e_cyclecounter_read(const struct cyclecounter *cc)
+u64 e1000e_read_systim(struct e1000_adapter *adapter,
+		       struct ptp_system_timestamp *sts)
 {
-	struct e1000_adapter *adapter = container_of(cc, struct e1000_adapter,
-						     cc);
 	struct e1000_hw *hw = &adapter->hw;
-	u32 systimel, systimeh;
+	u32 systimel, systimel_2, systimeh;
 	u64 systim;
 	/* SYSTIMH latching upon SYSTIML read does not work well.
 	 * This means that if SYSTIML overflows after we read it but before
@@ -4373,11 +4376,15 @@ static u64 e1000e_cyclecounter_read(const struct cyclecounter *cc)
 	 * will experience a huge non linear increment in the systime value
 	 * to fix that we test for overflow and if true, we re-read systime.
 	 */
+	ptp_read_system_prets(sts);
 	systimel = er32(SYSTIML);
+	ptp_read_system_postts(sts);
 	systimeh = er32(SYSTIMH);
 	/* Is systimel is so large that overflow is possible? */
 	if (systimel >= (u32)0xffffffff - E1000_TIMINCA_INCVALUE_MASK) {
-		u32 systimel_2 = er32(SYSTIML);
+		ptp_read_system_prets(sts);
+		systimel_2 = er32(SYSTIML);
+		ptp_read_system_postts(sts);
 		if (systimel > systimel_2) {
 			/* There was an overflow, read again SYSTIMH, and use
 			 * systimel_2
@@ -4390,9 +4397,21 @@ static u64 e1000e_cyclecounter_read(const struct cyclecounter *cc)
 	systim |= (u64)systimeh << 32;
 
 	if (adapter->flags2 & FLAG2_CHECK_SYSTIM_OVERFLOW)
-		systim = e1000e_sanitize_systim(hw, systim);
+		systim = e1000e_sanitize_systim(hw, systim, sts);
 
 	return systim;
+}
+
+/**
+ * e1000e_cyclecounter_read - read raw cycle counter (used by time counter)
+ * @cc: cyclecounter structure
+ **/
+static u64 e1000e_cyclecounter_read(const struct cyclecounter *cc)
+{
+	struct e1000_adapter *adapter = container_of(cc, struct e1000_adapter,
+						     cc);
+
+	return e1000e_read_systim(adapter, NULL);
 }
 
 /**
@@ -4800,9 +4819,9 @@ static void e1000e_update_phy_task(struct work_struct *work)
  * Need to wait a few seconds after link up to get diagnostic information from
  * the phy
  **/
-static void e1000_update_phy_info(unsigned long data)
+static void e1000_update_phy_info(struct timer_list *t)
 {
-	struct e1000_adapter *adapter = (struct e1000_adapter *)data;
+	struct e1000_adapter *adapter = from_timer(adapter, t, phy_info_timer);
 
 	if (test_bit(__E1000_DOWN, &adapter->state))
 		return;
@@ -5136,9 +5155,9 @@ static void e1000e_check_82574_phy_workaround(struct e1000_adapter *adapter)
  * e1000_watchdog - Timer Call-back
  * @data: pointer to adapter cast into an unsigned long
  **/
-static void e1000_watchdog(unsigned long data)
+static void e1000_watchdog(struct timer_list *t)
 {
-	struct e1000_adapter *adapter = (struct e1000_adapter *)data;
+	struct e1000_adapter *adapter = from_timer(adapter, t, watchdog_timer);
 
 	/* Do the rest outside of interrupt context */
 	schedule_work(&adapter->watchdog_task);
@@ -5155,9 +5174,8 @@ static void e1000_watchdog_task(struct work_struct *work)
 	struct e1000_mac_info *mac = &adapter->hw.mac;
 	struct e1000_phy_info *phy = &adapter->hw.phy;
 	struct e1000_ring *tx_ring = adapter->tx_ring;
-	u32 dmoff_exit_timeout = 100, tries = 0;
 	struct e1000_hw *hw = &adapter->hw;
-	u32 link, tctl, pcim_state;
+	u32 link, tctl;
 
 	if (test_bit(__E1000_DOWN, &adapter->state))
 		return;
@@ -5181,21 +5199,6 @@ static void e1000_watchdog_task(struct work_struct *work)
 
 			/* Cancel scheduled suspend requests. */
 			pm_runtime_resume(netdev->dev.parent);
-
-			/* Checking if MAC is in DMoff state*/
-			pcim_state = er32(STATUS);
-			while (pcim_state & E1000_STATUS_PCIM_STATE) {
-				if (tries++ == dmoff_exit_timeout) {
-					e_dbg("Error in exiting dmoff\n");
-					break;
-				}
-				usleep_range(10000, 20000);
-				pcim_state = er32(STATUS);
-
-				/* Checking if MAC exited DMoff state */
-				if (!(pcim_state & E1000_STATUS_PCIM_STATE))
-					e1000_phy_hw_reset(&adapter->hw);
-			}
 
 			/* update snapshot of PHY registers on LSC */
 			e1000_phy_read_status(adapter);
@@ -5306,8 +5309,13 @@ static void e1000_watchdog_task(struct work_struct *work)
 			/* 8000ES2LAN requires a Rx packet buffer work-around
 			 * on link down event; reset the controller to flush
 			 * the Rx packet buffer.
+			 *
+			 * If the link is lost the controller stops DMA, but
+			 * if there is queued Tx work it cannot be done.  So
+			 * reset the controller to flush the Tx packet buffers.
 			 */
-			if (adapter->flags & FLAG_RX_NEEDS_RESTART)
+			if ((adapter->flags & FLAG_RX_NEEDS_RESTART) ||
+			    e1000_desc_unused(tx_ring) + 1 < tx_ring->count)
 				adapter->flags |= FLAG_RESTART_NOW;
 			else
 				pm_schedule_suspend(netdev->dev.parent,
@@ -5329,14 +5337,6 @@ link_up:
 	adapter->gotc = adapter->stats.gotc - adapter->gotc_old;
 	adapter->gotc_old = adapter->stats.gotc;
 	spin_unlock(&adapter->stats64_lock);
-
-	/* If the link is lost the controller stops DMA, but
-	 * if there is queued Tx work it cannot be done.  So
-	 * reset the controller to flush the Tx packet buffers.
-	 */
-	if (!netif_carrier_ok(netdev) &&
-	    (e1000_desc_unused(tx_ring) + 1 < tx_ring->count))
-		adapter->flags |= FLAG_RESTART_NOW;
 
 	/* If reset is necessary, do it outside of interrupt context. */
 	if (adapter->flags & FLAG_RESTART_NOW) {
@@ -5418,16 +5418,14 @@ static int e1000_tso(struct e1000_ring *tx_ring, struct sk_buff *skb,
 	u32 cmd_length = 0;
 	u16 ipcse = 0, mss;
 	u8 ipcss, ipcso, tucss, tucso, hdr_len;
+	int err;
 
 	if (!skb_is_gso(skb))
 		return 0;
 
-	if (skb_header_cloned(skb)) {
-		int err = pskb_expand_head(skb, 0, 0, GFP_ATOMIC);
-
-		if (err)
-			return err;
-	}
+	err = skb_cow_head(skb, 0);
+	if (err < 0)
+		return err;
 
 	hdr_len = skb_transport_offset(skb) + tcp_hdrlen(skb);
 	mss = skb_shinfo(skb)->gso_size;
@@ -5845,7 +5843,8 @@ static netdev_tx_t e1000_xmit_frame(struct sk_buff *skb,
 
 	if (skb_vlan_tag_present(skb)) {
 		tx_flags |= E1000_TX_FLAGS_VLAN;
-		tx_flags |= (skb_vlan_tag_get(skb) << E1000_TX_FLAGS_VLAN_SHIFT);
+		tx_flags |= (skb_vlan_tag_get(skb) <<
+			     E1000_TX_FLAGS_VLAN_SHIFT);
 	}
 
 	first = tx_ring->next_to_use;
@@ -6757,20 +6756,20 @@ static irqreturn_t e1000_intr_msix(int __always_unused irq, void *data)
 
 		vector = 0;
 		msix_irq = adapter->msix_entries[vector].vector;
-		disable_irq(msix_irq);
-		e1000_intr_msix_rx(msix_irq, netdev);
+		if (disable_hardirq(msix_irq))
+			e1000_intr_msix_rx(msix_irq, netdev);
 		enable_irq(msix_irq);
 
 		vector++;
 		msix_irq = adapter->msix_entries[vector].vector;
-		disable_irq(msix_irq);
-		e1000_intr_msix_tx(msix_irq, netdev);
+		if (disable_hardirq(msix_irq))
+			e1000_intr_msix_tx(msix_irq, netdev);
 		enable_irq(msix_irq);
 
 		vector++;
 		msix_irq = adapter->msix_entries[vector].vector;
-		disable_irq(msix_irq);
-		e1000_msix_other(msix_irq, netdev);
+		if (disable_hardirq(msix_irq))
+			e1000_msix_other(msix_irq, netdev);
 		enable_irq(msix_irq);
 	}
 
@@ -6874,8 +6873,6 @@ static pci_ers_result_t e1000_io_slot_reset(struct pci_dev *pdev)
 		ew32(WUS, ~0);
 		result = PCI_ERS_RESULT_RECOVERED;
 	}
-
-	pci_cleanup_aer_uncorrect_error_status(pdev);
 
 	return result;
 }
@@ -7006,18 +7003,17 @@ static int e1000_set_features(struct net_device *netdev,
 	else
 		e1000e_reset(adapter);
 
-	return 0;
+	return 1;
 }
 
 static const struct net_device_ops e1000e_netdev_ops = {
-	.ndo_size		= sizeof(struct net_device_ops),
 	.ndo_open		= e1000e_open,
 	.ndo_stop		= e1000e_close,
 	.ndo_start_xmit		= e1000_xmit_frame,
 	.ndo_get_stats64	= e1000e_get_stats64,
 	.ndo_set_rx_mode	= e1000e_set_rx_mode,
 	.ndo_set_mac_address	= e1000_set_mac,
-	.extended.ndo_change_mtu = e1000_change_mtu,
+	.ndo_change_mtu		= e1000_change_mtu,
 	.ndo_do_ioctl		= e1000_ioctl,
 	.ndo_tx_timeout		= e1000_tx_timeout,
 	.ndo_validate_addr	= eth_validate_addr,
@@ -7221,8 +7217,8 @@ static int e1000_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	}
 
 	/* MTU range: 68 - max_hw_frame_size */
-	netdev->extended->min_mtu = ETH_MIN_MTU;
-	netdev->extended->max_mtu = adapter->max_hw_frame_size -
+	netdev->min_mtu = ETH_MIN_MTU;
+	netdev->max_mtu = adapter->max_hw_frame_size -
 			  (VLAN_ETH_HLEN + ETH_FCS_LEN);
 
 	if (e1000e_enable_mng_pass_thru(&adapter->hw))
@@ -7262,10 +7258,8 @@ static int e1000_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 		goto err_eeprom;
 	}
 
-	setup_timer(&adapter->watchdog_timer, e1000_watchdog,
-		    (unsigned long)adapter);
-	setup_timer(&adapter->phy_info_timer, e1000_update_phy_info,
-		    (unsigned long)adapter);
+	timer_setup(&adapter->watchdog_timer, e1000_watchdog, 0);
+	timer_setup(&adapter->phy_info_timer, e1000_update_phy_info, 0);
 
 	INIT_WORK(&adapter->reset_task, e1000_reset_task);
 	INIT_WORK(&adapter->watchdog_task, e1000_watchdog_task);
@@ -7354,7 +7348,9 @@ static int e1000_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	e1000_print_device_info(adapter);
 
-	if (pci_dev_run_wake(pdev))
+	dev_pm_set_driver_flags(&pdev->dev, DPM_FLAG_NEVER_SKIP);
+
+	if (pci_dev_run_wake(pdev) && hw->mac.type < e1000_pch_cnp)
 		pm_runtime_put_noidle(&pdev->dev);
 
 	return 0;

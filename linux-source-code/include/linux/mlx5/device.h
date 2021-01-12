@@ -301,9 +301,15 @@ enum {
 	MLX5_EVENT_QUEUE_TYPE_DCT = 6,
 };
 
+/* mlx5 components can subscribe to any one of these events via
+ * mlx5_eq_notifier_register API.
+ */
 enum mlx5_event {
+	/* Special value to subscribe to any event */
+	MLX5_EVENT_TYPE_NOTIFY_ANY	   = 0x0,
+	/* HW events enum start: comp events are not subscribable */
 	MLX5_EVENT_TYPE_COMP		   = 0x0,
-
+	/* HW Async events enum start: subscribable events */
 	MLX5_EVENT_TYPE_PATH_MIG	   = 0x01,
 	MLX5_EVENT_TYPE_COMM_EST	   = 0x02,
 	MLX5_EVENT_TYPE_SQ_DRAINED	   = 0x03,
@@ -324,6 +330,7 @@ enum mlx5_event {
 	MLX5_EVENT_TYPE_TEMP_WARN_EVENT    = 0x17,
 	MLX5_EVENT_TYPE_REMOTE_CONFIG	   = 0x19,
 	MLX5_EVENT_TYPE_GENERAL_EVENT	   = 0x22,
+	MLX5_EVENT_TYPE_MONITOR_COUNTER    = 0x24,
 	MLX5_EVENT_TYPE_PPS_EVENT          = 0x25,
 
 	MLX5_EVENT_TYPE_DB_BF_CONGESTION   = 0x1a,
@@ -341,6 +348,8 @@ enum mlx5_event {
 	MLX5_EVENT_TYPE_FPGA_QP_ERROR      = 0x21,
 
 	MLX5_EVENT_TYPE_DEVICE_TRACER      = 0x26,
+
+	MLX5_EVENT_TYPE_MAX                = MLX5_EVENT_TYPE_DEVICE_TRACER + 1,
 };
 
 enum {
@@ -412,6 +421,7 @@ enum {
 	MLX5_OPCODE_ATOMIC_MASKED_FA	= 0x15,
 	MLX5_OPCODE_BIND_MW		= 0x18,
 	MLX5_OPCODE_CONFIG_CMD		= 0x1f,
+	MLX5_OPCODE_ENHANCED_MPSW	= 0x29,
 
 	MLX5_RECV_OPCODE_RDMA_WRITE_IMM	= 0x00,
 	MLX5_RECV_OPCODE_SEND		= 0x01,
@@ -509,6 +519,10 @@ struct health_buffer {
 	u8		irisc_index;
 	u8		synd;
 	__be16		ext_synd;
+};
+
+enum mlx5_cmd_addr_l_sz_offset {
+	MLX5_NIC_IFC_OFFSET = 8,
 };
 
 struct mlx5_init_seg {
@@ -767,6 +781,11 @@ enum {
 static inline u8 mlx5_get_cqe_format(struct mlx5_cqe64 *cqe)
 {
 	return (cqe->op_own >> 2) & 0x3;
+}
+
+static inline u8 get_cqe_opcode(struct mlx5_cqe64 *cqe)
+{
+	return cqe->op_own >> 4;
 }
 
 static inline u8 get_cqe_lro_tcppsh(struct mlx5_cqe64 *cqe)

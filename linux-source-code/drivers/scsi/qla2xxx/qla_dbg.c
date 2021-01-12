@@ -12,15 +12,13 @@
  * |             Level            |   Last Value Used  |     Holes	|
  * ----------------------------------------------------------------------
  * | Module Init and Probe        |       0x0193       | 0x0146         |
- * | Mailbox commands             |       0x1206       | 0x1018-0x1019	|
- * |                              |                    | 0x1155-0x1158  |
- * |                              |                    | 0x1018-0x1019  |
- * |                              |                    | 0x1115-0x1116  |
- * |                              |                    | 0x10ca,0x1193  |
- * | Device Discovery             |       0x2134       | 0x2016         |
- * |                              |                    | 0x2020-0x2022, |
- * |                              |                    | 0x2011-0x2012, |
- * |                              |                    | 0x2099-0x20a4  |
+ * |                              |                    | 0x015b-0x0160	|
+ * |                              |                    | 0x016e		|
+ * | Mailbox commands             |       0x1206       | 0x11a2-0x11ff	|
+ * | Device Discovery             |       0x2134       | 0x210e-0x2116  |
+ * |				  | 		       | 0x211a         |
+ * |                              |                    | 0x211c-0x2128  |
+ * |                              |                    | 0x212a-0x2130  |
  * | Queue Command and IO tracing |       0x3074       | 0x300b         |
  * |                              |                    | 0x3027-0x3028  |
  * |                              |                    | 0x303d-0x3041  |
@@ -28,12 +26,13 @@
  * |                              |                    | 0x3036,0x3038  |
  * |                              |                    | 0x303a		|
  * | DPC Thread                   |       0x4023       | 0x4002,0x4013  |
- * | Async Events                 |       0x5089       | 0x502b-0x502f  |
+ * | Async Events                 |       0x5090       | 0x502b-0x502f  |
+ * |				  | 		       | 0x5047         |
  * |                              |                    | 0x5084,0x5075	|
  * |                              |                    | 0x503d,0x5044  |
  * |                              |                    | 0x505f		|
  * | Timer Routines               |       0x6012       |                |
- * | User Space Interactions      |       0x70e65      | 0x7018,0x702e  |
+ * | User Space Interactions      |       0x70e3       | 0x7018,0x702e  |
  * |				  |		       | 0x7020,0x7024  |
  * |                              |                    | 0x7039,0x7045  |
  * |                              |                    | 0x7073-0x7075  |
@@ -67,7 +66,7 @@
  * | Target Mode		  |	  0xe081       |		|
  * | Target Mode Management	  |	  0xf09b       | 0xf002		|
  * |                              |                    | 0xf046-0xf049  |
- * | Target Mode Task Management  |	  0x1000b      |		|
+ * | Target Mode Task Management  |	  0x1000d      |		|
  * ----------------------------------------------------------------------
  */
 
@@ -446,7 +445,7 @@ qla2xxx_dump_ram(struct qla_hw_data *ha, uint32_t addr, uint16_t *ram,
 		}
 	}
 
-	*nxt = rval == QLA_SUCCESS ? &ram[cnt] : NULL;
+	*nxt = rval == QLA_SUCCESS ? &ram[cnt]: NULL;
 	return rval;
 }
 
@@ -1177,7 +1176,7 @@ qla24xx_fw_dump(scsi_qla_host_t *vha, int hardware_locked)
 
 	/* Mailbox registers. */
 	mbx_reg = &reg->mailbox0;
-	for (cnt = 0; cnt < sizeof(fw->mailbox_reg) / 2; cnt++, dmp_reg++)
+	for (cnt = 0; cnt < sizeof(fw->mailbox_reg) / 2; cnt++, mbx_reg++)
 		fw->mailbox_reg[cnt] = htons(RD_REG_WORD(mbx_reg));
 
 	/* Transfer sequence registers. */
@@ -2141,7 +2140,7 @@ qla83xx_fw_dump(scsi_qla_host_t *vha, int hardware_locked)
 
 	/* Mailbox registers. */
 	mbx_reg = &reg->mailbox0;
-	for (cnt = 0; cnt < sizeof(fw->mailbox_reg) / 2; cnt++, dmp_reg++)
+	for (cnt = 0; cnt < sizeof(fw->mailbox_reg) / 2; cnt++, mbx_reg++)
 		fw->mailbox_reg[cnt] = htons(RD_REG_WORD(mbx_reg));
 
 	/* Transfer sequence registers. */
@@ -2519,6 +2518,12 @@ qla83xx_fw_dump_failed:
 /****************************************************************************/
 /*                         Driver Debug Functions.                          */
 /****************************************************************************/
+
+static inline int
+ql_mask_match(uint level)
+{
+	return (level & ql2xextended_error_logging) == level;
+}
 
 /*
  * This function is for formatting and logging debug information.

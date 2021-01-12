@@ -601,7 +601,7 @@ static void *display_thread_tui(void *arg)
 
 	/*
 	 * Initialize the uid_filter_str, in the future the TUI will allow
-	 * Zooming in/out UIDs. For now juse use whatever the user passed
+	 * Zooming in/out UIDs. For now just use whatever the user passed
 	 * via --uid.
 	 */
 	evlist__for_each_entry(top->evlist, pos) {
@@ -1028,12 +1028,7 @@ out_err:
 
 static int callchain_param__setup_sample_type(struct callchain_param *callchain)
 {
-	if (!perf_hpp_list.sym) {
-		if (callchain->enabled) {
-			ui__error("Selected -g but \"sym\" not present in --sort/-s.");
-			return -EINVAL;
-		}
-	} else if (callchain->mode != CHAIN_NONE) {
+	if (callchain->mode != CHAIN_NONE) {
 		if (callchain_register_param(callchain) < 0) {
 			ui__error("Can't register callchain params.\n");
 			return -EINVAL;
@@ -1222,7 +1217,6 @@ static int __cmd_top(struct perf_top *top)
 
 	machine__synthesize_threads(&top->session->machines.host, &opts->target,
 				    top->evlist->threads, false,
-				    opts->proc_map_timeout,
 				    top->nr_threads_synthesize);
 
 	if (top->nr_threads_synthesize > 1)
@@ -1390,7 +1384,6 @@ int cmd_top(int argc, const char **argv)
 			.target		= {
 				.uses_mmap   = true,
 			},
-			.proc_map_timeout    = 500,
 			/*
 			 * FIXME: This will lose PERF_RECORD_MMAP and other metadata
 			 * when we pause, fix that and reenable. Probably using a
@@ -1400,9 +1393,8 @@ int cmd_top(int argc, const char **argv)
 			 * */
 			.overwrite	= 0,
 			.sample_time	= true,
-			.sample_time_set = true,
 		},
-		.max_stack	     = sysctl_perf_event_max_stack,
+		.max_stack	     = sysctl__max_stack(),
 		.annotation_opts     = annotation__default_options,
 		.nr_threads_synthesize = UINT_MAX,
 	};
@@ -1425,6 +1417,8 @@ int cmd_top(int argc, const char **argv)
 		   "file", "vmlinux pathname"),
 	OPT_BOOLEAN(0, "ignore-vmlinux", &symbol_conf.ignore_vmlinux,
 		    "don't load vmlinux even if found"),
+	OPT_STRING(0, "kallsyms", &symbol_conf.kallsyms_name,
+		   "file", "kallsyms pathname"),
 	OPT_BOOLEAN('K', "hide_kernel_symbols", &top.hide_kernel_symbols,
 		    "hide kernel symbols"),
 	OPT_CALLBACK('m', "mmap-pages", &opts->mmap_pages, "pages",
@@ -1503,7 +1497,7 @@ int cmd_top(int argc, const char **argv)
 	OPT_STRING('w', "column-widths", &symbol_conf.col_width_list_str,
 		   "width[,width...]",
 		   "don't try to adjust column width, use these fixed values"),
-	OPT_UINTEGER(0, "proc-map-timeout", &opts->proc_map_timeout,
+	OPT_UINTEGER(0, "proc-map-timeout", &proc_map_timeout,
 			"per thread proc mmap processing timeout in ms"),
 	OPT_CALLBACK_NOOPT('b', "branch-any", &opts->branch_stack,
 		     "branch any", "sample any taken branches",

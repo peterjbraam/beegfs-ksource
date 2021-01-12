@@ -1,7 +1,7 @@
 #ifndef _HFI1_KERNEL_H
 #define _HFI1_KERNEL_H
 /*
- * Copyright(c) 2015-2017 Intel Corporation.
+ * Copyright(c) 2015-2018 Intel Corporation.
  *
  * This file is provided under a dual BSD/GPLv2 license.  When using or
  * redistributing this file, you may do so under either license.
@@ -73,6 +73,7 @@
 
 #include "chip_registers.h"
 #include "common.h"
+#include "opfn.h"
 #include "verbs.h"
 #include "pio.h"
 #include "chip.h"
@@ -97,6 +98,8 @@
 
 #define NEIGHBOR_TYPE_HFI		0
 #define NEIGHBOR_TYPE_SWITCH	1
+
+#define HFI1_MAX_ACTIVE_WORKQUEUE_ENTRIES 5
 
 extern unsigned long hfi1_cap_mask;
 #define HFI1_CAP_KGET_MASK(mask, cap) ((mask) & HFI1_CAP_##cap)
@@ -195,6 +198,14 @@ struct exp_tid_set {
 };
 
 typedef int (*rhf_rcv_function_ptr)(struct hfi1_packet *packet);
+
+struct tid_queue {
+	struct list_head queue_head;
+			/* queue head for QP TID resource waiters */
+	u32 enqueue;	/* count of tid enqueues */
+	u32 dequeue;	/* count of tid dequeues */
+};
+
 struct hfi1_ctxtdata {
 	/* rcvhdrq base, needs mmap before useful */
 	void *rcvhdrq;
@@ -288,6 +299,12 @@ struct hfi1_ctxtdata {
 	/* PSM Specific fields */
 	/* lock protecting all Expected TID data */
 	struct mutex exp_mutex;
+	/* lock protecting all Expected TID data of kernel contexts */
+	spinlock_t exp_lock;
+	/* Queue for QP's waiting for HW TID flows */
+	struct tid_queue flow_queue;
+	/* Queue for QP's waiting for HW receive array entries */
+	struct tid_queue rarr_queue;
 	/* when waiting for rcv or pioavail */
 	wait_queue_head_t wait;
 	/* uuid from PSM */
@@ -320,6 +337,9 @@ struct hfi1_ctxtdata {
 	 */
 	u8 subctxt_cnt;
 
+	/* Bit mask to track free TID RDMA HW flows */
+	unsigned long flow_mask;
+	struct tid_flow_state flows[RXE_NUM_TID_FLOWS];
 };
 
 /**
@@ -668,7 +688,6 @@ struct hfi1_msix_entry {
 	enum irq_type type;
 	int irq;
 	void *arg;
-	char name[MAX_NAME_SIZE];
 	cpumask_t mask;
 	struct irq_affinity_notify notify;
 };
@@ -2081,7 +2100,9 @@ static inline u64 hfi1_pkt_default_send_ctxt_mask(struct hfi1_devdata *dd,
 	| SEND_CTXT_CHECK_ENABLE_DISALLOW_TOO_LONG_BYPASS_PACKETS_SMASK
 	| SEND_CTXT_CHECK_ENABLE_DISALLOW_TOO_LONG_IB_PACKETS_SMASK
 	| SEND_CTXT_CHECK_ENABLE_DISALLOW_BAD_PKT_LEN_SMASK
+#ifndef CONFIG_FAULT_INJECTION
 	| SEND_CTXT_CHECK_ENABLE_DISALLOW_PBC_TEST_SMASK
+#endif
 	| SEND_CTXT_CHECK_ENABLE_DISALLOW_TOO_SMALL_BYPASS_PACKETS_SMASK
 	| SEND_CTXT_CHECK_ENABLE_DISALLOW_TOO_SMALL_IB_PACKETS_SMASK
 	| SEND_CTXT_CHECK_ENABLE_DISALLOW_RAW_IPV6_SMASK
@@ -2094,8 +2115,12 @@ static inline u64 hfi1_pkt_default_send_ctxt_mask(struct hfi1_devdata *dd,
 	| SEND_CTXT_CHECK_ENABLE_CHECK_ENABLE_SMASK;
 
 	if (ctxt_type == SC_USER)
-		base_sc_integrity |= HFI1_PKT_USER_SC_INTEGRITY;
-	else
+		base_sc_integrity |=
+#ifndef CONFIG_FAULT_INJECTION
+			SEND_CTXT_CHECK_ENABLE_DISALLOW_PBC_TEST_SMASK |
+#endif
+			HFI1_PKT_USER_SC_INTEGRITY;
+	else if (ctxt_type != SC_KERNEL)
 		base_sc_integrity |= HFI1_PKT_KERNEL_SC_INTEGRITY;
 
 	/* turn on send-side job key checks if !A0 */

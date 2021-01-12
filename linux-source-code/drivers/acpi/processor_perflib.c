@@ -20,10 +20,6 @@
  *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  *  General Public License for more details.
  *
- *  You should have received a copy of the GNU General Public License along
- *  with this program; if not, write to the Free Software Foundation, Inc.,
- *  59 Temple Place, Suite 330, Boston, MA 02111-1307 USA.
- *
  */
 
 #include <linux/kernel.h>
@@ -31,14 +27,11 @@
 #include <linux/init.h>
 #include <linux/cpufreq.h>
 #include <linux/slab.h>
-
+#include <linux/acpi.h>
+#include <acpi/processor.h>
 #ifdef CONFIG_X86
 #include <asm/cpufeature.h>
 #endif
-
-#include <acpi/acpi_bus.h>
-#include <acpi/acpi_drivers.h>
-#include <acpi/processor.h>
 
 #define PREFIX "ACPI: "
 
@@ -82,15 +75,13 @@ static int acpi_processor_ppc_notifier(struct notifier_block *nb,
 	struct acpi_processor *pr;
 	unsigned int ppc = 0;
 
-	if (event == CPUFREQ_START && ignore_ppc <= 0) {
+	if (ignore_ppc < 0)
 		ignore_ppc = 0;
-		return 0;
-	}
 
 	if (ignore_ppc)
 		return 0;
 
-	if (event != CPUFREQ_INCOMPATIBLE)
+	if (event != CPUFREQ_ADJUST)
 		return 0;
 
 	mutex_lock(&performance_mutex);
@@ -164,18 +155,18 @@ static void acpi_processor_ppc_ost(acpi_handle handle, int status)
 				  status, NULL);
 }
 
-int acpi_processor_ppc_has_changed(struct acpi_processor *pr, int event_flag)
+void acpi_processor_ppc_has_changed(struct acpi_processor *pr, int event_flag)
 {
 	int ret;
 
-	if (ignore_ppc) {
+	if (ignore_ppc || !pr->performance) {
 		/*
 		 * Only when it is notification event, the _OST object
 		 * will be evaluated. Otherwise it is skipped.
 		 */
 		if (event_flag)
 			acpi_processor_ppc_ost(pr->handle, 1);
-		return 0;
+		return;
 	}
 
 	ret = acpi_processor_get_platform_limit(pr);
@@ -189,10 +180,8 @@ int acpi_processor_ppc_has_changed(struct acpi_processor *pr, int event_flag)
 		else
 			acpi_processor_ppc_ost(pr->handle, 0);
 	}
-	if (ret < 0)
-		return (ret);
-	else
-		return cpufreq_update_policy(pr->id);
+	if (ret >= 0)
+		cpufreq_update_policy(pr->id);
 }
 
 int acpi_processor_get_bios_limit(int cpu, unsigned int *limit)
@@ -225,28 +214,6 @@ void acpi_processor_ppc_exit(void)
 					    CPUFREQ_POLICY_NOTIFIER);
 
 	acpi_processor_ppc_status &= ~PPC_REGISTERED;
-}
-
-/*
- * Do a quick check if the systems looks like it should use ACPI
- * cpufreq. We look at a _PCT method being available, but don't
- * do a whole lot of sanity checks.
- */
-void acpi_processor_load_module(struct acpi_processor *pr)
-{
-	static int requested;
-	acpi_status status = 0;
-	struct acpi_buffer buffer = { ACPI_ALLOCATE_BUFFER, NULL };
-
-	if (!arch_has_acpi_pdc() || requested)
-		return;
-	status = acpi_evaluate_object(pr->handle, "_PCT", NULL, &buffer);
-	if (!ACPI_FAILURE(status)) {
-		printk(KERN_INFO PREFIX "Requesting acpi_cpufreq\n");
-		request_module_nowait("acpi_cpufreq");
-		requested = 1;
-	}
-	kfree(buffer.pointer);
 }
 
 static int acpi_processor_get_performance_control(struct acpi_processor *pr)
@@ -376,8 +343,9 @@ static int acpi_processor_get_performance_states(struct acpi_processor *pr)
 
 	pr->performance->state_count = pss->package.count;
 	pr->performance->states =
-	    kmalloc(sizeof(struct acpi_processor_px) * pss->package.count,
-		    GFP_KERNEL);
+	    kmalloc_array(pss->package.count,
+			  sizeof(struct acpi_processor_px),
+			  GFP_KERNEL);
 	if (!pr->performance->states) {
 		result = -ENOMEM;
 		goto end;
@@ -566,7 +534,7 @@ int acpi_processor_notify_smm(struct module *calling_module)
 
 EXPORT_SYMBOL(acpi_processor_notify_smm);
 
-static int acpi_processor_get_psd(struct acpi_processor	*pr)
+int acpi_processor_get_psd(acpi_handle handle, struct acpi_psd_package *pdomain)
 {
 	int result = 0;
 	acpi_status status = AE_OK;
@@ -574,9 +542,8 @@ static int acpi_processor_get_psd(struct acpi_processor	*pr)
 	struct acpi_buffer format = {sizeof("NNNNN"), "NNNNN"};
 	struct acpi_buffer state = {0, NULL};
 	union acpi_object  *psd = NULL;
-	struct acpi_psd_package *pdomain;
 
-	status = acpi_evaluate_object(pr->handle, "_PSD", NULL, &buffer);
+	status = acpi_evaluate_object(handle, "_PSD", NULL, &buffer);
 	if (ACPI_FAILURE(status)) {
 		return -ENODEV;
 	}
@@ -593,8 +560,6 @@ static int acpi_processor_get_psd(struct acpi_processor	*pr)
 		result = -EFAULT;
 		goto end;
 	}
-
-	pdomain = &(pr->performance->domain_info);
 
 	state.length = sizeof(struct acpi_psd_package);
 	state.pointer = pdomain;
@@ -630,6 +595,7 @@ end:
 	kfree(buffer.pointer);
 	return result;
 }
+EXPORT_SYMBOL(acpi_processor_get_psd);
 
 int acpi_processor_preregister_performance(
 		struct acpi_processor_performance __percpu *performance)
@@ -678,7 +644,8 @@ int acpi_processor_preregister_performance(
 
 		pr->performance = per_cpu_ptr(performance, i);
 		cpumask_set_cpu(i, pr->performance->shared_cpu_map);
-		if (acpi_processor_get_psd(pr)) {
+		pdomain = &(pr->performance->domain_info);
+		if (acpi_processor_get_psd(pr->handle, pdomain)) {
 			retval = -EINVAL;
 			continue;
 		}
@@ -820,9 +787,7 @@ acpi_processor_register_performance(struct acpi_processor_performance
 
 EXPORT_SYMBOL(acpi_processor_register_performance);
 
-void
-acpi_processor_unregister_performance(struct acpi_processor_performance
-				      *performance, unsigned int cpu)
+void acpi_processor_unregister_performance(unsigned int cpu)
 {
 	struct acpi_processor *pr;
 

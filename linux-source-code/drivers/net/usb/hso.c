@@ -52,7 +52,7 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
-#include <linux/sched.h>
+#include <linux/sched/signal.h>
 #include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/delay.h>
@@ -519,7 +519,7 @@ static ssize_t hso_sysfs_show_porttype(struct device *dev,
 
 	return sprintf(buf, "%s\n", port_name);
 }
-static DEVICE_ATTR(hsotype, S_IRUGO, hso_sysfs_show_porttype, NULL);
+static DEVICE_ATTR(hsotype, 0444, hso_sysfs_show_porttype, NULL);
 
 static struct attribute *hso_serial_dev_attrs[] = {
 	&dev_attr_hsotype.attr,
@@ -1732,6 +1732,7 @@ static int hso_serial_ioctl(struct tty_struct *tty,
 /* starts a transmit */
 static void hso_kick_transmit(struct hso_serial *serial)
 {
+	u8 *temp;
 	unsigned long flags;
 	int res;
 
@@ -1747,12 +1748,14 @@ static void hso_kick_transmit(struct hso_serial *serial)
 		goto out;
 
 	/* Switch pointers around to avoid memcpy */
-	swap(serial->tx_buffer, serial->tx_data);
+	temp = serial->tx_buffer;
+	serial->tx_buffer = serial->tx_data;
+	serial->tx_data = temp;
 	serial->tx_data_count = serial->tx_buffer_count;
 	serial->tx_buffer_count = 0;
 
-	/* If serial->tx_data is set, it means we switched buffers */
-	if (serial->tx_data && serial->write_data) {
+	/* If temp is set, it means we switched buffers */
+	if (temp && serial->write_data) {
 		res = serial->write_data(serial);
 		if (res >= 0)
 			serial->tx_urb_used = 1;
@@ -2505,7 +2508,8 @@ static struct hso_device *hso_create_net_device(struct usb_interface *interface,
 
 	/* allocate our network device, then we can put in our private data */
 	/* call hso_net_init to do the basic initialization */
-	net = alloc_netdev(sizeof(struct hso_net), "hso%d", hso_net_init);
+	net = alloc_netdev(sizeof(struct hso_net), "hso%d", NET_NAME_UNKNOWN,
+			   hso_net_init);
 	if (!net) {
 		dev_err(&interface->dev, "Unable to create ethernet device\n");
 		goto exit;
@@ -3306,12 +3310,12 @@ MODULE_LICENSE("GPL");
 
 /* change the debug level (eg: insmod hso.ko debug=0x04) */
 MODULE_PARM_DESC(debug, "debug level mask [0x01 | 0x02 | 0x04 | 0x08 | 0x10]");
-module_param(debug, int, S_IRUGO | S_IWUSR);
+module_param(debug, int, 0644);
 
 /* set the major tty number (eg: insmod hso.ko tty_major=245) */
 MODULE_PARM_DESC(tty_major, "Set the major tty number");
-module_param(tty_major, int, S_IRUGO | S_IWUSR);
+module_param(tty_major, int, 0644);
 
 /* disable network interface (eg: insmod hso.ko disable_net=1) */
 MODULE_PARM_DESC(disable_net, "Disable the network interface");
-module_param(disable_net, int, S_IRUGO | S_IWUSR);
+module_param(disable_net, int, 0644);

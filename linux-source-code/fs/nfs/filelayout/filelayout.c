@@ -32,6 +32,7 @@
 #include <linux/nfs_fs.h>
 #include <linux/nfs_page.h>
 #include <linux/module.h>
+#include <linux/backing-dev.h>
 
 #include <linux/sunrpc/metrics.h>
 
@@ -454,7 +455,7 @@ filelayout_read_pagelist(struct nfs_pgio_header *hdr)
 	u32 j, idx;
 	struct nfs_fh *fh;
 
-	dprintk("--> %s ino %lu pgbase %u req %Zu@%llu\n",
+	dprintk("--> %s ino %lu pgbase %u req %zu@%llu\n",
 		__func__, hdr->inode->i_ino,
 		hdr->args.pgbase, (size_t)hdr->args.count, offset);
 
@@ -470,10 +471,10 @@ filelayout_read_pagelist(struct nfs_pgio_header *hdr)
 		return PNFS_NOT_ATTEMPTED;
 
 	dprintk("%s USE DS: %s cl_count %d\n", __func__,
-		ds->ds_remotestr, atomic_read(&ds->ds_clp->cl_count));
+		ds->ds_remotestr, refcount_read(&ds->ds_clp->cl_count));
 
 	/* No multipath support. Use first DS */
-	atomic_inc(&ds->ds_clp->cl_count);
+	refcount_inc(&ds->ds_clp->cl_count);
 	hdr->ds_clp = ds->ds_clp;
 	hdr->ds_commit_idx = idx;
 	fh = nfs4_fl_select_ds_fh(lseg, j);
@@ -512,12 +513,12 @@ filelayout_write_pagelist(struct nfs_pgio_header *hdr, int sync)
 	if (IS_ERR(ds_clnt))
 		return PNFS_NOT_ATTEMPTED;
 
-	dprintk("%s ino %lu sync %d req %Zu@%llu DS: %s cl_count %d\n",
+	dprintk("%s ino %lu sync %d req %zu@%llu DS: %s cl_count %d\n",
 		__func__, hdr->inode->i_ino, sync, (size_t) hdr->args.count,
-		offset, ds->ds_remotestr, atomic_read(&ds->ds_clp->cl_count));
+		offset, ds->ds_remotestr, refcount_read(&ds->ds_clp->cl_count));
 
 	hdr->pgio_done_cb = filelayout_write_done_cb;
-	atomic_inc(&ds->ds_clp->cl_count);
+	refcount_inc(&ds->ds_clp->cl_count);
 	hdr->ds_clp = ds->ds_clp;
 	hdr->ds_commit_idx = idx;
 	fh = nfs4_fl_select_ds_fh(lseg, j);
@@ -903,7 +904,7 @@ fl_pnfs_update_layout(struct inode *ino,
 	status = filelayout_check_deviceid(lo, fl, gfp_flags);
 	if (status) {
 		pnfs_put_lseg(lseg);
-		lseg = ERR_PTR(status);
+		lseg = NULL;
 	}
 out:
 	return lseg;
@@ -1061,9 +1062,9 @@ static int filelayout_initiate_commit(struct nfs_commit_data *data, int how)
 		goto out_err;
 
 	dprintk("%s ino %lu, how %d cl_count %d\n", __func__,
-		data->inode->i_ino, how, atomic_read(&ds->ds_clp->cl_count));
+		data->inode->i_ino, how, refcount_read(&ds->ds_clp->cl_count));
 	data->commit_done_cb = filelayout_commit_done_cb;
-	atomic_inc(&ds->ds_clp->cl_count);
+	refcount_inc(&ds->ds_clp->cl_count);
 	data->ds_clp = ds->ds_clp;
 	fh = select_ds_fh_from_commit(lseg, data->ds_commit_index);
 	if (fh)

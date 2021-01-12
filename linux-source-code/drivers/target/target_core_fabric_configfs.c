@@ -146,7 +146,7 @@ static int target_fabric_mappedlun_link(
 	return core_dev_add_initiator_node_lun_acl(se_tpg, lacl, lun, lun_access_ro);
 }
 
-static int target_fabric_mappedlun_unlink(
+static void target_fabric_mappedlun_unlink(
 	struct config_item *lun_acl_ci,
 	struct config_item *lun_ci)
 {
@@ -155,7 +155,7 @@ static int target_fabric_mappedlun_unlink(
 	struct se_lun *lun = container_of(to_config_group(lun_ci),
 			struct se_lun, lun_group);
 
-	return core_dev_del_initiator_node_lun_acl(lun, lacl);
+	core_dev_del_initiator_node_lun_acl(lun, lacl);
 }
 
 static struct se_lun_acl *item_to_lun_acl(struct config_item *item)
@@ -678,7 +678,7 @@ out:
 	return ret;
 }
 
-static int target_fabric_port_unlink(
+static void target_fabric_port_unlink(
 	struct config_item *lun_ci,
 	struct config_item *se_dev_ci)
 {
@@ -697,7 +697,6 @@ static int target_fabric_port_unlink(
 	}
 
 	core_dev_del_lun(se_tpg, lun);
-	return 0;
 }
 
 static void target_fabric_port_release(struct config_item *item)
@@ -843,7 +842,7 @@ static struct config_group *target_fabric_make_tpg(
 		return ERR_PTR(-ENOSYS);
 	}
 
-	se_tpg = tf->tf_ops->fabric_make_tpg(wwn, group, name);
+	se_tpg = tf->tf_ops->fabric_make_tpg(wwn, name);
 	if (!se_tpg || IS_ERR(se_tpg))
 		return ERR_PTR(-EINVAL);
 

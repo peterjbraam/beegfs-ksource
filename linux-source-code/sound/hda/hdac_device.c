@@ -89,7 +89,7 @@ int snd_hdac_device_init(struct hdac_device *codec, struct hdac_bus *bus,
 
 	fg = codec->afg ? codec->afg : codec->mfg;
 
-	err = snd_hdac_refresh_widgets(codec);
+	err = snd_hdac_refresh_widgets(codec, false);
 	if (err < 0)
 		goto error;
 
@@ -394,35 +394,32 @@ static void setup_fg_nodes(struct hdac_device *codec)
 /**
  * snd_hdac_refresh_widgets - Reset the widget start/end nodes
  * @codec: the codec object
+ * @sysfs: re-initialize sysfs tree, too
  */
-int snd_hdac_refresh_widgets(struct hdac_device *codec)
+int snd_hdac_refresh_widgets(struct hdac_device *codec, bool sysfs)
 {
 	hda_nid_t start_nid;
-	int nums, err = 0;
+	int nums, err;
 
-	/*
-	 * Serialize against multiple threads trying to update the sysfs
-	 * widgets array.
-	 */
-	mutex_lock(&codec->widget_lock);
 	nums = snd_hdac_get_sub_nodes(codec, codec->afg, &start_nid);
 	if (!start_nid || nums <= 0 || nums >= 0xff) {
 		dev_err(&codec->dev, "cannot read sub nodes for FG 0x%02x\n",
 			codec->afg);
-		err = -EINVAL;
-		goto unlock;
+		return -EINVAL;
 	}
 
-	err = hda_widget_sysfs_reinit(codec, start_nid, nums);
-	if (err < 0)
-		goto unlock;
+	if (sysfs) {
+		mutex_lock(&codec->widget_lock);
+		err = hda_widget_sysfs_reinit(codec, start_nid, nums);
+		mutex_unlock(&codec->widget_lock);
+		if (err < 0)
+			return err;
+	}
 
 	codec->num_nodes = nums;
 	codec->start_nid = start_nid;
 	codec->end_nid = start_nid + nums;
-unlock:
-	mutex_unlock(&codec->widget_lock);
-	return err;
+	return 0;
 }
 EXPORT_SYMBOL_GPL(snd_hdac_refresh_widgets);
 
@@ -631,23 +628,6 @@ int snd_hdac_power_down_pm(struct hdac_device *codec)
 }
 EXPORT_SYMBOL_GPL(snd_hdac_power_down_pm);
 #endif
-
-/**
- * snd_hdac_link_power - Enable/disable the link power for a codec
- * @codec: the codec object
- * @bool: enable or disable the link power
- */
-int snd_hdac_link_power(struct hdac_device *codec, bool enable)
-{
-	if  (!codec->link_power_control)
-		return 0;
-
-	if  (codec->bus->ops->link_power)
-		return codec->bus->ops->link_power(codec->bus, enable);
-	else
-		return -EINVAL;
-}
-EXPORT_SYMBOL_GPL(snd_hdac_link_power);
 
 /* codec vendor labels */
 struct hda_vendor_id {

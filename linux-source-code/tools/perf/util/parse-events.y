@@ -53,8 +53,8 @@ static void inc_group_count(struct list_head *list,
 %token PE_PREFIX_MEM PE_PREFIX_RAW PE_PREFIX_GROUP
 %token PE_ERROR
 %token PE_PMU_EVENT_PRE PE_PMU_EVENT_SUF PE_KERNEL_PMU_EVENT
-%token PE_DRV_CFG_TERM
 %token PE_ARRAY_ALL PE_ARRAY_RANGE
+%token PE_DRV_CFG_TERM
 %type <num> PE_VALUE
 %type <num> PE_VALUE_SYM_HW
 %type <num> PE_VALUE_SYM_SW
@@ -464,6 +464,29 @@ PE_RAW opt_event_config
 	$$ = list;
 }
 
+event_bpf_file:
+PE_BPF_OBJECT opt_event_config
+{
+	struct parse_events_state *parse_state = _parse_state;
+	struct parse_events_error *error = parse_state->error;
+	struct list_head *list;
+
+	ALLOC_LIST(list);
+	ABORT_ON(parse_events_load_bpf(parse_state, list, $1, false, $2));
+	parse_events_terms__delete($2);
+	$$ = list;
+}
+|
+PE_BPF_SOURCE opt_event_config
+{
+	struct list_head *list;
+
+	ALLOC_LIST(list);
+	ABORT_ON(parse_events_load_bpf(_parse_state, list, $1, true, $2));
+	parse_events_terms__delete($2);
+	$$ = list;
+}
+
 opt_event_config:
 '/' event_config '/'
 {
@@ -477,30 +500,6 @@ opt_event_config:
 |
 {
 	$$ = NULL;
-}
-
-event_bpf_file:
-PE_BPF_OBJECT opt_event_config
-{
-	struct parse_events_state *data = _parse_state;
-	struct parse_events_error *error = data->error;
-	struct list_head *list;
-
-	ALLOC_LIST(list);
-	ABORT_ON(parse_events_load_bpf(data, list, $1, false, $2));
-	parse_events_terms__delete($2);
-	$$ = list;
-}
-|
-PE_BPF_SOURCE opt_event_config
-{
-	struct parse_events_state *data = _parse_state;
-	struct list_head *list;
-
-	ALLOC_LIST(list);
-	ABORT_ON(parse_events_load_bpf(data, list, $1, true, $2));
-	parse_events_terms__delete($2);
-	$$ = list;
 }
 
 opt_pmu_config:
@@ -612,15 +611,6 @@ PE_TERM
 	$$ = term;
 }
 |
-PE_DRV_CFG_TERM
-{
-	struct parse_events_term *term;
-
-	ABORT_ON(parse_events_term__str(&term, PARSE_EVENTS__TERM_TYPE_DRV_CFG,
-					$1, $1, &@1, NULL));
-	$$ = term;
-}
-|
 PE_NAME array '=' PE_NAME
 {
 	struct parse_events_term *term;
@@ -640,6 +630,15 @@ PE_NAME array '=' PE_VALUE
 	ABORT_ON(parse_events_term__num(&term, PARSE_EVENTS__TERM_TYPE_USER,
 					$1, $4, false, &@1, &@4));
 	term->array = $2;
+	$$ = term;
+}
+|
+PE_DRV_CFG_TERM
+{
+	struct parse_events_term *term;
+
+	ABORT_ON(parse_events_term__str(&term, PARSE_EVENTS__TERM_TYPE_DRV_CFG,
+					$1, $1, &@1, NULL));
 	$$ = term;
 }
 

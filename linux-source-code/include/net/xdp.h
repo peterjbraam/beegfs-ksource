@@ -6,6 +6,8 @@
 #ifndef __LINUX_NET_XDP_H__
 #define __LINUX_NET_XDP_H__
 
+#include <linux/rh_kabi.h>
+
 /**
  * DOC: XDP RX-queue information
  *
@@ -42,12 +44,12 @@ enum xdp_mem_type {
 };
 
 /* XDP flags for ndo_xdp_xmit */
-#define XDP_XMIT_FLAGS_NONE	0U
 #define XDP_XMIT_FLUSH		(1U << 0)	/* doorbell signal consumer */
 #define XDP_XMIT_FLAGS_MASK	XDP_XMIT_FLUSH
 
 struct xdp_mem_info {
 	u32 type; /* enum xdp_mem_type, but known size type */
+	u32 id;
 };
 
 struct page_pool;
@@ -61,6 +63,20 @@ struct xdp_rxq_info {
 	u32 queue_index;
 	u32 reg_state;
 	struct xdp_mem_info mem;
+	/* RHEL: This structure is not considered part of the kABI
+	 * whitelist. However, it is embedded in struct netdev_rx_queue
+	 * which is referenced from struct net_device::_rx as an array.
+	 * Therefore, we need to protect the size of struct xdp_rxq_info. */
+	RH_KABI_RESERVE(1)
+	RH_KABI_RESERVE(2)
+	RH_KABI_RESERVE(3)
+	RH_KABI_RESERVE(4)
+	RH_KABI_RESERVE(5)
+	RH_KABI_RESERVE(6)
+	/* Note that there is more space available after the reserved fields
+	 * due to the cache alignment of this structure. Be sure to verify
+	 * the result with pahole on all supported archs before using the
+	 * padding, though. */
 } ____cacheline_aligned; /* perf critical, avoid false-sharing */
 
 struct xdp_buff {
@@ -81,27 +97,58 @@ struct xdp_frame {
 	 * while mem info is valid on remote CPU.
 	 */
 	struct xdp_mem_info mem;
+	struct net_device *dev_rx; /* used by cpumap */
 };
+
+/* Clear kernel pointers in xdp_frame */
+static inline void xdp_scrub_frame(struct xdp_frame *frame)
+{
+	frame->data = NULL;
+	frame->dev_rx = NULL;
+}
+
+struct xdp_frame *xdp_convert_zc_to_xdp_frame(struct xdp_buff *xdp);
 
 /* Convert xdp_buff to xdp_frame */
 static inline
 struct xdp_frame *convert_to_xdp_frame(struct xdp_buff *xdp)
 {
-	return NULL;
+	struct xdp_frame *xdp_frame;
+	int metasize;
+	int headroom;
+
+	if (xdp->rxq->mem.type == MEM_TYPE_ZERO_COPY)
+		return xdp_convert_zc_to_xdp_frame(xdp);
+
+	/* Assure headroom is available for storing info */
+	headroom = xdp->data - xdp->data_hard_start;
+	metasize = xdp->data - xdp->data_meta;
+	metasize = metasize > 0 ? metasize : 0;
+	if (unlikely((headroom - metasize) < sizeof(*xdp_frame)))
+		return NULL;
+
+	/* Store info in top of packet */
+	xdp_frame = xdp->data_hard_start;
+
+	xdp_frame->data = xdp->data;
+	xdp_frame->len  = xdp->data_end - xdp->data;
+	xdp_frame->headroom = headroom - sizeof(*xdp_frame);
+	xdp_frame->metasize = metasize;
+
+	/* rxq only valid until napi_schedule ends, convert to xdp_mem_info */
+	xdp_frame->mem = xdp->rxq->mem;
+
+	return xdp_frame;
 }
 
-static inline
-void xdp_return_frame(struct xdp_frame *xdpf)
-{
-	return;
-}
+void xdp_return_frame(struct xdp_frame *xdpf);
+void xdp_return_frame_rx_napi(struct xdp_frame *xdpf);
+void xdp_return_buff(struct xdp_buff *xdp);
 
-static inline
-void xdp_return_frame_rx_napi(struct xdp_frame *xdpf)
-{
-	return;
-}
-
+/* RHEL: increase the version of xdp_rxq_info_reg kABI whenever XDP is
+ * changed in a kABI incompatible way. That includes changes to ndo_xdp* and
+ * ndo_bpf ops, inline function changes and XDP struct changes. */
+RH_KABI_FORCE_CHANGE(1)
 int xdp_rxq_info_reg(struct xdp_rxq_info *xdp_rxq,
 		     struct net_device *dev, u32 queue_index);
 void xdp_rxq_info_unreg(struct xdp_rxq_info *xdp_rxq);
@@ -117,13 +164,26 @@ void xdp_rxq_info_unreg_mem_model(struct xdp_rxq_info *xdp_rxq);
 static __always_inline void
 xdp_set_data_meta_invalid(struct xdp_buff *xdp)
 {
-	return;
+	xdp->data_meta = xdp->data + 1;
 }
 
 static __always_inline bool
 xdp_data_meta_unsupported(const struct xdp_buff *xdp)
 {
-	return false;
+	return unlikely(xdp->data_meta > xdp->data);
 }
+
+struct xdp_attachment_info {
+	struct bpf_prog *prog;
+	u32 flags;
+};
+
+struct netdev_bpf;
+int xdp_attachment_query(struct xdp_attachment_info *info,
+			 struct netdev_bpf *bpf);
+bool xdp_attachment_flags_ok(struct xdp_attachment_info *info,
+			     struct netdev_bpf *bpf);
+void xdp_attachment_setup(struct xdp_attachment_info *info,
+			  struct netdev_bpf *bpf);
 
 #endif /* __LINUX_NET_XDP_H__ */

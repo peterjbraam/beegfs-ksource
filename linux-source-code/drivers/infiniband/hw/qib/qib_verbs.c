@@ -144,13 +144,8 @@ static u32 qib_count_sge(struct rvt_sge_state *ss, u32 length)
 	u32 ndesc = 1;  /* count the header */
 
 	while (length) {
-		u32 len = sge.length;
+		u32 len = rvt_get_sge_length(&sge, length);
 
-		if (len > length)
-			len = length;
-		if (len > sge.sge_length)
-			len = sge.sge_length;
-		BUG_ON(len == 0);
 		if (((long) sge.vaddr & (sizeof(u32) - 1)) ||
 		    (len != length && (len & (sizeof(u32) - 1)))) {
 			ndesc = 0;
@@ -187,13 +182,8 @@ static void qib_copy_from_sge(void *data, struct rvt_sge_state *ss, u32 length)
 	struct rvt_sge *sge = &ss->sge;
 
 	while (length) {
-		u32 len = sge->length;
+		u32 len = rvt_get_sge_length(sge, length);
 
-		if (len > length)
-			len = length;
-		if (len > sge->sge_length)
-			len = sge->sge_length;
-		BUG_ON(len == 0);
 		memcpy(data, sge->vaddr, len);
 		sge->vaddr += len;
 		sge->length -= len;
@@ -442,14 +432,9 @@ static void copy_io(u32 __iomem *piobuf, struct rvt_sge_state *ss,
 	u32 last;
 
 	while (1) {
-		u32 len = ss->sge.length;
+		u32 len = rvt_get_sge_length(&ss->sge, length);
 		u32 off;
 
-		if (len > length)
-			len = length;
-		if (len > ss->sge.sge_length)
-			len = ss->sge.sge_length;
-		BUG_ON(len == 0);
 		/* If the source address is not aligned, try to align it. */
 		off = (unsigned long)ss->sge.vaddr & (sizeof(u32) - 1);
 		if (off) {
@@ -680,7 +665,7 @@ void qib_put_txreq(struct qib_verbs_txreq *tx)
  */
 void qib_verbs_sdma_desc_avail(struct qib_pportdata *ppd, unsigned avail)
 {
-	struct rvt_qp *qp, *nqp;
+	struct rvt_qp *qp;
 	struct qib_qp_priv *qpp, *nqpp;
 	struct rvt_qp *qps[20];
 	struct qib_ibdev *dev;
@@ -693,7 +678,6 @@ void qib_verbs_sdma_desc_avail(struct qib_pportdata *ppd, unsigned avail)
 	/* Search wait list for first QP wanting DMA descriptors. */
 	list_for_each_entry_safe(qpp, nqpp, &dev->dmawait, iowait) {
 		qp = qpp->owner;
-		nqp = nqpp->owner;
 		if (qp->port_num != ppd->port)
 			continue;
 		if (n == ARRAY_SIZE(qps))
@@ -1366,7 +1350,7 @@ struct ib_ah *qib_create_qp0_ah(struct qib_ibport *ibp, u16 dlid)
 	rcu_read_lock();
 	qp0 = rcu_dereference(ibp->rvp.qp[0]);
 	if (qp0)
-		ah = rdma_create_ah(qp0->ibqp.pd, &attr);
+		ah = rdma_create_ah(qp0->ibqp.pd, &attr, 0);
 	rcu_read_unlock();
 	return ah;
 }
@@ -1497,6 +1481,11 @@ static void qib_fill_device_attr(struct qib_devdata *dd)
 	dd->verbs_dev.rdi.wc_opcode = ib_qib_wc_opcode;
 }
 
+static const struct ib_device_ops qib_dev_ops = {
+	.modify_device = qib_modify_device,
+	.process_mad = qib_process_mad,
+};
+
 /**
  * qib_register_ib_device - register our device with the infiniband core
  * @dd: the device data structure
@@ -1559,8 +1548,6 @@ int qib_register_ib_device(struct qib_devdata *dd)
 	ibdev->node_guid = ppd->guid;
 	ibdev->phys_port_cnt = dd->num_pports;
 	ibdev->dev.parent = &dd->pcidev->dev;
-	ibdev->modify_device = qib_modify_device;
-	ibdev->process_mad = qib_process_mad;
 
 	snprintf(ibdev->node_desc, sizeof(ibdev->node_desc),
 		 "Intel Infiniband HCA %s", init_utsname()->nodename);
@@ -1628,6 +1615,7 @@ int qib_register_ib_device(struct qib_devdata *dd)
 	}
 	rdma_set_device_sysfs_group(&dd->verbs_dev.rdi.ibdev, &qib_attr_group);
 
+	ib_set_device_ops(ibdev, &qib_dev_ops);
 	ret = rvt_register_device(&dd->verbs_dev.rdi, RDMA_DRIVER_QIB);
 	if (ret)
 		goto err_tx;

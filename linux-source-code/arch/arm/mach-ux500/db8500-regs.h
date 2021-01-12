@@ -41,10 +41,6 @@
 /* ASIC ID is at 0xbf4 offset within this region */
 #define U8500_ASIC_ID_BASE	0x9001D000
 
-#define U9540_BOOT_ROM_BASE	0xFFFE0000
-/* ASIC ID is at 0xbf4 offset within this region */
-#define U9540_ASIC_ID_BASE	0xFFFFD000
-
 #define U8500_PER6_BASE		0xa03c0000
 #define U8500_PER7_BASE		0xa03d0000
 #define U8500_PER5_BASE		0xa03e0000
@@ -102,7 +98,6 @@
 #define U8500_PRCMU_BASE	(U8500_PER4_BASE + 0x07000)
 #define U9540_DMC1_BASE		(U8500_PER4_BASE + 0x0A000)
 #define U8500_PRCMU_TCDM_BASE	(U8500_PER4_BASE + 0x68000)
-#define U9540_PRCMU_TCDM_BASE	(U8500_PER4_BASE + 0x6A000)
 #define U8500_PRCMU_TCPM_BASE   (U8500_PER4_BASE + 0x60000)
 #define U8500_PRCMU_TIMER_3_BASE (U8500_PER4_BASE + 0x07338)
 #define U8500_PRCMU_TIMER_4_BASE (U8500_PER4_BASE + 0x07450)
@@ -184,7 +179,7 @@
 #define U8500_IO_VIRTUAL	0xf0000000
 #define U8500_IO_PHYSICAL	0xa0000000
 /* This is where we map in the ROM to check ASIC IDs */
-#define UX500_VIRT_ROM		0xf0000000
+#define UX500_VIRT_ROM		IOMEM(0xf0000000)
 
 /* This macro is used in assembly, so no cast */
 #define IO_ADDRESS(x)           \

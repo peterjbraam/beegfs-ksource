@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Driver core interface to the pinctrl subsystem.
  *
@@ -6,8 +7,6 @@
  * Based on bits of regulator core, gpio core and clk core
  *
  * Author: Linus Walleij <linus.walleij@linaro.org>
- *
- * License terms: GNU General Public License (GPL) version 2
  */
 
 #include <linux/device.h>
@@ -23,28 +22,42 @@ int pinctrl_bind_pins(struct device *dev)
 {
 	int ret;
 
-	dev->device_rh->pins = devm_kzalloc(dev, sizeof(*(dev->device_rh->pins)), GFP_KERNEL);
-	if (!dev->device_rh->pins)
+	if (dev->of_node_reused)
+		return 0;
+
+	dev->pins = devm_kzalloc(dev, sizeof(*(dev->pins)), GFP_KERNEL);
+	if (!dev->pins)
 		return -ENOMEM;
 
-	dev->device_rh->pins->p = devm_pinctrl_get(dev);
-	if (IS_ERR(dev->device_rh->pins->p)) {
+	dev->pins->p = devm_pinctrl_get(dev);
+	if (IS_ERR(dev->pins->p)) {
 		dev_dbg(dev, "no pinctrl handle\n");
-		ret = PTR_ERR(dev->device_rh->pins->p);
+		ret = PTR_ERR(dev->pins->p);
 		goto cleanup_alloc;
 	}
 
-	dev->device_rh->pins->default_state = pinctrl_lookup_state(dev->device_rh->pins->p,
+	dev->pins->default_state = pinctrl_lookup_state(dev->pins->p,
 					PINCTRL_STATE_DEFAULT);
-	if (IS_ERR(dev->device_rh->pins->default_state)) {
+	if (IS_ERR(dev->pins->default_state)) {
 		dev_dbg(dev, "no default pinctrl state\n");
 		ret = 0;
 		goto cleanup_get;
 	}
 
-	ret = pinctrl_select_state(dev->device_rh->pins->p, dev->device_rh->pins->default_state);
+	dev->pins->init_state = pinctrl_lookup_state(dev->pins->p,
+					PINCTRL_STATE_INIT);
+	if (IS_ERR(dev->pins->init_state)) {
+		/* Not supplying this state is perfectly legal */
+		dev_dbg(dev, "no init pinctrl state\n");
+
+		ret = pinctrl_select_state(dev->pins->p,
+					   dev->pins->default_state);
+	} else {
+		ret = pinctrl_select_state(dev->pins->p, dev->pins->init_state);
+	}
+
 	if (ret) {
-		dev_dbg(dev, "failed to activate default pinctrl state\n");
+		dev_dbg(dev, "failed to activate initial pinctrl state\n");
 		goto cleanup_get;
 	}
 
@@ -54,15 +67,15 @@ int pinctrl_bind_pins(struct device *dev)
 	 * sleep and idle pin states, with semantics as defined in
 	 * <linux/pinctrl/pinctrl-state.h>
 	 */
-	dev->device_rh->pins->sleep_state = pinctrl_lookup_state(dev->device_rh->pins->p,
-						PINCTRL_STATE_SLEEP);
-	if (IS_ERR(dev->device_rh->pins->sleep_state))
+	dev->pins->sleep_state = pinctrl_lookup_state(dev->pins->p,
+					PINCTRL_STATE_SLEEP);
+	if (IS_ERR(dev->pins->sleep_state))
 		/* Not supplying this state is perfectly legal */
 		dev_dbg(dev, "no sleep pinctrl state\n");
 
-	dev->device_rh->pins->idle_state = pinctrl_lookup_state(dev->device_rh->pins->p,
-						PINCTRL_STATE_IDLE);
-	if (IS_ERR(dev->device_rh->pins->idle_state))
+	dev->pins->idle_state = pinctrl_lookup_state(dev->pins->p,
+					PINCTRL_STATE_IDLE);
+	if (IS_ERR(dev->pins->idle_state))
 		/* Not supplying this state is perfectly legal */
 		dev_dbg(dev, "no idle pinctrl state\n");
 #endif
@@ -75,14 +88,18 @@ int pinctrl_bind_pins(struct device *dev)
 	 * no point in keeping it around.
 	 */
 cleanup_get:
-	devm_pinctrl_put(dev->device_rh->pins->p);
+	devm_pinctrl_put(dev->pins->p);
 cleanup_alloc:
-	devm_kfree(dev, dev->device_rh->pins);
-	dev->device_rh->pins = NULL;
+	devm_kfree(dev, dev->pins);
+	dev->pins = NULL;
 
-	/* Only return deferrals */
-	if (ret != -EPROBE_DEFER)
-		ret = 0;
+	/* Return deferrals */
+	if (ret == -EPROBE_DEFER)
+		return ret;
+	/* Return serious errors */
+	if (ret == -EINVAL)
+		return ret;
+	/* We ignore errors like -ENOENT meaning no pinctrl state */
 
-	return ret;
+	return 0;
 }

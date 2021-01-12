@@ -239,13 +239,16 @@ static struct fq_flow *fq_classify(struct sk_buff *skb, struct fq_sched_data *q)
 	if (unlikely((skb->priority & TC_PRIO_MAX) == TC_PRIO_CONTROL))
 		return &q->internal;
 
-	/* SYNACK messages are attached to a listener socket.
-	 * 1) They are not part of a 'flow' yet
-	 * 2) We do not want to rate limit them (eg SYNFLOOD attack),
+	/* SYNACK messages are attached to a TCP_NEW_SYN_RECV request socket
+	 * or a listener (SYNCOOKIE mode)
+	 * 1) request sockets are not full blown,
+	 *    they do not contain sk_pacing_rate
+	 * 2) They are not part of a 'flow' yet
+	 * 3) We do not want to rate limit them (eg SYNFLOOD attack),
 	 *    especially if the listener set SO_MAX_PACING_RATE
-	 * 3) We pretend they are orphaned
+	 * 4) We pretend they are orphaned
 	 */
-	if (!sk || sk->sk_state == TCP_LISTEN) {
+	if (!sk || sk_listener(sk)) {
 		unsigned long hash = skb_get_hash(skb) & q->orphan_mask;
 
 		/* By forcing low order bit to 1, we make sure to not
@@ -316,7 +319,7 @@ static struct sk_buff *fq_dequeue_head(struct Qdisc *sch, struct fq_flow *flow)
 
 	if (skb) {
 		flow->head = skb->next;
-		skb->next = NULL;
+		skb_mark_not_on_list(skb);
 		flow->qlen--;
 		qdisc_qstats_backlog_dec(sch, skb);
 		sch->q.qlen--;
@@ -402,9 +405,17 @@ static int fq_enqueue(struct sk_buff *skb, struct Qdisc *sch,
 		q->stat_tcp_retrans++;
 	qdisc_qstats_backlog_inc(sch, skb);
 	if (fq_flow_is_detached(f)) {
+		struct sock *sk = skb->sk;
+
 		fq_flow_add_tail(&q->new_flows, f);
 		if (time_after(jiffies, f->age + q->flow_refill_delay))
 			f->credit = max_t(u32, f->credit, q->quantum);
+		if (sk && q->rate_enable) {
+			if (unlikely(smp_load_acquire(&sk->sk_pacing_status) !=
+				     SK_PACING_FQ))
+				smp_store_release(&sk->sk_pacing_status,
+						  SK_PACING_FQ);
+		}
 		q->inactive_flows--;
 	}
 
@@ -650,7 +661,7 @@ static int fq_resize(struct Qdisc *sch, u32 log)
 		return 0;
 
 	/* If XPS was setup, we can allocate memory on right NUMA node */
-	array = kvmalloc_node(sizeof(struct rb_root) << log, GFP_KERNEL | __GFP_REPEAT,
+	array = kvmalloc_node(sizeof(struct rb_root) << log, GFP_KERNEL | __GFP_RETRY_MAYFAIL,
 			      netdev_queue_numa_node_read(sch->dev_queue));
 	if (!array)
 		return -ENOMEM;
@@ -687,7 +698,8 @@ static const struct nla_policy fq_policy[TCA_FQ_MAX + 1] = {
 	[TCA_FQ_LOW_RATE_THRESHOLD]	= { .type = NLA_U32 },
 };
 
-static int fq_change(struct Qdisc *sch, struct nlattr *opt)
+static int fq_change(struct Qdisc *sch, struct nlattr *opt,
+		     struct netlink_ext_ack *extack)
 {
 	struct fq_sched_data *q = qdisc_priv(sch);
 	struct nlattr *tb[TCA_FQ_MAX + 1];
@@ -698,7 +710,7 @@ static int fq_change(struct Qdisc *sch, struct nlattr *opt)
 	if (!opt)
 		return -EINVAL;
 
-	err = nla_parse_nested(tb, TCA_FQ_MAX, opt, fq_policy);
+	err = nla_parse_nested(tb, TCA_FQ_MAX, opt, fq_policy, NULL);
 	if (err < 0)
 		return err;
 
@@ -790,7 +802,8 @@ static void fq_destroy(struct Qdisc *sch)
 	qdisc_watchdog_cancel(&q->watchdog);
 }
 
-static int fq_init(struct Qdisc *sch, struct nlattr *opt)
+static int fq_init(struct Qdisc *sch, struct nlattr *opt,
+		   struct netlink_ext_ack *extack)
 {
 	struct fq_sched_data *q = qdisc_priv(sch);
 	int err;
@@ -813,7 +826,7 @@ static int fq_init(struct Qdisc *sch, struct nlattr *opt)
 	qdisc_watchdog_init(&q->watchdog, sch);
 
 	if (opt)
-		err = fq_change(sch, opt);
+		err = fq_change(sch, opt, extack);
 	else
 		err = fq_resize(sch, q->fq_trees_log);
 

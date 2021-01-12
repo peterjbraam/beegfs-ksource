@@ -61,8 +61,7 @@ static struct switch_ctx *alloc_switch_ctx(struct dm_target *ti, unsigned nr_pat
 {
 	struct switch_ctx *sctx;
 
-	sctx = kzalloc(sizeof(struct switch_ctx) + nr_paths * sizeof(struct switch_path),
-		       GFP_KERNEL);
+	sctx = kzalloc(struct_size(sctx, path_list, nr_paths), GFP_KERNEL);
 	if (!sctx)
 		return NULL;
 
@@ -114,7 +113,8 @@ static int alloc_region_table(struct dm_target *ti, unsigned nr_paths)
 		return -EINVAL;
 	}
 
-	sctx->region_table = vmalloc(nr_slots * sizeof(region_table_slot_t));
+	sctx->region_table = vmalloc(array_size(nr_slots,
+						sizeof(region_table_slot_t)));
 	if (!sctx->region_table) {
 		ti->error = "Cannot allocate region table";
 		return -ENOMEM;
@@ -144,7 +144,7 @@ static unsigned switch_region_table_read(struct switch_ctx *sctx, unsigned long 
 
 	switch_get_position(sctx, region_nr, &region_index, &bit);
 
-	return (ACCESS_ONCE(sctx->region_table[region_index]) >> bit) &
+	return (READ_ONCE(sctx->region_table[region_index]) >> bit) &
 		((1 << sctx->region_table_entry_bits) - 1);
 }
 
@@ -319,11 +319,11 @@ error:
 static int switch_map(struct dm_target *ti, struct bio *bio)
 {
 	struct switch_ctx *sctx = ti->private;
-	sector_t offset = dm_target_offset(ti, bio->bi_sector);
+	sector_t offset = dm_target_offset(ti, bio->bi_iter.bi_sector);
 	unsigned path_nr = switch_get_path_nr(sctx, offset);
 
-	bio->bi_bdev = sctx->path_list[path_nr].dmdev->bdev;
-	bio->bi_sector = sctx->path_list[path_nr].start + offset;
+	bio_set_dev(bio, sctx->path_list[path_nr].dmdev->bdev);
+	bio->bi_iter.bi_sector = sctx->path_list[path_nr].start + offset;
 
 	return DM_MAPIO_REMAPPED;
 }
@@ -466,7 +466,8 @@ static int process_set_region_mappings(struct switch_ctx *sctx,
  *
  * Only set_region_mappings is supported.
  */
-static int switch_message(struct dm_target *ti, unsigned argc, char **argv)
+static int switch_message(struct dm_target *ti, unsigned argc, char **argv,
+			  char *result, unsigned maxlen)
 {
 	static DEFINE_MUTEX(message_mutex);
 

@@ -34,7 +34,8 @@
 
 #include <linux/mm.h>
 #include <linux/dma-mapping.h>
-#include <linux/sched.h>
+#include <linux/sched/signal.h>
+#include <linux/sched/mm.h>
 #include <linux/hugetlb.h>
 #include <linux/iommu.h>
 #include <linux/workqueue.h>
@@ -101,6 +102,7 @@ static int usnic_uiom_get_pages(unsigned long addr, size_t size, int writable,
 	int i;
 	int flags;
 	dma_addr_t pa;
+	unsigned int gup_flags;
 	struct mm_struct *mm;
 
 	/*
@@ -137,6 +139,8 @@ static int usnic_uiom_get_pages(unsigned long addr, size_t size, int writable,
 
 	flags = IOMMU_READ | IOMMU_CACHE;
 	flags |= (writable) ? IOMMU_WRITE : 0;
+	gup_flags = FOLL_WRITE;
+	gup_flags |= (writable) ? 0 : FOLL_FORCE;
 	cur_base = addr & PAGE_MASK;
 	ret = 0;
 
@@ -144,7 +148,7 @@ static int usnic_uiom_get_pages(unsigned long addr, size_t size, int writable,
 		ret = get_user_pages_longterm(cur_base,
 					min_t(unsigned long, npages,
 					PAGE_SIZE / sizeof(struct page *)),
-					1, !writable, page_list, NULL);
+					gup_flags, page_list, NULL);
 
 		if (ret < 0)
 			goto out;
@@ -227,7 +231,7 @@ static void __usnic_uiom_reg_release(struct usnic_uiom_pd *pd,
 	vpn_last = vpn_start + npages - 1;
 
 	spin_lock(&pd->lock);
-	usnic_uiom_remove_interval(&pd->rb_root, vpn_start,
+	usnic_uiom_remove_interval(&pd->root, vpn_start,
 					vpn_last, &rm_intervals);
 	usnic_uiom_unmap_sorted_intervals(&rm_intervals, pd);
 
@@ -379,7 +383,7 @@ struct usnic_uiom_reg *usnic_uiom_reg_get(struct usnic_uiom_pd *pd,
 	err = usnic_uiom_get_intervals_diff(vpn_start, vpn_last,
 						(writable) ? IOMMU_WRITE : 0,
 						IOMMU_WRITE,
-						&pd->rb_root,
+						&pd->root,
 						&sorted_diff_intervals);
 	if (err) {
 		usnic_err("Failed disjoint interval vpn [0x%lx,0x%lx] err %d\n",
@@ -395,7 +399,7 @@ struct usnic_uiom_reg *usnic_uiom_reg_get(struct usnic_uiom_pd *pd,
 
 	}
 
-	err = usnic_uiom_insert_interval(&pd->rb_root, vpn_start, vpn_last,
+	err = usnic_uiom_insert_interval(&pd->root, vpn_start, vpn_last,
 					(writable) ? IOMMU_WRITE : 0);
 	if (err) {
 		usnic_err("Failed insert interval vpn [0x%lx,0x%lx] err %d\n",

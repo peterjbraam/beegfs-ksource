@@ -45,7 +45,7 @@ static s64 __uv_bios_call(enum uv_bios_cmd which, u64 a1, u64 a2, u64 a3,
 	 * If EFI_OLD_MEMMAP is set, we need to fall back to using our old EFI
 	 * callback method, which uses efi_call() directly, with the kernel page tables:
 	 */
-	if (unlikely(efi_enabled(EFI_OLD_MEMMAP)))
+	if (unlikely(test_bit(EFI_OLD_MEMMAP, &efi.flags)))
 		ret = efi_call((void *)__va(tab->function), (u64)which, a1, a2, a3, a4, a5);
 	else
 		ret = efi_call_virt_pointer(tab, function, (u64)which, a1, a2, a3, a4, a5);
@@ -81,6 +81,18 @@ s64 uv_bios_call_irqsave(enum uv_bios_cmd which, u64 a1, u64 a2, u64 a3,
 	local_irq_restore(bios_flags);
 
 	up(&__efi_uv_runtime_lock);
+
+	return ret;
+}
+
+s64 uv_bios_call_reentrant(enum uv_bios_cmd which, u64 a1, u64 a2, u64 a3,
+					u64 a4, u64 a5)
+{
+	s64 ret;
+
+	preempt_disable();
+	ret = uv_bios_call(which, a1, a2, a3, a4, a5);
+	preempt_enable();
 
 	return ret;
 }
@@ -164,11 +176,8 @@ EXPORT_SYMBOL_GPL(uv_bios_change_memprotect);
 s64
 uv_bios_reserved_page_pa(u64 buf, u64 *cookie, u64 *addr, u64 *len)
 {
-	s64 ret;
-
-	ret = uv_bios_call_irqsave(UV_BIOS_GET_PARTITION_ADDR, (u64)cookie,
-					(u64)addr, buf, (u64)len, 0);
-	return ret;
+	return uv_bios_call_irqsave(UV_BIOS_GET_PARTITION_ADDR, (u64)cookie,
+				    (u64)addr, buf, (u64)len, 0);
 }
 EXPORT_SYMBOL_GPL(uv_bios_reserved_page_pa);
 
@@ -198,6 +207,7 @@ int uv_bios_set_legacy_vga_target(bool decode, int domain, int bus)
 }
 EXPORT_SYMBOL_GPL(uv_bios_set_legacy_vga_target);
 
+#ifdef CONFIG_EFI
 void uv_bios_init(void)
 {
 	uv_systab = NULL;
@@ -227,3 +237,4 @@ void uv_bios_init(void)
 	}
 	pr_info("UV: UVsystab: Revision:%x\n", uv_systab->revision);
 }
+#endif

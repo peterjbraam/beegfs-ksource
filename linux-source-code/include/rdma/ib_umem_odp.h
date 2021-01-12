@@ -83,6 +83,19 @@ static inline struct ib_umem_odp *to_ib_umem_odp(struct ib_umem *umem)
 	return container_of(umem, struct ib_umem_odp, umem);
 }
 
+/*
+ * The lower 2 bits of the DMA address signal the R/W permissions for
+ * the entry. To upgrade the permissions, provide the appropriate
+ * bitmask to the map_dma_pages function.
+ *
+ * Be aware that upgrading a mapped address might result in change of
+ * the DMA address for the page.
+ */
+#define ODP_READ_ALLOWED_BIT  (1<<0ULL)
+#define ODP_WRITE_ALLOWED_BIT (1<<1ULL)
+
+#define ODP_DMA_ADDR_MASK (~(ODP_READ_ALLOWED_BIT | ODP_WRITE_ALLOWED_BIT))
+
 #ifdef CONFIG_INFINIBAND_ON_DEMAND_PAGING
 
 struct ib_ucontext_per_mm {
@@ -91,7 +104,7 @@ struct ib_ucontext_per_mm {
 	struct pid *tgid;
 	bool active;
 
-	struct rb_root umem_tree;
+	struct rb_root_cached umem_tree;
 	/* Protects umem_tree */
 	struct rw_semaphore umem_rwsem;
 
@@ -107,19 +120,6 @@ struct ib_umem_odp *ib_alloc_odp_umem(struct ib_umem_odp *root_umem,
 				      unsigned long addr, size_t size);
 void ib_umem_odp_release(struct ib_umem_odp *umem_odp);
 
-/*
- * The lower 2 bits of the DMA address signal the R/W permissions for
- * the entry. To upgrade the permissions, provide the appropriate
- * bitmask to the map_dma_pages function.
- *
- * Be aware that upgrading a mapped address might result in change of
- * the DMA address for the page.
- */
-#define ODP_READ_ALLOWED_BIT  (1<<0ULL)
-#define ODP_WRITE_ALLOWED_BIT (1<<1ULL)
-
-#define ODP_DMA_ADDR_MASK (~(ODP_READ_ALLOWED_BIT | ODP_WRITE_ALLOWED_BIT))
-
 int ib_umem_odp_map_dma_pages(struct ib_umem_odp *umem_odp, u64 start_offset,
 			      u64 bcnt, u64 access_mask,
 			      unsigned long current_seq);
@@ -133,14 +133,15 @@ typedef int (*umem_call_back)(struct ib_umem_odp *item, u64 start, u64 end,
  * Call the callback on each ib_umem in the range. Returns the logical or of
  * the return values of the functions called.
  */
-int rbt_ib_umem_for_each_in_range(struct rb_root *root, u64 start, u64 end,
+int rbt_ib_umem_for_each_in_range(struct rb_root_cached *root,
+				  u64 start, u64 end,
 				  umem_call_back cb, void *cookie);
 
 /*
  * Find first region intersecting with address range.
  * Return NULL if not found
  */
-struct ib_umem_odp *rbt_ib_umem_lookup(struct rb_root *root,
+struct ib_umem_odp *rbt_ib_umem_lookup(struct rb_root_cached *root,
 				       u64 addr, u64 length);
 
 static inline int ib_umem_mmu_notifier_retry(struct ib_umem_odp *umem_odp,

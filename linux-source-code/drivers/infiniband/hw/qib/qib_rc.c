@@ -45,12 +45,7 @@ static u32 restart_sge(struct rvt_sge_state *ss, struct rvt_swqe *wqe,
 	u32 len;
 
 	len = ((psn - wqe->psn) & QIB_PSN_MASK) * pmtu;
-	ss->sge = wqe->sg_list[0];
-	ss->sg_list = wqe->sg_list + 1;
-	ss->num_sge = wqe->wr.num_sge;
-	ss->total_len = wqe->length;
-	rvt_skip_sge(ss, len, false);
-	return wqe->length - len;
+	return rvt_restart_sge(ss, wqe, len);
 }
 
 /**
@@ -1868,7 +1863,7 @@ send_middle:
 		qp->r_rcv_len = 0;
 		if (opcode == OP(SEND_ONLY))
 			goto no_immediate_data;
-		/* FALLTHROUGH for SEND_ONLY_WITH_IMMEDIATE */
+		/* fall through -- for SEND_ONLY_WITH_IMMEDIATE */
 	case OP(SEND_LAST_WITH_IMMEDIATE):
 send_last_imm:
 		wc.ex.imm_data = ohdr->u.imm_data;

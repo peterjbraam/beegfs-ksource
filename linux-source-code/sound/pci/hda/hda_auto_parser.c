@@ -828,8 +828,6 @@ static void apply_fixup(struct hda_codec *codec, int id, int action, int depth)
 	while (id >= 0) {
 		const struct hda_fixup *fix = codec->fixup_list + id;
 
-		if (++depth > 10)
-			break;
 		if (fix->chained_before)
 			apply_fixup(codec, fix->chain_id, action, depth + 1);
 
@@ -869,6 +867,8 @@ static void apply_fixup(struct hda_codec *codec, int id, int action, int depth)
 		}
 		if (!fix->chained || fix->chained_before)
 			break;
+		if (++depth > 10)
+			break;
 		id = fix->chain_id;
 	}
 }
@@ -888,8 +888,7 @@ EXPORT_SYMBOL_GPL(snd_hda_apply_fixup);
 #define IGNORE_SEQ_ASSOC (~(AC_DEFCFG_SEQUENCE | AC_DEFCFG_DEF_ASSOC))
 
 static bool pin_config_match(struct hda_codec *codec,
-			     const struct hda_pintbl *pins,
-			     bool match_all_pins)
+			     const struct hda_pintbl *pins)
 {
 	const struct hda_pincfg *pin;
 	int i;
@@ -913,8 +912,7 @@ static bool pin_config_match(struct hda_codec *codec,
 					return false;
 			}
 		}
-		if (match_all_pins &&
-		    !found && (cfg & 0xf0000000) != 0x40000000)
+		if (!found && (cfg & 0xf0000000) != 0x40000000)
 			return false;
 	}
 
@@ -926,12 +924,10 @@ static bool pin_config_match(struct hda_codec *codec,
  * @codec: the HDA codec
  * @pin_quirk: zero-terminated pin quirk list
  * @fixlist: the fixup list
- * @match_all_pins: all valid pins must match with the table entries
  */
 void snd_hda_pick_pin_fixup(struct hda_codec *codec,
 			    const struct snd_hda_pin_quirk *pin_quirk,
-			    const struct hda_fixup *fixlist,
-			    bool match_all_pins)
+			    const struct hda_fixup *fixlist)
 {
 	const struct snd_hda_pin_quirk *pq;
 
@@ -943,7 +939,7 @@ void snd_hda_pick_pin_fixup(struct hda_codec *codec,
 			continue;
 		if (codec->core.vendor_id != pq->codec)
 			continue;
-		if (pin_config_match(codec, pq->pins, match_all_pins)) {
+		if (pin_config_match(codec, pq->pins)) {
 			codec->fixup_id = pq->value;
 #ifdef CONFIG_SND_DEBUG_VERBOSE
 			codec->fixup_name = pq->name;

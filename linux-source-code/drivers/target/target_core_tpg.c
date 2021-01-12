@@ -32,8 +32,7 @@
 #include <linux/export.h>
 #include <net/sock.h>
 #include <net/tcp.h>
-#include <scsi/scsi.h>
-#include <scsi/scsi_cmnd.h>
+#include <scsi/scsi_proto.h>
 
 #include <target/target_core_base.h>
 #include <target/target_core_backend.h>
@@ -341,26 +340,18 @@ static void target_shutdown_sessions(struct se_node_acl *acl)
 {
 	struct se_session *sess;
 	unsigned long flags;
-	int ret;
 
 restart:
 	spin_lock_irqsave(&acl->nacl_sess_lock, flags);
 	list_for_each_entry(sess, &acl->acl_sess_list, sess_acl_list) {
 		if (sess->sess_tearing_down)
 			continue;
-		if (!target_get_session(sess))
-			continue;
 
 		list_del_init(&sess->sess_acl_list);
-
 		spin_unlock_irqrestore(&acl->nacl_sess_lock, flags);
-		if (acl->se_tpg->se_tpg_tfo->shutdown_session)
-			ret = acl->se_tpg->se_tpg_tfo->shutdown_session(sess);
-		else
-			ret = 1;
-		target_put_session(sess);
-		if (ret)
-			target_put_session(sess);
+
+		if (acl->se_tpg->se_tpg_tfo->close_session)
+			acl->se_tpg->se_tpg_tfo->close_session(sess);
 		goto restart;
 	}
 	spin_unlock_irqrestore(&acl->nacl_sess_lock, flags);
@@ -586,7 +577,6 @@ struct se_lun *core_tpg_alloc_lun(
 	}
 	lun->unpacked_lun = unpacked_lun;
 	atomic_set(&lun->lun_acl_count, 0);
-	init_completion(&lun->lun_ref_comp);
 	init_completion(&lun->lun_shutdown_comp);
 	INIT_LIST_HEAD(&lun->lun_deve_list);
 	INIT_LIST_HEAD(&lun->lun_dev_link);

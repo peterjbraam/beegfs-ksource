@@ -25,17 +25,9 @@
 #define _LINUX_NET_BUSY_POLL_H
 
 #include <linux/netdevice.h>
+#include <linux/sched/clock.h>
+#include <linux/sched/signal.h>
 #include <net/ip.h>
-
-#ifdef CONFIG_NET_RX_BUSY_POLL
-
-struct napi_struct;
-extern unsigned int sysctl_net_busy_read __read_mostly;
-extern unsigned int sysctl_net_busy_poll __read_mostly;
-
-/* return values from ndo_ll_poll */
-#define LL_FLUSH_FAILED		-1
-#define LL_FLUSH_BUSY		-2
 
 /*		0 - Reserved to indicate value not set
  *     1..NR_CPUS - Reserved for sender_cpu
@@ -43,25 +35,15 @@ extern unsigned int sysctl_net_busy_poll __read_mostly;
  */
 #define MIN_NAPI_ID ((unsigned int)(NR_CPUS + 1))
 
+#ifdef CONFIG_NET_RX_BUSY_POLL
+
+struct napi_struct;
+extern unsigned int sysctl_net_busy_read __read_mostly;
+extern unsigned int sysctl_net_busy_poll __read_mostly;
+
 static inline bool net_busy_loop_on(void)
 {
 	return sysctl_net_busy_poll;
-}
-
-static inline u64 busy_loop_us_clock(void)
-{
-	return local_clock() >> 10;
-}
-
-static inline unsigned long sk_busy_loop_end_time(struct sock *sk)
-{
-	return busy_loop_us_clock() + ACCESS_ONCE(sk->sk_ll_usec);
-}
-
-/* in poll/select we use the global sysctl_net_ll_poll value */
-static inline unsigned long busy_loop_end_time(void)
-{
-	return busy_loop_us_clock() + ACCESS_ONCE(sysctl_net_busy_poll);
 }
 
 static inline bool sk_can_busy_loop(const struct sock *sk)
@@ -69,35 +51,14 @@ static inline bool sk_can_busy_loop(const struct sock *sk)
 	return sk->sk_ll_usec && !signal_pending(current);
 }
 
-static inline bool busy_loop_timeout(unsigned long end_time)
-{
-	unsigned long now = busy_loop_us_clock();
+bool sk_busy_loop_end(void *p, unsigned long start_time);
 
-	return time_after(now, end_time);
-}
-
-bool sk_busy_loop(struct sock *sk, int nonblock);
-
-/* used in the NIC receive handler to mark the skb */
-static inline void skb_mark_napi_id(struct sk_buff *skb,
-				    struct napi_struct *napi)
-{
-	skb->napi_id = napi->napi_id;
-}
-
-/* used in the protocol hanlder to propagate the napi_id to the socket */
-static inline void sk_mark_napi_id(struct sock *sk, struct sk_buff *skb)
-{
-	sk->sk_napi_id = skb->napi_id;
-}
+void napi_busy_loop(unsigned int napi_id,
+		    bool (*loop_end)(void *, unsigned long),
+		    void *loop_end_arg);
 
 #else /* CONFIG_NET_RX_BUSY_POLL */
 static inline unsigned long net_busy_loop_on(void)
-{
-	return 0;
-}
-
-static inline unsigned long busy_loop_end_time(void)
 {
 	return 0;
 }
@@ -107,29 +68,100 @@ static inline bool sk_can_busy_loop(struct sock *sk)
 	return false;
 }
 
-static inline bool sk_busy_poll(struct sock *sk, int nonblock)
+#endif /* CONFIG_NET_RX_BUSY_POLL */
+
+static inline unsigned long busy_loop_current_time(void)
 {
-	return false;
+#ifdef CONFIG_NET_RX_BUSY_POLL
+	return (unsigned long)(local_clock() >> 10);
+#else
+	return 0;
+#endif
 }
 
-static inline void skb_mark_napi_id(struct sk_buff *skb,
-				    struct napi_struct *napi)
+/* in poll/select we use the global sysctl_net_ll_poll value */
+static inline bool busy_loop_timeout(unsigned long start_time)
 {
-}
+#ifdef CONFIG_NET_RX_BUSY_POLL
+	unsigned long bp_usec = READ_ONCE(sysctl_net_busy_poll);
 
-static inline void sk_mark_napi_id(struct sock *sk, struct sk_buff *skb)
-{
-}
+	if (bp_usec) {
+		unsigned long end_time = start_time + bp_usec;
+		unsigned long now = busy_loop_current_time();
 
-static inline bool busy_loop_timeout(unsigned long end_time)
-{
+		return time_after(now, end_time);
+	}
+#endif
 	return true;
 }
 
-static inline bool sk_busy_loop(struct sock *sk, int nonblock)
+static inline bool sk_busy_loop_timeout(struct sock *sk,
+					unsigned long start_time)
 {
-	return false;
+#ifdef CONFIG_NET_RX_BUSY_POLL
+	unsigned long bp_usec = READ_ONCE(sk->sk_ll_usec);
+
+	if (bp_usec) {
+		unsigned long end_time = start_time + bp_usec;
+		unsigned long now = busy_loop_current_time();
+
+		return time_after(now, end_time);
+	}
+#endif
+	return true;
 }
 
-#endif /* CONFIG_NET_RX_BUSY_POLL */
+static inline void sk_busy_loop(struct sock *sk, int nonblock)
+{
+#ifdef CONFIG_NET_RX_BUSY_POLL
+	unsigned int napi_id = READ_ONCE(sk->sk_napi_id);
+
+	if (napi_id >= MIN_NAPI_ID)
+		napi_busy_loop(napi_id, nonblock ? NULL : sk_busy_loop_end, sk);
+#endif
+}
+
+static inline void sock_poll_busy_loop(struct socket *sock, __poll_t events)
+{
+	if (sk_can_busy_loop(sock->sk) &&
+	    events && (events & POLL_BUSY_LOOP)) {
+		/* once, only if requested by syscall */
+		sk_busy_loop(sock->sk, 1);
+	}
+}
+
+/* if this socket can poll_ll, tell the system call */
+static inline __poll_t sock_poll_busy_flag(struct socket *sock)
+{
+	return sk_can_busy_loop(sock->sk) ? POLL_BUSY_LOOP : 0;
+}
+
+/* used in the NIC receive handler to mark the skb */
+static inline void skb_mark_napi_id(struct sk_buff *skb,
+				    struct napi_struct *napi)
+{
+#ifdef CONFIG_NET_RX_BUSY_POLL
+	skb->napi_id = napi->napi_id;
+#endif
+}
+
+/* used in the protocol hanlder to propagate the napi_id to the socket */
+static inline void sk_mark_napi_id(struct sock *sk, const struct sk_buff *skb)
+{
+#ifdef CONFIG_NET_RX_BUSY_POLL
+	sk->sk_napi_id = skb->napi_id;
+#endif
+	sk_rx_queue_set(sk, skb);
+}
+
+/* variant used for unconnected sockets */
+static inline void sk_mark_napi_id_once(struct sock *sk,
+					const struct sk_buff *skb)
+{
+#ifdef CONFIG_NET_RX_BUSY_POLL
+	if (!sk->sk_napi_id)
+		sk->sk_napi_id = skb->napi_id;
+#endif
+}
+
 #endif /* _LINUX_NET_BUSY_POLL_H */

@@ -37,21 +37,6 @@ static unsigned long long quirks;
 module_param(quirks, ullong, S_IRUGO);
 MODULE_PARM_DESC(quirks, "Bit flags for quirks to be enabled as default");
 
-static bool td_on_ring(struct xhci_td *td, struct xhci_ring *ring)
-{
-	struct xhci_segment *seg = ring->first_seg;
-
-	if (!td || !td->start_seg)
-		return false;
-	do {
-		if (seg == td->start_seg)
-			return true;
-		seg = seg->next;
-	} while (seg && seg != ring->first_seg);
-
-	return false;
-}
-
 /* TODO: copied from ehci-hcd.c - can this be refactored? */
 /*
  * xhci_handshake - spin reading hc until handshake completes or fails
@@ -528,8 +513,6 @@ static void compliance_mode_recovery_timer_init(struct xhci_hcd *xhci)
 	xhci->comp_mode_recovery_timer.expires = jiffies +
 			msecs_to_jiffies(COMP_MODE_RCVRY_MSECS);
 
-	set_timer_slack(&xhci->comp_mode_recovery_timer,
-			msecs_to_jiffies(COMP_MODE_RCVRY_MSECS));
 	add_timer(&xhci->comp_mode_recovery_timer);
 	xhci_dbg_trace(xhci, trace_xhci_dbg_quirks,
 			"Compliance mode recovery timer initialized");
@@ -1586,21 +1569,6 @@ static int xhci_urb_dequeue(struct usb_hcd *hcd, struct urb *urb, int status)
 	if (temp == ~(u32)0 || xhci->xhc_state & XHCI_STATE_DYING) {
 		xhci_hc_died(xhci);
 		goto done;
-	}
-
-	/*
-	 * check ring is not re-allocated since URB was enqueued. If it is, then
-	 * make sure none of the ring related pointers in this URB private data
-	 * are touched, such as td_list, otherwise we overwrite freed data
-	 */
-	if (!td_on_ring(&urb_priv->td[0], ep_ring)) {
-		xhci_err(xhci, "Canceled URB td not found on endpoint ring");
-		for (i = urb_priv->num_tds_done; i < urb_priv->num_tds; i++) {
-			td = &urb_priv->td[i];
-			if (!list_empty(&td->cancelled_td_list))
-				list_del_init(&td->cancelled_td_list);
-		}
-		goto err_giveback;
 	}
 
 	if (xhci->xhc_state & XHCI_STATE_HALTED) {
@@ -3037,7 +3005,6 @@ static void xhci_endpoint_reset(struct usb_hcd *hcd,
 	unsigned int ep_index;
 	unsigned long flags;
 	u32 ep_flag;
-	int err;
 
 	xhci = hcd_to_xhci(hcd);
 	if (!host_ep->hcpriv)
@@ -3087,17 +3054,7 @@ static void xhci_endpoint_reset(struct usb_hcd *hcd,
 		xhci_free_command(xhci, cfg_cmd);
 		goto cleanup;
 	}
-
-	err = xhci_queue_stop_endpoint(xhci, stop_cmd, udev->slot_id,
-					ep_index, 0);
-	if (err < 0) {
-		spin_unlock_irqrestore(&xhci->lock, flags);
-		xhci_free_command(xhci, cfg_cmd);
-		xhci_dbg(xhci, "%s: Failed to queue stop ep command, %d ",
-				__func__, err);
-		goto cleanup;
-	}
-
+	xhci_queue_stop_endpoint(xhci, stop_cmd, udev->slot_id, ep_index, 0);
 	xhci_ring_cmd_db(xhci);
 	spin_unlock_irqrestore(&xhci->lock, flags);
 
@@ -3111,16 +3068,8 @@ static void xhci_endpoint_reset(struct usb_hcd *hcd,
 					   ctrl_ctx, ep_flag, ep_flag);
 	xhci_endpoint_copy(xhci, cfg_cmd->in_ctx, vdev->out_ctx, ep_index);
 
-	err = xhci_queue_configure_endpoint(xhci, cfg_cmd, cfg_cmd->in_ctx->dma,
+	xhci_queue_configure_endpoint(xhci, cfg_cmd, cfg_cmd->in_ctx->dma,
 				      udev->slot_id, false);
-	if (err < 0) {
-		spin_unlock_irqrestore(&xhci->lock, flags);
-		xhci_free_command(xhci, cfg_cmd);
-		xhci_dbg(xhci, "%s: Failed to queue config ep command, %d ",
-				__func__, err);
-		goto cleanup;
-	}
-
 	xhci_ring_cmd_db(xhci);
 	spin_unlock_irqrestore(&xhci->lock, flags);
 

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  *  include/linux/nfs4.h
  *
@@ -15,6 +16,13 @@
 #include <linux/list.h>
 #include <linux/uidgid.h>
 #include <uapi/linux/nfs4.h>
+
+enum nfs4_acl_whotype {
+	NFS4_ACL_WHO_NAMED = 0,
+	NFS4_ACL_WHO_OWNER,
+	NFS4_ACL_WHO_GROUP,
+	NFS4_ACL_WHO_EVERYONE,
+};
 
 struct nfs4_ace {
 	uint32_t	type;
@@ -449,7 +457,12 @@ enum lock_type4 {
 
 #define NFS4_DEBUG 1
 
-/* Index of predefined Linux client operations */
+/*
+ * Index of predefined Linux client operations
+ *
+ * To ensure that /proc/net/rpc/nfs remains correctly ordered, please
+ * append only to this enum when adding new client operations.
+ */
 
 enum {
 	NFSPROC4_CLNT_NULL = 0,		/* Unused */
@@ -491,7 +504,6 @@ enum {
 	NFSPROC4_CLNT_SECINFO,
 	NFSPROC4_CLNT_FSID_PRESENT,
 
-	/* nfs41 */
 	NFSPROC4_CLNT_EXCHANGE_ID,
 	NFSPROC4_CLNT_CREATE_SESSION,
 	NFSPROC4_CLNT_DESTROY_SESSION,
@@ -509,13 +521,14 @@ enum {
 	NFSPROC4_CLNT_BIND_CONN_TO_SESSION,
 	NFSPROC4_CLNT_DESTROY_CLIENTID,
 
-	/* nfs42 */
 	NFSPROC4_CLNT_SEEK,
 	NFSPROC4_CLNT_ALLOCATE,
 	NFSPROC4_CLNT_DEALLOCATE,
 	NFSPROC4_CLNT_LAYOUTSTATS,
 	NFSPROC4_CLNT_CLONE,
 	NFSPROC4_CLNT_COPY,
+
+	NFSPROC4_CLNT_LOOKUPP,
 };
 
 /* nfs41 types */
@@ -637,6 +650,17 @@ enum pnfs_update_layout_reason {
 	PNFS_UPDATE_LAYOUT_BLOCKED,
 	PNFS_UPDATE_LAYOUT_INVALID_OPEN,
 	PNFS_UPDATE_LAYOUT_SEND_LAYOUTGET,
+};
+
+#define NFS4_OP_MAP_NUM_LONGS					\
+	DIV_ROUND_UP(LAST_NFS4_OP, 8 * sizeof(unsigned long))
+#define NFS4_OP_MAP_NUM_WORDS \
+	(NFS4_OP_MAP_NUM_LONGS * sizeof(unsigned long) / sizeof(u32))
+struct nfs4_op_map {
+	union {
+		unsigned long longs[NFS4_OP_MAP_NUM_LONGS];
+		u32 words[NFS4_OP_MAP_NUM_WORDS];
+	} u;
 };
 
 #endif

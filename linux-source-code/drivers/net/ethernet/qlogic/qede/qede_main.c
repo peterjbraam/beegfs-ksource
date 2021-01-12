@@ -285,7 +285,7 @@ int __init qede_init(void)
 	/* Must register notifier before pci ops, since we might miss
 	 * interface rename after pci probe and netdev registration.
 	 */
-	ret = register_netdevice_notifier_rh(&qede_netdev_notifier);
+	ret = register_netdevice_notifier(&qede_netdev_notifier);
 	if (ret) {
 		pr_notice("Failed to register netdevice_notifier\n");
 		qed_put_eth_ops();
@@ -295,7 +295,7 @@ int __init qede_init(void)
 	ret = pci_register_driver(&qede_pci_driver);
 	if (ret) {
 		pr_notice("Failed to register driver\n");
-		unregister_netdevice_notifier_rh(&qede_netdev_notifier);
+		unregister_netdevice_notifier(&qede_netdev_notifier);
 		qed_put_eth_ops();
 		return -EINVAL;
 	}
@@ -308,7 +308,7 @@ static void __exit qede_cleanup(void)
 	if (debug & QED_LOG_INFO_MASK)
 		pr_info("qede_cleanup called\n");
 
-	unregister_netdevice_notifier_rh(&qede_netdev_notifier);
+	unregister_netdevice_notifier(&qede_netdev_notifier);
 	pci_unregister_driver(&qede_pci_driver);
 	qed_put_eth_ops();
 }
@@ -390,7 +390,6 @@ void qede_fill_by_demand_stats(struct qede_dev *edev)
 	p_common->brb_discards = stats.common.brb_discards;
 	p_common->tx_mac_ctrl_frames = stats.common.tx_mac_ctrl_frames;
 	p_common->link_change_count = stats.common.link_change_count;
-	p_common->ptp_skip_txts = edev->ptp_skip_txts;
 
 	if (QEDE_IS_BB(edev)) {
 		struct qede_stats_bb *p_bb = &edev->stats.bb;
@@ -589,7 +588,7 @@ static int qede_setup_tc_block(struct qede_dev *edev,
 	case TC_BLOCK_BIND:
 		return tcf_block_cb_register(f->block,
 					     qede_setup_tc_block_cb,
-					     edev, edev);
+					     edev, edev, f->extack);
 	case TC_BLOCK_UNBIND:
 		tcf_block_cb_unregister(f->block, qede_setup_tc_block_cb, edev);
 		return 0;
@@ -619,7 +618,6 @@ qede_setup_tc_offload(struct net_device *dev, enum tc_setup_type type,
 }
 
 static const struct net_device_ops qede_netdev_ops = {
-	.ndo_size = sizeof(struct net_device_ops),
 	.ndo_open = qede_open,
 	.ndo_stop = qede_close,
 	.ndo_start_xmit = qede_start_xmit,
@@ -627,12 +625,12 @@ static const struct net_device_ops qede_netdev_ops = {
 	.ndo_set_rx_mode = qede_set_rx_mode,
 	.ndo_set_mac_address = qede_set_mac_addr,
 	.ndo_validate_addr = eth_validate_addr,
-	.ndo_change_mtu_rh74 = qede_change_mtu,
+	.ndo_change_mtu = qede_change_mtu,
 	.ndo_do_ioctl = qede_ioctl,
 #ifdef CONFIG_QED_SRIOV
 	.ndo_set_vf_mac = qede_set_vf_mac,
-	.extended.ndo_set_vf_vlan = qede_set_vf_vlan,
-	.extended.ndo_set_vf_trust = qede_set_vf_trust,
+	.ndo_set_vf_vlan = qede_set_vf_vlan,
+	.ndo_set_vf_trust = qede_set_vf_trust,
 #endif
 	.ndo_vlan_rx_add_vid = qede_vlan_rx_add_vid,
 	.ndo_vlan_rx_kill_vid = qede_vlan_rx_kill_vid,
@@ -645,14 +643,14 @@ static const struct net_device_ops qede_netdev_ops = {
 	.ndo_get_vf_config = qede_get_vf_config,
 	.ndo_set_vf_rate = qede_set_vf_rate,
 #endif
-	.extended.ndo_udp_tunnel_add = qede_udp_tunnel_add,
-	.extended.ndo_udp_tunnel_del = qede_udp_tunnel_del,
+	.ndo_udp_tunnel_add = qede_udp_tunnel_add,
+	.ndo_udp_tunnel_del = qede_udp_tunnel_del,
 	.ndo_features_check = qede_features_check,
-	.extended.ndo_xdp = qede_xdp,
+	.ndo_bpf = qede_xdp,
 #ifdef CONFIG_RFS_ACCEL
 	.ndo_rx_flow_steer = qede_rx_flow_steer,
 #endif
-	.extended.ndo_setup_tc_rh = qede_setup_tc_offload,
+	.ndo_setup_tc = qede_setup_tc_offload,
 };
 
 static const struct net_device_ops qede_netdev_vf_ops = {
@@ -663,14 +661,14 @@ static const struct net_device_ops qede_netdev_vf_ops = {
 	.ndo_set_rx_mode = qede_set_rx_mode,
 	.ndo_set_mac_address = qede_set_mac_addr,
 	.ndo_validate_addr = eth_validate_addr,
-	.ndo_change_mtu_rh74 = qede_change_mtu,
+	.ndo_change_mtu = qede_change_mtu,
 	.ndo_vlan_rx_add_vid = qede_vlan_rx_add_vid,
 	.ndo_vlan_rx_kill_vid = qede_vlan_rx_kill_vid,
 	.ndo_fix_features = qede_fix_features,
 	.ndo_set_features = qede_set_features,
 	.ndo_get_stats64 = qede_get_stats64,
-	.extended.ndo_udp_tunnel_add = qede_udp_tunnel_add,
-	.extended.ndo_udp_tunnel_del = qede_udp_tunnel_del,
+	.ndo_udp_tunnel_add = qede_udp_tunnel_add,
+	.ndo_udp_tunnel_del = qede_udp_tunnel_del,
 	.ndo_features_check = qede_features_check,
 };
 
@@ -682,16 +680,16 @@ static const struct net_device_ops qede_netdev_vf_xdp_ops = {
 	.ndo_set_rx_mode = qede_set_rx_mode,
 	.ndo_set_mac_address = qede_set_mac_addr,
 	.ndo_validate_addr = eth_validate_addr,
-	.ndo_change_mtu_rh74 = qede_change_mtu,
+	.ndo_change_mtu = qede_change_mtu,
 	.ndo_vlan_rx_add_vid = qede_vlan_rx_add_vid,
 	.ndo_vlan_rx_kill_vid = qede_vlan_rx_kill_vid,
 	.ndo_fix_features = qede_fix_features,
 	.ndo_set_features = qede_set_features,
 	.ndo_get_stats64 = qede_get_stats64,
-	.extended.ndo_udp_tunnel_add = qede_udp_tunnel_add,
-	.extended.ndo_udp_tunnel_del = qede_udp_tunnel_del,
+	.ndo_udp_tunnel_add = qede_udp_tunnel_add,
+	.ndo_udp_tunnel_del = qede_udp_tunnel_del,
 	.ndo_features_check = qede_features_check,
-	.extended.ndo_xdp = qede_xdp,
+	.ndo_bpf = qede_xdp,
 };
 
 /* -------------------------------------------------------------------------
@@ -815,8 +813,8 @@ static void qede_init_ndev(struct qede_dev *edev)
 	ndev->hw_features = hw_features;
 
 	/* MTU range: 46 - 9600 */
-	ndev->extended->min_mtu = ETH_ZLEN - ETH_HLEN;
-	ndev->extended->max_mtu = QEDE_MAX_JUMBO_PACKET_SIZE;
+	ndev->min_mtu = ETH_ZLEN - ETH_HLEN;
+	ndev->max_mtu = QEDE_MAX_JUMBO_PACKET_SIZE;
 
 	/* Set network device HW mac */
 	ether_addr_copy(edev->ndev->dev_addr, edev->dev_info.common.hw_mac);
@@ -934,7 +932,6 @@ static int qede_alloc_fp_array(struct qede_dev *edev)
 						     GFP_KERNEL);
 				if (!fp->xdp_tx)
 					goto err;
-
 				fp->type |= QEDE_FASTPATH_XDP;
 			}
 		}
@@ -1017,7 +1014,7 @@ static void qede_update_pf_params(struct qed_dev *cdev)
 	struct qed_pf_params pf_params;
 	u16 num_cons;
 
-	/* 64 rx + 64 tx */
+	/* 64 rx + 64 tx + 64 XDP */
 	memset(&pf_params, 0, sizeof(struct qed_pf_params));
 
 	/* 1 rx + 1 xdp + max tx cos */
@@ -1224,16 +1221,8 @@ enum qede_remove_mode {
 static void __qede_remove(struct pci_dev *pdev, enum qede_remove_mode mode)
 {
 	struct net_device *ndev = pci_get_drvdata(pdev);
-	struct qede_dev *edev;
-	struct qed_dev *cdev;
-
-	if (!ndev) {
-		dev_info(&pdev->dev, "Device has already been removed\n");
-		return;
-	}
-
-	edev = netdev_priv(ndev);
-	cdev = edev->cdev;
+	struct qede_dev *edev = netdev_priv(ndev);
+	struct qed_dev *cdev = edev->cdev;
 
 	DP_INFO(edev, "Starting qede_remove\n");
 
@@ -2173,7 +2162,6 @@ out:
 	return rc;
 }
 
-
 enum qede_unload_mode {
 	QEDE_UNLOAD_NORMAL,
 	QEDE_UNLOAD_RECOVERY,
@@ -2242,8 +2230,6 @@ out:
 
 	if (mode != QEDE_UNLOAD_RECOVERY)
 		DP_NOTICE(edev, "Link is down\n");
-
-	edev->ptp_skip_txts = 0;
 
 	DP_INFO(edev, "Ending qede unload\n");
 }

@@ -72,6 +72,15 @@ int wil_fw_copy_crash_dump(struct wil6210_priv *wil, void *dest, u32 size)
 		return -EINVAL;
 	}
 
+	set_bit(wil_status_collecting_dumps, wil->status);
+	if (test_bit(wil_status_suspending, wil->status) ||
+	    test_bit(wil_status_suspended, wil->status) ||
+	    test_bit(wil_status_resetting, wil->status)) {
+		wil_err(wil, "cannot collect fw dump during suspend/reset\n");
+		clear_bit(wil_status_collecting_dumps, wil->status);
+		return -EINVAL;
+	}
+
 	/* copy to crash dump area */
 	for (i = 0; i < ARRAY_SIZE(fw_mapping); i++) {
 		map = &fw_mapping[i];
@@ -90,6 +99,8 @@ int wil_fw_copy_crash_dump(struct wil6210_priv *wil, void *dest, u32 size)
 		wil_memcpy_fromio_32((void * __force)(dest + offset),
 				     (const void __iomem * __force)data, len);
 	}
+
+	clear_bit(wil_status_collecting_dumps, wil->status);
 
 	return 0;
 }
@@ -115,8 +126,6 @@ void wil_fw_core_dump(struct wil6210_priv *wil)
 	/* fw_dump_data will be free in device coredump release function
 	 * after 5 min
 	 */
-#if 0 /* Not in RHEL */
 	dev_coredumpv(wil_to_dev(wil), fw_dump_data, fw_dump_size, GFP_KERNEL);
-#endif
 	wil_info(wil, "fw core dumped, size %d bytes\n", fw_dump_size);
 }

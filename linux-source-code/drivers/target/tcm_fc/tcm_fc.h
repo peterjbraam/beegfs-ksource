@@ -17,6 +17,9 @@
 #ifndef __TCM_FC_H__
 #define __TCM_FC_H__
 
+#include <linux/types.h>
+#include <target/target_core_base.h>
+
 #define FT_VERSION "0.4"
 
 #define FT_NAMELEN 32		/* length of ASCII WWPNs including pad */
@@ -155,7 +158,6 @@ void ft_release_cmd(struct se_cmd *);
 int ft_queue_status(struct se_cmd *);
 int ft_queue_data_in(struct se_cmd *);
 int ft_write_pending(struct se_cmd *);
-int ft_write_pending_status(struct se_cmd *);
 int ft_get_cmd_state(struct se_cmd *);
 void ft_queue_tm_resp(struct se_cmd *);
 void ft_aborted_task(struct se_cmd *);

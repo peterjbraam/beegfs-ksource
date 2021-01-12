@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _RAID5_H
 #define _RAID5_H
 
@@ -225,14 +226,15 @@ struct stripe_head {
 	struct list_head	batch_list; /* protected by head's batch lock*/
 
 	union {
-		struct r5l_io_unit      *log_io;
-		struct ppl_io_unit      *ppl_io;
+		struct r5l_io_unit	*log_io;
+		struct ppl_io_unit	*ppl_io;
 	};
-	struct page             *ppl_page; /* partial parity of this stripe */
 
 	struct list_head	log_list;
 	sector_t		log_start; /* first meta block on the journal */
 	struct list_head	r5c; /* for r5c_cache->stripe_in_journal */
+
+	struct page		*ppl_page; /* partial parity of this stripe */
 	/**
 	 * struct stripe_operations
 	 * @target - STRIPE_OP_COMPUTE_BLK target
@@ -255,6 +257,7 @@ struct stripe_head {
 		sector_t	sector;			/* sector of this page */
 		unsigned long	flags;
 		u32		log_checksum;
+		unsigned short	write_hint;
 	} dev[1]; /* allocated with extra space depending of RAID geometry */
 };
 
@@ -492,7 +495,7 @@ static inline struct bio *r5_next_bio(struct bio *bio, sector_t sector)
 {
 	int sectors = bio_sectors(bio);
 
-	if (bio->bi_sector + sectors < sector + STRIPE_SECTORS)
+	if (bio->bi_iter.bi_sector + sectors < sector + STRIPE_SECTORS)
 		return bio->bi_next;
 	else
 		return NULL;
@@ -635,16 +638,15 @@ struct r5conf {
 	/* per cpu variables */
 	struct raid5_percpu {
 		struct page	*spare_page; /* Used when checking P/Q in raid6 */
-		struct flex_array *scribble;   /* space for constructing buffer
-					      * lists and performing address
-					      * conversions
-					      */
+		void		*scribble;  /* space for constructing buffer
+					     * lists and performing address
+					     * conversions
+					     */
+		int scribble_obj_size;
 	} __percpu *percpu;
 	int scribble_disks;
 	int scribble_sectors;
-#ifdef CONFIG_HOTPLUG_CPU
-	struct notifier_block	cpu_notify;
-#endif
+	struct hlist_node node;
 
 	/*
 	 * Free stripes pool
@@ -669,6 +671,7 @@ struct r5conf {
 	int			pool_size; /* number of disks in stripeheads in pool */
 	spinlock_t		device_lock;
 	struct disk_info	*disks;
+	struct bio_set		bio_split;
 
 	/* When taking over an array from a different personality, we store
 	 * the new thread here until we fully activate the array.

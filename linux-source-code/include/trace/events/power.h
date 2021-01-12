@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #undef TRACE_SYSTEM
 #define TRACE_SYSTEM power
 
@@ -7,6 +8,9 @@
 #include <linux/ktime.h>
 #include <linux/pm_qos.h>
 #include <linux/tracepoint.h>
+#include <linux/trace_events.h>
+
+#define TPS(x)  tracepoint_string(x)
 
 DECLARE_EVENT_CLASS(cpu,
 
@@ -66,7 +70,8 @@ TRACE_EVENT(pstate_sample,
 		u64 mperf,
 		u64 aperf,
 		u64 tsc,
-		u32 freq
+		u32 freq,
+		u32 io_boost
 		),
 
 	TP_ARGS(core_busy,
@@ -76,7 +81,8 @@ TRACE_EVENT(pstate_sample,
 		mperf,
 		aperf,
 		tsc,
-		freq
+		freq,
+		io_boost
 		),
 
 	TP_STRUCT__entry(
@@ -88,6 +94,7 @@ TRACE_EVENT(pstate_sample,
 		__field(u64, aperf)
 		__field(u64, tsc)
 		__field(u32, freq)
+		__field(u32, io_boost)
 		),
 
 	TP_fast_assign(
@@ -99,9 +106,10 @@ TRACE_EVENT(pstate_sample,
 		__entry->aperf = aperf;
 		__entry->tsc = tsc;
 		__entry->freq = freq;
+		__entry->io_boost = io_boost;
 		),
 
-	TP_printk("core_busy=%lu scaled=%lu from=%lu to=%lu mperf=%llu aperf=%llu tsc=%llu freq=%lu ",
+	TP_printk("core_busy=%lu scaled=%lu from=%lu to=%lu mperf=%llu aperf=%llu tsc=%llu freq=%lu io_boost=%lu",
 		(unsigned long)__entry->core_busy,
 		(unsigned long)__entry->scaled_busy,
 		(unsigned long)__entry->from,
@@ -109,7 +117,8 @@ TRACE_EVENT(pstate_sample,
 		(unsigned long long)__entry->mperf,
 		(unsigned long long)__entry->aperf,
 		(unsigned long long)__entry->tsc,
-		(unsigned long)__entry->freq
+		(unsigned long)__entry->freq,
+		(unsigned long)__entry->io_boost
 		)
 
 );
@@ -121,6 +130,17 @@ TRACE_EVENT(pstate_sample,
 #define PWR_EVENT_EXIT -1
 #endif
 
+#define pm_verb_symbolic(event) \
+	__print_symbolic(event, \
+		{ PM_EVENT_SUSPEND, "suspend" }, \
+		{ PM_EVENT_RESUME, "resume" }, \
+		{ PM_EVENT_FREEZE, "freeze" }, \
+		{ PM_EVENT_QUIESCE, "quiesce" }, \
+		{ PM_EVENT_HIBERNATE, "hibernate" }, \
+		{ PM_EVENT_THAW, "thaw" }, \
+		{ PM_EVENT_RESTORE, "restore" }, \
+		{ PM_EVENT_RECOVER, "recover" })
+
 DEFINE_EVENT(cpu, cpu_frequency,
 
 	TP_PROTO(unsigned int frequency, unsigned int cpu_id),
@@ -128,21 +148,76 @@ DEFINE_EVENT(cpu, cpu_frequency,
 	TP_ARGS(frequency, cpu_id)
 );
 
-TRACE_EVENT(machine_suspend,
+TRACE_EVENT(device_pm_callback_start,
 
-	TP_PROTO(unsigned int state),
+	TP_PROTO(struct device *dev, const char *pm_ops, int event),
 
-	TP_ARGS(state),
+	TP_ARGS(dev, pm_ops, event),
 
 	TP_STRUCT__entry(
-		__field(	u32,		state		)
+		__string(device, dev_name(dev))
+		__string(driver, dev_driver_string(dev))
+		__string(parent, dev->parent ? dev_name(dev->parent) : "none")
+		__string(pm_ops, pm_ops ? pm_ops : "none ")
+		__field(int, event)
 	),
 
 	TP_fast_assign(
-		__entry->state = state;
+		__assign_str(device, dev_name(dev));
+		__assign_str(driver, dev_driver_string(dev));
+		__assign_str(parent,
+			dev->parent ? dev_name(dev->parent) : "none");
+		__assign_str(pm_ops, pm_ops ? pm_ops : "none ");
+		__entry->event = event;
 	),
 
-	TP_printk("state=%lu", (unsigned long)__entry->state)
+	TP_printk("%s %s, parent: %s, %s[%s]", __get_str(driver),
+		__get_str(device), __get_str(parent), __get_str(pm_ops),
+		pm_verb_symbolic(__entry->event))
+);
+
+TRACE_EVENT(device_pm_callback_end,
+
+	TP_PROTO(struct device *dev, int error),
+
+	TP_ARGS(dev, error),
+
+	TP_STRUCT__entry(
+		__string(device, dev_name(dev))
+		__string(driver, dev_driver_string(dev))
+		__field(int, error)
+	),
+
+	TP_fast_assign(
+		__assign_str(device, dev_name(dev));
+		__assign_str(driver, dev_driver_string(dev));
+		__entry->error = error;
+	),
+
+	TP_printk("%s %s, err=%d",
+		__get_str(driver), __get_str(device), __entry->error)
+);
+
+TRACE_EVENT(suspend_resume,
+
+	TP_PROTO(const char *action, int val, bool start),
+
+	TP_ARGS(action, val, start),
+
+	TP_STRUCT__entry(
+		__field(const char *, action)
+		__field(int, val)
+		__field(bool, start)
+	),
+
+	TP_fast_assign(
+		__entry->action = action;
+		__entry->val = val;
+		__entry->start = start;
+	),
+
+	TP_printk("%s[%u] %s", __entry->action, (unsigned int)__entry->val,
+		(__entry->start)?"begin":"end")
 );
 
 DECLARE_EVENT_CLASS(wakeup_source,
@@ -401,8 +476,8 @@ DECLARE_EVENT_CLASS(dev_pm_qos_request,
 	TP_printk("device=%s type=%s new_value=%d",
 		  __get_str(name),
 		  __print_symbolic(__entry->type,
-			{ DEV_PM_QOS_LATENCY,	"DEV_PM_QOS_LATENCY" },
-			{ DEV_PM_QOS_FLAGS,	"DEV_PM_QOS_FLAGS" }),
+			{ DEV_PM_QOS_RESUME_LATENCY, "DEV_PM_QOS_RESUME_LATENCY" },
+			{ DEV_PM_QOS_FLAGS, "DEV_PM_QOS_FLAGS" }),
 		  __entry->new_value)
 );
 

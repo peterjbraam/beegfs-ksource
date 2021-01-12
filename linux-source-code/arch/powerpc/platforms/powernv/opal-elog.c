@@ -18,7 +18,7 @@
 #include <linux/vmalloc.h>
 #include <linux/fcntl.h>
 #include <linux/kobject.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/opal.h>
 
 struct elog_obj {
@@ -71,26 +71,21 @@ static ssize_t elog_ack_show(struct elog_obj *elog_obj,
 	return sprintf(buf, "ack - acknowledge log message\n");
 }
 
-static void delay_release_kobj(void *kobj)
-{
-	kobject_put((struct kobject *)kobj);
-}
-
 static ssize_t elog_ack_store(struct elog_obj *elog_obj,
 			      struct elog_attribute *attr,
 			      const char *buf,
 			      size_t count)
 {
 	opal_send_ack_elog(elog_obj->id);
-	sysfs_schedule_callback(&elog_obj->kobj, delay_release_kobj,
-				&elog_obj->kobj, THIS_MODULE);
+	sysfs_remove_file_self(&elog_obj->kobj, &attr->attr);
+	kobject_put(&elog_obj->kobj);
 	return count;
 }
 
 static struct elog_attribute id_attribute =
-	__ATTR(id, S_IRUGO, elog_id_show, NULL);
+	__ATTR(id, 0444, elog_id_show, NULL);
 static struct elog_attribute type_attribute =
-	__ATTR(type, S_IRUGO, elog_type_show, NULL);
+	__ATTR(type, 0444, elog_type_show, NULL);
 static struct elog_attribute ack_attribute =
 	__ATTR(acknowledge, 0660, elog_ack_show, elog_ack_store);
 
@@ -242,7 +237,7 @@ static struct elog_obj *create_elog_obj(uint64_t id, size_t size, uint64_t type)
 	return elog;
 }
 
-static void elog_work_fn(struct work_struct *work)
+static irqreturn_t elog_event(int irq, void *data)
 {
 	__be64 size;
 	__be64 id;
@@ -257,7 +252,7 @@ static void elog_work_fn(struct work_struct *work)
 	rc = opal_get_elog_size(&id, &size, &type);
 	if (rc != OPAL_SUCCESS) {
 		pr_err("ELOG: OPAL log info read failed\n");
-		return;
+		return IRQ_HANDLED;
 	}
 
 	elog_size = be64_to_cpu(size);
@@ -279,17 +274,11 @@ static void elog_work_fn(struct work_struct *work)
 	if (kobj) {
 		/* Drop reference added by kset_find_obj() */
 		kobject_put(kobj);
-		return;
+		return IRQ_HANDLED;
 	}
 
 	create_elog_obj(log_id, elog_size, elog_type);
-}
 
-static DECLARE_WORK(elog_work, elog_work_fn);
-
-static irqreturn_t elog_event(int irq, void *data)
-{
-	schedule_work(&elog_work);
 	return IRQ_HANDLED;
 }
 
@@ -314,8 +303,8 @@ int __init opal_elog_init(void)
 		return irq;
 	}
 
-	rc = request_irq(irq, elog_event,
-			IRQ_TYPE_LEVEL_HIGH, "opal-elog", NULL);
+	rc = request_threaded_irq(irq, NULL, elog_event,
+			IRQF_TRIGGER_HIGH | IRQF_ONESHOT, "opal-elog", NULL);
 	if (rc) {
 		pr_err("%s: Can't request OPAL event irq (%d)\n",
 		       __func__, rc);

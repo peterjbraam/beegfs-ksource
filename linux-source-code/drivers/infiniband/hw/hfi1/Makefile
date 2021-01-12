@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0
 #
 # HFI driver
 #
@@ -23,6 +24,7 @@ hfi1-y := \
 	mad.o \
 	mmu_rb.o \
 	msix.o \
+	opfn.o \
 	pcie.o \
 	pio.o \
 	pio_copy.o \
@@ -33,6 +35,7 @@ hfi1-y := \
 	ruc.o \
 	sdma.o \
 	sysfs.o \
+	tid_rdma.o \
 	trace.o \
 	uc.o \
 	ud.o \
@@ -46,6 +49,11 @@ hfi1-y := \
 
 ifdef CONFIG_DEBUG_FS
 hfi1-y += debugfs.o
+ifdef CONFIG_FAULT_INJECTION
+ifdef CONFIG_FAULT_INJECTION_DEBUG_FS
+hfi1-y += fault.o
+endif
+endif
 endif
 
 CFLAGS_trace.o = -I$(src)

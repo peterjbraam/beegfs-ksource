@@ -75,7 +75,7 @@ qla24xx_deallocate_vp_id(scsi_qla_host_t *vha)
 	 * ensures no active vp_list traversal while the vport is removed
 	 * from the queue)
 	 */
-	wait_event_timeout(vha->vref_waitq, atomic_read(&vha->vref_count),
+	wait_event_timeout(vha->vref_waitq, !atomic_read(&vha->vref_count),
 	    10*HZ);
 
 	spin_lock_irqsave(&ha->vport_slock, flags);
@@ -504,7 +504,7 @@ qla24xx_create_vhost(struct fc_vport *fc_vport)
 	atomic_set(&vha->loop_state, LOOP_DOWN);
 	atomic_set(&vha->loop_down_timer, LOOP_DOWN_TIME);
 
-	qla2x00_start_timer(vha, qla2x00_timer, WATCH_INTERVAL);
+	qla2x00_start_timer(vha, WATCH_INTERVAL);
 
 	vha->req = base_vha->req;
 	vha->flags.nvme_enabled = base_vha->flags.nvme_enabled;
@@ -630,8 +630,8 @@ qla25xx_delete_queues(struct scsi_qla_host *vha)
 
 	if (ql2xmqsupport || ql2xnvmeenable) {
 		list_for_each_entry_safe(qpair, tqpair, &vha->qp_list,
-			qp_list_elem)
-		qla2xxx_delete_qpair(vha, qpair);
+		    qp_list_elem)
+			qla2xxx_delete_qpair(vha, qpair);
 	} else {
 		/* Delete request queues */
 		for (cnt = 1; cnt < ha->max_req_queues; cnt++) {
@@ -640,8 +640,8 @@ qla25xx_delete_queues(struct scsi_qla_host *vha)
 				ret = qla25xx_delete_req_que(vha, req);
 				if (ret != QLA_SUCCESS) {
 					ql_log(ql_log_warn, vha, 0x00ea,
-						"Couldn't delete req que %d.\n",
-						req->id);
+					    "Couldn't delete req que %d.\n",
+					    req->id);
 					return ret;
 				}
 			}
@@ -654,13 +654,14 @@ qla25xx_delete_queues(struct scsi_qla_host *vha)
 				ret = qla25xx_delete_rsp_que(vha, rsp);
 				if (ret != QLA_SUCCESS) {
 					ql_log(ql_log_warn, vha, 0x00eb,
-						"Couldn't delete rsp que %d.\n",
-						rsp->id);
+					    "Couldn't delete rsp que %d.\n",
+					    rsp->id);
 					return ret;
 				}
 			}
 		}
 	}
+
 	return ret;
 }
 
@@ -933,7 +934,7 @@ int qla24xx_control_vp(scsi_qla_host_t *vha, int cmd)
 
 	sp = qla2x00_get_sp(base_vha, NULL, GFP_KERNEL);
 	if (!sp)
-		return rval;
+		goto done;
 
 	sp->type = SRB_CTRL_VP;
 	sp->name = "ctrl_vp";
@@ -949,7 +950,7 @@ int qla24xx_control_vp(scsi_qla_host_t *vha, int cmd)
 		ql_dbg(ql_dbg_async, vha, 0xffff,
 		    "%s: %s Failed submission. %x.\n",
 		    __func__, sp->name, rval);
-		goto done;
+		goto done_free_sp;
 	}
 
 	ql_dbg(ql_dbg_vport, vha, 0x113f, "%s hndl %x submitted\n",
@@ -967,13 +968,16 @@ int qla24xx_control_vp(scsi_qla_host_t *vha, int cmd)
 	case QLA_SUCCESS:
 		ql_dbg(ql_dbg_vport, vha, 0xffff, "%s: %s done.\n",
 		    __func__, sp->name);
-		break;
+		goto done_free_sp;
 	default:
 		ql_dbg(ql_dbg_vport, vha, 0xffff, "%s: %s Failed. %x.\n",
 		    __func__, sp->name, rval);
-		break;
+		goto done_free_sp;
 	}
 done:
+	return rval;
+
+done_free_sp:
 	sp->free(sp);
 	return rval;
 }

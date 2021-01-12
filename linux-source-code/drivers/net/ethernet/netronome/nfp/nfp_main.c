@@ -38,12 +38,17 @@ static const struct pci_device_id nfp_pci_device_ids[] = {
 	  PCI_VENDOR_ID_NETRONOME, PCI_ANY_ID,
 	  PCI_ANY_ID, 0,
 	},
+	{ PCI_VENDOR_ID_NETRONOME, PCI_DEVICE_ID_NETRONOME_NFP5000,
+	  PCI_VENDOR_ID_NETRONOME, PCI_ANY_ID,
+	  PCI_ANY_ID, 0,
+	},
 	{ PCI_VENDOR_ID_NETRONOME, PCI_DEVICE_ID_NETRONOME_NFP4000,
 	  PCI_VENDOR_ID_NETRONOME, PCI_ANY_ID,
 	  PCI_ANY_ID, 0,
 	},
 	{ 0, } /* Required last entry. */
 };
+MODULE_DEVICE_TABLE(pci, nfp_pci_device_ids);
 
 int nfp_pf_rtsym_read_optional(struct nfp_pf *pf, const char *format,
 			       unsigned int default_val)
@@ -293,6 +298,47 @@ static int nfp_pcie_sriov_configure(struct pci_dev *pdev, int num_vfs)
 		return nfp_pcie_sriov_disable(pdev);
 	else
 		return nfp_pcie_sriov_enable(pdev, num_vfs);
+}
+
+int nfp_flash_update_common(struct nfp_pf *pf, const char *path,
+			    struct netlink_ext_ack *extack)
+{
+	struct device *dev = &pf->pdev->dev;
+	const struct firmware *fw;
+	struct nfp_nsp *nsp;
+	int err;
+
+	nsp = nfp_nsp_open(pf->cpp);
+	if (IS_ERR(nsp)) {
+		err = PTR_ERR(nsp);
+		if (extack)
+			NL_SET_ERR_MSG_MOD(extack, "can't access NSP");
+		else
+			dev_err(dev, "Failed to access the NSP: %d\n", err);
+		return err;
+	}
+
+	err = request_firmware_direct(&fw, path, dev);
+	if (err) {
+		NL_SET_ERR_MSG_MOD(extack,
+				   "unable to read flash file from disk");
+		goto exit_close_nsp;
+	}
+
+	dev_info(dev, "Please be patient while writing flash image: %s\n",
+		 path);
+
+	err = nfp_nsp_write_flash(nsp, fw);
+	if (err < 0)
+		goto exit_release_fw;
+	dev_info(dev, "Finished writing flash image\n");
+	err = 0;
+
+exit_release_fw:
+	release_firmware(fw);
+exit_close_nsp:
+	nfp_nsp_close(nsp);
+	return err;
 }
 
 static const struct firmware *
@@ -711,48 +757,6 @@ static struct pci_driver nfp_pci_driver = {
 	.sriov_configure	= nfp_pcie_sriov_configure,
 };
 
-static const struct pci_device_id compat_nfp_device_ids[] = {
-	{ PCI_VENDOR_ID_NETRONOME, PCI_DEVICE_ID_NETRONOME_NFP6000,
-	  PCI_VENDOR_ID_NETRONOME, PCI_ANY_ID,
-	  PCI_ANY_ID, 0,
-	},
-	{ PCI_VENDOR_ID_NETRONOME, PCI_DEVICE_ID_NETRONOME_NFP4000,
-	  PCI_VENDOR_ID_NETRONOME, PCI_ANY_ID,
-	  PCI_ANY_ID, 0,
-	},
-	{ PCI_VENDOR_ID_NETRONOME, PCI_DEVICE_ID_NETRONOME_NFP6000_VF,
-	  PCI_VENDOR_ID_NETRONOME, PCI_ANY_ID,
-	  PCI_ANY_ID, 0,
-	},
-	{ 0, } /* Required last entry. */
-};
-MODULE_DEVICE_TABLE(pci, compat_nfp_device_ids);
-
-static int compat_nfp_probe(struct pci_dev *pdev,
-			    const struct pci_device_id *pci_id)
-{
-	if (pdev->device == 0x6003)
-		return nfp_netvf_pci_driver.probe(pdev, pci_id);
-	return nfp_pci_driver.probe(pdev, pci_id);
-}
-
-static void compat_nfp_remove(struct pci_dev *pdev)
-{
-	if (pdev->device == 0x6003) {
-		nfp_netvf_pci_driver.remove(pdev);
-		return;
-	}
-	nfp_pci_driver.remove(pdev);
-}
-
-static struct pci_driver compat_nfp_driver = {
-	.name        = nfp_driver_name,
-	.id_table    = compat_nfp_device_ids,
-	.probe       = compat_nfp_probe,
-	.remove      = compat_nfp_remove,
-	.sriov_configure = nfp_pcie_sriov_configure,
-};
-
 static int __init nfp_main_init(void)
 {
 	int err;
@@ -762,12 +766,18 @@ static int __init nfp_main_init(void)
 
 	nfp_net_debugfs_create();
 
-	err = pci_register_driver(&compat_nfp_driver);
+	err = pci_register_driver(&nfp_pci_driver);
 	if (err < 0)
 		goto err_destroy_debugfs;
 
+	err = pci_register_driver(&nfp_netvf_pci_driver);
+	if (err)
+		goto err_unreg_pf;
+
 	return err;
 
+err_unreg_pf:
+	pci_unregister_driver(&nfp_pci_driver);
 err_destroy_debugfs:
 	nfp_net_debugfs_destroy();
 	return err;
@@ -775,7 +785,8 @@ err_destroy_debugfs:
 
 static void __exit nfp_main_exit(void)
 {
-	pci_unregister_driver(&compat_nfp_driver);
+	pci_unregister_driver(&nfp_netvf_pci_driver);
+	pci_unregister_driver(&nfp_pci_driver);
 	nfp_net_debugfs_destroy();
 }
 

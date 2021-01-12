@@ -26,6 +26,7 @@
 #include <linux/vmalloc.h>
 #include <linux/time.h>
 #include <linux/mm.h>
+#include <linux/sched/signal.h>
 #include <sound/core.h>
 #include <sound/minors.h>
 #include <sound/info.h>
@@ -210,12 +211,16 @@ EXPORT_SYMBOL(snd_ctl_notify);
 static int snd_ctl_new(struct snd_kcontrol **kctl, unsigned int count,
 		       unsigned int access, struct snd_ctl_file *file)
 {
+	unsigned int size;
 	unsigned int idx;
 
 	if (count == 0 || count > MAX_CONTROL_COUNT)
 		return -EINVAL;
 
-	*kctl = kzalloc(struct_size(*kctl, vd, count), GFP_KERNEL);
+	size  = sizeof(struct snd_kcontrol);
+	size += sizeof(struct snd_kcontrol_volatile) * count;
+
+	*kctl = kzalloc(size, GFP_KERNEL);
 	if (!*kctl)
 		return -ENOMEM;
 
@@ -1614,7 +1619,7 @@ static ssize_t snd_ctl_read(struct file *file, char __user *buffer,
 		struct snd_ctl_event ev;
 		struct snd_kctl_event *kev;
 		while (list_empty(&ctl->events)) {
-			wait_queue_t wait;
+			wait_queue_entry_t wait;
 			if ((file->f_flags & O_NONBLOCK) != 0 || result > 0) {
 				err = -EAGAIN;
 				goto __end_lock;
@@ -1653,9 +1658,9 @@ static ssize_t snd_ctl_read(struct file *file, char __user *buffer,
       	return result > 0 ? result : err;
 }
 
-static unsigned int snd_ctl_poll(struct file *file, poll_table * wait)
+static __poll_t snd_ctl_poll(struct file *file, poll_table * wait)
 {
-	unsigned int mask;
+	__poll_t mask;
 	struct snd_ctl_file *ctl;
 
 	ctl = file->private_data;
@@ -1665,7 +1670,7 @@ static unsigned int snd_ctl_poll(struct file *file, poll_table * wait)
 
 	mask = 0;
 	if (!list_empty(&ctl->events))
-		mask |= POLLIN | POLLRDNORM;
+		mask |= EPOLLIN | EPOLLRDNORM;
 
 	return mask;
 }

@@ -390,8 +390,8 @@ int xgbe_config_netdev(struct xgbe_prv_data *pdata)
 	pdata->netdev_features = netdev->features;
 
 	netdev->priv_flags |= IFF_UNICAST_FLT;
-	netdev->extended->min_mtu = 0;
-	netdev->extended->max_mtu = XGMAC_JUMBO_PACKET_MTU;
+	netdev->min_mtu = 0;
+	netdev->max_mtu = XGMAC_JUMBO_PACKET_MTU;
 
 	/* Use default watchdog timeout */
 	netdev->watchdog_timeo = 0;
@@ -406,7 +406,8 @@ int xgbe_config_netdev(struct xgbe_prv_data *pdata)
 		return ret;
 	}
 
-	xgbe_ptp_register(pdata);
+	if (IS_REACHABLE(CONFIG_PTP_1588_CLOCK))
+		xgbe_ptp_register(pdata);
 
 	xgbe_debugfs_init(pdata);
 
@@ -424,7 +425,8 @@ void xgbe_deconfig_netdev(struct xgbe_prv_data *pdata)
 
 	xgbe_debugfs_exit(pdata);
 
-	xgbe_ptp_unregister(pdata);
+	if (IS_REACHABLE(CONFIG_PTP_1588_CLOCK))
+		xgbe_ptp_unregister(pdata);
 
 	unregister_netdev(netdev);
 
@@ -461,7 +463,7 @@ static int __init xgbe_mod_init(void)
 {
 	int ret;
 
-	ret = register_netdevice_notifier_rh(&xgbe_netdev_notifier);
+	ret = register_netdevice_notifier(&xgbe_netdev_notifier);
 	if (ret)
 		return ret;
 
@@ -482,7 +484,7 @@ static void __exit xgbe_mod_exit(void)
 
 	xgbe_platform_exit();
 
-	unregister_netdevice_notifier_rh(&xgbe_netdev_notifier);
+	unregister_netdevice_notifier(&xgbe_netdev_notifier);
 }
 
 module_init(xgbe_mod_init);

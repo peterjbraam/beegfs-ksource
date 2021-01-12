@@ -119,7 +119,7 @@ int ishtp_send_msg(struct ishtp_device *dev, struct ishtp_msg_hdr *hdr,
  * Return: This returns IPC send message status.
  */
 int ishtp_write_message(struct ishtp_device *dev, struct ishtp_msg_hdr *hdr,
-			unsigned char *buf)
+			void *buf)
 {
 	return ishtp_send_msg(dev, hdr, buf, NULL, NULL);
 }
@@ -147,31 +147,6 @@ int ishtp_fw_cl_by_uuid(struct ishtp_device *dev, const uuid_le *uuid)
 	return res;
 }
 EXPORT_SYMBOL(ishtp_fw_cl_by_uuid);
-
-/**
- * ishtp_fw_cl_get_client() - return client information to client
- * @dev: the ishtp device structure
- * @uuid: uuid of the client to search
- *
- * Search firmware client using UUID and reture related client information.
- *
- * Return: pointer of client information on success, NULL on failure.
- */
-struct ishtp_fw_client *ishtp_fw_cl_get_client(struct ishtp_device *dev,
-						const uuid_le *uuid)
-{
-	int i;
-	unsigned long flags;
-
-	spin_lock_irqsave(&dev->fw_clients_lock, flags);
-	i = ishtp_fw_cl_by_uuid(dev, uuid);
-	spin_unlock_irqrestore(&dev->fw_clients_lock, flags);
-	if (i < 0 || dev->fw_clients[i].props.fixed_address)
-		return NULL;
-
-	return &dev->fw_clients[i];
-}
-EXPORT_SYMBOL(ishtp_fw_cl_get_client);
 
 /**
  * ishtp_fw_cl_by_id() - return index to fw_clients for client_id
@@ -589,33 +564,6 @@ void ishtp_put_device(struct ishtp_cl_device *cl_device)
 EXPORT_SYMBOL(ishtp_put_device);
 
 /**
- * ishtp_set_drvdata() - set client driver data
- * @cl_device:	client device instance
- * @data:	driver data need to be set
- *
- * Set client driver data to cl_device->driver_data.
- */
-void ishtp_set_drvdata(struct ishtp_cl_device *cl_device, void *data)
-{
-	cl_device->driver_data = data;
-}
-EXPORT_SYMBOL(ishtp_set_drvdata);
-
-/**
- * ishtp_get_drvdata() - get client driver data
- * @cl_device:	client device instance
- *
- * Get client driver data from cl_device->driver_data.
- *
- * Return: pointer of driver data
- */
-void *ishtp_get_drvdata(struct ishtp_cl_device *cl_device)
-{
-	return cl_device->driver_data;
-}
-EXPORT_SYMBOL(ishtp_get_drvdata);
-
-/**
  * ishtp_bus_new_client() - Create a new client
  * @dev:	ISHTP device instance
  *
@@ -675,7 +623,8 @@ int ishtp_cl_device_bind(struct ishtp_cl *cl)
 	spin_lock_irqsave(&cl->dev->device_list_lock, flags);
 	list_for_each_entry(cl_device, &cl->dev->device_list,
 			device_link) {
-		if (cl_device->fw_client->client_id == cl->fw_client_id) {
+		if (cl_device->fw_client &&
+		    cl_device->fw_client->client_id == cl->fw_client_id) {
 			cl->device = cl_device;
 			rv = 0;
 			break;
@@ -735,6 +684,7 @@ void ishtp_bus_remove_all_clients(struct ishtp_device *ishtp_dev,
 	spin_lock_irqsave(&ishtp_dev->device_list_lock, flags);
 	list_for_each_entry_safe(cl_device, n, &ishtp_dev->device_list,
 				 device_link) {
+		cl_device->fw_client = NULL;
 		if (warm_reset && cl_device->reference_count)
 			continue;
 

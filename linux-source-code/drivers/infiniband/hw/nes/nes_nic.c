@@ -146,6 +146,8 @@ static int nes_netdev_open(struct net_device *netdev)
 	struct list_head *list_pos, *list_temp;
 	unsigned long flags;
 
+	assert(nesdev != NULL);
+
 	if (nesvnic->netdev_open == 1)
 		return 0;
 
@@ -571,7 +573,8 @@ tso_sq_no_longer_full:
 				/* setup the VLAN tag if present */
 				if (skb_vlan_tag_present(skb)) {
 					nes_debug(NES_DBG_NIC_TX, "%s: VLAN packet to send... VLAN = %08X\n",
-							netdev->name, skb_vlan_tag_get(skb) );
+							netdev->name,
+						  skb_vlan_tag_get(skb));
 					wqe_misc = NES_NIC_SQ_WQE_TAGVALUE_ENABLE;
 					wqe_fragment_length[0] = (__force __le16) skb_vlan_tag_get(skb);
 				} else
@@ -1631,7 +1634,7 @@ static const struct net_device_ops nes_netdev_ops = {
 	.ndo_tx_timeout		= nes_netdev_tx_timeout,
 	.ndo_set_mac_address	= nes_netdev_set_mac_address,
 	.ndo_set_rx_mode	= nes_netdev_set_multicast_list,
-	.ndo_change_mtu_rh74	= nes_netdev_change_mtu,
+	.ndo_change_mtu		= nes_netdev_change_mtu,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_fix_features	= nes_fix_features,
 	.ndo_set_features	= nes_set_features,
@@ -1662,7 +1665,7 @@ struct net_device *nes_netdev_init(struct nes_device *nesdev,
 
 	netdev->watchdog_timeo = NES_TX_TIMEOUT;
 	netdev->irq = nesdev->pcidev->irq;
-	netdev->extended->max_mtu = NES_MAX_MTU;
+	netdev->max_mtu = NES_MAX_MTU;
 	netdev->hard_header_len = ETH_HLEN;
 	netdev->addr_len = ETH_ALEN;
 	netdev->type = ARPHRD_ETHER;

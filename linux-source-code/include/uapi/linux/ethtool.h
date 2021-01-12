@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /*
  * ethtool.h: Defines for Linux ethtool.
  *
@@ -119,8 +120,7 @@ struct ethtool_cmd {
 static inline void ethtool_cmd_speed_set(struct ethtool_cmd *ep,
 					 __u32 speed)
 {
-
-	ep->speed = (__u16)speed;
+	ep->speed = (__u16)(speed & 0xFFFF);
 	ep->speed_hi = (__u16)(speed >> 16);
 }
 
@@ -145,6 +145,7 @@ static inline __u32 ethtool_cmd_speed(const struct ethtool_cmd *ep)
 
 #define ETHTOOL_FWVERS_LEN	32
 #define ETHTOOL_BUSINFO_LEN	32
+#define ETHTOOL_EROMVERS_LEN	32
 
 /**
  * struct ethtool_drvinfo - general driver and device information
@@ -154,6 +155,7 @@ static inline __u32 ethtool_cmd_speed(const struct ethtool_cmd *ep)
  *	not be an empty string.
  * @version: Driver version string; may be an empty string
  * @fw_version: Firmware version string; may be an empty string
+ * @erom_version: Expansion ROM version string; may be an empty string
  * @bus_info: Device bus address.  This should match the dev_name()
  *	string for the underlying bus device, if there is one.  May be
  *	an empty string.
@@ -182,7 +184,7 @@ struct ethtool_drvinfo {
 	char	version[32];
 	char	fw_version[ETHTOOL_FWVERS_LEN];
 	char	bus_info[ETHTOOL_BUSINFO_LEN];
-	char	reserved1[32];
+	char	erom_version[ETHTOOL_EROMVERS_LEN];
 	char	reserved2[12];
 	__u32	n_priv_flags;
 	__u32	n_stats;
@@ -224,7 +226,7 @@ enum tunable_id {
 	ETHTOOL_TX_COPYBREAK,
 	ETHTOOL_PFC_PREVENTION_TOUT, /* timeout in msecs */
 	/*
-	 * Add your fresh new tubale attribute above and remember to update
+	 * Add your fresh new tunable attribute above and remember to update
 	 * tunable_strings[] in net/core/ethtool.c
 	 */
 	__ETHTOOL_TUNABLE_COUNT,
@@ -249,6 +251,19 @@ struct ethtool_tunable {
 	__u32	type_id;
 	__u32	len;
 	void	*data[0];
+};
+
+#define DOWNSHIFT_DEV_DEFAULT_COUNT	0xff
+#define DOWNSHIFT_DEV_DISABLE		0
+
+enum phy_tunable_id {
+	ETHTOOL_PHY_ID_UNSPEC,
+	ETHTOOL_PHY_DOWNSHIFT,
+	/*
+	 * Add your fresh new phy tunable attribute above and remember to update
+	 * phy_tunable_strings[] in net/core/ethtool.c
+	 */
+	__ETHTOOL_PHY_TUNABLE_COUNT,
 };
 
 /**
@@ -550,6 +565,8 @@ struct ethtool_pauseparam {
  *	now deprecated
  * @ETH_SS_FEATURES: Device feature names
  * @ETH_SS_RSS_HASH_FUNCS: RSS hush function names
+ * @ETH_SS_PHY_STATS: Statistic names, for use with %ETHTOOL_GPHYSTATS
+ * @ETH_SS_PHY_TUNABLES: PHY tunable names
  */
 enum ethtool_stringset {
 	ETH_SS_TEST		= 0,
@@ -559,6 +576,8 @@ enum ethtool_stringset {
 	ETH_SS_FEATURES,
 	ETH_SS_RSS_HASH_FUNCS,
 	ETH_SS_TUNABLES,
+	ETH_SS_PHY_STATS,
+	ETH_SS_PHY_TUNABLES,
 };
 
 /**
@@ -811,14 +830,12 @@ union ethtool_flow_union {
 	struct ethtool_ah_espip4_spec		ah_ip4_spec;
 	struct ethtool_ah_espip4_spec		esp_ip4_spec;
 	struct ethtool_usrip4_spec		usr_ip4_spec;
-#ifndef __GENKSYMS__
 	struct ethtool_tcpip6_spec		tcp_ip6_spec;
 	struct ethtool_tcpip6_spec		udp_ip6_spec;
 	struct ethtool_tcpip6_spec		sctp_ip6_spec;
 	struct ethtool_ah_espip6_spec		ah_ip6_spec;
 	struct ethtool_ah_espip6_spec		esp_ip6_spec;
 	struct ethtool_usrip6_spec		usr_ip6_spec;
-#endif
 	struct ethhdr				ether_spec;
 	__u8					hdata[52];
 };
@@ -960,14 +977,10 @@ struct ethtool_rxnfc {
 	__u32				flow_type;
 	__u64				data;
 	struct ethtool_rx_flow_spec	fs;
-#ifdef __GENKSYMS__
-	__u32				rule_cnt;
-#else
 	union {
 		__u32			rule_cnt;
 		__u32			rss_context;
 	};
-#endif
 	__u32				rule_locs[0];
 };
 
@@ -1374,12 +1387,14 @@ enum ethtool_fec_config_bits {
 #define ETHTOOL_SRSSH		0x00000047 /* Set RX flow hash configuration */
 #define ETHTOOL_GTUNABLE	0x00000048 /* Get tunable configuration */
 #define ETHTOOL_STUNABLE	0x00000049 /* Set tunable configuration */
+#define ETHTOOL_GPHYSTATS	0x0000004a /* get PHY-specific statistics */
 
 #define ETHTOOL_PERQUEUE	0x0000004b /* Set per queue options */
 
 #define ETHTOOL_GLINKSETTINGS	0x0000004c /* Get ethtool_link_settings */
 #define ETHTOOL_SLINKSETTINGS	0x0000004d /* Set ethtool_link_settings */
-
+#define ETHTOOL_PHY_GTUNABLE	0x0000004e /* Get PHY tunable configuration */
+#define ETHTOOL_PHY_STUNABLE	0x0000004f /* Set PHY tunable configuration */
 #define ETHTOOL_GFECPARAM	0x00000050 /* Get FEC settings */
 #define ETHTOOL_SFECPARAM	0x00000051 /* Set FEC settings */
 
@@ -1464,8 +1479,16 @@ enum ethtool_link_mode_bit_indices {
 	 * use the new ETHTOOL_GLINKSETTINGS/ETHTOOL_SLINKSETTINGS API.
 	 */
 
+	/* RHEL */
+	__ETHTOOL_LINK_MODE_LAST_RH80
+	  = ETHTOOL_LINK_MODE_FEC_BASER_BIT,
+
 	__ETHTOOL_LINK_MODE_LAST
+#ifndef __GENKSYMS__
 	  = ETHTOOL_LINK_MODE_200000baseCR4_Full_BIT,
+#else
+	  = __ETHTOOL_LINK_MODE_LAST_RH80,
+#endif
 };
 
 #define __ETHTOOL_LINK_MODE_LEGACY_MASK(base_name)	\
@@ -1556,7 +1579,10 @@ enum ethtool_link_mode_bit_indices {
  * it was forced up into this mode or autonegotiated.
  */
 
-/* The forced speed, in units of 1Mb. All values 0 to INT_MAX are legal. */
+/* The forced speed, in units of 1Mb. All values 0 to INT_MAX are legal.
+ * Update drivers/net/phy/phy.c:phy_speed_to_str() and
+ * drivers/net/bonding/bond_3ad.c:__get_link_speed() when adding new values.
+ */
 #define SPEED_10		10
 #define SPEED_100		100
 #define SPEED_1000		1000
@@ -1759,9 +1785,9 @@ enum ethtool_reset_flags {
  *	%ETHTOOL_GLINKSETTINGS: on entry, number of words passed by user
  *	(>= 0); on return, if handshake in progress, negative if
  *	request size unsupported by kernel: absolute value indicates
- *	kernel recommended size and cmd field is 0, as well as all the
- *	other fields; otherwise (handshake completed), strictly
- *	positive to indicate size used by kernel and cmd field is
+ *	kernel expected size and all the other fields but cmd
+ *	are 0; otherwise (handshake completed), strictly positive
+ *	to indicate size used by kernel and cmd field stays
  *	%ETHTOOL_GLINKSETTINGS, all other fields populated by driver. For
  *	%ETHTOOL_SLINKSETTINGS: must be valid on entry, ie. a positive
  *	value returned previously by %ETHTOOL_GLINKSETTINGS, otherwise

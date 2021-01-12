@@ -1240,8 +1240,8 @@ static int tbnet_probe(struct tb_service *svc, const struct tb_service_id *id)
 	netif_napi_add(dev, &net->napi, tbnet_poll, NAPI_POLL_WEIGHT);
 
 	/* MTU range: 68 - 65522 */
-	dev->extended->min_mtu = ETH_MIN_MTU;
-	dev->extended->max_mtu = TBNET_MAX_MTU - ETH_HLEN;
+	dev->min_mtu = ETH_MIN_MTU;
+	dev->max_mtu = TBNET_MAX_MTU - ETH_HLEN;
 
 	net->handler.uuid = &tbnet_svc_uuid;
 	net->handler.callback = tbnet_handle_packet,

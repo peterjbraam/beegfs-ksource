@@ -13,7 +13,7 @@
 
 #include <linux/eventfd.h>
 #include <linux/vhost.h>
-#include <linux/socket.h> /* memcpy_fromiovec */
+#include <linux/uio.h>
 #include <linux/mm.h>
 #include <linux/mmu_context.h>
 #include <linux/miscdevice.h>
@@ -27,6 +27,8 @@
 #include <linux/cgroup.h>
 #include <linux/module.h>
 #include <linux/sort.h>
+#include <linux/sched/mm.h>
+#include <linux/sched/signal.h>
 #include <linux/interval_tree_generic.h>
 #include <linux/nospec.h>
 
@@ -53,9 +55,19 @@ INTERVAL_TREE_DEFINE(struct vhost_umem_node,
 		     START, LAST, static inline, vhost_umem_interval_tree);
 
 #ifdef CONFIG_VHOST_CROSS_ENDIAN_LEGACY
-static void vhost_vq_reset_user_be(struct vhost_virtqueue *vq)
+static void vhost_disable_cross_endian(struct vhost_virtqueue *vq)
 {
 	vq->user_be = !virtio_legacy_is_little_endian();
+}
+
+static void vhost_enable_cross_endian_big(struct vhost_virtqueue *vq)
+{
+	vq->user_be = true;
+}
+
+static void vhost_enable_cross_endian_little(struct vhost_virtqueue *vq)
+{
+	vq->user_be = false;
 }
 
 static long vhost_set_vring_endian(struct vhost_virtqueue *vq, int __user *argp)
@@ -72,7 +84,10 @@ static long vhost_set_vring_endian(struct vhost_virtqueue *vq, int __user *argp)
 	    s.num != VHOST_VRING_BIG_ENDIAN)
 		return -EINVAL;
 
-	vq->user_be = s.num;
+	if (s.num == VHOST_VRING_BIG_ENDIAN)
+		vhost_enable_cross_endian_big(vq);
+	else
+		vhost_enable_cross_endian_little(vq);
 
 	return 0;
 }
@@ -101,7 +116,7 @@ static void vhost_init_is_le(struct vhost_virtqueue *vq)
 	vq->is_le = vhost_has_feature(vq, VIRTIO_F_VERSION_1) || !vq->user_be;
 }
 #else
-static void vhost_vq_reset_user_be(struct vhost_virtqueue *vq)
+static void vhost_disable_cross_endian(struct vhost_virtqueue *vq)
 {
 }
 
@@ -118,11 +133,15 @@ static long vhost_get_vring_endian(struct vhost_virtqueue *vq, u32 idx,
 
 static void vhost_init_is_le(struct vhost_virtqueue *vq)
 {
-	if (vhost_has_feature(vq, VIRTIO_F_VERSION_1))
-		vq->is_le = true;
+	vq->is_le = vhost_has_feature(vq, VIRTIO_F_VERSION_1)
+		|| virtio_legacy_is_little_endian();
 }
 #endif /* CONFIG_VHOST_CROSS_ENDIAN_LEGACY */
 
+static void vhost_reset_is_le(struct vhost_virtqueue *vq)
+{
+	vhost_init_is_le(vq);
+}
 
 struct vhost_flush_struct {
 	struct vhost_work work;
@@ -147,12 +166,12 @@ static void vhost_poll_func(struct file *file, wait_queue_head_t *wqh,
 	add_wait_queue(wqh, &poll->wait);
 }
 
-static int vhost_poll_wakeup(wait_queue_t *wait, unsigned mode, int sync,
+static int vhost_poll_wakeup(wait_queue_entry_t *wait, unsigned mode, int sync,
 			     void *key)
 {
 	struct vhost_poll *poll = container_of(wait, struct vhost_poll, wait);
 
-	if (!((unsigned long)key & poll->mask))
+	if (!(key_to_poll(key) & poll->mask))
 		return 0;
 
 	vhost_poll_queue(poll);
@@ -163,13 +182,12 @@ void vhost_work_init(struct vhost_work *work, vhost_work_fn_t fn)
 {
 	clear_bit(VHOST_WORK_QUEUED, &work->flags);
 	work->fn = fn;
-	init_waitqueue_head(&work->done);
 }
 EXPORT_SYMBOL_GPL(vhost_work_init);
 
 /* Init poll structure */
 void vhost_poll_init(struct vhost_poll *poll, vhost_work_fn_t fn,
-		     unsigned long mask, struct vhost_dev *dev)
+		     __poll_t mask, struct vhost_dev *dev)
 {
 	init_waitqueue_func_entry(&poll->wait, vhost_poll_wakeup);
 	init_poll_funcptr(&poll->table, vhost_poll_func);
@@ -185,16 +203,16 @@ EXPORT_SYMBOL_GPL(vhost_poll_init);
  * keep a reference to a file until after vhost_poll_stop is called. */
 int vhost_poll_start(struct vhost_poll *poll, struct file *file)
 {
-	unsigned long mask;
+	__poll_t mask;
 	int ret = 0;
 
 	if (poll->wqh)
 		return 0;
 
-	mask = file->f_op->poll(file, &poll->table);
+	mask = vfs_poll(file, &poll->table);
 	if (mask)
-		vhost_poll_wakeup(&poll->wait, 0, 0, (void *)mask);
-	if (mask & POLLERR) {
+		vhost_poll_wakeup(&poll->wait, 0, 0, poll_to_key(mask));
+	if (mask & EPOLLERR) {
 		vhost_poll_stop(poll);
 		ret = -EINVAL;
 	}
@@ -244,8 +262,8 @@ void vhost_work_queue(struct vhost_dev *dev, struct vhost_work *work)
 	if (!test_and_set_bit(VHOST_WORK_QUEUED, &work->flags)) {
 		/* We can only add the work to the list after we're
 		 * sure it was not in the list.
+		 * test_and_set_bit() implies a memory barrier.
 		 */
-		smp_mb();
 		llist_add(&work->node, &dev->work_list);
 		wake_up_process(dev->worker);
 	}
@@ -298,15 +316,14 @@ static void vhost_vq_reset(struct vhost_dev *dev,
 	vq->log_addr = -1ull;
 	vq->private_data = NULL;
 	vq->acked_features = 0;
+	vq->acked_backend_features = 0;
 	vq->log_base = NULL;
 	vq->error_ctx = NULL;
-	vq->error = NULL;
 	vq->kick = NULL;
 	vq->call_ctx = NULL;
-	vq->call = NULL;
 	vq->log_ctx = NULL;
-	vq->is_le = virtio_legacy_is_little_endian();
-	vhost_vq_reset_user_be(vq);
+	vhost_reset_is_le(vq);
+	vhost_disable_cross_endian(vq);
 	vq->busyloop_timeout = 0;
 	vq->umem = NULL;
 	vq->iotlb = NULL;
@@ -365,17 +382,19 @@ static void vhost_vq_free_iovecs(struct vhost_virtqueue *vq)
 /* Helper to allocate iovec buffers for all vqs. */
 static long vhost_dev_alloc_iovecs(struct vhost_dev *dev)
 {
+	struct vhost_virtqueue *vq;
 	int i;
 
 	for (i = 0; i < dev->nvqs; ++i) {
-		dev->vqs[i]->indirect = kmalloc(sizeof *dev->vqs[i]->indirect *
-					       dev->iov_limit, GFP_KERNEL);
-		dev->vqs[i]->log = kmalloc(sizeof *dev->vqs[i]->log *
-					   dev->iov_limit, GFP_KERNEL);
-		dev->vqs[i]->heads = kmalloc(sizeof *dev->vqs[i]->heads *
-					    dev->iov_limit, GFP_KERNEL);
-		if (!dev->vqs[i]->indirect || !dev->vqs[i]->log ||
-			!dev->vqs[i]->heads)
+		vq = dev->vqs[i];
+		vq->indirect = kmalloc_array(UIO_MAXIOV,
+					     sizeof(*vq->indirect),
+					     GFP_KERNEL);
+		vq->log = kmalloc_array(dev->iov_limit, sizeof(*vq->log),
+					GFP_KERNEL);
+		vq->heads = kmalloc_array(dev->iov_limit, sizeof(*vq->heads),
+					  GFP_KERNEL);
+		if (!vq->indirect || !vq->log || !vq->heads)
 			goto err_nomem;
 	}
 	return 0;
@@ -409,17 +428,17 @@ bool vhost_exceeds_weight(struct vhost_virtqueue *vq,
 }
 EXPORT_SYMBOL_GPL(vhost_exceeds_weight);
 
-long vhost_dev_init(struct vhost_dev *dev,
+void vhost_dev_init(struct vhost_dev *dev,
 		    struct vhost_virtqueue **vqs, int nvqs,
 		    int iov_limit, int weight, int byte_weight)
 {
+	struct vhost_virtqueue *vq;
 	int i;
 
 	dev->vqs = vqs;
 	dev->nvqs = nvqs;
 	mutex_init(&dev->mutex);
 	dev->log_ctx = NULL;
-	dev->log_file = NULL;
 	dev->umem = NULL;
 	dev->iotlb = NULL;
 	dev->mm = NULL;
@@ -433,19 +452,19 @@ long vhost_dev_init(struct vhost_dev *dev,
 	INIT_LIST_HEAD(&dev->pending_list);
 	spin_lock_init(&dev->iotlb_lock);
 
-	for (i = 0; i < dev->nvqs; ++i) {
-		dev->vqs[i]->log = NULL;
-		dev->vqs[i]->indirect = NULL;
-		dev->vqs[i]->heads = NULL;
-		dev->vqs[i]->dev = dev;
-		mutex_init(&dev->vqs[i]->mutex);
-		vhost_vq_reset(dev, dev->vqs[i]);
-		if (dev->vqs[i]->handle_kick)
-			vhost_poll_init(&dev->vqs[i]->poll,
-					dev->vqs[i]->handle_kick, POLLIN, dev);
-	}
 
-	return 0;
+	for (i = 0; i < dev->nvqs; ++i) {
+		vq = dev->vqs[i];
+		vq->log = NULL;
+		vq->indirect = NULL;
+		vq->heads = NULL;
+		vq->dev = dev;
+		mutex_init(&vq->mutex);
+		vhost_vq_reset(dev, vq);
+		if (vq->handle_kick)
+			vhost_poll_init(&vq->poll, vq->handle_kick,
+					EPOLLIN, dev);
+	}
 }
 EXPORT_SYMBOL_GPL(vhost_dev_init);
 
@@ -544,7 +563,7 @@ void vhost_dev_reset_owner(struct vhost_dev *dev, struct vhost_umem *umem)
 {
 	int i;
 
-	vhost_dev_cleanup(dev, true);
+	vhost_dev_cleanup(dev);
 
 	/* Restore memory to default empty mapping. */
 	INIT_LIST_HEAD(&umem->umem_list);
@@ -611,38 +630,30 @@ static void vhost_clear_msg(struct vhost_dev *dev)
 	spin_unlock(&dev->iotlb_lock);
 }
 
-/* Caller should have device mutex if and only if locked is set */
-void vhost_dev_cleanup(struct vhost_dev *dev, bool locked)
+void vhost_dev_cleanup(struct vhost_dev *dev)
 {
 	int i;
 
 	for (i = 0; i < dev->nvqs; ++i) {
 		if (dev->vqs[i]->error_ctx)
 			eventfd_ctx_put(dev->vqs[i]->error_ctx);
-		if (dev->vqs[i]->error)
-			fput(dev->vqs[i]->error);
 		if (dev->vqs[i]->kick)
 			fput(dev->vqs[i]->kick);
 		if (dev->vqs[i]->call_ctx)
 			eventfd_ctx_put(dev->vqs[i]->call_ctx);
-		if (dev->vqs[i]->call)
-			fput(dev->vqs[i]->call);
 		vhost_vq_reset(dev, dev->vqs[i]);
 	}
 	vhost_dev_free_iovecs(dev);
 	if (dev->log_ctx)
 		eventfd_ctx_put(dev->log_ctx);
 	dev->log_ctx = NULL;
-	if (dev->log_file)
-		fput(dev->log_file);
-	dev->log_file = NULL;
 	/* No one will access memory at this point */
 	vhost_umem_clean(dev->umem);
 	dev->umem = NULL;
 	vhost_umem_clean(dev->iotlb);
 	dev->iotlb = NULL;
 	vhost_clear_msg(dev);
-	wake_up_interruptible_poll(&dev->wait, POLLIN | POLLRDNORM);
+	wake_up_interruptible_poll(&dev->wait, EPOLLIN | EPOLLRDNORM);
 	WARN_ON(!llist_empty(&dev->work_list));
 	if (dev->worker) {
 		kthread_stop(dev->worker);
@@ -663,7 +674,7 @@ static bool log_access_ok(void __user *log_base, u64 addr, unsigned long sz)
 	    a + (unsigned long)log_base > ULONG_MAX)
 		return false;
 
-	return access_ok(VERIFY_WRITE, log_base + a,
+	return access_ok(log_base + a,
 			 (sz + VHOST_PAGE_SIZE * 8 - 1) / VHOST_PAGE_SIZE / 8);
 }
 
@@ -689,7 +700,7 @@ static bool vq_memory_access_ok(void __user *log_base, struct vhost_umem *umem,
 			return false;
 
 
-		if (!access_ok(VERIFY_WRITE, (void __user *)a,
+		if (!access_ok((void __user *)a,
 				    node->size))
 			return false;
 		else if (log_all && !log_access_ok(log_base,
@@ -762,14 +773,15 @@ static int vhost_copy_to_user(struct vhost_virtqueue *vq, void __user *to,
 		if (uaddr)
 			return __copy_to_user(uaddr, from, size);
 
-		ret = translate_desc(vq, (u64)(uintptr_t)to, size,
-				     vq->iotlb_iov, ARRAY_SIZE(vq->iotlb_iov),
+		ret = translate_desc(vq, (u64)(uintptr_t)to, size, vq->iotlb_iov,
+				     ARRAY_SIZE(vq->iotlb_iov),
 				     VHOST_ACCESS_WO);
 		if (ret < 0)
 			goto out;
-		iov_iter_init(&t, (const struct iovec *)vq->iotlb_iov,
-			      ret, size, 0);
-		ret = memcpy_toiovecend(t.iov, (unsigned char *)from, 0, size);
+		iov_iter_init(&t, WRITE, vq->iotlb_iov, ret, size);
+		ret = copy_to_iter(from, size, &t);
+		if (ret == size)
+			ret = 0;
 	}
 out:
 	return ret;
@@ -796,8 +808,8 @@ static int vhost_copy_from_user(struct vhost_virtqueue *vq, void *to,
 		if (uaddr)
 			return __copy_from_user(to, uaddr, size);
 
-		ret = translate_desc(vq, (u64)(uintptr_t)from, size,
-				     vq->iotlb_iov, ARRAY_SIZE(vq->iotlb_iov),
+		ret = translate_desc(vq, (u64)(uintptr_t)from, size, vq->iotlb_iov,
+				     ARRAY_SIZE(vq->iotlb_iov),
 				     VHOST_ACCESS_RO);
 		if (ret < 0) {
 			vq_err(vq, "IOTLB translation failure: uaddr "
@@ -805,9 +817,10 @@ static int vhost_copy_from_user(struct vhost_virtqueue *vq, void *to,
 			       (unsigned long long) size);
 			goto out;
 		}
-		iov_iter_init(&f, (const struct iovec *)vq->iotlb_iov,
-			      ret, size, 0);
-		ret = memcpy_fromiovecend((unsigned char *)to, f.iov, 0, size);
+		iov_iter_init(&f, READ, vq->iotlb_iov, ret, size);
+		ret = copy_from_iter(to, size, &f);
+		if (ret == size)
+			ret = 0;
 	}
 
 out:
@@ -963,7 +976,7 @@ static void vhost_iotlb_notify_vq(struct vhost_dev *d,
 	list_for_each_entry_safe(node, n, &d->pending_list, node) {
 		struct vhost_iotlb_msg *vq_msg = &node->msg.iotlb;
 		if (msg->iova <= vq_msg->iova &&
-		    msg->iova + msg->size - 1 > vq_msg->iova &&
+		    msg->iova + msg->size - 1 >= vq_msg->iova &&
 		    vq_msg->type == VHOST_IOTLB_MISS) {
 			vhost_poll_queue(&node->vq->poll);
 			list_del(&node->node);
@@ -983,10 +996,10 @@ static bool umem_access_ok(u64 uaddr, u64 size, int access)
 		return false;
 
 	if ((access & VHOST_ACCESS_RO) &&
-	    !access_ok(VERIFY_READ, (void __user *)a, size))
+	    !access_ok((void __user *)a, size))
 		return false;
 	if ((access & VHOST_ACCESS_WO) &&
-	    !access_ok(VERIFY_WRITE, (void __user *)a, size))
+	    !access_ok((void __user *)a, size))
 		return false;
 	return true;
 }
@@ -996,6 +1009,7 @@ static int vhost_process_iotlb_msg(struct vhost_dev *dev,
 {
 	int ret = 0;
 
+	mutex_lock(&dev->mutex);
 	vhost_dev_lock_vqs(dev);
 	switch (msg->type) {
 	case VHOST_IOTLB_UPDATE:
@@ -1031,57 +1045,80 @@ static int vhost_process_iotlb_msg(struct vhost_dev *dev,
 	}
 
 	vhost_dev_unlock_vqs(dev);
+	mutex_unlock(&dev->mutex);
+
 	return ret;
 }
-
-ssize_t vhost_chr_write_iter(struct vhost_dev *dev, const struct iovec *from)
+ssize_t vhost_chr_write_iter(struct vhost_dev *dev,
+			     struct iov_iter *from)
 {
-	struct vhost_msg_node node;
-	unsigned size = sizeof(struct vhost_msg);
-	size_t ret;
-	int err;
+	struct vhost_iotlb_msg msg;
+	size_t offset;
+	int type, ret;
 
-	ret = memcpy_fromiovecend((unsigned char *)&node.msg, from, 0, size);
-	if (ret)
+	ret = copy_from_iter(&type, sizeof(type), from);
+	if (ret != sizeof(type)) {
+		ret = -EINVAL;
 		goto done;
+	}
 
-	switch (node.msg.type) {
+	switch (type) {
 	case VHOST_IOTLB_MSG:
-		err = vhost_process_iotlb_msg(dev, &node.msg.iotlb);
-		if (err)
-			ret = err;
+		/* There maybe a hole after type for V1 message type,
+		 * so skip it here.
+		 */
+		offset = offsetof(struct vhost_msg, iotlb) - sizeof(int);
+		break;
+	case VHOST_IOTLB_MSG_V2:
+		offset = sizeof(__u32);
 		break;
 	default:
 		ret = -EINVAL;
-		break;
+		goto done;
 	}
 
+	iov_iter_advance(from, offset);
+	ret = copy_from_iter(&msg, sizeof(msg), from);
+	if (ret != sizeof(msg)) {
+		ret = -EINVAL;
+		goto done;
+	}
+	if (vhost_process_iotlb_msg(dev, &msg)) {
+		ret = -EFAULT;
+		goto done;
+	}
+
+	ret = (type == VHOST_IOTLB_MSG) ? sizeof(struct vhost_msg) :
+	      sizeof(struct vhost_msg_v2);
 done:
-	return ret ? ret : size;
+	return ret;
 }
 EXPORT_SYMBOL(vhost_chr_write_iter);
 
-unsigned int vhost_chr_poll(struct file *file, struct vhost_dev *dev,
+__poll_t vhost_chr_poll(struct file *file, struct vhost_dev *dev,
 			    poll_table *wait)
 {
-	unsigned int mask = 0;
+	__poll_t mask = 0;
 
 	poll_wait(file, &dev->wait, wait);
 
 	if (!list_empty(&dev->read_list))
-		mask |= POLLIN | POLLRDNORM;
+		mask |= EPOLLIN | EPOLLRDNORM;
 
 	return mask;
 }
 EXPORT_SYMBOL(vhost_chr_poll);
 
-ssize_t vhost_chr_read_iter(struct vhost_dev *dev, const struct iovec *to,
+ssize_t vhost_chr_read_iter(struct vhost_dev *dev, struct iov_iter *to,
 			    int noblock)
 {
 	DEFINE_WAIT(wait);
 	struct vhost_msg_node *node;
 	ssize_t ret = 0;
 	unsigned size = sizeof(struct vhost_msg);
+
+	if (iov_iter_count(to) < size)
+		return 0;
 
 	while (1) {
 		if (!noblock)
@@ -1111,18 +1148,32 @@ ssize_t vhost_chr_read_iter(struct vhost_dev *dev, const struct iovec *to,
 		finish_wait(&dev->wait, &wait);
 
 	if (node) {
-		ret = memcpy_toiovecend(to, (unsigned char *)&node->msg,
-					0, size);
+		struct vhost_iotlb_msg *msg;
+		void *start = &node->msg;
 
-		if (ret || node->msg.type != VHOST_IOTLB_MISS) {
+		switch (node->msg.type) {
+		case VHOST_IOTLB_MSG:
+			size = sizeof(node->msg);
+			msg = &node->msg.iotlb;
+			break;
+		case VHOST_IOTLB_MSG_V2:
+			size = sizeof(node->msg_v2);
+			msg = &node->msg_v2.iotlb;
+			break;
+		default:
+			BUG();
+			break;
+		}
+
+		ret = copy_to_iter(start, size, to);
+		if (ret != size || msg->type != VHOST_IOTLB_MISS) {
 			kfree(node);
 			return ret;
 		}
-
 		vhost_enqueue_msg(dev, &dev->pending_list, node);
 	}
 
-	return ret ? ret : size;
+	return ret;
 }
 EXPORT_SYMBOL_GPL(vhost_chr_read_iter);
 
@@ -1131,12 +1182,19 @@ static int vhost_iotlb_miss(struct vhost_virtqueue *vq, u64 iova, int access)
 	struct vhost_dev *dev = vq->dev;
 	struct vhost_msg_node *node;
 	struct vhost_iotlb_msg *msg;
+	bool v2 = vhost_backend_has_feature(vq, VHOST_BACKEND_F_IOTLB_MSG_V2);
 
-	node = vhost_new_msg(vq, VHOST_IOTLB_MISS);
+	node = vhost_new_msg(vq, v2 ? VHOST_IOTLB_MSG_V2 : VHOST_IOTLB_MSG);
 	if (!node)
 		return -ENOMEM;
 
-	msg = &node->msg.iotlb;
+	if (v2) {
+		node->msg_v2.type = VHOST_IOTLB_MSG_V2;
+		msg = &node->msg_v2.iotlb;
+	} else {
+		msg = &node->msg.iotlb;
+	}
+
 	msg->type = VHOST_IOTLB_MISS;
 	msg->iova = iova;
 	msg->perm = access;
@@ -1152,12 +1210,12 @@ static bool vq_access_ok(struct vhost_virtqueue *vq, unsigned int num,
 			 struct vring_used __user *used)
 
 {
-	size_t s = vhost_has_feature(vq, VIRTIO_RING_F_EVENT_IDX) ? 2 : 0;
+	size_t s __maybe_unused = vhost_has_feature(vq, VIRTIO_RING_F_EVENT_IDX) ? 2 : 0;
 
-	return access_ok(VERIFY_READ, desc, num * sizeof(*desc)) &&
-	       access_ok(VERIFY_READ, avail,
-			 sizeof(*avail) + num * sizeof(*avail->ring) + s) &&
-	       access_ok(VERIFY_WRITE, used,
+	return access_ok(desc, num * sizeof *desc) &&
+	       access_ok(avail,
+			 sizeof *avail + num * sizeof *avail->ring + s) &&
+	       access_ok(used,
 			sizeof *used + num * sizeof *used->ring + s);
 }
 
@@ -1177,7 +1235,7 @@ static bool iotlb_access_ok(struct vhost_virtqueue *vq,
 {
 	const struct vhost_umem_node *node;
 	struct vhost_umem *umem = vq->iotlb;
-	u64 s = 0, size, orig_addr = addr;
+	u64 s = 0, size, orig_addr = addr, last = addr + len - 1;
 
 	if (vhost_vq_meta_fetch(vq, addr, len, type))
 		return true;
@@ -1185,7 +1243,7 @@ static bool iotlb_access_ok(struct vhost_virtqueue *vq,
 	while (len > s) {
 		node = vhost_umem_interval_tree_iter_first(&umem->umem_tree,
 							   addr,
-							   addr + len - 1);
+							   last);
 		if (node == NULL || node->start > addr) {
 			vhost_iotlb_miss(vq, addr, access);
 			return false;
@@ -1219,11 +1277,11 @@ int vq_iotlb_prefetch(struct vhost_virtqueue *vq)
 	return iotlb_access_ok(vq, VHOST_ACCESS_RO, (u64)(uintptr_t)vq->desc,
 			       num * sizeof(*vq->desc), VHOST_ADDR_DESC) &&
 	       iotlb_access_ok(vq, VHOST_ACCESS_RO, (u64)(uintptr_t)vq->avail,
-			       sizeof(*vq->avail) +
+			       sizeof *vq->avail +
 			       num * sizeof(*vq->avail->ring) + s,
 			       VHOST_ADDR_AVAIL) &&
 	       iotlb_access_ok(vq, VHOST_ACCESS_WO, (u64)(uintptr_t)vq->used,
-			       sizeof(*vq->used) +
+			       sizeof *vq->used +
 			       num * sizeof(*vq->used->ring) + s,
 			       VHOST_ADDR_USED);
 }
@@ -1273,7 +1331,7 @@ static struct vhost_umem *vhost_umem_alloc(void)
 	if (!umem)
 		return NULL;
 
-	umem->umem_tree = RB_ROOT;
+	umem->umem_tree = RB_ROOT_CACHED;
 	umem->numem = 0;
 	INIT_LIST_HEAD(&umem->umem_list);
 
@@ -1294,7 +1352,8 @@ static long vhost_set_memory(struct vhost_dev *d, struct vhost_memory __user *m)
 		return -EOPNOTSUPP;
 	if (mem.nregions > max_mem_regions)
 		return -E2BIG;
-	newmem = kvzalloc(size + mem.nregions * sizeof(*m->regions), GFP_KERNEL);
+	newmem = kvzalloc(struct_size(newmem, regions, mem.nregions),
+			GFP_KERNEL);
 	if (!newmem)
 		return -ENOMEM;
 
@@ -1437,7 +1496,7 @@ long vhost_vring_ioctl(struct vhost_dev *d, unsigned int ioctl, void __user *arg
 		BUILD_BUG_ON(__alignof__ *vq->used > VRING_USED_ALIGN_SIZE);
 		if ((a.avail_user_addr & (VRING_AVAIL_ALIGN_SIZE - 1)) ||
 		    (a.used_user_addr & (VRING_USED_ALIGN_SIZE - 1)) ||
-		    (a.log_guest_addr & (sizeof(u64) - 1))) {
+		    (a.log_guest_addr & (VRING_USED_ALIGN_SIZE - 1))) {
 			r = -EINVAL;
 			break;
 		}
@@ -1491,38 +1550,24 @@ long vhost_vring_ioctl(struct vhost_dev *d, unsigned int ioctl, void __user *arg
 			r = -EFAULT;
 			break;
 		}
-		eventfp = f.fd == -1 ? NULL : eventfd_fget(f.fd);
-		if (IS_ERR(eventfp)) {
-			r = PTR_ERR(eventfp);
+		ctx = f.fd == -1 ? NULL : eventfd_ctx_fdget(f.fd);
+		if (IS_ERR(ctx)) {
+			r = PTR_ERR(ctx);
 			break;
 		}
-		if (eventfp != vq->call) {
-			filep = vq->call;
-			ctx = vq->call_ctx;
-			vq->call = eventfp;
-			vq->call_ctx = eventfp ?
-				eventfd_ctx_fileget(eventfp) : NULL;
-		} else
-			filep = eventfp;
+		swap(ctx, vq->call_ctx);
 		break;
 	case VHOST_SET_VRING_ERR:
 		if (copy_from_user(&f, argp, sizeof f)) {
 			r = -EFAULT;
 			break;
 		}
-		eventfp = f.fd == -1 ? NULL : eventfd_fget(f.fd);
-		if (IS_ERR(eventfp)) {
-			r = PTR_ERR(eventfp);
+		ctx = f.fd == -1 ? NULL : eventfd_ctx_fdget(f.fd);
+		if (IS_ERR(ctx)) {
+			r = PTR_ERR(ctx);
 			break;
 		}
-		if (eventfp != vq->error) {
-			filep = vq->error;
-			vq->error = eventfp;
-			ctx = vq->error_ctx;
-			vq->error_ctx = eventfp ?
-				eventfd_ctx_fileget(eventfp) : NULL;
-		} else
-			filep = eventfp;
+		swap(ctx, vq->error_ctx);
 		break;
 	case VHOST_SET_VRING_ENDIAN:
 		r = vhost_set_vring_endian(vq, argp);
@@ -1550,7 +1595,7 @@ long vhost_vring_ioctl(struct vhost_dev *d, unsigned int ioctl, void __user *arg
 	if (pollstop && vq->handle_kick)
 		vhost_poll_stop(&vq->poll);
 
-	if (ctx)
+	if (!IS_ERR_OR_NULL(ctx))
 		eventfd_ctx_put(ctx);
 	if (filep)
 		fput(filep);
@@ -1579,9 +1624,12 @@ int vhost_init_device_iotlb(struct vhost_dev *d, bool enabled)
 	d->iotlb = niotlb;
 
 	for (i = 0; i < d->nvqs; ++i) {
-		mutex_lock(&d->vqs[i]->mutex);
-		d->vqs[i]->iotlb = niotlb;
-		mutex_unlock(&d->vqs[i]->mutex);
+		struct vhost_virtqueue *vq = d->vqs[i];
+
+		mutex_lock(&vq->mutex);
+		vq->iotlb = niotlb;
+		__vhost_vq_meta_reset(vq);
+		mutex_unlock(&vq->mutex);
 	}
 
 	vhost_umem_clean(oiotlb);
@@ -1593,8 +1641,7 @@ EXPORT_SYMBOL_GPL(vhost_init_device_iotlb);
 /* Caller must have device mutex */
 long vhost_dev_ioctl(struct vhost_dev *d, unsigned int ioctl, void __user *argp)
 {
-	struct file *eventfp, *filep = NULL;
-	struct eventfd_ctx *ctx = NULL;
+	struct eventfd_ctx *ctx;
 	u64 p;
 	long r;
 	int i, fd;
@@ -1640,18 +1687,12 @@ long vhost_dev_ioctl(struct vhost_dev *d, unsigned int ioctl, void __user *argp)
 		r = get_user(fd, (int __user *)argp);
 		if (r < 0)
 			break;
-		eventfp = fd == -1 ? NULL : eventfd_fget(fd);
-		if (IS_ERR(eventfp)) {
-			r = PTR_ERR(eventfp);
+		ctx = fd == -1 ? NULL : eventfd_ctx_fdget(fd);
+		if (IS_ERR(ctx)) {
+			r = PTR_ERR(ctx);
 			break;
 		}
-		if (eventfp != d->log_file) {
-			filep = d->log_file;
-			ctx = d->log_ctx;
-			d->log_ctx = eventfp ?
-				eventfd_ctx_fileget(eventfp) : NULL;
-		} else
-			filep = eventfp;
+		swap(ctx, d->log_ctx);
 		for (i = 0; i < d->nvqs; ++i) {
 			mutex_lock(&d->vqs[i]->mutex);
 			d->vqs[i]->log_ctx = d->log_ctx;
@@ -1659,8 +1700,6 @@ long vhost_dev_ioctl(struct vhost_dev *d, unsigned int ioctl, void __user *argp)
 		}
 		if (ctx)
 			eventfd_ctx_put(ctx);
-		if (filep)
-			fput(filep);
 		break;
 	default:
 		r = -ENOIOCTLCMD;
@@ -1858,34 +1897,40 @@ static int vhost_update_avail_event(struct vhost_virtqueue *vq, u16 avail_event)
 	return 0;
 }
 
-int vhost_init_used(struct vhost_virtqueue *vq)
+int vhost_vq_init_access(struct vhost_virtqueue *vq)
 {
 	__virtio16 last_used_idx;
 	int r;
-	if (!vq->private_data) {
-		vq->is_le = virtio_legacy_is_little_endian();
+	bool is_le = vq->is_le;
+
+	if (!vq->private_data)
 		return 0;
-	}
 
 	vhost_init_is_le(vq);
 
 	r = vhost_update_used_flags(vq);
 	if (r)
-		return r;
+		goto err;
 	vq->signalled_used_valid = false;
 	if (!vq->iotlb &&
-	    !access_ok(VERIFY_READ, &vq->used->idx, sizeof(vq->used->idx)))
-		return -EFAULT;
+	    !access_ok(&vq->used->idx, sizeof vq->used->idx)) {
+		r = -EFAULT;
+		goto err;
+	}
 	r = vhost_get_used(vq, last_used_idx, &vq->used->idx);
 	if (r) {
 		vq_err(vq, "Can't access used idx at %p\n",
 		       &vq->used->idx);
-		return r;
+		goto err;
 	}
 	vq->last_used_idx = vhost16_to_cpu(vq, last_used_idx);
 	return 0;
+
+err:
+	vq->is_le = is_le;
+	return r;
 }
-EXPORT_SYMBOL_GPL(vhost_init_used);
+EXPORT_SYMBOL_GPL(vhost_vq_init_access);
 
 static int translate_desc(struct vhost_virtqueue *vq, u64 addr, u32 len,
 			  struct iovec iov[], int iov_size, int access)
@@ -1945,12 +1990,7 @@ static unsigned next_desc(struct vhost_virtqueue *vq, struct vring_desc *desc)
 		return -1U;
 
 	/* Check they're not leading us off end of descriptors. */
-	next = vhost16_to_cpu(vq, desc->next);
-	/* Make sure compiler knows to grab that: we don't want it changing! */
-	/* We will use the result as an index in an array, so most
-	 * architectures only need a compiler barrier here. */
-	read_barrier_depends();
-
+	next = vhost16_to_cpu(vq, READ_ONCE(desc->next));
 	return next;
 }
 
@@ -1982,7 +2022,7 @@ static int get_indirect(struct vhost_virtqueue *vq,
 			vq_err(vq, "Translation failure %d in indirect.\n", ret);
 		return ret;
 	}
-	iov_iter_init(&from, vq->indirect, ret, len, 0);
+	iov_iter_init(&from, READ, vq->indirect, ret, len);
 
 	/* We will use the result as an address to read from, so most
 	 * architectures only need a compiler barrier here. */
@@ -2005,8 +2045,7 @@ static int get_indirect(struct vhost_virtqueue *vq,
 			       i, count);
 			return -EINVAL;
 		}
-		if (unlikely(memcpy_fromiovec((unsigned char *)&desc,
-					      vq->indirect, sizeof desc))) {
+		if (unlikely(!copy_from_iter_full(&desc, sizeof(desc), &from))) {
 			vq_err(vq, "Failed indirect descriptor: idx %d, %zx\n",
 			       i, (size_t)vhost64_to_cpu(vq, indirect->addr) + i * sizeof desc);
 			return -EINVAL;
@@ -2066,7 +2105,7 @@ int vhost_get_vq_desc(struct vhost_virtqueue *vq,
 		      unsigned int *out_num, unsigned int *in_num,
 		      struct vhost_log *log, unsigned int *log_num)
 {
-	struct vring_desc desc = {0};
+	struct vring_desc desc;
 	unsigned int i, head, found = 0;
 	u16 last_avail_idx;
 	__virtio16 avail_idx;
@@ -2075,25 +2114,32 @@ int vhost_get_vq_desc(struct vhost_virtqueue *vq,
 
 	/* Check it isn't doing very strange things with descriptor numbers. */
 	last_avail_idx = vq->last_avail_idx;
-	if (unlikely(vhost_get_avail(vq, avail_idx, &vq->avail->idx))) {
-		vq_err(vq, "Failed to access avail idx at %p\n",
-		       &vq->avail->idx);
-		return -EFAULT;
+
+	if (vq->avail_idx == vq->last_avail_idx) {
+		if (unlikely(vhost_get_avail(vq, avail_idx, &vq->avail->idx))) {
+			vq_err(vq, "Failed to access avail idx at %p\n",
+				&vq->avail->idx);
+			return -EFAULT;
+		}
+		vq->avail_idx = vhost16_to_cpu(vq, avail_idx);
+
+		if (unlikely((u16)(vq->avail_idx - last_avail_idx) > vq->num)) {
+			vq_err(vq, "Guest moved used index from %u to %u",
+				last_avail_idx, vq->avail_idx);
+			return -EFAULT;
+		}
+
+		/* If there's nothing new since last we looked, return
+		 * invalid.
+		 */
+		if (vq->avail_idx == last_avail_idx)
+			return vq->num;
+
+		/* Only get avail ring entries after they have been
+		 * exposed by guest.
+		 */
+		smp_rmb();
 	}
-	vq->avail_idx = vhost16_to_cpu(vq, avail_idx);
-
-	if (unlikely((u16)(vq->avail_idx - last_avail_idx) > vq->num)) {
-		vq_err(vq, "Guest moved used index from %u to %u",
-		       last_avail_idx, vq->avail_idx);
-		return -EFAULT;
-	}
-
-	/* If there's nothing new since last we looked, return invalid. */
-	if (vq->avail_idx == last_avail_idx)
-		return vq->num;
-
-	/* Only get avail ring entries after they have been exposed by guest. */
-	smp_rmb();
 
 	/* Grab the next descriptor number they're advertising, and increment
 	 * the index we've seen. */
@@ -2147,7 +2193,7 @@ int vhost_get_vq_desc(struct vhost_virtqueue *vq,
 			if (unlikely(ret < 0)) {
 				if (ret != -EAGAIN)
 					vq_err(vq, "Failure detected "
-					       "in indirect descriptor at idx %d\n", i);
+						"in indirect descriptor at idx %d\n", i);
 				return ret;
 			}
 			continue;
@@ -2284,6 +2330,8 @@ int vhost_add_used_n(struct vhost_virtqueue *vq, struct vring_used_elem *heads,
 		return -EFAULT;
 	}
 	if (unlikely(vq->log_used)) {
+		/* Make sure used idx is seen before log. */
+		smp_wmb();
 		/* Log used index update. */
 		log_used(vq, offsetof(struct vring_used, idx),
 			 sizeof vq->used->idx);
@@ -2436,7 +2484,7 @@ EXPORT_SYMBOL_GPL(vhost_disable_notify);
 /* Create a new message. */
 struct vhost_msg_node *vhost_new_msg(struct vhost_virtqueue *vq, int type)
 {
-	struct vhost_msg_node *node = kmalloc(sizeof(*node), GFP_KERNEL);
+	struct vhost_msg_node *node = kmalloc(sizeof *node, GFP_KERNEL);
 	if (!node)
 		return NULL;
 
@@ -2455,7 +2503,7 @@ void vhost_enqueue_msg(struct vhost_dev *dev, struct list_head *head,
 	list_add_tail(&node->node, head);
 	spin_unlock(&dev->iotlb_lock);
 
-	wake_up_interruptible_poll(&dev->wait, POLLIN | POLLRDNORM);
+	wake_up_interruptible_poll(&dev->wait, EPOLLIN | EPOLLRDNORM);
 }
 EXPORT_SYMBOL_GPL(vhost_enqueue_msg);
 

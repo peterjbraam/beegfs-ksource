@@ -127,8 +127,7 @@ static inline struct i915_priolist *to_priolist(struct rb_node *rb)
 	return rb_entry(rb, struct i915_priolist, node);
 }
 
-static void assert_priolists(struct intel_engine_execlists * const execlists,
-			     long queue_priority)
+static void assert_priolists(struct intel_engine_execlists * const execlists)
 {
 	struct rb_node *rb;
 	long last_prio, i;
@@ -136,8 +135,11 @@ static void assert_priolists(struct intel_engine_execlists * const execlists,
 	if (!IS_ENABLED(CONFIG_DRM_I915_DEBUG_GEM))
 		return;
 
-	last_prio = (queue_priority >> I915_USER_PRIORITY_SHIFT) + 1;
-	for (rb = rb_first(&execlists->queue); rb; rb = rb_next(rb)) {
+	GEM_BUG_ON(rb_first_cached(&execlists->queue) !=
+		   rb_first(&execlists->queue.rb_root));
+
+	last_prio = (INT_MAX >> I915_USER_PRIORITY_SHIFT) + 1;
+	for (rb = rb_first_cached(&execlists->queue); rb; rb = rb_next(rb)) {
 		const struct i915_priolist *p = to_priolist(rb);
 
 		GEM_BUG_ON(p->priority >= last_prio);
@@ -159,10 +161,11 @@ i915_sched_lookup_priolist(struct intel_engine_cs *engine, int prio)
 	struct intel_engine_execlists * const execlists = &engine->execlists;
 	struct i915_priolist *p;
 	struct rb_node **parent, *rb;
+	bool first = true;
 	int idx, i;
 
 	lockdep_assert_held(&engine->timeline.lock);
-	assert_priolists(execlists, INT_MAX);
+	assert_priolists(execlists);
 
 	/* buckets sorted from highest [in slot 0] to lowest priority */
 	idx = I915_PRIORITY_COUNT - (prio & I915_PRIORITY_MASK) - 1;
@@ -173,7 +176,7 @@ i915_sched_lookup_priolist(struct intel_engine_cs *engine, int prio)
 find_priolist:
 	/* most positive priority is scheduled first, equal priorities fifo */
 	rb = NULL;
-	parent = &execlists->queue.rb_node;
+	parent = &execlists->queue.rb_root.rb_node;
 	while (*parent) {
 		rb = *parent;
 		p = to_priolist(rb);
@@ -181,6 +184,7 @@ find_priolist:
 			parent = &rb->rb_left;
 		} else if (prio < p->priority) {
 			parent = &rb->rb_right;
+			first = false;
 		} else {
 			goto out;
 		}
@@ -211,7 +215,7 @@ find_priolist:
 	for (i = 0; i < ARRAY_SIZE(p->requests); i++)
 		INIT_LIST_HEAD(&p->requests[i]);
 	rb_link_node(&p->node, rb, parent);
-	rb_insert_color(&p->node, &execlists->queue);
+	rb_insert_color_cached(&p->node, &execlists->queue, first);
 	p->used = 0;
 
 out:
@@ -219,8 +223,14 @@ out:
 	return &p->requests[idx];
 }
 
+struct sched_cache {
+	struct list_head *priolist;
+};
+
 static struct intel_engine_cs *
-sched_lock_engine(struct i915_sched_node *node, struct intel_engine_cs *locked)
+sched_lock_engine(const struct i915_sched_node *node,
+		  struct intel_engine_cs *locked,
+		  struct sched_cache *cache)
 {
 	struct intel_engine_cs *engine = node_to_request(node)->engine;
 
@@ -228,20 +238,33 @@ sched_lock_engine(struct i915_sched_node *node, struct intel_engine_cs *locked)
 
 	if (engine != locked) {
 		spin_unlock(&locked->timeline.lock);
+		memset(cache, 0, sizeof(*cache));
 		spin_lock(&engine->timeline.lock);
 	}
 
 	return engine;
 }
 
+static bool inflight(const struct i915_request *rq,
+		     const struct intel_engine_cs *engine)
+{
+	const struct i915_request *active;
+
+	if (!i915_request_is_active(rq))
+		return false;
+
+	active = port_request(engine->execlists.port);
+	return active->hw_context == rq->hw_context;
+}
+
 static void __i915_schedule(struct i915_request *rq,
 			    const struct i915_sched_attr *attr)
 {
-	struct list_head *uninitialized_var(pl);
-	struct intel_engine_cs *engine, *last;
+	struct intel_engine_cs *engine;
 	struct i915_dependency *dep, *p;
 	struct i915_dependency stack;
 	const int prio = attr->priority;
+	struct sched_cache cache;
 	LIST_HEAD(dfs);
 
 	/* Needed in order to use the temporary link inside i915_dependency */
@@ -312,7 +335,7 @@ static void __i915_schedule(struct i915_request *rq,
 		__list_del_entry(&stack.dfs_link);
 	}
 
-	last = NULL;
+	memset(&cache, 0, sizeof(cache));
 	engine = rq->engine;
 	spin_lock_irq(&engine->timeline.lock);
 
@@ -322,7 +345,8 @@ static void __i915_schedule(struct i915_request *rq,
 
 		INIT_LIST_HEAD(&dep->dfs_link);
 
-		engine = sched_lock_engine(node, engine);
+		engine = sched_lock_engine(node, engine, &cache);
+		lockdep_assert_held(&engine->timeline.lock);
 
 		/* Recheck after acquiring the engine->timeline.lock */
 		if (prio <= node->attr.priority || node_signaled(node))
@@ -330,11 +354,11 @@ static void __i915_schedule(struct i915_request *rq,
 
 		node->attr.priority = prio;
 		if (!list_empty(&node->link)) {
-			if (last != engine) {
-				pl = i915_sched_lookup_priolist(engine, prio);
-				last = engine;
-			}
-			list_move_tail(&node->link, pl);
+			if (!cache.priolist)
+				cache.priolist =
+					i915_sched_lookup_priolist(engine,
+								   prio);
+			list_move_tail(&node->link, cache.priolist);
 		} else {
 			/*
 			 * If the request is not in the priolist queue because
@@ -348,20 +372,19 @@ static void __i915_schedule(struct i915_request *rq,
 				continue;
 		}
 
-		if (prio <= engine->execlists.queue_priority)
+		if (prio <= engine->execlists.queue_priority_hint)
 			continue;
+
+		engine->execlists.queue_priority_hint = prio;
 
 		/*
 		 * If we are already the currently executing context, don't
 		 * bother evaluating if we should preempt ourselves.
 		 */
-		if (node_to_request(node)->global_seqno &&
-		    i915_seqno_passed(port_request(engine->execlists.port)->global_seqno,
-				      node_to_request(node)->global_seqno))
+		if (inflight(node_to_request(node), engine))
 			continue;
 
 		/* Defer (tasklet) submission until after all of our updates. */
-		engine->execlists.queue_priority = prio;
 		tasklet_hi_schedule(&engine->execlists.tasklet);
 	}
 

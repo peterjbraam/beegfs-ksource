@@ -87,7 +87,7 @@ struct async_submit_ctl {
 	void *scribble;
 };
 
-#ifdef CONFIG_DMA_ENGINE
+#if defined(CONFIG_DMA_ENGINE) && !defined(CONFIG_ASYNC_TX_CHANNEL_SWITCH)
 #define async_tx_issue_pending_all dma_issue_pending_all
 
 /**
@@ -184,10 +184,6 @@ struct dma_async_tx_descriptor *
 async_memcpy(struct page *dest, struct page *src, unsigned int dest_offset,
 	     unsigned int src_offset, size_t len,
 	     struct async_submit_ctl *submit);
-
-struct dma_async_tx_descriptor *
-async_memset(struct page *dest, int val, unsigned int offset,
-	     size_t len, struct async_submit_ctl *submit);
 
 struct dma_async_tx_descriptor *async_trigger_callback(struct async_submit_ctl *submit);
 

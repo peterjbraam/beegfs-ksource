@@ -11,6 +11,7 @@
  */
 #include <linux/init.h>
 #include <linux/perf_event.h>
+#include <linux/sched/signal.h>
 #include <linux/hw_breakpoint.h>
 #include <linux/percpu.h>
 #include <linux/kallsyms.h>
@@ -52,7 +53,7 @@ int arch_install_hw_breakpoint(struct perf_event *bp)
 	int i;
 
 	for (i = 0; i < sh_ubc->num_events; i++) {
-		struct perf_event **slot = &__get_cpu_var(bp_per_reg[i]);
+		struct perf_event **slot = this_cpu_ptr(&bp_per_reg[i]);
 
 		if (!*slot) {
 			*slot = bp;
@@ -84,7 +85,7 @@ void arch_uninstall_hw_breakpoint(struct perf_event *bp)
 	int i;
 
 	for (i = 0; i < sh_ubc->num_events; i++) {
-		struct perf_event **slot = &__get_cpu_var(bp_per_reg[i]);
+		struct perf_event **slot = this_cpu_ptr(&bp_per_reg[i]);
 
 		if (*slot == bp) {
 			*slot = NULL;
@@ -123,14 +124,13 @@ static int get_hbp_len(u16 hbp_len)
 /*
  * Check for virtual address in kernel space.
  */
-int arch_check_bp_in_kernelspace(struct perf_event *bp)
+int arch_check_bp_in_kernelspace(struct arch_hw_breakpoint *hw)
 {
 	unsigned int len;
 	unsigned long va;
-	struct arch_hw_breakpoint *info = counter_arch_bp(bp);
 
-	va = info->address;
-	len = get_hbp_len(info->len);
+	va = hw->address;
+	len = get_hbp_len(hw->len);
 
 	return (va >= TASK_SIZE) && ((va + len - 1) >= TASK_SIZE);
 }
@@ -345,14 +345,9 @@ static int __kprobes hw_breakpoint_handler(struct die_args *args)
 		perf_bp_event(bp, args->regs);
 
 		/* Deliver the signal to userspace */
-		if (!arch_check_bp_in_kernelspace(bp)) {
-			siginfo_t info;
-
-			info.si_signo = args->signr;
-			info.si_errno = notifier_to_errno(rc);
-			info.si_code = TRAP_HWBKPT;
-
-			force_sig_info(args->signr, &info, current);
+		if (!arch_check_bp_in_kernelspace(&bp->hw.info)) {
+			force_sig_fault(SIGTRAP, TRAP_HWBKPT,
+					(void __user *)NULL, current);
 		}
 
 		rcu_read_unlock();

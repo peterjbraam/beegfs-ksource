@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * CP Assist for Cryptographic Functions (CPACF)
  *
@@ -27,6 +28,7 @@
 #define CPACF_KMCTR		0xb92d		/* MSA4 */
 #define CPACF_PRNO		0xb93c		/* MSA5 */
 #define CPACF_KMA		0xb929		/* MSA8 */
+#define CPACF_KDSA		0xb93a		/* MSA9 */
 
 /*
  * En/decryption modifier bits

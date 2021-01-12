@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __IPC_NAMESPACE_H__
 #define __IPC_NAMESPACE_H__
 
@@ -6,6 +7,9 @@
 #include <linux/rwsem.h>
 #include <linux/notifier.h>
 #include <linux/nsproxy.h>
+#include <linux/ns_common.h>
+#include <linux/refcount.h>
+#include <linux/rhashtable-types.h>
 
 struct user_namespace;
 
@@ -19,10 +23,11 @@ struct ipc_ids {
 #ifdef CONFIG_CHECKPOINT_RESTORE
 	int next_id;
 #endif
+	struct rhashtable key_ht;
 };
 
 struct ipc_namespace {
-	atomic_t	count;
+	refcount_t	count;
 	struct ipc_ids	ids[3];
 
 	int		sem_ctls[4];
@@ -61,14 +66,12 @@ struct ipc_namespace {
 
 	/* user_ns which owns the ipc ns */
 	struct user_namespace *user_ns;
+	struct ucounts *ucounts;
 
-	unsigned int	proc_inum;
-	RH_KABI_EXTEND(struct ucounts *ucounts)
-};
+	struct ns_common ns;
+} __randomize_layout;
 
 extern struct ipc_namespace init_ipc_ns;
-extern atomic_t nr_ipc_ns;
-
 extern spinlock_t mq_lock;
 
 #ifdef CONFIG_SYSVIPC
@@ -123,7 +126,7 @@ extern struct ipc_namespace *copy_ipcs(unsigned long flags,
 static inline struct ipc_namespace *get_ipc_ns(struct ipc_namespace *ns)
 {
 	if (ns)
-		atomic_inc(&ns->count);
+		refcount_inc(&ns->count);
 	return ns;
 }
 

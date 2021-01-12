@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * addi_apci_2200.c
  * Copyright (C) 2004,2005  ADDI-DATA GmbH for the source code of this module.
@@ -10,28 +11,11 @@
  *	Fax: +49(0)7223/9493-92
  *	http://www.addi-data.com
  *	info@addi-data.com
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2 of the License, or (at your
- * option) any later version.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; if not, write to the Free Software Foundation, Inc.,
- * 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
- *
- * You should also find the complete GPL in the COPYING file accompanying
- * this source code.
  */
 
-#include <linux/pci.h>
+#include <linux/module.h>
 
-#include "../comedidev.h"
+#include "../comedi_pci.h"
 #include "addi_watchdog.h"
 
 /*
@@ -56,16 +40,10 @@ static int apci2200_do_insn_bits(struct comedi_device *dev,
 				 struct comedi_insn *insn,
 				 unsigned int *data)
 {
-	unsigned int mask = data[0];
-	unsigned int bits = data[1];
-
 	s->state = inw(dev->iobase + APCI2200_DO_REG);
-	if (mask) {
-		s->state &= ~mask;
-		s->state |= (bits & mask);
 
+	if (comedi_dio_update_state(s, data))
 		outw(s->state, dev->iobase + APCI2200_DO_REG);
-	}
 
 	data[1] = s->state;
 
@@ -110,7 +88,7 @@ static int apci2200_auto_attach(struct comedi_device *dev,
 	/* Initialize the digital output subdevice */
 	s = &dev->subdevices[1];
 	s->type		= COMEDI_SUBD_DO;
-	s->subdev_flags	= SDF_WRITEABLE;
+	s->subdev_flags	= SDF_WRITABLE;
 	s->n_chan	= 16;
 	s->maxdata	= 1;
 	s->range_table	= &range_digital;
@@ -130,8 +108,7 @@ static void apci2200_detach(struct comedi_device *dev)
 {
 	if (dev->iobase)
 		apci2200_reset(dev);
-	comedi_spriv_free(dev, 2);
-	comedi_pci_disable(dev);
+	comedi_pci_detach(dev);
 }
 
 static struct comedi_driver apci2200_driver = {
@@ -147,7 +124,7 @@ static int apci2200_pci_probe(struct pci_dev *dev,
 	return comedi_pci_auto_config(dev, &apci2200_driver, id->driver_data);
 }
 
-static DEFINE_PCI_DEVICE_TABLE(apci2200_pci_table) = {
+static const struct pci_device_id apci2200_pci_table[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_ADDIDATA, 0x1005) },
 	{ 0 }
 };

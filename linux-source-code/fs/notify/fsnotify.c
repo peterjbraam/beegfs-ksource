@@ -67,7 +67,7 @@ void fsnotify_unmount_inodes(struct super_block *sb)
 
 		/*
 		 * If i_count is zero, the inode cannot have any watches and
-		 * doing an __iget/iput with MS_ACTIVE clear would actually
+		 * doing an __iget/iput with SB_ACTIVE clear would actually
 		 * evict all inodes with zero i_count from icache which is
 		 * unnecessarily violent and may in fact be illegal to do.
 		 */
@@ -97,7 +97,7 @@ void fsnotify_unmount_inodes(struct super_block *sb)
 	if (iput_inode)
 		iput(iput_inode);
 	/* Wait for outstanding inode references from connectors */
-	wait_event(sb->s_writers.wait_unfrozen,
+	wait_var_event(&sb->s_fsnotify_inode_refs,
 		       !atomic_long_read(&sb->s_fsnotify_inode_refs));
 }
 
@@ -122,14 +122,14 @@ void __fsnotify_update_child_dentry_flags(struct inode *inode)
 	spin_lock(&inode->i_lock);
 	/* run all of the dentries associated with this inode.  Since this is a
 	 * directory, there damn well better only be one item on this list */
-	hlist_for_each_entry(alias, &inode->i_dentry, d_alias) {
+	hlist_for_each_entry(alias, &inode->i_dentry, d_u.d_alias) {
 		struct dentry *child;
 
 		/* run all of the children of the original inode and fix their
 		 * d_flags to indicate parental interest (their parent is the
 		 * original inode) */
 		spin_lock(&alias->d_lock);
-		list_for_each_entry(child, &alias->d_subdirs, d_u.d_child) {
+		list_for_each_entry(child, &alias->d_subdirs, d_child) {
 			if (!child->d_inode)
 				continue;
 
@@ -193,7 +193,7 @@ static int send_to_group(struct inode *to_tell,
 			 struct fsnotify_iter_info *iter_info)
 {
 	struct fsnotify_group *group = NULL;
-	__u32 test_mask = (mask & ~FS_EVENT_ON_CHILD);
+	__u32 test_mask = (mask & ALL_FSNOTIFY_EVENTS);
 	__u32 marks_mask = 0;
 	__u32 marks_ignored_mask = 0;
 	struct fsnotify_mark *mark;
@@ -324,8 +324,7 @@ int fsnotify(struct inode *to_tell, __u32 mask, const void *data, int data_is,
 	struct fsnotify_iter_info iter_info = {};
 	struct mount *mnt;
 	int ret = 0;
-	/* global tests shouldn't care about events on child only the specific event */
-	__u32 test_mask = (mask & ~FS_EVENT_ON_CHILD);
+	__u32 test_mask = (mask & ALL_FSNOTIFY_EVENTS);
 
 	if (data_is == FSNOTIFY_EVENT_PATH)
 		mnt = real_mount(((const struct path *)data)->mnt);
@@ -393,7 +392,7 @@ static __init int fsnotify_init(void)
 {
 	int ret;
 
-	BUG_ON(hweight32(ALL_FSNOTIFY_EVENTS) != 23);
+	BUILD_BUG_ON(HWEIGHT32(ALL_FSNOTIFY_BITS) != 25);
 
 	ret = init_srcu_struct(&fsnotify_mark_srcu);
 	if (ret)

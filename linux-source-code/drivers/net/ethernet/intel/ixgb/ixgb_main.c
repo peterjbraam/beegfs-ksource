@@ -1,30 +1,5 @@
-/*******************************************************************************
-
-  Intel PRO/10GbE Linux driver
-  Copyright(c) 1999 - 2008 Intel Corporation.
-
-  This program is free software; you can redistribute it and/or modify it
-  under the terms and conditions of the GNU General Public License,
-  version 2, as published by the Free Software Foundation.
-
-  This program is distributed in the hope it will be useful, but WITHOUT
-  ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
-  FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
-  more details.
-
-  You should have received a copy of the GNU General Public License along with
-  this program; if not, write to the Free Software Foundation, Inc.,
-  51 Franklin St - Fifth Floor, Boston, MA 02110-1301 USA.
-
-  The full GNU General Public License is included in this distribution in
-  the file called "COPYING".
-
-  Contact Information:
-  Linux NICS <linux.nics@intel.com>
-  e1000-devel Mailing List <e1000-devel@lists.sourceforge.net>
-  Intel Corporation, 5200 N.E. Elam Young Parkway, Hillsboro, OR 97124-6497
-
-*******************************************************************************/
+// SPDX-License-Identifier: GPL-2.0
+/* Copyright(c) 1999 - 2008 Intel Corporation. */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
@@ -83,10 +58,9 @@ static void ixgb_setup_rctl(struct ixgb_adapter *adapter);
 static void ixgb_clean_tx_ring(struct ixgb_adapter *adapter);
 static void ixgb_clean_rx_ring(struct ixgb_adapter *adapter);
 static void ixgb_set_multi(struct net_device *netdev);
-static void ixgb_watchdog(unsigned long data);
+static void ixgb_watchdog(struct timer_list *t);
 static netdev_tx_t ixgb_xmit_frame(struct sk_buff *skb,
 				   struct net_device *netdev);
-static struct net_device_stats *ixgb_get_stats(struct net_device *netdev);
 static int ixgb_change_mtu(struct net_device *netdev, int new_mtu);
 static int ixgb_set_mac(struct net_device *netdev, void *p);
 static irqreturn_t ixgb_intr(int irq, void *data);
@@ -285,6 +259,8 @@ ixgb_down(struct ixgb_adapter *adapter, bool kill_watchdog)
 	/* prevent the interrupt handler from restarting watchdog */
 	set_bit(__IXGB_DOWN, &adapter->flags);
 
+	netif_carrier_off(netdev);
+
 	napi_disable(&adapter->napi);
 	/* waiting for NAPI to complete can re-enable interrupts */
 	ixgb_irq_disable(adapter);
@@ -298,7 +274,6 @@ ixgb_down(struct ixgb_adapter *adapter, bool kill_watchdog)
 
 	adapter->link_speed = 0;
 	adapter->link_duplex = 0;
-	netif_carrier_off(netdev);
 	netif_stop_queue(netdev);
 
 	ixgb_reset(adapter);
@@ -366,7 +341,6 @@ static const struct net_device_ops ixgb_netdev_ops = {
 	.ndo_open 		= ixgb_open,
 	.ndo_stop		= ixgb_close,
 	.ndo_start_xmit		= ixgb_xmit_frame,
-	.ndo_get_stats		= ixgb_get_stats,
 	.ndo_set_rx_mode	= ixgb_set_multi,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_set_mac_address	= ixgb_set_mac,
@@ -408,20 +382,14 @@ ixgb_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 		return err;
 
 	pci_using_dac = 0;
-	err = dma_set_mask(&pdev->dev, DMA_BIT_MASK(64));
+	err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
 	if (!err) {
-		err = dma_set_coherent_mask(&pdev->dev, DMA_BIT_MASK(64));
-		if (!err)
-			pci_using_dac = 1;
+		pci_using_dac = 1;
 	} else {
-		err = dma_set_mask(&pdev->dev, DMA_BIT_MASK(32));
+		err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
 		if (err) {
-			err = dma_set_coherent_mask(&pdev->dev,
-						    DMA_BIT_MASK(32));
-			if (err) {
-				pr_err("No usable DMA configuration, aborting\n");
-				goto err_dma_mask;
-			}
+			pr_err("No usable DMA configuration, aborting\n");
+			goto err_dma_mask;
 		}
 	}
 
@@ -492,6 +460,10 @@ ixgb_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 		netdev->vlan_features |= NETIF_F_HIGHDMA;
 	}
 
+	/* MTU range: 68 - 16114 */
+	netdev->min_mtu = ETH_MIN_MTU;
+	netdev->max_mtu = IXGB_MAX_JUMBO_FRAME_SIZE - ETH_HLEN;
+
 	/* make sure the EEPROM is good */
 
 	if (!ixgb_validate_eeprom_checksum(&adapter->hw)) {
@@ -511,9 +483,7 @@ ixgb_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	adapter->part_num = ixgb_get_ee_pba_number(&adapter->hw);
 
-	init_timer(&adapter->watchdog_timer);
-	adapter->watchdog_timer.function = ixgb_watchdog;
-	adapter->watchdog_timer.data = (unsigned long)adapter;
+	timer_setup(&adapter->watchdog_timer, ixgb_watchdog, 0);
 
 	INIT_WORK(&adapter->tx_timeout_task, ixgb_tx_timeout_task);
 
@@ -718,8 +688,8 @@ ixgb_setup_tx_resources(struct ixgb_adapter *adapter)
 	txdr->size = txdr->count * sizeof(struct ixgb_tx_desc);
 	txdr->size = ALIGN(txdr->size, 4096);
 
-	txdr->desc = dma_alloc_coherent(&pdev->dev, txdr->size, &txdr->dma,
-					GFP_KERNEL | __GFP_ZERO);
+	txdr->desc = dma_zalloc_coherent(&pdev->dev, txdr->size, &txdr->dma,
+					 GFP_KERNEL);
 	if (!txdr->desc) {
 		vfree(txdr->buffer_info);
 		return -ENOMEM;
@@ -1123,8 +1093,9 @@ ixgb_set_multi(struct net_device *netdev)
 		rctl |= IXGB_RCTL_MPE;
 		IXGB_WRITE_REG(hw, RCTL, rctl);
 	} else {
-		u8 *mta = kmalloc(IXGB_MAX_NUM_MULTICAST_ADDRESSES *
-			      ETH_ALEN, GFP_ATOMIC);
+		u8 *mta = kmalloc_array(ETH_ALEN,
+				        IXGB_MAX_NUM_MULTICAST_ADDRESSES,
+				        GFP_ATOMIC);
 		u8 *addr;
 		if (!mta)
 			goto alloc_failed;
@@ -1155,9 +1126,9 @@ alloc_failed:
  **/
 
 static void
-ixgb_watchdog(unsigned long data)
+ixgb_watchdog(struct timer_list *t)
 {
-	struct ixgb_adapter *adapter = (struct ixgb_adapter *)data;
+	struct ixgb_adapter *adapter = from_timer(adapter, t, watchdog_timer);
 	struct net_device *netdev = adapter->netdev;
 	struct ixgb_desc_ring *txdr = &adapter->tx_ring;
 
@@ -1226,17 +1197,15 @@ ixgb_tso(struct ixgb_adapter *adapter, struct sk_buff *skb)
 	unsigned int i;
 	u8 ipcss, ipcso, tucss, tucso, hdr_len;
 	u16 ipcse, tucse, mss;
-	int err;
 
 	if (likely(skb_is_gso(skb))) {
 		struct ixgb_buffer *buffer_info;
 		struct iphdr *iph;
+		int err;
 
-		if (skb_header_cloned(skb)) {
-			err = pskb_expand_head(skb, 0, 0, GFP_ATOMIC);
-			if (err)
-				return err;
-		}
+		err = skb_cow_head(skb, 0);
+		if (err < 0)
+			return err;
 
 		hdr_len = skb_transport_offset(skb) + tcp_hdrlen(skb);
 		mss = skb_shinfo(skb)->gso_size;
@@ -1527,12 +1496,12 @@ ixgb_xmit_frame(struct sk_buff *skb, struct net_device *netdev)
 	int tso;
 
 	if (test_bit(__IXGB_DOWN, &adapter->flags)) {
-		dev_kfree_skb(skb);
+		dev_kfree_skb_any(skb);
 		return NETDEV_TX_OK;
 	}
 
 	if (skb->len <= 0) {
-		dev_kfree_skb(skb);
+		dev_kfree_skb_any(skb);
 		return NETDEV_TX_OK;
 	}
 
@@ -1549,7 +1518,7 @@ ixgb_xmit_frame(struct sk_buff *skb, struct net_device *netdev)
 
 	tso = ixgb_tso(adapter, skb);
 	if (tso < 0) {
-		dev_kfree_skb(skb);
+		dev_kfree_skb_any(skb);
 		return NETDEV_TX_OK;
 	}
 
@@ -1600,20 +1569,6 @@ ixgb_tx_timeout_task(struct work_struct *work)
 }
 
 /**
- * ixgb_get_stats - Get System Network Statistics
- * @netdev: network interface device structure
- *
- * Returns the address of the device statistics structure.
- * The statistics are actually updated from the timer callback.
- **/
-
-static struct net_device_stats *
-ixgb_get_stats(struct net_device *netdev)
-{
-	return &netdev->stats;
-}
-
-/**
  * ixgb_change_mtu - Change the Maximum Transfer Unit
  * @netdev: network interface device structure
  * @new_mtu: new value for maximum frame size
@@ -1626,18 +1581,6 @@ ixgb_change_mtu(struct net_device *netdev, int new_mtu)
 {
 	struct ixgb_adapter *adapter = netdev_priv(netdev);
 	int max_frame = new_mtu + ENET_HEADER_SIZE + ENET_FCS_LENGTH;
-	int old_max_frame = netdev->mtu + ENET_HEADER_SIZE + ENET_FCS_LENGTH;
-
-	/* MTU < 68 is an error for IPv4 traffic, just don't allow it */
-	if ((new_mtu < 68) ||
-	    (max_frame > IXGB_MAX_JUMBO_FRAME_SIZE + ENET_FCS_LENGTH)) {
-		netif_err(adapter, probe, adapter->netdev,
-			  "Invalid MTU setting %d\n", new_mtu);
-		return -EINVAL;
-	}
-
-	if (old_max_frame == max_frame)
-		return 0;
 
 	if (netif_running(netdev))
 		ixgb_down(adapter, true);
@@ -1832,7 +1775,7 @@ ixgb_clean(struct napi_struct *napi, int budget)
 
 	/* If budget not fully consumed, exit the polling mode */
 	if (work_done < budget) {
-		napi_complete(napi);
+		napi_complete_done(napi, work_done);
 		if (!test_bit(__IXGB_DOWN, &adapter->flags))
 			ixgb_irq_enable(adapter);
 	}
@@ -1971,7 +1914,7 @@ ixgb_rx_checksum(struct ixgb_adapter *adapter,
  * this should improve performance for small packets with large amounts
  * of reassembly being done in the stack
  */
-static void ixgb_check_copybreak(struct net_device *netdev,
+static void ixgb_check_copybreak(struct napi_struct *napi,
 				 struct ixgb_buffer *buffer_info,
 				 u32 length, struct sk_buff **skb)
 {
@@ -1980,7 +1923,7 @@ static void ixgb_check_copybreak(struct net_device *netdev,
 	if (length > copybreak)
 		return;
 
-	new_skb = netdev_alloc_skb_ip_align(netdev, length);
+	new_skb = napi_alloc_skb(napi, length);
 	if (!new_skb)
 		return;
 
@@ -2072,7 +2015,7 @@ ixgb_clean_rx_irq(struct ixgb_adapter *adapter, int *work_done, int work_to_do)
 			goto rxdesc_done;
 		}
 
-		ixgb_check_copybreak(netdev, buffer_info, length, &skb);
+		ixgb_check_copybreak(&adapter->napi, buffer_info, length, &skb);
 
 		/* Good Receive */
 		skb_put(skb, length);

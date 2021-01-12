@@ -37,13 +37,6 @@
 #include <nvkm/subdev/iccsense.h>
 #include <nvkm/subdev/volt.h>
 
-#ifdef CONFIG_HWMON
-#  undef CONFIG_HWMON
-#endif
-#ifdef CONFIG_HWMON_MODULE
-#  undef CONFIG_HWMON_MODULE
-#endif
-
 #if defined(CONFIG_HWMON) || (defined(MODULE) && defined(CONFIG_HWMON_MODULE))
 
 static ssize_t

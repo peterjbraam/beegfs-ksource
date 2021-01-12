@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 #include "builtin.h"
 #include "perf.h"
 
@@ -617,16 +618,16 @@ static int gfpcmp(const void *a, const void *b)
 	return fa->flags - fb->flags;
 }
 
-/* see include/trace/events/gfpflags.h */
+/* see include/trace/events/mmflags.h */
 static const struct {
 	const char *original;
 	const char *compact;
 } gfp_compact_table[] = {
 	{ "GFP_TRANSHUGE",		"THP" },
+	{ "GFP_TRANSHUGE_LIGHT",	"THL" },
 	{ "GFP_HIGHUSER_MOVABLE",	"HUM" },
 	{ "GFP_HIGHUSER",		"HU" },
 	{ "GFP_USER",			"U" },
-	{ "GFP_TEMPORARY",		"TMP" },
 	{ "GFP_KERNEL_ACCOUNT",		"KAC" },
 	{ "GFP_KERNEL",			"K" },
 	{ "GFP_NOFS",			"NF" },
@@ -640,9 +641,8 @@ static const struct {
 	{ "__GFP_ATOMIC",		"_A" },
 	{ "__GFP_IO",			"I" },
 	{ "__GFP_FS",			"F" },
-	{ "__GFP_COLD",			"CO" },
 	{ "__GFP_NOWARN",		"NWR" },
-	{ "__GFP_REPEAT",		"R" },
+	{ "__GFP_RETRY_MAYFAIL",	"R" },
 	{ "__GFP_NOFAIL",		"NF" },
 	{ "__GFP_NORETRY",		"NR" },
 	{ "__GFP_COMP",			"C" },
@@ -654,12 +654,10 @@ static const struct {
 	{ "__GFP_RECLAIMABLE",		"RC" },
 	{ "__GFP_MOVABLE",		"M" },
 	{ "__GFP_ACCOUNT",		"AC" },
-	{ "__GFP_NOTRACK",		"NT" },
 	{ "__GFP_WRITE",		"WR" },
 	{ "__GFP_RECLAIM",		"R" },
 	{ "__GFP_DIRECT_RECLAIM",	"DR" },
 	{ "__GFP_KSWAPD_RECLAIM",	"KR" },
-	{ "__GFP_OTHER_NODE",		"ON" },
 };
 
 static size_t max_gfp_len;
@@ -731,7 +729,7 @@ static char *compact_gfp_string(unsigned long gfp_flags)
 static int parse_gfp_flags(struct perf_evsel *evsel, struct perf_sample *sample,
 			   unsigned int gfp_flags)
 {
-	struct pevent_record record = {
+	struct tep_record record = {
 		.cpu = sample->cpu,
 		.data = sample->raw_data,
 		.size = sample->raw_size,
@@ -749,7 +747,7 @@ static int parse_gfp_flags(struct perf_evsel *evsel, struct perf_sample *sample,
 	}
 
 	trace_seq_init(&seq);
-	pevent_event_info(&seq, evsel->tp_format, &record);
+	tep_event_info(&seq, evsel->tp_format, &record);
 
 	str = strtok_r(seq.buffer, " ", &pos);
 	while (str) {
@@ -969,6 +967,7 @@ static struct perf_tool perf_kmem = {
 	.comm		 = perf_event__process_comm,
 	.mmap		 = perf_event__process_mmap,
 	.mmap2		 = perf_event__process_mmap2,
+	.namespaces	 = perf_event__process_namespaces,
 	.ordered_events	 = true,
 };
 
@@ -1975,7 +1974,7 @@ int cmd_kmem(int argc, const char **argv)
 			goto out_delete;
 		}
 
-		kmem_page_size = pevent_get_page_size(evsel->tp_format->pevent);
+		kmem_page_size = tep_get_page_size(evsel->tp_format->pevent);
 		symbol_conf.use_callchain = true;
 	}
 

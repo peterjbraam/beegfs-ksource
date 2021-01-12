@@ -34,10 +34,6 @@
 #include <linux/kernel.h>
 #include <linux/ctype.h>
 #include <asm/unaligned.h>
-#include <scsi/scsi.h>
-#include <scsi/scsi_host.h>
-#include <scsi/scsi_device.h>
-#include <scsi/scsi_cmnd.h>
 #include <scsi/libfc.h>
 
 #include <target/target_core_base.h>
@@ -227,10 +223,7 @@ static int ft_init_nodeacl(struct se_node_acl *nacl, const char *name)
 /*
  * local_port port_group (tpg) ops.
  */
-static struct se_portal_group *ft_add_tpg(
-	struct se_wwn *wwn,
-	struct config_group *group,
-	const char *name)
+static struct se_portal_group *ft_add_tpg(struct se_wwn *wwn, const char *name)
 {
 	struct ft_lport_wwn *ft_wwn;
 	struct ft_tpg *tpg;
@@ -444,7 +437,6 @@ static const struct target_core_fabric_ops ft_fabric_ops = {
 	.sess_get_index =		ft_sess_get_index,
 	.sess_get_initiator_sid =	NULL,
 	.write_pending =		ft_write_pending,
-	.write_pending_status =		ft_write_pending_status,
 	.set_default_node_attributes =	ft_set_default_node_attr,
 	.get_cmd_state =		ft_get_cmd_state,
 	.queue_data_in =		ft_queue_data_in,

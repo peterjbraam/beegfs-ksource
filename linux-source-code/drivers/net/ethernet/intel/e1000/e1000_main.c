@@ -1,30 +1,5 @@
-/*******************************************************************************
-
-  Intel PRO/1000 Linux driver
-  Copyright(c) 1999 - 2006 Intel Corporation.
-
-  This program is free software; you can redistribute it and/or modify it
-  under the terms and conditions of the GNU General Public License,
-  version 2, as published by the Free Software Foundation.
-
-  This program is distributed in the hope it will be useful, but WITHOUT
-  ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
-  FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
-  more details.
-
-  You should have received a copy of the GNU General Public License along with
-  this program; if not, write to the Free Software Foundation, Inc.,
-  51 Franklin St - Fifth Floor, Boston, MA 02110-1301 USA.
-
-  The full GNU General Public License is included in this distribution in
-  the file called "COPYING".
-
-  Contact Information:
-  Linux NICS <linux.nics@intel.com>
-  e1000-devel Mailing List <e1000-devel@lists.sourceforge.net>
-  Intel Corporation, 5200 N.E. Elam Young Parkway, Hillsboro, OR 97124-6497
-
-*******************************************************************************/
+// SPDX-License-Identifier: GPL-2.0
+/* Copyright(c) 1999 - 2006 Intel Corporation. */
 
 #include "e1000.h"
 #include <net/ip6_checksum.h>
@@ -251,6 +226,9 @@ static int __init e1000_init_module(void)
 	pr_info("%s - version %s\n", e1000_driver_string, e1000_driver_version);
 
 	pr_info("%s\n", e1000_copyright);
+
+	add_taint(TAINT_SUPPORT_REMOVED, LOCKDEP_STILL_OK);
+	pr_warn("E1000 MODULE IS NOT SUPPORTED\n");
 
 	ret = pci_register_driver(&e1000_driver);
 	if (copybreak != COPYBREAK_DEFAULT) {
@@ -849,14 +827,13 @@ static int e1000_set_features(struct net_device *netdev,
 }
 
 static const struct net_device_ops e1000_netdev_ops = {
-	.ndo_size		= sizeof(struct net_device_ops),
 	.ndo_open		= e1000_open,
 	.ndo_stop		= e1000_close,
 	.ndo_start_xmit		= e1000_xmit_frame,
 	.ndo_set_rx_mode	= e1000_set_rx_mode,
 	.ndo_set_mac_address	= e1000_set_mac,
 	.ndo_tx_timeout		= e1000_tx_timeout,
-	.extended.ndo_change_mtu = e1000_change_mtu,
+	.ndo_change_mtu		= e1000_change_mtu,
 	.ndo_do_ioctl		= e1000_ioctl,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_vlan_rx_add_vid	= e1000_vlan_rx_add_vid,
@@ -1024,19 +1001,14 @@ static int e1000_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	 */
 	pci_using_dac = 0;
 	if ((hw->bus_type == e1000_bus_type_pcix) &&
-	    !dma_set_mask(&pdev->dev, DMA_BIT_MASK(64))) {
-		/* according to DMA-API-HOWTO, coherent calls will always
-		 * succeed if the set call did
-		 */
-		dma_set_coherent_mask(&pdev->dev, DMA_BIT_MASK(64));
+	    !dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64))) {
 		pci_using_dac = 1;
 	} else {
-		err = dma_set_mask(&pdev->dev, DMA_BIT_MASK(32));
+		err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
 		if (err) {
 			pr_err("No usable DMA config, aborting\n");
 			goto err_dma;
 		}
-		dma_set_coherent_mask(&pdev->dev, DMA_BIT_MASK(32));
 	}
 
 	netdev->netdev_ops = &e1000_netdev_ops;
@@ -1098,8 +1070,8 @@ static int e1000_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 		netdev->priv_flags |= IFF_UNICAST_FLT;
 
 	/* MTU range: 46 - 16110 */
-	netdev->extended->min_mtu = ETH_ZLEN - ETH_HLEN;
-	netdev->extended->max_mtu = MAX_JUMBO_FRAME_SIZE - (ETH_HLEN + ETH_FCS_LEN);
+	netdev->min_mtu = ETH_ZLEN - ETH_HLEN;
+	netdev->max_mtu = MAX_JUMBO_FRAME_SIZE - (ETH_HLEN + ETH_FCS_LEN);
 
 	adapter->en_mng_pt = e1000_enable_mng_pass_thru(hw);
 
@@ -1132,7 +1104,7 @@ static int e1000_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 		if (e1000_read_mac_addr(hw))
 			e_err(probe, "EEPROM Read Error\n");
 	}
-	/* don't block initalization here due to bad MAC address */
+	/* don't block initialization here due to bad MAC address */
 	memcpy(netdev->dev_addr, hw->mac_addr, netdev->addr_len);
 
 	if (!is_valid_ether_addr(netdev->dev_addr))
@@ -2100,11 +2072,6 @@ static void *e1000_alloc_frag(const struct e1000_adapter *a)
 	return data;
 }
 
-static void e1000_free_frag(const void *data)
-{
-	put_page(virt_to_head_page(data));
-}
-
 /**
  * e1000_clean_rx_ring - Free Rx Buffers per Queue
  * @adapter: board private structure
@@ -2128,7 +2095,7 @@ static void e1000_clean_rx_ring(struct e1000_adapter *adapter,
 						 adapter->rx_buffer_len,
 						 DMA_FROM_DEVICE);
 			if (buffer_info->rxbuf.data) {
-				e1000_free_frag(buffer_info->rxbuf.data);
+				skb_free_frag(buffer_info->rxbuf.data);
 				buffer_info->rxbuf.data = NULL;
 			}
 		} else if (adapter->clean_rx == e1000_clean_jumbo_rx_irq) {
@@ -3253,7 +3220,8 @@ static netdev_tx_t e1000_xmit_frame(struct sk_buff *skb,
 
 	if (skb_vlan_tag_present(skb)) {
 		tx_flags |= E1000_TX_FLAGS_VLAN;
-		tx_flags |= (skb_vlan_tag_get(skb) << E1000_TX_FLAGS_VLAN_SHIFT);
+		tx_flags |= (skb_vlan_tag_get(skb) <<
+			     E1000_TX_FLAGS_VLAN_SHIFT);
 	}
 
 	first = tx_ring->next_to_use;
@@ -3848,7 +3816,7 @@ static int e1000_clean(struct napi_struct *napi, int budget)
 	if (work_done < budget) {
 		if (likely(adapter->itr_setting & 3))
 			e1000_set_itr(adapter);
-		napi_complete(napi);
+		napi_complete_done(napi, work_done);
 		if (!test_bit(__E1000_DOWN, &adapter->flags))
 			e1000_irq_enable(adapter);
 	}
@@ -3949,8 +3917,7 @@ static bool e1000_clean_tx_irq(struct e1000_adapter *adapter,
 			      "  next_to_watch        <%x>\n"
 			      "  jiffies              <%lx>\n"
 			      "  next_to_watch.status <%x>\n",
-				(unsigned long)((tx_ring - adapter->tx_ring) /
-					sizeof(struct e1000_tx_ring)),
+				(unsigned long)(tx_ring - adapter->tx_ring),
 				readl(hw->hw_addr + tx_ring->tdh),
 				readl(hw->hw_addr + tx_ring->tdt),
 				tx_ring->next_to_use,
@@ -4628,28 +4595,28 @@ static void e1000_alloc_rx_buffers(struct e1000_adapter *adapter,
 			data = e1000_alloc_frag(adapter);
 			/* Failed allocation, critical failure */
 			if (!data) {
-				e1000_free_frag(olddata);
+				skb_free_frag(olddata);
 				adapter->alloc_rx_buff_failed++;
 				break;
 			}
 
 			if (!e1000_check_64k_bound(adapter, data, bufsz)) {
 				/* give up */
-				e1000_free_frag(data);
-				e1000_free_frag(olddata);
+				skb_free_frag(data);
+				skb_free_frag(olddata);
 				adapter->alloc_rx_buff_failed++;
 				break;
 			}
 
 			/* Use new allocation */
-			e1000_free_frag(olddata);
+			skb_free_frag(olddata);
 		}
 		buffer_info->dma = dma_map_single(&pdev->dev,
 						  data,
 						  adapter->rx_buffer_len,
 						  DMA_FROM_DEVICE);
 		if (dma_mapping_error(&pdev->dev, buffer_info->dma)) {
-			e1000_free_frag(data);
+			skb_free_frag(data);
 			buffer_info->dma = 0;
 			adapter->alloc_rx_buff_failed++;
 			break;
@@ -4671,7 +4638,7 @@ static void e1000_alloc_rx_buffers(struct e1000_adapter *adapter,
 					 adapter->rx_buffer_len,
 					 DMA_FROM_DEVICE);
 
-			e1000_free_frag(data);
+			skb_free_frag(data);
 			buffer_info->rxbuf.data = NULL;
 			buffer_info->dma = 0;
 

@@ -28,6 +28,7 @@
 
 #include <linux/init.h>
 #include <linux/slab.h>
+#include <linux/sched/signal.h>
 #include <linux/time.h>
 #include <linux/vmalloc.h>
 #include <linux/module.h>
@@ -1595,7 +1596,7 @@ static int snd_pcm_oss_sync1(struct snd_pcm_substream *substream, size_t size)
 	ssize_t result = 0;
 	snd_pcm_state_t state;
 	long res;
-	wait_queue_t wait;
+	wait_queue_entry_t wait;
 
 	runtime = substream->runtime;
 	init_waitqueue_entry(&wait, current);
@@ -2462,7 +2463,7 @@ static int snd_pcm_oss_open(struct inode *inode, struct file *file)
 	struct snd_pcm_oss_file *pcm_oss_file;
 	struct snd_pcm_oss_setup setup[2];
 	int nonblock;
-	wait_queue_t wait;
+	wait_queue_entry_t wait;
 
 	err = nonseekable_open(inode, file);
 	if (err < 0)
@@ -2801,10 +2802,10 @@ static int snd_pcm_oss_capture_ready(struct snd_pcm_substream *substream)
 						runtime->oss.period_frames;
 }
 
-static unsigned int snd_pcm_oss_poll(struct file *file, poll_table * wait)
+static __poll_t snd_pcm_oss_poll(struct file *file, poll_table * wait)
 {
 	struct snd_pcm_oss_file *pcm_oss_file;
-	unsigned int mask;
+	__poll_t mask;
 	struct snd_pcm_substream *psubstream = NULL, *csubstream = NULL;
 	
 	pcm_oss_file = file->private_data;
@@ -2820,7 +2821,7 @@ static unsigned int snd_pcm_oss_poll(struct file *file, poll_table * wait)
 		if (runtime->status->state != SNDRV_PCM_STATE_DRAINING &&
 		    (runtime->status->state != SNDRV_PCM_STATE_RUNNING ||
 		     snd_pcm_oss_playback_ready(psubstream)))
-			mask |= POLLOUT | POLLWRNORM;
+			mask |= EPOLLOUT | EPOLLWRNORM;
 		snd_pcm_stream_unlock_irq(psubstream);
 	}
 	if (csubstream != NULL) {
@@ -2830,7 +2831,7 @@ static unsigned int snd_pcm_oss_poll(struct file *file, poll_table * wait)
 		snd_pcm_stream_lock_irq(csubstream);
 		if ((ostate = runtime->status->state) != SNDRV_PCM_STATE_RUNNING ||
 		    snd_pcm_oss_capture_ready(csubstream))
-			mask |= POLLIN | POLLRDNORM;
+			mask |= EPOLLIN | EPOLLRDNORM;
 		snd_pcm_stream_unlock_irq(csubstream);
 		if (ostate != SNDRV_PCM_STATE_RUNNING && runtime->oss.trigger) {
 			struct snd_pcm_oss_file ofile;

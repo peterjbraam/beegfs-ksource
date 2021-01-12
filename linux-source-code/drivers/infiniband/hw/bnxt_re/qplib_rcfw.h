@@ -55,7 +55,9 @@
 	do {								\
 		memset(&(req), 0, sizeof((req)));			\
 		(req).opcode = CMDQ_BASE_OPCODE_##CMD;			\
-		(req).cmd_size = sizeof((req));				\
+		(req).cmd_size = (sizeof((req)) +			\
+				BNXT_QPLIB_CMDQE_UNITS - 1) /		\
+				BNXT_QPLIB_CMDQE_UNITS;			\
 		(req).flags = cpu_to_le16(cmd_flags);			\
 	} while (0)
 
@@ -91,13 +93,6 @@ static inline u32 bnxt_qplib_cmdqe_cnt_per_pg(u32 depth)
 {
 	return (bnxt_qplib_cmdqe_page_size(depth) /
 		 BNXT_QPLIB_CMDQE_UNITS);
-}
-
-/* Set the cmd_size to a factor of CMDQE unit */
-static inline void bnxt_qplib_set_cmd_slots(struct cmdq_base *req)
-{
-	req->cmd_size = (req->cmd_size + BNXT_QPLIB_CMDQE_UNITS - 1) /
-			 BNXT_QPLIB_CMDQE_UNITS;
 }
 
 #define MAX_CMDQ_IDX(depth)		((depth) - 1)
@@ -240,7 +235,7 @@ struct bnxt_qplib_rcfw {
 #define FIRMWARE_TIMED_OUT		3
 	wait_queue_head_t	waitq;
 	int			(*aeq_handler)(struct bnxt_qplib_rcfw *,
-					       void *, void*);
+					       void *, void *);
 	u32			seq_num;
 
 	/* Bar region info */

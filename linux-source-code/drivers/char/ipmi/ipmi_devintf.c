@@ -26,7 +26,7 @@
 
 struct ipmi_file_private
 {
-	ipmi_user_t          user;
+	struct ipmi_user     *user;
 	spinlock_t           recv_msg_lock;
 	struct list_head     recv_msgs;
 	struct file          *file;
@@ -55,10 +55,10 @@ static void file_receive_handler(struct ipmi_recv_msg *msg,
 	}
 }
 
-static unsigned int ipmi_poll(struct file *file, poll_table *wait)
+static __poll_t ipmi_poll(struct file *file, poll_table *wait)
 {
 	struct ipmi_file_private *priv = file->private_data;
-	unsigned int             mask = 0;
+	__poll_t             mask = 0;
 	unsigned long            flags;
 
 	poll_wait(file, &priv->wait, wait);
@@ -66,7 +66,7 @@ static unsigned int ipmi_poll(struct file *file, poll_table *wait)
 	spin_lock_irqsave(&priv->recv_msg_lock, flags);
 
 	if (!list_empty(&priv->recv_msgs))
-		mask |= (POLLIN | POLLRDNORM);
+		mask |= (EPOLLIN | EPOLLRDNORM);
 
 	spin_unlock_irqrestore(&priv->recv_msg_lock, flags);
 
@@ -80,7 +80,7 @@ static int ipmi_fasync(int fd, struct file *file, int on)
 	return fasync_helper(fd, file, on, &priv->fasync_queue);
 }
 
-static RH_KABI_CONST struct ipmi_user_hndl ipmi_hndlrs =
+static const struct ipmi_user_hndl ipmi_hndlrs =
 {
 	.ipmi_recv_hndl	= file_receive_handler,
 };
@@ -140,7 +140,7 @@ static int ipmi_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
-static int handle_send_req(ipmi_user_t     user,
+static int handle_send_req(struct ipmi_user *user,
 			   struct ipmi_req *req,
 			   int             retries,
 			   unsigned int    retry_time_ms)
@@ -207,7 +207,7 @@ static int handle_recv(struct ipmi_file_private *priv,
 	struct list_head *entry;
 	struct ipmi_recv_msg  *msg;
 	unsigned long    flags;
-	int rv = 0;
+	int rv = 0, rv2 = 0;
 
 	/* We claim a mutex because we don't want two
 	   users getting something from the queue at a time.
@@ -250,7 +250,7 @@ static int handle_recv(struct ipmi_file_private *priv,
 
 	if (msg->msg.data_len > 0) {
 		if (rsp->msg.data_len < msg->msg.data_len) {
-			rv = -EMSGSIZE;
+			rv2 = -EMSGSIZE;
 			if (trunc)
 				msg->msg.data_len = rsp->msg.data_len;
 			else
@@ -274,7 +274,7 @@ static int handle_recv(struct ipmi_file_private *priv,
 
 	mutex_unlock(&priv->recv_mutex);
 	ipmi_free_recv_msg(msg);
-	return 0;
+	return rv2;
 
 recv_putback_on_err:
 	/* If we got an error, put the message back onto
@@ -818,7 +818,8 @@ static void ipmi_new_smi(int if_num, struct device *device)
 
 	entry = kmalloc(sizeof(*entry), GFP_KERNEL);
 	if (!entry) {
-		pr_err("ipmi_devintf: Unable to create the ipmi class device link\n");
+		printk(KERN_ERR "ipmi_devintf: Unable to create the"
+		       " ipmi class device link\n");
 		return;
 	}
 	entry->dev = dev;
@@ -860,18 +861,18 @@ static int __init init_ipmi_devintf(void)
 	if (ipmi_major < 0)
 		return -EINVAL;
 
-	pr_info("ipmi device interface\n");
+	printk(KERN_INFO "ipmi device interface\n");
 
 	ipmi_class = class_create(THIS_MODULE, "ipmi");
 	if (IS_ERR(ipmi_class)) {
-		pr_err("ipmi: can't register device class\n");
+		printk(KERN_ERR "ipmi: can't register device class\n");
 		return PTR_ERR(ipmi_class);
 	}
 
 	rv = register_chrdev(ipmi_major, DEVICE_NAME, &ipmi_fops);
 	if (rv < 0) {
 		class_destroy(ipmi_class);
-		pr_err("ipmi: can't get major %d\n", ipmi_major);
+		printk(KERN_ERR "ipmi: can't get major %d\n", ipmi_major);
 		return rv;
 	}
 
@@ -883,7 +884,7 @@ static int __init init_ipmi_devintf(void)
 	if (rv) {
 		unregister_chrdev(ipmi_major, DEVICE_NAME);
 		class_destroy(ipmi_class);
-		pr_warn("ipmi: can't register smi watcher\n");
+		printk(KERN_WARNING "ipmi: can't register smi watcher\n");
 		return rv;
 	}
 

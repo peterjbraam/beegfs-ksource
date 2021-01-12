@@ -1,45 +1,11 @@
+// SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0
 /******************************************************************************
  *
  * Module Name: evgpeinit - System GPE initialization and update
  *
+ * Copyright (C) 2000 - 2018, Intel Corp.
+ *
  *****************************************************************************/
-
-/*
- * Copyright (C) 2000 - 2013, Intel Corp.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions, and the following disclaimer,
- *    without modification.
- * 2. Redistributions in binary form must reproduce at minimum a disclaimer
- *    substantially similar to the "NO WARRANTY" disclaimer below
- *    ("Disclaimer") and any redistribution must be conditioned upon
- *    including a substantially similar Disclaimer requirement for further
- *    binary redistribution.
- * 3. Neither the names of the above-listed copyright holders nor the names
- *    of any contributors may be used to endorse or promote products derived
- *    from this software without specific prior written permission.
- *
- * Alternatively, this software may be distributed under the terms of the
- * GNU General Public License ("GPL") version 2 as published by the Free
- * Software Foundation.
- *
- * NO WARRANTY
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTIBILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * HOLDERS OR CONTRIBUTORS BE LIABLE FOR SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
- * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGES.
- */
 
 #include <acpi/acpi.h>
 #include "accommon.h"
@@ -125,15 +91,16 @@ acpi_status acpi_ev_gpe_initialize(void)
 		/* GPE block 0 exists (has both length and address > 0) */
 
 		register_count0 = (u16)(acpi_gbl_FADT.gpe0_block_length / 2);
-
 		gpe_number_max =
 		    (register_count0 * ACPI_GPE_REGISTER_WIDTH) - 1;
 
 		/* Install GPE Block 0 */
 
 		status = acpi_ev_create_gpe_block(acpi_gbl_fadt_gpe_device,
-						  &acpi_gbl_FADT.xgpe0_block,
-						  register_count0, 0,
+						  acpi_gbl_FADT.xgpe0_block.
+						  address,
+						  acpi_gbl_FADT.xgpe0_block.
+						  space_id, register_count0, 0,
 						  acpi_gbl_FADT.sci_interrupt,
 						  &acpi_gbl_gpe_fadt_blocks[0]);
 
@@ -170,8 +137,10 @@ acpi_status acpi_ev_gpe_initialize(void)
 
 			status =
 			    acpi_ev_create_gpe_block(acpi_gbl_fadt_gpe_device,
-						     &acpi_gbl_FADT.xgpe1_block,
-						     register_count1,
+						     acpi_gbl_FADT.xgpe1_block.
+						     address,
+						     acpi_gbl_FADT.xgpe1_block.
+						     space_id, register_count1,
 						     acpi_gbl_FADT.gpe1_base,
 						     acpi_gbl_FADT.
 						     sci_interrupt,
@@ -204,17 +173,7 @@ acpi_status acpi_ev_gpe_initialize(void)
 		goto cleanup;
 	}
 
-	/* Check for Max GPE number out-of-range */
-
-	if (gpe_number_max > ACPI_GPE_MAX) {
-		ACPI_ERROR((AE_INFO,
-			    "Maximum GPE number from FADT is too large: 0x%X",
-			    gpe_number_max));
-		status = AE_BAD_VALUE;
-		goto cleanup;
-	}
-
-      cleanup:
+cleanup:
 	(void)acpi_ut_release_mutex(ACPI_MTX_NAMESPACE);
 	return_ACPI_STATUS(AE_OK);
 }
@@ -288,7 +247,7 @@ void acpi_ev_update_gpes(acpi_owner_id table_owner_id)
 	}
 
 	if (walk_info.count) {
-		ACPI_INFO((AE_INFO, "Enabled %u new GPEs", walk_info.count));
+		ACPI_INFO(("Enabled %u new GPEs", walk_info.count));
 	}
 
 	(void)acpi_ut_release_mutex(ACPI_MTX_EVENTS);
@@ -411,8 +370,10 @@ acpi_ev_match_gpe_method(acpi_handle obj_handle,
 		return_ACPI_STATUS(AE_OK);
 	}
 
-	if (ACPI_GPE_DISPATCH_TYPE(gpe_event_info->flags) ==
-	    ACPI_GPE_DISPATCH_HANDLER) {
+	if ((ACPI_GPE_DISPATCH_TYPE(gpe_event_info->flags) ==
+	     ACPI_GPE_DISPATCH_HANDLER) ||
+	    (ACPI_GPE_DISPATCH_TYPE(gpe_event_info->flags) ==
+	     ACPI_GPE_DISPATCH_RAW_HANDLER)) {
 
 		/* If there is already a handler, ignore this GPE method */
 
@@ -434,6 +395,7 @@ acpi_ev_match_gpe_method(acpi_handle obj_handle,
 	}
 
 	/* Disable the GPE in case it's been enabled already. */
+
 	(void)acpi_hw_low_set_gpe(gpe_event_info, ACPI_GPE_DISABLE);
 
 	/*

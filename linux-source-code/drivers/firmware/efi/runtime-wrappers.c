@@ -27,8 +27,10 @@
 
 #include <linux/bug.h>
 #include <linux/efi.h>
+#include <linux/irqflags.h>
 #include <linux/mutex.h>
 #include <linux/semaphore.h>
+#include <linux/stringify.h>
 #include <linux/workqueue.h>
 #include <linux/completion.h>
 

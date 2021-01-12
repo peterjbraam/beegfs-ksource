@@ -100,12 +100,10 @@ static int fnic_slave_alloc(struct scsi_device *sdev)
 {
 	struct fc_rport *rport = starget_to_rport(scsi_target(sdev));
 
-	sdev->tagged_supported = 1;
-
 	if (!rport || fc_remote_port_chkready(rport))
 		return -ENXIO;
 
-	scsi_activate_tcq(sdev, fnic_max_qdepth);
+	scsi_change_queue_depth(sdev, fnic_max_qdepth);
 	return 0;
 }
 
@@ -113,19 +111,20 @@ static struct scsi_host_template fnic_host_template = {
 	.module = THIS_MODULE,
 	.name = DRV_NAME,
 	.queuecommand = fnic_queuecommand,
+	.eh_timed_out = fc_eh_timed_out,
 	.eh_abort_handler = fnic_abort_cmd,
 	.eh_device_reset_handler = fnic_device_reset,
 	.eh_host_reset_handler = fnic_host_reset,
 	.slave_alloc = fnic_slave_alloc,
-	.change_queue_depth = fc_change_queue_depth,
-	.change_queue_type = fc_change_queue_type,
+	.change_queue_depth = scsi_change_queue_depth,
 	.this_id = -1,
 	.cmd_per_lun = 3,
-	.can_queue = FNIC_MAX_IO_REQ,
+	.can_queue = FNIC_DFLT_IO_REQ,
 	.use_clustering = ENABLE_CLUSTERING,
 	.sg_tablesize = FNIC_MAX_SG_DESC_CNT,
 	.max_sectors = 0xffff,
 	.shost_attrs = fnic_attrs,
+	.track_queue_depth = 1,
 };
 
 static void
@@ -416,18 +415,18 @@ static int fnic_notify_set(struct fnic *fnic)
 	return err;
 }
 
-static void fnic_notify_timer(unsigned long data)
+static void fnic_notify_timer(struct timer_list *t)
 {
-	struct fnic *fnic = (struct fnic *)data;
+	struct fnic *fnic = from_timer(fnic, t, notify_timer);
 
 	fnic_handle_link_event(fnic);
 	mod_timer(&fnic->notify_timer,
 		  round_jiffies(jiffies + FNIC_NOTIFY_TIMER_PERIOD));
 }
 
-static void fnic_fip_notify_timer(unsigned long data)
+static void fnic_fip_notify_timer(struct timer_list *t)
 {
-	struct fnic *fnic = (struct fnic *)data;
+	struct fnic *fnic = from_timer(fnic, t, fip_timer);
 
 	fnic_handle_fip_timer(fnic);
 }
@@ -704,13 +703,6 @@ static int fnic_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	}
 	fnic->fnic_max_tag_id = host->can_queue;
 
-	err = scsi_init_shared_tag_map(host, fnic->fnic_max_tag_id);
-	if (err) {
-		shost_printk(KERN_ERR, fnic->lport->host,
-			  "Unable to alloc shared tag map\n");
-		goto err_out_dev_close;
-	}
-
 	host->max_lun = fnic->config.luns_per_tgt;
 	host->max_id = FNIC_MAX_FCP_TARGET;
 	host->max_cmd_len = FCOE_MAX_CMD_LEN;
@@ -781,8 +773,7 @@ static int fnic_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 		vnic_dev_add_addr(fnic->vdev, fnic->ctlr.ctl_src_addr);
 		fnic->set_vlan = fnic_set_vlan;
 		fcoe_ctlr_init(&fnic->ctlr, FIP_MODE_AUTO);
-		setup_timer(&fnic->fip_timer, fnic_fip_notify_timer,
-							(unsigned long)fnic);
+		timer_setup(&fnic->fip_timer, fnic_fip_notify_timer, 0);
 		spin_lock_init(&fnic->vlans_lock);
 		INIT_WORK(&fnic->fip_frame_work, fnic_handle_fip_frame);
 		INIT_WORK(&fnic->event_work, fnic_handle_event);
@@ -793,6 +784,7 @@ static int fnic_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 		shost_printk(KERN_INFO, fnic->lport->host,
 			     "firmware uses non-FIP mode\n");
 		fcoe_ctlr_init(&fnic->ctlr, FIP_MODE_NON_FIP);
+		fnic->ctlr.state = FIP_ST_NON_FIP;
 	}
 	fnic->state = FNIC_IN_FC_MODE;
 
@@ -812,8 +804,7 @@ static int fnic_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	/* Setup notify timer when using MSI interrupts */
 	if (vnic_dev_get_intr_mode(fnic->vdev) == VNIC_DEV_INTR_MODE_MSI)
-		setup_timer(&fnic->notify_timer,
-			    fnic_notify_timer, (unsigned long)fnic);
+		timer_setup(&fnic->notify_timer, fnic_notify_timer, 0);
 
 	/* allocate RQ buffers and post them to RQ*/
 	for (i = 0; i < fnic->rq_count; i++) {

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * ceph_fs.h - Ceph constants and data types to share between kernel and
  * user space.
@@ -627,6 +628,7 @@ int ceph_flags_to_mode(int flags);
 				 CEPH_CAP_XATTR_SHARED)
 #define CEPH_STAT_CAP_INLINE_DATA (CEPH_CAP_FILE_SHARED | \
 				   CEPH_CAP_FILE_RD)
+#define CEPH_STAT_RSTAT CEPH_CAP_FILE_WREXTEND
 
 #define CEPH_CAP_ANY_SHARED (CEPH_CAP_AUTH_SHARED |			\
 			      CEPH_CAP_LINK_SHARED |			\

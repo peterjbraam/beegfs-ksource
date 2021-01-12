@@ -30,6 +30,7 @@
  * Register locations derived from NVClock by Roderick Colenbrander
  */
 
+#include <linux/apple-gmux.h>
 #include <linux/backlight.h>
 #include <linux/idr.h>
 
@@ -228,6 +229,11 @@ nouveau_backlight_init(struct drm_connector *connector)
 	struct backlight_properties props = {0};
 	const struct backlight_ops *ops;
 	int ret;
+
+	if (apple_gmux_present()) {
+		NV_INFO_ONCE(drm, "Apple GMUX detected: not registering Nouveau backlight interface\n");
+		return 0;
+	}
 
 	if (connector->connector_type == DRM_MODE_CONNECTOR_LVDS)
 		nv_encoder = find_encoder(connector, DCB_OUTPUT_LVDS);

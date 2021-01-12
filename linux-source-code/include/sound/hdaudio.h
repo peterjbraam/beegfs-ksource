@@ -79,7 +79,6 @@ struct hdac_device {
 
 	/* misc flags */
 	atomic_t in_pm;		/* suspend/resume being performed */
-	bool  link_power_control:1;
 
 	/* sysfs */
 	struct mutex widget_lock;
@@ -100,6 +99,12 @@ enum {
 	HDA_DEV_ASOC,
 };
 
+enum {
+	SND_SKL_PCI_BIND_AUTO,	/* automatic selection based on pci class */
+	SND_SKL_PCI_BIND_LEGACY,/* bind only with legacy driver */
+	SND_SKL_PCI_BIND_ASOC	/* bind only with ASoC driver */
+};
+
 /* direction */
 enum {
 	HDA_INPUT, HDA_OUTPUT
@@ -115,7 +120,7 @@ void snd_hdac_device_unregister(struct hdac_device *codec);
 int snd_hdac_device_set_chip_name(struct hdac_device *codec, const char *name);
 int snd_hdac_codec_modalias(struct hdac_device *hdac, char *buf, size_t size);
 
-int snd_hdac_refresh_widgets(struct hdac_device *codec);
+int snd_hdac_refresh_widgets(struct hdac_device *codec, bool sysfs);
 
 unsigned int snd_hdac_make_cmd(struct hdac_device *codec, hda_nid_t nid,
 			       unsigned int verb, unsigned int parm);
@@ -217,6 +222,11 @@ struct hdac_driver {
 	const struct hda_device_id *id_table;
 	int (*match)(struct hdac_device *dev, struct hdac_driver *drv);
 	void (*unsol_event)(struct hdac_device *dev, unsigned int event);
+
+	/* fields used by ext bus APIs */
+	int (*probe)(struct hdac_device *dev);
+	int (*remove)(struct hdac_device *dev);
+	void (*shutdown)(struct hdac_device *dev);
 };
 
 #define drv_to_hdac_driver(_drv) container_of(_drv, struct hdac_driver, driver)
@@ -233,8 +243,14 @@ struct hdac_bus_ops {
 	/* get a response from the last command */
 	int (*get_response)(struct hdac_bus *bus, unsigned int addr,
 			    unsigned int *res);
-	/* control the link power  */
-	int (*link_power)(struct hdac_bus *bus, bool enable);
+};
+
+/*
+ * ops used for ASoC HDA codec drivers
+ */
+struct hdac_ext_bus_ops {
+	int (*hdev_attach)(struct hdac_device *hdev);
+	int (*hdev_detach)(struct hdac_device *hdev);
 };
 
 /*
@@ -258,9 +274,6 @@ struct hdac_io_ops {
 #define HDA_UNSOL_QUEUE_SIZE	64
 #define HDA_MAX_CODECS		8	/* limit by controller side */
 
-/* HD Audio class code */
-#define PCI_CLASS_MULTIMEDIA_HD_AUDIO	0x0403
-
 /*
  * CORB/RIRB
  *
@@ -282,11 +295,17 @@ struct hdac_rb {
  * @mlcap: MultiLink capabilities pointer
  * @gtscap: gts capabilities pointer
  * @drsmcap: dma resume capabilities pointer
+ * @num_streams: streams supported
+ * @idx: HDA link index
+ * @hlink_list: link list of HDA links
+ * @lock: lock for link and display power mgmt
+ * @cmd_dma_state: state of cmd DMAs: CORB and RIRB
  */
 struct hdac_bus {
 	struct device *dev;
 	const struct hdac_bus_ops *ops;
 	const struct hdac_io_ops *io_ops;
+	const struct hdac_ext_bus_ops *ext_ops;
 
 	/* h/w resources */
 	unsigned long addr;
@@ -339,19 +358,26 @@ struct hdac_bus {
 	bool align_bdle_4k:1;		/* BDLE align 4K boundary */
 	bool reverse_assign:1;		/* assign devices in reverse order */
 	bool corbrp_self_clear:1;	/* CORBRP clears itself after reset */
-	bool polling_mode:1;
-
-	int poll_count;
 
 	int bdl_pos_adj;		/* BDL position adjustment */
 
 	/* locks */
 	spinlock_t reg_lock;
 	struct mutex cmd_mutex;
+	struct mutex lock;
 
 	/* DRM component interface */
 	struct drm_audio_component *audio_component;
-	int drm_power_refcount;
+	long display_power_status;
+	bool display_power_active;
+
+	/* parameters required for enhanced capabilities */
+	int num_streams;
+	int idx;
+
+	/* link management */
+	struct list_head hlink_list;
+	bool cmd_dma_state;
 };
 
 int snd_hdac_bus_init(struct hdac_bus *bus, struct device *dev,
@@ -383,7 +409,6 @@ int snd_hdac_bus_send_cmd(struct hdac_bus *bus, unsigned int val);
 int snd_hdac_bus_get_response(struct hdac_bus *bus, unsigned int addr,
 			      unsigned int *res);
 int snd_hdac_bus_parse_capabilities(struct hdac_bus *bus);
-int snd_hdac_link_power(struct hdac_device *codec, bool enable);
 
 bool snd_hdac_bus_init_chip(struct hdac_bus *bus, bool full_reset);
 void snd_hdac_bus_stop_chip(struct hdac_bus *bus);

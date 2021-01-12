@@ -17,7 +17,6 @@
 #include <net/tc_act/tc_mirred.h>
 #include <net/tc_act/tc_vlan.h>
 #include <net/tc_act/tc_tunnel_key.h>
-#include <net/vxlan.h>
 
 #include "bnxt_hsi.h"
 #include "bnxt.h"
@@ -62,9 +61,9 @@ static u16 bnxt_flow_get_dst_fid(struct bnxt *pf_bp, struct net_device *dev)
 
 static int bnxt_tc_parse_redir(struct bnxt *bp,
 			       struct bnxt_tc_actions *actions,
-			       const struct tc_action *tc_act)
+			       const struct flow_action_entry *act)
 {
-	struct net_device *dev = tcf_mirred_dev(tc_act);
+	struct net_device *dev = act->dev;
 
 	if (!dev) {
 		netdev_info(bp->dev, "no dev in mirred action");
@@ -78,16 +77,16 @@ static int bnxt_tc_parse_redir(struct bnxt *bp,
 
 static int bnxt_tc_parse_vlan(struct bnxt *bp,
 			      struct bnxt_tc_actions *actions,
-			      const struct tc_action *tc_act)
+			      const struct flow_action_entry *act)
 {
-	switch (tcf_vlan_action(tc_act)) {
-	case TCA_VLAN_ACT_POP:
+	switch (act->id) {
+	case FLOW_ACTION_VLAN_POP:
 		actions->flags |= BNXT_TC_ACTION_FLAG_POP_VLAN;
 		break;
-	case TCA_VLAN_ACT_PUSH:
+	case FLOW_ACTION_VLAN_PUSH:
 		actions->flags |= BNXT_TC_ACTION_FLAG_PUSH_VLAN;
-		actions->push_vlan_tci = htons(tcf_vlan_push_vid(tc_act));
-		actions->push_vlan_tpid = tcf_vlan_push_proto(tc_act);
+		actions->push_vlan_tci = htons(act->vlan.vid);
+		actions->push_vlan_tpid = act->vlan.proto;
 		break;
 	default:
 		return -EOPNOTSUPP;
@@ -97,10 +96,10 @@ static int bnxt_tc_parse_vlan(struct bnxt *bp,
 
 static int bnxt_tc_parse_tunnel_set(struct bnxt *bp,
 				    struct bnxt_tc_actions *actions,
-				    const struct tc_action *tc_act)
+				    const struct flow_action_entry *act)
 {
-	struct ip_tunnel_info *tun_info = tcf_tunnel_info(tc_act);
-	struct ip_tunnel_key *tun_key = &tun_info->key;
+	const struct ip_tunnel_info *tun_info = act->tunnel;
+	const struct ip_tunnel_key *tun_key = &tun_info->key;
 
 	if (ip_tunnel_info_af(tun_info) != AF_INET) {
 		netdev_info(bp->dev, "only IPv4 tunnel-encap is supported");
@@ -114,53 +113,43 @@ static int bnxt_tc_parse_tunnel_set(struct bnxt *bp,
 
 static int bnxt_tc_parse_actions(struct bnxt *bp,
 				 struct bnxt_tc_actions *actions,
-				 struct tcf_exts *tc_exts)
+				 struct flow_action *flow_action)
 {
-	const struct tc_action *tc_act;
-	LIST_HEAD(tc_actions);
-	int rc;
+	struct flow_action_entry *act;
+	int i, rc;
 
-	if (!tcf_exts_has_actions(tc_exts)) {
+	if (!flow_action_has_entries(flow_action)) {
 		netdev_info(bp->dev, "no actions");
 		return -EINVAL;
 	}
 
-	tcf_exts_to_list(tc_exts, &tc_actions);
-	list_for_each_entry(tc_act, &tc_actions, list) {
-		/* Drop action */
-		if (is_tcf_gact_shot(tc_act)) {
+	flow_action_for_each(i, act, flow_action) {
+		switch (act->id) {
+		case FLOW_ACTION_DROP:
 			actions->flags |= BNXT_TC_ACTION_FLAG_DROP;
 			return 0; /* don't bother with other actions */
-		}
-
-		/* Redirect action */
-		if (is_tcf_mirred_egress_redirect(tc_act)) {
-			rc = bnxt_tc_parse_redir(bp, actions, tc_act);
+		case FLOW_ACTION_REDIRECT:
+			rc = bnxt_tc_parse_redir(bp, actions, act);
 			if (rc)
 				return rc;
-			continue;
-		}
-
-		/* Push/pop VLAN */
-		if (is_tcf_vlan(tc_act)) {
-			rc = bnxt_tc_parse_vlan(bp, actions, tc_act);
+			break;
+		case FLOW_ACTION_VLAN_POP:
+		case FLOW_ACTION_VLAN_PUSH:
+		case FLOW_ACTION_VLAN_MANGLE:
+			rc = bnxt_tc_parse_vlan(bp, actions, act);
 			if (rc)
 				return rc;
-			continue;
-		}
-
-		/* Tunnel encap */
-		if (is_tcf_tunnel_set(tc_act)) {
-			rc = bnxt_tc_parse_tunnel_set(bp, actions, tc_act);
+			break;
+		case FLOW_ACTION_TUNNEL_ENCAP:
+			rc = bnxt_tc_parse_tunnel_set(bp, actions, act);
 			if (rc)
 				return rc;
-			continue;
-		}
-
-		/* Tunnel decap */
-		if (is_tcf_tunnel_release(tc_act)) {
+			break;
+		case FLOW_ACTION_TUNNEL_DECAP:
 			actions->flags |= BNXT_TC_ACTION_FLAG_TUNNEL_DECAP;
-			continue;
+			break;
+		default:
+			break;
 		}
 	}
 
@@ -180,18 +169,12 @@ static int bnxt_tc_parse_actions(struct bnxt *bp,
 	return 0;
 }
 
-#define GET_KEY(flow_cmd, key_type)					\
-		skb_flow_dissector_target((flow_cmd)->dissector, key_type,\
-					  (flow_cmd)->key)
-#define GET_MASK(flow_cmd, key_type)					\
-		skb_flow_dissector_target((flow_cmd)->dissector, key_type,\
-					  (flow_cmd)->mask)
-
 static int bnxt_tc_parse_flow(struct bnxt *bp,
 			      struct tc_cls_flower_offload *tc_flow_cmd,
 			      struct bnxt_tc_flow *flow)
 {
-	struct flow_dissector *dissector = tc_flow_cmd->dissector;
+	struct flow_rule *rule = tc_cls_flower_offload_flow_rule(tc_flow_cmd);
+	struct flow_dissector *dissector = rule->match.dissector;
 
 	/* KEY_CONTROL and KEY_BASIC are needed for forming a meaningful key */
 	if ((dissector->used_keys & BIT(FLOW_DISSECTOR_KEY_CONTROL)) == 0 ||
@@ -201,143 +184,123 @@ static int bnxt_tc_parse_flow(struct bnxt *bp,
 		return -EOPNOTSUPP;
 	}
 
-	if (dissector_uses_key(dissector, FLOW_DISSECTOR_KEY_BASIC)) {
-		struct flow_dissector_key_basic *key =
-			GET_KEY(tc_flow_cmd, FLOW_DISSECTOR_KEY_BASIC);
-		struct flow_dissector_key_basic *mask =
-			GET_MASK(tc_flow_cmd, FLOW_DISSECTOR_KEY_BASIC);
+	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_BASIC)) {
+		struct flow_match_basic match;
 
-		flow->l2_key.ether_type = key->n_proto;
-		flow->l2_mask.ether_type = mask->n_proto;
+		flow_rule_match_basic(rule, &match);
+		flow->l2_key.ether_type = match.key->n_proto;
+		flow->l2_mask.ether_type = match.mask->n_proto;
 
-		if (key->n_proto == htons(ETH_P_IP) ||
-		    key->n_proto == htons(ETH_P_IPV6)) {
-			flow->l4_key.ip_proto = key->ip_proto;
-			flow->l4_mask.ip_proto = mask->ip_proto;
+		if (match.key->n_proto == htons(ETH_P_IP) ||
+		    match.key->n_proto == htons(ETH_P_IPV6)) {
+			flow->l4_key.ip_proto = match.key->ip_proto;
+			flow->l4_mask.ip_proto = match.mask->ip_proto;
 		}
 	}
 
-	if (dissector_uses_key(dissector, FLOW_DISSECTOR_KEY_ETH_ADDRS)) {
-		struct flow_dissector_key_eth_addrs *key =
-			GET_KEY(tc_flow_cmd, FLOW_DISSECTOR_KEY_ETH_ADDRS);
-		struct flow_dissector_key_eth_addrs *mask =
-			GET_MASK(tc_flow_cmd, FLOW_DISSECTOR_KEY_ETH_ADDRS);
+	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_ETH_ADDRS)) {
+		struct flow_match_eth_addrs match;
 
+		flow_rule_match_eth_addrs(rule, &match);
 		flow->flags |= BNXT_TC_FLOW_FLAGS_ETH_ADDRS;
-		ether_addr_copy(flow->l2_key.dmac, key->dst);
-		ether_addr_copy(flow->l2_mask.dmac, mask->dst);
-		ether_addr_copy(flow->l2_key.smac, key->src);
-		ether_addr_copy(flow->l2_mask.smac, mask->src);
+		ether_addr_copy(flow->l2_key.dmac, match.key->dst);
+		ether_addr_copy(flow->l2_mask.dmac, match.mask->dst);
+		ether_addr_copy(flow->l2_key.smac, match.key->src);
+		ether_addr_copy(flow->l2_mask.smac, match.mask->src);
 	}
 
-	if (dissector_uses_key(dissector, FLOW_DISSECTOR_KEY_VLAN)) {
-		struct flow_dissector_key_vlan *key =
-			GET_KEY(tc_flow_cmd, FLOW_DISSECTOR_KEY_VLAN);
-		struct flow_dissector_key_vlan *mask =
-			GET_MASK(tc_flow_cmd, FLOW_DISSECTOR_KEY_VLAN);
+	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_VLAN)) {
+		struct flow_match_vlan match;
 
+		flow_rule_match_vlan(rule, &match);
 		flow->l2_key.inner_vlan_tci =
-		   cpu_to_be16(VLAN_TCI(key->vlan_id, key->vlan_priority));
+			cpu_to_be16(VLAN_TCI(match.key->vlan_id,
+					     match.key->vlan_priority));
 		flow->l2_mask.inner_vlan_tci =
-		   cpu_to_be16((VLAN_TCI(mask->vlan_id, mask->vlan_priority)));
+			cpu_to_be16((VLAN_TCI(match.mask->vlan_id,
+					      match.mask->vlan_priority)));
 		flow->l2_key.inner_vlan_tpid = htons(ETH_P_8021Q);
 		flow->l2_mask.inner_vlan_tpid = htons(0xffff);
 		flow->l2_key.num_vlans = 1;
 	}
 
-	if (dissector_uses_key(dissector, FLOW_DISSECTOR_KEY_IPV4_ADDRS)) {
-		struct flow_dissector_key_ipv4_addrs *key =
-			GET_KEY(tc_flow_cmd, FLOW_DISSECTOR_KEY_IPV4_ADDRS);
-		struct flow_dissector_key_ipv4_addrs *mask =
-			GET_MASK(tc_flow_cmd, FLOW_DISSECTOR_KEY_IPV4_ADDRS);
+	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_IPV4_ADDRS)) {
+		struct flow_match_ipv4_addrs match;
 
+		flow_rule_match_ipv4_addrs(rule, &match);
 		flow->flags |= BNXT_TC_FLOW_FLAGS_IPV4_ADDRS;
-		flow->l3_key.ipv4.daddr.s_addr = key->dst;
-		flow->l3_mask.ipv4.daddr.s_addr = mask->dst;
-		flow->l3_key.ipv4.saddr.s_addr = key->src;
-		flow->l3_mask.ipv4.saddr.s_addr = mask->src;
-	} else if (dissector_uses_key(dissector,
-				      FLOW_DISSECTOR_KEY_IPV6_ADDRS)) {
-		struct flow_dissector_key_ipv6_addrs *key =
-			GET_KEY(tc_flow_cmd, FLOW_DISSECTOR_KEY_IPV6_ADDRS);
-		struct flow_dissector_key_ipv6_addrs *mask =
-			GET_MASK(tc_flow_cmd, FLOW_DISSECTOR_KEY_IPV6_ADDRS);
+		flow->l3_key.ipv4.daddr.s_addr = match.key->dst;
+		flow->l3_mask.ipv4.daddr.s_addr = match.mask->dst;
+		flow->l3_key.ipv4.saddr.s_addr = match.key->src;
+		flow->l3_mask.ipv4.saddr.s_addr = match.mask->src;
+	} else if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_IPV6_ADDRS)) {
+		struct flow_match_ipv6_addrs match;
 
+		flow_rule_match_ipv6_addrs(rule, &match);
 		flow->flags |= BNXT_TC_FLOW_FLAGS_IPV6_ADDRS;
-		flow->l3_key.ipv6.daddr = key->dst;
-		flow->l3_mask.ipv6.daddr = mask->dst;
-		flow->l3_key.ipv6.saddr = key->src;
-		flow->l3_mask.ipv6.saddr = mask->src;
+		flow->l3_key.ipv6.daddr = match.key->dst;
+		flow->l3_mask.ipv6.daddr = match.mask->dst;
+		flow->l3_key.ipv6.saddr = match.key->src;
+		flow->l3_mask.ipv6.saddr = match.mask->src;
 	}
 
-	if (dissector_uses_key(dissector, FLOW_DISSECTOR_KEY_PORTS)) {
-		struct flow_dissector_key_ports *key =
-			GET_KEY(tc_flow_cmd, FLOW_DISSECTOR_KEY_PORTS);
-		struct flow_dissector_key_ports *mask =
-			GET_MASK(tc_flow_cmd, FLOW_DISSECTOR_KEY_PORTS);
+	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_PORTS)) {
+		struct flow_match_ports match;
 
+		flow_rule_match_ports(rule, &match);
 		flow->flags |= BNXT_TC_FLOW_FLAGS_PORTS;
-		flow->l4_key.ports.dport = key->dst;
-		flow->l4_mask.ports.dport = mask->dst;
-		flow->l4_key.ports.sport = key->src;
-		flow->l4_mask.ports.sport = mask->src;
+		flow->l4_key.ports.dport = match.key->dst;
+		flow->l4_mask.ports.dport = match.mask->dst;
+		flow->l4_key.ports.sport = match.key->src;
+		flow->l4_mask.ports.sport = match.mask->src;
 	}
 
-	if (dissector_uses_key(dissector, FLOW_DISSECTOR_KEY_ICMP)) {
-		struct flow_dissector_key_icmp *key =
-			GET_KEY(tc_flow_cmd, FLOW_DISSECTOR_KEY_ICMP);
-		struct flow_dissector_key_icmp *mask =
-			GET_MASK(tc_flow_cmd, FLOW_DISSECTOR_KEY_ICMP);
+	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_ICMP)) {
+		struct flow_match_icmp match;
 
+		flow_rule_match_icmp(rule, &match);
 		flow->flags |= BNXT_TC_FLOW_FLAGS_ICMP;
-		flow->l4_key.icmp.type = key->type;
-		flow->l4_key.icmp.code = key->code;
-		flow->l4_mask.icmp.type = mask->type;
-		flow->l4_mask.icmp.code = mask->code;
+		flow->l4_key.icmp.type = match.key->type;
+		flow->l4_key.icmp.code = match.key->code;
+		flow->l4_mask.icmp.type = match.mask->type;
+		flow->l4_mask.icmp.code = match.mask->code;
 	}
 
-	if (dissector_uses_key(dissector, FLOW_DISSECTOR_KEY_ENC_IPV4_ADDRS)) {
-		struct flow_dissector_key_ipv4_addrs *key =
-			GET_KEY(tc_flow_cmd, FLOW_DISSECTOR_KEY_ENC_IPV4_ADDRS);
-		struct flow_dissector_key_ipv4_addrs *mask =
-				GET_MASK(tc_flow_cmd,
-					 FLOW_DISSECTOR_KEY_ENC_IPV4_ADDRS);
+	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_ENC_IPV4_ADDRS)) {
+		struct flow_match_ipv4_addrs match;
 
+		flow_rule_match_enc_ipv4_addrs(rule, &match);
 		flow->flags |= BNXT_TC_FLOW_FLAGS_TUNL_IPV4_ADDRS;
-		flow->tun_key.u.ipv4.dst = key->dst;
-		flow->tun_mask.u.ipv4.dst = mask->dst;
-		flow->tun_key.u.ipv4.src = key->src;
-		flow->tun_mask.u.ipv4.src = mask->src;
-	} else if (dissector_uses_key(dissector,
+		flow->tun_key.u.ipv4.dst = match.key->dst;
+		flow->tun_mask.u.ipv4.dst = match.mask->dst;
+		flow->tun_key.u.ipv4.src = match.key->src;
+		flow->tun_mask.u.ipv4.src = match.mask->src;
+	} else if (flow_rule_match_key(rule,
 				      FLOW_DISSECTOR_KEY_ENC_IPV6_ADDRS)) {
 		return -EOPNOTSUPP;
 	}
 
-	if (dissector_uses_key(dissector, FLOW_DISSECTOR_KEY_ENC_KEYID)) {
-		struct flow_dissector_key_keyid *key =
-			GET_KEY(tc_flow_cmd, FLOW_DISSECTOR_KEY_ENC_KEYID);
-		struct flow_dissector_key_keyid *mask =
-			GET_MASK(tc_flow_cmd, FLOW_DISSECTOR_KEY_ENC_KEYID);
+	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_ENC_KEYID)) {
+		struct flow_match_enc_keyid match;
 
+		flow_rule_match_enc_keyid(rule, &match);
 		flow->flags |= BNXT_TC_FLOW_FLAGS_TUNL_ID;
-		flow->tun_key.tun_id = key32_to_tunnel_id(key->keyid);
-		flow->tun_mask.tun_id = key32_to_tunnel_id(mask->keyid);
+		flow->tun_key.tun_id = key32_to_tunnel_id(match.key->keyid);
+		flow->tun_mask.tun_id = key32_to_tunnel_id(match.mask->keyid);
 	}
 
-	if (dissector_uses_key(dissector, FLOW_DISSECTOR_KEY_ENC_PORTS)) {
-		struct flow_dissector_key_ports *key =
-			GET_KEY(tc_flow_cmd, FLOW_DISSECTOR_KEY_ENC_PORTS);
-		struct flow_dissector_key_ports *mask =
-			GET_MASK(tc_flow_cmd, FLOW_DISSECTOR_KEY_ENC_PORTS);
+	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_ENC_PORTS)) {
+		struct flow_match_ports match;
 
+		flow_rule_match_enc_ports(rule, &match);
 		flow->flags |= BNXT_TC_FLOW_FLAGS_TUNL_PORTS;
-		flow->tun_key.tp_dst = key->dst;
-		flow->tun_mask.tp_dst = mask->dst;
-		flow->tun_key.tp_src = key->src;
-		flow->tun_mask.tp_src = mask->src;
+		flow->tun_key.tp_dst = match.key->dst;
+		flow->tun_mask.tp_dst = match.mask->dst;
+		flow->tun_key.tp_src = match.key->src;
+		flow->tun_mask.tp_src = match.mask->src;
 	}
 
-	return bnxt_tc_parse_actions(bp, &flow->actions, tc_flow_cmd->exts);
+	return bnxt_tc_parse_actions(bp, &flow->actions, &rule->action);
 }
 
 static int bnxt_hwrm_cfa_flow_free(struct bnxt *bp,
@@ -1327,7 +1290,7 @@ static int bnxt_tc_add_flow(struct bnxt *bp, u16 src_fid,
 		bnxt_tc_set_flow_dir(bp, flow, src_fid);
 
 	if (!bnxt_tc_can_offload(bp, flow)) {
-		rc = -ENOSPC;
+		rc = -EOPNOTSUPP;
 		goto free_node;
 	}
 
@@ -1425,8 +1388,8 @@ static int bnxt_tc_get_flow_stats(struct bnxt *bp,
 	lastused = flow->lastused;
 	spin_unlock(&flow->stats_lock);
 
-	tcf_exts_stats_update(tc_flow_cmd->exts, stats.bytes, stats.packets,
-			      lastused);
+	flow_stats_update(&tc_flow_cmd->stats, stats.bytes, stats.packets,
+			  lastused);
 	return 0;
 }
 
@@ -1564,11 +1527,7 @@ bnxt_tc_flow_stats_batch_prep(struct bnxt *bp,
 	void *flow_node;
 	int rc, i;
 
-	rc = rhashtable_walk_start(iter);
-	if (rc && rc != -EAGAIN) {
-		i = 0;
-		goto done;
-	}
+	rhashtable_walk_start(iter);
 
 	rc = 0;
 	for (i = 0; i < BNXT_FLOW_STATS_BATCH_MAX; i++) {
@@ -1638,139 +1597,6 @@ int bnxt_tc_setup_flower(struct bnxt *bp, u16 src_fid,
 	default:
 		return -EOPNOTSUPP;
 	}
-}
-
-static int bnxt_tc_setup_indr_block_cb(enum tc_setup_type type,
-				       void *type_data, void *cb_priv)
-{
-	struct bnxt_flower_indr_block_cb_priv *priv = cb_priv;
-	struct tc_cls_flower_offload *flower = type_data;
-	struct bnxt *bp = priv->bp;
-
-	if (flower->common.chain_index)
-		return -EOPNOTSUPP;
-
-	switch (type) {
-	case TC_SETUP_CLSFLOWER:
-		return bnxt_tc_setup_flower(bp, bp->pf.fw_fid, flower);
-	default:
-		return -EOPNOTSUPP;
-	}
-}
-
-static struct bnxt_flower_indr_block_cb_priv *
-bnxt_tc_indr_block_cb_lookup(struct bnxt *bp, struct net_device *netdev)
-{
-	struct bnxt_flower_indr_block_cb_priv *cb_priv;
-
-	/* All callback list access should be protected by RTNL. */
-	ASSERT_RTNL();
-
-	list_for_each_entry(cb_priv, &bp->tc_indr_block_list, list)
-		if (cb_priv->tunnel_netdev == netdev)
-			return cb_priv;
-
-	return NULL;
-}
-
-static void bnxt_tc_setup_indr_rel(void *cb_priv)
-{
-	struct bnxt_flower_indr_block_cb_priv *priv = cb_priv;
-
-	list_del(&priv->list);
-	kfree(priv);
-}
-
-static int bnxt_tc_setup_indr_block(struct net_device *netdev, struct bnxt *bp,
-				    struct tc_block_offload *f)
-{
-	struct bnxt_flower_indr_block_cb_priv *cb_priv;
-	int err;
-
-	if (f->binder_type != TCF_BLOCK_BINDER_TYPE_CLSACT_INGRESS)
-		return -EOPNOTSUPP;
-
-	switch (f->command) {
-	case TC_BLOCK_BIND:
-		cb_priv = kmalloc(sizeof(*cb_priv), GFP_KERNEL);
-		if (!cb_priv)
-			return -ENOMEM;
-
-		cb_priv->tunnel_netdev = netdev;
-		cb_priv->bp = bp;
-		list_add(&cb_priv->list, &bp->tc_indr_block_list);
-
-		err = tcf_block_cb_register(f->block,
-					    bnxt_tc_setup_indr_block_cb,
-					    cb_priv,
-					    cb_priv);
-		if (err) {
-			bnxt_tc_setup_indr_rel(cb_priv);
-			return err;
-		}
-		break;
-	case TC_BLOCK_UNBIND:
-		cb_priv = bnxt_tc_indr_block_cb_lookup(bp, netdev);
-		if (!cb_priv)
-			return -ENOENT;
-
-		tcf_block_cb_unregister(f->block,
-                                       bnxt_tc_setup_indr_block_cb, cb_priv);
-		bnxt_tc_setup_indr_rel(cb_priv);
-		break;
-	default:
-		return -EOPNOTSUPP;
-	}
-	return 0;
-}
-
-static int bnxt_tc_setup_indr_cb(struct net_device *netdev, void *cb_priv,
-				 enum tc_setup_type type, void *type_data)
-{
-	switch (type) {
-	case TC_SETUP_BLOCK:
-		return bnxt_tc_setup_indr_block(netdev, cb_priv, type_data);
-	default:
-		return -EOPNOTSUPP;
-	}
-}
-
-static bool bnxt_is_netdev_indr_offload(struct net_device *netdev)
-{
-	return netif_is_vxlan(netdev);
-}
-
-static int bnxt_tc_indr_block_event(struct notifier_block *nb,
-				    unsigned long event, void *ptr)
-{
-	struct net_device *netdev;
-	struct bnxt *bp;
-	int rc;
-
-	netdev = netdev_notifier_info_to_dev(ptr);
-	if (!bnxt_is_netdev_indr_offload(netdev))
-		return NOTIFY_OK;
-
-	bp = container_of(nb, struct bnxt, tc_netdev_nb);
-
-	switch (event) {
-	case NETDEV_REGISTER:
-		rc = __tc_indr_block_cb_register(netdev, bp,
-						 bnxt_tc_setup_indr_cb,
-						 netdev);
-		if (rc)
-			netdev_info(bp->dev,
-				    "Failed to register indirect blk: dev: %s",
-				    netdev->name);
-		break;
-	case NETDEV_UNREGISTER:
-		__tc_indr_block_cb_unregister(netdev,
-					      bnxt_tc_setup_indr_cb,
-					      netdev);
-		break;
-	}
-
-	return NOTIFY_OK;
 }
 
 static const struct rhashtable_params bnxt_tc_flow_ht_params = {
@@ -1856,15 +1682,7 @@ int bnxt_init_tc(struct bnxt *bp)
 	bp->dev->hw_features |= NETIF_F_HW_TC;
 	bp->dev->features |= NETIF_F_HW_TC;
 	bp->tc_info = tc_info;
-
-	/* init indirect block notifications */
-	INIT_LIST_HEAD(&bp->tc_indr_block_list);
-	bp->tc_netdev_nb.notifier_call = bnxt_tc_indr_block_event;
-	rc = register_netdevice_notifier_rh(&bp->tc_netdev_nb);
-	if (!rc)
-		return 0;
-
-	rhashtable_destroy(&tc_info->encap_table);
+	return 0;
 
 destroy_decap_table:
 	rhashtable_destroy(&tc_info->decap_table);
@@ -1886,7 +1704,6 @@ void bnxt_shutdown_tc(struct bnxt *bp)
 	if (!bnxt_tc_flower_enabled(bp))
 		return;
 
-	unregister_netdevice_notifier_rh(&bp->tc_netdev_nb);
 	rhashtable_destroy(&tc_info->flow_table);
 	rhashtable_destroy(&tc_info->l2_table);
 	rhashtable_destroy(&tc_info->decap_l2_table);

@@ -35,6 +35,8 @@
 
 #ifdef CONFIG_X86
 
+#include <asm/set_memory.h>
+
 static inline int ttm_set_pages_array_wb(struct page **pages, int addrinarray)
 {
 	return set_pages_array_wb(pages, addrinarray);

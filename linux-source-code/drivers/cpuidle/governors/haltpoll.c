@@ -46,10 +46,15 @@ module_param(guest_halt_poll_allow_shrink, bool, 0644);
  * @stop_tick: indication on whether or not to stop the tick
  */
 static int haltpoll_select(struct cpuidle_driver *drv,
-			   struct cpuidle_device *dev)
+			   struct cpuidle_device *dev,
+			   bool *stop_tick)
 {
-	if (!drv->state_count)
+	int latency_req = cpuidle_governor_latency_req(dev->cpu);
+
+	if (!drv->state_count || latency_req == 0) {
+		*stop_tick = false;
 		return 0;
+	}
 
 	if (dev->poll_limit_ns == 0)
 		return 1;
@@ -60,10 +65,12 @@ static int haltpoll_select(struct cpuidle_driver *drv,
 		if (dev->poll_time_limit == true)
 			return 1;
 
+		*stop_tick = false;
 		/* Otherwise, poll again */
 		return 0;
 	}
 
+	*stop_tick = false;
 	/* Last state was halt: poll */
 	return 0;
 }
@@ -126,7 +133,7 @@ static int haltpoll_enable_device(struct cpuidle_driver *drv,
 
 static struct cpuidle_governor haltpoll_governor = {
 	.name =			"haltpoll",
-	.rating =		21,
+	.rating =		9,
 	.enable =		haltpoll_enable_device,
 	.select =		haltpoll_select,
 	.reflect =		haltpoll_reflect,

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /* bbc_envctrl.c: UltraSPARC-III environment control driver.
  *
  * Copyright (C) 2001, 2008 David S. Miller (davem@davemloft.net)
@@ -451,6 +452,9 @@ static void attach_one_temp(struct bbc_i2c_bus *bp, struct platform_device *op,
 	if (!tp)
 		return;
 
+	INIT_LIST_HEAD(&tp->bp_list);
+	INIT_LIST_HEAD(&tp->glob_list);
+
 	tp->client = bbc_i2c_attach(bp, op);
 	if (!tp->client) {
 		kfree(tp);
@@ -495,6 +499,9 @@ static void attach_one_fan(struct bbc_i2c_bus *bp, struct platform_device *op,
 	fp = kzalloc(sizeof(*fp), GFP_KERNEL);
 	if (!fp)
 		return;
+
+	INIT_LIST_HEAD(&fp->bp_list);
+	INIT_LIST_HEAD(&fp->glob_list);
 
 	fp->client = bbc_i2c_attach(bp, op);
 	if (!fp->client) {

@@ -276,7 +276,8 @@ static void route4_queue_work(struct route4_filter *f)
 	tcf_queue_work(&f->rwork, route4_delete_filter_work);
 }
 
-static void route4_destroy(struct tcf_proto *tp)
+static void route4_destroy(struct tcf_proto *tp, bool rtnl_held,
+			   struct netlink_ext_ack *extack)
 {
 	struct route4_head *head = rtnl_dereference(tp->root);
 	int h1, h2;
@@ -311,7 +312,8 @@ static void route4_destroy(struct tcf_proto *tp)
 	kfree_rcu(head, rcu);
 }
 
-static int route4_delete(struct tcf_proto *tp, void *arg, bool *last)
+static int route4_delete(struct tcf_proto *tp, void *arg, bool *last,
+			 bool rtnl_held, struct netlink_ext_ack *extack)
 {
 	struct route4_head *head = rtnl_dereference(tp->root);
 	struct route4_filter *f = arg;
@@ -384,7 +386,7 @@ static int route4_set_parms(struct net *net, struct tcf_proto *tp,
 			    unsigned long base, struct route4_filter *f,
 			    u32 handle, struct route4_head *head,
 			    struct nlattr **tb, struct nlattr *est, int new,
-			    bool ovr)
+			    bool ovr, struct netlink_ext_ack *extack)
 {
 	u32 id = 0, to = 0, nhandle = 0x8000;
 	struct route4_filter *fp;
@@ -392,7 +394,7 @@ static int route4_set_parms(struct net *net, struct tcf_proto *tp,
 	struct route4_bucket *b;
 	int err;
 
-	err = tcf_exts_validate(net, tp, tb, est, &f->exts, ovr);
+	err = tcf_exts_validate(net, tp, tb, est, &f->exts, ovr, true, extack);
 	if (err < 0)
 		return err;
 
@@ -466,7 +468,8 @@ static int route4_set_parms(struct net *net, struct tcf_proto *tp,
 
 static int route4_change(struct net *net, struct sk_buff *in_skb,
 			 struct tcf_proto *tp, unsigned long base, u32 handle,
-			 struct nlattr **tca, void **arg, bool ovr)
+			 struct nlattr **tca, void **arg, bool ovr,
+			 bool rtnl_held, struct netlink_ext_ack *extack)
 {
 	struct route4_head *head = rtnl_dereference(tp->root);
 	struct route4_filter __rcu **fp;
@@ -481,7 +484,7 @@ static int route4_change(struct net *net, struct sk_buff *in_skb,
 	if (opt == NULL)
 		return handle ? -EINVAL : 0;
 
-	err = nla_parse_nested(tb, TCA_ROUTE4_MAX, opt, route4_policy);
+	err = nla_parse_nested(tb, TCA_ROUTE4_MAX, opt, route4_policy, NULL);
 	if (err < 0)
 		return err;
 
@@ -494,7 +497,7 @@ static int route4_change(struct net *net, struct sk_buff *in_skb,
 	if (!f)
 		goto errout;
 
-	err = tcf_exts_init(&f->exts, TCA_ROUTE4_ACT, TCA_ROUTE4_POLICE);
+	err = tcf_exts_init(&f->exts, net, TCA_ROUTE4_ACT, TCA_ROUTE4_POLICE);
 	if (err < 0)
 		goto errout;
 
@@ -510,7 +513,7 @@ static int route4_change(struct net *net, struct sk_buff *in_skb,
 	}
 
 	err = route4_set_parms(net, tp, base, f, handle, head, tb,
-			       tca[TCA_RATE], new, ovr);
+			       tca[TCA_RATE], new, ovr, extack);
 	if (err < 0)
 		goto errout;
 
@@ -558,15 +561,13 @@ errout:
 	return err;
 }
 
-static void route4_walk(struct tcf_proto *tp, struct tcf_walker *arg)
+static void route4_walk(struct tcf_proto *tp, struct tcf_walker *arg,
+			bool rtnl_held)
 {
 	struct route4_head *head = rtnl_dereference(tp->root);
 	unsigned int h, h1;
 
-	if (head == NULL)
-		arg->stop = 1;
-
-	if (arg->stop)
+	if (head == NULL || arg->stop)
 		return;
 
 	for (h = 0; h <= 256; h++) {
@@ -595,7 +596,7 @@ static void route4_walk(struct tcf_proto *tp, struct tcf_walker *arg)
 }
 
 static int route4_dump(struct net *net, struct tcf_proto *tp, void *fh,
-		       struct sk_buff *skb, struct tcmsg *t)
+		       struct sk_buff *skb, struct tcmsg *t, bool rtnl_held)
 {
 	struct route4_filter *f = fh;
 	struct nlattr *nest;

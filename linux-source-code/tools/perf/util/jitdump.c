@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <sys/sysmacros.h>
 #include <sys/types.h>
 #include <errno.h>
@@ -37,7 +38,7 @@ struct jit_buf_desc {
 	uint64_t	 sample_type;
 	size_t           bufsize;
 	FILE             *in;
-	bool		 needs_bswap; /* handles cross-endianess */
+	bool		 needs_bswap; /* handles cross-endianness */
 	bool		 use_arch_timestamp;
 	void		 *debug_data;
 	void		 *unwinding_data;
@@ -113,16 +114,8 @@ jit_close(struct jit_buf_desc *jd)
 }
 
 static int
-jit_validate_events(struct perf_session *session __maybe_unused)
+jit_validate_events(struct perf_session *session)
 {
-	/*
-	 * RHEL7 we don't support use_clockid yet,
-	 * making all pass and omiting following code.
-	 */
-
-	return 0;
-
-#if 0
 	struct perf_evsel *evsel;
 
 	/*
@@ -133,7 +126,6 @@ jit_validate_events(struct perf_session *session __maybe_unused)
 			return -1;
 	}
 	return 0;
-#endif
 }
 
 static int

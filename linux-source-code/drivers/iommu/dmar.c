@@ -68,12 +68,13 @@ DECLARE_RWSEM(dmar_global_lock);
 LIST_HEAD(dmar_drhd_units);
 
 struct acpi_table_header * __initdata dmar_tbl;
-static acpi_size dmar_tbl_size;
 static int dmar_dev_scope_status = 1;
 static unsigned long dmar_seq_ids[BITS_TO_LONGS(DMAR_UNITS_SUPPORTED)];
 
 static int alloc_iommu(struct dmar_drhd_unit *drhd);
 static void free_iommu(struct intel_iommu *iommu);
+
+extern const struct iommu_ops intel_iommu_ops;
 
 static void dmar_register_drhd_unit(struct dmar_drhd_unit *drhd)
 {
@@ -143,7 +144,7 @@ dmar_alloc_pci_notify_info(struct pci_dev *dev, unsigned long event)
 		for (tmp = dev; tmp; tmp = tmp->bus->self)
 			level++;
 
-	size = sizeof(*info) + level * sizeof(struct acpi_dmar_pci_path);
+	size = sizeof(*info) + level * sizeof(info->path[0]);
 	if (size <= sizeof(dmar_pci_notify_info_buf)) {
 		info = (struct dmar_pci_notify_info *)dmar_pci_notify_info_buf;
 	} else {
@@ -310,7 +311,7 @@ static int dmar_pci_bus_add_dev(struct dmar_pci_notify_info *info)
 				((void *)drhd) + drhd->header.length,
 				dmaru->segment,
 				dmaru->devices, dmaru->devices_cnt);
-		if (ret != 0)
+		if (ret)
 			break;
 	}
 	if (ret >= 0)
@@ -390,7 +391,7 @@ static int dmar_parse_one_drhd(struct acpi_dmar_header *header, void *arg)
 {
 	struct acpi_dmar_hardware_unit *drhd;
 	struct dmar_drhd_unit *dmaru;
-	int ret = 0;
+	int ret;
 
 	drhd = (struct acpi_dmar_hardware_unit *)header;
 	dmaru = dmar_find_dmaru(drhd);
@@ -496,7 +497,7 @@ static int dmar_parse_one_rhsa(struct acpi_dmar_header *header, void *arg)
 #define	dmar_parse_one_rhsa		dmar_res_noop
 #endif
 
-static void __init
+static void
 dmar_table_print_dmar_entry(struct acpi_dmar_header *header)
 {
 	struct acpi_dmar_hardware_unit *drhd;
@@ -543,26 +544,23 @@ static int __init dmar_table_detect(void)
 	acpi_status status = AE_OK;
 
 	/* if we could find DMAR table, then there are DMAR devices */
-	status = acpi_get_table_with_size(ACPI_SIG_DMAR, 0,
-				(struct acpi_table_header **)&dmar_tbl,
-				&dmar_tbl_size);
+	status = acpi_get_table(ACPI_SIG_DMAR, 0, &dmar_tbl);
 
 	if (ACPI_SUCCESS(status) && !dmar_tbl) {
 		pr_warn("Unable to map DMAR\n");
 		status = AE_NOT_FOUND;
 	}
 
-	return (ACPI_SUCCESS(status) ? 1 : 0);
+	return ACPI_SUCCESS(status) ? 0 : -ENOENT;
 }
 
 static int dmar_walk_remapping_entries(struct acpi_dmar_header *start,
 				       size_t len, struct dmar_res_callback *cb)
 {
-	int ret = 0;
 	struct acpi_dmar_header *iter, *next;
 	struct acpi_dmar_header *end = ((void *)start) + len;
 
-	for (iter = start; iter < end && ret == 0; iter = next) {
+	for (iter = start; iter < end; iter = next) {
 		next = (void *)iter + iter->length;
 		if (iter->length == 0) {
 			/* Avoid looping forever on bad ACPI tables */
@@ -571,8 +569,7 @@ static int dmar_walk_remapping_entries(struct acpi_dmar_header *start,
 		} else if (next > end) {
 			/* Avoid passing table end */
 			pr_warn(FW_BUG "Record passes table end\n");
-			ret = -EINVAL;
-			break;
+			return -EINVAL;
 		}
 
 		if (cb->print_entry)
@@ -583,15 +580,19 @@ static int dmar_walk_remapping_entries(struct acpi_dmar_header *start,
 			pr_debug("Unknown DMAR structure type %d\n",
 				 iter->type);
 		} else if (cb->cb[iter->type]) {
+			int ret;
+
 			ret = cb->cb[iter->type](iter, cb->arg[iter->type]);
+			if (ret)
+				return ret;
 		} else if (!cb->ignore_unhandled) {
 			pr_warn("No handler for DMAR structure type %d\n",
 				iter->type);
-			ret = -EINVAL;
+			return -EINVAL;
 		}
 	}
 
-	return ret;
+	return 0;
 }
 
 static inline int dmar_walk_dmar_table(struct acpi_table_dmar *dmar,
@@ -608,8 +609,8 @@ static int __init
 parse_dmar_table(void)
 {
 	struct acpi_table_dmar *dmar;
-	int ret = 0;
 	int drhd_count = 0;
+	int ret;
 	struct dmar_res_callback cb = {
 		.print_entry = true,
 		.ignore_unhandled = true,
@@ -805,7 +806,7 @@ int __init dmar_dev_scope_init(void)
 	return dmar_dev_scope_status;
 }
 
-void dmar_register_bus_notifier(void)
+void __init dmar_register_bus_notifier(void)
 {
 	bus_register_notifier(&pci_bus_type, &dmar_pci_bus_nb);
 }
@@ -835,17 +836,16 @@ int __init dmar_table_init(void)
 	return dmar_table_initialized < 0 ? dmar_table_initialized : 0;
 }
 
-static inline void warn_invalid_dmar(u64 addr, const char *message)
+static void warn_invalid_dmar(u64 addr, const char *message)
 {
-	printk_once(FW_WARN "%s at %d: "
-		    "Your BIOS is broken; DMAR reported at address %llx%s!\n"
-		    "BIOS vendor: %s; Ver: %s; Product Version: %s\n",
-		    __FILE__, __LINE__,
-		    addr, message,
-		    dmi_get_system_info(DMI_BIOS_VENDOR),
-		    dmi_get_system_info(DMI_BIOS_VERSION),
-		    dmi_get_system_info(DMI_PRODUCT_VERSION));
-	add_taint(TAINT_FIRMWARE_WORKAROUND, LOCKDEP_STILL_OK);
+	WARN_TAINT_ONCE(
+		1, TAINT_FIRMWARE_WORKAROUND,
+		"Your BIOS is broken; DMAR reported at address %llx%s!\n"
+		"BIOS vendor: %s; Ver: %s; Product Version: %s\n",
+		addr, message,
+		dmi_get_system_info(DMI_BIOS_VENDOR),
+		dmi_get_system_info(DMI_BIOS_VERSION),
+		dmi_get_system_info(DMI_PRODUCT_VERSION));
 }
 
 static int __ref
@@ -896,27 +896,28 @@ int __init detect_intel_iommu(void)
 
 	down_write(&dmar_global_lock);
 	ret = dmar_table_detect();
-	if (ret)
-		ret = !dmar_walk_dmar_table((struct acpi_table_dmar *)dmar_tbl,
-					    &validate_drhd_cb);
-	if (ret && !no_iommu && !iommu_detected && !dmar_disabled) {
+	if (!ret)
+		ret = dmar_walk_dmar_table((struct acpi_table_dmar *)dmar_tbl,
+					   &validate_drhd_cb);
+	if (!ret && !no_iommu && !iommu_detected && !dmar_disabled) {
 		iommu_detected = 1;
 		/* Make sure ACS will be enabled */
 		pci_request_acs();
 	}
 
 #ifdef CONFIG_X86
-	if (ret)
+	if (!ret)
 		x86_init.iommu.iommu_init = intel_iommu_init;
 #endif
 
-	early_acpi_os_unmap_memory((void __iomem *)dmar_tbl, dmar_tbl_size);
-	dmar_tbl = NULL;
+	if (dmar_tbl) {
+		acpi_put_table(dmar_tbl);
+		dmar_tbl = NULL;
+	}
 	up_write(&dmar_global_lock);
 
-	return ret ? 1 : -ENODEV;
+	return ret ? ret : 1;
 }
-
 
 static void unmap_iommu(struct intel_iommu *iommu)
 {
@@ -1083,14 +1084,17 @@ static int alloc_iommu(struct dmar_drhd_unit *drhd)
 	raw_spin_lock_init(&iommu->register_lock);
 
 	if (intel_iommu_enabled) {
-		iommu->iommu_dev = iommu_device_create(NULL, iommu,
-						       intel_iommu_groups,
-						       "%s", iommu->name);
-
-		if (IS_ERR(iommu->iommu_dev)) {
-			err = PTR_ERR(iommu->iommu_dev);
+		err = iommu_device_sysfs_add(&iommu->iommu, NULL,
+					     intel_iommu_groups,
+					     "%s", iommu->name);
+		if (err)
 			goto err_unmap;
-		}
+
+		iommu_device_set_ops(&iommu->iommu, &intel_iommu_ops);
+
+		err = iommu_device_register(&iommu->iommu);
+		if (err)
+			goto err_unmap;
 	}
 
 	drhd->iommu = iommu;
@@ -1108,12 +1112,20 @@ error:
 
 static void free_iommu(struct intel_iommu *iommu)
 {
-	iommu_device_destroy(iommu->iommu_dev);
+	if (intel_iommu_enabled) {
+		iommu_device_unregister(&iommu->iommu);
+		iommu_device_sysfs_remove(&iommu->iommu);
+	}
 
 	if (iommu->irq) {
+		if (iommu->pr_irq) {
+			free_irq(iommu->pr_irq, iommu);
+			dmar_free_hwirq(iommu->pr_irq);
+			iommu->pr_irq = 0;
+		}
 		free_irq(iommu->irq, iommu);
-		irq_set_handler_data(iommu->irq, NULL);
 		dmar_free_hwirq(iommu->irq);
+		iommu->irq = 0;
 	}
 
 	if (iommu->qi) {
@@ -1333,7 +1345,7 @@ void qi_flush_dev_iotlb(struct intel_iommu *iommu, u16 sid, u16 qdep,
 	struct qi_desc desc;
 
 	if (mask) {
-		BUG_ON(addr & ((1 << (VTD_PAGE_SHIFT + mask)) - 1));
+		WARN_ON_ONCE(addr & ((1ULL << (VTD_PAGE_SHIFT + mask)) - 1));
 		addr |= (1ULL << (VTD_PAGE_SHIFT + mask - 1)) - 1;
 		desc.high = QI_DEV_IOTLB_ADDR(addr) | QI_DEV_IOTLB_SIZE;
 	} else
@@ -1446,7 +1458,7 @@ int dmar_enable_qi(struct intel_iommu *iommu)
 
 	qi->desc = page_address(desc_page);
 
-	qi->desc_status = kzalloc(QI_LENGTH * sizeof(int), GFP_ATOMIC);
+	qi->desc_status = kcalloc(QI_LENGTH, sizeof(int), GFP_ATOMIC);
 	if (!qi->desc_status) {
 		free_page((unsigned long) qi->desc);
 		kfree(qi);
@@ -1513,53 +1525,68 @@ static const char *dmar_get_fault_reason(u8 fault_reason, int *fault_type)
 	}
 }
 
+
+static inline int dmar_msi_reg(struct intel_iommu *iommu, int irq)
+{
+	if (iommu->irq == irq)
+		return DMAR_FECTL_REG;
+	else if (iommu->pr_irq == irq)
+		return DMAR_PECTL_REG;
+	else
+		BUG();
+}
+
 void dmar_msi_unmask(struct irq_data *data)
 {
 	struct intel_iommu *iommu = irq_data_get_irq_handler_data(data);
+	int reg = dmar_msi_reg(iommu, data->irq);
 	unsigned long flag;
 
 	/* unmask it */
 	raw_spin_lock_irqsave(&iommu->register_lock, flag);
-	writel(0, iommu->reg + DMAR_FECTL_REG);
+	writel(0, iommu->reg + reg);
 	/* Read a reg to force flush the post write */
-	readl(iommu->reg + DMAR_FECTL_REG);
+	readl(iommu->reg + reg);
 	raw_spin_unlock_irqrestore(&iommu->register_lock, flag);
 }
 
 void dmar_msi_mask(struct irq_data *data)
 {
-	unsigned long flag;
 	struct intel_iommu *iommu = irq_data_get_irq_handler_data(data);
+	int reg = dmar_msi_reg(iommu, data->irq);
+	unsigned long flag;
 
 	/* mask it */
 	raw_spin_lock_irqsave(&iommu->register_lock, flag);
-	writel(DMA_FECTL_IM, iommu->reg + DMAR_FECTL_REG);
+	writel(DMA_FECTL_IM, iommu->reg + reg);
 	/* Read a reg to force flush the post write */
-	readl(iommu->reg + DMAR_FECTL_REG);
+	readl(iommu->reg + reg);
 	raw_spin_unlock_irqrestore(&iommu->register_lock, flag);
 }
 
 void dmar_msi_write(int irq, struct msi_msg *msg)
 {
 	struct intel_iommu *iommu = irq_get_handler_data(irq);
+	int reg = dmar_msi_reg(iommu, irq);
 	unsigned long flag;
 
 	raw_spin_lock_irqsave(&iommu->register_lock, flag);
-	writel(msg->data, iommu->reg + DMAR_FEDATA_REG);
-	writel(msg->address_lo, iommu->reg + DMAR_FEADDR_REG);
-	writel(msg->address_hi, iommu->reg + DMAR_FEUADDR_REG);
+	writel(msg->data, iommu->reg + reg + 4);
+	writel(msg->address_lo, iommu->reg + reg + 8);
+	writel(msg->address_hi, iommu->reg + reg + 12);
 	raw_spin_unlock_irqrestore(&iommu->register_lock, flag);
 }
 
 void dmar_msi_read(int irq, struct msi_msg *msg)
 {
 	struct intel_iommu *iommu = irq_get_handler_data(irq);
+	int reg = dmar_msi_reg(iommu, irq);
 	unsigned long flag;
 
 	raw_spin_lock_irqsave(&iommu->register_lock, flag);
-	msg->data = readl(iommu->reg + DMAR_FEDATA_REG);
-	msg->address_lo = readl(iommu->reg + DMAR_FEADDR_REG);
-	msg->address_hi = readl(iommu->reg + DMAR_FEUADDR_REG);
+	msg->data = readl(iommu->reg + reg + 4);
+	msg->address_lo = readl(iommu->reg + reg + 8);
+	msg->address_hi = readl(iommu->reg + reg + 12);
 	raw_spin_unlock_irqrestore(&iommu->register_lock, flag);
 }
 
@@ -1591,17 +1618,13 @@ irqreturn_t dmar_fault(int irq, void *dev_id)
 	int reg, fault_index;
 	u32 fault_status;
 	unsigned long flag;
-	bool ratelimited;
 	static DEFINE_RATELIMIT_STATE(rs,
 				      DEFAULT_RATELIMIT_INTERVAL,
 				      DEFAULT_RATELIMIT_BURST);
 
-	/* Disable printing, simply clear the fault when ratelimited */
-	ratelimited = !__ratelimit(&rs);
-
 	raw_spin_lock_irqsave(&iommu->register_lock, flag);
 	fault_status = readl(iommu->reg + DMAR_FSTS_REG);
-	if (fault_status && !ratelimited)
+	if (fault_status && __ratelimit(&rs))
 		pr_err("DRHD: handling fault status reg %x\n", fault_status);
 
 	/* TBD: ignore advanced fault log currently */
@@ -1611,6 +1634,8 @@ irqreturn_t dmar_fault(int irq, void *dev_id)
 	fault_index = dma_fsts_fault_record_index(fault_status);
 	reg = cap_fault_reg_offset(iommu->cap);
 	while (1) {
+		/* Disable printing, simply clear the fault when ratelimited */
+		bool ratelimited = !__ratelimit(&rs);
 		u8 fault_reason;
 		u16 source_id;
 		u64 guest_addr;
@@ -1670,21 +1695,12 @@ int dmar_set_interrupt(struct intel_iommu *iommu)
 	if (iommu->irq)
 		return 0;
 
-	irq = dmar_alloc_hwirq();
-	if (irq <= 0) {
+	irq = dmar_alloc_hwirq(iommu->seq_id, iommu->node, iommu);
+	if (irq > 0) {
+		iommu->irq = irq;
+	} else {
 		pr_err("No free IRQ vectors\n");
 		return -EINVAL;
-	}
-
-	irq_set_handler_data(irq, iommu);
-	iommu->irq = irq;
-
-	ret = arch_setup_dmar_msi(irq);
-	if (ret) {
-		irq_set_handler_data(irq, NULL);
-		iommu->irq = 0;
-		dmar_free_hwirq(irq);
-		return ret;
 	}
 
 	ret = request_irq(irq, dmar_fault, IRQF_NO_THREAD, iommu->name, iommu);
@@ -1794,10 +1810,9 @@ IOMMU_INIT_POST(detect_intel_iommu);
  * for Directed-IO Architecture Specifiction, Rev 2.2, Section 8.8
  * "Remapping Hardware Unit Hot Plug".
  */
-static u8 dmar_hp_uuid[] = {
-	/* 0000 */    0xA6, 0xA3, 0xC1, 0xD8, 0x9B, 0xBE, 0x9B, 0x4C,
-	/* 0008 */    0x91, 0xBF, 0xC3, 0xCB, 0x81, 0xFC, 0x5D, 0xAF
-};
+static guid_t dmar_hp_guid =
+	GUID_INIT(0xD8C1A3A6, 0xBE9B, 0x4C9B,
+		  0x91, 0xBF, 0xC3, 0xCB, 0x81, 0xFC, 0x5D, 0xAF);
 
 /*
  * Currently there's only one revision and BIOS will not check the revision id,
@@ -1810,7 +1825,7 @@ static u8 dmar_hp_uuid[] = {
 
 static inline bool dmar_detect_dsm(acpi_handle handle, int func)
 {
-	return acpi_check_dsm(handle, dmar_hp_uuid, DMAR_DSM_REV_ID, 1 << func);
+	return acpi_check_dsm(handle, &dmar_hp_guid, DMAR_DSM_REV_ID, 1 << func);
 }
 
 static int dmar_walk_dsm_resource(acpi_handle handle, int func,
@@ -1829,7 +1844,7 @@ static int dmar_walk_dsm_resource(acpi_handle handle, int func,
 	if (!dmar_detect_dsm(handle, func))
 		return 0;
 
-	obj = acpi_evaluate_dsm_typed(handle, dmar_hp_uuid, DMAR_DSM_REV_ID,
+	obj = acpi_evaluate_dsm_typed(handle, &dmar_hp_guid, DMAR_DSM_REV_ID,
 				      func, NULL, ACPI_TYPE_BUFFER);
 	if (!obj)
 		return -ENODEV;
@@ -1874,10 +1889,11 @@ static int dmar_hp_remove_drhd(struct acpi_dmar_header *header, void *arg)
 	/*
 	 * All PCI devices managed by this unit should have been destroyed.
 	 */
-	if (!dmaru->include_all && dmaru->devices && dmaru->devices_cnt)
+	if (!dmaru->include_all && dmaru->devices && dmaru->devices_cnt) {
 		for_each_active_dev_scope(dmaru->devices,
 					  dmaru->devices_cnt, i, dev)
 			return -EBUSY;
+	}
 
 	ret = dmar_ir_hotplug(dmaru, false);
 	if (ret == 0)
@@ -2026,3 +2042,28 @@ int dmar_device_remove(acpi_handle handle)
 {
 	return dmar_device_hotplug(handle, false);
 }
+
+/*
+ * dmar_platform_optin - Is %DMA_CTRL_PLATFORM_OPT_IN_FLAG set in DMAR table
+ *
+ * Returns true if the platform has %DMA_CTRL_PLATFORM_OPT_IN_FLAG set in
+ * the ACPI DMAR table. This means that the platform boot firmware has made
+ * sure no device can issue DMA outside of RMRR regions.
+ */
+bool dmar_platform_optin(void)
+{
+	struct acpi_table_dmar *dmar;
+	acpi_status status;
+	bool ret;
+
+	status = acpi_get_table(ACPI_SIG_DMAR, 0,
+				(struct acpi_table_header **)&dmar);
+	if (ACPI_FAILURE(status))
+		return false;
+
+	ret = !!(dmar->flags & DMAR_PLATFORM_OPT_IN);
+	acpi_put_table((struct acpi_table_header *)dmar);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(dmar_platform_optin);

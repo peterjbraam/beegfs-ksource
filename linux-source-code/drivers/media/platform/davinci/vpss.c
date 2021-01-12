@@ -11,16 +11,13 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- *
  * common vpss system module platform driver for all video drivers.
  */
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/io.h>
 #include <linux/pm_runtime.h>
+#include <linux/err.h>
 
 #include <media/davinci/vpss.h>
 
@@ -62,9 +59,9 @@ MODULE_AUTHOR("Texas Instruments");
 #define DM365_ISP5_INTSEL1		0x10
 #define DM365_ISP5_INTSEL2		0x14
 #define DM365_ISP5_INTSEL3		0x18
-#define DM365_ISP5_CCDCMUX 		0x20
-#define DM365_ISP5_PG_FRAME_SIZE 	0x28
-#define DM365_VPBE_CLK_CTRL 		0x00
+#define DM365_ISP5_CCDCMUX		0x20
+#define DM365_ISP5_PG_FRAME_SIZE	0x28
+#define DM365_VPBE_CLK_CTRL		0x00
 
 #define VPSS_CLK_CTRL			0x01c40044
 #define VPSS_CLK_CTRL_VENCCLKEN		BIT(3)
@@ -81,8 +78,8 @@ MODULE_AUTHOR("Texas Instruments");
 #define DM365_ISP5_INTSEL3_DEFAULT	0x00000015
 
 /* masks and shifts for DM365*/
-#define DM365_CCDC_PG_VD_POL_SHIFT 	0
-#define DM365_CCDC_PG_HD_POL_SHIFT 	1
+#define DM365_CCDC_PG_VD_POL_SHIFT	0
+#define DM365_CCDC_PG_HD_POL_SHIFT	1
 
 #define CCD_SRC_SEL_MASK		(BIT_MASK(5) | BIT_MASK(4))
 #define CCD_SRC_SEL_SHIFT		4
@@ -119,7 +116,7 @@ struct vpss_hw_ops {
 struct vpss_oper_config {
 	__iomem void *vpss_regs_base0;
 	__iomem void *vpss_regs_base1;
-	resource_size_t *vpss_regs_base2;
+	__iomem void *vpss_regs_base2;
 	enum vpss_platform_type platform;
 	spinlock_t vpss_lock;
 	struct vpss_hw_ops hw_ops;
@@ -260,8 +257,8 @@ static int dm355_enable_clock(enum vpss_clock_sel clock_sel, int en)
 		shift = 6;
 		break;
 	default:
-		printk(KERN_ERR "dm355_enable_clock:"
-				" Invalid selector: %d\n", clock_sel);
+		printk(KERN_ERR "dm355_enable_clock: Invalid selector: %d\n",
+		       clock_sel);
 		return -EINVAL;
 	}
 
@@ -404,9 +401,8 @@ EXPORT_SYMBOL(dm365_vpss_set_pg_frame_size);
 
 static int vpss_probe(struct platform_device *pdev)
 {
-	struct resource		*r1, *r2;
+	struct resource *res;
 	char *platform_name;
-	int status;
 
 	if (!pdev->dev.platform_data) {
 		dev_err(&pdev->dev, "no platform data\n");
@@ -421,44 +417,24 @@ static int vpss_probe(struct platform_device *pdev)
 	else if (!strcmp(platform_name, "dm644x_vpss"))
 		oper_cfg.platform = DM644X;
 	else {
-		dev_err(&pdev->dev, "vpss driver not supported on"
-			" this platform\n");
+		dev_err(&pdev->dev, "vpss driver not supported on this platform\n");
 		return -ENODEV;
 	}
 
 	dev_info(&pdev->dev, "%s vpss probed\n", platform_name);
-	r1 = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	if (!r1)
-		return -ENOENT;
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 
-	r1 = request_mem_region(r1->start, resource_size(r1), r1->name);
-	if (!r1)
-		return -EBUSY;
-
-	oper_cfg.vpss_regs_base0 = ioremap(r1->start, resource_size(r1));
-	if (!oper_cfg.vpss_regs_base0) {
-		status = -EBUSY;
-		goto fail1;
-	}
+	oper_cfg.vpss_regs_base0 = devm_ioremap_resource(&pdev->dev, res);
+	if (IS_ERR(oper_cfg.vpss_regs_base0))
+		return PTR_ERR(oper_cfg.vpss_regs_base0);
 
 	if (oper_cfg.platform == DM355 || oper_cfg.platform == DM365) {
-		r2 = platform_get_resource(pdev, IORESOURCE_MEM, 1);
-		if (!r2) {
-			status = -ENOENT;
-			goto fail2;
-		}
-		r2 = request_mem_region(r2->start, resource_size(r2), r2->name);
-		if (!r2) {
-			status = -EBUSY;
-			goto fail2;
-		}
+		res = platform_get_resource(pdev, IORESOURCE_MEM, 1);
 
-		oper_cfg.vpss_regs_base1 = ioremap(r2->start,
-						   resource_size(r2));
-		if (!oper_cfg.vpss_regs_base1) {
-			status = -EBUSY;
-			goto fail3;
-		}
+		oper_cfg.vpss_regs_base1 = devm_ioremap_resource(&pdev->dev,
+								 res);
+		if (IS_ERR(oper_cfg.vpss_regs_base1))
+			return PTR_ERR(oper_cfg.vpss_regs_base1);
 	}
 
 	if (oper_cfg.platform == DM355) {
@@ -493,30 +469,13 @@ static int vpss_probe(struct platform_device *pdev)
 
 	spin_lock_init(&oper_cfg.vpss_lock);
 	dev_info(&pdev->dev, "%s vpss probe success\n", platform_name);
-	return 0;
 
-fail3:
-	release_mem_region(r2->start, resource_size(r2));
-fail2:
-	iounmap(oper_cfg.vpss_regs_base0);
-fail1:
-	release_mem_region(r1->start, resource_size(r1));
-	return status;
+	return 0;
 }
 
 static int vpss_remove(struct platform_device *pdev)
 {
-	struct resource		*res;
-
 	pm_runtime_disable(&pdev->dev);
-	iounmap(oper_cfg.vpss_regs_base0);
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	release_mem_region(res->start, resource_size(res));
-	if (oper_cfg.platform == DM355 || oper_cfg.platform == DM365) {
-		iounmap(oper_cfg.vpss_regs_base1);
-		res = platform_get_resource(pdev, IORESOURCE_MEM, 1);
-		release_mem_region(res->start, resource_size(res));
-	}
 	return 0;
 }
 
@@ -540,7 +499,6 @@ static const struct dev_pm_ops vpss_pm_ops = {
 static struct platform_driver vpss_driver = {
 	.driver = {
 		.name	= "vpss",
-		.owner = THIS_MODULE,
 		.pm = &vpss_pm_ops,
 	},
 	.remove = vpss_remove,

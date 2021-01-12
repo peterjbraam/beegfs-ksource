@@ -66,7 +66,7 @@
 #include <crypto/crypto_wq.h>
 #include <asm/byteorder.h>
 #include <linux/hardirq.h>
-#include <asm/i387.h>
+#include <asm/fpu/api.h>
 #include "sha256_mb_ctx.h"
 
 #define FLUSH_INTERVAL 1000 /* in usec */
@@ -106,16 +106,8 @@ static asmlinkage struct job_sha256* (*sha256_job_mgr_flush)
 static asmlinkage struct job_sha256* (*sha256_job_mgr_get_comp_job)
 			(struct sha256_mb_mgr *state);
 
-inline void sha256_init_digest(uint32_t *digest)
-{
-	static const uint32_t initial_digest[SHA256_DIGEST_LENGTH] = {
-				SHA256_H0, SHA256_H1, SHA256_H2, SHA256_H3,
-				SHA256_H4, SHA256_H5, SHA256_H6, SHA256_H7};
-	memcpy(digest, initial_digest, sizeof(initial_digest));
-}
-
 inline uint32_t sha256_pad(uint8_t padblock[SHA256_BLOCK_SIZE * 2],
-			 uint32_t total_len)
+			 uint64_t total_len)
 {
 	uint32_t i = total_len & (SHA256_BLOCK_SIZE - 1);
 
@@ -245,10 +237,8 @@ static struct sha256_hash_ctx *sha256_ctx_mgr_submit(struct sha256_ctx_mgr *mgr,
 					  uint32_t len,
 					  int flags)
 {
-	if (flags & (~HASH_ENTIRE)) {
-		/* User should not pass anything other than FIRST, UPDATE
-		 * or LAST
-		 */
+	if (flags & ~(HASH_UPDATE | HASH_LAST)) {
+		/* User should not pass anything other than UPDATE or LAST */
 		ctx->error = HASH_CTX_ERROR_INVALID_FLAGS;
 		return ctx;
 	}
@@ -259,21 +249,10 @@ static struct sha256_hash_ctx *sha256_ctx_mgr_submit(struct sha256_ctx_mgr *mgr,
 		return ctx;
 	}
 
-	if ((ctx->status & HASH_CTX_STS_COMPLETE) && !(flags & HASH_FIRST)) {
+	if (ctx->status & HASH_CTX_STS_COMPLETE) {
 		/* Cannot update a finished job. */
 		ctx->error = HASH_CTX_ERROR_ALREADY_COMPLETED;
 		return ctx;
-	}
-
-	if (flags & HASH_FIRST) {
-		/* Init digest */
-		sha256_init_digest(ctx->job.result_digest);
-
-		/* Reset byte counter */
-		ctx->total_length = 0;
-
-		/* Clear extra blocks */
-		ctx->partial_block_buffer_length = 0;
 	}
 
 	/* If we made it here, there was no error during this call to submit */
@@ -283,7 +262,8 @@ static struct sha256_hash_ctx *sha256_ctx_mgr_submit(struct sha256_ctx_mgr *mgr,
 	ctx->incoming_buffer = buffer;
 	ctx->incoming_buffer_length = len;
 
-	/* Store the user's request flags and mark this ctx as currently
+	/*
+	 * Store the user's request flags and mark this ctx as currently
 	 * being processed.
 	 */
 	ctx->status = (flags & HASH_LAST) ?
@@ -299,8 +279,9 @@ static struct sha256_hash_ctx *sha256_ctx_mgr_submit(struct sha256_ctx_mgr *mgr,
 	 * Or if the user's buffer contains less than a whole block,
 	 * append as much as possible to the extra block.
 	 */
-	if ((ctx->partial_block_buffer_length) | (len < SHA256_BLOCK_SIZE)) {
-		/* Compute how many bytes to copy from user buffer into
+	if (ctx->partial_block_buffer_length || len < SHA256_BLOCK_SIZE) {
+		/*
+		 * Compute how many bytes to copy from user buffer into
 		 * extra block
 		 */
 		uint32_t copy_len = SHA256_BLOCK_SIZE -
@@ -323,7 +304,8 @@ static struct sha256_hash_ctx *sha256_ctx_mgr_submit(struct sha256_ctx_mgr *mgr,
 		/* The extra block should never contain more than 1 block */
 		assert(ctx->partial_block_buffer_length <= SHA256_BLOCK_SIZE);
 
-		/* If the extra block buffer contains exactly 1 block,
+		/*
+		 * If the extra block buffer contains exactly 1 block,
 		 * it can be hashed.
 		 */
 		if (ctx->partial_block_buffer_length >= SHA256_BLOCK_SIZE) {
@@ -482,10 +464,10 @@ static int sha_complete_job(struct mcryptd_hash_request_ctx *rctx,
 
 			req = cast_mcryptd_ctx_to_req(req_ctx);
 			if (irqs_disabled())
-				rctx->complete(&req->base, ret);
+				req_ctx->complete(&req->base, ret);
 			else {
 				local_bh_disable();
-				rctx->complete(&req->base, ret);
+				req_ctx->complete(&req->base, ret);
 				local_bh_enable();
 			}
 		}

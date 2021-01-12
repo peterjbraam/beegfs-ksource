@@ -127,12 +127,6 @@ static ssize_t __rapl_##_var##_show(struct kobject *kobj,	\
 static struct kobj_attribute format_attr_##_var =		\
 	__ATTR(_name, 0444, __rapl_##_var##_show, NULL)
 
-#define RAPL_EVENT_DESC(_name, _config)				\
-{								\
-	.attr	= __ATTR(_name, 0444, rapl_event_show, NULL),	\
-	.config	= _config,					\
-}
-
 #define RAPL_CNTR_WIDTH 32
 
 #define RAPL_EVENT_ATTR_STR(_name, v, str)					\
@@ -167,7 +161,7 @@ static u64 rapl_timer_ms;
 
 static inline struct rapl_pmu *cpu_to_rapl_pmu(unsigned int cpu)
 {
-	unsigned int pkgid = topology_logical_die_id(cpu);
+	unsigned int pkgid = topology_logical_package_id(cpu);
 
 	/*
 	 * The unsigned check also catches the '-1' return value for non
@@ -369,6 +363,8 @@ static int rapl_pmu_event_init(struct perf_event *event)
 	if (event->cpu < 0)
 		return -EINVAL;
 
+	event->event_caps |= PERF_EV_CAP_READ_ACTIVE_PKG;
+
 	/*
 	 * check event is known (determines counter)
 	 */
@@ -431,11 +427,7 @@ static void rapl_pmu_event_read(struct perf_event *event)
 static ssize_t rapl_get_attr_cpumask(struct device *dev,
 				struct device_attribute *attr, char *buf)
 {
-	int n = cpulist_scnprintf(buf, PAGE_SIZE - 2, &rapl_cpu_mask);
-
-	buf[n++] = '\n';
-	buf[n] = '\0';
-	return n;
+	return cpumap_print_to_pagebuf(true, buf, &rapl_cpu_mask);
 }
 
 static DEVICE_ATTR(cpumask, S_IRUGO, rapl_get_attr_cpumask, NULL);
@@ -585,7 +577,7 @@ static int rapl_cpu_offline(unsigned int cpu)
 
 	pmu->cpu = -1;
 	/* Find a new cpu to collect rapl events */
-	target = cpumask_any_but(topology_die_cpumask(cpu), cpu);
+	target = cpumask_any_but(topology_core_cpumask(cpu), cpu);
 
 	/* Migrate rapl events to the new target */
 	if (target < nr_cpu_ids) {
@@ -612,14 +604,14 @@ static int rapl_cpu_online(unsigned int cpu)
 		pmu->timer_interval = ms_to_ktime(rapl_timer_ms);
 		rapl_hrtimer_init(pmu);
 
-		rapl_pmus->pmus[topology_logical_die_id(cpu)] = pmu;
+		rapl_pmus->pmus[topology_logical_package_id(cpu)] = pmu;
 	}
 
 	/*
 	 * Check if there is an online cpu in the package which collects rapl
 	 * events already.
 	 */
-	target = cpumask_any_and(&rapl_cpu_mask, topology_die_cpumask(cpu));
+	target = cpumask_any_and(&rapl_cpu_mask, topology_core_cpumask(cpu));
 	if (target < nr_cpu_ids)
 		return 0;
 
@@ -627,29 +619,6 @@ static int rapl_cpu_online(unsigned int cpu)
 	pmu->cpu = cpu;
 	return 0;
 }
-
-static int rapl_cpu_notifier(struct notifier_block *self,
-			     unsigned long action, void *hcpu)
-{
-	unsigned int cpu = (long)hcpu;
-
-	switch (action & ~CPU_TASKS_FROZEN) {
-	case CPU_DOWN_FAILED:
-	case CPU_ONLINE:
-		rapl_cpu_online(cpu);
-		break;
-
-	case CPU_DOWN_PREPARE:
-		rapl_cpu_offline(cpu);
-		break;
-	}
-	return NOTIFY_OK;
-}
-
-static struct notifier_block rapl_cpu_nb = {
-	.notifier_call	= rapl_cpu_notifier,
-	.priority       = CPU_PRI_PERF + 1,
-};
 
 static int rapl_check_hw_unit(bool apply_quirk)
 {
@@ -701,23 +670,6 @@ static void __init rapl_advertise(void)
 	}
 }
 
-static int __init rapl_prepare_cpus(void)
-{
-	unsigned int cpu, pkg;
-	int ret;
-
-	for_each_online_cpu(cpu) {
-		pkg = topology_logical_die_id(cpu);
-		if (rapl_pmus->pmus[pkg])
-			continue;
-
-		ret = rapl_cpu_online(cpu);
-		if (ret)
-			return ret;
-	}
-	return 0;
-}
-
 static void cleanup_rapl_pmus(void)
 {
 	int i;
@@ -729,7 +681,7 @@ static void cleanup_rapl_pmus(void)
 
 static int __init init_rapl_pmus(void)
 {
-	int maxpkg = topology_max_packages() * topology_max_die_per_package();
+	int maxpkg = topology_max_packages();
 	size_t size;
 
 	size = sizeof(*rapl_pmus) + maxpkg * sizeof(struct rapl_pmu *);
@@ -857,35 +809,35 @@ static int __init rapl_pmu_init(void)
 	if (ret)
 		return ret;
 
-	cpu_notifier_register_begin();
-
-	ret = rapl_prepare_cpus();
+	/*
+	 * Install callbacks. Core will call them for each online cpu.
+	 */
+	ret = cpuhp_setup_state(CPUHP_AP_PERF_X86_RAPL_ONLINE,
+				"perf/x86/rapl:online",
+				rapl_cpu_online, rapl_cpu_offline);
 	if (ret)
 		goto out;
 
 	ret = perf_pmu_register(&rapl_pmus->pmu, "power", -1);
 	if (ret)
-		goto out;
+		goto out1;
 
-	__register_cpu_notifier(&rapl_cpu_nb);
-	cpu_notifier_register_done();
 	rapl_advertise();
 	return 0;
 
+out1:
+	cpuhp_remove_state(CPUHP_AP_PERF_X86_RAPL_ONLINE);
 out:
 	pr_warn("Initialization failed (%d), disabled\n", ret);
 	cleanup_rapl_pmus();
-	cpu_notifier_register_done();
 	return ret;
 }
 module_init(rapl_pmu_init);
 
 static void __exit intel_rapl_exit(void)
 {
-	cpu_notifier_register_begin();
-	__unregister_cpu_notifier(&rapl_cpu_nb);
+	cpuhp_remove_state_nocalls(CPUHP_AP_PERF_X86_RAPL_ONLINE);
 	perf_pmu_unregister(&rapl_pmus->pmu);
 	cleanup_rapl_pmus();
-	cpu_notifier_register_done();
 }
 module_exit(intel_rapl_exit);

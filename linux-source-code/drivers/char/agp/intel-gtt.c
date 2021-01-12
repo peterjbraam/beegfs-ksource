@@ -25,6 +25,7 @@
 #include "agp.h"
 #include "intel-agp.h"
 #include <drm/intel-gtt.h>
+#include <asm/set_memory.h>
 
 /*
  * If we have Intel graphics, we're not going to have anything other than
@@ -329,7 +330,7 @@ static void i810_write_entry(dma_addr_t addr, unsigned int entry,
 		break;
 	}
 
-	writel(addr | pte_flags, intel_private.gtt + entry);
+	writel_relaxed(addr | pte_flags, intel_private.gtt + entry);
 }
 
 static resource_size_t intel_gtt_stolen_size(void)
@@ -737,7 +738,7 @@ static void i830_write_entry(dma_addr_t addr, unsigned int entry,
 	if (flags ==  AGP_USER_CACHED_MEMORY)
 		pte_flags |= I830_PTE_SYSTEM_CACHED;
 
-	writel(addr | pte_flags, intel_private.gtt + entry);
+	writel_relaxed(addr | pte_flags, intel_private.gtt + entry);
 }
 
 bool intel_enable_gtt(void)
@@ -1120,7 +1121,7 @@ static void i965_write_entry(dma_addr_t addr,
 
 	/* Shift high bits down */
 	addr |= (addr >> 28) & 0xf0;
-	writel(addr | pte_flags, intel_private.gtt + entry);
+	writel_relaxed(addr | pte_flags, intel_private.gtt + entry);
 }
 
 static int i9xx_setup(void)

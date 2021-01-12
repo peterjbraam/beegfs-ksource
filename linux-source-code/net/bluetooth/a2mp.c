@@ -63,8 +63,7 @@ static void a2mp_send(struct amp_mgr *mgr, u8 code, u8 ident, u16 len, void *dat
 
 	memset(&msg, 0, sizeof(msg));
 
-	msg.msg_iov = (struct iovec *) &iv;
-	msg.msg_iovlen = 1;
+	iov_iter_kvec(&msg.msg_iter, WRITE | ITER_KVEC, &iv, 1, total_len);
 
 	l2cap_chan_send(chan, &msg, total_len);
 
@@ -240,7 +239,7 @@ static int a2mp_discover_rsp(struct amp_mgr *mgr, struct sk_buff *skb,
 		}
 
 		len -= sizeof(*cl);
-		cl = (void *) skb_pull(skb, sizeof(*cl));
+		cl = skb_pull(skb, sizeof(*cl));
 	}
 
 	/* Fall back to L2CAP init sequence */
@@ -280,7 +279,7 @@ static int a2mp_change_notify(struct amp_mgr *mgr, struct sk_buff *skb,
 	while (skb->len >= sizeof(*cl)) {
 		BT_DBG("Controller id %d type %d status %d", cl->id, cl->type,
 		       cl->status);
-		cl = (struct a2mp_cl *) skb_pull(skb, sizeof(*cl));
+		cl = skb_pull(skb, sizeof(*cl));
 	}
 
 	/* TODO send A2MP_CHANGE_RSP */
@@ -574,7 +573,7 @@ static int a2mp_discphyslink_req(struct amp_mgr *mgr, struct sk_buff *skb,
 	hcon = hci_conn_hash_lookup_ba(hdev, AMP_LINK,
 				       &mgr->l2cap_conn->hcon->dst);
 	if (!hcon) {
-		BT_ERR("No phys link exist");
+		bt_dev_err(hdev, "no phys link exist");
 		rsp.status = A2MP_STATUS_NO_PHYSICAL_LINK_EXISTS;
 		goto clean;
 	}
@@ -754,7 +753,6 @@ static const struct l2cap_ops a2mp_chan_ops = {
 	.resume = l2cap_chan_no_resume,
 	.set_shutdown = l2cap_chan_no_set_shutdown,
 	.get_sndtimeo = l2cap_chan_no_get_sndtimeo,
-	.memcpy_fromiovec = l2cap_chan_no_memcpy_fromiovec,
 };
 
 static struct l2cap_chan *a2mp_chan_open(struct l2cap_conn *conn, bool locked)

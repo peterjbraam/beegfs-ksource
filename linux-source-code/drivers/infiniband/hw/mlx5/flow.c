@@ -77,6 +77,7 @@ static int UVERBS_HANDLER(MLX5_IB_METHOD_CREATE_FLOW)(
 		uverbs_attr_get_uobject(attrs, MLX5_IB_ATTR_CREATE_FLOW_HANDLE);
 	struct mlx5_ib_dev *dev = to_mdev(uobj->context->device);
 	int len, ret, i;
+	u32 counter_id = 0;
 
 	if (!capable(CAP_NET_RAW))
 		return -EPERM;
@@ -124,8 +125,15 @@ static int UVERBS_HANDLER(MLX5_IB_METHOD_CREATE_FLOW)(
 		dest_type = MLX5_FLOW_DESTINATION_TYPE_PORT;
 	}
 
-	if (dev->rep)
-		return -ENOTSUPP;
+	len = uverbs_attr_get_uobjs_arr(attrs,
+		MLX5_IB_ATTR_CREATE_FLOW_ARR_COUNTERS_DEVX, &arr_flow_actions);
+	if (len) {
+		devx_obj = arr_flow_actions[0]->object;
+
+		if (!mlx5_ib_devx_is_flow_counter(devx_obj, &counter_id))
+			return -EINVAL;
+		flow_act.action |= MLX5_FLOW_CONTEXT_ACTION_COUNT;
+	}
 
 	if (dest_type == MLX5_FLOW_DESTINATION_TYPE_TIR &&
 	    fs_matcher->ns_type == MLX5_FLOW_NAMESPACE_EGRESS)
@@ -164,6 +172,7 @@ static int UVERBS_HANDLER(MLX5_IB_METHOD_CREATE_FLOW)(
 	}
 
 	flow_handler = mlx5_ib_raw_fs_rule_add(dev, fs_matcher, &flow_act,
+					       counter_id,
 					       cmd_in, inlen,
 					       dest_id, dest_type);
 	if (IS_ERR(flow_handler)) {
@@ -322,7 +331,6 @@ static int UVERBS_HANDLER(MLX5_IB_METHOD_FLOW_ACTION_CREATE_MODIFY_HEADER)(
 	struct ib_flow_action *action;
 	int num_actions;
 	void *in;
-	int len;
 	int ret;
 
 	if (!mlx5_ib_modify_header_supported(mdev))
@@ -330,18 +338,17 @@ static int UVERBS_HANDLER(MLX5_IB_METHOD_FLOW_ACTION_CREATE_MODIFY_HEADER)(
 
 	in = uverbs_attr_get_alloced_ptr(attrs,
 		MLX5_IB_ATTR_CREATE_MODIFY_HEADER_ACTIONS_PRM);
-	len = uverbs_attr_get_len(attrs,
-		MLX5_IB_ATTR_CREATE_MODIFY_HEADER_ACTIONS_PRM);
 
-	if (len % MLX5_UN_SZ_BYTES(set_action_in_add_action_in_auto))
-		return -EINVAL;
+	num_actions = uverbs_attr_ptr_get_array_size(
+		attrs, MLX5_IB_ATTR_CREATE_MODIFY_HEADER_ACTIONS_PRM,
+		MLX5_UN_SZ_BYTES(set_action_in_add_action_in_auto));
+	if (num_actions < 0)
+		return num_actions;
 
 	ret = uverbs_get_const(&ft_type, attrs,
 			       MLX5_IB_ATTR_CREATE_MODIFY_HEADER_FT_TYPE);
 	if (ret)
 		return ret;
-
-	num_actions = len / MLX5_UN_SZ_BYTES(set_action_in_add_action_in_auto),
 	action = mlx5_ib_create_modify_header(mdev, ft_type, num_actions, in);
 	if (IS_ERR(action))
 		return PTR_ERR(action);
@@ -524,7 +531,11 @@ DECLARE_UVERBS_NAMED_METHOD(
 			     UA_OPTIONAL),
 	UVERBS_ATTR_PTR_IN(MLX5_IB_ATTR_CREATE_FLOW_TAG,
 			   UVERBS_ATTR_TYPE(u32),
-			   UA_OPTIONAL));
+			   UA_OPTIONAL),
+	UVERBS_ATTR_IDRS_ARR(MLX5_IB_ATTR_CREATE_FLOW_ARR_COUNTERS_DEVX,
+			     MLX5_IB_OBJECT_DEVX_OBJ,
+			     UVERBS_ACCESS_READ, 1, 1,
+			     UA_OPTIONAL));
 
 DECLARE_UVERBS_NAMED_METHOD_DESTROY(
 	MLX5_IB_METHOD_DESTROY_FLOW,
@@ -608,9 +619,18 @@ DECLARE_UVERBS_NAMED_OBJECT(MLX5_IB_OBJECT_FLOW_MATCHER,
 			    &UVERBS_METHOD(MLX5_IB_METHOD_FLOW_MATCHER_CREATE),
 			    &UVERBS_METHOD(MLX5_IB_METHOD_FLOW_MATCHER_DESTROY));
 
+static bool flow_is_supported(struct ib_device *device)
+{
+	return !to_mdev(device)->rep;
+}
+
 const struct uapi_definition mlx5_ib_flow_defs[] = {
-	UAPI_DEF_CHAIN_OBJ_TREE_NAMED(MLX5_IB_OBJECT_FLOW_MATCHER),
-	UAPI_DEF_CHAIN_OBJ_TREE(UVERBS_OBJECT_FLOW, &mlx5_ib_fs),
+	UAPI_DEF_CHAIN_OBJ_TREE_NAMED(
+		MLX5_IB_OBJECT_FLOW_MATCHER,
+		UAPI_DEF_IS_OBJ_SUPPORTED(flow_is_supported)),
+	UAPI_DEF_CHAIN_OBJ_TREE(
+		UVERBS_OBJECT_FLOW,
+		&mlx5_ib_fs),
 	UAPI_DEF_CHAIN_OBJ_TREE(UVERBS_OBJECT_FLOW_ACTION,
 				&mlx5_ib_flow_actions),
 	{},

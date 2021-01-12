@@ -4,6 +4,7 @@
 
 #include <linux/spinlock.h>
 #include <asm/page.h>
+#include <linux/time.h>
 
 /*
  * Definitions for talking to the RTAS on CHRP machines.
@@ -184,9 +185,21 @@ static inline uint8_t rtas_error_disposition(const struct rtas_error_log *elog)
 	return (elog->byte1 & 0x18) >> 3;
 }
 
+static inline
+void rtas_set_disposition_recovered(struct rtas_error_log *elog)
+{
+	elog->byte1 &= ~0x18;
+	elog->byte1 |= (RTAS_DISP_FULLY_RECOVERED << 3);
+}
+
 static inline uint8_t rtas_error_extended(const struct rtas_error_log *elog)
 {
 	return (elog->byte1 & 0x04) >> 2;
+}
+
+static inline uint8_t rtas_error_initiator(const struct rtas_error_log *elog)
+{
+	return (elog->byte2 & 0xf0) >> 4;
 }
 
 #define rtas_error_type(x)	((x)->byte3)
@@ -274,6 +287,7 @@ inline uint32_t rtas_ext_event_company_id(struct rtas_ext_event_log_v6 *ext_log)
 #define PSERIES_ELOG_SECT_ID_CALL_HOME		(('C' << 8) | 'H')
 #define PSERIES_ELOG_SECT_ID_USER_DEF		(('U' << 8) | 'D')
 #define PSERIES_ELOG_SECT_ID_HOTPLUG		(('H' << 8) | 'P')
+#define PSERIES_ELOG_SECT_ID_MCE		(('M' << 8) | 'C')
 
 /* Vendor specific Platform Event Log Format, Version 6, section header */
 struct pseries_errorlog {
@@ -336,13 +350,14 @@ extern void (*rtas_flash_term_hook)(int);
 
 extern struct rtas_t rtas;
 
-extern void enter_rtas(unsigned long);
 extern int rtas_token(const char *service);
 extern int rtas_service_present(const char *service);
 extern int rtas_call(int token, int, int, int *, ...);
-extern void rtas_restart(char *cmd);
+void rtas_call_unlocked(struct rtas_args *args, int token, int nargs,
+			int nret, ...);
+extern void __noreturn rtas_restart(char *cmd);
 extern void rtas_power_off(void);
-extern void rtas_halt(void);
+extern void __noreturn rtas_halt(void);
 extern void rtas_os_term(char *str);
 extern int rtas_get_sensor(int sensor, int index, int *state);
 extern int rtas_get_sensor_fast(int sensor, int index, int *state);
@@ -352,7 +367,6 @@ extern bool rtas_indicator_present(int token, int *maxindex);
 extern int rtas_set_indicator(int indicator, int index, int new_value);
 extern int rtas_set_indicator_fast(int indicator, int index, int new_value);
 extern void rtas_progress(char *s, unsigned short hex);
-extern void rtas_initialize(void);
 extern int rtas_suspend_cpu(struct rtas_suspend_me_data *data);
 extern int rtas_suspend_last_cpu(struct rtas_suspend_me_data *data);
 extern int rtas_online_cpus_mask(cpumask_var_t cpus);
@@ -360,7 +374,7 @@ extern int rtas_offline_cpus_mask(cpumask_var_t cpus);
 extern int rtas_ibm_suspend_me(u64 handle);
 
 struct rtc_time;
-extern unsigned long rtas_get_boot_time(void);
+extern time64_t rtas_get_boot_time(void);
 extern void rtas_get_rtc_time(struct rtc_time *rtc_time);
 extern int rtas_set_rtc_time(struct rtc_time *rtc_time);
 
@@ -373,7 +387,7 @@ extern int early_init_dt_scan_rtas(unsigned long node,
 extern void pSeries_log_error(char *buf, unsigned int err_type, int fatal);
 
 #ifdef CONFIG_PPC_PSERIES
-extern unsigned long last_rtas_event;
+extern time64_t last_rtas_event;
 extern int clobbering_unread_rtas_event(void);
 extern int pseries_devicetree_update(s32 scope);
 extern void post_mobility_fixup(void);
@@ -461,9 +475,11 @@ static inline int page_is_rtas_user_buf(unsigned long pfn)
 /* Not the best place to put pSeries_coalesce_init, will be fixed when we
  * move some of the rtas suspend-me stuff to pseries */
 extern void pSeries_coalesce_init(void);
+void rtas_initialize(void);
 #else
 static inline int page_is_rtas_user_buf(unsigned long pfn) { return 0;}
 static inline void pSeries_coalesce_init(void) { }
+static inline void rtas_initialize(void) { };
 #endif
 
 extern int call_rtas(const char *, int, int, unsigned long *, ...);

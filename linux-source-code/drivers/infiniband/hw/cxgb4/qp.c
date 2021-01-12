@@ -273,6 +273,7 @@ static int create_qp(struct c4iw_rdev *rdev, struct t4_wq *wq,
 			 (unsigned long long)virt_to_phys(wq->sq.queue),
 			 wq->rq.queue,
 			 (unsigned long long)virt_to_phys(wq->rq.queue));
+		memset(wq->rq.queue, 0, wq->rq.memsize);
 		dma_unmap_addr_set(&wq->rq, mapping, wq->rq.dma_addr);
 	}
 
@@ -902,8 +903,6 @@ static void free_qp_work(struct work_struct *work)
 	destroy_qp(&rhp->rdev, &qhp->wq,
 		   ucontext ? &ucontext->uctx : &rhp->rdev.uctx, !qhp->srq);
 
-	if (ucontext)
-		c4iw_put_ucontext(ucontext);
 	c4iw_put_wr_wait(qhp->wr_waitp);
 	kfree(qhp);
 }
@@ -1363,6 +1362,7 @@ int c4iw_post_receive(struct ib_qp *ibqp, const struct ib_recv_wr *wr,
 	}
 	return err;
 }
+
 
 static void defer_srq_wr(struct t4_srq *srq, union t4_recv_wr *wqe,
 			 u64 wr_id, u8 len16)
@@ -2169,7 +2169,7 @@ struct ib_qp *c4iw_create_qp(struct ib_pd *pd, struct ib_qp_init_attr *attrs,
 	if (sqsize < 8)
 		sqsize = 8;
 
-	ucontext = pd->uobject ? to_c4iw_ucontext(pd->uobject->context) : NULL;
+	ucontext = udata ? to_c4iw_ucontext(pd->uobject->context) : NULL;
 
 	qhp = kzalloc(sizeof(*qhp), GFP_KERNEL);
 	if (!qhp)
@@ -2337,7 +2337,6 @@ struct ib_qp *c4iw_create_qp(struct ib_pd *pd, struct ib_qp_init_attr *attrs,
 			insert_mmap(ucontext, ma_sync_key_mm);
 		}
 
-		c4iw_get_ucontext(ucontext);
 		qhp->ucontext = ucontext;
 	}
 	if (!attrs->srq) {
@@ -2570,12 +2569,13 @@ static int alloc_srq_queue(struct c4iw_srq *srq, struct c4iw_dev_ucontext *uctx,
 	wq->rqt_abs_idx = (wq->rqt_hwaddr - rdev->lldi.vr->rq.start) >>
 		T4_RQT_ENTRY_SHIFT;
 
-	wq->queue = dma_zalloc_coherent(&rdev->lldi.pdev->dev,
+	wq->queue = dma_alloc_coherent(&rdev->lldi.pdev->dev,
 				       wq->memsize, &wq->dma_addr,
 			GFP_KERNEL);
 	if (!wq->queue)
 		goto err_free_rqtpool;
 
+	memset(wq->queue, 0, wq->memsize);
 	dma_unmap_addr_set(wq, mapping, wq->dma_addr);
 
 	wq->bar2_va = c4iw_bar2_addrs(rdev, wq->qid, CXGB4_BAR2_QTYPE_EGRESS,
@@ -2777,7 +2777,6 @@ struct ib_srq *c4iw_create_srq(struct ib_pd *pd, struct ib_srq_init_attr *attrs,
 			ret = -ENOMEM;
 			goto err_free_srq_key_mm;
 		}
-		memset(&uresp, 0, sizeof(uresp));
 		uresp.flags = srq->flags;
 		uresp.qid_mask = rhp->rdev.qpmask;
 		uresp.srqid = srq->wq.qid;

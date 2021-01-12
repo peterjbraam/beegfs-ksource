@@ -2063,14 +2063,15 @@ static int fm10k_sw_init(struct fm10k_intfc *interface,
 	interface->tx_itr = FM10K_TX_ITR_DEFAULT;
 	interface->rx_itr = FM10K_ITR_ADAPTIVE | FM10K_RX_ITR_DEFAULT;
 
-	/* initialize vxlan_port list */
+	/* initialize udp port lists */
 	INIT_LIST_HEAD(&interface->vxlan_port);
-
-	netdev_rss_key_fill(rss_key, sizeof(rss_key));
-	memcpy(interface->rssrk, rss_key, sizeof(rss_key));
+	INIT_LIST_HEAD(&interface->geneve_port);
 
 	/* Initialize the MAC/VLAN queue */
 	INIT_LIST_HEAD(&interface->macvlan_requests);
+
+	netdev_rss_key_fill(rss_key, sizeof(rss_key));
+	memcpy(interface->rssrk, rss_key, sizeof(rss_key));
 
 	/* Initialize the mailbox lock */
 	spin_lock_init(&interface->mbx_lock);
@@ -2081,91 +2082,6 @@ static int fm10k_sw_init(struct fm10k_intfc *interface,
 	set_bit(__FM10K_UPDATING_STATS, interface->state);
 
 	return 0;
-}
-
-static void fm10k_slot_warn(struct fm10k_intfc *interface)
-{
-	enum pcie_link_width width = PCIE_LNK_WIDTH_UNKNOWN;
-	enum pci_bus_speed speed = PCI_SPEED_UNKNOWN;
-	struct fm10k_hw *hw = &interface->hw;
-	int max_gts = 0, expected_gts = 0;
-
-	if (pcie_get_minimum_link(interface->pdev, &speed, &width) ||
-	    speed == PCI_SPEED_UNKNOWN || width == PCIE_LNK_WIDTH_UNKNOWN) {
-		dev_warn(&interface->pdev->dev,
-			 "Unable to determine PCI Express bandwidth.\n");
-		return;
-	}
-
-	switch (speed) {
-	case PCIE_SPEED_2_5GT:
-		/* 8b/10b encoding reduces max throughput by 20% */
-		max_gts = 2 * width;
-		break;
-	case PCIE_SPEED_5_0GT:
-		/* 8b/10b encoding reduces max throughput by 20% */
-		max_gts = 4 * width;
-		break;
-	case PCIE_SPEED_8_0GT:
-		/* 128b/130b encoding has less than 2% impact on throughput */
-		max_gts = 8 * width;
-		break;
-	default:
-		dev_warn(&interface->pdev->dev,
-			 "Unable to determine PCI Express bandwidth.\n");
-		return;
-	}
-
-	dev_info(&interface->pdev->dev,
-		 "PCI Express bandwidth of %dGT/s available\n",
-		 max_gts);
-	dev_info(&interface->pdev->dev,
-		 "(Speed:%s, Width: x%d, Encoding Loss:%s, Payload:%s)\n",
-		 (speed == PCIE_SPEED_8_0GT ? "8.0GT/s" :
-		  speed == PCIE_SPEED_5_0GT ? "5.0GT/s" :
-		  speed == PCIE_SPEED_2_5GT ? "2.5GT/s" :
-		  "Unknown"),
-		 hw->bus.width,
-		 (speed == PCIE_SPEED_2_5GT ? "20%" :
-		  speed == PCIE_SPEED_5_0GT ? "20%" :
-		  speed == PCIE_SPEED_8_0GT ? "<2%" :
-		  "Unknown"),
-		 (hw->bus.payload == fm10k_bus_payload_128 ? "128B" :
-		  hw->bus.payload == fm10k_bus_payload_256 ? "256B" :
-		  hw->bus.payload == fm10k_bus_payload_512 ? "512B" :
-		  "Unknown"));
-
-	switch (hw->bus_caps.speed) {
-	case fm10k_bus_speed_2500:
-		/* 8b/10b encoding reduces max throughput by 20% */
-		expected_gts = 2 * hw->bus_caps.width;
-		break;
-	case fm10k_bus_speed_5000:
-		/* 8b/10b encoding reduces max throughput by 20% */
-		expected_gts = 4 * hw->bus_caps.width;
-		break;
-	case fm10k_bus_speed_8000:
-		/* 128b/130b encoding has less than 2% impact on throughput */
-		expected_gts = 8 * hw->bus_caps.width;
-		break;
-	default:
-		dev_warn(&interface->pdev->dev,
-			 "Unable to determine expected PCI Express bandwidth.\n");
-		return;
-	}
-
-	if (max_gts >= expected_gts)
-		return;
-
-	dev_warn(&interface->pdev->dev,
-		 "This device requires %dGT/s of bandwidth for optimal performance.\n",
-		 expected_gts);
-	dev_warn(&interface->pdev->dev,
-		 "A %sslot with x%d lanes is suggested.\n",
-		 (hw->bus_caps.speed == fm10k_bus_speed_2500 ? "2.5GT/s " :
-		  hw->bus_caps.speed == fm10k_bus_speed_5000 ? "5.0GT/s " :
-		  hw->bus_caps.speed == fm10k_bus_speed_8000 ? "8.0GT/s " : ""),
-		 hw->bus_caps.width);
 }
 
 /**
@@ -2207,10 +2123,7 @@ static int fm10k_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 		goto err_dma;
 	}
 
-	err = pci_request_selected_regions(pdev,
-					   pci_select_bars(pdev,
-							   IORESOURCE_MEM),
-					   fm10k_driver_name);
+	err = pci_request_mem_regions(pdev, fm10k_driver_name);
 	if (err) {
 		dev_err(&pdev->dev,
 			"pci_request_selected_regions failed: %d\n", err);
@@ -2292,7 +2205,7 @@ static int fm10k_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	mod_timer(&interface->service_timer, (HZ * 2) + jiffies);
 
 	/* print warning for non-optimal configurations */
-	fm10k_slot_warn(interface);
+	pcie_print_link_status(interface->pdev);
 
 	/* report MAC address for logging */
 	dev_info(&pdev->dev, "%pM\n", netdev->dev_addr);
@@ -2317,8 +2230,7 @@ err_sw_init:
 err_ioremap:
 	free_netdev(netdev);
 err_alloc_netdev:
-	pci_release_selected_regions(pdev,
-				     pci_select_bars(pdev, IORESOURCE_MEM));
+	pci_release_mem_regions(pdev);
 err_pci_reg:
 err_dma:
 	pci_disable_device(pdev);
@@ -2369,8 +2281,7 @@ static void fm10k_remove(struct pci_dev *pdev)
 
 	free_netdev(netdev);
 
-	pci_release_selected_regions(pdev,
-				     pci_select_bars(pdev, IORESOURCE_MEM));
+	pci_release_mem_regions(pdev);
 
 	pci_disable_pcie_error_reporting(pdev);
 
@@ -2557,29 +2468,32 @@ static void fm10k_io_resume(struct pci_dev *pdev)
 }
 
 /**
- * fm10k_io_reset_notify - called when PCI function is reset
+ * fm10k_io_reset_prepare - called when PCI function is about to be reset
  * @pdev: Pointer to PCI device
  *
- * This callback is called when the PCI function is reset such as from
- * /sys/class/net/<enpX>/device/reset or similar. When prepare is true, it
- * means we should prepare for a function reset. If prepare is false, it means
- * the function reset just occurred.
+ * This callback is called when the PCI function is about to be reset,
+ * allowing the device driver to prepare for it.
  */
-static void fm10k_io_reset_notify(struct pci_dev *pdev, bool prepare)
+static void fm10k_io_reset_prepare(struct pci_dev *pdev)
+{
+	/* warn incase we have any active VF devices */
+	if (pci_num_vf(pdev))
+		dev_warn(&pdev->dev,
+			 "PCIe FLR may cause issues for any active VF devices\n");
+	fm10k_prepare_suspend(pci_get_drvdata(pdev));
+}
+
+/**
+ * fm10k_io_reset_done - called when PCI function has finished resetting
+ * @pdev: Pointer to PCI device
+ *
+ * This callback is called just after the PCI function is reset, such as via
+ * /sys/class/net/<enpX>/device/reset or similar.
+ */
+static void fm10k_io_reset_done(struct pci_dev *pdev)
 {
 	struct fm10k_intfc *interface = pci_get_drvdata(pdev);
-	int err = 0;
-
-	if (prepare) {
-		/* warn incase we have any active VF devices */
-		if (pci_num_vf(pdev))
-			dev_warn(&pdev->dev,
-				 "PCIe FLR may cause issues for any active VF devices\n");
-
-		fm10k_prepare_suspend(interface);
-	} else {
-		err = fm10k_handle_resume(interface);
-	}
+	int err = fm10k_handle_resume(interface);
 
 	if (err) {
 		dev_warn(&pdev->dev,
@@ -2588,15 +2502,12 @@ static void fm10k_io_reset_notify(struct pci_dev *pdev, bool prepare)
 	}
 }
 
-static struct pci_driver_rh fm10k_driver_rh = {
-	.size           = sizeof(struct pci_driver_rh),
-	.reset_notify   = fm10k_io_reset_notify
-};
-
 static const struct pci_error_handlers fm10k_err_handler = {
 	.error_detected = fm10k_io_error_detected,
 	.slot_reset = fm10k_io_slot_reset,
 	.resume = fm10k_io_resume,
+	.reset_prepare = fm10k_io_reset_prepare,
+	.reset_done = fm10k_io_reset_done,
 };
 
 static SIMPLE_DEV_PM_OPS(fm10k_pm_ops, fm10k_suspend, fm10k_resume);
@@ -2610,8 +2521,7 @@ static struct pci_driver fm10k_driver = {
 		.pm		= &fm10k_pm_ops,
 	},
 	.sriov_configure	= fm10k_iov_configure,
-	.err_handler		= &fm10k_err_handler,
-	.pci_driver_rh		= &fm10k_driver_rh
+	.err_handler		= &fm10k_err_handler
 };
 
 /**

@@ -1186,7 +1186,7 @@ sequence_cmd:
 	rc = iscsit_sequence_cmd(conn, cmd, buf, hdr->cmdsn);
 
 	if (!rc && dump_payload == false && unsol_data)
-		iscsit_set_unsoliticed_dataout(cmd);
+		iscsit_set_unsolicited_dataout(cmd);
 	else if (dump_payload && imm_data)
 		target_put_sess_cmd(&cmd->se_cmd);
 
@@ -2113,10 +2113,13 @@ isert_set_sig_attrs(struct se_cmd *se_cmd, struct ib_sig_attrs *sig_attrs)
 		return -EINVAL;
 	}
 
-	sig_attrs->check_mask =
-	       (se_cmd->prot_checks & TARGET_DIF_CHECK_GUARD  ? 0xc0 : 0) |
-	       (se_cmd->prot_checks & TARGET_DIF_CHECK_APPTAG ? 0x30 : 0) |
-	       (se_cmd->prot_checks & TARGET_DIF_CHECK_REFTAG ? 0x0f : 0);
+	if (se_cmd->prot_checks & TARGET_DIF_CHECK_GUARD)
+		sig_attrs->check_mask |= IB_SIG_CHECK_GUARD;
+	if (se_cmd->prot_checks & TARGET_DIF_CHECK_APPTAG)
+		sig_attrs->check_mask |= IB_SIG_CHECK_APPTAG;
+	if (se_cmd->prot_checks & TARGET_DIF_CHECK_REFTAG)
+		sig_attrs->check_mask |= IB_SIG_CHECK_REFTAG;
+
 	return 0;
 }
 
@@ -2203,7 +2206,6 @@ isert_put_datain(struct iscsi_conn *conn, struct iscsi_cmd *cmd)
 		isert_init_tx_hdrs(isert_conn, &isert_cmd->tx_desc);
 		isert_init_send_wr(isert_conn, isert_cmd,
 				   &isert_cmd->tx_desc.send_wr);
-
 
 		rc = isert_post_recv(isert_conn, isert_cmd->rx_desc);
 		if (rc) {

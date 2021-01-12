@@ -346,37 +346,6 @@ void usbnet_skb_return (struct usbnet *dev, struct sk_buff *skb)
 }
 EXPORT_SYMBOL_GPL(usbnet_skb_return);
 
-void usbnet_get_stats64(struct net_device *net, struct rtnl_link_stats64 *stats)
-{
-	struct usbnet *dev = netdev_priv(net);
-	unsigned int start;
-	int cpu;
-
-	netdev_stats_to_stats64(stats, &net->stats);
-
-	for_each_possible_cpu(cpu) {
-		struct pcpu_sw_netstats *stats64;
-		u64 rx_packets, rx_bytes;
-		u64 tx_packets, tx_bytes;
-
-		stats64 = per_cpu_ptr(dev->stats64, cpu);
-
-		do {
-			start = u64_stats_fetch_begin_irq(&stats64->syncp);
-			rx_packets = stats64->rx_packets;
-			rx_bytes = stats64->rx_bytes;
-			tx_packets = stats64->tx_packets;
-			tx_bytes = stats64->tx_bytes;
-		} while (u64_stats_fetch_retry_irq(&stats64->syncp, start));
-
-		stats->rx_packets += rx_packets;
-		stats->rx_bytes += rx_bytes;
-		stats->tx_packets += tx_packets;
-		stats->tx_bytes += tx_bytes;
-	}
-}
-EXPORT_SYMBOL_GPL(usbnet_get_stats64);
-
 /* must be called if hard_mtu or rx_urb_size changed */
 void usbnet_update_max_qlen(struct usbnet *dev)
 {
@@ -417,8 +386,6 @@ int usbnet_change_mtu (struct net_device *net, int new_mtu)
 	int		old_hard_mtu = dev->hard_mtu;
 	int		old_rx_urb_size = dev->rx_urb_size;
 
-	if (new_mtu <= 0)
-		return -EINVAL;
 	// no second zero-length packet read wanted after mtu-sized packets
 	if ((ll_mtu % dev->maxpacket) == 0)
 		return -EDOM;
@@ -1019,6 +986,37 @@ int usbnet_set_link_ksettings(struct net_device *net,
 }
 EXPORT_SYMBOL_GPL(usbnet_set_link_ksettings);
 
+void usbnet_get_stats64(struct net_device *net, struct rtnl_link_stats64 *stats)
+{
+	struct usbnet *dev = netdev_priv(net);
+	unsigned int start;
+	int cpu;
+
+	netdev_stats_to_stats64(stats, &net->stats);
+
+	for_each_possible_cpu(cpu) {
+		struct pcpu_sw_netstats *stats64;
+		u64 rx_packets, rx_bytes;
+		u64 tx_packets, tx_bytes;
+
+		stats64 = per_cpu_ptr(dev->stats64, cpu);
+
+		do {
+			start = u64_stats_fetch_begin_irq(&stats64->syncp);
+			rx_packets = stats64->rx_packets;
+			rx_bytes = stats64->rx_bytes;
+			tx_packets = stats64->tx_packets;
+			tx_bytes = stats64->tx_bytes;
+		} while (u64_stats_fetch_retry_irq(&stats64->syncp, start));
+
+		stats->rx_packets += rx_packets;
+		stats->rx_bytes += rx_bytes;
+		stats->tx_packets += tx_packets;
+		stats->tx_bytes += tx_bytes;
+	}
+}
+EXPORT_SYMBOL_GPL(usbnet_get_stats64);
+
 u32 usbnet_get_link (struct net_device *net)
 {
 	struct usbnet *dev = netdev_priv(net);
@@ -1325,8 +1323,8 @@ static int build_dma_sg(const struct sk_buff *skb, struct urb *urb)
 		return 0;
 
 	/* reserve one for zero packet */
-	urb->sg = kmalloc((num_sgs + 1) * sizeof(struct scatterlist),
-			  GFP_ATOMIC);
+	urb->sg = kmalloc_array(num_sgs + 1, sizeof(struct scatterlist),
+				GFP_ATOMIC);
 	if (!urb->sg)
 		return -ENOMEM;
 
@@ -1624,7 +1622,7 @@ static const struct net_device_ops usbnet_netdev_ops = {
 	.ndo_start_xmit		= usbnet_start_xmit,
 	.ndo_tx_timeout		= usbnet_tx_timeout,
 	.ndo_set_rx_mode	= usbnet_set_rx_mode,
-	.ndo_change_mtu_rh74	= usbnet_change_mtu,
+	.ndo_change_mtu		= usbnet_change_mtu,
 	.ndo_get_stats64	= usbnet_get_stats64,
 	.ndo_set_mac_address 	= eth_mac_addr,
 	.ndo_validate_addr	= eth_validate_addr,
@@ -1716,6 +1714,8 @@ usbnet_probe (struct usb_interface *udev, const struct usb_device_id *prod)
 	 * bind() should set rx_urb_size in that case.
 	 */
 	dev->hard_mtu = net->mtu + net->hard_header_len;
+	net->min_mtu = 0;
+	net->max_mtu = ETH_MAX_MTU;
 
 	net->netdev_ops = &usbnet_netdev_ops;
 	net->watchdog_timeo = TX_TIMEOUT_JIFFIES;

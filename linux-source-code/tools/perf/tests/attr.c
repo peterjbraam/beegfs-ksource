@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * The struct perf_event_attr test support.
  *
@@ -127,6 +128,7 @@ static int store_event(struct perf_event_attr *attr, pid_t pid, int cpu,
 	WRITE_ASS(comm_exec,	  "d");
 	WRITE_ASS(context_switch, "d");
 	WRITE_ASS(write_backward, "d");
+	WRITE_ASS(namespaces,	  "d");
 	WRITE_ASS(use_clockid,    "d");
 	WRITE_ASS(wakeup_events, PRIu32);
 	WRITE_ASS(bp_type, PRIu32);
@@ -180,7 +182,7 @@ int test__attr(struct test *test __maybe_unused, int subtest __maybe_unused)
 	char path_perf[PATH_MAX];
 	char path_dir[PATH_MAX];
 
-	/* First try developement tree tests. */
+	/* First try development tree tests. */
 	if (!lstat("./tests", &st))
 		return run_dir("./tests", "./perf");
 

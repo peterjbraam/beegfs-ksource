@@ -41,7 +41,6 @@ static int
 qla2x00_dfs_tgt_sess_open(struct inode *inode, struct file *file)
 {
 	scsi_qla_host_t *vha = inode->i_private;
-
 	return single_open(file, qla2x00_dfs_tgt_sess_show, vha);
 }
 
@@ -162,7 +161,6 @@ static int
 qla_dfs_fw_resource_cnt_open(struct inode *inode, struct file *file)
 {
 	struct scsi_qla_host *vha = inode->i_private;
-
 	return single_open(file, qla_dfs_fw_resource_cnt_show, vha);
 }
 
@@ -252,7 +250,6 @@ static int
 qla_dfs_tgt_counters_open(struct inode *inode, struct file *file)
 {
 	struct scsi_qla_host *vha = inode->i_private;
-
 	return single_open(file, qla_dfs_tgt_counters_show, vha);
 }
 
@@ -274,10 +271,10 @@ qla2x00_dfs_fce_show(struct seq_file *s, void *unused)
 
 	mutex_lock(&ha->fce_mutex);
 
-	seq_printf(s, "FCE Trace Buffer\n");
+	seq_puts(s, "FCE Trace Buffer\n");
 	seq_printf(s, "In Pointer = %llx\n\n", (unsigned long long)ha->fce_wr);
 	seq_printf(s, "Base = %llx\n\n", (unsigned long long) ha->fce_dma);
-	seq_printf(s, "FCE Enable Registers\n");
+	seq_puts(s, "FCE Enable Registers\n");
 	seq_printf(s, "%08x %08x %08x %08x %08x %08x\n",
 	    ha->fce_mb[0], ha->fce_mb[2], ha->fce_mb[3], ha->fce_mb[4],
 	    ha->fce_mb[5], ha->fce_mb[6]);
@@ -289,11 +286,11 @@ qla2x00_dfs_fce_show(struct seq_file *s, void *unused)
 			seq_printf(s, "\n%llx: ",
 			    (unsigned long long)((cnt * 4) + fce_start));
 		else
-			seq_printf(s, " ");
+			seq_putc(s, ' ');
 		seq_printf(s, "%08x", *fce++);
 	}
 
-	seq_printf(s, "\nEnd\n");
+	seq_puts(s, "\nEnd\n");
 
 	mutex_unlock(&ha->fce_mutex);
 
@@ -360,6 +357,81 @@ static const struct file_operations dfs_fce_ops = {
 	.release	= qla2x00_dfs_fce_release,
 };
 
+static int
+qla_dfs_naqp_show(struct seq_file *s, void *unused)
+{
+	struct scsi_qla_host *vha = s->private;
+	struct qla_hw_data *ha = vha->hw;
+
+	seq_printf(s, "%d\n", ha->tgt.num_act_qpairs);
+	return 0;
+}
+
+static int
+qla_dfs_naqp_open(struct inode *inode, struct file *file)
+{
+	struct scsi_qla_host *vha = inode->i_private;
+
+	return single_open(file, qla_dfs_naqp_show, vha);
+}
+
+static ssize_t
+qla_dfs_naqp_write(struct file *file, const char __user *buffer,
+    size_t count, loff_t *pos)
+{
+	struct seq_file *s = file->private_data;
+	struct scsi_qla_host *vha = s->private;
+	struct qla_hw_data *ha = vha->hw;
+	char *buf;
+	int rc = 0;
+	unsigned long num_act_qp;
+
+	if (!(IS_QLA27XX(ha) || IS_QLA83XX(ha) || IS_QLA28XX(ha))) {
+		pr_err("host%ld: this adapter does not support Multi Q.",
+		    vha->host_no);
+		return -EINVAL;
+	}
+
+	if (!vha->flags.qpairs_available) {
+		pr_err("host%ld: Driver is not setup with Multi Q.",
+		    vha->host_no);
+		return -EINVAL;
+	}
+	buf = memdup_user_nul(buffer, count);
+	if (IS_ERR(buf)) {
+		pr_err("host%ld: fail to copy user buffer.",
+		    vha->host_no);
+		return PTR_ERR(buf);
+	}
+
+	num_act_qp = simple_strtoul(buf, NULL, 0);
+
+	if (num_act_qp >= vha->hw->max_qpairs) {
+		pr_err("User set invalid number of qpairs %lu. Max = %d",
+		    num_act_qp, vha->hw->max_qpairs);
+		rc = -EINVAL;
+		goto out_free;
+	}
+
+	if (num_act_qp != ha->tgt.num_act_qpairs) {
+		ha->tgt.num_act_qpairs = num_act_qp;
+		qlt_clr_qp_table(vha);
+	}
+	rc = count;
+out_free:
+	kfree(buf);
+	return rc;
+}
+
+static const struct file_operations dfs_naqp_ops = {
+	.open		= qla_dfs_naqp_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+	.write		= qla_dfs_naqp_write,
+};
+
+
 int
 qla2x00_dfs_setup(scsi_qla_host_t *vha)
 {
@@ -402,6 +474,9 @@ create_nodes:
 	ha->tgt.dfs_tgt_sess = debugfs_create_file("tgt_sess",
 		S_IRUSR, ha->dfs_dir, vha, &dfs_tgt_sess_ops);
 
+	if (IS_QLA27XX(ha) || IS_QLA83XX(ha) || IS_QLA28XX(ha))
+		ha->tgt.dfs_naqp = debugfs_create_file("naqp",
+		    0400, ha->dfs_dir, vha, &dfs_naqp_ops);
 out:
 	return 0;
 }
@@ -410,6 +485,11 @@ int
 qla2x00_dfs_remove(scsi_qla_host_t *vha)
 {
 	struct qla_hw_data *ha = vha->hw;
+
+	if (ha->tgt.dfs_naqp) {
+		debugfs_remove(ha->tgt.dfs_naqp);
+		ha->tgt.dfs_naqp = NULL;
+	}
 
 	if (ha->tgt.dfs_tgt_sess) {
 		debugfs_remove(ha->tgt.dfs_tgt_sess);

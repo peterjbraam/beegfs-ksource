@@ -280,7 +280,7 @@ static const struct vmstor_protocol vmstor_protocols[] = {
 
 
 /*
- * This structure is sent during the intialization phase to get the different
+ * This structure is sent during the initialization phase to get the different
  * properties of the channel.
  */
 
@@ -385,7 +385,7 @@ enum storvsc_request_type {
  * This is the end of Protocol specific defines.
  */
 
-static int storvsc_ringbuffer_size = (256 * PAGE_SIZE);
+static int storvsc_ringbuffer_size = (128 * 1024);
 static u32 max_outstanding_req_per_channel;
 
 static int storvsc_vcpus_per_sub_channel = 4;
@@ -668,13 +668,22 @@ static void  handle_multichannel_storage(struct hv_device *device, int max_chns)
 {
 	struct device *dev = &device->device;
 	struct storvsc_device *stor_device;
-	int num_cpus = num_online_cpus();
 	int num_sc;
 	struct storvsc_cmd_request *request;
 	struct vstor_packet *vstor_packet;
 	int ret, t;
 
-	num_sc = ((max_chns > num_cpus) ? num_cpus : max_chns);
+	/*
+	 * If the number of CPUs is artificially restricted, such as
+	 * with maxcpus=1 on the kernel boot line, Hyper-V could offer
+	 * sub-channels >= the number of CPUs. These sub-channels
+	 * should not be created. The primary channel is already created
+	 * and assigned to one CPU, so check against # CPUs - 1.
+	 */
+	num_sc = min((int)(num_online_cpus() - 1), max_chns);
+	if (!num_sc)
+		return;
+
 	stor_device = get_out_stor_device(device);
 	if (!stor_device)
 		return;
@@ -873,7 +882,7 @@ static int storvsc_channel_init(struct hv_device *device, bool is_fc)
 	 * We will however populate all the slots to evenly distribute
 	 * the load.
 	 */
-	stor_device->stor_chns = kzalloc(sizeof(void *) * num_possible_cpus(),
+	stor_device->stor_chns = kcalloc(num_possible_cpus(), sizeof(void *),
 					 GFP_KERNEL);
 	if (stor_device->stor_chns == NULL)
 		return -ENOMEM;
@@ -1429,6 +1438,7 @@ static int storvsc_device_configure(struct scsi_device *sdevice)
 	blk_queue_virt_boundary(sdevice->request_queue, PAGE_SIZE - 1);
 
 	sdevice->no_write_same = 1;
+
 	/*
 	 * If the host is WIN8 or WIN8 R2, claim conformance to SPC-3
 	 * if the device is a MSFT virtual device.  If the host is
@@ -1530,6 +1540,10 @@ static int storvsc_host_reset_handler(struct scsi_cmnd *scmnd)
  */
 static enum blk_eh_timer_return storvsc_eh_timed_out(struct scsi_cmnd *scmnd)
 {
+#if IS_ENABLED(CONFIG_SCSI_FC_ATTRS)
+	if (scmnd->device->host->transportt == fc_transport_template)
+		return fc_eh_timed_out(scmnd);
+#endif
 	return BLK_EH_RESET_TIMER;
 }
 
@@ -1560,8 +1574,7 @@ static int storvsc_queuecommand(struct Scsi_Host *host, struct scsi_cmnd *scmnd)
 	int ret;
 	struct hv_host_device *host_dev = shost_priv(host);
 	struct hv_device *dev = host_dev->dev;
-	struct storvsc_cmd_request *cmd_request =
-		(struct storvsc_cmd_request *)(scmnd + 1);
+	struct storvsc_cmd_request *cmd_request = scsi_cmd_priv(scmnd);
 	int i;
 	struct scatterlist *sgl;
 	unsigned int sg_count = 0;
@@ -1646,9 +1659,9 @@ static int storvsc_queuecommand(struct Scsi_Host *host, struct scsi_cmnd *scmnd)
 	if (sg_count) {
 		if (sg_count > MAX_PAGE_BUFFER_COUNT) {
 
-			payload_sz = (sg_count * sizeof(void *) +
+			payload_sz = (sg_count * sizeof(u64) +
 				      sizeof(struct vmbus_packet_mpb_array));
-			payload = kmalloc(payload_sz, GFP_ATOMIC);
+			payload = kzalloc(payload_sz, GFP_ATOMIC);
 			if (!payload)
 				return SCSI_MLQUEUE_DEVICE_BUSY;
 		}
@@ -1698,6 +1711,7 @@ static struct scsi_host_template scsi_driver = {
 	/* Make sure we dont get a sg segment crosses a page boundary */
 	.dma_boundary =		PAGE_SIZE-1,
 	.no_write_same =	1,
+	.track_queue_depth =	1,
 };
 
 enum {
@@ -1929,6 +1943,9 @@ static struct hv_driver storvsc_drv = {
 	.id_table = id_table,
 	.probe = storvsc_probe,
 	.remove = storvsc_remove,
+	.driver = {
+		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
+	},
 };
 
 #if IS_ENABLED(CONFIG_SCSI_FC_ATTRS)

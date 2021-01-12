@@ -34,11 +34,11 @@
 #include <linux/sched.h>
 #include <linux/interrupt.h>
 
-#include "dmxdev.h"
-#include "dvbdev.h"
-#include "dvb_demux.h"
-#include "dvb_frontend.h"
-#include "dvb_net.h"
+#include <media/dmxdev.h>
+#include <media/dvbdev.h>
+#include <media/dvb_demux.h>
+#include <media/dvb_frontend.h>
+#include <media/dvb_net.h>
 
 #include "mantis_common.h"
 #include "mantis_reg.h"
@@ -143,7 +143,6 @@ fail1:
 
 fail0:
 	dprintk(MANTIS_ERROR, 1, "ERROR: <%d> exiting", ret);
-	pci_set_drvdata(pdev, NULL);
 	return ret;
 }
 EXPORT_SYMBOL_GPL(mantis_pci_init);
@@ -161,7 +160,6 @@ void mantis_pci_exit(struct mantis_pci *mantis)
 	}
 
 	pci_disable_device(pdev);
-	pci_set_drvdata(pdev, NULL);
 }
 EXPORT_SYMBOL_GPL(mantis_pci_exit);
 

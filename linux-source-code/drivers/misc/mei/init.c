@@ -37,7 +37,7 @@ const char *mei_dev_state_str(int state)
 	MEI_DEV_STATE(POWER_DOWN);
 	MEI_DEV_STATE(POWER_UP);
 	default:
-		return "unkown";
+		return "unknown";
 	}
 #undef MEI_DEV_STATE
 }
@@ -121,6 +121,8 @@ int mei_reset(struct mei_device *dev)
 		dev_warn(dev->dev, "unexpected reset: dev_state = %s fw status = %s\n",
 			 mei_dev_state_str(state), fw_sts_str);
 	}
+
+	mei_clear_interrupts(dev);
 
 	/* we're already in reset, cancel the init timer
 	 * if the reset was called due the hbm protocol error
@@ -258,8 +260,6 @@ int mei_restart(struct mei_device *dev)
 
 	mutex_lock(&dev->device_lock);
 
-	mei_clear_interrupts(dev);
-
 	dev->dev_state = MEI_DEV_POWER_UP;
 	dev->reset_count = 0;
 
@@ -287,6 +287,9 @@ static void mei_reset_work(struct work_struct *work)
 		container_of(work, struct mei_device,  reset_work);
 	int ret;
 
+	mei_clear_interrupts(dev);
+	mei_synchronize_irq(dev);
+
 	mutex_lock(&dev->device_lock);
 
 	ret = mei_reset(dev);
@@ -307,14 +310,21 @@ void mei_stop(struct mei_device *dev)
 {
 	dev_dbg(dev->dev, "stopping the device.\n");
 
+	mutex_lock(&dev->device_lock);
+	dev->dev_state = MEI_DEV_POWER_DOWN;
+	mutex_unlock(&dev->device_lock);
 	mei_cl_bus_remove_devices(dev);
 
 	mei_cancel_work(dev);
 
+	mei_clear_interrupts(dev);
+	mei_synchronize_irq(dev);
+
 	mutex_lock(&dev->device_lock);
 
-	dev->dev_state = MEI_DEV_POWER_DOWN;
 	mei_reset(dev);
+	/* move device to disabled state unconditionally */
+	dev->dev_state = MEI_DEV_DISABLED;
 
 	mutex_unlock(&dev->device_lock);
 }
@@ -373,6 +383,7 @@ void mei_device_init(struct mei_device *dev,
 	INIT_LIST_HEAD(&dev->write_waiting_list);
 	INIT_LIST_HEAD(&dev->ctrl_wr_list);
 	INIT_LIST_HEAD(&dev->ctrl_rd_list);
+	dev->tx_queue_limit = MEI_TX_QUEUE_LIMIT_DEFAULT;
 
 	INIT_DELAYED_WORK(&dev->timer_work, mei_timer);
 	INIT_WORK(&dev->reset_work, mei_reset_work);

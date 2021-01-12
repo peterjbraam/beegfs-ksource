@@ -855,7 +855,7 @@ struct sdma_engine *sdma_select_user_engine(struct hfi1_devdata *dd,
 {
 	struct sdma_rht_node *rht_node;
 	struct sdma_engine *sde = NULL;
-	const struct cpumask *current_mask = tsk_cpus_allowed(current);
+	const struct cpumask *current_mask = &current->cpus_allowed;
 	unsigned long cpu_id;
 
 	/*
@@ -1424,6 +1424,7 @@ int sdma_init(struct hfi1_devdata *dd, u8 port)
 		seqlock_init(&sde->head_lock);
 		spin_lock_init(&sde->senddmactrl_lock);
 		spin_lock_init(&sde->flushlist_lock);
+		seqlock_init(&sde->waitlock);
 		/* insure there is always a zero bit */
 		sde->ahg_bits = 0xfffffffe00000000ULL;
 
@@ -1461,7 +1462,8 @@ int sdma_init(struct hfi1_devdata *dd, u8 port)
 		if (!sde->descq)
 			goto bail;
 		sde->tx_ring =
-			kvzalloc_node(sizeof(struct sdma_txreq *) * descq_cnt,
+			kvzalloc_node(array_size(descq_cnt,
+						 sizeof(struct sdma_txreq *)),
 				      GFP_KERNEL, dd->node);
 		if (!sde->tx_ring)
 			goto bail;
@@ -1715,7 +1717,7 @@ retry:
 
 		swhead = sde->descq_head & sde->sdma_mask;
 		/* this code is really bad for cache line trading */
-		swtail = ACCESS_ONCE(sde->descq_tail) & sde->sdma_mask;
+		swtail = READ_ONCE(sde->descq_tail) & sde->sdma_mask;
 		cnt = sde->descq_cnt;
 
 		if (swhead < swtail)
@@ -1754,11 +1756,9 @@ retry:
  */
 static void sdma_desc_avail(struct sdma_engine *sde, uint avail)
 {
-	struct iowait *wait, *nw;
+	struct iowait *wait, *nw, *twait;
 	struct iowait *waits[SDMA_WAIT_BATCH_SIZE];
-	uint i, n = 0, seq, max_idx = 0;
-	struct hfi1_ibdev *dev = &sde->dd->verbs_dev;
-	u8 max_starved_cnt = 0;
+	uint i, n = 0, seq, tidx = 0;
 
 #ifdef CONFIG_SDMA_VERBOSITY
 	dd_dev_err(sde->dd, "CONFIG SDMA(%u) %s:%d %s()\n", sde->this_idx,
@@ -1767,10 +1767,10 @@ static void sdma_desc_avail(struct sdma_engine *sde, uint avail)
 #endif
 
 	do {
-		seq = read_seqbegin(&dev->iowait_lock);
+		seq = read_seqbegin(&sde->waitlock);
 		if (!list_empty(&sde->dmawait)) {
 			/* at least one item */
-			write_seqlock(&dev->iowait_lock);
+			write_seqlock(&sde->waitlock);
 			/* Harvest waiters wanting DMA descriptors */
 			list_for_each_entry_safe(
 					wait,
@@ -1783,27 +1783,34 @@ static void sdma_desc_avail(struct sdma_engine *sde, uint avail)
 					continue;
 				if (n == ARRAY_SIZE(waits))
 					break;
+				iowait_init_priority(wait);
 				num_desc = iowait_get_all_desc(wait);
 				if (num_desc > avail)
 					break;
 				avail -= num_desc;
-				/* Find the most starved wait memeber */
-				iowait_starve_find_max(wait, &max_starved_cnt,
-						       n, &max_idx);
+				/* Find the top-priority wait memeber */
+				if (n) {
+					twait = waits[tidx];
+					tidx =
+					    iowait_priority_update_top(wait,
+								       twait,
+								       n,
+								       tidx);
+				}
 				list_del_init(&wait->list);
 				waits[n++] = wait;
 			}
-			write_sequnlock(&dev->iowait_lock);
+			write_sequnlock(&sde->waitlock);
 			break;
 		}
-	} while (read_seqretry(&dev->iowait_lock, seq));
+	} while (read_seqretry(&sde->waitlock, seq));
 
-	/* Schedule the most starved one first */
+	/* Schedule the top-priority entry first */
 	if (n)
-		waits[max_idx]->wakeup(waits[max_idx], SDMA_AVAIL_REASON);
+		waits[tidx]->wakeup(waits[tidx], SDMA_AVAIL_REASON);
 
 	for (i = 0; i < n; i++)
-		if (i != max_idx)
+		if (i != tidx)
 			waits[i]->wakeup(waits[i], SDMA_AVAIL_REASON);
 }
 
@@ -1855,7 +1862,7 @@ retry:
 	if ((status & sde->idle_mask) && !idle_check_done) {
 		u16 swtail;
 
-		swtail = ACCESS_ONCE(sde->descq_tail) & sde->sdma_mask;
+		swtail = READ_ONCE(sde->descq_tail) & sde->sdma_mask;
 		if (swtail != hwhead) {
 			hwhead = (u16)read_sde_csr(sde, SD(HEAD));
 			idle_check_done = 1;
@@ -2203,7 +2210,7 @@ void sdma_seqfile_dump_sde(struct seq_file *s, struct sdma_engine *sde)
 	u16 len;
 
 	head = sde->descq_head & sde->sdma_mask;
-	tail = ACCESS_ONCE(sde->descq_tail) & sde->sdma_mask;
+	tail = READ_ONCE(sde->descq_tail) & sde->sdma_mask;
 	seq_printf(s, SDE_FMT, sde->this_idx,
 		   sde->cpu,
 		   sdma_state_name(sde->state.current_state),
@@ -3282,7 +3289,7 @@ int sdma_ahg_alloc(struct sdma_engine *sde)
 		return -EINVAL;
 	}
 	while (1) {
-		nr = ffz(ACCESS_ONCE(sde->ahg_bits));
+		nr = ffz(READ_ONCE(sde->ahg_bits));
 		if (nr > 31) {
 			trace_hfi1_ahg_allocate(sde, -ENOSPC);
 			return -ENOSPC;

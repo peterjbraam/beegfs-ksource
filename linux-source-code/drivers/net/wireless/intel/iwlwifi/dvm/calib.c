@@ -895,11 +895,7 @@ static void iwlagn_gain_computation(struct iwl_priv *priv,
 
 		/* bound gain by 2 bits value max, 3rd bit is sign */
 		data->delta_gain_code[i] =
-#if 0 /* abs() is different on RHEL */
 			min(abs(delta_g), CHAIN_NOISE_MAX_DELTA_GAIN_CODE);
-#else
-			min(abs(delta_g), (long) CHAIN_NOISE_MAX_DELTA_GAIN_CODE);
-#endif
 
 		if (delta_g < 0)
 			/*

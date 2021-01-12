@@ -314,7 +314,6 @@ struct ieee80211_vif_chanctx_switch {
  * @BSS_CHANGED_MCAST_RATE: Multicast Rate setting changed for this interface
  * @BSS_CHANGED_FTM_RESPONDER: fime timing reasurement request responder
  *	functionality changed for this BSS (AP mode).
- * @BSS_CHANGED_TWT: TWT status changed
  *
  */
 enum ieee80211_bss_change {
@@ -345,7 +344,6 @@ enum ieee80211_bss_change {
 	BSS_CHANGED_KEEP_ALIVE		= 1<<24,
 	BSS_CHANGED_MCAST_RATE		= 1<<25,
 	BSS_CHANGED_FTM_RESPONDER	= 1<<26,
-	BSS_CHANGED_TWT			= 1<<27,
 
 	/* when adding here, make sure to change ieee80211_reconfig */
 };
@@ -503,8 +501,6 @@ struct ieee80211_ftm_responder_params {
  * @he_support: does this BSS support HE
  * @twt_requester: does this BSS support TWT requester (relevant for managed
  *	mode only, set if the AP advertises TWT responder role)
- * @twt_responder: does this BSS support TWT requester (relevant for managed
- *	mode only, set if the AP advertises TWT responder role)
  * @assoc: association status
  * @ibss_joined: indicates whether this station is part of an IBSS
  *	or not
@@ -612,7 +608,6 @@ struct ieee80211_bss_conf {
 	u16 frame_time_rts_th;
 	bool he_support;
 	bool twt_requester;
-	bool twt_responder;
 	/* association related data */
 	bool assoc, ibss_joined;
 	bool ibss_creator;
@@ -1701,6 +1696,7 @@ struct wireless_dev *ieee80211_vif_to_wdev(struct ieee80211_vif *vif);
  * @IEEE80211_KEY_FLAG_PUT_MIC_SPACE: This flag should be set by the driver for
  *	a TKIP key if it only requires MIC space. Do not set together with
  *	@IEEE80211_KEY_FLAG_GENERATE_MMIC on the same key.
+ * @IEEE80211_KEY_FLAG_NO_AUTO_TX: Key needs explicit Tx activation.
  */
 enum ieee80211_key_flags {
 	IEEE80211_KEY_FLAG_GENERATE_IV_MGMT	= BIT(0),
@@ -1712,6 +1708,7 @@ enum ieee80211_key_flags {
 	IEEE80211_KEY_FLAG_RX_MGMT		= BIT(6),
 	IEEE80211_KEY_FLAG_RESERVE_TAILROOM	= BIT(7),
 	IEEE80211_KEY_FLAG_PUT_MIC_SPACE	= BIT(8),
+	IEEE80211_KEY_FLAG_NO_AUTO_TX		= BIT(9),
 };
 
 /**
@@ -2266,6 +2263,9 @@ struct ieee80211_txq {
  * @IEEE80211_HW_SUPPORTS_ONLY_HE_MULTI_BSSID: Hardware supports multi BSSID
  *	only for HE APs. Applies if @IEEE80211_HW_SUPPORTS_MULTI_BSSID is set.
  *
+ * @IEEE80211_HW_EXT_KEY_ID_NATIVE: Driver and hardware are supporting Extended
+ *	Key ID and can handle two unicast keys per station for Rx and Tx.
+ *
  * @NUM_IEEE80211_HW_FLAGS: number of hardware flags, used for sizing arrays
  */
 enum ieee80211_hw_flags {
@@ -2317,6 +2317,7 @@ enum ieee80211_hw_flags {
 	IEEE80211_HW_TX_STATUS_NO_AMPDU_LEN,
 	IEEE80211_HW_SUPPORTS_MULTI_BSSID,
 	IEEE80211_HW_SUPPORTS_ONLY_HE_MULTI_BSSID,
+	IEEE80211_HW_EXT_KEY_ID_NATIVE,
 
 	/* keep last, obviously */
 	NUM_IEEE80211_HW_FLAGS
@@ -5946,6 +5947,29 @@ static inline int rate_supported(struct ieee80211_sta *sta,
 {
 	return (sta == NULL || sta->supp_rates[band] & BIT(index));
 }
+
+/**
+ * rate_control_send_low - helper for drivers for management/no-ack frames
+ *
+ * Rate control algorithms that agree to use the lowest rate to
+ * send management frames and NO_ACK data with the respective hw
+ * retries should use this in the beginning of their mac80211 get_rate
+ * callback. If true is returned the rate control can simply return.
+ * If false is returned we guarantee that sta and sta and priv_sta is
+ * not null.
+ *
+ * Rate control algorithms wishing to do more intelligent selection of
+ * rate for multicast/broadcast frames may choose to not use this.
+ *
+ * @sta: &struct ieee80211_sta pointer to the target destination. Note
+ * 	that this may be null.
+ * @priv_sta: private rate control structure. This may be null.
+ * @txrc: rate control information we sholud populate for mac80211.
+ */
+bool rate_control_send_low(struct ieee80211_sta *sta,
+			   void *priv_sta,
+			   struct ieee80211_tx_rate_control *txrc);
+
 
 static inline s8
 rate_lowest_index(struct ieee80211_supported_band *sband,

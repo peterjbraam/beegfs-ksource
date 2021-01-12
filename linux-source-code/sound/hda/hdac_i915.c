@@ -20,6 +20,8 @@
 #include <sound/hda_i915.h>
 #include <sound/hda_register.h>
 
+static struct completion bind_complete;
+
 #define CONTROLLER_IN_GPU(pci) (((pci)->device == 0x0a0c) || \
 				((pci)->device == 0x0c0c) || \
 				((pci)->device == 0x0d0c) || \
@@ -80,9 +82,11 @@ void snd_hdac_i915_set_bclk(struct hdac_bus *bus)
 }
 EXPORT_SYMBOL_GPL(snd_hdac_i915_set_bclk);
 
-static int i915_component_master_match(struct device *dev, void *data)
+static int i915_component_master_match(struct device *dev, int subcomponent,
+				       void *data)
 {
-	return !strcmp(dev->driver->name, "i915");
+	return !strcmp(dev->driver->name, "i915") &&
+	       subcomponent == I915_COMPONENT_AUDIO;
 }
 
 /* check whether intel graphics is present */
@@ -96,6 +100,19 @@ static bool i915_gfx_present(void)
 	};
 	return pci_dev_present(ids);
 }
+
+static int i915_master_bind(struct device *dev,
+			    struct drm_audio_component *acomp)
+{
+	complete_all(&bind_complete);
+	/* clear audio_ops here as it was needed only for completion call */
+	acomp->audio_ops = NULL;
+	return 0;
+}
+
+static const struct drm_audio_component_audio_ops i915_init_ops = {
+	.master_bind = i915_master_bind
+};
 
 /**
  * snd_hdac_i915_init - Initialize i915 audio component
@@ -117,7 +134,9 @@ int snd_hdac_i915_init(struct hdac_bus *bus)
 	if (!i915_gfx_present())
 		return -ENODEV;
 
-	err = snd_hdac_acomp_init(bus, NULL,
+	init_completion(&bind_complete);
+
+	err = snd_hdac_acomp_init(bus, &i915_init_ops,
 				  i915_component_master_match,
 				  sizeof(struct i915_audio_component) - sizeof(*acomp));
 	if (err < 0)
@@ -125,9 +144,14 @@ int snd_hdac_i915_init(struct hdac_bus *bus)
 	acomp = bus->audio_component;
 	if (!acomp)
 		return -ENODEV;
-	if (!acomp->ops)
-		request_module("i915");
 	if (!acomp->ops) {
+		request_module("i915");
+		/* 60s timeout */
+		wait_for_completion_timeout(&bind_complete,
+					    msecs_to_jiffies(60 * 1000));
+	}
+	if (!acomp->ops) {
+		dev_info(bus->dev, "couldn't bind with audio component\n");
 		snd_hdac_acomp_exit(bus);
 		return -ENODEV;
 	}

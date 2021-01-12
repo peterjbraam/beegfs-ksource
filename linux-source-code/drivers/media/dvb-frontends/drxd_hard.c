@@ -13,12 +13,8 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  *
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
- * 02110-1301, USA
- * Or, point your browser to http://www.gnu.org/copyleft/gpl.html
+ * To obtain the license, point your browser to
+ * http://www.gnu.org/copyleft/gpl.html
  */
 
 #include <linux/kernel.h>
@@ -30,7 +26,7 @@
 #include <linux/i2c.h>
 #include <asm/div64.h>
 
-#include "dvb_frontend.h"
+#include <media/dvb_frontend.h>
 #include "drxd.h"
 #include "drxd_firm.h"
 
@@ -45,10 +41,6 @@
 #define DRX_I2C_SINGLE_MASTER 0xC0
 #define DRX_I2C_MODEFLAGS     0xC0
 #define DRX_I2C_FLAGS         0xF0
-
-#ifndef SIZEOF_ARRAY
-#define SIZEOF_ARRAY(array) (sizeof((array))/sizeof((array)[0]))
-#endif
 
 #define DEFAULT_LOCK_TIMEOUT    1100
 
@@ -336,7 +328,7 @@ static int WriteTable(struct drxd_state *state, u8 * pTable)
 {
 	int status = 0;
 
-	if (pTable == NULL)
+	if (!pTable)
 		return 0;
 
 	while (!status) {
@@ -646,8 +638,10 @@ static int SetCfgIfAgc(struct drxd_state *state, struct SCfgAgc *cfg)
 			/* == Speed == */
 			{
 				const u16 maxRur = 8;
-				const u16 slowIncrDecLUT[] = { 3, 4, 4, 5, 6 };
-				const u16 fastIncrDecLUT[] = { 14, 15, 15, 16,
+				static const u16 slowIncrDecLUT[] = {
+					3, 4, 4, 5, 6 };
+				static const u16 fastIncrDecLUT[] = {
+					14, 15, 15, 16,
 					17, 18, 18, 19,
 					20, 21, 22, 23,
 					24, 26, 27, 28,
@@ -915,9 +909,8 @@ static int load_firmware(struct drxd_state *state, const char *fw_name)
 	}
 
 	state->microcode = kmemdup(fw->data, fw->size, GFP_KERNEL);
-	if (state->microcode == NULL) {
+	if (!state->microcode) {
 		release_firmware(fw);
-		printk(KERN_ERR "drxd: firmware load failure: no memory\n");
 		return -ENOMEM;
 	}
 
@@ -979,7 +972,6 @@ static int DownloadMicrocode(struct drxd_state *state,
 static int HI_Command(struct drxd_state *state, u16 cmd, u16 * pResult)
 {
 	u32 nrRetries = 0;
-	u16 waitCmd;
 	int status;
 
 	status = Write16(state, HI_RA_RAM_SRV_CMD__A, cmd, 0);
@@ -992,8 +984,8 @@ static int HI_Command(struct drxd_state *state, u16 cmd, u16 * pResult)
 			status = -1;
 			break;
 		}
-		status = Read16(state, HI_RA_RAM_SRV_CMD__A, &waitCmd, 0);
-	} while (waitCmd != 0);
+		status = Read16(state, HI_RA_RAM_SRV_CMD__A, NULL, 0);
+	} while (status != 0);
 
 	if (status >= 0)
 		status = Read16(state, HI_RA_RAM_SRV_RES__A, pResult, 0);
@@ -1018,7 +1010,7 @@ static int HI_CfgCommand(struct drxd_state *state)
 		status = Write16(state, HI_RA_RAM_SRV_CMD__A,
 				 HI_RA_RAM_SRV_CMD_CONFIG, 0);
 	else
-		status = HI_Command(state, HI_RA_RAM_SRV_CMD_CONFIG, 0);
+		status = HI_Command(state, HI_RA_RAM_SRV_CMD_CONFIG, NULL);
 	mutex_unlock(&state->mutex);
 	return status;
 }
@@ -1039,7 +1031,7 @@ static int HI_ResetCommand(struct drxd_state *state)
 	status = Write16(state, HI_RA_RAM_SRV_RST_KEY__A,
 			 HI_RA_RAM_SRV_RST_KEY_ACT, 0);
 	if (status == 0)
-		status = HI_Command(state, HI_RA_RAM_SRV_CMD_RESET, 0);
+		status = HI_Command(state, HI_RA_RAM_SRV_CMD_RESET, NULL);
 	mutex_unlock(&state->mutex);
 	msleep(1);
 	return status;
@@ -1305,12 +1297,11 @@ static int InitFT(struct drxd_state *state)
 
 static int SC_WaitForReady(struct drxd_state *state)
 {
-	u16 curCmd;
 	int i;
 
 	for (i = 0; i < DRXD_MAX_RETRIES; i += 1) {
-		int status = Read16(state, SC_RA_RAM_CMD__A, &curCmd, 0);
-		if (status == 0 || curCmd == 0)
+		int status = Read16(state, SC_RA_RAM_CMD__A, NULL, 0);
+		if (status == 0)
 			return status;
 	}
 	return -1;
@@ -1318,15 +1309,15 @@ static int SC_WaitForReady(struct drxd_state *state)
 
 static int SC_SendCommand(struct drxd_state *state, u16 cmd)
 {
-	int status = 0;
+	int status = 0, ret;
 	u16 errCode;
 
 	Write16(state, SC_RA_RAM_CMD__A, cmd, 0);
 	SC_WaitForReady(state);
 
-	Read16(state, SC_RA_RAM_CMD_ADDR__A, &errCode, 0);
+	ret = Read16(state, SC_RA_RAM_CMD_ADDR__A, &errCode, 0);
 
-	if (errCode == 0xFFFF) {
+	if (ret < 0 || errCode == 0xFFFF) {
 		printk(KERN_ERR "Command Error\n");
 		status = -1;
 	}
@@ -1337,13 +1328,13 @@ static int SC_SendCommand(struct drxd_state *state, u16 cmd)
 static int SC_ProcStartCommand(struct drxd_state *state,
 			       u16 subCmd, u16 param0, u16 param1)
 {
-	int status = 0;
+	int ret, status = 0;
 	u16 scExec;
 
 	mutex_lock(&state->mutex);
 	do {
-		Read16(state, SC_COMM_EXEC__A, &scExec, 0);
-		if (scExec != 1) {
+		ret = Read16(state, SC_COMM_EXEC__A, &scExec, 0);
+		if (ret < 0 || scExec != 1) {
 			status = -1;
 			break;
 		}
@@ -2147,7 +2138,6 @@ static int DRX_Start(struct drxd_state *state, s32 off)
 			}
 			break;
 		}
-		status = status;
 		if (status < 0)
 			break;
 
@@ -2258,7 +2248,6 @@ static int DRX_Start(struct drxd_state *state, s32 off)
 			break;
 
 		}
-		status = status;
 		if (status < 0)
 			break;
 
@@ -2325,7 +2314,6 @@ static int DRX_Start(struct drxd_state *state, s32 off)
 			}
 			break;
 		}
-		status = status;
 		if (status < 0)
 			break;
 
@@ -2636,10 +2624,11 @@ static int DRXD_init(struct drxd_state *state, const u8 *fw, u32 fw_size)
 			break;
 
 		/* Apply I2c address patch to B1 */
-		if (!state->type_A && state->m_HiI2cPatch != NULL)
+		if (!state->type_A && state->m_HiI2cPatch) {
 			status = WriteTable(state, state->m_HiI2cPatch);
 			if (status < 0)
 				break;
+		}
 
 		if (state->type_A) {
 			/* HI firmware patch for UIO readout,
@@ -2696,11 +2685,11 @@ static int DRXD_init(struct drxd_state *state, const u8 *fw, u32 fw_size)
 		status = EnableAndResetMB(state);
 		if (status < 0)
 			break;
-		if (state->type_A)
+		if (state->type_A) {
 			status = ResetCEFR(state);
 			if (status < 0)
 				break;
-
+		}
 		if (fw) {
 			status = DownloadMicrocode(state, fw, fw_size);
 			if (status < 0)
@@ -2812,7 +2801,7 @@ static int drxd_read_signal_strength(struct dvb_frontend *fe, u16 * strength)
 	return 0;
 }
 
-static int drxd_read_status(struct dvb_frontend *fe, fe_status_t * status)
+static int drxd_read_status(struct dvb_frontend *fe, enum fe_status *status)
 {
 	struct drxd_state *state = fe->demodulator_priv;
 	u32 lock;
@@ -2838,17 +2827,11 @@ static int drxd_read_status(struct dvb_frontend *fe, fe_status_t * status)
 static int drxd_init(struct dvb_frontend *fe)
 {
 	struct drxd_state *state = fe->demodulator_priv;
-	int err = 0;
 
-/*	if (request_firmware(&state->fw, "drxd.fw", state->dev)<0) */
-	return DRXD_init(state, 0, 0);
-
-	err = DRXD_init(state, state->fw->data, state->fw->size);
-	release_firmware(state->fw);
-	return err;
+	return DRXD_init(state, NULL, 0);
 }
 
-int drxd_config_i2c(struct dvb_frontend *fe, int onoff)
+static int drxd_config_i2c(struct dvb_frontend *fe, int onoff)
 {
 	struct drxd_state *state = fe->demodulator_priv;
 
@@ -2857,7 +2840,6 @@ int drxd_config_i2c(struct dvb_frontend *fe, int onoff)
 
 	return DRX_ConfigureI2CBridge(state, onoff);
 }
-EXPORT_SYMBOL(drxd_config_i2c);
 
 static int drxd_get_tune_settings(struct dvb_frontend *fe,
 				  struct dvb_frontend_tune_settings *sets)
@@ -2926,7 +2908,7 @@ static void drxd_release(struct dvb_frontend *fe)
 	kfree(state);
 }
 
-static struct dvb_frontend_ops drxd_ops = {
+static const struct dvb_frontend_ops drxd_ops = {
 	.delsys = { SYS_DVBT},
 	.info = {
 		 .name = "Micronas DRXD DVB-T",
@@ -2964,10 +2946,9 @@ struct dvb_frontend *drxd_attach(const struct drxd_config *config,
 {
 	struct drxd_state *state = NULL;
 
-	state = kmalloc(sizeof(struct drxd_state), GFP_KERNEL);
+	state = kzalloc(sizeof(*state), GFP_KERNEL);
 	if (!state)
 		return NULL;
-	memset(state, 0, sizeof(*state));
 
 	state->ops = drxd_ops;
 	state->dev = dev;
@@ -2977,7 +2958,7 @@ struct dvb_frontend *drxd_attach(const struct drxd_config *config,
 
 	mutex_init(&state->mutex);
 
-	if (Read16(state, 0, 0, 0) < 0)
+	if (Read16(state, 0, NULL, 0) < 0)
 		goto error;
 
 	state->frontend.ops = drxd_ops;

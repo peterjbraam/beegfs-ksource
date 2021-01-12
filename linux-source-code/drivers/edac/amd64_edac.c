@@ -15,8 +15,7 @@ module_param(ecc_enable_override, int, 0644);
 
 static struct msr __percpu *msrs;
 
-/* Per-node driver instances */
-static struct mem_ctl_info **mcis;
+/* Per-node stuff */
 static struct ecc_settings **ecc_stngs;
 
 /* Number of Unified Memory Controllers */
@@ -680,7 +679,7 @@ static u64 sys_addr_to_input_addr(struct mem_ctl_info *mci, u64 sys_addr)
 	input_addr =
 	    dram_addr_to_input_addr(mci, sys_addr_to_dram_addr(mci, sys_addr));
 
-	edac_dbg(2, "SysAdddr 0x%lx translates to InputAddr 0x%lx\n",
+	edac_dbg(2, "SysAddr 0x%lx translates to InputAddr 0x%lx\n",
 		 (unsigned long)sys_addr, (unsigned long)input_addr);
 
 	return input_addr;
@@ -1116,9 +1115,17 @@ static int k8_early_channel_count(struct amd64_pvt *pvt)
 /* On F10h and later ErrAddr is MC4_ADDR[47:1] */
 static u64 get_error_address(struct amd64_pvt *pvt, struct mce *m)
 {
-	u64 addr;
+	u16 mce_nid = amd_get_nb_id(m->extcpu);
+	struct mem_ctl_info *mci;
 	u8 start_bit = 1;
 	u8 end_bit   = 47;
+	u64 addr;
+
+	mci = edac_mc_find(mce_nid);
+	if (!mci)
+		return 0;
+
+	pvt = mci->pvt_info;
 
 	if (pvt->fam == 0xf) {
 		start_bit = 3;
@@ -1131,17 +1138,13 @@ static u64 get_error_address(struct amd64_pvt *pvt, struct mce *m)
 	 * Erratum 637 workaround
 	 */
 	if (pvt->fam == 0x15) {
-		struct amd64_pvt *pvt;
 		u64 cc6_base, tmp_addr;
 		u32 tmp;
-		u16 mce_nid;
 		u8 intlv_en;
 
 		if ((addr & GENMASK_ULL(47, 24)) >> 24 != 0x00fdf7)
 			return addr;
 
-		mce_nid	= amd_get_nb_id(m->extcpu);
-		pvt	= mcis[mce_nid]->pvt_info;
 
 		amd64_read_pci_cfg(pvt->F1, DRAM_LOCAL_NODE_LIM, &tmp);
 		intlv_en = tmp >> 21 & 0x7;
@@ -1614,9 +1617,17 @@ static u8 f15_m30h_determine_channel(struct amd64_pvt *pvt, u64 sys_addr,
 	if (num_dcts_intlv == 2) {
 		select = (sys_addr >> 8) & 0x3;
 		channel = select ? 0x3 : 0;
-	} else if (num_dcts_intlv == 4)
-		channel = (sys_addr >> 8) & 0x7;
-
+	} else if (num_dcts_intlv == 4) {
+		u8 intlv_addr = dct_sel_interleave_addr(pvt);
+		switch (intlv_addr) {
+		case 0x4:
+			channel = (sys_addr >> 8) & 0x3;
+			break;
+		case 0x5:
+			channel = (sys_addr >> 9) & 0x3;
+			break;
+		}
+	}
 	return channel;
 }
 
@@ -1675,7 +1686,7 @@ static u64 f1x_get_norm_dct_addr(struct amd64_pvt *pvt, u8 range,
 	u64 chan_off;
 	u64 dram_base		= get_dram_base(pvt, range);
 	u64 hole_off		= f10_dhar_offset(pvt);
-	u64 dct_sel_base_off	= (pvt->dct_sel_hi & 0xFFFFFC00) << 16;
+	u64 dct_sel_base_off	= (u64)(pvt->dct_sel_hi & 0xFFFFFC00) << 16;
 
 	if (hi_rng) {
 		/*
@@ -1752,7 +1763,7 @@ static int f1x_lookup_addr_in_dct(u64 in_addr, u8 nid, u8 dct)
 	int cs_found = -EINVAL;
 	int csrow;
 
-	mci = mcis[nid];
+	mci = edac_mc_find(nid);
 	if (!mci)
 		return cs_found;
 
@@ -1961,7 +1972,7 @@ static int f15_m30h_match_to_this_node(struct amd64_pvt *pvt, unsigned range,
 						     num_dcts_intlv, dct_sel);
 
 	/* Verify we stay within the MAX number of channels allowed */
-	if (channel > 4 || channel < 0)
+	if (channel > 3)
 		return -EINVAL;
 
 	leg_mmio_hole = (u8) (dct_cont_base_reg >> 1 & BIT(0));
@@ -2202,6 +2213,16 @@ static struct amd64_family_type family_types[] = {
 			.dbam_to_cs		= f16_dbam_to_chip_select,
 		}
 	},
+	[F16_M30H_CPUS] = {
+		.ctl_name = "F16h_M30h",
+		.f1_id = PCI_DEVICE_ID_AMD_16H_M30H_NB_F1,
+		.f2_id = PCI_DEVICE_ID_AMD_16H_M30H_NB_F2,
+		.ops = {
+			.early_channel_count	= f1x_early_channel_count,
+			.map_sysaddr_to_csrow	= f1x_map_sysaddr_to_csrow,
+			.dbam_to_cs		= f16_dbam_to_chip_select,
+		}
+	},
 	[F17_CPUS] = {
 		.ctl_name = "F17h",
 		.f0_id = PCI_DEVICE_ID_AMD_17H_DF_F0,
@@ -2211,19 +2232,19 @@ static struct amd64_family_type family_types[] = {
 			.dbam_to_cs		= f17_base_addr_to_cs_size,
 		}
 	},
-	[F17_M10H_CPUS] = {
-		.ctl_name = "F17h_M10h",
-		.f0_id = PCI_DEVICE_ID_AMD_17H_M10H_DF_F0,
-		.f6_id = PCI_DEVICE_ID_AMD_17H_M10H_DF_F6,
+	[F17_M30H_CPUS] = {
+		.ctl_name = "F17h_M30h",
+		.f0_id = PCI_DEVICE_ID_AMD_17H_M30H_DF_F0,
+		.f6_id = PCI_DEVICE_ID_AMD_17H_M30H_DF_F6,
 		.ops = {
 			.early_channel_count	= f17_early_channel_count,
 			.dbam_to_cs		= f17_base_addr_to_cs_size,
 		}
 	},
-	[F17_M30H_CPUS] = {
-		.ctl_name = "F17h_M30h",
-		.f0_id = PCI_DEVICE_ID_AMD_17H_M30H_DF_F0,
-		.f6_id = PCI_DEVICE_ID_AMD_17H_M30H_DF_F6,
+	[F17_M10H_CPUS] = {
+		.ctl_name = "F17h_M10h",
+		.f0_id = PCI_DEVICE_ID_AMD_17H_M10H_DF_F0,
+		.f6_id = PCI_DEVICE_ID_AMD_17H_M10H_DF_F6,
 		.ops = {
 			.early_channel_count	= f17_early_channel_count,
 			.dbam_to_cs		= f17_base_addr_to_cs_size,
@@ -2444,13 +2465,19 @@ static void __log_ecc_error(struct mem_ctl_info *mci, struct err_info *err,
 
 static inline void decode_bus_error(int node_id, struct mce *m)
 {
-	struct mem_ctl_info *mci = mcis[node_id];
-	struct amd64_pvt *pvt = mci->pvt_info;
+	struct mem_ctl_info *mci;
+	struct amd64_pvt *pvt;
 	u8 ecc_type = (m->status >> 45) & 0x3;
 	u8 xec = XEC(m->status, 0x1f);
 	u16 ec = EC(m->status);
 	u64 sys_addr;
 	struct err_info err;
+
+	mci = edac_mc_find(node_id);
+	if (!mci)
+		return;
+
+	pvt = mci->pvt_info;
 
 	/* Bail out early if this was an 'observed' error */
 	if (PP(ec) == NBSL_PP_OBS)
@@ -2545,8 +2572,7 @@ reserve_mc_sibling_devs(struct amd64_pvt *pvt, u16 pci_id1, u16 pci_id2)
 	if (pvt->umc) {
 		pvt->F0 = pci_get_related_function(pvt->F3->vendor, pci_id1, pvt->F3);
 		if (!pvt->F0) {
-		amd64_err("error F0 device not found: vendor %x device 0x%x (broken BIOS?)\n",
-			  PCI_VENDOR_ID_AMD, pci_id1);
+			amd64_err("F0 not found, device 0x%x (broken BIOS?)\n", pci_id1);
 			return -ENODEV;
 		}
 
@@ -2555,11 +2581,10 @@ reserve_mc_sibling_devs(struct amd64_pvt *pvt, u16 pci_id1, u16 pci_id2)
 			pci_dev_put(pvt->F0);
 			pvt->F0 = NULL;
 
-		amd64_err("error F6 device not found: vendor %x device 0x%x (broken BIOS?)\n",
-			  PCI_VENDOR_ID_AMD, pci_id2);
-
+			amd64_err("F6 not found: device 0x%x (broken BIOS?)\n", pci_id2);
 			return -ENODEV;
 		}
+
 		edac_dbg(1, "F0: %s\n", pci_name(pvt->F0));
 		edac_dbg(1, "F3: %s\n", pci_name(pvt->F3));
 		edac_dbg(1, "F6: %s\n", pci_name(pvt->F6));
@@ -2570,8 +2595,7 @@ reserve_mc_sibling_devs(struct amd64_pvt *pvt, u16 pci_id1, u16 pci_id2)
 	/* Reserve the ADDRESS MAP Device */
 	pvt->F1 = pci_get_related_function(pvt->F3->vendor, pci_id1, pvt->F3);
 	if (!pvt->F1) {
-	amd64_err("error address map device not found: vendor %x device 0x%x (broken BIOS?)\n",
-		  PCI_VENDOR_ID_AMD, pci_id1);
+		amd64_err("F1 not found: device 0x%x (broken BIOS?)\n", pci_id1);
 		return -ENODEV;
 	}
 
@@ -2581,9 +2605,8 @@ reserve_mc_sibling_devs(struct amd64_pvt *pvt, u16 pci_id1, u16 pci_id2)
 		pci_dev_put(pvt->F1);
 		pvt->F1 = NULL;
 
-	amd64_err("error F2 device not found: vendor %x device 0x%x (broken BIOS?)\n",
-		  PCI_VENDOR_ID_AMD, pci_id2);
-			return -ENODEV;
+		amd64_err("F2 not found: device 0x%x (broken BIOS?)\n", pci_id2);
+		return -ENODEV;
 	}
 
 	edac_dbg(1, "F1: %s\n", pci_name(pvt->F1));
@@ -2930,7 +2953,7 @@ static int toggle_ecc_err_reporting(struct ecc_settings *s, u16 nid, bool on)
 
 	if (!zalloc_cpumask_var(&cmask, GFP_KERNEL)) {
 		amd64_warn("%s: error allocating mask\n", __func__);
-		return false;
+		return -ENOMEM;
 	}
 
 	get_cpus_on_this_dct_cpumask(cmask, nid);
@@ -3082,6 +3105,8 @@ static bool ecc_enabled(struct pci_dev *F3, u16 nid)
 		/* Check whether at least one UMC is enabled: */
 		if (umc_en_mask)
 			ecc_en = umc_en_mask == ecc_en_mask;
+		else
+			edac_dbg(0, "Node %d: No enabled UMCs.\n", nid);
 
 		/* Assume UMC MCA banks are enabled. */
 		nb_mce_en = true;
@@ -3092,45 +3117,18 @@ static bool ecc_enabled(struct pci_dev *F3, u16 nid)
 
 		nb_mce_en = nb_mce_bank_enabled_on_node(nid);
 		if (!nb_mce_en)
-			amd64_notice("NB MCE bank disabled, set MSR 0x%08x[4] on node %d to enable.\n",
+			edac_dbg(0, "NB MCE bank disabled, set MSR 0x%08x[4] on node %d to enable.\n",
 				     MSR_IA32_MCG_CTL, nid);
 	}
 
-	amd64_info("DRAM ECC %s.\n", (ecc_en ? "enabled" : "disabled"));
+	amd64_info("Node %d: DRAM ECC %s.\n",
+		   nid, (ecc_en ? "enabled" : "disabled"));
 
 	if (!ecc_en || !nb_mce_en) {
-		amd64_notice("%s", ecc_msg);
+		amd64_info("%s", ecc_msg);
 		return false;
 	}
 	return true;
-}
-
-static int set_mc_sysfs_attrs(struct mem_ctl_info *mci)
-{
-	struct amd64_pvt *pvt = mci->pvt_info;
-	int rc;
-
-	rc = amd64_create_sysfs_dbg_files(mci);
-	if (rc < 0)
-		return rc;
-
-	if (pvt->fam >= 0x10) {
-		rc = amd64_create_sysfs_inject_files(mci);
-		if (rc < 0)
-			return rc;
-	}
-
-	return 0;
-}
-
-static void del_mc_sysfs_attrs(struct mem_ctl_info *mci)
-{
-	struct amd64_pvt *pvt = mci->pvt_info;
-
-	amd64_remove_sysfs_dbg_files(mci);
-
-	if (pvt->fam >= 0x10)
-		amd64_remove_sysfs_inject_files(mci);
 }
 
 static inline void
@@ -3174,7 +3172,6 @@ static void setup_mci_misc_attrs(struct mem_ctl_info *mci,
 
 	mci->edac_cap		= determine_edac_cap(pvt);
 	mci->mod_name		= EDAC_MOD_STR;
-	mci->mod_ver		= EDAC_AMD64_VERSION;
 	mci->ctl_name		= fam->ctl_name;
 	mci->dev_name		= pci_name(pvt->F3);
 	mci->ctl_page_to_phys	= NULL;
@@ -3192,7 +3189,7 @@ static struct amd64_family_type *per_family_init(struct amd64_pvt *pvt)
 	struct amd64_family_type *fam_type = NULL;
 
 	pvt->ext_model  = boot_cpu_data.x86_model >> 4;
-	pvt->stepping	= boot_cpu_data.x86_mask;
+	pvt->stepping	= boot_cpu_data.x86_stepping;
 	pvt->model	= boot_cpu_data.x86_model;
 	pvt->fam	= boot_cpu_data.x86;
 
@@ -3223,6 +3220,11 @@ static struct amd64_family_type *per_family_init(struct amd64_pvt *pvt)
 		break;
 
 	case 0x16:
+		if (pvt->model == 0x30) {
+			fam_type = &family_types[F16_M30H_CPUS];
+			pvt->ops = &family_types[F16_M30H_CPUS].ops;
+			break;
+		}
 		fam_type	= &family_types[F16_CPUS];
 		pvt->ops	= &family_types[F16_CPUS].ops;
 		break;
@@ -3253,6 +3255,16 @@ static struct amd64_family_type *per_family_init(struct amd64_pvt *pvt)
 				 : ""), pvt->mc_node_id);
 	return fam_type;
 }
+
+static const struct attribute_group *amd64_edac_attr_groups[] = {
+#ifdef CONFIG_EDAC_DEBUG
+	&amd64_edac_dbg_group,
+#endif
+#ifdef CONFIG_EDAC_AMD64_ERROR_INJECTION
+	&amd64_edac_inj_group,
+#endif
+	NULL
+};
 
 /* Set the number of Unified Memory Controllers in the system. */
 static void compute_num_umcs(void)
@@ -3356,30 +3368,13 @@ static int init_one_instance(unsigned int nid)
 		mci->edac_cap = EDAC_FLAG_NONE;
 
 	ret = -ENODEV;
-	if (edac_mc_add_mc(mci)) {
+	if (edac_mc_add_mc_with_groups(mci, amd64_edac_attr_groups)) {
 		edac_dbg(1, "failed edac_mc_add_mc()\n");
 		goto err_add_mc;
 	}
-	if (set_mc_sysfs_attrs(mci)) {
-		edac_dbg(1, "failed edac_mc_add_mc()\n");
-		goto err_add_sysfs;
-	}
-
-	/* register stuff with EDAC MCE */
-	if (report_gart_errors)
-		amd_report_gart_errors(true);
-
-	if (pvt->umc)
-		amd_register_ecc_decoder(decode_umc_error);
-	else
-		amd_register_ecc_decoder(decode_bus_error);
-
-	mcis[nid] = mci;
 
 	return 0;
 
-err_add_sysfs:
-	edac_mc_del_mc(mci->pdev);
 err_add_mc:
 	edac_mc_free(mci);
 
@@ -3432,6 +3427,8 @@ static int probe_one_instance(unsigned int nid)
 
 		if (boot_cpu_data.x86 < 0x17)
 			restore_ecc_error_reporting(s, nid, F3);
+
+		goto err_enable;
 	}
 
 	return ret;
@@ -3454,7 +3451,6 @@ static void remove_one_instance(unsigned int nid)
 	mci = find_mci_by_dev(&F3->dev);
 	WARN_ON(!mci);
 
-	del_mc_sysfs_attrs(mci);
 	/* Remove from EDAC CORE tracking list */
 	mci = edac_mc_del_mc(&F3->dev);
 	if (!mci)
@@ -3466,20 +3462,11 @@ static void remove_one_instance(unsigned int nid)
 
 	free_mc_sibling_devs(pvt);
 
-	/* unregister from EDAC MCE */
-	amd_report_gart_errors(false);
-
-	if (pvt->umc)
-		amd_unregister_ecc_decoder(decode_umc_error);
-	else
-		amd_unregister_ecc_decoder(decode_bus_error);
-
 	kfree(ecc_stngs[nid]);
 	ecc_stngs[nid] = NULL;
 
 	/* Free the EDAC CORE resources */
 	mci->pvt_info = NULL;
-	mcis[nid] = NULL;
 
 	kfree(pvt);
 	edac_mc_free(mci);
@@ -3493,7 +3480,7 @@ static void setup_pci_device(void)
 	if (pci_ctl)
 		return;
 
-	mci = mcis[0];
+	mci = edac_mc_find(0);
 	if (!mci)
 		return;
 
@@ -3520,20 +3507,25 @@ MODULE_DEVICE_TABLE(x86cpu, amd64_cpuids);
 
 static int __init amd64_edac_init(void)
 {
+	const char *owner;
 	int err = -ENODEV;
 	int i;
 
-	printk(KERN_INFO "AMD64 EDAC driver v%s\n", EDAC_AMD64_VERSION);
+	owner = edac_get_owner();
+	if (owner && strncmp(owner, EDAC_MOD_STR, sizeof(EDAC_MOD_STR)))
+		return -EBUSY;
+
+	if (!x86_match_cpu(amd64_cpuids))
+		return -ENODEV;
+
+	if (amd_cache_northbridges() < 0)
+		return -ENODEV;
 
 	opstate_init();
 
-	if (amd_cache_northbridges() < 0)
-		goto err_ret;
-
 	err = -ENOMEM;
-	mcis	  = kzalloc(amd_nb_num() * sizeof(mcis[0]), GFP_KERNEL);
-	ecc_stngs = kzalloc(amd_nb_num() * sizeof(ecc_stngs[0]), GFP_KERNEL);
-	if (!(mcis && ecc_stngs))
+	ecc_stngs = kcalloc(amd_nb_num(), sizeof(ecc_stngs[0]), GFP_KERNEL);
+	if (!ecc_stngs)
 		goto err_free;
 
 	msrs = msrs_alloc();
@@ -3542,20 +3534,39 @@ static int __init amd64_edac_init(void)
 
 	compute_num_umcs();
 
-	for (i = 0; i < amd_nb_num(); i++)
-		if (probe_one_instance(i)) {
+	for (i = 0; i < amd_nb_num(); i++) {
+		err = probe_one_instance(i);
+		if (err) {
 			/* unwind properly */
 			while (--i >= 0)
 				remove_one_instance(i);
+
 			goto err_pci;
 		}
+	}
 
 	if (!edac_has_mcs()) {
 		err = -ENODEV;
 		goto err_pci;
 	}
 
+	/* register stuff with EDAC MCE */
+	if (report_gart_errors)
+		amd_report_gart_errors(true);
+
+	if (boot_cpu_data.x86 >= 0x17)
+		amd_register_ecc_decoder(decode_umc_error);
+	else
+		amd_register_ecc_decoder(decode_bus_error);
+
 	setup_pci_device();
+
+#ifdef CONFIG_X86_32
+	amd64_err("%s on 32-bit is unsupported. USE AT YOUR OWN RISK!\n", EDAC_MOD_STR);
+#endif
+
+	printk(KERN_INFO "AMD64 EDAC driver v%s\n", EDAC_AMD64_VERSION);
+
 	return 0;
 
 err_pci:
@@ -3563,13 +3574,9 @@ err_pci:
 	msrs = NULL;
 
 err_free:
-	kfree(mcis);
-	mcis = NULL;
-
 	kfree(ecc_stngs);
 	ecc_stngs = NULL;
 
-err_ret:
 	return err;
 }
 
@@ -3580,14 +3587,19 @@ static void __exit amd64_edac_exit(void)
 	if (pci_ctl)
 		edac_pci_release_generic_ctl(pci_ctl);
 
+	/* unregister from EDAC MCE */
+	amd_report_gart_errors(false);
+
+	if (boot_cpu_data.x86 >= 0x17)
+		amd_unregister_ecc_decoder(decode_umc_error);
+	else
+		amd_unregister_ecc_decoder(decode_bus_error);
+
 	for (i = 0; i < amd_nb_num(); i++)
 		remove_one_instance(i);
 
 	kfree(ecc_stngs);
 	ecc_stngs = NULL;
-
-	kfree(mcis);
-	mcis = NULL;
 
 	msrs_free(msrs);
 	msrs = NULL;

@@ -55,11 +55,8 @@ static irqreturn_t itg3200_trigger_handler(int irq, void *p)
 	if (ret < 0)
 		goto error_ret;
 
-	if (indio_dev->scan_timestamp)
-		memcpy(buf + indio_dev->scan_bytes - sizeof(s64),
-				&pf->timestamp, sizeof(pf->timestamp));
+	iio_push_to_buffers_with_timestamp(indio_dev, buf, pf->timestamp);
 
-	iio_push_to_buffers(indio_dev, buf);
 	iio_trigger_notify_done(indio_dev->trig);
 
 error_ret:
@@ -104,7 +101,6 @@ error_ret:
 }
 
 static const struct iio_trigger_ops itg3200_trigger_ops = {
-	.owner = THIS_MODULE,
 	.set_trigger_state = &itg3200_data_rdy_trigger_set_state,
 };
 
@@ -135,7 +131,7 @@ int itg3200_probe_trigger(struct iio_dev *indio_dev)
 		goto error_free_irq;
 
 	/* select default trigger */
-	indio_dev->trig = st->trig;
+	indio_dev->trig = iio_trigger_get(st->trig);
 
 	return 0;
 

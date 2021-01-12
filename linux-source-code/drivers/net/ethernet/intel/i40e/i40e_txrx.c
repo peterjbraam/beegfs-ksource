@@ -636,9 +636,7 @@ void i40e_clean_tx_ring(struct i40e_ring *tx_ring)
 	u16 i;
 
 	if (ring_is_xdp(tx_ring) && tx_ring->xsk_umem) {
-		/* RHEL7: removed i40e_xsk_clean_tx_ring, no i40e_xsk.c
 		i40e_xsk_clean_tx_ring(tx_ring);
-		*/
 	} else {
 		/* ring already cleared, nothing to do */
 		if (!tx_ring->tx_bi)
@@ -776,7 +774,7 @@ void i40e_detect_recover_hung(struct i40e_vsi *vsi)
 static bool i40e_clean_tx_irq(struct i40e_vsi *vsi,
 			      struct i40e_ring *tx_ring, int napi_budget)
 {
-	int i = tx_ring->next_to_clean;
+	u16 i = tx_ring->next_to_clean;
 	struct i40e_tx_buffer *tx_buf;
 	struct i40e_tx_desc *tx_head;
 	struct i40e_tx_desc *tx_desc;
@@ -1346,7 +1344,6 @@ void i40e_clean_rx_ring(struct i40e_ring *rx_ring)
 {
 	unsigned long bi_size;
 	u16 i;
-	DEFINE_DMA_ATTRS(attrs);
 
 	/* ring already cleared, nothing to do */
 	if (!rx_ring->rx_bi)
@@ -1358,9 +1355,7 @@ void i40e_clean_rx_ring(struct i40e_ring *rx_ring)
 	}
 
 	if (rx_ring->xsk_umem) {
-		/* RHEL7: Removed i40e_xsk_clean_rx_ring, no i40e_xsk.c
 		i40e_xsk_clean_rx_ring(rx_ring);
-		*/
 		goto skip_free;
 	}
 
@@ -1381,12 +1376,10 @@ void i40e_clean_rx_ring(struct i40e_ring *rx_ring)
 					      DMA_FROM_DEVICE);
 
 		/* free resources associated with mapping */
-		dma_set_attr(DMA_ATTR_SKIP_CPU_SYNC, &attrs);
-		dma_set_attr(DMA_ATTR_WEAK_ORDERING, &attrs);
 		dma_unmap_page_attrs(rx_ring->dev, rx_bi->dma,
 				     i40e_rx_pg_size(rx_ring),
 				     DMA_FROM_DEVICE,
-				     &attrs);
+				     I40E_RX_DMA_ATTR);
 
 		__page_frag_cache_drain(rx_bi->page, rx_bi->pagecnt_bias);
 
@@ -1527,7 +1520,6 @@ static bool i40e_alloc_mapped_page(struct i40e_ring *rx_ring,
 {
 	struct page *page = bi->page;
 	dma_addr_t dma;
-	DEFINE_DMA_ATTRS(attrs);
 
 	/* since we are recycling buffers we should seldom need to alloc */
 	if (likely(page)) {
@@ -1543,12 +1535,10 @@ static bool i40e_alloc_mapped_page(struct i40e_ring *rx_ring,
 	}
 
 	/* map page for use */
-	dma_set_attr(DMA_ATTR_SKIP_CPU_SYNC, &attrs);
-	dma_set_attr(DMA_ATTR_WEAK_ORDERING, &attrs);
 	dma = dma_map_page_attrs(rx_ring->dev, page, 0,
 				 i40e_rx_pg_size(rx_ring),
 				 DMA_FROM_DEVICE,
-				 &attrs);
+				 I40E_RX_DMA_ATTR);
 
 	/* if mapping failed free memory back to system since
 	 * there isn't much point in holding memory we can't use
@@ -2136,18 +2126,14 @@ static struct sk_buff *i40e_build_skb(struct i40e_ring *rx_ring,
 static void i40e_put_rx_buffer(struct i40e_ring *rx_ring,
 			       struct i40e_rx_buffer *rx_buffer)
 {
-	DEFINE_DMA_ATTRS(attrs);
-
 	if (i40e_can_reuse_rx_page(rx_buffer)) {
 		/* hand second half of page back to the ring */
 		i40e_reuse_rx_page(rx_ring, rx_buffer);
 	} else {
 		/* we are not reusing the buffer so unmap it */
-		dma_set_attr(DMA_ATTR_SKIP_CPU_SYNC, &attrs);
-		dma_set_attr(DMA_ATTR_WEAK_ORDERING, &attrs);
 		dma_unmap_page_attrs(rx_ring->dev, rx_buffer->dma,
 				     i40e_rx_pg_size(rx_ring),
-				     DMA_FROM_DEVICE, &attrs);
+				     DMA_FROM_DEVICE, I40E_RX_DMA_ATTR);
 		__page_frag_cache_drain(rx_buffer->page,
 					rx_buffer->pagecnt_bias);
 		/* clear contents of buffer_info */
@@ -2598,8 +2584,9 @@ int i40e_napi_poll(struct napi_struct *napi, int budget)
 	 * budget and be more aggressive about cleaning up the Tx descriptors.
 	 */
 	i40e_for_each_ring(ring, q_vector->tx) {
-		/* RHEL7: removed i40e_clean_xdp_tx_irq, no i40e_xsk.c */
-		bool wd = i40e_clean_tx_irq(vsi, ring, budget);
+		bool wd = ring->xsk_umem ?
+			  i40e_clean_xdp_tx_irq(vsi, ring, budget) :
+			  i40e_clean_tx_irq(vsi, ring, budget);
 
 		if (!wd) {
 			clean_complete = false;
@@ -2619,8 +2606,9 @@ int i40e_napi_poll(struct napi_struct *napi, int budget)
 	budget_per_ring = max(budget/q_vector->num_ringpairs, 1);
 
 	i40e_for_each_ring(ring, q_vector->rx) {
-		/* RHEL7: removed i40e_clean_rx_irq_zc, no i40e_xsk.c */
-		int cleaned = i40e_clean_rx_irq(ring, budget_per_ring);
+		int cleaned = ring->xsk_umem ?
+			      i40e_clean_rx_irq_zc(ring, budget_per_ring) :
+			      i40e_clean_rx_irq(ring, budget_per_ring);
 
 		work_done += cleaned;
 		/* if we clean as many as budgeted, we must not be done */
@@ -2936,8 +2924,8 @@ static int i40e_tso(struct i40e_tx_buffer *first, u8 *hdr_len,
 
 	if (skb_shinfo(skb)->gso_type & (SKB_GSO_GRE |
 					 SKB_GSO_GRE_CSUM |
-					 SKB_GSO_IPIP |
-					 SKB_GSO_SIT |
+					 SKB_GSO_IPXIP4 |
+					 SKB_GSO_IPXIP6 |
 					 SKB_GSO_UDP_TUNNEL |
 					 SKB_GSO_UDP_TUNNEL_CSUM)) {
 		if (!(skb_shinfo(skb)->gso_type & SKB_GSO_PARTIAL) &&
@@ -3273,7 +3261,7 @@ int __i40e_maybe_stop_tx(struct i40e_ring *tx_ring, int size)
  **/
 bool __i40e_chk_linearize(struct sk_buff *skb)
 {
-	const skb_frag_t *frag, *stale;
+	const struct skb_frag_struct *frag, *stale;
 	int nr_frags, sum;
 
 	/* no need to check if number of frags is less than 7 */
@@ -3360,7 +3348,7 @@ static inline int i40e_tx_map(struct i40e_ring *tx_ring, struct sk_buff *skb,
 {
 	unsigned int data_len = skb->data_len;
 	unsigned int size = skb_headlen(skb);
-	skb_frag_t *frag;
+	struct skb_frag_struct *frag;
 	struct i40e_tx_buffer *tx_bi;
 	struct i40e_tx_desc *tx_desc;
 	u16 i = tx_ring->next_to_use;

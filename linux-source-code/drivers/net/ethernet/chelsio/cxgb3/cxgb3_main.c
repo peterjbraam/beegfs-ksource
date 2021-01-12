@@ -50,7 +50,8 @@
 #include <linux/stringify.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
+#include <linux/nospec.h>
 
 #include "common.h"
 #include "cxgb3_ioctl.h"
@@ -471,8 +472,7 @@ static int init_tp_parity(struct adapter *adap)
 		if (!skb)
 			goto alloc_skb_fail;
 
-		req = (struct cpl_smt_write_req *)__skb_put(skb, sizeof(*req));
-		memset(req, 0, sizeof(*req));
+		req = __skb_put_zero(skb, sizeof(*req));
 		req->wr.wr_hi = htonl(V_WR_OP(FW_WROPCODE_FORWARD));
 		OPCODE_TID(req) = htonl(MK_OPCODE_TID(CPL_SMT_WRITE_REQ, i));
 		req->mtu_idx = NMTUS - 1;
@@ -495,8 +495,7 @@ static int init_tp_parity(struct adapter *adap)
 		if (!skb)
 			goto alloc_skb_fail;
 
-		req = (struct cpl_l2t_write_req *)__skb_put(skb, sizeof(*req));
-		memset(req, 0, sizeof(*req));
+		req = __skb_put_zero(skb, sizeof(*req));
 		req->wr.wr_hi = htonl(V_WR_OP(FW_WROPCODE_FORWARD));
 		OPCODE_TID(req) = htonl(MK_OPCODE_TID(CPL_L2T_WRITE_REQ, i));
 		req->params = htonl(V_L2T_W_IDX(i));
@@ -518,8 +517,7 @@ static int init_tp_parity(struct adapter *adap)
 		if (!skb)
 			goto alloc_skb_fail;
 
-		req = (struct cpl_rte_write_req *)__skb_put(skb, sizeof(*req));
-		memset(req, 0, sizeof(*req));
+		req = __skb_put_zero(skb, sizeof(*req));
 		req->wr.wr_hi = htonl(V_WR_OP(FW_WROPCODE_FORWARD));
 		OPCODE_TID(req) = htonl(MK_OPCODE_TID(CPL_RTE_WRITE_REQ, i));
 		req->l2t_idx = htonl(V_L2T_W_IDX(i));
@@ -538,8 +536,7 @@ static int init_tp_parity(struct adapter *adap)
 	if (!skb)
 		goto alloc_skb_fail;
 
-	greq = (struct cpl_set_tcb_field *)__skb_put(skb, sizeof(*greq));
-	memset(greq, 0, sizeof(*greq));
+	greq = __skb_put_zero(skb, sizeof(*greq));
 	greq->wr.wr_hi = htonl(V_WR_OP(FW_WROPCODE_FORWARD));
 	OPCODE_TID(greq) = htonl(MK_OPCODE_TID(CPL_SET_TCB_FIELD, 0));
 	greq->mask = cpu_to_be64(1);
@@ -780,11 +777,11 @@ static ssize_t store_nservers(struct device *d, struct device_attribute *attr,
 
 #define CXGB3_ATTR_R(name, val_expr) \
 CXGB3_SHOW(name, val_expr) \
-static DEVICE_ATTR(name, S_IRUGO, show_##name, NULL)
+static DEVICE_ATTR(name, 0444, show_##name, NULL)
 
 #define CXGB3_ATTR_RW(name, val_expr, store_method) \
 CXGB3_SHOW(name, val_expr) \
-static DEVICE_ATTR(name, S_IRUGO | S_IWUSR, show_##name, store_method)
+static DEVICE_ATTR(name, 0644, show_##name, store_method)
 
 CXGB3_ATTR_R(cam_size, t3_mc5_size(&adap->mc5));
 CXGB3_ATTR_RW(nfilters, adap->params.mc5.nfilters, store_nfilters);
@@ -797,7 +794,9 @@ static struct attribute *cxgb3_attrs[] = {
 	NULL
 };
 
-static struct attribute_group cxgb3_attr_group = {.attrs = cxgb3_attrs };
+static const struct attribute_group cxgb3_attr_group = {
+	.attrs = cxgb3_attrs,
+};
 
 static ssize_t tm_attr_show(struct device *d,
 			    char *buf, int sched)
@@ -861,7 +860,7 @@ static ssize_t store_##name(struct device *d, struct device_attribute *attr, \
 { \
 	return tm_attr_store(d, buf, len, sched); \
 } \
-static DEVICE_ATTR(name, S_IRUGO | S_IWUSR, show_##name, store_##name)
+static DEVICE_ATTR(name, 0644, show_##name, store_##name)
 
 TM_ATTR(sched0, 0);
 TM_ATTR(sched1, 1);
@@ -884,7 +883,9 @@ static struct attribute *offload_attrs[] = {
 	NULL
 };
 
-static struct attribute_group offload_attr_group = {.attrs = offload_attrs };
+static const struct attribute_group offload_attr_group = {
+	.attrs = offload_attrs,
+};
 
 /*
  * Sends an sk_buff to an offload queue driver
@@ -909,7 +910,7 @@ static int write_smt_entry(struct adapter *adapter, int idx)
 	if (!skb)
 		return -ENOMEM;
 
-	req = (struct cpl_smt_write_req *)__skb_put(skb, sizeof(*req));
+	req = __skb_put(skb, sizeof(*req));
 	req->wr.wr_hi = htonl(V_WR_OP(FW_WROPCODE_FORWARD));
 	OPCODE_TID(req) = htonl(MK_OPCODE_TID(CPL_SMT_WRITE_REQ, idx));
 	req->mtu_idx = NMTUS - 1;	/* should be 0 but there's a T3 bug */
@@ -952,7 +953,7 @@ static int send_pktsched_cmd(struct adapter *adap, int sched, int qidx, int lo,
 	if (!skb)
 		return -ENOMEM;
 
-	req = (struct mngt_pktsched_wr *)skb_put(skb, sizeof(*req));
+	req = skb_put(skb, sizeof(*req));
 	req->wr_hi = htonl(V_WR_OP(FW_WROPCODE_MNGT));
 	req->mngt_opcode = FW_MNGTOPCODE_PKTSCHED_SET;
 	req->sched = sched;
@@ -1540,7 +1541,7 @@ static void set_msglevel(struct net_device *dev, u32 val)
 	adapter->msg_enable = val;
 }
 
-static char stats_strings[][ETH_GSTRING_LEN] = {
+static const char stats_strings[][ETH_GSTRING_LEN] = {
 	"TxOctetsOK         ",
 	"TxFramesOK         ",
 	"TxMulticastFramesOK",
@@ -2268,6 +2269,7 @@ static int cxgb_extension_ioctl(struct net_device *dev, void __user *useraddr)
 
 		if (t.qset_idx >= nqsets)
 			return -EINVAL;
+		t.qset_idx = array_index_nospec(t.qset_idx, nqsets);
 
 		q = &adapter->params.sge.qset[q1 + t.qset_idx];
 		t.rspq_size = q->rspq_size;
@@ -2540,8 +2542,6 @@ static int cxgb_change_mtu(struct net_device *dev, int new_mtu)
 	struct adapter *adapter = pi->adapter;
 	int ret;
 
-	if (new_mtu < 81)	/* accommodate SACK */
-		return -EINVAL;
 	if ((ret = t3_mac_set_mtu(&pi->mac, new_mtu)))
 		return ret;
 	dev->mtu = new_mtu;
@@ -3100,30 +3100,22 @@ static int cxgb_enable_msix(struct adapter *adap)
 {
 	struct msix_entry entries[SGE_QSETS + 1];
 	int vectors;
-	int i, err;
+	int i;
 
 	vectors = ARRAY_SIZE(entries);
 	for (i = 0; i < vectors; ++i)
 		entries[i].entry = i;
 
-	while ((err = pci_enable_msix(adap->pdev, entries, vectors)) > 0)
-		vectors = err;
+	vectors = pci_enable_msix_range(adap->pdev, entries,
+					adap->params.nports + 1, vectors);
+	if (vectors < 0)
+		return vectors;
 
-	if (err < 0)
-		pci_disable_msix(adap->pdev);
+	for (i = 0; i < vectors; ++i)
+		adap->msix_info[i].vec = entries[i].vector;
+	adap->msix_nvectors = vectors;
 
-	if (!err && vectors < (adap->params.nports + 1)) {
-		pci_disable_msix(adap->pdev);
-		err = -1;
-	}
-
-	if (!err) {
-		for (i = 0; i < vectors; ++i)
-			adap->msix_info[i].vec = entries[i].vector;
-		adap->msix_nvectors = vectors;
-	}
-
-	return err;
+	return 0;
 }
 
 static void print_port_info(struct adapter *adap, const struct adapter_info *ai)
@@ -3172,7 +3164,7 @@ static const struct net_device_ops cxgb_netdev_ops = {
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_set_rx_mode	= cxgb_set_rxmode,
 	.ndo_do_ioctl		= cxgb_ioctl,
-	.ndo_change_mtu_rh74	= cxgb_change_mtu,
+	.ndo_change_mtu		= cxgb_change_mtu,
 	.ndo_set_mac_address	= cxgb_set_mac_addr,
 	.ndo_fix_features	= cxgb_fix_features,
 	.ndo_set_features	= cxgb_set_features,
@@ -3311,7 +3303,9 @@ static int init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 			netdev->features |= NETIF_F_HIGHDMA;
 
 		netdev->netdev_ops = &cxgb_netdev_ops;
-		SET_ETHTOOL_OPS(netdev, &cxgb_ethtool_ops);
+		netdev->ethtool_ops = &cxgb_ethtool_ops;
+		netdev->min_mtu = 81;
+		netdev->max_mtu = ETH_MAX_MTU;
 		netdev->dev_port = pi->port_id;
 	}
 
@@ -3370,9 +3364,16 @@ static int init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	err = sysfs_create_group(&adapter->port[0]->dev.kobj,
 				 &cxgb3_attr_group);
+	if (err) {
+		dev_err(&pdev->dev, "cannot create sysfs group\n");
+		goto out_close_led;
+	}
 
 	print_port_info(adapter, ai);
 	return 0;
+
+out_close_led:
+	t3_set_reg_field(adapter, A_T3DBG_GPIO_EN, F_GPIO0_OUT_VAL, 0);
 
 out_free_dev:
 	iounmap(adapter->regs);

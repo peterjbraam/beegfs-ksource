@@ -38,7 +38,7 @@ static int ieee802154_nl_fill_phy(struct sk_buff *msg, u32 portid,
 {
 	void *hdr;
 	int i, pages = 0;
-	uint32_t *buf = kzalloc(32 * sizeof(uint32_t), GFP_KERNEL);
+	uint32_t *buf = kcalloc(32, sizeof(uint32_t), GFP_KERNEL);
 
 	pr_debug("%s\n", __func__);
 
@@ -175,6 +175,7 @@ int ieee802154_add_iface(struct sk_buff *skb, struct genl_info *info)
 	int rc = -ENOBUFS;
 	struct net_device *dev;
 	int type = __IEEE802154_DEV_INVALID;
+	unsigned char name_assign_type;
 
 	pr_debug("%s\n", __func__);
 
@@ -190,8 +191,10 @@ int ieee802154_add_iface(struct sk_buff *skb, struct genl_info *info)
 		if (devname[nla_len(info->attrs[IEEE802154_ATTR_DEV_NAME]) - 1]
 				!= '\0')
 			return -EINVAL; /* phy name should be null-terminated */
+		name_assign_type = NET_NAME_USER;
 	} else  {
 		devname = "wpan%d";
+		name_assign_type = NET_NAME_ENUM;
 	}
 
 	if (strlen(devname) >= IFNAMSIZ)
@@ -221,7 +224,7 @@ int ieee802154_add_iface(struct sk_buff *skb, struct genl_info *info)
 	}
 
 	dev = rdev_add_virtual_intf_deprecated(wpan_phy_to_rdev(phy), devname,
-					       type);
+					       name_assign_type, type);
 	if (IS_ERR(dev)) {
 		rc = PTR_ERR(dev);
 		goto nla_put_failure;
@@ -239,7 +242,7 @@ int ieee802154_add_iface(struct sk_buff *skb, struct genl_info *info)
 		 * dev_set_mac_address require RTNL_LOCK
 		 */
 		rtnl_lock();
-		rc = dev_set_mac_address(dev, &addr);
+		rc = dev_set_mac_address(dev, &addr, NULL);
 		rtnl_unlock();
 		if (rc)
 			goto dev_unregister;

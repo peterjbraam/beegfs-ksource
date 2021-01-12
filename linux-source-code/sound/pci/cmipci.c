@@ -68,14 +68,14 @@ module_param_array(id, charp, NULL, 0444);
 MODULE_PARM_DESC(id, "ID string for C-Media PCI soundcard.");
 module_param_array(enable, bool, NULL, 0444);
 MODULE_PARM_DESC(enable, "Enable C-Media PCI soundcard.");
-module_param_array(mpu_port, long, NULL, 0444);
+module_param_hw_array(mpu_port, long, ioport, NULL, 0444);
 MODULE_PARM_DESC(mpu_port, "MPU-401 port.");
-module_param_array(fm_port, long, NULL, 0444);
+module_param_hw_array(fm_port, long, ioport, NULL, 0444);
 MODULE_PARM_DESC(fm_port, "FM port.");
 module_param_array(soft_ac3, bool, NULL, 0444);
 MODULE_PARM_DESC(soft_ac3, "Software-conversion of raw SPDIF packets (model 033 only).");
 #ifdef SUPPORT_JOYSTICK
-module_param_array(joystick_port, int, NULL, 0444);
+module_param_hw_array(joystick_port, int, ioport, NULL, 0444);
 MODULE_PARM_DESC(joystick_port, "Joystick port address.");
 #endif
 
@@ -1139,7 +1139,7 @@ static int save_mixer_state(struct cmipci *cm)
 		struct snd_ctl_elem_value *val;
 		unsigned int i;
 
-		val = kmalloc(sizeof(*val), GFP_ATOMIC);
+		val = kmalloc(sizeof(*val), GFP_KERNEL);
 		if (!val)
 			return -ENOMEM;
 		for (i = 0; i < CM_SAVED_MIXERS; i++) {
@@ -3348,10 +3348,6 @@ static int snd_cmipci_suspend(struct device *dev)
 
 	snd_power_change_state(card, SNDRV_CTL_POWER_D3hot);
 	
-	snd_pcm_suspend_all(cm->pcm);
-	snd_pcm_suspend_all(cm->pcm2);
-	snd_pcm_suspend_all(cm->pcm_spdif);
-
 	/* save registers */
 	for (i = 0; i < ARRAY_SIZE(saved_regs); i++)
 		cm->saved_regs[i] = snd_cmipci_read(cm, saved_regs[i]);

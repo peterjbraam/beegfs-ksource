@@ -33,6 +33,7 @@ static inline void mcsafe_inject_dst(void *addr)
 #endif /* CONFIG_MCSAFE_TEST */
 
 #else /* __ASSEMBLY__ */
+#include <asm/export.h>
 
 #ifdef CONFIG_MCSAFE_TEST
 .macro MCSAFE_TEST_CTL
@@ -41,9 +42,11 @@ static inline void mcsafe_inject_dst(void *addr)
 	.globl mcsafe_test_src
 	mcsafe_test_src:
 		.quad 0
+	EXPORT_SYMBOL_GPL(mcsafe_test_src)
 	.globl mcsafe_test_dst
 	mcsafe_test_dst:
 		.quad 0
+	EXPORT_SYMBOL_GPL(mcsafe_test_dst)
 	.popsection
 .endm
 

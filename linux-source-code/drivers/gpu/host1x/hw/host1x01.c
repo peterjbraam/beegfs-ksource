@@ -17,17 +17,19 @@
  */
 
 /* include hw specification */
-#include "hw/host1x01.h"
-#include "hw/host1x01_hardware.h"
+#include "host1x01.h"
+#include "host1x01_hardware.h"
 
 /* include code */
-#include "hw/cdma_hw.c"
-#include "hw/channel_hw.c"
-#include "hw/debug_hw.c"
-#include "hw/intr_hw.c"
-#include "hw/syncpt_hw.c"
+#define HOST1X_HW 1
 
-#include "dev.h"
+#include "cdma_hw.c"
+#include "channel_hw.c"
+#include "debug_hw.c"
+#include "intr_hw.c"
+#include "syncpt_hw.c"
+
+#include "../dev.h"
 
 int host1x01_init(struct host1x *host)
 {

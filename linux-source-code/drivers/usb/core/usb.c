@@ -53,12 +53,7 @@ const char *usbcore_name = "usbcore";
 
 static bool nousb;	/* Disable USB when built into kernel image */
 
-/* To disable USB, kernel command line is 'nousb' not 'usbcore.nousb' */
-#ifdef MODULE
 module_param(nousb, bool, 0444);
-#else
-core_param(nousb, nousb, bool, 0444);
-#endif
 
 /*
  * for external read access to <nousb>
@@ -233,8 +228,6 @@ struct usb_host_interface *usb_find_alt_setting(
 	struct usb_interface_cache *intf_cache = NULL;
 	int i;
 
-	if (!config)
-		return NULL;
 	for (i = 0; i < config->desc.bNumInterfaces; i++) {
 		if (config->intf_cache[i]->altsetting[0].desc.bInterfaceNumber
 				== iface_num) {
@@ -596,8 +589,7 @@ struct usb_device *usb_alloc_dev(struct usb_device *parent,
 	 * mask for the entire HCD, so don't do that.
 	 */
 	dev->dev.dma_mask = bus->sysdev->dma_mask;
-	if (dev->dev.device_rh && bus->sysdev->device_rh)
-		dev->dev.device_rh->dma_pfn_offset = bus->sysdev->device_rh->dma_pfn_offset;
+	dev->dev.dma_pfn_offset = bus->sysdev->dma_pfn_offset;
 	set_dev_node(&dev->dev, dev_to_node(bus->sysdev));
 	dev->state = USB_STATE_ATTACHED;
 	dev->lpm_disable_count = 1;

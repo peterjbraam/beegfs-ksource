@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <stdio.h>
 #include <errno.h>
 #include <string.h>
@@ -156,6 +157,7 @@ out:
 					 */
 			case 0x2C:	/* Westmere EP - Gulftown */
 				cpu_info->caps |= CPUPOWER_CAP_HAS_TURBO_RATIO;
+				break;
 			case 0x2A:	/* SNB */
 			case 0x2D:	/* SNB Xeon */
 			case 0x3A:	/* IVB */

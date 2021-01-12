@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * bitmap.h: Copyright (C) Peter T. Breuer (ptb@ot.uc3m.es) 2003
  *
@@ -9,8 +10,10 @@
 #define BITMAP_MAJOR_LO 3
 /* version 4 insists the bitmap is in little-endian order
  * with version 3, it is host-endian which is non-portable
+ * Version 5 is currently set only for clustered devices
  */
 #define BITMAP_MAJOR_HI 4
+#define BITMAP_MAJOR_CLUSTERED 5
 #define	BITMAP_MAJOR_HOSTENDIAN 3
 
 /*
@@ -130,8 +133,9 @@ typedef struct bitmap_super_s {
 	__le32 write_behind; /* 60  number of outstanding write-behind writes */
 	__le32 sectors_reserved; /* 64 number of 512-byte sectors that are
 				  * reserved for the bitmap. */
-
-	__u8  pad[256 - 68]; /* set to zero */
+	__le32 nodes;        /* 68 the maximum number of nodes in cluster. */
+	__u8 cluster_name[64]; /* 72 cluster name to which this md belongs */
+	__u8  pad[256 - 136]; /* set to zero */
 } bitmap_super_t;
 
 /* notes:
@@ -226,40 +230,49 @@ struct bitmap {
 	wait_queue_head_t behind_wait;
 
 	struct kernfs_node *sysfs_can_clear;
+	int cluster_slot;		/* Slot offset for clustered env */
 };
 
 /* the bitmap API */
 
 /* these are used only by md/bitmap */
-int  bitmap_create(struct mddev *mddev);
-int bitmap_load(struct mddev *mddev);
-void bitmap_flush(struct mddev *mddev);
-void bitmap_destroy(struct mddev *mddev);
+struct bitmap *md_bitmap_create(struct mddev *mddev, int slot);
+int md_bitmap_load(struct mddev *mddev);
+void md_bitmap_flush(struct mddev *mddev);
+void md_bitmap_destroy(struct mddev *mddev);
 
-void bitmap_print_sb(struct bitmap *bitmap);
-void bitmap_update_sb(struct bitmap *bitmap);
-void bitmap_status(struct seq_file *seq, struct bitmap *bitmap);
+void md_bitmap_print_sb(struct bitmap *bitmap);
+void md_bitmap_update_sb(struct bitmap *bitmap);
+void md_bitmap_status(struct seq_file *seq, struct bitmap *bitmap);
 
-int  bitmap_setallbits(struct bitmap *bitmap);
-void bitmap_write_all(struct bitmap *bitmap);
+int  md_bitmap_setallbits(struct bitmap *bitmap);
+void md_bitmap_write_all(struct bitmap *bitmap);
 
-void bitmap_dirty_bits(struct bitmap *bitmap, unsigned long s, unsigned long e);
+void md_bitmap_dirty_bits(struct bitmap *bitmap, unsigned long s, unsigned long e);
 
 /* these are exported */
-int bitmap_startwrite(struct bitmap *bitmap, sector_t offset,
-			unsigned long sectors, int behind);
-void bitmap_endwrite(struct bitmap *bitmap, sector_t offset,
+int md_bitmap_startwrite(struct bitmap *bitmap, sector_t offset,
+			 unsigned long sectors, int behind);
+void md_bitmap_endwrite(struct bitmap *bitmap, sector_t offset,
 			unsigned long sectors, int success, int behind);
-int bitmap_start_sync(struct bitmap *bitmap, sector_t offset, sector_t *blocks, int degraded);
-void bitmap_end_sync(struct bitmap *bitmap, sector_t offset, sector_t *blocks, int aborted);
-void bitmap_close_sync(struct bitmap *bitmap);
-void bitmap_cond_end_sync(struct bitmap *bitmap, sector_t sector);
+int md_bitmap_start_sync(struct bitmap *bitmap, sector_t offset, sector_t *blocks, int degraded);
+void md_bitmap_end_sync(struct bitmap *bitmap, sector_t offset, sector_t *blocks, int aborted);
+void md_bitmap_close_sync(struct bitmap *bitmap);
+void md_bitmap_cond_end_sync(struct bitmap *bitmap, sector_t sector, bool force);
+void md_bitmap_sync_with_cluster(struct mddev *mddev,
+				 sector_t old_lo, sector_t old_hi,
+				 sector_t new_lo, sector_t new_hi);
 
-void bitmap_unplug(struct bitmap *bitmap);
-void bitmap_daemon_work(struct mddev *mddev);
+void md_bitmap_unplug(struct bitmap *bitmap);
+void md_bitmap_daemon_work(struct mddev *mddev);
 
-int bitmap_resize(struct bitmap *bitmap, sector_t blocks,
-		  int chunksize, int init);
+int md_bitmap_resize(struct bitmap *bitmap, sector_t blocks,
+		     int chunksize, int init);
+struct bitmap *get_bitmap_from_slot(struct mddev *mddev, int slot);
+int md_bitmap_copy_from_slot(struct mddev *mddev, int slot,
+			     sector_t *lo, sector_t *hi, bool clear_bits);
+void md_bitmap_free(struct bitmap *bitmap);
+void md_bitmap_wait_behind_writes(struct mddev *mddev);
 #endif
 
 #endif

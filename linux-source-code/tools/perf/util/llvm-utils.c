@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (C) 2015, Wang Nan <wangnan0@huawei.com>
  * Copyright (C) 2015, Huawei Inc.
@@ -6,27 +7,29 @@
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
-#include "util.h"
+#include <stdlib.h>
 #include <linux/err.h>
 #include "debug.h"
 #include "llvm-utils.h"
 #include "config.h"
-#include <stdlib.h>
 #include "util.h"
 #include <sys/wait.h>
+#include <subcmd/exec-cmd.h>
 
 #define CLANG_BPF_CMD_DEFAULT_TEMPLATE				\
 		"$CLANG_EXEC -D__KERNEL__ -D__NR_CPUS__=$NR_CPUS "\
 		"-DLINUX_VERSION_CODE=$LINUX_VERSION_CODE "	\
-		"$CLANG_OPTIONS $KERNEL_INC_OPTIONS "		\
+		"$CLANG_OPTIONS $PERF_BPF_INC_OPTIONS $KERNEL_INC_OPTIONS " \
 		"-Wno-unused-value -Wno-pointer-sign "		\
 		"-working-directory $WORKING_DIR "		\
-		"-c \"$CLANG_SOURCE\" -target bpf -O2 -o -"
+		"-c \"$CLANG_SOURCE\" -target bpf $CLANG_EMIT_LLVM -O2 -o - $LLVM_OPTIONS_PIPE"
 
 struct llvm_param llvm_param = {
 	.clang_path = "clang",
+	.llc_path = "llc",
 	.clang_bpf_cmd_template = CLANG_BPF_CMD_DEFAULT_TEMPLATE,
 	.clang_opt = NULL,
+	.opts = NULL,
 	.kbuild_dir = NULL,
 	.kbuild_opts = NULL,
 	.user_set_param = false,
@@ -50,6 +53,8 @@ int perf_llvm_config(const char *var, const char *value)
 		llvm_param.kbuild_opts = strdup(value);
 	else if (!strcmp(var, "dump-obj"))
 		llvm_param.dump_obj = !!perf_config_bool(var, value);
+	else if (!strcmp(var, "opts"))
+		llvm_param.opts = strdup(value);
 	else {
 		pr_debug("Invalid LLVM config option: %s\n", value);
 		return -1;
@@ -108,11 +113,12 @@ read_from_pipe(const char *cmd, void **p_buf, size_t *p_read_sz)
 	void *buf = NULL;
 	FILE *file = NULL;
 	size_t read_sz = 0, buf_sz = 0;
+	char serr[STRERR_BUFSIZE];
 
 	file = popen(cmd, "r");
 	if (!file) {
 		pr_err("ERROR: unable to popen cmd: %s\n",
-		       strerror(errno));
+		       str_error_r(errno, serr, sizeof(serr)));
 		return -EINVAL;
 	}
 
@@ -146,7 +152,7 @@ read_from_pipe(const char *cmd, void **p_buf, size_t *p_read_sz)
 
 	if (ferror(file)) {
 		pr_err("ERROR: error occurred when reading from pipe: %s\n",
-		       strerror(errno));
+		       str_error_r(errno, serr, sizeof(serr)));
 		err = -EIO;
 		goto errout;
 	}
@@ -211,7 +217,7 @@ version_notice(void)
 "     \t\thttp://llvm.org/apt\n\n"
 "     \tIf you are using old version of clang, change 'clang-bpf-cmd-template'\n"
 "     \toption in [llvm] section of ~/.perfconfig to:\n\n"
-"     \t  \"$CLANG_EXEC $CLANG_OPTIONS $KERNEL_INC_OPTIONS \\\n"
+"     \t  \"$CLANG_EXEC $CLANG_OPTIONS $KERNEL_INC_OPTIONS $PERF_BPF_INC_OPTIONS \\\n"
 "     \t     -working-directory $WORKING_DIR -c $CLANG_SOURCE \\\n"
 "     \t     -emit-llvm -o - | /path/to/llc -march=bpf -filetype=obj -o -\"\n"
 "     \t(Replace /path/to/llc with path to your llc)\n\n"
@@ -391,7 +397,7 @@ void llvm__dump_obj(const char *path, void *obj_buf, size_t size)
 	char *p;
 
 	if (!obj_path) {
-		pr_warning("WARNING: No enough memory, skip object dumping\n");
+		pr_warning("WARNING: Not enough memory, skip object dumping\n");
 		return;
 	}
 
@@ -428,16 +434,20 @@ int llvm__compile_bpf(const char *path, void **p_obj_buf,
 	unsigned int kernel_version;
 	char linux_version_code_str[64];
 	const char *clang_opt = llvm_param.clang_opt;
+	char clang_path[PATH_MAX], llc_path[PATH_MAX], abspath[PATH_MAX], nr_cpus_avail_str[64];
 	char serr[STRERR_BUFSIZE];
-	char clang_path[PATH_MAX], nr_cpus_avail_str[64], abspath[PATH_MAX];
-	char *kbuild_dir = NULL, *kbuild_include_opts = NULL;
+	char *kbuild_dir = NULL, *kbuild_include_opts = NULL,
+	     *perf_bpf_include_opts = NULL;
 	const char *template = llvm_param.clang_bpf_cmd_template;
-	char *command_echo, *command_out;
+	char *pipe_template = NULL;
+	const char *opts = llvm_param.opts;
+	char *command_echo = NULL, *command_out;
+	char *perf_include_dir = system_path(PERF_INCLUDE_DIR);
 
 	if (path[0] != '-' && realpath(path, abspath) == NULL) {
 		err = errno;
 		pr_err("ERROR: problems with path %s: %s\n",
-		       path, strerror_r(err, serr, sizeof(serr)));
+		       path, str_error_r(err, serr, sizeof(serr)));
 		return -err;
 	}
 
@@ -470,13 +480,35 @@ int llvm__compile_bpf(const char *path, void **p_obj_buf,
 
 	snprintf(linux_version_code_str, sizeof(linux_version_code_str),
 		 "0x%x", kernel_version);
-
+	if (asprintf(&perf_bpf_include_opts, "-I%s/bpf", perf_include_dir) < 0)
+		goto errout;
 	force_set_env("NR_CPUS", nr_cpus_avail_str);
 	force_set_env("LINUX_VERSION_CODE", linux_version_code_str);
 	force_set_env("CLANG_EXEC", clang_path);
 	force_set_env("CLANG_OPTIONS", clang_opt);
 	force_set_env("KERNEL_INC_OPTIONS", kbuild_include_opts);
+	force_set_env("PERF_BPF_INC_OPTIONS", perf_bpf_include_opts);
 	force_set_env("WORKING_DIR", kbuild_dir ? : ".");
+
+	if (opts) {
+		err = search_program(llvm_param.llc_path, "llc", llc_path);
+		if (err) {
+			pr_err("ERROR:\tunable to find llc.\n"
+			       "Hint:\tTry to install latest clang/llvm to support BPF. Check your $PATH\n"
+			       "     \tand 'llc-path' option in [llvm] section of ~/.perfconfig.\n");
+			version_notice();
+			goto errout;
+		}
+
+		if (asprintf(&pipe_template, "%s -emit-llvm | %s -march=bpf %s -filetype=obj -o -",
+			      template, llc_path, opts) < 0) {
+			pr_err("ERROR:\tnot enough memory to setup command line\n");
+			goto errout;
+		}
+
+		template = pipe_template;
+
+	}
 
 	/*
 	 * Since we may reset clang's working dir, path of source file
@@ -511,6 +543,8 @@ int llvm__compile_bpf(const char *path, void **p_obj_buf,
 	free(command_out);
 	free(kbuild_dir);
 	free(kbuild_include_opts);
+	free(perf_bpf_include_opts);
+	free(perf_include_dir);
 
 	if (!p_obj_buf)
 		free(obj_buf);
@@ -525,6 +559,9 @@ errout:
 	free(kbuild_dir);
 	free(kbuild_include_opts);
 	free(obj_buf);
+	free(perf_bpf_include_opts);
+	free(perf_include_dir);
+	free(pipe_template);
 	if (p_obj_buf)
 		*p_obj_buf = NULL;
 	if (p_obj_buf_sz)

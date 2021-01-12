@@ -1,14 +1,21 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_X86_MMU_CONTEXT_H
 #define _ASM_X86_MMU_CONTEXT_H
 
 #include <asm/desc.h>
 #include <linux/atomic.h>
+#include <linux/mm_types.h>
+#include <linux/pkeys.h>
+
+#include <trace/events/tlb.h>
+
 #include <asm/pgalloc.h>
 #include <asm/tlbflush.h>
 #include <asm/paravirt.h>
 #include <asm/mpx.h>
-#include <linux/pkeys.h>
-#include <asm/spec_ctrl.h>
+
+extern atomic64_t last_mm_ctx_id;
+
 #ifndef CONFIG_PARAVIRT
 static inline void paravirt_activate_mm(struct mm_struct *prev,
 					struct mm_struct *next)
@@ -16,6 +23,23 @@ static inline void paravirt_activate_mm(struct mm_struct *prev,
 }
 #endif	/* !CONFIG_PARAVIRT */
 
+#ifdef CONFIG_PERF_EVENTS
+
+DECLARE_STATIC_KEY_FALSE(rdpmc_always_available_key);
+
+static inline void load_mm_cr4(struct mm_struct *mm)
+{
+	if (static_branch_unlikely(&rdpmc_always_available_key) ||
+	    atomic_read(&mm->context.perf_rdpmc_allowed))
+		cr4_set_bits(X86_CR4_PCE);
+	else
+		cr4_clear_bits(X86_CR4_PCE);
+}
+#else
+static inline void load_mm_cr4(struct mm_struct *mm) {}
+#endif
+
+#ifdef CONFIG_MODIFY_LDT_SYSCALL
 /*
  * ldt_structs can be allocated, used, and freed, but they are never
  * modified while live.
@@ -27,16 +51,63 @@ struct ldt_struct {
 	 * call gates.  On native, we could merge the ldt_struct and LDT
 	 * allocations, but it's not worth trying to optimize.
 	 */
-	struct desc_struct *entries;
-	unsigned int size;
+	struct desc_struct	*entries;
+	unsigned int		nr_entries;
+
+	/*
+	 * If PTI is in use, then the entries array is not mapped while we're
+	 * in user mode.  The whole array will be aliased at the addressed
+	 * given by ldt_slot_va(slot).  We use two slots so that we can allocate
+	 * and map, and enable a new LDT without invalidating the mapping
+	 * of an older, still-in-use LDT.
+	 *
+	 * slot will be -1 if this LDT doesn't have an alias mapping.
+	 */
+	int			slot;
 };
+
+/* This is a multiple of PAGE_SIZE. */
+#define LDT_SLOT_STRIDE (LDT_ENTRIES * LDT_ENTRY_SIZE)
+
+static inline void *ldt_slot_va(int slot)
+{
+#ifdef CONFIG_X86_64
+	return (void *)(LDT_BASE_ADDR + LDT_SLOT_STRIDE * slot);
+#else
+	BUG();
+	return (void *)fix_to_virt(FIX_HOLE);
+#endif
+}
+
+/*
+ * Used for LDT copy/destruction.
+ */
+static inline void init_new_context_ldt(struct mm_struct *mm)
+{
+	mm->context.ldt = NULL;
+	init_rwsem(&mm->context.ldt_usr_sem);
+}
+int ldt_dup_context(struct mm_struct *oldmm, struct mm_struct *mm);
+void destroy_context_ldt(struct mm_struct *mm);
+void ldt_arch_exit_mmap(struct mm_struct *mm);
+#else	/* CONFIG_MODIFY_LDT_SYSCALL */
+static inline void init_new_context_ldt(struct mm_struct *mm) { }
+static inline int ldt_dup_context(struct mm_struct *oldmm,
+				  struct mm_struct *mm)
+{
+	return 0;
+}
+static inline void destroy_context_ldt(struct mm_struct *mm) { }
+static inline void ldt_arch_exit_mmap(struct mm_struct *mm) { }
+#endif
 
 static inline void load_mm_ldt(struct mm_struct *mm)
 {
+#ifdef CONFIG_MODIFY_LDT_SYSCALL
 	struct ldt_struct *ldt;
 
-	/* lockless_dereference synchronizes with smp_store_release */
-	ldt = lockless_dereference(mm->context.ldt);
+	/* READ_ONCE synchronizes with smp_store_release */
+	ldt = READ_ONCE(mm->context.ldt);
 
 	/*
 	 * Any change to mm->context.ldt is followed by an IPI to all
@@ -52,143 +123,96 @@ static inline void load_mm_ldt(struct mm_struct *mm)
 	 * that we can see.
 	 */
 
-	if (unlikely(ldt))
-		set_ldt(ldt->entries, ldt->size);
-	else
+	if (unlikely(ldt)) {
+		if (static_cpu_has(X86_FEATURE_PTI)) {
+			if (WARN_ON_ONCE((unsigned long)ldt->slot > 1)) {
+				/*
+				 * Whoops -- either the new LDT isn't mapped
+				 * (if slot == -1) or is mapped into a bogus
+				 * slot (if slot > 1).
+				 */
+				clear_LDT();
+				return;
+			}
+
+			/*
+			 * If page table isolation is enabled, ldt->entries
+			 * will not be mapped in the userspace pagetables.
+			 * Tell the CPU to access the LDT through the alias
+			 * at ldt_slot_va(ldt->slot).
+			 */
+			set_ldt(ldt_slot_va(ldt->slot), ldt->nr_entries);
+		} else {
+			set_ldt(ldt->entries, ldt->nr_entries);
+		}
+	} else {
 		clear_LDT();
+	}
+#else
+	clear_LDT();
+#endif
+}
+
+static inline void switch_ldt(struct mm_struct *prev, struct mm_struct *next)
+{
+#ifdef CONFIG_MODIFY_LDT_SYSCALL
+	/*
+	 * Load the LDT if either the old or new mm had an LDT.
+	 *
+	 * An mm will never go from having an LDT to not having an LDT.  Two
+	 * mms never share an LDT, so we don't gain anything by checking to
+	 * see whether the LDT changed.  There's also no guarantee that
+	 * prev->context.ldt actually matches LDTR, but, if LDTR is non-NULL,
+	 * then prev->context.ldt will also be non-NULL.
+	 *
+	 * If we really cared, we could optimize the case where prev == next
+	 * and we're exiting lazy mode.  Most of the time, if this happens,
+	 * we don't actually need to reload LDTR, but modify_ldt() is mostly
+	 * used by legacy code and emulators where we don't need this level of
+	 * performance.
+	 *
+	 * This uses | instead of || because it generates better code.
+	 */
+	if (unlikely((unsigned long)prev->context.ldt |
+		     (unsigned long)next->context.ldt))
+		load_mm_ldt(next);
+#endif
 
 	DEBUG_LOCKS_WARN_ON(preemptible());
 }
 
-/*
- * Used for LDT copy/destruction.
- */
-int init_new_context_ldt(struct task_struct *tsk, struct mm_struct *mm);
-void destroy_context_ldt(struct mm_struct *mm);
+void enter_lazy_tlb(struct mm_struct *mm, struct task_struct *tsk);
 
-
-static inline void enter_lazy_tlb(struct mm_struct *mm, struct task_struct *tsk)
-{
-#ifdef CONFIG_SMP
-	if (this_cpu_read(cpu_tlbstate.state) == TLBSTATE_OK)
-		this_cpu_write(cpu_tlbstate.state, TLBSTATE_LAZY);
-#endif
-}
-
-static inline void load_cr3(pgd_t *pgdir)
-{
-	__load_cr3(__sme_pa(pgdir));
-}
-
-/*
- * Init a new mm.  Used on mm copies, like at fork()
- * and on mm's that are brand-new, like at execve().
- */
 static inline int init_new_context(struct task_struct *tsk,
-				       struct mm_struct *mm)
+				   struct mm_struct *mm)
 {
-	#ifdef CONFIG_X86_INTEL_MEMORY_PROTECTION_KEYS
+	mutex_init(&mm->context.lock);
+
+	mm->context.ctx_id = atomic64_inc_return(&last_mm_ctx_id);
+	atomic64_set(&mm->context.tlb_gen, 0);
+
+#ifdef CONFIG_X86_INTEL_MEMORY_PROTECTION_KEYS
 	if (cpu_feature_enabled(X86_FEATURE_OSPKE)) {
 		/* pkey 0 is the default and allocated implicitly */
-		mm->pkey_allocation_map = 0x1;
+		mm->context.pkey_allocation_map = 0x1;
 		/* -1 means unallocated or invalid */
-		mm->execute_only_pkey = -1;
+		mm->context.execute_only_pkey = -1;
 	}
-	#endif
-	return init_new_context_ldt(tsk, mm);
+#endif
+	init_new_context_ldt(mm);
+	return 0;
 }
 static inline void destroy_context(struct mm_struct *mm)
 {
 	destroy_context_ldt(mm);
 }
 
-static inline void switch_mm(struct mm_struct *prev, struct mm_struct *next,
-			     struct task_struct *tsk)
-{
-	unsigned cpu = smp_processor_id();
+extern void switch_mm(struct mm_struct *prev, struct mm_struct *next,
+		      struct task_struct *tsk);
 
-	if (likely(prev != next)) {
-#ifdef CONFIG_SMP
-		this_cpu_write(cpu_tlbstate.state, TLBSTATE_OK);
-		this_cpu_write(cpu_tlbstate.active_mm, next);
-#endif
-		cpumask_set_cpu(cpu, mm_cpumask(next));
-
-#ifndef CONFIG_PREEMPT_RCU
-		spec_ctrl_ibpb_if_different_creds(tsk);
-#else
-		spec_ctrl_ibpb();
-#endif
-
-		/*
-		 * Re-load page tables.
-		 *
-		 * This logic has an ordering constraint:
-		 *
-		 *  CPU 0: Write to a PTE for 'next'
-		 *  CPU 0: load bit 1 in mm_cpumask.  if nonzero, send IPI.
-		 *  CPU 1: set bit 1 in next's mm_cpumask
-		 *  CPU 1: load from the PTE that CPU 0 writes (implicit)
-		 *
-		 * We need to prevent an outcome in which CPU 1 observes
-		 * the new PTE value and CPU 0 observes bit 1 clear in
-		 * mm_cpumask.  (If that occurs, then the IPI will never
-		 * be sent, and CPU 0's TLB will contain a stale entry.)
-		 *
-		 * The bad outcome can occur if either CPU's load is
-		 * reordered before that CPU's store, so both CPUs must
-		 * execute full barriers to prevent this from happening.
-		 *
-		 * Thus, switch_mm needs a full barrier between the
-		 * store to mm_cpumask and any operation that could load
-		 * from next->pgd.  TLB fills are special and can happen
-		 * due to instruction fetches or for no reason at all,
-		 * and neither LOCK nor MFENCE orders them.
-		 * Fortunately, load_cr3() is serializing and gives the
-		 * ordering guarantee we need.
-		 *
-		 */
-		load_cr3(next->pgd);
-
-		/* Stop flush ipis for the previous mm */
-		cpumask_clear_cpu(cpu, mm_cpumask(prev));
-
-		/* Load the LDT, if the LDT is different:
-		 * never set context.ldt to NULL while the mm still
-		 * exists.  That means that next->context.ldt !=
-		 * prev->context.ldt, because mms never share an LDT.
-		*/
-		if (unlikely(prev->context.ldt != next->context.ldt))
-			load_mm_ldt(next);
-	}
-#ifdef CONFIG_SMP
-	  else {
-		this_cpu_write(cpu_tlbstate.state, TLBSTATE_OK);
-		BUG_ON(this_cpu_read(cpu_tlbstate.active_mm) != next);
-
-		if (!cpumask_test_cpu(cpu, mm_cpumask(next))) {
-			/*
-			 * On established mms, the mm_cpumask is only changed
-			 * from irq context, from ptep_clear_flush() while in
-			 * lazy tlb mode, and here. Irqs are blocked during
-			 * schedule, protecting us from simultaneous changes.
-			 */
-			cpumask_set_cpu(cpu, mm_cpumask(next));
-
-			/*
-			 * We were in lazy tlb mode and leave_mm disabled
-			 * tlb flush IPI delivery. We must reload CR3
-			 * to make sure to use no freed page tables.
-			 *
-			 * As above, load_cr3() is serializing and orders TLB
-			 * fills with respect to the mm_cpumask write.
-			 */
-			load_cr3(next->pgd);
-			load_mm_ldt(next);
-		}
-	}
-#endif
-}
+extern void switch_mm_irqs_off(struct mm_struct *prev, struct mm_struct *next,
+			       struct task_struct *tsk);
+#define switch_mm_irqs_off switch_mm_irqs_off
 
 #define activate_mm(prev, next)			\
 do {						\
@@ -209,10 +233,22 @@ do {						\
 } while (0)
 #endif
 
+static inline int arch_dup_mmap(struct mm_struct *oldmm, struct mm_struct *mm)
+{
+	paravirt_arch_dup_mmap(oldmm, mm);
+	return ldt_dup_context(oldmm, mm);
+}
+
+static inline void arch_exit_mmap(struct mm_struct *mm)
+{
+	paravirt_arch_exit_mmap(mm);
+	ldt_arch_exit_mmap(mm);
+}
+
 #ifdef CONFIG_X86_64
 static inline bool is_64bit_mm(struct mm_struct *mm)
 {
-	return  !config_enabled(CONFIG_IA32_EMULATION) ||
+	return	!IS_ENABLED(CONFIG_IA32_EMULATION) ||
 		!(mm->context.ia32_compat == TIF_IA32);
 }
 #else
@@ -221,31 +257,6 @@ static inline bool is_64bit_mm(struct mm_struct *mm)
 	return false;
 }
 #endif
-
-static inline void arch_dup_pkeys(struct mm_struct *oldmm,
-				  struct mm_struct *mm)
-{
-#ifdef CONFIG_X86_INTEL_MEMORY_PROTECTION_KEYS
-	if (!cpu_feature_enabled(X86_FEATURE_OSPKE))
-		return;
-
-	/* Duplicate the oldmm pkey state in mm: */
-	mm->pkey_allocation_map = oldmm->pkey_allocation_map;
-	mm->execute_only_pkey   = oldmm->execute_only_pkey;
-#endif
-}
-
-static inline void arch_dup_mmap(struct mm_struct *oldmm,
-				 struct mm_struct *mm)
-{
-	arch_dup_pkeys(oldmm, mm);
-	paravirt_arch_dup_mmap(oldmm, mm);
-}
-
-static inline void arch_exit_mmap(struct mm_struct *mm)
-{
-	paravirt_arch_exit_mmap(mm);
-}
 
 static inline void arch_bprm_mm_init(struct mm_struct *mm,
 		struct vm_area_struct *vma)
@@ -256,34 +267,25 @@ static inline void arch_bprm_mm_init(struct mm_struct *mm,
 static inline void arch_unmap(struct mm_struct *mm, struct vm_area_struct *vma,
 			      unsigned long start, unsigned long end)
 {
-	mpx_notify_unmap(mm, vma, start, end);
-}
-
-#ifdef CONFIG_X86_INTEL_MEMORY_PROTECTION_KEYS
-static inline int vma_pkey(struct vm_area_struct *vma)
-{
-	unsigned long vma_pkey_mask = VM_PKEY_BIT0 | VM_PKEY_BIT1 |
-				      VM_PKEY_BIT2 | VM_PKEY_BIT3;
-
-	return (vma->vm_flags & vma_pkey_mask) >> VM_PKEY_SHIFT;
-}
-#else
-static inline int vma_pkey(struct vm_area_struct *vma)
-{
-	return 0;
-}
-#endif
-
-static inline bool __pkru_allows_pkey(u16 pkey, bool write)
-{
-	u32 pkru = read_pkru();
-
-	if (!__pkru_allows_read(pkru, pkey))
-		return false;
-	if (write && !__pkru_allows_write(pkru, pkey))
-		return false;
-
-	return true;
+	/*
+	 * mpx_notify_unmap() goes and reads a rarely-hot
+	 * cacheline in the mm_struct.  That can be expensive
+	 * enough to be seen in profiles.
+	 *
+	 * The mpx_notify_unmap() call and its contents have been
+	 * observed to affect munmap() performance on hardware
+	 * where MPX is not present.
+	 *
+	 * The unlikely() optimizes for the fast case: no MPX
+	 * in the CPU, or no MPX use in the process.  Even if
+	 * we get this wrong (in the unlikely event that MPX
+	 * is widely enabled on some system) the overhead of
+	 * MPX itself (reading bounds tables) is expected to
+	 * overwhelm the overhead of getting this unlikely()
+	 * consistently wrong.
+	 */
+	if (unlikely(cpu_feature_enabled(X86_FEATURE_MPX)))
+		mpx_notify_unmap(mm, vma, start, end);
 }
 
 /*
@@ -322,9 +324,23 @@ static inline bool arch_vma_access_permitted(struct vm_area_struct *vma,
 	return __pkru_allows_pkey(vma_pkey(vma), write);
 }
 
-static inline bool arch_pte_access_permitted(pte_t pte, bool write)
+/*
+ * This can be used from process context to figure out what the value of
+ * CR3 is without needing to do a (slow) __read_cr3().
+ *
+ * It's intended to be used for code like KVM that sneakily changes CR3
+ * and needs to restore it.  It needs to be used very carefully.
+ */
+static inline unsigned long __get_current_cr3_fast(void)
 {
-	return __pkru_allows_pkey(pte_flags_pkey(pte_flags(pte)), write);
+	unsigned long cr3 = build_cr3(this_cpu_read(cpu_tlbstate.loaded_mm)->pgd,
+		this_cpu_read(cpu_tlbstate.loaded_mm_asid));
+
+	/* For now, be very restrictive about when this can be called. */
+	VM_WARN_ON(in_nmi() || preemptible());
+
+	VM_BUG_ON(cr3 != __read_cr3());
+	return cr3;
 }
 
 #endif /* _ASM_X86_MMU_CONTEXT_H */

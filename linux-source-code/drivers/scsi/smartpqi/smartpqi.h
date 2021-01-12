@@ -1,20 +1,15 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  *    driver for Microsemi PQI-based storage controllers
- *    Copyright (c) 2016-2017 Microsemi Corporation
+ *    Copyright (c) 2019 Microchip Technology Inc. and its subsidiaries
+ *    Copyright (c) 2016-2018 Microsemi Corporation
  *    Copyright (c) 2016 PMC-Sierra, Inc.
  *
- *    This program is free software; you can redistribute it and/or modify
- *    it under the terms of the GNU General Public License as published by
- *    the Free Software Foundation; version 2 of the License.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE, GOOD TITLE or
- *    NON INFRINGEMENT.  See the GNU General Public License for more details.
- *
- *    Questions/Comments/Bugfixes to esc.storagedev@microsemi.com
+ *    Questions/Comments/Bugfixes to storagedev@microchip.com
  *
  */
+
+#include <linux/io-64-nonatomic-lo-hi.h>
 
 #if !defined(_SMARTPQI_H)
 #define _SMARTPQI_H
@@ -281,9 +276,7 @@ struct pqi_raid_path_request {
 	u8	reserved4 : 2;
 	u8	additional_cdb_bytes_usage : 3;
 	u8	reserved5 : 3;
-	u8	cdb[16];
-	u8	reserved6[12];
-	__le32	timeout;
+	u8	cdb[32];
 	struct pqi_sg_descriptor
 		sg_descriptors[PQI_MAX_EMBEDDED_SG_DESCRIPTORS];
 };
@@ -392,8 +385,7 @@ struct pqi_task_management_request {
 	struct pqi_iu_header header;
 	__le16	request_id;
 	__le16	nexus_id;
-	u8	reserved[2];
-	__le16  timeout;
+	u8	reserved[4];
 	u8	lun_number[8];
 	__le16	protocol_specific;
 	__le16	outbound_queue_id_to_manage;
@@ -769,8 +761,6 @@ struct pqi_config_table_firmware_features {
 #define PQI_FIRMWARE_FEATURE_OFA			0
 #define PQI_FIRMWARE_FEATURE_SMP			1
 #define PQI_FIRMWARE_FEATURE_SOFT_RESET_HANDSHAKE	11
-#define PQI_FIRMWARE_FEATURE_RAID_IU_TIMEOUT		13
-#define PQI_FIRMWARE_FEATURE_TMF_IU_TIMEOUT		14
 
 struct pqi_config_table_debug {
 	struct pqi_config_table_section_header header;
@@ -1140,8 +1130,6 @@ struct pqi_ctrl_info {
 	u8		pqi_mode_enabled : 1;
 	u8		pqi_reset_quiesce_supported : 1;
 	u8		soft_reset_handshake_supported : 1;
-	u8		raid_iu_timeout_supported: 1;
-	u8		tmf_iu_timeout_supported: 1;
 
 	struct list_head scsi_device_list;
 	spinlock_t	scsi_device_list_lock;
@@ -1419,8 +1407,8 @@ static inline bool pqi_ctrl_blocked(struct pqi_ctrl_info *ctrl_info)
 	return ctrl_info->block_requests;
 }
 
-int pqi_sas_smp_handler(struct Scsi_Host *shost, struct sas_rphy *rphy,
-        struct request *rq);
+void pqi_sas_smp_handler(struct bsg_job *job, struct Scsi_Host *shost,
+	struct sas_rphy *rphy);
 
 int pqi_add_sas_host(struct Scsi_Host *shost, struct pqi_ctrl_info *ctrl_info);
 void pqi_delete_sas_host(struct pqi_ctrl_info *ctrl_info);
@@ -1436,5 +1424,4 @@ int pqi_csmi_smp_passthru(struct pqi_ctrl_info *ctrl_info,
 
 extern struct sas_function_template pqi_sas_transport_functions;
 
-#define TYPE_ZBC            0x14
 #endif /* _SMARTPQI_H */

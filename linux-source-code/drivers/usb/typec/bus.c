@@ -51,7 +51,7 @@ static int typec_altmode_set_state(struct typec_altmode *adev, int state)
 int typec_altmode_notify(struct typec_altmode *adev,
 			 unsigned long conf, void *data)
 {
-	bool is_port;
+	bool is_port = is_typec_port(adev->dev.parent);
 	struct altmode *altmode;
 	struct altmode *partner;
 	int ret;
@@ -64,7 +64,6 @@ int typec_altmode_notify(struct typec_altmode *adev,
 	if (!altmode->partner)
 		return -ENODEV;
 
-	is_port = is_typec_port(adev->dev.parent);
 	partner = altmode->partner;
 
 	ret = typec_altmode_set_mux(is_port ? altmode : partner, (u8)conf);
@@ -255,13 +254,12 @@ EXPORT_SYMBOL_GPL(typec_altmode_unregister_driver);
 /* API for the port drivers */
 
 /**
- * typec_match_altmode - Match SVID and mode to an array of alternate modes
+ * typec_match_altmode - Match SVID to an array of alternate modes
  * @altmodes: Array of alternate modes
- * @n: Number of elements in the array, or -1 for NULL terminated arrays
+ * @n: Number of elements in the array, or -1 for NULL termiated arrays
  * @svid: Standard or Vendor ID to match with
- * @mode: Mode to match with
  *
- * Return pointer to an alternate mode with SVID matching @svid, or NULL when no
+ * Return pointer to an alternate mode with SVID mathing @svid, or NULL when no
  * match is found.
  */
 struct typec_altmode *typec_match_altmode(struct typec_altmode **altmodes,

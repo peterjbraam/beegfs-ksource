@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Kernel interface for the s390 arch_random_* functions
  *
@@ -12,10 +13,10 @@
 
 #ifdef CONFIG_ARCH_RANDOM
 
-#include <linux/jump_label.h>
+#include <linux/static_key.h>
 #include <linux/atomic.h>
 
-extern struct static_key s390_arch_random_available;
+DECLARE_STATIC_KEY_FALSE(s390_arch_random_available);
 extern atomic64_t s390_arch_random_counter;
 
 bool s390_arch_random_generate(u8 *buf, unsigned int nbytes);
@@ -27,7 +28,7 @@ static inline bool arch_has_random(void)
 
 static inline bool arch_has_random_seed(void)
 {
-	if (!static_key_true(&s390_arch_random_available))
+	if (static_branch_likely(&s390_arch_random_available))
 		return true;
 	return false;
 }
@@ -44,7 +45,7 @@ static inline bool arch_get_random_int(unsigned int *v)
 
 static inline bool arch_get_random_seed_long(unsigned long *v)
 {
-	if (!static_key_true(&s390_arch_random_available)) {
+	if (static_branch_likely(&s390_arch_random_available)) {
 		return s390_arch_random_generate((u8 *)v, sizeof(*v));
 	}
 	return false;
@@ -52,7 +53,7 @@ static inline bool arch_get_random_seed_long(unsigned long *v)
 
 static inline bool arch_get_random_seed_int(unsigned int *v)
 {
-	if (!static_key_true(&s390_arch_random_available)) {
+	if (static_branch_likely(&s390_arch_random_available)) {
 		return s390_arch_random_generate((u8 *)v, sizeof(*v));
 	}
 	return false;

@@ -15,8 +15,6 @@
 
 #include <linux/hid.h>
 #include <uapi/linux/input.h>
-#include <linux/sched.h>
-#include <linux/wait.h>
 #include "ishtp/client.h"
 #include "ishtp-hid.h"
 
@@ -224,7 +222,7 @@ int ishtp_hid_probe(unsigned int cur_hid_dev,
 err_hid_device:
 	kfree(hid_data);
 err_hid_data:
-	hid_destroy_device(hid);
+	kfree(hid);
 	return rv;
 }
 

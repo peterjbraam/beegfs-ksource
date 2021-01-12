@@ -106,7 +106,7 @@ The system configuration dump (if --quiet is not used) is followed by statistics
 \fBC1%, C2%, C3%\fP The residency percentage that Linux requested C1, C2, C3....  The system summary is the average of all CPUs in the system.  Note that these are software, reflecting what was requested.  The hardware counters reflect what was actually achieved.
 \fBCPU%c1, CPU%c3, CPU%c6, CPU%c7\fP show the percentage residency in hardware core idle states.  These numbers are from hardware residency counters.
 \fBCoreTmp\fP Degrees Celsius reported by the per-core Digital Thermal Sensor.
-\fBPkgTtmp\fP Degrees Celsius reported by the per-package Package Thermal Monitor.
+\fBPkgTmp\fP Degrees Celsius reported by the per-package Package Thermal Monitor.
 \fBGFX%rc6\fP The percentage of time the GPU is in the "render C6" state, rc6, during the measurement interval. From /sys/class/drm/card0/power/rc6_residency_ms.
 \fBGFXMHz\fP Instantaneous snapshot of what sysfs presents at the end of the measurement interval. From /sys/class/graphics/fb0/device/drm/card0/gt_cur_freq_mhz.
 \fBPkg%pc2, Pkg%pc3, Pkg%pc6, Pkg%pc7\fP percentage residency in hardware package idle states.  These numbers are from hardware residency counters.
@@ -114,14 +114,13 @@ The system configuration dump (if --quiet is not used) is followed by statistics
 \fBCorWatt\fP Watts consumed by the core part of the package.
 \fBGFXWatt\fP Watts consumed by the Graphics part of the package -- available only on client processors.
 \fBRAMWatt\fP Watts consumed by the DRAM DIMMS -- available only on server processors.
-\fBPKG_%\fP percent of the interval that RAPL throttling was active on the Package.
+\fBPKG_%\fP percent of the interval that RAPL throttling was active on the Package.  Note that the system summary is the sum of the package throttling time, and thus may be higher than 100% on a multi-package system.  Note that the meaning of this field is model specific.  For example, some hardware increments this counter when RAPL responds to thermal limits, but does not increment this counter when RAPL responds to power limits.  Comparing PkgWatt and PkgTmp to system limits is necessary.
 \fBRAM_%\fP percent of the interval that RAPL throttling was active on DRAM.
 .fi
 .SH TOO MUCH INFORMATION EXAMPLE
 By default, turbostat dumps all possible information -- a system configuration header, followed by columns for all counters.
 This is ideal for remote debugging, use the "--out" option to save everything to a text file, and get that file to the expert helping you debug.
 .PP
-.SH PERIODIC EXAMPLE
 When you are not interested in all that information, and there are several ways to see only what you want.  First the "--quiet" option will skip the configuration information, and turbostat will show only the counter columns.  Second, you can reduce the columns with the "--hide" and "--show" options.  If you use the "--show" option, then turbostat will show only the columns you list.  If you use the "--hide" option, turbostat will show all columns, except the ones you list.
 .PP
 To find out what columns are available for --show and --hide, the "--list" option is available.  For convenience, the special strings "sysfs" can be used to refer to all of the sysfs C-state counters at once:
@@ -190,7 +189,6 @@ By default, turbostat always dumps system configuration information
 before taking measurements.  In the example above, "--quiet" is used
 to suppress that output.  Here is an example of the configuration information:
 .nf
-
 turbostat version 2017.02.15 - Len Brown <lenb@kernel.org>
 CPUID(0): GenuineIntel 13 CPUID levels; family:model:stepping 0x6:3c:3 (6:60:3)
 CPUID(1): SSE3 MONITOR - EIST TM2 TSC MSR ACPI-TM TM
@@ -270,7 +268,6 @@ CPU	  PRF_CTRL
 3	0x00000800
 
 .fi
-ot including any non-busy idle time.
 
 .SH INPUT
 

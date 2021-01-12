@@ -11,7 +11,6 @@
 #include <linux/average.h>
 #include <linux/bitops.h>
 #include <linux/bitfield.h>
-#include <linux/module.h>
 
 #include "util.h"
 
@@ -562,11 +561,7 @@ struct rtw_tx_report {
 };
 
 #define RTW_BC_MC_MACID 1
-#if 0 /* Different semantic on RHEL */
-DECLARE_EWMA(rssi, 10, 16)
-#else
-DECLARE_EWMA(rssi, 1024, 16)
-#endif
+DECLARE_EWMA(rssi, 10, 16);
 
 struct rtw_sta_info {
 	struct ieee80211_sta *sta;

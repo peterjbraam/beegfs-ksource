@@ -33,11 +33,12 @@
 #include <linux/kthread.h>
 #include <linux/in.h>
 #include <linux/export.h>
+#include <linux/t10-pi.h>
 #include <asm/unaligned.h>
 #include <net/sock.h>
 #include <net/tcp.h>
-#include <scsi/scsi.h>
-#include <scsi/scsi_device.h>
+#include <scsi/scsi_common.h>
+#include <scsi/scsi_proto.h>
 
 #include <target/target_core_base.h>
 #include <target/target_core_backend.h>
@@ -335,7 +336,6 @@ int core_enable_device_list_for_node(
 		return -ENOMEM;
 	}
 
-	atomic_set(&new->ua_count, 0);
 	spin_lock_init(&new->ua_lock);
 	INIT_LIST_HEAD(&new->ua_list);
 	INIT_LIST_HEAD(&new->lun_link);
@@ -404,9 +404,6 @@ int core_enable_device_list_for_node(
 	return 0;
 }
 
-/*
- *	Called with se_node_acl->lun_entry_mutex held.
- */
 void core_disable_device_list_for_node(
 	struct se_lun *lun,
 	struct se_dev_entry *orig,
@@ -418,6 +415,9 @@ void core_disable_device_list_for_node(
 	 * reference to se_device->dev_group.
 	 */
 	struct se_device *dev = rcu_dereference_raw(lun->lun_se_dev);
+
+	lockdep_assert_held(&nacl->lun_entry_mutex);
+
 	/*
 	 * If the MappedLUN entry is being disabled, the entry in
 	 * lun->lun_deve_list must be removed now before clearing the
@@ -720,36 +720,17 @@ void core_dev_free_initiator_node_lun_acl(
 static void scsi_dump_inquiry(struct se_device *dev)
 {
 	struct t10_wwn *wwn = &dev->t10_wwn;
-	char buf[17];
-	int i, device_type;
+	int device_type = dev->transport->get_device_type(dev);
+
 	/*
 	 * Print Linux/SCSI style INQUIRY formatting to the kernel ring buffer
 	 */
-	for (i = 0; i < 8; i++)
-		if (wwn->vendor[i] >= 0x20)
-			buf[i] = wwn->vendor[i];
-		else
-			buf[i] = ' ';
-	buf[i] = '\0';
-	pr_debug("  Vendor: %s\n", buf);
-
-	for (i = 0; i < 16; i++)
-		if (wwn->model[i] >= 0x20)
-			buf[i] = wwn->model[i];
-		else
-			buf[i] = ' ';
-	buf[i] = '\0';
-	pr_debug("  Model: %s\n", buf);
-
-	for (i = 0; i < 4; i++)
-		if (wwn->revision[i] >= 0x20)
-			buf[i] = wwn->revision[i];
-		else
-			buf[i] = ' ';
-	buf[i] = '\0';
-	pr_debug("  Revision: %s\n", buf);
-
-	device_type = dev->transport->get_device_type(dev);
+	pr_debug("  Vendor: %-" __stringify(INQUIRY_VENDOR_LEN) "s\n",
+		wwn->vendor);
+	pr_debug("  Model: %-" __stringify(INQUIRY_MODEL_LEN) "s\n",
+		wwn->model);
+	pr_debug("  Revision: %-" __stringify(INQUIRY_REVISION_LEN) "s\n",
+		wwn->revision);
 	pr_debug("  Type:   %s ", scsi_device_type(device_type));
 }
 
@@ -764,7 +745,7 @@ struct se_device *target_alloc_device(struct se_hba *hba, const char *name)
 
 	dev->se_hba = hba;
 	dev->transport = hba->backend->ops;
-	dev->prot_length = sizeof(struct se_dif_v1_tuple);
+	dev->prot_length = sizeof(struct t10_pi_tuple);
 	dev->hba_index = hba->hba_index;
 
 	INIT_LIST_HEAD(&dev->dev_sep_list);
@@ -823,12 +804,18 @@ struct se_device *target_alloc_device(struct se_hba *hba, const char *name)
 
 	xcopy_lun = &dev->xcopy_lun;
 	rcu_assign_pointer(xcopy_lun->lun_se_dev, dev);
-	init_completion(&xcopy_lun->lun_ref_comp);
 	init_completion(&xcopy_lun->lun_shutdown_comp);
 	INIT_LIST_HEAD(&xcopy_lun->lun_deve_list);
 	INIT_LIST_HEAD(&xcopy_lun->lun_dev_link);
 	mutex_init(&xcopy_lun->lun_tg_pt_md_mutex);
 	xcopy_lun->lun_tpg = &xcopy_pt_tpg;
+
+	/* Preload the default INQUIRY const values */
+	strlcpy(dev->t10_wwn.vendor, "LIO-ORG", sizeof(dev->t10_wwn.vendor));
+	strlcpy(dev->t10_wwn.model, dev->transport->inquiry_prod,
+		sizeof(dev->t10_wwn.model));
+	strlcpy(dev->t10_wwn.revision, dev->transport->inquiry_rev,
+		sizeof(dev->t10_wwn.revision));
 
 	return dev;
 }
@@ -855,7 +842,7 @@ bool target_configure_unmap_from_queue(struct se_dev_attrib *attrib,
 	attrib->unmap_granularity = q->limits.discard_granularity / block_size;
 	attrib->unmap_granularity_alignment = q->limits.discard_alignment /
 								block_size;
-	attrib->unmap_zeroes_data = q->limits.discard_zeroes_data;
+	attrib->unmap_zeroes_data = (q->limits.max_write_zeroes_sectors);
 	return true;
 }
 EXPORT_SYMBOL(target_configure_unmap_from_queue);
@@ -880,14 +867,20 @@ sector_t target_to_linux_sector(struct se_device *dev, sector_t lb)
 EXPORT_SYMBOL(target_to_linux_sector);
 
 struct devices_idr_iter {
+	struct config_item *prev_item;
 	int (*fn)(struct se_device *dev, void *data);
 	void *data;
 };
 
 static int target_devices_idr_iter(int id, void *p, void *data)
+	 __must_hold(&device_mutex)
 {
 	struct devices_idr_iter *iter = data;
 	struct se_device *dev = p;
+	int ret;
+
+	config_item_put(iter->prev_item);
+	iter->prev_item = NULL;
 
 	/*
 	 * We add the device early to the idr, so it can be used
@@ -898,7 +891,15 @@ static int target_devices_idr_iter(int id, void *p, void *data)
 	if (!target_dev_configured(dev))
 		return 0;
 
-	return iter->fn(dev, iter->data);
+	iter->prev_item = config_item_get_unless_zero(&dev->dev_group.cg_item);
+	if (!iter->prev_item)
+		return 0;
+	mutex_unlock(&device_mutex);
+
+	ret = iter->fn(dev, iter->data);
+
+	mutex_lock(&device_mutex);
+	return ret;
 }
 
 /**
@@ -912,15 +913,13 @@ static int target_devices_idr_iter(int id, void *p, void *data)
 int target_for_each_device(int (*fn)(struct se_device *dev, void *data),
 			   void *data)
 {
-	struct devices_idr_iter iter;
+	struct devices_idr_iter iter = { .fn = fn, .data = data };
 	int ret;
-
-	iter.fn = fn;
-	iter.data = data;
 
 	mutex_lock(&device_mutex);
 	ret = idr_for_each(&devices_idr, target_devices_idr_iter, &iter);
 	mutex_unlock(&device_mutex);
+	config_item_put(iter.prev_item);
 	return ret;
 }
 
@@ -973,37 +972,12 @@ int target_configure_device(struct se_device *dev)
 
 	ret = core_setup_alua(dev);
 	if (ret)
-		goto out_free_index;
-
-	/*
-	 * Startup the struct se_device processing thread
-	 */
-	dev->tmr_wq = alloc_workqueue("tmr-%s", WQ_MEM_RECLAIM | WQ_UNBOUND, 1,
-				      dev->transport->name);
-	if (!dev->tmr_wq) {
-		pr_err("Unable to create tmr workqueue for %s\n",
-			dev->transport->name);
-		ret = -ENOMEM;
-		goto out_free_alua;
-	}
+		goto out_destroy_device;
 
 	/*
 	 * Setup work_queue for QUEUE_FULL
 	 */
 	INIT_WORK(&dev->qf_work_queue, target_qf_do_work);
-
-	/*
-	 * Preload the initial INQUIRY const values if we are doing
-	 * anything virtual (IBLOCK, FILEIO, RAMDISK), but not for TCM/pSCSI
-	 * passthrough because this is being provided by the backend LLD.
-	 */
-	if (!(dev->transport->transport_flags & TRANSPORT_FLAG_PASSTHROUGH)) {
-		strncpy(&dev->t10_wwn.vendor[0], "LIO-ORG", 8);
-		strncpy(&dev->t10_wwn.model[0],
-			dev->transport->inquiry_prod, 16);
-		strncpy(&dev->t10_wwn.revision[0],
-			dev->transport->inquiry_rev, 4);
-	}
 
 	scsi_dump_inquiry(dev);
 
@@ -1015,8 +989,8 @@ int target_configure_device(struct se_device *dev)
 
 	return 0;
 
-out_free_alua:
-	core_alua_free_lu_gp_mem(dev);
+out_destroy_device:
+	dev->transport->destroy_device(dev);
 out_free_index:
 	mutex_lock(&device_mutex);
 	idr_remove(&devices_idr, dev->dev_index);
@@ -1033,10 +1007,7 @@ void target_free_device(struct se_device *dev)
 	WARN_ON(!list_empty(&dev->dev_sep_list));
 
 	if (target_dev_configured(dev)) {
-		destroy_workqueue(dev->tmr_wq);
-
-		if (dev->transport->destroy_device)
-			dev->transport->destroy_device(dev);
+		dev->transport->destroy_device(dev);
 
 		mutex_lock(&device_mutex);
 		idr_remove(&devices_idr, dev->dev_index);

@@ -1,14 +1,15 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  Copyright (C) 1995  Linus Torvalds
  *  Copyright (C) 2001, 2002 Andi Kleen, SuSE Labs.
  *  Copyright (C) 2008-2009, Red Hat Inc., Ingo Molnar
  */
-#include <linux/magic.h>		/* STACK_END_MAGIC		*/
 #include <linux/sched.h>		/* test_thread_flag(), ...	*/
+#include <linux/sched/task_stack.h>	/* task_stack_*(), ...		*/
 #include <linux/kdebug.h>		/* oops_begin/end, ...		*/
-#include <linux/module.h>		/* search_exception_table	*/
+#include <linux/extable.h>		/* search_exception_tables	*/
 #include <linux/bootmem.h>		/* max_low_pfn			*/
-#include <linux/kprobes.h>		/* __kprobes, ...		*/
+#include <linux/kprobes.h>		/* NOKPROBE_SYMBOL, ...		*/
 #include <linux/mmiotrace.h>		/* kmmio_handler, ...		*/
 #include <linux/perf_event.h>		/* perf_sw_event		*/
 #include <linux/hugetlb.h>		/* hstate_index_to_shift	*/
@@ -16,12 +17,14 @@
 #include <linux/context_tracking.h>	/* exception_enter(), ...	*/
 #include <linux/uaccess.h>		/* faulthandler_disabled()	*/
 #include <linux/efi.h>			/* efi_recover_from_page_fault()*/
+#include <linux/mm_types.h>
 
 #include <asm/cpufeature.h>		/* boot_cpu_has, ...		*/
 #include <asm/traps.h>			/* dotraplinkage, ...		*/
 #include <asm/pgalloc.h>		/* pgd_*(), ...			*/
-#include <asm/kmemcheck.h>		/* kmemcheck_*(), ...		*/
-#include <asm/fixmap.h>			/* VSYSCALL_START		*/
+#include <asm/fixmap.h>			/* VSYSCALL_ADDR		*/
+#include <asm/vsyscall.h>		/* emulate_vsyscall		*/
+#include <asm/vm86.h>			/* struct vm86			*/
 #include <asm/mmu_context.h>		/* vma_pkey()			*/
 #include <asm/efi.h>			/* efi_recover_from_page_fault()*/
 
@@ -32,7 +35,7 @@
  * Returns 0 if mmiotrace is disabled, or if the fault is not
  * handled by mmiotrace:
  */
-static inline int __kprobes
+static nokprobe_inline int
 kmmio_fault(struct pt_regs *regs, unsigned long addr)
 {
 	if (unlikely(is_kmmio_active()))
@@ -41,12 +44,12 @@ kmmio_fault(struct pt_regs *regs, unsigned long addr)
 	return 0;
 }
 
-static inline int __kprobes kprobes_fault(struct pt_regs *regs)
+static nokprobe_inline int kprobes_fault(struct pt_regs *regs)
 {
 	int ret = 0;
 
 	/* kprobe_running() needs smp_processor_id() */
-	if (kprobes_built_in() && !user_mode_vm(regs)) {
+	if (kprobes_built_in() && !user_mode(regs)) {
 		preempt_disable();
 		if (kprobe_running() && kprobe_fault_handler(regs, 14))
 			ret = 1;
@@ -135,7 +138,7 @@ is_prefetch(struct pt_regs *regs, unsigned long error_code, unsigned long addr)
 	instr = (void *)convert_ip_to_linear(current, regs);
 	max_instr = instr + 15;
 
-	if (user_mode(regs) && instr >= (unsigned char *)TASK_SIZE)
+	if (user_mode(regs) && instr >= (unsigned char *)TASK_SIZE_MAX)
 		return 0;
 
 	while (instr < max_instr) {
@@ -152,79 +155,6 @@ is_prefetch(struct pt_regs *regs, unsigned long error_code, unsigned long addr)
 	return prefetch;
 }
 
-/*
- * A protection key fault means that the PKRU value did not allow
- * access to some PTE.  Userspace can figure out what PKRU was
- * from the XSAVE state, and this function fills out a field in
- * siginfo so userspace can discover which protection key was set
- * on the PTE.
- *
- * If we get here, we know that the hardware signaled a X86_PF_PK
- * fault and that there was a VMA once we got in the fault
- * handler.  It does *not* guarantee that the VMA we find here
- * was the one that we faulted on.
- *
- * 1. T1   : mprotect_key(foo, PAGE_SIZE, pkey=4);
- * 2. T1   : set PKRU to deny access to pkey=4, touches page
- * 3. T1   : faults...
- * 4.    T2: mprotect_key(foo, PAGE_SIZE, pkey=5);
- * 5. T1   : enters fault handler, takes mmap_sem, etc...
- * 6. T1   : reaches here, sees vma_pkey(vma)=5, when we really
- *	     faulted on a pte with its pkey=4.
- */
-static void fill_sig_info_pkey(int si_signo, int si_code, siginfo_t *info,
-		struct vm_area_struct *vma)
-{
-	/* This is effectively an #ifdef */
-	if (!boot_cpu_has(X86_FEATURE_OSPKE))
-		return;
-
-	/* Fault not from Protection Keys: nothing to do */
-	if ((si_code != SEGV_PKUERR) || (si_signo != SIGSEGV))
-		return;
-	/*
-	 * force_sig_info_fault() is called from a number of
-	 * contexts, some of which have a VMA and some of which
-	 * do not.  The X86_PF_PK handing happens after we have a
-	 * valid VMA, so we should never reach this without a
-	 * valid VMA.
-	 */
-	if (!vma) {
-		WARN_ONCE(1, "PKU fault with no VMA passed in");
-		info->si_pkey = 0;
-		return;
-	}
-	/*
-	 * si_pkey should be thought of as a strong hint, but not
-	 * absolutely guranteed to be 100% accurate because of
-	 * the race explained above.
-	 */
-	info->si_pkey = vma_pkey(vma);
-}
-
-static void
-force_sig_info_fault(int si_signo, int si_code, unsigned long address,
-		     struct task_struct *tsk, struct vm_area_struct *vma,
-		     int fault)
-{
-	unsigned lsb = 0;
-	siginfo_t info;
-
-	info.si_signo	= si_signo;
-	info.si_errno	= 0;
-	info.si_code	= si_code;
-	info.si_addr	= (void __user *)address;
-	if (fault & VM_FAULT_HWPOISON_LARGE)
-		lsb = hstate_index_to_shift(VM_FAULT_GET_HINDEX(fault)); 
-	if (fault & VM_FAULT_HWPOISON)
-		lsb = PAGE_SHIFT;
-	info.si_addr_lsb = lsb;
-
-	fill_sig_info_pkey(si_signo, si_code, &info, vma);
-
-	force_sig_info(si_signo, &info, tsk);
-}
-
 DEFINE_SPINLOCK(pgd_lock);
 LIST_HEAD(pgd_list);
 
@@ -233,6 +163,7 @@ static inline pmd_t *vmalloc_sync_one(pgd_t *pgd, unsigned long address)
 {
 	unsigned index = pgd_index(address);
 	pgd_t *pgd_k;
+	p4d_t *p4d, *p4d_k;
 	pud_t *pud, *pud_k;
 	pmd_t *pmd, *pmd_k;
 
@@ -245,10 +176,15 @@ static inline pmd_t *vmalloc_sync_one(pgd_t *pgd, unsigned long address)
 	/*
 	 * set_pgd(pgd, *pgd_k); here would be useless on PAE
 	 * and redundant with the set_pmd() on non-PAE. As would
-	 * set_pud.
+	 * set_p4d/set_pud.
 	 */
-	pud = pud_offset(pgd, address);
-	pud_k = pud_offset(pgd_k, address);
+	p4d = p4d_offset(pgd, address);
+	p4d_k = p4d_offset(pgd_k, address);
+	if (!p4d_present(*p4d_k))
+		return NULL;
+
+	pud = pud_offset(p4d, address);
+	pud_k = pud_offset(p4d_k, address);
 	if (!pud_present(*pud_k))
 		return NULL;
 
@@ -273,7 +209,7 @@ void vmalloc_sync_all(void)
 		return;
 
 	for (address = VMALLOC_START & PMD_MASK;
-	     address >= TASK_SIZE && address < FIXADDR_TOP;
+	     address >= TASK_SIZE_MAX && address < FIXADDR_TOP;
 	     address += PMD_SIZE) {
 		struct page *page;
 
@@ -301,7 +237,7 @@ void vmalloc_sync_all(void)
  *
  *   Handle a fault on the vmalloc or module mapping area
  */
-static noinline __kprobes int vmalloc_fault(unsigned long address)
+static noinline int vmalloc_fault(unsigned long address)
 {
 	unsigned long pgd_paddr;
 	pmd_t *pmd_k;
@@ -325,7 +261,7 @@ static noinline __kprobes int vmalloc_fault(unsigned long address)
 	if (!pmd_k)
 		return -1;
 
-	if (pmd_huge(*pmd_k))
+	if (pmd_large(*pmd_k))
 		return 0;
 
 	pte_k = pte_offset_kernel(pmd_k, address);
@@ -334,6 +270,7 @@ static noinline __kprobes int vmalloc_fault(unsigned long address)
 
 	return 0;
 }
+NOKPROBE_SYMBOL(vmalloc_fault);
 
 /*
  * Did it hit the DOS screen memory VA from vm86 mode?
@@ -342,14 +279,16 @@ static inline void
 check_v8086_mode(struct pt_regs *regs, unsigned long address,
 		 struct task_struct *tsk)
 {
+#ifdef CONFIG_VM86
 	unsigned long bit;
 
-	if (!v8086_mode(regs))
+	if (!v8086_mode(regs) || !tsk->thread.vm86)
 		return;
 
 	bit = (address - 0xA0000) >> PAGE_SHIFT;
 	if (bit < 32)
-		tsk->thread.screen_bitmap |= 1 << bit;
+		tsk->thread.vm86->screen_bitmap |= 1 << bit;
+#endif
 }
 
 static bool low_pfn(unsigned long pfn)
@@ -361,16 +300,24 @@ static void dump_pagetable(unsigned long address)
 {
 	pgd_t *base = __va(read_cr3_pa());
 	pgd_t *pgd = &base[pgd_index(address)];
+	p4d_t *p4d;
+	pud_t *pud;
 	pmd_t *pmd;
 	pte_t *pte;
 
 #ifdef CONFIG_X86_PAE
-	printk("*pdpt = %016Lx ", pgd_val(*pgd));
+	pr_info("*pdpt = %016Lx ", pgd_val(*pgd));
 	if (!low_pfn(pgd_val(*pgd) >> PAGE_SHIFT) || !pgd_present(*pgd))
 		goto out;
+#define pr_pde pr_cont
+#else
+#define pr_pde pr_info
 #endif
-	pmd = pmd_offset(pud_offset(pgd, address), address);
-	printk(KERN_CONT "*pde = %0*Lx ", sizeof(*pmd) * 2, (u64)pmd_val(*pmd));
+	p4d = p4d_offset(pgd, address);
+	pud = pud_offset(p4d, address);
+	pmd = pmd_offset(pud, address);
+	pr_pde("*pde = %0*Lx ", sizeof(*pmd) * 2, (u64)pmd_val(*pmd));
+#undef pr_pde
 
 	/*
 	 * We must not directly access the pte in the highpte
@@ -382,16 +329,16 @@ static void dump_pagetable(unsigned long address)
 		goto out;
 
 	pte = pte_offset_kernel(pmd, address);
-	printk("*pte = %0*Lx ", sizeof(*pte) * 2, (u64)pte_val(*pte));
+	pr_cont("*pte = %0*Lx ", sizeof(*pte) * 2, (u64)pte_val(*pte));
 out:
-	printk("\n");
+	pr_cont("\n");
 }
 
 #else /* CONFIG_X86_64: */
 
 void vmalloc_sync_all(void)
 {
-	sync_global_pgds(VMALLOC_START & PGDIR_MASK, VMALLOC_END, 0);
+	sync_global_pgds(VMALLOC_START & PGDIR_MASK, VMALLOC_END);
 }
 
 /*
@@ -399,12 +346,13 @@ void vmalloc_sync_all(void)
  *
  *   Handle a fault on the vmalloc area
  */
-static noinline __kprobes int vmalloc_fault(unsigned long address)
+static noinline int vmalloc_fault(unsigned long address)
 {
-	pgd_t *pgd, *pgd_ref;
-	pud_t *pud, *pud_ref;
-	pmd_t *pmd, *pmd_ref;
-	pte_t *pte, *pte_ref;
+	pgd_t *pgd, *pgd_k;
+	p4d_t *p4d, *p4d_k;
+	pud_t *pud;
+	pmd_t *pmd;
+	pte_t *pte;
 
 	/* Make sure we are in vmalloc area: */
 	if (!(address >= VMALLOC_START && address < VMALLOC_END))
@@ -417,61 +365,56 @@ static noinline __kprobes int vmalloc_fault(unsigned long address)
 	 * happen within a race in page table update. In the later
 	 * case just flush:
 	 */
-	pgd = pgd_offset(current->active_mm, address);
-	pgd_ref = pgd_offset_k(address);
-	if (pgd_none(*pgd_ref))
+	pgd = (pgd_t *)__va(read_cr3_pa()) + pgd_index(address);
+	pgd_k = pgd_offset_k(address);
+	if (pgd_none(*pgd_k))
 		return -1;
 
-	if (pgd_none(*pgd)) {
-		set_pgd(pgd, *pgd_ref);
-		arch_flush_lazy_mmu_mode();
-	} else {
-		BUG_ON(pgd_page_vaddr(*pgd) != pgd_page_vaddr(*pgd_ref));
+	if (pgtable_l5_enabled()) {
+		if (pgd_none(*pgd)) {
+			set_pgd(pgd, *pgd_k);
+			arch_flush_lazy_mmu_mode();
+		} else {
+			BUG_ON(pgd_page_vaddr(*pgd) != pgd_page_vaddr(*pgd_k));
+		}
 	}
 
-	/*
-	 * Below here mismatches are bugs because these lower tables
-	 * are shared:
-	 */
-
-	pud = pud_offset(pgd, address);
-	pud_ref = pud_offset(pgd_ref, address);
-	if (pud_none(*pud_ref))
+	/* With 4-level paging, copying happens on the p4d level. */
+	p4d = p4d_offset(pgd, address);
+	p4d_k = p4d_offset(pgd_k, address);
+	if (p4d_none(*p4d_k))
 		return -1;
 
-	if (pud_none(*pud) || pud_pfn(*pud) != pud_pfn(*pud_ref))
-		BUG();
+	if (p4d_none(*p4d) && !pgtable_l5_enabled()) {
+		set_p4d(p4d, *p4d_k);
+		arch_flush_lazy_mmu_mode();
+	} else {
+		BUG_ON(p4d_pfn(*p4d) != p4d_pfn(*p4d_k));
+	}
 
-	if (pud_huge(*pud))
+	BUILD_BUG_ON(CONFIG_PGTABLE_LEVELS < 4);
+
+	pud = pud_offset(p4d, address);
+	if (pud_none(*pud))
+		return -1;
+
+	if (pud_large(*pud))
 		return 0;
 
 	pmd = pmd_offset(pud, address);
-	pmd_ref = pmd_offset(pud_ref, address);
-	if (pmd_none(*pmd_ref))
+	if (pmd_none(*pmd))
 		return -1;
 
-	if (pmd_none(*pmd) || pmd_pfn(*pmd) != pmd_pfn(*pmd_ref))
-		BUG();
-
-	if (pmd_huge(*pmd))
+	if (pmd_large(*pmd))
 		return 0;
 
-	pte_ref = pte_offset_kernel(pmd_ref, address);
-	if (!pte_present(*pte_ref))
-		return -1;
-
 	pte = pte_offset_kernel(pmd, address);
-
-	/*
-	 * Don't use pte_page here, because the mappings can point
-	 * outside mem_map, and the NUMA hash lookup cannot handle
-	 * that:
-	 */
-	if (!pte_present(*pte) || pte_pfn(*pte) != pte_pfn(*pte_ref))
-		BUG();
+	if (!pte_present(*pte))
+		return -1;
 
 	return 0;
 }
+NOKPROBE_SYMBOL(vmalloc_fault);
 
 #ifdef CONFIG_CPU_SUP_AMD
 static const char errata93_warning[] =
@@ -502,6 +445,7 @@ static void dump_pagetable(unsigned long address)
 {
 	pgd_t *base = __va(read_cr3_pa());
 	pgd_t *pgd = base + pgd_index(address);
+	p4d_t *p4d;
 	pud_t *pud;
 	pmd_t *pmd;
 	pte_t *pte;
@@ -509,16 +453,24 @@ static void dump_pagetable(unsigned long address)
 	if (bad_address(pgd))
 		goto bad;
 
-	printk("PGD %lx ", pgd_val(*pgd));
+	pr_info("PGD %lx ", pgd_val(*pgd));
 
 	if (!pgd_present(*pgd))
 		goto out;
 
-	pud = pud_offset(pgd, address);
+	p4d = p4d_offset(pgd, address);
+	if (bad_address(p4d))
+		goto bad;
+
+	pr_cont("P4D %lx ", p4d_val(*p4d));
+	if (!p4d_present(*p4d) || p4d_large(*p4d))
+		goto out;
+
+	pud = pud_offset(p4d, address);
 	if (bad_address(pud))
 		goto bad;
 
-	printk("PUD %lx ", pud_val(*pud));
+	pr_cont("PUD %lx ", pud_val(*pud));
 	if (!pud_present(*pud) || pud_large(*pud))
 		goto out;
 
@@ -526,7 +478,7 @@ static void dump_pagetable(unsigned long address)
 	if (bad_address(pmd))
 		goto bad;
 
-	printk("PMD %lx ", pmd_val(*pmd));
+	pr_cont("PMD %lx ", pmd_val(*pmd));
 	if (!pmd_present(*pmd) || pmd_large(*pmd))
 		goto out;
 
@@ -534,12 +486,12 @@ static void dump_pagetable(unsigned long address)
 	if (bad_address(pte))
 		goto bad;
 
-	printk("PTE %lx", pte_val(*pte));
+	pr_cont("PTE %lx", pte_val(*pte));
 out:
-	printk("\n");
+	pr_cont("\n");
 	return;
 bad:
-	printk("BAD\n");
+	pr_info("BAD\n");
 }
 
 #endif /* CONFIG_X86_64 */
@@ -619,9 +571,6 @@ static int is_f00f_bug(struct pt_regs *regs, unsigned long address)
 	return 0;
 }
 
-static const char nx_warning[] = KERN_CRIT
-"kernel tried to execute NX-protected page - exploit attempt? (uid: %d)\n";
-
 static void
 show_fault_oops(struct pt_regs *regs, unsigned long error_code,
 		unsigned long address)
@@ -631,22 +580,27 @@ show_fault_oops(struct pt_regs *regs, unsigned long error_code,
 
 	if (error_code & X86_PF_INSTR) {
 		unsigned int level;
+		pgd_t *pgd;
+		pte_t *pte;
 
-		pte_t *pte = lookup_address(address, &level);
+		pgd = __va(read_cr3_pa());
+		pgd += pgd_index(address);
+
+		pte = lookup_address_in_pgd(pgd, address, &level);
 
 		if (pte && pte_present(*pte) && !pte_exec(*pte))
-			printk(nx_warning, from_kuid(&init_user_ns, current_uid()));
+			pr_crit("kernel tried to execute NX-protected page - exploit attempt? (uid: %d)\n",
+				from_kuid(&init_user_ns, current_uid()));
+		if (pte && pte_present(*pte) && pte_exec(*pte) &&
+				(pgd_flags(*pgd) & _PAGE_USER) &&
+				(__read_cr4() & X86_CR4_SMEP))
+			pr_crit("unable to execute userspace code (SMEP?) (uid: %d)\n",
+				from_kuid(&init_user_ns, current_uid()));
 	}
 
-	printk(KERN_ALERT "BUG: unable to handle kernel ");
-	if (address < PAGE_SIZE)
-		printk(KERN_CONT "NULL pointer dereference");
-	else
-		printk(KERN_CONT "paging request");
-
-	printk(KERN_CONT " at %p\n", (void *) address);
-	printk(KERN_ALERT "IP:");
-	printk_address(regs->ip);
+	pr_alert("BUG: unable to handle kernel %s at %px\n",
+		 address < PAGE_SIZE ? "NULL pointer dereference" : "paging request",
+		 (void *)address);
 
 	dump_pagetable(address);
 }
@@ -682,14 +636,11 @@ no_context(struct pt_regs *regs, unsigned long error_code,
 	   unsigned long address, int signal, int si_code)
 {
 	struct task_struct *tsk = current;
-	unsigned long *stackend;
 	unsigned long flags;
 	int sig;
-	/* No context means no VMA to pass down */
-	struct vm_area_struct *vma = NULL;
 
 	/* Are we prepared to handle this kernel fault? */
-	if (fixup_exception(regs)) {
+	if (fixup_exception(regs, X86_TRAP_PF)) {
 		/*
 		 * Any interrupt that takes a fault gets the fixup. This makes
 		 * the below recursive fault logic only apply to a faults from
@@ -704,14 +655,14 @@ no_context(struct pt_regs *regs, unsigned long error_code,
 		 * In this case we need to make sure we're not recursively
 		 * faulting through the emulate_vsyscall() logic.
 		 */
-		if (current_thread_info()->sig_on_uaccess_error && signal) {
+		if (current->thread.sig_on_uaccess_err && signal) {
 			tsk->thread.trap_nr = X86_TRAP_PF;
 			tsk->thread.error_code = error_code | X86_PF_USER;
 			tsk->thread.cr2 = address;
 
 			/* XXX: hwpoison faults will set the wrong code. */
-			force_sig_info_fault(signal, si_code, address,
-					     tsk, vma, 0);
+			force_sig_fault(signal, si_code, (void __user *)address,
+					tsk);
 		}
 
 		/*
@@ -719,6 +670,37 @@ no_context(struct pt_regs *regs, unsigned long error_code,
 		 */
 		return;
 	}
+
+#ifdef CONFIG_VMAP_STACK
+	/*
+	 * Stack overflow?  During boot, we can fault near the initial
+	 * stack in the direct map, but that's not an overflow -- check
+	 * that we're in vmalloc space to avoid this.
+	 */
+	if (is_vmalloc_addr((void *)address) &&
+	    (((unsigned long)tsk->stack - 1 - address < PAGE_SIZE) ||
+	     address - ((unsigned long)tsk->stack + THREAD_SIZE) < PAGE_SIZE)) {
+		unsigned long stack = this_cpu_read(orig_ist.ist[DOUBLEFAULT_STACK]) - sizeof(void *);
+		/*
+		 * We're likely to be running with very little stack space
+		 * left.  It's plausible that we'd hit this condition but
+		 * double-fault even before we get this far, in which case
+		 * we're fine: the double-fault handler will deal with it.
+		 *
+		 * We don't want to make it all the way into the oops code
+		 * and then double-fault, though, because we're likely to
+		 * break the console driver and lose most of the stack dump.
+		 */
+		asm volatile ("movq %[stack], %%rsp\n\t"
+			      "call handle_stack_overflow\n\t"
+			      "1: jmp 1b"
+			      : ASM_CALL_CONSTRAINT
+			      : "D" ("kernel stack overflow (page fault)"),
+				"S" (regs), "d" (address),
+				[stack] "rm" (stack));
+		unreachable();
+	}
+#endif
 
 	/*
 	 * 32-bit:
@@ -752,8 +734,7 @@ no_context(struct pt_regs *regs, unsigned long error_code,
 
 	show_fault_oops(regs, error_code, address);
 
-	stackend = end_of_stack(tsk);
-	if (tsk != &init_task && *stackend != STACK_END_MAGIC)
+	if (task_stack_end_corrupted(tsk))
 		printk(KERN_EMERG "Thread overran stack, or stack corrupted\n");
 
 	tsk->thread.cr2		= address;
@@ -778,26 +759,28 @@ static inline void
 show_signal_msg(struct pt_regs *regs, unsigned long error_code,
 		unsigned long address, struct task_struct *tsk)
 {
+	const char *loglvl = task_pid_nr(tsk) > 1 ? KERN_INFO : KERN_EMERG;
+
 	if (!unhandled_signal(tsk, SIGSEGV))
 		return;
 
 	if (!printk_ratelimit())
 		return;
 
-	printk("%s%s[%d]: segfault at %lx ip %p sp %p error %lx",
-		task_pid_nr(tsk) > 1 ? KERN_INFO : KERN_EMERG,
-		tsk->comm, task_pid_nr(tsk), address,
+	printk("%s%s[%d]: segfault at %lx ip %px sp %px error %lx",
+		loglvl, tsk->comm, task_pid_nr(tsk), address,
 		(void *)regs->ip, (void *)regs->sp, error_code);
 
 	print_vma_addr(KERN_CONT " in ", regs->ip);
 
 	printk(KERN_CONT "\n");
+
+	show_opcodes(regs, loglvl);
 }
 
 static void
 __bad_area_nosemaphore(struct pt_regs *regs, unsigned long error_code,
-		       unsigned long address, struct vm_area_struct *vma,
-		       int si_code)
+		       unsigned long address, u32 pkey, int si_code)
 {
 	struct task_struct *tsk = current;
 
@@ -824,13 +807,18 @@ __bad_area_nosemaphore(struct pt_regs *regs, unsigned long error_code,
 		 * emulation.
 		 */
 		if (unlikely((error_code & X86_PF_INSTR) &&
-			     ((address & ~0xfff) == VSYSCALL_START))) {
+			     ((address & ~0xfff) == VSYSCALL_ADDR))) {
 			if (emulate_vsyscall(regs, address))
 				return;
 		}
 #endif
-		/* Kernel addresses are always protection faults: */
-		if (address >= TASK_SIZE)
+
+		/*
+		 * To avoid leaking information about the kernel page table
+		 * layout, pretend that user-mode accesses to kernel addresses
+		 * are always protection faults.
+		 */
+		if (address >= TASK_SIZE_MAX)
 			error_code |= X86_PF_PROT;
 
 		if (likely(show_unhandled_signals))
@@ -840,7 +828,10 @@ __bad_area_nosemaphore(struct pt_regs *regs, unsigned long error_code,
 		tsk->thread.error_code	= error_code;
 		tsk->thread.trap_nr	= X86_TRAP_PF;
 
-		force_sig_info_fault(SIGSEGV, si_code, address, tsk, vma, 0);
+		if (si_code == SEGV_PKUERR)
+			force_sig_pkuerr((void __user *)address, pkey);
+
+		force_sig_fault(SIGSEGV, si_code, (void __user *)address, tsk);
 
 		return;
 	}
@@ -853,30 +844,29 @@ __bad_area_nosemaphore(struct pt_regs *regs, unsigned long error_code,
 
 static noinline void
 bad_area_nosemaphore(struct pt_regs *regs, unsigned long error_code,
-		     unsigned long address, struct vm_area_struct *vma)
+		     unsigned long address)
 {
-	__bad_area_nosemaphore(regs, error_code, address, vma, SEGV_MAPERR);
+	__bad_area_nosemaphore(regs, error_code, address, 0, SEGV_MAPERR);
 }
 
 static void
 __bad_area(struct pt_regs *regs, unsigned long error_code,
-	   unsigned long address,  struct vm_area_struct *vma, int si_code)
+	   unsigned long address, u32 pkey, int si_code)
 {
 	struct mm_struct *mm = current->mm;
-
 	/*
 	 * Something tried to access memory that isn't in our memory map..
 	 * Fix it, but check if it's kernel or user first..
 	 */
 	up_read(&mm->mmap_sem);
 
-	__bad_area_nosemaphore(regs, error_code, address, vma, si_code);
+	__bad_area_nosemaphore(regs, error_code, address, pkey, si_code);
 }
 
 static noinline void
 bad_area(struct pt_regs *regs, unsigned long error_code, unsigned long address)
 {
-	__bad_area(regs, error_code, address, NULL, SEGV_MAPERR);
+	__bad_area(regs, error_code, address, 0, SEGV_MAPERR);
 }
 
 static inline bool bad_area_access_from_pkeys(unsigned long error_code,
@@ -905,18 +895,40 @@ bad_area_access_error(struct pt_regs *regs, unsigned long error_code,
 	 * But, doing it this way allows compiler optimizations
 	 * if pkeys are compiled out.
 	 */
-	if (bad_area_access_from_pkeys(error_code, vma))
-		__bad_area(regs, error_code, address, vma, SEGV_PKUERR);
-	else
-		__bad_area(regs, error_code, address, vma, SEGV_ACCERR);
+	if (bad_area_access_from_pkeys(error_code, vma)) {
+		/*
+		 * A protection key fault means that the PKRU value did not allow
+		 * access to some PTE.  Userspace can figure out what PKRU was
+		 * from the XSAVE state.  This function captures the pkey from
+		 * the vma and passes it to userspace so userspace can discover
+		 * which protection key was set on the PTE.
+		 *
+		 * If we get here, we know that the hardware signaled a X86_PF_PK
+		 * fault and that there was a VMA once we got in the fault
+		 * handler.  It does *not* guarantee that the VMA we find here
+		 * was the one that we faulted on.
+		 *
+		 * 1. T1   : mprotect_key(foo, PAGE_SIZE, pkey=4);
+		 * 2. T1   : set PKRU to deny access to pkey=4, touches page
+		 * 3. T1   : faults...
+		 * 4.    T2: mprotect_key(foo, PAGE_SIZE, pkey=5);
+		 * 5. T1   : enters fault handler, takes mmap_sem, etc...
+		 * 6. T1   : reaches here, sees vma_pkey(vma)=5, when we really
+		 *	     faulted on a pte with its pkey=4.
+		 */
+		u32 pkey = vma_pkey(vma);
+
+		__bad_area(regs, error_code, address, pkey, SEGV_PKUERR);
+	} else {
+		__bad_area(regs, error_code, address, 0, SEGV_ACCERR);
+	}
 }
 
 static void
 do_sigbus(struct pt_regs *regs, unsigned long error_code, unsigned long address,
-	  struct vm_area_struct *vma, unsigned int fault)
+	  unsigned int fault)
 {
 	struct task_struct *tsk = current;
-	int code = BUS_ADRERR;
 
 	/* Kernel mode? Handle exceptions or die: */
 	if (!(error_code & X86_PF_USER)) {
@@ -934,19 +946,25 @@ do_sigbus(struct pt_regs *regs, unsigned long error_code, unsigned long address,
 
 #ifdef CONFIG_MEMORY_FAILURE
 	if (fault & (VM_FAULT_HWPOISON|VM_FAULT_HWPOISON_LARGE)) {
-		printk(KERN_ERR
+		unsigned lsb = 0;
+
+		pr_err(
 	"MCE: Killing %s:%d due to hardware memory corruption fault at %lx\n",
 			tsk->comm, tsk->pid, address);
-		code = BUS_MCEERR_AR;
+		if (fault & VM_FAULT_HWPOISON_LARGE)
+			lsb = hstate_index_to_shift(VM_FAULT_GET_HINDEX(fault));
+		if (fault & VM_FAULT_HWPOISON)
+			lsb = PAGE_SHIFT;
+		force_sig_mceerr(BUS_MCEERR_AR, (void __user *)address, lsb, tsk);
+		return;
 	}
 #endif
-	force_sig_info_fault(SIGBUS, code, address, tsk, vma, fault);
+	force_sig_fault(SIGBUS, BUS_ADRERR, (void __user *)address, tsk);
 }
 
 static noinline void
 mm_fault_error(struct pt_regs *regs, unsigned long error_code,
-	       unsigned long address, struct vm_area_struct *vma,
-	       unsigned int fault)
+	       unsigned long address, vm_fault_t fault)
 {
 	if (fatal_signal_pending(current) && !(error_code & X86_PF_USER)) {
 		no_context(regs, error_code, address, 0, 0);
@@ -970,9 +988,9 @@ mm_fault_error(struct pt_regs *regs, unsigned long error_code,
 	} else {
 		if (fault & (VM_FAULT_SIGBUS|VM_FAULT_HWPOISON|
 			     VM_FAULT_HWPOISON_LARGE))
-			do_sigbus(regs, error_code, address, vma, fault);
+			do_sigbus(regs, error_code, address, fault);
 		else if (fault & VM_FAULT_SIGSEGV)
-			bad_area_nosemaphore(regs, error_code, address, vma);
+			bad_area_nosemaphore(regs, error_code, address);
 		else
 			BUG();
 	}
@@ -1016,10 +1034,11 @@ static int spurious_fault_check(unsigned long error_code, pte_t *pte)
  * See Intel Developer's Manual Vol 3 Section 4.10.4.3, bullet 3
  * (Optional Invalidation).
  */
-static noinline __kprobes int
+static noinline int
 spurious_fault(unsigned long error_code, unsigned long address)
 {
 	pgd_t *pgd;
+	p4d_t *p4d;
 	pud_t *pud;
 	pmd_t *pmd;
 	pte_t *pte;
@@ -1042,7 +1061,14 @@ spurious_fault(unsigned long error_code, unsigned long address)
 	if (!pgd_present(*pgd))
 		return 0;
 
-	pud = pud_offset(pgd, address);
+	p4d = p4d_offset(pgd, address);
+	if (!p4d_present(*p4d))
+		return 0;
+
+	if (p4d_large(*p4d))
+		return spurious_fault_check(error_code, (pte_t *) p4d);
+
+	pud = pud_offset(p4d, address);
 	if (!pud_present(*pud))
 		return 0;
 
@@ -1073,6 +1099,7 @@ spurious_fault(unsigned long error_code, unsigned long address)
 
 	return ret;
 }
+NOKPROBE_SYMBOL(spurious_fault);
 
 int show_unhandled_signals = 1;
 
@@ -1124,10 +1151,16 @@ static int fault_in_kernel_space(unsigned long address)
 
 static inline bool smap_violation(int error_code, struct pt_regs *regs)
 {
+	if (!IS_ENABLED(CONFIG_X86_SMAP))
+		return false;
+
+	if (!static_cpu_has(X86_FEATURE_SMAP))
+		return false;
+
 	if (error_code & X86_PF_USER)
 		return false;
 
-	if (!user_mode_vm(regs) && (regs->flags & X86_EFLAGS_AC))
+	if (!user_mode(regs) && (regs->flags & X86_EFLAGS_AC))
 		return false;
 
 	return true;
@@ -1138,25 +1171,20 @@ static inline bool smap_violation(int error_code, struct pt_regs *regs)
  * and the problem, and then passes it off to one of the appropriate
  * routines.
  */
-static void __kprobes
-__do_page_fault(struct pt_regs *regs, unsigned long error_code,
+static noinline void
+__do_page_fault(struct pt_regs *regs, unsigned long hw_error_code,
 		unsigned long address)
 {
+	unsigned long sw_error_code;
 	struct vm_area_struct *vma;
 	struct task_struct *tsk;
 	struct mm_struct *mm;
-	int fault, major = 0;
+	vm_fault_t fault, major = 0;
 	unsigned int flags = FAULT_FLAG_ALLOW_RETRY | FAULT_FLAG_KILLABLE;
 
 	tsk = current;
 	mm = tsk->mm;
 
-	/*
-	 * Detect and handle instructions that would cause a page fault for
-	 * both a tracked kernel page and a userspace page.
-	 */
-	if (kmemcheck_active(regs))
-		kmemcheck_hide(regs);
 	prefetchw(&mm->mmap_sem);
 
 	if (unlikely(kmmio_fault(regs, address)))
@@ -1172,20 +1200,17 @@ __do_page_fault(struct pt_regs *regs, unsigned long error_code,
 	 * nothing more.
 	 *
 	 * This verifies that the fault happens in kernel space
-	 * (error_code & 4) == 0, and that the fault was not a
-	 * protection error (error_code & 9) == 0.
+	 * (hw_error_code & 4) == 0, and that the fault was not a
+	 * protection error (hw_error_code & 9) == 0.
 	 */
 	if (unlikely(fault_in_kernel_space(address))) {
-		if (!(error_code & (X86_PF_RSVD | X86_PF_USER | X86_PF_PROT))) {
+		if (!(hw_error_code & (X86_PF_RSVD | X86_PF_USER | X86_PF_PROT))) {
 			if (vmalloc_fault(address) >= 0)
-				return;
-
-			if (kmemcheck_fault(regs, address, error_code))
 				return;
 		}
 
 		/* Can handle a stale RO->RW TLB: */
-		if (spurious_fault(error_code, address))
+		if (spurious_fault(hw_error_code, address))
 			return;
 
 		/* kprobes don't want to hook the spurious faults: */
@@ -1195,7 +1220,7 @@ __do_page_fault(struct pt_regs *regs, unsigned long error_code,
 		 * Don't take the mm semaphore here. If we fixup a prefetch
 		 * fault we could otherwise deadlock:
 		 */
-		bad_area_nosemaphore(regs, error_code, address, NULL);
+		bad_area_nosemaphore(regs, hw_error_code, address);
 
 		return;
 	}
@@ -1204,15 +1229,12 @@ __do_page_fault(struct pt_regs *regs, unsigned long error_code,
 	if (unlikely(kprobes_fault(regs)))
 		return;
 
-	if (unlikely(error_code & X86_PF_RSVD))
-		pgtable_bad(regs, error_code, address);
+	if (unlikely(hw_error_code & X86_PF_RSVD))
+		pgtable_bad(regs, hw_error_code, address);
 
-	if (static_cpu_has(X86_FEATURE_SMAP)) {
-		if (unlikely(smap_violation(error_code, regs))) {
-			bad_area_nosemaphore(regs, error_code, address,
-				NULL);
-			return;
-		}
+	if (unlikely(smap_violation(hw_error_code, regs))) {
+		bad_area_nosemaphore(regs, hw_error_code, address);
+		return;
 	}
 
 	/*
@@ -1220,9 +1242,16 @@ __do_page_fault(struct pt_regs *regs, unsigned long error_code,
 	 * in a region with pagefaults disabled then we must not take the fault
 	 */
 	if (unlikely(faulthandler_disabled() || !mm)) {
-		bad_area_nosemaphore(regs, error_code, address, NULL);
+		bad_area_nosemaphore(regs, hw_error_code, address);
 		return;
 	}
+
+	/*
+	 * hw_error_code is literally the "page fault error code" passed to
+	 * the kernel directly from the hardware.  But, we will shortly be
+	 * modifying it in software, so give it a new name.
+	 */
+	sw_error_code = hw_error_code;
 
 	/*
 	 * It's safe to allow irq's after cr2 has been saved and the
@@ -1231,9 +1260,28 @@ __do_page_fault(struct pt_regs *regs, unsigned long error_code,
 	 * User-mode registers count as a user access even for any
 	 * potential system fault or CPU buglet:
 	 */
-	if (user_mode_vm(regs)) {
+	if (user_mode(regs)) {
 		local_irq_enable();
-		error_code |= X86_PF_USER;
+		/*
+		 * Up to this point, X86_PF_USER set in hw_error_code
+		 * indicated a user-mode access.  But, after this,
+		 * X86_PF_USER in sw_error_code will indicate either
+		 * that, *or* an implicit kernel(supervisor)-mode access
+		 * which originated from user mode.
+		 */
+		if (!(hw_error_code & X86_PF_USER)) {
+			/*
+			 * The CPU was in user mode, but the CPU says
+			 * the fault was not a user-mode access.
+			 * Must be an implicit kernel-mode access,
+			 * which we do not expect to happen in the
+			 * user address space.
+			 */
+			pr_warn_once("kernel-mode error from user-mode: %lx\n",
+					hw_error_code);
+
+			sw_error_code |= X86_PF_USER;
+		}
 		flags |= FAULT_FLAG_USER;
 	} else {
 		if (regs->flags & X86_EFLAGS_IF)
@@ -1242,9 +1290,9 @@ __do_page_fault(struct pt_regs *regs, unsigned long error_code,
 
 	perf_sw_event(PERF_COUNT_SW_PAGE_FAULTS, 1, regs, address);
 
-	if (error_code & X86_PF_WRITE)
+	if (sw_error_code & X86_PF_WRITE)
 		flags |= FAULT_FLAG_WRITE;
-	if (error_code & X86_PF_INSTR)
+	if (sw_error_code & X86_PF_INSTR)
 		flags |= FAULT_FLAG_INSTRUCTION;
 
 	/*
@@ -1264,9 +1312,9 @@ __do_page_fault(struct pt_regs *regs, unsigned long error_code,
 	 * space check, thus avoiding the deadlock:
 	 */
 	if (unlikely(!down_read_trylock(&mm->mmap_sem))) {
-		if (!(error_code & X86_PF_USER) &&
+		if (!(sw_error_code & X86_PF_USER) &&
 		    !search_exception_tables(regs->ip)) {
-			bad_area_nosemaphore(regs, error_code, address, NULL);
+			bad_area_nosemaphore(regs, sw_error_code, address);
 			return;
 		}
 retry:
@@ -1282,17 +1330,17 @@ retry:
 
 	vma = find_vma(mm, address);
 	if (unlikely(!vma)) {
-		bad_area(regs, error_code, address);
+		bad_area(regs, sw_error_code, address);
 		return;
 	}
 	if (likely(vma->vm_start <= address))
 		goto good_area;
 	if (unlikely(!(vma->vm_flags & VM_GROWSDOWN))) {
-		bad_area(regs, error_code, address);
+		bad_area(regs, sw_error_code, address);
 		return;
 	}
 	if (unlikely(expand_stack(vma, address))) {
-		bad_area(regs, error_code, address);
+		bad_area(regs, sw_error_code, address);
 		return;
 	}
 
@@ -1301,15 +1349,23 @@ retry:
 	 * we can handle it..
 	 */
 good_area:
-	if (unlikely(access_error(error_code, vma))) {
-		bad_area_access_error(regs, error_code, address, vma);
+	if (unlikely(access_error(sw_error_code, vma))) {
+		bad_area_access_error(regs, sw_error_code, address, vma);
 		return;
 	}
 
 	/*
 	 * If for any reason at all we couldn't handle the fault,
 	 * make sure we exit gracefully rather than endlessly redo
-	 * the fault:
+	 * the fault.  Since we never set FAULT_FLAG_RETRY_NOWAIT, if
+	 * we get VM_FAULT_RETRY back, the mmap_sem has been unlocked.
+	 *
+	 * Note that handle_userfault() may also release and reacquire mmap_sem
+	 * (and not return with VM_FAULT_RETRY), when returning to userland to
+	 * repeat the page fault later with a VM_FAULT_NOPAGE retval
+	 * (potentially after handling any pending signal during the return to
+	 * userland). The return to userland is identified whenever
+	 * FAULT_FLAG_USER|FAULT_FLAG_KILLABLE are both set in flags.
 	 */
 	fault = handle_mm_fault(vma, address, flags);
 	major |= fault & VM_FAULT_MAJOR;
@@ -1333,13 +1389,13 @@ good_area:
 			return;
 
 		/* Not returning to user mode? Handle exceptions or die: */
-		no_context(regs, error_code, address, SIGBUS, BUS_ADRERR);
+		no_context(regs, sw_error_code, address, SIGBUS, BUS_ADRERR);
 		return;
 	}
 
 	up_read(&mm->mmap_sem);
 	if (unlikely(fault & VM_FAULT_ERROR)) {
-		mm_fault_error(regs, error_code, address, vma, fault);
+		mm_fault_error(regs, sw_error_code, address, fault);
 		return;
 	}
 
@@ -1357,42 +1413,36 @@ good_area:
 
 	check_v8086_mode(regs, address, tsk);
 }
+NOKPROBE_SYMBOL(__do_page_fault);
 
-dotraplinkage void __kprobes
-do_page_fault(struct pt_regs *regs, unsigned long error_code)
-{
-	enum ctx_state prev_state;
-	/* Get the faulting address: */
-	unsigned long address = read_cr2();
-
-	prev_state = exception_enter();
-	__do_page_fault(regs, error_code, address);
-	exception_exit(prev_state);
-}
-
-static void trace_page_fault_entries(struct pt_regs *regs,
-				     unsigned long error_code)
+static nokprobe_inline void
+trace_page_fault_entries(unsigned long address, struct pt_regs *regs,
+			 unsigned long error_code)
 {
 	if (user_mode(regs))
-		trace_page_fault_user(read_cr2(), regs, error_code);
+		trace_page_fault_user(address, regs, error_code);
 	else
-		trace_page_fault_kernel(read_cr2(), regs, error_code);
+		trace_page_fault_kernel(address, regs, error_code);
 }
 
-dotraplinkage void __kprobes
-trace_do_page_fault(struct pt_regs *regs, unsigned long error_code)
+/*
+ * We must have this function blacklisted from kprobes, tagged with notrace
+ * and call read_cr2() before calling anything else. To avoid calling any
+ * kind of tracing machinery before we've observed the CR2 value.
+ *
+ * exception_{enter,exit}() contains all sorts of tracepoints.
+ */
+dotraplinkage void notrace
+do_page_fault(struct pt_regs *regs, unsigned long error_code)
 {
+	unsigned long address = read_cr2(); /* Get the faulting address */
 	enum ctx_state prev_state;
-	/*
-	 * The exception_enter and tracepoint processing could
-	 * trigger another page faults (user space callchain
-	 * reading) and destroy the original cr2 value, so read
-	 * the faulting address now.
-	 */
-	unsigned long address = read_cr2();
 
 	prev_state = exception_enter();
-	trace_page_fault_entries(regs, error_code);
+	if (trace_pagefault_enabled())
+		trace_page_fault_entries(address, regs, error_code);
+
 	__do_page_fault(regs, error_code, address);
 	exception_exit(prev_state);
 }
+NOKPROBE_SYMBOL(do_page_fault);

@@ -21,8 +21,9 @@
 
 #include <linux/init.h>
 #include <linux/io.h>
-#include <linux/module.h>
+#include <linux/export.h>
 
+#include <xen/xen.h>
 #include <xen/platform_pci.h>
 #include "xen-ops.h"
 
@@ -30,10 +31,9 @@
 #define XEN_PLATFORM_ERR_PROTOCOL -2
 #define XEN_PLATFORM_ERR_BLACKLIST -3
 
-/* store the value of xen_emul_unplug after the unplug is done */
-int xen_platform_pci_unplug;
-EXPORT_SYMBOL_GPL(xen_platform_pci_unplug);
 #ifdef CONFIG_XEN_PVHVM
+/* store the value of xen_emul_unplug after the unplug is done */
+static int xen_platform_pci_unplug;
 static int xen_emul_unplug;
 
 static int check_platform_magic(void)
@@ -62,20 +62,20 @@ static int check_platform_magic(void)
 		}
 		break;
 	default:
-		printk(KERN_WARNING "Xen Platform PCI: unknown I/O protocol version");
+		printk(KERN_WARNING "Xen Platform PCI: unknown I/O protocol version\n");
 		return XEN_PLATFORM_ERR_PROTOCOL;
 	}
 
 	return 0;
 }
 
-bool xen_has_pv_devices()
+bool xen_has_pv_devices(void)
 {
 	if (!xen_domain())
 		return false;
 
-	/* PV domains always have them. */
-	if (xen_pv_domain())
+	/* PV and PVH domains always have them. */
+	if (xen_pv_domain() || xen_pvh_domain())
 		return true;
 
 	/* And user has xen_platform_pci=0 set in guest config as

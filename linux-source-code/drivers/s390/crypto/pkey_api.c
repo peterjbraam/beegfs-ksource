@@ -1,13 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  pkey device driver
  *
  *  Copyright IBM Corp. 2017
  *  Author(s): Harald Freudenberger
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License (version 2 only)
- * as published by the Free Software Foundation.
- *
  */
 
 #define KMSG_COMPONENT "pkey"
@@ -21,6 +17,7 @@
 #include <linux/kallsyms.h>
 #include <linux/debugfs.h>
 #include <linux/random.h>
+#include <linux/cpufeature.h>
 #include <asm/zcrypt.h>
 #include <asm/cpacf.h>
 #include <asm/pkey.h>
@@ -54,7 +51,8 @@ static debug_info_t *debug_info;
 
 static void __init pkey_debug_init(void)
 {
-	debug_info = debug_register("pkey", 1, 1, 4 * sizeof(long));
+	/* 5 arguments per dbf entry (including the format string ptr) */
+	debug_info = debug_register("pkey", 1, 1, 5 * sizeof(long));
 	debug_register_view(debug_info, &debug_sprintf_view);
 	debug_set_level(debug_info, 3);
 }
@@ -132,8 +130,8 @@ static int check_secaeskeytoken(const u8 *token, int keybitsize)
 	}
 	if (keybitsize > 0 && t->bitsize != keybitsize) {
 		DEBUG_ERR(
-			"check_secaeskeytoken secure token check failed, bitsize mismatch %d != %d\n",
-			(int) t->bitsize, keybitsize);
+			"%s secure token check failed, bitsize mismatch %d != %d\n",
+			__func__, (int) t->bitsize, keybitsize);
 		return -EINVAL;
 	}
 
@@ -159,10 +157,9 @@ static int alloc_and_prep_cprbmem(size_t paramblen,
 	 * allocate consecutive memory for request CPRB, request param
 	 * block, reply CPRB and reply param block
 	 */
-	cprbmem = kmalloc(2 * cprbplusparamblen, GFP_KERNEL);
+	cprbmem = kcalloc(2, cprbplusparamblen, GFP_KERNEL);
 	if (!cprbmem)
 		return -ENOMEM;
-	memset(cprbmem, 0, 2 * cprbplusparamblen);
 
 	preqcblk = (struct CPRBX *) cprbmem;
 	prepcblk = (struct CPRBX *) (cprbmem + cprbplusparamblen);
@@ -212,9 +209,9 @@ static inline void prep_xcrb(struct ica_xcRB *pxcrb,
 	pxcrb->user_defined = (cardnr == 0xFFFF ? AUTOSELECT : cardnr);
 	pxcrb->request_control_blk_length =
 		preqcblk->cprb_len + preqcblk->req_parml;
-	pxcrb->request_control_blk_addr = (void *) preqcblk;
+	pxcrb->request_control_blk_addr = (void __user *) preqcblk;
 	pxcrb->reply_control_blk_length = preqcblk->rpl_msgbl;
-	pxcrb->reply_control_blk_addr = (void *) prepcblk;
+	pxcrb->reply_control_blk_addr = (void __user *) prepcblk;
 }
 
 /*
@@ -309,8 +306,8 @@ int pkey_genseckey(u16 cardnr, u16 domain,
 		break;
 	default:
 		DEBUG_ERR(
-			"pkey_genseckey unknown/unsupported keytype %d\n",
-			keytype);
+			"%s unknown/unsupported keytype %d\n",
+			__func__, keytype);
 		rc = -EINVAL;
 		goto out;
 	}
@@ -329,15 +326,16 @@ int pkey_genseckey(u16 cardnr, u16 domain,
 	rc = _zcrypt_send_cprb(&xcrb);
 	if (rc) {
 		DEBUG_ERR(
-			"pkey_genseckey zcrypt_send_cprb (cardnr=%d domain=%d) failed with errno %d\n",
-			(int) cardnr, (int) domain, rc);
+			"%s zcrypt_send_cprb (cardnr=%d domain=%d) failed with errno %d\n",
+			__func__, (int) cardnr, (int) domain, rc);
 		goto out;
 	}
 
 	/* check response returncode and reasoncode */
 	if (prepcblk->ccp_rtcode != 0) {
 		DEBUG_ERR(
-			"pkey_genseckey secure key generate failure, card response %d/%d\n",
+			"%s secure key generate failure, card response %d/%d\n",
+			__func__,
 			(int) prepcblk->ccp_rtcode,
 			(int) prepcblk->ccp_rscode);
 		rc = -EIO;
@@ -354,8 +352,8 @@ int pkey_genseckey(u16 cardnr, u16 domain,
 		- sizeof(prepparm->lv3.keyblock.tokattr);
 	if (seckeysize != SECKEYBLOBSIZE) {
 		DEBUG_ERR(
-			"pkey_genseckey secure token size mismatch %d != %d bytes\n",
-			seckeysize, SECKEYBLOBSIZE);
+			"%s secure token size mismatch %d != %d bytes\n",
+			__func__, seckeysize, SECKEYBLOBSIZE);
 		rc = -EIO;
 		goto out;
 	}
@@ -446,8 +444,8 @@ int pkey_clr2seckey(u16 cardnr, u16 domain, u32 keytype,
 		break;
 	default:
 		DEBUG_ERR(
-			"pkey_clr2seckey unknown/unsupported keytype %d\n",
-			keytype);
+			"%s unknown/unsupported keytype %d\n",
+			__func__, keytype);
 		rc = -EINVAL;
 		goto out;
 	}
@@ -466,15 +464,16 @@ int pkey_clr2seckey(u16 cardnr, u16 domain, u32 keytype,
 	rc = _zcrypt_send_cprb(&xcrb);
 	if (rc) {
 		DEBUG_ERR(
-			"pkey_clr2seckey zcrypt_send_cprb (cardnr=%d domain=%d) failed with errno %d\n",
-			(int) cardnr, (int) domain, rc);
+			"%s zcrypt_send_cprb (cardnr=%d domain=%d) failed with errno %d\n",
+			__func__, (int) cardnr, (int) domain, rc);
 		goto out;
 	}
 
 	/* check response returncode and reasoncode */
 	if (prepcblk->ccp_rtcode != 0) {
 		DEBUG_ERR(
-			"pkey_clr2seckey clear key import failure, card response %d/%d\n",
+			"%s clear key import failure, card response %d/%d\n",
+			__func__,
 			(int) prepcblk->ccp_rtcode,
 			(int) prepcblk->ccp_rscode);
 		rc = -EIO;
@@ -491,8 +490,8 @@ int pkey_clr2seckey(u16 cardnr, u16 domain, u32 keytype,
 		- sizeof(prepparm->lv3.keyblock.tokattr);
 	if (seckeysize != SECKEYBLOBSIZE) {
 		DEBUG_ERR(
-			"pkey_clr2seckey secure token size mismatch %d != %d bytes\n",
-			seckeysize, SECKEYBLOBSIZE);
+			"%s secure token size mismatch %d != %d bytes\n",
+			__func__, seckeysize, SECKEYBLOBSIZE);
 		rc = -EIO;
 		goto out;
 	}
@@ -592,15 +591,16 @@ int pkey_sec2protkey(u16 cardnr, u16 domain,
 	rc = _zcrypt_send_cprb(&xcrb);
 	if (rc) {
 		DEBUG_ERR(
-			"pkey_sec2protkey zcrypt_send_cprb (cardnr=%d domain=%d) failed with errno %d\n",
-			(int) cardnr, (int) domain, rc);
+			"%s zcrypt_send_cprb (cardnr=%d domain=%d) failed with errno %d\n",
+			__func__, (int) cardnr, (int) domain, rc);
 		goto out;
 	}
 
 	/* check response returncode and reasoncode */
 	if (prepcblk->ccp_rtcode != 0) {
 		DEBUG_ERR(
-			"pkey_sec2protkey unwrap secure key failure, card response %d/%d\n",
+			"%s unwrap secure key failure, card response %d/%d\n",
+			__func__,
 			(int) prepcblk->ccp_rtcode,
 			(int) prepcblk->ccp_rscode);
 		rc = -EIO;
@@ -608,7 +608,8 @@ int pkey_sec2protkey(u16 cardnr, u16 domain,
 	}
 	if (prepcblk->ccp_rscode != 0) {
 		DEBUG_WARN(
-			"pkey_sec2protkey unwrap secure key warning, card response %d/%d\n",
+			"%s unwrap secure key warning, card response %d/%d\n",
+			__func__,
 			(int) prepcblk->ccp_rtcode,
 			(int) prepcblk->ccp_rscode);
 	}
@@ -620,8 +621,8 @@ int pkey_sec2protkey(u16 cardnr, u16 domain,
 	/* check the returned keyblock */
 	if (prepparm->lv3.keyblock.version != 0x01) {
 		DEBUG_ERR(
-			"pkey_sec2protkey reply param keyblock version mismatch 0x%02x != 0x01\n",
-			(int) prepparm->lv3.keyblock.version);
+			"%s reply param keyblock version mismatch 0x%02x != 0x01\n",
+			__func__, (int) prepparm->lv3.keyblock.version);
 		rc = -EIO;
 		goto out;
 	}
@@ -638,8 +639,8 @@ int pkey_sec2protkey(u16 cardnr, u16 domain,
 		protkey->type = PKEY_KEYTYPE_AES_256;
 		break;
 	default:
-		DEBUG_ERR("pkey_sec2protkey unknown/unsupported keytype %d\n",
-			  prepparm->lv3.keyblock.keylen);
+		DEBUG_ERR("%s unknown/unsupported keytype %d\n",
+			  __func__, prepparm->lv3.keyblock.keylen);
 		rc = -EIO;
 		goto out;
 	}
@@ -677,8 +678,8 @@ int pkey_clr2protkey(u32 keytype,
 		fc = CPACF_PCKMO_ENC_AES_256_KEY;
 		break;
 	default:
-		DEBUG_ERR("pkey_clr2protkey unknown/unsupported keytype %d\n",
-			  keytype);
+		DEBUG_ERR("%s unknown/unsupported keytype %d\n",
+			  __func__, keytype);
 		return -EINVAL;
 	}
 
@@ -748,7 +749,7 @@ static int query_crypto_facility(u16 cardnr, u16 domain,
 	/* fill request cprb param block with FQ request */
 	preqparm = (struct fqreqparm *) preqcblk->req_parmb;
 	memcpy(preqparm->subfunc_code, "FQ", 2);
-	strncpy(preqparm->rule_array, keyword, sizeof(preqparm->rule_array));
+	memcpy(preqparm->rule_array, keyword, sizeof(preqparm->rule_array));
 	preqparm->rule_array_len =
 		sizeof(preqparm->rule_array_len) + sizeof(preqparm->rule_array);
 	preqparm->lv1.len = sizeof(preqparm->lv1);
@@ -762,15 +763,16 @@ static int query_crypto_facility(u16 cardnr, u16 domain,
 	rc = _zcrypt_send_cprb(&xcrb);
 	if (rc) {
 		DEBUG_ERR(
-			"query_crypto_facility zcrypt_send_cprb (cardnr=%d domain=%d) failed with errno %d\n",
-			(int) cardnr, (int) domain, rc);
+			"%s zcrypt_send_cprb (cardnr=%d domain=%d) failed with errno %d\n",
+			__func__, (int) cardnr, (int) domain, rc);
 		goto out;
 	}
 
 	/* check response returncode and reasoncode */
 	if (prepcblk->ccp_rtcode != 0) {
 		DEBUG_ERR(
-			"query_crypto_facility unwrap secure key failure, card response %d/%d\n",
+			"%s unwrap secure key failure, card response %d/%d\n",
+			__func__,
 			(int) prepcblk->ccp_rtcode,
 			(int) prepcblk->ccp_rscode);
 		rc = -EIO;
@@ -948,9 +950,9 @@ int pkey_findcard(const struct pkey_seckey *seckey,
 		return -EINVAL;
 
 	/* fetch status of all crypto cards */
-	device_status = kmalloc(MAX_ZDEV_ENTRIES_EXT
-				* sizeof(struct zcrypt_device_status_ext),
-				GFP_KERNEL);
+	device_status = kmalloc_array(MAX_ZDEV_ENTRIES_EXT,
+				      sizeof(struct zcrypt_device_status_ext),
+				      GFP_KERNEL);
 	if (!device_status)
 		return -ENOMEM;
 	zcrypt_device_status_mask_ext(device_status);
@@ -1042,7 +1044,7 @@ int pkey_skey2pkey(const struct pkey_seckey *seckey,
 	}
 
 	if (rc)
-		DEBUG_DBG("pkey_skey2pkey failed rc=%d\n", rc);
+		DEBUG_DBG("%s failed rc=%d\n", __func__, rc);
 
 	return rc;
 }
@@ -1079,7 +1081,7 @@ int pkey_verifykey(const struct pkey_seckey *seckey,
 	if (rc)
 		goto out;
 	if (t->mkvp == mkvp[1] && t->mkvp != mkvp[0]) {
-		DEBUG_DBG("pkey_verifykey secure key has old mkvp\n");
+		DEBUG_DBG("%s secure key has old mkvp\n", __func__);
 		if (pattributes)
 			*pattributes |= PKEY_VERIFY_ATTR_OLD_MKVP;
 	}
@@ -1090,7 +1092,7 @@ int pkey_verifykey(const struct pkey_seckey *seckey,
 		*pdomain = domain;
 
 out:
-	DEBUG_DBG("pkey_verifykey rc=%d\n", rc);
+	DEBUG_DBG("%s rc=%d\n", __func__, rc);
 	return rc;
 }
 EXPORT_SYMBOL(pkey_verifykey);
@@ -1273,7 +1275,7 @@ static long pkey_unlocked_ioctl(struct file *filp, unsigned int cmd,
 			return -EFAULT;
 		rc = pkey_genseckey(kgs.cardnr, kgs.domain,
 				    kgs.keytype, &kgs.seckey);
-		DEBUG_DBG("pkey_ioctl pkey_genseckey()=%d\n", rc);
+		DEBUG_DBG("%s pkey_genseckey()=%d\n", __func__, rc);
 		if (rc)
 			break;
 		if (copy_to_user(ugs, &kgs, sizeof(kgs)))
@@ -1288,7 +1290,7 @@ static long pkey_unlocked_ioctl(struct file *filp, unsigned int cmd,
 			return -EFAULT;
 		rc = pkey_clr2seckey(kcs.cardnr, kcs.domain, kcs.keytype,
 				     &kcs.clrkey, &kcs.seckey);
-		DEBUG_DBG("pkey_ioctl pkey_clr2seckey()=%d\n", rc);
+		DEBUG_DBG("%s pkey_clr2seckey()=%d\n", __func__, rc);
 		if (rc)
 			break;
 		if (copy_to_user(ucs, &kcs, sizeof(kcs)))
@@ -1304,7 +1306,7 @@ static long pkey_unlocked_ioctl(struct file *filp, unsigned int cmd,
 			return -EFAULT;
 		rc = pkey_sec2protkey(ksp.cardnr, ksp.domain,
 				      &ksp.seckey, &ksp.protkey);
-		DEBUG_DBG("pkey_ioctl pkey_sec2protkey()=%d\n", rc);
+		DEBUG_DBG("%s pkey_sec2protkey()=%d\n", __func__, rc);
 		if (rc)
 			break;
 		if (copy_to_user(usp, &ksp, sizeof(ksp)))
@@ -1319,7 +1321,7 @@ static long pkey_unlocked_ioctl(struct file *filp, unsigned int cmd,
 			return -EFAULT;
 		rc = pkey_clr2protkey(kcp.keytype,
 				      &kcp.clrkey, &kcp.protkey);
-		DEBUG_DBG("pkey_ioctl pkey_clr2protkey()=%d\n", rc);
+		DEBUG_DBG("%s pkey_clr2protkey()=%d\n", __func__, rc);
 		if (rc)
 			break;
 		if (copy_to_user(ucp, &kcp, sizeof(kcp)))
@@ -1335,7 +1337,7 @@ static long pkey_unlocked_ioctl(struct file *filp, unsigned int cmd,
 			return -EFAULT;
 		rc = pkey_findcard(&kfc.seckey,
 				   &kfc.cardnr, &kfc.domain, 1);
-		DEBUG_DBG("pkey_ioctl pkey_findcard()=%d\n", rc);
+		DEBUG_DBG("%s pkey_findcard()=%d\n", __func__, rc);
 		if (rc)
 			break;
 		if (copy_to_user(ufc, &kfc, sizeof(kfc)))
@@ -1349,7 +1351,7 @@ static long pkey_unlocked_ioctl(struct file *filp, unsigned int cmd,
 		if (copy_from_user(&ksp, usp, sizeof(ksp)))
 			return -EFAULT;
 		rc = pkey_skey2pkey(&ksp.seckey, &ksp.protkey);
-		DEBUG_DBG("pkey_ioctl pkey_skey2pkey()=%d\n", rc);
+		DEBUG_DBG("%s pkey_skey2pkey()=%d\n", __func__, rc);
 		if (rc)
 			break;
 		if (copy_to_user(usp, &ksp, sizeof(ksp)))
@@ -1364,7 +1366,7 @@ static long pkey_unlocked_ioctl(struct file *filp, unsigned int cmd,
 			return -EFAULT;
 		rc = pkey_verifykey(&kvk.seckey, &kvk.cardnr, &kvk.domain,
 				    &kvk.keysize, &kvk.attributes);
-		DEBUG_DBG("pkey_ioctl pkey_verifykey()=%d\n", rc);
+		DEBUG_DBG("%s pkey_verifykey()=%d\n", __func__, rc);
 		if (rc)
 			break;
 		if (copy_to_user(uvk, &kvk, sizeof(kvk)))
@@ -1658,6 +1660,12 @@ static struct attribute_group ccadata_attr_group = {
 	.bin_attrs = ccadata_attrs,
 };
 
+static const struct attribute_group *pkey_attr_groups[] = {
+	&protkey_attr_group,
+	&ccadata_attr_group,
+	NULL,
+};
+
 static const struct file_operations pkey_fops = {
 	.owner		= THIS_MODULE,
 	.open		= nonseekable_open,
@@ -1670,15 +1678,15 @@ static struct miscdevice pkey_dev = {
 	.minor	= MISC_DYNAMIC_MINOR,
 	.mode	= 0666,
 	.fops	= &pkey_fops,
+	.groups = pkey_attr_groups,
 };
 
 /*
  * Module init
  */
-int __init pkey_init(void)
+static int __init pkey_init(void)
 {
 	cpacf_mask_t kmc_functions;
-	int ret;
 
 	/*
 	 * The pckmo instruction should be available - even if we don't
@@ -1699,26 +1707,7 @@ int __init pkey_init(void)
 
 	pkey_debug_init();
 
-	ret = misc_register(&pkey_dev);
-	if (ret)
-		return ret;
-
-	ret = sysfs_create_group(&pkey_dev.this_device->kobj, &protkey_attr_group);
-	if (ret)
-		goto out_err;
-
-	ret = sysfs_create_group(&pkey_dev.this_device->kobj, &ccadata_attr_group);
-	if (ret)
-		goto out_err2;
-
-	return 0;
-
-out_err2:
-	sysfs_remove_group(&pkey_dev.this_device->kobj, &protkey_attr_group);
-out_err:
-	misc_deregister(&pkey_dev);
-	pkey_debug_exit();
-	return ret;
+	return misc_register(&pkey_dev);
 }
 
 /*
@@ -1726,12 +1715,10 @@ out_err:
  */
 static void __exit pkey_exit(void)
 {
-	sysfs_remove_group(&pkey_dev.this_device->kobj, &protkey_attr_group);
-	sysfs_remove_group(&pkey_dev.this_device->kobj, &ccadata_attr_group);
 	misc_deregister(&pkey_dev);
 	mkvp_cache_free();
 	pkey_debug_exit();
 }
 
-module_init(pkey_init);
+module_cpu_feature_match(MSA, pkey_init);
 module_exit(pkey_exit);

@@ -80,7 +80,6 @@ static char lancestr[] = "LANCE";
 #include <linux/in.h>
 #include <linux/string.h>
 #include <linux/delay.h>
-#include <linux/init.h>
 #include <linux/crc32.h>
 #include <linux/errno.h>
 #include <linux/socket.h> /* Used for the temporal inet entries and routing */
@@ -1249,9 +1248,10 @@ static void lance_set_multicast(struct net_device *dev)
 	netif_wake_queue(dev);
 }
 
-static void lance_set_multicast_retry(unsigned long _opaque)
+static void lance_set_multicast_retry(struct timer_list *t)
 {
-	struct net_device *dev = (struct net_device *) _opaque;
+	struct lance_private *lp = from_timer(lp, t, multicast_timer);
+	struct net_device *dev = lp->dev;
 
 	lance_set_multicast(dev);
 }
@@ -1295,7 +1295,6 @@ static const struct net_device_ops sparc_lance_ops = {
 	.ndo_start_xmit		= lance_start_xmit,
 	.ndo_set_rx_mode	= lance_set_multicast,
 	.ndo_tx_timeout		= lance_tx_timeout,
-	.ndo_change_mtu		= eth_change_mtu,
 	.ndo_set_mac_address	= eth_mac_addr,
 	.ndo_validate_addr	= eth_validate_addr,
 };
@@ -1461,16 +1460,14 @@ no_link_test:
 	 * can occur from interrupts (ex. IPv6).  So we
 	 * use a timer to try again later when necessary. -DaveM
 	 */
-	init_timer(&lp->multicast_timer);
-	lp->multicast_timer.data = (unsigned long) dev;
-	lp->multicast_timer.function = lance_set_multicast_retry;
+	timer_setup(&lp->multicast_timer, lance_set_multicast_retry, 0);
 
 	if (register_netdev(dev)) {
 		printk(KERN_ERR "SunLance: Cannot register device.\n");
 		goto fail;
 	}
 
-	dev_set_drvdata(&op->dev, lp);
+	platform_set_drvdata(op, lp);
 
 	printk(KERN_INFO "%s: LANCE %pM\n",
 	       dev->name, dev->dev_addr);
@@ -1501,7 +1498,7 @@ static int sunlance_sbus_probe(struct platform_device *op)
 
 static int sunlance_sbus_remove(struct platform_device *op)
 {
-	struct lance_private *lp = dev_get_drvdata(&op->dev);
+	struct lance_private *lp = platform_get_drvdata(op);
 	struct net_device *net_dev = lp->dev;
 
 	unregister_netdev(net_dev);
@@ -1509,8 +1506,6 @@ static int sunlance_sbus_remove(struct platform_device *op)
 	lance_free_hwresources(lp);
 
 	free_netdev(net_dev);
-
-	dev_set_drvdata(&op->dev, NULL);
 
 	return 0;
 }
@@ -1527,7 +1522,6 @@ MODULE_DEVICE_TABLE(of, sunlance_sbus_match);
 static struct platform_driver sunlance_sbus_driver = {
 	.driver = {
 		.name = "sunlance",
-		.owner = THIS_MODULE,
 		.of_match_table = sunlance_sbus_match,
 	},
 	.probe		= sunlance_sbus_probe,

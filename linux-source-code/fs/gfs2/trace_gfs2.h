@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #undef TRACE_SYSTEM
 #define TRACE_SYSTEM gfs2
 
@@ -268,14 +269,14 @@ TRACE_EVENT(gfs2_glock_lock_time,
 		__field(	int,	status		)
 		__field(	char,	flags		)
 		__field(	s64,	tdiff		)
-		__field(	s64,	srtt		)
-		__field(	s64,	srttvar		)
-		__field(	s64,	srttb		)
-		__field(	s64,	srttvarb	)
-		__field(	s64,	sirt		)
-		__field(	s64,	sirtvar		)
-		__field(	s64,	dcount		)
-		__field(	s64,	qcount		)
+		__field(	u64,	srtt		)
+		__field(	u64,	srttvar		)
+		__field(	u64,	srttb		)
+		__field(	u64,	srttvarb	)
+		__field(	u64,	sirt		)
+		__field(	u64,	sirtvar		)
+		__field(	u64,	dcount		)
+		__field(	u64,	qcount		)
 	),
 
 	TP_fast_assign(
@@ -352,26 +353,29 @@ TRACE_EVENT(gfs2_pin,
 /* Flushing the log */
 TRACE_EVENT(gfs2_log_flush,
 
-	TP_PROTO(const struct gfs2_sbd *sdp, int start),
+	TP_PROTO(const struct gfs2_sbd *sdp, int start, u32 flags),
 
-	TP_ARGS(sdp, start),
+	TP_ARGS(sdp, start, flags),
 
 	TP_STRUCT__entry(
 		__field(        dev_t,  dev                     )
 		__field(	int,	start			)
 		__field(	u64,	log_seq			)
+		__field(	u32,	flags			)
 	),
 
 	TP_fast_assign(
 		__entry->dev            = sdp->sd_vfs->s_dev;
 		__entry->start		= start;
 		__entry->log_seq	= sdp->sd_log_sequence;
+		__entry->flags		= flags;
 	),
 
-	TP_printk("%u,%u log flush %s %llu",
+	TP_printk("%u,%u log flush %s %llu %llx",
 		  MAJOR(__entry->dev), MINOR(__entry->dev),
 		  __entry->start ? "start" : "end",
-		  (unsigned long long)__entry->log_seq)
+		  (unsigned long long)__entry->log_seq,
+		  (unsigned long long)__entry->flags)
 );
 
 /* Reserving/releasing blocks in the log */
@@ -602,7 +606,8 @@ TRACE_EVENT(gfs2_rs,
 		__entry->rd_addr	= rs->rs_rbm.rgd->rd_addr;
 		__entry->rd_free_clone	= rs->rs_rbm.rgd->rd_free_clone;
 		__entry->rd_reserved	= rs->rs_rbm.rgd->rd_reserved;
-		__entry->inum		= rs->rs_inum;
+		__entry->inum		= container_of(rs, struct gfs2_inode,
+						       i_res)->i_no_addr;
 		__entry->start		= gfs2_rbm_to_block(&rs->rs_rbm);
 		__entry->free		= rs->rs_free;
 		__entry->func		= func;

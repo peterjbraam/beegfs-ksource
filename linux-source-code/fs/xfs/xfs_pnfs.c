@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (c) 2014 Christoph Hellwig.
  */
@@ -33,7 +34,6 @@ int
 xfs_break_leased_layouts(
 	struct inode		*inode,
 	uint			*iolock,
-	bool			with_imutex,
 	bool			*did_unlock)
 {
 	struct xfs_inode	*ip = XFS_I(inode);
@@ -42,13 +42,9 @@ xfs_break_leased_layouts(
 	while ((error = break_layout(inode, false) == -EWOULDBLOCK)) {
 		xfs_iunlock(ip, *iolock);
 		*did_unlock = true;
-		if (with_imutex && (*iolock & XFS_IOLOCK_EXCL))
-			mutex_unlock(&inode->i_mutex);
 		error = break_layout(inode, true);
 		*iolock &= ~XFS_IOLOCK_SHARED;
 		*iolock |= XFS_IOLOCK_EXCL;
-		if (with_imutex)
-			mutex_lock(&inode->i_mutex);
 		xfs_ilock(ip, *iolock);
 	}
 
@@ -112,6 +108,13 @@ xfs_fs_map_blocks(
 	 * to find it.
 	 */
 	if (XFS_IS_REALTIME_INODE(ip))
+		return -ENXIO;
+
+	/*
+	 * The pNFS block layout spec actually supports reflink like
+	 * functionality, but the Linux pNFS server doesn't implement it yet.
+	 */
+	if (xfs_is_reflink_inode(ip))
 		return -ENXIO;
 
 	/*
@@ -269,8 +272,8 @@ xfs_fs_commit_blocks(
 		 * Make sure reads through the pagecache see the new data.
 		 */
 		error = invalidate_inode_pages2_range(inode->i_mapping,
-					start >> PAGE_CACHE_SHIFT,
-					(end - 1) >> PAGE_CACHE_SHIFT);
+					start >> PAGE_SHIFT,
+					(end - 1) >> PAGE_SHIFT);
 		WARN_ON_ONCE(error);
 
 		error = xfs_iomap_write_unwritten(ip, start, length, false);

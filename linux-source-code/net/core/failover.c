@@ -73,7 +73,7 @@ static int failover_slave_register(struct net_device *slave_dev)
 
 	lag_upper_info.tx_type = NETDEV_LAG_TX_TYPE_ACTIVEBACKUP;
 	err = netdev_master_upper_dev_link(slave_dev, failover_dev, NULL,
-					   &lag_upper_info);
+					   &lag_upper_info, NULL);
 	if (err) {
 		netdev_err(slave_dev, "can not set failover device %s (err = %d)\n",
 			   failover_dev->name, err);
@@ -298,7 +298,7 @@ EXPORT_SYMBOL_GPL(failover_unregister);
 static __init int
 failover_init(void)
 {
-	register_netdevice_notifier_rh(&failover_notifier);
+	register_netdevice_notifier(&failover_notifier);
 
 	return 0;
 }
@@ -307,7 +307,7 @@ module_init(failover_init);
 static __exit
 void failover_exit(void)
 {
-	unregister_netdevice_notifier_rh(&failover_notifier);
+	unregister_netdevice_notifier(&failover_notifier);
 }
 module_exit(failover_exit);
 

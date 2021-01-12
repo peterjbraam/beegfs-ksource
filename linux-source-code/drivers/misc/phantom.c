@@ -256,18 +256,18 @@ static int phantom_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
-static unsigned int phantom_poll(struct file *file, poll_table *wait)
+static __poll_t phantom_poll(struct file *file, poll_table *wait)
 {
 	struct phantom_device *dev = file->private_data;
-	unsigned int mask = 0;
+	__poll_t mask = 0;
 
 	pr_debug("phantom_poll: %d\n", atomic_read(&dev->counter));
 	poll_wait(file, &dev->wait, wait);
 
 	if (!(dev->status & PHB_RUNNING))
-		mask = POLLERR;
+		mask = EPOLLERR;
 	else if (atomic_read(&dev->counter))
-		mask = POLLIN | POLLRDNORM;
+		mask = EPOLLIN | EPOLLRDNORM;
 
 	pr_debug("phantom_poll end: %x/%d\n", mask, atomic_read(&dev->counter));
 
@@ -395,7 +395,7 @@ static int phantom_probe(struct pci_dev *pdev,
 	iowrite32(0, pht->caddr + PHN_IRQCTL);
 	ioread32(pht->caddr + PHN_IRQCTL); /* PCI posting */
 	retval = request_irq(pdev->irq, phantom_isr,
-			IRQF_SHARED | IRQF_DISABLED, "phantom", pht);
+			IRQF_SHARED, "phantom", pht);
 	if (retval) {
 		dev_err(&pdev->dev, "can't establish ISR\n");
 		goto err_unmo;

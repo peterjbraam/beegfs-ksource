@@ -108,8 +108,9 @@ static int psbfb_pan(struct fb_var_screeninfo *var, struct fb_info *info)
         return 0;
 }
 
-static int psbfb_vm_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
+static vm_fault_t psbfb_vm_fault(struct vm_fault *vmf)
 {
+	struct vm_area_struct *vma = vmf->vma;
 	struct psb_framebuffer *psbfb = vma->vm_private_data;
 	struct drm_device *dev = psbfb->base.dev;
 	struct drm_psb_private *dev_priv = dev->dev_private;
@@ -117,31 +118,27 @@ static int psbfb_vm_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 	int page_num;
 	int i;
 	unsigned long address;
-	int ret;
+	vm_fault_t ret = VM_FAULT_SIGBUS;
 	unsigned long pfn;
 	unsigned long phys_addr = (unsigned long)dev_priv->stolen_base +
 				  gtt->offset;
 
 	page_num = vma_pages(vma);
-	address = (unsigned long)vmf->virtual_address - (vmf->pgoff << PAGE_SHIFT);
+	address = vmf->address - (vmf->pgoff << PAGE_SHIFT);
 
 	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
 
 	for (i = 0; i < page_num; i++) {
 		pfn = (phys_addr >> PAGE_SHIFT);
 
-		ret = vm_insert_mixed(vma, address,
+		ret = vmf_insert_mixed(vma, address,
 				__pfn_to_pfn_t(pfn, PFN_DEV));
-		if (unlikely((ret == -EBUSY) || (ret != 0 && i > 0)))
+		if (unlikely(ret & VM_FAULT_ERROR))
 			break;
-		else if (unlikely(ret != 0)) {
-			ret = (ret == -ENOMEM) ? VM_FAULT_OOM : VM_FAULT_SIGBUS;
-			return ret;
-		}
 		address += PAGE_SIZE;
 		phys_addr += PAGE_SIZE;
 	}
-	return VM_FAULT_NOPAGE;
+	return ret;
 }
 
 static void psbfb_vm_open(struct vm_area_struct *vma)
@@ -408,7 +405,6 @@ static int psbfb_create(struct psb_fbdev *fbdev,
 	drm_fb_helper_fill_fix(info, fb->pitches[0], fb->format->depth);
 	strcpy(info->fix.id, "psbdrmfb");
 
-	info->flags = FBINFO_DEFAULT;
 	if (dev_priv->ops->accel_2d && pitch_lines > 8)	/* 2D engine */
 		info->fbops = &psbfb_ops;
 	else if (gtt_roll) {	/* GTT rolling seems best */

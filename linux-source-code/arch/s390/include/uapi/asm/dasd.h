@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /* 
  * Author(s)......: Holger Smolinski <Holger.Smolinski@de.ibm.com>
  * Bugreports.to..: <Linux390@de.ibm.com>
@@ -87,7 +88,7 @@ typedef struct dasd_information2_t {
 #define DASD_FEATURE_USERAW	      0x040
 #define DASD_FEATURE_DISCARD	      0x080
 #define DASD_FEATURE_PATH_AUTODISABLE 0x100
-#define DASD_FEATURE_DEFAULT          DASD_FEATURE_PATH_AUTODISABLE
+#define DASD_FEATURE_DEFAULT	      DASD_FEATURE_PATH_AUTODISABLE
 
 #define DASD_PARTN_BITS 2
 
@@ -297,6 +298,10 @@ struct dasd_snid_ioctl_data {
 #define BIODASDQUIESCE _IO(DASD_IOCTL_LETTER,6) 
 /* Resume IO on device */
 #define BIODASDRESUME  _IO(DASD_IOCTL_LETTER,7) 
+/* Abort all I/O on a device */
+#define BIODASDABORTIO _IO(DASD_IOCTL_LETTER, 240)
+/* Allow I/O on a device */
+#define BIODASDALLOWIO _IO(DASD_IOCTL_LETTER, 241)
 
 
 /* retrieve API version number */

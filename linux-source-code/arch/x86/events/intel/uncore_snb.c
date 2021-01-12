@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /* Nehalem/SandBridge/Haswell/Broadwell/Skylake uncore support */
 #include "uncore.h"
 
@@ -423,6 +424,8 @@ static int snb_uncore_imc_event_init(struct perf_event *event)
 	event->cpu = box->cpu;
 	event->pmu_private = box;
 
+	event->event_caps |= PERF_EV_CAP_READ_ACTIVE_PKG;
+
 	event->hw.idx = -1;
 	event->hw.last_tag = ~0ULL;
 	event->hw.extra_reg.idx = EXTRA_REG_NONE;
@@ -524,7 +527,7 @@ static struct intel_uncore_type *snb_pci_uncores[] = {
 	NULL,
 };
 
-static DEFINE_PCI_DEVICE_TABLE(snb_uncore_pci_ids) = {
+static const struct pci_device_id snb_uncore_pci_ids[] = {
 	{ /* IMC */
 		PCI_DEVICE(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_SNB_IMC),
 		.driver_data = UNCORE_PCI_DEV_DATA(SNB_PCI_UNCORE_IMC, 0),
@@ -532,7 +535,7 @@ static DEFINE_PCI_DEVICE_TABLE(snb_uncore_pci_ids) = {
 	{ /* end: all zeroes */ },
 };
 
-static DEFINE_PCI_DEVICE_TABLE(ivb_uncore_pci_ids) = {
+static const struct pci_device_id ivb_uncore_pci_ids[] = {
 	{ /* IMC */
 		PCI_DEVICE(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_IVB_IMC),
 		.driver_data = UNCORE_PCI_DEV_DATA(SNB_PCI_UNCORE_IMC, 0),
@@ -544,7 +547,7 @@ static DEFINE_PCI_DEVICE_TABLE(ivb_uncore_pci_ids) = {
 	{ /* end: all zeroes */ },
 };
 
-static DEFINE_PCI_DEVICE_TABLE(hsw_uncore_pci_ids) = {
+static const struct pci_device_id hsw_uncore_pci_ids[] = {
 	{ /* IMC */
 		PCI_DEVICE(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_HSW_IMC),
 		.driver_data = UNCORE_PCI_DEV_DATA(SNB_PCI_UNCORE_IMC, 0),

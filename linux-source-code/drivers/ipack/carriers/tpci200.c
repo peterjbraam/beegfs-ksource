@@ -457,8 +457,8 @@ static int tpci200_install(struct tpci200_board *tpci200)
 {
 	int res;
 
-	tpci200->slots = kzalloc(
-		TPCI200_NB_SLOT * sizeof(struct tpci200_slot), GFP_KERNEL);
+	tpci200->slots = kcalloc(TPCI200_NB_SLOT, sizeof(struct tpci200_slot),
+				 GFP_KERNEL);
 	if (tpci200->slots == NULL)
 		return -ENOMEM;
 
@@ -572,7 +572,8 @@ static int tpci200_pci_probe(struct pci_dev *pdev,
 	/* Register the carrier in the industry pack bus driver */
 	tpci200->info->ipack_bus = ipack_bus_register(&pdev->dev,
 						      TPCI200_NB_SLOT,
-						      &tpci200_bus_ops);
+						      &tpci200_bus_ops,
+						      THIS_MODULE);
 	if (!tpci200->info->ipack_bus) {
 		dev_err(&pdev->dev,
 			"error registering the carrier on ipack driver\n");

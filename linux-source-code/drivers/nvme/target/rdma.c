@@ -219,59 +219,6 @@ nvmet_rdma_put_rsp(struct nvmet_rdma_rsp *rsp)
 	spin_unlock_irqrestore(&rsp->queue->rsps_lock, flags);
 }
 
-static void nvmet_rdma_free_sgl(struct scatterlist *sgl, unsigned int nents)
-{
-	struct scatterlist *sg;
-	int count;
-
-	if (!sgl || !nents)
-		return;
-
-	for_each_sg(sgl, sg, nents, count)
-		__free_page(sg_page(sg));
-	kfree(sgl);
-}
-
-static int nvmet_rdma_alloc_sgl(struct scatterlist **sgl, unsigned int *nents,
-		u32 length)
-{
-	struct scatterlist *sg;
-	struct page *page;
-	unsigned int nent;
-	int i = 0;
-
-	nent = DIV_ROUND_UP(length, PAGE_SIZE);
-	sg = kmalloc_array(nent, sizeof(struct scatterlist), GFP_KERNEL);
-	if (!sg)
-		goto out;
-
-	sg_init_table(sg, nent);
-
-	while (length) {
-		u32 page_len = min_t(u32, length, PAGE_SIZE);
-
-		page = alloc_page(GFP_KERNEL);
-		if (!page)
-			goto out_free_pages;
-
-		sg_set_page(&sg[i], page, page_len, 0);
-		length -= page_len;
-		i++;
-	}
-	*sgl = sg;
-	*nents = nent;
-	return 0;
-
-out_free_pages:
-	while (i > 0) {
-		i--;
-		__free_page(sg_page(&sg[i]));
-	}
-	kfree(sg);
-out:
-	return NVME_SC_INTERNAL;
-}
-
 static void nvmet_rdma_free_inline_pages(struct nvmet_rdma_device *ndev,
 				struct nvmet_rdma_cmd *c)
 {
@@ -569,7 +516,7 @@ static void nvmet_rdma_release_rsp(struct nvmet_rdma_rsp *rsp)
 	}
 
 	if (rsp->req.sg != rsp->cmd->inline_sg)
-		nvmet_rdma_free_sgl(rsp->req.sg, rsp->req.sg_cnt);
+		nvmet_req_free_sgl(&rsp->req);
 
 	if (unlikely(!list_empty_careful(&queue->rsp_wr_wait_list)))
 		nvmet_rdma_process_wr_wait_list(queue);
@@ -696,8 +643,11 @@ static u16 nvmet_rdma_map_sgl_inline(struct nvmet_rdma_rsp *rsp)
 	u64 off = le64_to_cpu(sgl->addr);
 	u32 len = le32_to_cpu(sgl->length);
 
-	if (!nvme_is_write(rsp->req.cmd))
+	if (!nvme_is_write(rsp->req.cmd)) {
+		rsp->req.error_loc =
+			offsetof(struct nvme_common_command, opcode);
 		return NVME_SC_INVALID_FIELD | NVME_SC_DNR;
+	}
 
 	if (off + len > rsp->queue->dev->inline_data_size) {
 		pr_err("invalid inline data offset!\n");
@@ -719,26 +669,24 @@ static u16 nvmet_rdma_map_sgl_keyed(struct nvmet_rdma_rsp *rsp,
 {
 	struct rdma_cm_id *cm_id = rsp->queue->cm_id;
 	u64 addr = le64_to_cpu(sgl->addr);
-	u32 len = get_unaligned_le24(sgl->length);
 	u32 key = get_unaligned_le32(sgl->key);
 	int ret;
-	u16 status;
+
+	rsp->req.transfer_len = get_unaligned_le24(sgl->length);
 
 	/* no data command? */
-	if (!len)
+	if (!rsp->req.transfer_len)
 		return 0;
 
-	status = nvmet_rdma_alloc_sgl(&rsp->req.sg, &rsp->req.sg_cnt,
-			len);
-	if (status)
-		return status;
+	ret = nvmet_req_alloc_sgl(&rsp->req);
+	if (ret < 0)
+		goto error_out;
 
 	ret = rdma_rw_ctx_init(&rsp->rw, cm_id->qp, cm_id->port_num,
 			rsp->req.sg, rsp->req.sg_cnt, 0, addr, key,
 			nvmet_data_dir(&rsp->req));
 	if (ret < 0)
-		return NVME_SC_INTERNAL;
-	rsp->req.transfer_len += len;
+		goto error_out;
 	rsp->n_rdma += ret;
 
 	if (invalidate) {
@@ -747,6 +695,10 @@ static u16 nvmet_rdma_map_sgl_keyed(struct nvmet_rdma_rsp *rsp,
 	}
 
 	return 0;
+
+error_out:
+	rsp->req.transfer_len = 0;
+	return NVME_SC_INTERNAL;
 }
 
 static u16 nvmet_rdma_map_sgl(struct nvmet_rdma_rsp *rsp)
@@ -760,6 +712,8 @@ static u16 nvmet_rdma_map_sgl(struct nvmet_rdma_rsp *rsp)
 			return nvmet_rdma_map_sgl_inline(rsp);
 		default:
 			pr_err("invalid SGL subtype: %#x\n", sgl->type);
+			rsp->req.error_loc =
+				offsetof(struct nvme_common_command, dptr);
 			return NVME_SC_INVALID_FIELD | NVME_SC_DNR;
 		}
 	case NVME_KEY_SGL_FMT_DATA_DESC:
@@ -770,10 +724,13 @@ static u16 nvmet_rdma_map_sgl(struct nvmet_rdma_rsp *rsp)
 			return nvmet_rdma_map_sgl_keyed(rsp, sgl, false);
 		default:
 			pr_err("invalid SGL subtype: %#x\n", sgl->type);
+			rsp->req.error_loc =
+				offsetof(struct nvme_common_command, dptr);
 			return NVME_SC_INVALID_FIELD | NVME_SC_DNR;
 		}
 	default:
 		pr_err("invalid SGL type: %#x\n", sgl->type);
+		rsp->req.error_loc = offsetof(struct nvme_common_command, dptr);
 		return NVME_SC_SGL_INVALID_TYPE | NVME_SC_DNR;
 	}
 }
@@ -813,6 +770,8 @@ static void nvmet_rdma_handle_command(struct nvmet_rdma_queue *queue,
 	ib_dma_sync_single_for_cpu(queue->dev->device,
 		cmd->send_sge.addr, cmd->send_sge.length,
 		DMA_TO_DEVICE);
+
+	cmd->req.p2p_client = &queue->dev->device->dev;
 
 	if (!nvmet_req_init(&cmd->req, &queue->nvme_cq,
 			&queue->nvme_sq, &nvmet_rdma_ops))
@@ -931,16 +890,11 @@ static int nvmet_rdma_init_srq(struct nvmet_rdma_device *ndev)
 	ndev->srq = srq;
 	ndev->srq_size = srq_size;
 
-	for (i = 0; i < srq_size; i++) {
-		ret = nvmet_rdma_post_recv(ndev, &ndev->srq_cmds[i]);
-		if (ret)
-			goto out_free_cmds;
-	}
+	for (i = 0; i < srq_size; i++)
+		nvmet_rdma_post_recv(ndev, &ndev->srq_cmds[i]);
 
 	return 0;
 
-out_free_cmds:
-	nvmet_rdma_free_cmds(ndev, ndev->srq_cmds, ndev->srq_size, false);
 out_destroy_srq:
 	ib_destroy_srq(srq);
 	return ret;
@@ -1085,17 +1039,13 @@ static int nvmet_rdma_create_queue_ib(struct nvmet_rdma_queue *queue)
 	if (!ndev->srq) {
 		for (i = 0; i < queue->recv_queue_size; i++) {
 			queue->cmds[i].queue = queue;
-			ret = nvmet_rdma_post_recv(ndev, &queue->cmds[i]);
-			if (ret)
-				goto err_destroy_qp;
+			nvmet_rdma_post_recv(ndev, &queue->cmds[i]);
 		}
 	}
 
 out:
 	return ret;
 
-err_destroy_qp:
-	rdma_destroy_qp(queue->cm_id);
 err_destroy_cq:
 	ib_free_cq(queue->cq);
 	goto out;
@@ -1515,6 +1465,9 @@ static int nvmet_rdma_cm_handler(struct rdma_cm_id *cm_id,
 		ret = nvmet_rdma_device_removal(cm_id, queue);
 		break;
 	case RDMA_CM_EVENT_REJECTED:
+		pr_debug("Connection rejected: %s\n",
+			 rdma_reject_msg(cm_id, event->status));
+		/* FALLTHROUGH */
 	case RDMA_CM_EVENT_UNREACHABLE:
 	case RDMA_CM_EVENT_CONNECT_ERROR:
 		nvmet_rdma_queue_connect_fail(cm_id, queue);
@@ -1632,6 +1585,23 @@ static void nvmet_rdma_remove_port(struct nvmet_port *port)
 		rdma_destroy_id(cm_id);
 }
 
+static void nvmet_rdma_disc_port_addr(struct nvmet_req *req,
+		struct nvmet_port *port, char *traddr)
+{
+	struct rdma_cm_id *cm_id = port->priv;
+
+	if (inet_addr_is_any((struct sockaddr *)&cm_id->route.addr.src_addr)) {
+		struct nvmet_rdma_rsp *rsp =
+			container_of(req, struct nvmet_rdma_rsp, req);
+		struct rdma_cm_id *req_cm_id = rsp->queue->cm_id;
+		struct sockaddr *addr = (void *)&req_cm_id->route.addr.src_addr;
+
+		sprintf(traddr, "%pISc", addr);
+	} else {
+		memcpy(traddr, port->disc_addr.traddr, NVMF_TRADDR_SIZE);
+	}
+}
+
 static const struct nvmet_fabrics_ops nvmet_rdma_ops = {
 	.owner			= THIS_MODULE,
 	.type			= NVMF_TRTYPE_RDMA,
@@ -1641,6 +1611,7 @@ static const struct nvmet_fabrics_ops nvmet_rdma_ops = {
 	.remove_port		= nvmet_rdma_remove_port,
 	.queue_response		= nvmet_rdma_queue_response,
 	.delete_ctrl		= nvmet_rdma_delete_ctrl,
+	.disc_traddr		= nvmet_rdma_disc_port_addr,
 };
 
 static void nvmet_rdma_remove_one(struct ib_device *ib_device, void *client_data)

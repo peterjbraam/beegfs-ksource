@@ -454,8 +454,14 @@ alloc_begin_idr_uobject(const struct uverbs_api_object *obj,
 	if (ret)
 		goto uobj_put;
 
+	ret = ib_rdmacg_try_charge(&uobj->cg_obj, uobj->context->device,
+				   RDMACG_RESOURCE_HCA_OBJECT);
+	if (ret)
+		goto idr_remove;
+
 	return uobj;
 
+idr_remove:
 	spin_lock(&ufile->idr_lock);
 	idr_remove(&ufile->idr, uobj->id);
 	spin_unlock(&ufile->idr_lock);
@@ -513,6 +519,9 @@ struct ib_uobject *rdma_alloc_begin_uobject(const struct uverbs_api_object *obj,
 
 static void alloc_abort_idr_uobject(struct ib_uobject *uobj)
 {
+	ib_rdmacg_uncharge(&uobj->cg_obj, uobj->context->device,
+			   RDMACG_RESOURCE_HCA_OBJECT);
+
 	spin_lock(&uobj->ufile->idr_lock);
 	idr_remove(&uobj->ufile->idr, uobj->id);
 	spin_unlock(&uobj->ufile->idr_lock);
@@ -536,6 +545,9 @@ static int __must_check destroy_hw_idr_uobject(struct ib_uobject *uobj,
 
 	if (why == RDMA_REMOVE_ABORT)
 		return 0;
+
+	ib_rdmacg_uncharge(&uobj->cg_obj, uobj->context->device,
+			   RDMACG_RESOURCE_HCA_OBJECT);
 
 	return 0;
 }
@@ -808,16 +820,20 @@ static void ufile_destroy_ucontext(struct ib_uverbs_file *ufile,
 	 */
 	if (reason == RDMA_REMOVE_DRIVER_REMOVE) {
 		uverbs_user_mmap_disassociate(ufile);
-		if (ib_dev->disassociate_ucontext)
-			ib_dev->disassociate_ucontext(ucontext);
+		if (ib_dev->ops.disassociate_ucontext)
+			ib_dev->ops.disassociate_ucontext(ucontext);
 	}
 
+	ib_rdmacg_uncharge(&ucontext->cg_obj, ib_dev,
+			   RDMACG_RESOURCE_HCA_HANDLE);
+
+	rdma_restrack_del(&ucontext->res);
 
 	/*
 	 * FIXME: Drivers are not permitted to fail dealloc_ucontext, remove
 	 * the error return.
 	 */
-	ret = ib_dev->dealloc_ucontext(ucontext);
+	ret = ib_dev->ops.dealloc_ucontext(ucontext);
 	WARN_ON(ret);
 
 	ufile->ucontext = NULL;
@@ -909,7 +925,7 @@ done:
 	up_write(&ufile->hw_destroy_rwsem);
 	mutex_unlock(&ufile->ucontext_lock);
 }
- 
+
 const struct uverbs_obj_type_class uverbs_fd_class = {
 	.alloc_begin = alloc_begin_fd_uobject,
 	.lookup_get = lookup_get_fd_uobject,

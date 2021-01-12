@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *    Copyright IBM Corp. 1999, 2006
  *    Author(s): Denis Joseph Barrow (djbarrow@de.ibm.com,barrow_dj@yahoo.com)
@@ -10,6 +11,7 @@
  */
 
 #include <linux/sched.h>
+#include <linux/sched/task_stack.h>
 #include <linux/mm.h>
 #include <linux/smp.h>
 #include <linux/kernel.h>
@@ -26,7 +28,7 @@
 #include <linux/syscalls.h>
 #include <linux/compat.h>
 #include <asm/ucontext.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/lowcore.h>
 #include <asm/switch_to.h>
 #include "entry.h"
@@ -105,36 +107,13 @@ struct rt_sigframe
 static void store_sigregs(void)
 {
 	save_access_regs(current->thread.acrs);
-	save_fp_ctl(&current->thread.fp_regs.fpc);
-#ifdef CONFIG_64BIT
-	if (current->thread.vxrs) {
-		int i;
-
-		save_vx_regs(current->thread.vxrs);
-		for (i = 0; i < __NUM_FPRS; i++)
-			current->thread.fp_regs.fprs[i] =
-				*(freg_t *)(current->thread.vxrs + i);
-	} else
-#endif
-		save_fp_regs(current->thread.fp_regs.fprs);
+	save_fpu_regs();
 }
 
 /* Load registers after signal return */
 static void load_sigregs(void)
 {
 	restore_access_regs(current->thread.acrs);
-	/* restore_fp_ctl is done in restore_sigregs */
-#ifdef CONFIG_64BIT
-	if (current->thread.vxrs) {
-		int i;
-
-		for (i = 0; i < __NUM_FPRS; i++)
-			*(freg_t *)(current->thread.vxrs + i) =
-				current->thread.fp_regs.fprs[i];
-		restore_vx_regs(current->thread.vxrs);
-	} else
-#endif
-		restore_fp_regs(current->thread.fp_regs.fprs);
 }
 
 /* Returns non-zero on fault. */
@@ -150,8 +129,7 @@ static int save_sigregs(struct pt_regs *regs, _sigregs __user *sregs)
 	memcpy(&user_sregs.regs.gprs, &regs->gprs, sizeof(sregs->regs.gprs));
 	memcpy(&user_sregs.regs.acrs, current->thread.acrs,
 	       sizeof(user_sregs.regs.acrs));
-	memcpy(&user_sregs.fpregs, &current->thread.fp_regs,
-	       sizeof(user_sregs.fpregs));
+	fpregs_store(&user_sregs.fpregs, &current->thread.fpu);
 	if (__copy_to_user(sregs, &user_sregs, sizeof(_sigregs)))
 		return -EFAULT;
 	return 0;
@@ -162,7 +140,7 @@ static int restore_sigregs(struct pt_regs *regs, _sigregs __user *sregs)
 	_sigregs user_sregs;
 
 	/* Alwys make any pending restarted system call return -EINTR */
-	current_thread_info()->restart_block.fn = do_no_restart_syscall;
+	current->restart_block.fn = do_no_restart_syscall;
 
 	if (__copy_from_user(&user_sregs, sregs, sizeof(user_sregs)))
 		return -EFAULT;
@@ -170,8 +148,8 @@ static int restore_sigregs(struct pt_regs *regs, _sigregs __user *sregs)
 	if (!is_ri_task(current) && (user_sregs.regs.psw.mask & PSW_MASK_RI))
 		return -EINVAL;
 
-	/* Loading the floating-point-control word can fail. Do that first. */
-	if (restore_fp_ctl(&user_sregs.fpregs.fpc))
+	/* Test the floating-point-control word. */
+	if (test_fp_ctl(user_sregs.fpregs.fpc))
 		return -EINVAL;
 
 	/* Use regs->psw.mask instead of PSW_USER_BITS to preserve PER bit. */
@@ -189,10 +167,9 @@ static int restore_sigregs(struct pt_regs *regs, _sigregs __user *sregs)
 	memcpy(&current->thread.acrs, &user_sregs.regs.acrs,
 	       sizeof(current->thread.acrs));
 
-	memcpy(&current->thread.fp_regs, &user_sregs.fpregs,
-	       sizeof(current->thread.fp_regs));
+	fpregs_load(&user_sregs.fpregs, &current->thread.fpu);
 
-	clear_thread_flag(TIF_SYSCALL);	/* No longer in a system call */
+	clear_pt_regs_flag(regs, PIF_SYSCALL); /* No longer in a system call */
 	return 0;
 }
 
@@ -200,44 +177,40 @@ static int restore_sigregs(struct pt_regs *regs, _sigregs __user *sregs)
 static int save_sigregs_ext(struct pt_regs *regs,
 			    _sigregs_ext __user *sregs_ext)
 {
-#ifdef CONFIG_64BIT
 	__u64 vxrs[__NUM_VXRS_LOW];
 	int i;
 
 	/* Save vector registers to signal stack */
-	if (current->thread.vxrs) {
+	if (MACHINE_HAS_VX) {
 		for (i = 0; i < __NUM_VXRS_LOW; i++)
-			vxrs[i] = *((__u64 *)(current->thread.vxrs + i) + 1);
+			vxrs[i] = *((__u64 *)(current->thread.fpu.vxrs + i) + 1);
 		if (__copy_to_user(&sregs_ext->vxrs_low, vxrs,
 				   sizeof(sregs_ext->vxrs_low)) ||
 		    __copy_to_user(&sregs_ext->vxrs_high,
-				   current->thread.vxrs + __NUM_VXRS_LOW,
+				   current->thread.fpu.vxrs + __NUM_VXRS_LOW,
 				   sizeof(sregs_ext->vxrs_high)))
 			return -EFAULT;
 	}
-#endif
 	return 0;
 }
 
 static int restore_sigregs_ext(struct pt_regs *regs,
 			       _sigregs_ext __user *sregs_ext)
 {
-#ifdef CONFIG_64BIT
 	__u64 vxrs[__NUM_VXRS_LOW];
 	int i;
 
 	/* Restore vector registers from signal stack */
-	if (current->thread.vxrs) {
+	if (MACHINE_HAS_VX) {
 		if (__copy_from_user(vxrs, &sregs_ext->vxrs_low,
 				     sizeof(sregs_ext->vxrs_low)) ||
- 		    __copy_from_user(current->thread.vxrs + __NUM_VXRS_LOW,
+		    __copy_from_user(current->thread.fpu.vxrs + __NUM_VXRS_LOW,
 				     &sregs_ext->vxrs_high,
 				     sizeof(sregs_ext->vxrs_high)))
 			return -EFAULT;
 		for (i = 0; i < __NUM_VXRS_LOW; i++)
-			*((__u64 *)(current->thread.vxrs + i) + 1) = vxrs[i];
+			*((__u64 *)(current->thread.fpu.vxrs + i) + 1) = vxrs[i];
 	}
-#endif
 	return 0;
 }
 
@@ -251,6 +224,7 @@ SYSCALL_DEFINE0(sigreturn)
 	if (__copy_from_user(&set.sig, &frame->sc.oldmask, _SIGMASK_COPY_SIZE))
 		goto badframe;
 	set_current_blocked(&set);
+	save_fpu_regs();
 	if (restore_sigregs(regs, &frame->sregs))
 		goto badframe;
 	if (restore_sigregs_ext(regs, &frame->sregs_ext))
@@ -274,6 +248,7 @@ SYSCALL_DEFINE0(rt_sigreturn)
 	set_current_blocked(&set);
 	if (restore_altstack(&frame->uc.uc_stack))
 		goto badframe;
+	save_fpu_regs();
 	if (restore_sigregs(regs, &frame->uc.uc_mcontext))
 		goto badframe;
 	if (restore_sigregs_ext(regs, &frame->uc.uc_mcontext_ext))
@@ -309,16 +284,6 @@ get_sigframe(struct k_sigaction *ka, struct pt_regs * regs, size_t frame_size)
 	return (void __user *)((sp - frame_size) & -8ul);
 }
 
-static inline int map_signal(int sig)
-{
-	if (current_thread_info()->exec_domain
-	    && current_thread_info()->exec_domain->signal_invmap
-	    && sig < 32)
-		return current_thread_info()->exec_domain->signal_invmap[sig];
-	else
-		return sig;
-}
-
 static int setup_frame(int sig, struct k_sigaction *ka,
 		       sigset_t *set, struct pt_regs * regs)
 {
@@ -338,43 +303,43 @@ static int setup_frame(int sig, struct k_sigaction *ka,
 		frame_size += sizeof(frame->sregs_ext);
 	frame = get_sigframe(ka, regs, frame_size);
 	if (frame == (void __user *) -1UL)
-		goto give_sigsegv;
+		return -EFAULT;
 
 	/* Set up backchain. */
 	if (__put_user(regs->gprs[15], (addr_t __user *) frame))
-		goto give_sigsegv;
+		return -EFAULT;
 
 	/* Create struct sigcontext on the signal stack */
 	memcpy(&sc.oldmask, &set->sig, _SIGMASK_COPY_SIZE);
 	sc.sregs = (_sigregs __user __force *) &frame->sregs;
 	if (__copy_to_user(&frame->sc, &sc, sizeof(frame->sc)))
-		goto give_sigsegv;
+		return -EFAULT;
 
 	/* Store registers needed to create the signal frame */
 	store_sigregs();
 
 	/* Create _sigregs on the signal stack */
 	if (save_sigregs(regs, &frame->sregs))
-		goto give_sigsegv;
+		return -EFAULT;
 
 	/* Place signal number on stack to allow backtrace from handler.  */
 	if (__put_user(regs->gprs[2], (int __user *) &frame->signo))
-		goto give_sigsegv;
+		return -EFAULT;
 
 	/* Create _sigregs_ext on the signal stack */
 	if (save_sigregs_ext(regs, &frame->sregs_ext))
-		goto give_sigsegv;
+		return -EFAULT;
 
 	/* Set up to return from userspace.  If provided, use a stub
 	   already in userspace.  */
 	if (ka->sa.sa_flags & SA_RESTORER) {
-		restorer = (unsigned long) ka->sa.sa_restorer | PSW_ADDR_AMODE;
+		restorer = (unsigned long) ka->sa.sa_restorer;
 	} else {
 		/* Signal frame without vector registers are short ! */
-		__u16 __user *svc = (void *) frame + frame_size - 2;
+		__u16 __user *svc = (void __user *) frame + frame_size - 2;
 		if (__put_user(S390_SYSCALL_OPCODE | __NR_sigreturn, svc))
-			goto give_sigsegv;
-		restorer = (unsigned long) svc | PSW_ADDR_AMODE;
+			return -EFAULT;
+		restorer = (unsigned long) svc;
 	}
 
 	/* Set up registers for signal handler */
@@ -384,9 +349,9 @@ static int setup_frame(int sig, struct k_sigaction *ka,
 	regs->psw.mask = PSW_MASK_EA | PSW_MASK_BA |
 		(PSW_USER_BITS & PSW_MASK_ASC) |
 		(regs->psw.mask & ~PSW_MASK_ASC);
-	regs->psw.addr = (unsigned long) ka->sa.sa_handler | PSW_ADDR_AMODE;
+	regs->psw.addr = (unsigned long) ka->sa.sa_handler;
 
-	regs->gprs[2] = map_signal(sig);
+	regs->gprs[2] = sig;
 	regs->gprs[3] = (unsigned long) &frame->sc;
 
 	/* We forgot to include these in the sigcontext.
@@ -396,17 +361,13 @@ static int setup_frame(int sig, struct k_sigaction *ka,
 		/* set extra registers only for synchronous signals */
 		regs->gprs[4] = regs->int_code & 127;
 		regs->gprs[5] = regs->int_parm_long;
-		regs->gprs[6] = task_thread_info(current)->last_break;
+		regs->gprs[6] = current->thread.last_break;
 	}
 	return 0;
-
-give_sigsegv:
-	force_sigsegv(sig, current);
-	return -EFAULT;
 }
 
-static int setup_rt_frame(int sig, struct k_sigaction *ka, siginfo_t *info,
-			   sigset_t *set, struct pt_regs * regs)
+static int setup_rt_frame(struct ksignal *ksig, sigset_t *set,
+			  struct pt_regs *regs)
 {
 	struct rt_sigframe __user *frame;
 	unsigned long uc_flags, restorer;
@@ -420,36 +381,32 @@ static int setup_rt_frame(int sig, struct k_sigaction *ka, siginfo_t *info,
 	 * included in the signal frame on a 31-bit system.
 	 */
 	uc_flags = 0;
-#ifdef CONFIG_64BIT
 	if (MACHINE_HAS_VX) {
 		frame_size += sizeof(_sigregs_ext);
-		if (current->thread.vxrs)
-			uc_flags |= UC_VXRS;
- 	}
-#endif
-	frame = get_sigframe(ka, regs, frame_size);
+		uc_flags |= UC_VXRS;
+	}
+	frame = get_sigframe(&ksig->ka, regs, frame_size);
 	if (frame == (void __user *) -1UL)
-		goto give_sigsegv;
+		return -EFAULT;
 
 	/* Set up backchain. */
 	if (__put_user(regs->gprs[15], (addr_t __user *) frame))
-		goto give_sigsegv;
+		return -EFAULT;
 
 	/* Set up to return from userspace.  If provided, use a stub
 	   already in userspace.  */
-	if (ka->sa.sa_flags & SA_RESTORER) {
-		restorer = (unsigned long)
-			ka->sa.sa_restorer | PSW_ADDR_AMODE;
+	if (ksig->ka.sa.sa_flags & SA_RESTORER) {
+		restorer = (unsigned long) ksig->ka.sa.sa_restorer;
 	} else {
 		__u16 __user *svc = &frame->svc_insn;
 		if (__put_user(S390_SYSCALL_OPCODE | __NR_rt_sigreturn, svc))
-			goto give_sigsegv;
-		restorer = (unsigned long) svc | PSW_ADDR_AMODE;
+			return -EFAULT;
+		restorer = (unsigned long) svc;
 	}
 
 	/* Create siginfo on the signal stack */
-	if (copy_siginfo_to_user(&frame->info, info))
-		goto give_sigsegv;
+	if (copy_siginfo_to_user(&frame->info, &ksig->info))
+		return -EFAULT;
 
 	/* Store registers needed to create the signal frame */
 	store_sigregs();
@@ -461,7 +418,7 @@ static int setup_rt_frame(int sig, struct k_sigaction *ka, siginfo_t *info,
 	    save_sigregs(regs, &frame->uc.uc_mcontext) ||
 	    __copy_to_user(&frame->uc.uc_sigmask, set, sizeof(*set)) ||
 	    save_sigregs_ext(regs, &frame->uc.uc_mcontext_ext))
-		goto give_sigsegv;
+		return -EFAULT;
 
 	/* Set up registers for signal handler */
 	regs->gprs[14] = restorer;
@@ -470,34 +427,27 @@ static int setup_rt_frame(int sig, struct k_sigaction *ka, siginfo_t *info,
 	regs->psw.mask = PSW_MASK_EA | PSW_MASK_BA |
 		(PSW_USER_BITS & PSW_MASK_ASC) |
 		(regs->psw.mask & ~PSW_MASK_ASC);
-	regs->psw.addr = (unsigned long) ka->sa.sa_handler | PSW_ADDR_AMODE;
+	regs->psw.addr = (unsigned long) ksig->ka.sa.sa_handler;
 
-	regs->gprs[2] = map_signal(sig);
+	regs->gprs[2] = ksig->sig;
 	regs->gprs[3] = (unsigned long) &frame->info;
 	regs->gprs[4] = (unsigned long) &frame->uc;
-	regs->gprs[5] = task_thread_info(current)->last_break;
+	regs->gprs[5] = current->thread.last_break;
 	return 0;
-
-give_sigsegv:
-	force_sigsegv(sig, current);
-	return -EFAULT;
 }
 
-static void handle_signal(unsigned long sig, struct k_sigaction *ka,
-			 siginfo_t *info, sigset_t *oldset,
-			 struct pt_regs *regs)
+static void handle_signal(struct ksignal *ksig, sigset_t *oldset,
+			  struct pt_regs *regs)
 {
 	int ret;
 
 	/* Set up the stack frame */
-	if (ka->sa.sa_flags & SA_SIGINFO)
-		ret = setup_rt_frame(sig, ka, info, oldset, regs);
+	if (ksig->ka.sa.sa_flags & SA_SIGINFO)
+		ret = setup_rt_frame(ksig, oldset, regs);
 	else
-		ret = setup_frame(sig, ka, oldset, regs);
-	if (ret)
-		return;
-	signal_delivered(sig, info, ka, regs,
-				 test_thread_flag(TIF_SINGLE_STEP));
+		ret = setup_frame(ksig->sig, &ksig->ka, oldset, regs);
+
+	signal_setup_done(ret, ksig, test_thread_flag(TIF_SINGLE_STEP));
 }
 
 /*
@@ -511,9 +461,7 @@ static void handle_signal(unsigned long sig, struct k_sigaction *ka,
  */
 void do_signal(struct pt_regs *regs)
 {
-	siginfo_t info;
-	int signr;
-	struct k_sigaction ka;
+	struct ksignal ksig;
 	sigset_t *oldset = sigmask_to_save();
 
 	/*
@@ -521,14 +469,13 @@ void do_signal(struct pt_regs *regs)
 	 * the debugger may change all our registers, including the system
 	 * call information.
 	 */
-	current_thread_info()->system_call =
-		test_thread_flag(TIF_SYSCALL) ? regs->int_code : 0;
-	signr = get_signal_to_deliver(&info, &ka, regs, NULL);
+	current->thread.system_call =
+		test_pt_regs_flag(regs, PIF_SYSCALL) ? regs->int_code : 0;
 
-	if (signr > 0) {
+	if (get_signal(&ksig)) {
 		/* Whee!  Actually deliver the signal.  */
-		if (current_thread_info()->system_call) {
-			regs->int_code = current_thread_info()->system_call;
+		if (current->thread.system_call) {
+			regs->int_code = current->thread.system_call;
 			/* Check for system call restarting. */
 			switch (regs->gprs[2]) {
 			case -ERESTART_RESTARTBLOCK:
@@ -536,7 +483,7 @@ void do_signal(struct pt_regs *regs)
 				regs->gprs[2] = -EINTR;
 				break;
 			case -ERESTARTSYS:
-				if (!(ka.sa.sa_flags & SA_RESTART)) {
+				if (!(ksig.ka.sa.sa_flags & SA_RESTART)) {
 					regs->gprs[2] = -EINTR;
 					break;
 				}
@@ -550,19 +497,19 @@ void do_signal(struct pt_regs *regs)
 			}
 		}
 		/* No longer in a system call */
-		clear_thread_flag(TIF_SYSCALL);
-
+		clear_pt_regs_flag(regs, PIF_SYSCALL);
+		rseq_signal_deliver(&ksig, regs);
 		if (is_compat_task())
-			handle_signal32(signr, &ka, &info, oldset, regs);
+			handle_signal32(&ksig, oldset, regs);
 		else
-			handle_signal(signr, &ka, &info, oldset, regs);
+			handle_signal(&ksig, oldset, regs);
 		return;
 	}
 
 	/* No handlers present - check for system call restart */
-	clear_thread_flag(TIF_SYSCALL);
-	if (current_thread_info()->system_call) {
-		regs->int_code = current_thread_info()->system_call;
+	clear_pt_regs_flag(regs, PIF_SYSCALL);
+	if (current->thread.system_call) {
+		regs->int_code = current->thread.system_call;
 		switch (regs->gprs[2]) {
 		case -ERESTART_RESTARTBLOCK:
 			/* Restart with sys_restart_syscall */
@@ -573,9 +520,9 @@ void do_signal(struct pt_regs *regs)
 		case -ERESTARTNOINTR:
 			/* Restart system call with magic TIF bit. */
 			regs->gprs[2] = regs->orig_gpr2;
-			set_thread_flag(TIF_SYSCALL);
+			set_pt_regs_flag(regs, PIF_SYSCALL);
 			if (test_thread_flag(TIF_SINGLE_STEP))
-				set_thread_flag(TIF_PER_TRAP);
+				clear_pt_regs_flag(regs, PIF_PER_TRAP);
 			break;
 		}
 	}
@@ -590,4 +537,5 @@ void do_notify_resume(struct pt_regs *regs)
 {
 	clear_thread_flag(TIF_NOTIFY_RESUME);
 	tracehook_notify_resume(regs);
+	rseq_handle_notify_resume(NULL, regs);
 }

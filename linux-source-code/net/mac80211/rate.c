@@ -182,11 +182,7 @@ ieee80211_rate_control_ops_get(const char *name)
 	const struct rate_control_ops *ops;
 	const char *alg_name;
 
-#if 0 /* Not in RHEL */
 	kernel_param_lock(THIS_MODULE);
-#else
-	kparam_block_sysfs_write(ieee80211_default_rc_algo);
-#endif
 	if (!name)
 		alg_name = ieee80211_default_rc_algo;
 	else
@@ -202,11 +198,7 @@ ieee80211_rate_control_ops_get(const char *name)
 		/* try built-in one if specific alg requested but not found */
 		ops = ieee80211_try_rate_control_ops_get(CONFIG_MAC80211_RC_DEFAULT);
 
-#if 0 /* Not in RHEL */
 	kernel_param_unlock(THIS_MODULE);
-#else
-	kparam_unblock_sysfs_write(ieee80211_default_rc_algo);
-#endif
 
 	return ops;
 }
@@ -362,10 +354,8 @@ static void __rate_control_send_low(struct ieee80211_hw *hw,
 		break;
 	}
 	WARN_ONCE(i == sband->n_bitrates,
-		  "no supported rates for sta %pM (0x%x, band %d) in rate_mask 0x%x with flags 0x%x\n",
-		  sta ? sta->addr : NULL,
+		  "no supported rates (0x%x) in rate_mask 0x%x with flags 0x%x\n",
 		  sta ? sta->supp_rates[sband->band] : -1,
-		  sband->band,
 		  rate_mask, rate_flags);
 
 	info->control.rates[0].count =
@@ -376,8 +366,9 @@ static void __rate_control_send_low(struct ieee80211_hw *hw,
 }
 
 
-static bool rate_control_send_low(struct ieee80211_sta *pubsta,
-				  struct ieee80211_tx_rate_control *txrc)
+bool rate_control_send_low(struct ieee80211_sta *pubsta,
+			   void *priv_sta,
+			   struct ieee80211_tx_rate_control *txrc)
 {
 	struct ieee80211_tx_info *info = IEEE80211_SKB_CB(txrc->skb);
 	struct ieee80211_supported_band *sband = txrc->sband;
@@ -385,7 +376,7 @@ static bool rate_control_send_low(struct ieee80211_sta *pubsta,
 	int mcast_rate;
 	bool use_basicrate = false;
 
-	if (!pubsta || rc_no_data_or_no_ack_use_min(txrc)) {
+	if (!pubsta || !priv_sta || rc_no_data_or_no_ack_use_min(txrc)) {
 		__rate_control_send_low(txrc->hw, sband, pubsta, info,
 					txrc->rate_idx_mask);
 
@@ -411,6 +402,7 @@ static bool rate_control_send_low(struct ieee80211_sta *pubsta,
 	}
 	return false;
 }
+EXPORT_SYMBOL(rate_control_send_low);
 
 static bool rate_idx_match_legacy_mask(s8 *rate_idx, int n_bitrates, u32 mask)
 {
@@ -893,29 +885,26 @@ void rate_control_get_rate(struct ieee80211_sub_if_data *sdata,
 	struct ieee80211_tx_info *info = IEEE80211_SKB_CB(txrc->skb);
 	int i;
 
+	if (sta && test_sta_flag(sta, WLAN_STA_RATE_CONTROL)) {
+		ista = &sta->sta;
+		priv_sta = sta->rate_ctrl_priv;
+	}
+
 	for (i = 0; i < IEEE80211_TX_MAX_RATES; i++) {
 		info->control.rates[i].idx = -1;
 		info->control.rates[i].flags = 0;
 		info->control.rates[i].count = 0;
 	}
 
-	if (rate_control_send_low(sta ? &sta->sta : NULL, txrc))
-		return;
-
 	if (ieee80211_hw_check(&sdata->local->hw, HAS_RATE_CONTROL))
 		return;
-
-	if (sta && test_sta_flag(sta, WLAN_STA_RATE_CONTROL)) {
-		ista = &sta->sta;
-		priv_sta = sta->rate_ctrl_priv;
-	}
 
 	if (ista) {
 		spin_lock_bh(&sta->rate_ctrl_lock);
 		ref->ops->get_rate(ref->priv, ista, priv_sta, txrc);
 		spin_unlock_bh(&sta->rate_ctrl_lock);
 	} else {
-		rate_control_send_low(NULL, txrc);
+		ref->ops->get_rate(ref->priv, NULL, NULL, txrc);
 	}
 
 	if (ieee80211_hw_check(&sdata->local->hw, SUPPORTS_RC_TABLE))

@@ -1,24 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * Common ACPI functions for hot plug platforms
  *
  * Copyright (C) 2006 Intel Corporation
  *
  * All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or (at
- * your option) any later version.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE, GOOD TITLE or
- * NON INFRINGEMENT.  See the GNU General Public License for more
- * details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  *
  * Send feedback to <kristen.c.accardi@intel.com>
  */
@@ -81,7 +67,7 @@ static acpi_status acpi_run_oshp(acpi_handle handle)
  */
 int acpi_get_hp_hw_control_from_firmware(struct pci_dev *pdev)
 {
-	struct pci_host_bridge *host;
+	const struct pci_host_bridge *host;
 	const struct acpi_pci_root *root;
 	acpi_status status;
 	acpi_handle chandle, handle;
@@ -159,13 +145,10 @@ EXPORT_SYMBOL(acpi_get_hp_hw_control_from_firmware);
 static int pcihp_is_ejectable(acpi_handle handle)
 {
 	acpi_status status;
-	acpi_handle tmp;
 	unsigned long long removable;
-	status = acpi_get_handle(handle, "_ADR", &tmp);
-	if (ACPI_FAILURE(status))
+	if (!acpi_has_method(handle, "_ADR"))
 		return 0;
-	status = acpi_get_handle(handle, "_EJ0", &tmp);
-	if (ACPI_SUCCESS(status))
+	if (acpi_has_method(handle, "_EJ0"))
 		return 1;
 	status = acpi_evaluate_integer(handle, "_RMV", NULL, &removable);
 	if (ACPI_SUCCESS(status) && removable)

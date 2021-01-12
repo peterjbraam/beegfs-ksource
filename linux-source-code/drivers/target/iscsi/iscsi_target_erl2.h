@@ -1,5 +1,13 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef ISCSI_TARGET_ERL2_H
 #define ISCSI_TARGET_ERL2_H
+
+#include <linux/types.h>
+
+struct iscsi_cmd;
+struct iscsi_conn;
+struct iscsi_conn_recovery;
+struct iscsi_session;
 
 extern void iscsit_create_conn_recovery_datain_values(struct iscsi_cmd *, __be32);
 extern void iscsit_create_conn_recovery_dataout_values(struct iscsi_cmd *);

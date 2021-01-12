@@ -188,7 +188,7 @@ struct amdgpu_retryfault_hashtable {
 
 struct amdgpu_vm {
 	/* tree of virtual addresses mapped */
-	struct rb_root		va;
+	struct rb_root_cached	va;
 
 	/* BOs who needs a validation */
 	struct list_head	evicted;
@@ -362,5 +362,7 @@ void amdgpu_vm_move_to_lru_tail(struct amdgpu_device *adev,
 int amdgpu_vm_add_fault(struct amdgpu_retryfault_hashtable *fault_hash, u64 key);
 
 void amdgpu_vm_clear_fault(struct amdgpu_retryfault_hashtable *fault_hash, u64 key);
+
+void amdgpu_vm_del_from_lru_notify(struct ttm_buffer_object *bo);
 
 #endif

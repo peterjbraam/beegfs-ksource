@@ -1276,11 +1276,6 @@ MODULE_LICENSE ("GPL");
 #define XILINX_OF_PLATFORM_DRIVER	ehci_hcd_xilinx_of_driver
 #endif
 
-#ifdef CONFIG_TILE_USB
-#include "ehci-tilegx.c"
-#define	PLATFORM_DRIVER		ehci_hcd_tilegx_driver
-#endif
-
 #ifdef CONFIG_USB_EHCI_HCD_PMC_MSP
 #include "ehci-pmcmsp.c"
 #define	PLATFORM_DRIVER		ehci_hcd_msp_driver
@@ -1310,7 +1305,7 @@ static int __init ehci_hcd_init(void)
 		printk(KERN_WARNING "Warning! ehci_hcd should always be loaded"
 				" before uhci_hcd and ohci_hcd, not after\n");
 
-	pr_debug("%s: block sizes: qh %Zd qtd %Zd itd %Zd sitd %Zd\n",
+	pr_debug("%s: block sizes: qh %zd qtd %zd itd %zd sitd %zd\n",
 		 hcd_name,
 		 sizeof(struct ehci_qh), sizeof(struct ehci_qtd),
 		 sizeof(struct ehci_itd), sizeof(struct ehci_sitd));

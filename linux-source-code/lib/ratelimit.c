@@ -12,7 +12,6 @@
 #include <linux/ratelimit.h>
 #include <linux/jiffies.h>
 #include <linux/export.h>
-#include <linux/sched.h>
 
 /*
  * __ratelimit - rate limiting
@@ -49,7 +48,9 @@ int ___ratelimit(struct ratelimit_state *rs, const char *func)
 	if (time_is_before_jiffies(rs->begin + rs->interval)) {
 		if (rs->missed) {
 			if (!(rs->flags & RATELIMIT_MSG_ON_RELEASE)) {
-				pr_warn("%s: %d callbacks suppressed\n", func, rs->missed);
+				printk_deferred(KERN_WARNING
+						"%s: %d callbacks suppressed\n",
+						func, rs->missed);
 				rs->missed = 0;
 			}
 		}
@@ -68,17 +69,3 @@ int ___ratelimit(struct ratelimit_state *rs, const char *func)
 	return ret;
 }
 EXPORT_SYMBOL(___ratelimit);
-
-
-void ratelimit_state_exit(struct ratelimit_state *rs)
-{
-	if (!(rs->flags & RATELIMIT_MSG_ON_RELEASE))
-		return;
-
-	if (rs->missed) {
-		pr_warn("%s: %d output lines suppressed due to ratelimiting\n",
-			current->comm, rs->missed);
-		rs->missed = 0;
-	}
-}
-EXPORT_SYMBOL(ratelimit_state_exit);

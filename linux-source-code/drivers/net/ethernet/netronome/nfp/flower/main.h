@@ -16,7 +16,6 @@
 #include <linux/workqueue.h>
 #include <linux/idr.h>
 
-struct tc_to_netdev;
 struct nfp_fl_pre_lag;
 struct net_device;
 struct nfp_app;
@@ -43,8 +42,6 @@ struct nfp_app;
 #define NFP_FL_NBI_MTU_SETTING		BIT(1)
 #define NFP_FL_FEATS_GENEVE_OPT		BIT(2)
 #define NFP_FL_FEATS_VLAN_PCP		BIT(3)
-#define NFP_FL_FEATS_FLOW_MOD		BIT(5)
-#define NFP_FL_FEATS_FLOW_MERGE		BIT(30)
 #define NFP_FL_FEATS_LAG		BIT(31)
 
 struct nfp_fl_mask_id {
@@ -57,6 +54,26 @@ struct nfp_fl_stats_id {
 	struct circ_buf free_list;
 	u32 init_unalloc;
 	u8 repeated_em_count;
+};
+
+/**
+ * struct nfp_fl_tunnel_offloads - priv data for tunnel offloads
+ * @offloaded_macs:	Hashtable of the offloaded MAC addresses
+ * @ipv4_off_list:	List of IPv4 addresses to offload
+ * @neigh_off_list:	List of neighbour offloads
+ * @ipv4_off_lock:	Lock for the IPv4 address list
+ * @neigh_off_lock:	Lock for the neighbour address list
+ * @mac_off_ids:	IDA to manage id assignment for offloaded MACs
+ * @neigh_nb:		Notifier to monitor neighbour state
+ */
+struct nfp_fl_tunnel_offloads {
+	struct rhashtable offloaded_macs;
+	struct list_head ipv4_off_list;
+	struct list_head neigh_off_list;
+	struct mutex ipv4_off_lock;
+	spinlock_t neigh_off_lock;
+	struct ida mac_off_ids;
+	struct notifier_block neigh_nb;
 };
 
 /**
@@ -101,16 +118,6 @@ struct nfp_fl_lag {
 };
 
 /**
- * struct nfp_fl_internal_ports - Flower APP priv data for additional ports
- * @port_ids:	Assignment of ids to any additional ports
- * @lock:	Lock for extra ports list
- */
-struct nfp_fl_internal_ports {
-	struct idr port_ids;
-	spinlock_t lock;
-};
-
-/**
  * struct nfp_flower_priv - Flower APP per-vNIC priv data
  * @app:		Back pointer to app
  * @nn:			Pointer to vNIC
@@ -124,23 +131,12 @@ struct nfp_fl_internal_ports {
  * @flow_table:		Hash table used to store flower rules
  * @stats:		Stored stats updates for flower rules
  * @stats_lock:		Lock for flower rule stats updates
- * @stats_ctx_table:	Hash table to map stats contexts to its flow rule
  * @cmsg_work:		Workqueue for control messages processing
  * @cmsg_skbs_high:	List of higher priority skbs for control message
  *			processing
  * @cmsg_skbs_low:	List of lower priority skbs for control message
  *			processing
- * @nfp_mac_off_list:	List of MAC addresses to offload
- * @nfp_mac_index_list:	List of unique 8-bit indexes for non NFP netdevs
- * @nfp_ipv4_off_list:	List of IPv4 addresses to offload
- * @nfp_neigh_off_list:	List of neighbour offloads
- * @nfp_mac_off_lock:	Lock for the MAC address list
- * @nfp_mac_index_lock:	Lock for the MAC index list
- * @nfp_ipv4_off_lock:	Lock for the IPv4 address list
- * @nfp_neigh_off_lock:	Lock for the neighbour address list
- * @nfp_mac_off_ids:	IDA to manage id assignment for offloaded macs
- * @nfp_mac_off_count:	Number of MACs in address list
- * @nfp_tun_neigh_nb:	Notifier to monitor neighbour state
+ * @tun:		Tunnel offload data
  * @reify_replies:	atomically stores the number of replies received
  *			from firmware for repr reify
  * @reify_wait_queue:	wait queue for repr reify response counting
@@ -150,7 +146,6 @@ struct nfp_fl_internal_ports {
  * @non_repr_priv:	List of offloaded non-repr ports and their priv data
  * @active_mem_unit:	Current active memory unit for flower rules
  * @total_mem_units:	Total number of available memory units for flower rules
- * @internal_ports:	Internal port ids used in offloaded rules
  */
 struct nfp_flower_priv {
 	struct nfp_app *app;
@@ -165,21 +160,10 @@ struct nfp_flower_priv {
 	struct rhashtable flow_table;
 	struct nfp_fl_stats *stats;
 	spinlock_t stats_lock; /* lock stats */
-	struct rhashtable stats_ctx_table;
 	struct work_struct cmsg_work;
 	struct sk_buff_head cmsg_skbs_high;
 	struct sk_buff_head cmsg_skbs_low;
-	struct list_head nfp_mac_off_list;
-	struct list_head nfp_mac_index_list;
-	struct list_head nfp_ipv4_off_list;
-	struct list_head nfp_neigh_off_list;
-	struct mutex nfp_mac_off_lock;
-	struct mutex nfp_mac_index_lock;
-	struct mutex nfp_ipv4_off_lock;
-	spinlock_t nfp_neigh_off_lock;
-	struct ida nfp_mac_off_ids;
-	int nfp_mac_off_count;
-	struct notifier_block nfp_tun_neigh_nb;
+	struct nfp_fl_tunnel_offloads tun;
 	atomic_t reify_replies;
 	wait_queue_head_t reify_wait_queue;
 	struct nfp_mtu_conf mtu_conf;
@@ -188,15 +172,22 @@ struct nfp_flower_priv {
 	struct list_head non_repr_priv;
 	unsigned int active_mem_unit;
 	unsigned int total_mem_units;
-	struct nfp_fl_internal_ports internal_ports;
 };
 
 /**
  * struct nfp_flower_repr_priv - Flower APP per-repr priv data
+ * @nfp_repr:		Back pointer to nfp_repr
  * @lag_port_flags:	Extended port flags to record lag state of repr
+ * @mac_offloaded:	Flag indicating a MAC address is offloaded for repr
+ * @offloaded_mac_addr:	MAC address that has been offloaded for repr
+ * @mac_list:		List entry of reprs that share the same offloaded MAC
  */
 struct nfp_flower_repr_priv {
+	struct nfp_repr *nfp_repr;
 	unsigned long lag_port_flags;
+	bool mac_offloaded;
+	u8 offloaded_mac_addr[ETH_ALEN];
+	struct list_head mac_list;
 };
 
 /**
@@ -204,11 +195,15 @@ struct nfp_flower_repr_priv {
  * @list:		List entry of offloaded reprs
  * @netdev:		Pointer to non-repr net_device
  * @ref_count:		Number of references held for this priv data
+ * @mac_offloaded:	Flag indicating a MAC address is offloaded for device
+ * @offloaded_mac_addr:	MAC address that has been offloaded for dev
  */
 struct nfp_flower_non_repr_priv {
 	struct list_head list;
 	struct net_device *netdev;
 	int ref_count;
+	bool mac_offloaded;
+	u8 offloaded_mac_addr[ETH_ALEN];
 };
 
 struct nfp_fl_key_ls {
@@ -244,25 +239,6 @@ struct nfp_fl_payload {
 	char *unmasked_data;
 	char *mask_data;
 	char *action_data;
-	struct list_head linked_flows;
-	bool in_hw;
-};
-
-struct nfp_fl_payload_link {
-	/* A link contains a pointer to a merge flow and an associated sub_flow.
-	 * Each merge flow will feature in 2 links to its underlying sub_flows.
-	 * A sub_flow will have at least 1 link to a merge flow or more if it
-	 * has been used to create multiple merge flows.
-	 *
-	 * For a merge flow, 'linked_flows' in its nfp_fl_payload struct lists
-	 * all links to sub_flows (sub_flow.flow) via merge.list.
-	 * For a sub_flow, 'linked_flows' gives all links to merge flows it has
-	 * formed (merge_flow.flow) via sub_flow.list.
-	 */
-	struct {
-		struct list_head list;
-		struct nfp_fl_payload *flow;
-	} merge_flow, sub_flow;
 };
 
 extern const struct rhashtable_params nfp_flower_table_params;
@@ -274,40 +250,12 @@ struct nfp_fl_stats_frame {
 	__be64 stats_cookie;
 };
 
-static inline bool
-nfp_flower_internal_port_can_offload(struct nfp_app *app,
-				     struct net_device *netdev)
-{
-	struct nfp_flower_priv *app_priv = app->priv;
-
-	if (!(app_priv->flower_ext_feats & NFP_FL_FEATS_FLOW_MERGE))
-		return false;
-	if (!netdev->rtnl_link_ops)
-		return false;
-	if (!strcmp(netdev->rtnl_link_ops->kind, "openvswitch"))
-		return true;
-
-	return false;
-}
-
-/* The address of the merged flow acts as its cookie.
- * Cookies supplied to us by TC flower are also addresses to allocated
- * memory and thus this scheme should not generate any collisions.
- */
-static inline bool nfp_flower_is_merge_flow(struct nfp_fl_payload *flow_pay)
-{
-	return flow_pay->tc_flower_cookie == (unsigned long)flow_pay;
-}
-
 int nfp_flower_metadata_init(struct nfp_app *app, u64 host_ctx_count,
 			     unsigned int host_ctx_split);
 void nfp_flower_metadata_cleanup(struct nfp_app *app);
 
 int nfp_flower_setup_tc(struct nfp_app *app, struct net_device *netdev,
 			enum tc_setup_type type, void *type_data);
-int nfp_flower_merge_offloaded_flows(struct nfp_app *app,
-				     struct nfp_fl_payload *sub_flow1,
-				     struct nfp_fl_payload *sub_flow2);
 int nfp_flower_compile_flow_match(struct nfp_app *app,
 				  struct tc_cls_flower_offload *flow,
 				  struct nfp_fl_key_ls *key_ls,
@@ -322,16 +270,12 @@ int nfp_compile_flow_metadata(struct nfp_app *app,
 			      struct tc_cls_flower_offload *flow,
 			      struct nfp_fl_payload *nfp_flow,
 			      struct net_device *netdev);
-void __nfp_modify_flow_metadata(struct nfp_flower_priv *priv,
-				struct nfp_fl_payload *nfp_flow);
 int nfp_modify_flow_metadata(struct nfp_app *app,
 			     struct nfp_fl_payload *nfp_flow);
 
 struct nfp_fl_payload *
 nfp_flower_search_fl_table(struct nfp_app *app, unsigned long tc_flower_cookie,
 			   struct net_device *netdev);
-struct nfp_fl_payload *
-nfp_flower_get_fl_payload_from_ctx(struct nfp_app *app, u32 ctx_id);
 struct nfp_fl_payload *
 nfp_flower_remove_fl_table(struct nfp_app *app, unsigned long tc_flower_cookie);
 
@@ -342,7 +286,6 @@ void nfp_tunnel_config_stop(struct nfp_app *app);
 int nfp_tunnel_mac_event_handler(struct nfp_app *app,
 				 struct net_device *netdev,
 				 unsigned long event, void *ptr);
-void nfp_tunnel_write_macs(struct nfp_app *app);
 void nfp_tunnel_del_ipv4_off(struct nfp_app *app, __be32 ipv4);
 void nfp_tunnel_add_ipv4_off(struct nfp_app *app, __be32 ipv4);
 void nfp_tunnel_request_route(struct nfp_app *app, struct sk_buff *skb);
@@ -371,6 +314,4 @@ void
 __nfp_flower_non_repr_priv_put(struct nfp_flower_non_repr_priv *non_repr_priv);
 void
 nfp_flower_non_repr_priv_put(struct nfp_app *app, struct net_device *netdev);
-u32 nfp_flower_get_port_id_from_netdev(struct nfp_app *app,
-				       struct net_device *netdev);
 #endif

@@ -34,10 +34,10 @@
 
 #include <linux/mm.h>
 #include <linux/dma-mapping.h>
-#include <linux/sched.h>
+#include <linux/sched/signal.h>
+#include <linux/sched/mm.h>
 #include <linux/export.h>
 #include <linux/hugetlb.h>
-#include <linux/dma-attrs.h>
 #include <linux/slab.h>
 #include <rdma/ib_umem_odp.h>
 
@@ -91,11 +91,12 @@ struct ib_umem *ib_umem_get(struct ib_ucontext *context, unsigned long addr,
 	unsigned long npages;
 	int ret;
 	int i;
-	DEFINE_DMA_ATTRS(attrs);
+	unsigned long dma_attrs = 0;
 	struct scatterlist *sg, *sg_list_start;
+	unsigned int gup_flags = FOLL_WRITE;
 
 	if (dmasync)
-		dma_set_attr(DMA_ATTR_WRITE_BARRIER, &attrs);
+		dma_attrs |= DMA_ATTR_WRITE_BARRIER;
 
 	/*
 	 * If the combination of the addr and size requested for this memory
@@ -175,15 +176,17 @@ struct ib_umem *ib_umem_get(struct ib_ucontext *context, unsigned long addr,
 	if (ret)
 		goto vma;
 
+	if (!umem->writable)
+		gup_flags |= FOLL_FORCE;
+
 	sg_list_start = umem->sg_head.sgl;
 
 	while (npages) {
 		down_read(&mm->mmap_sem);
 		ret = get_user_pages_longterm(cur_base,
-				min_t(unsigned long, npages,
-				      PAGE_SIZE / sizeof (struct page *)),
-				1, !umem->writable, page_list, vma_list);
-
+				     min_t(unsigned long, npages,
+					   PAGE_SIZE / sizeof (struct page *)),
+				     gup_flags, page_list, vma_list);
 		if (ret < 0) {
 			up_read(&mm->mmap_sem);
 			goto umem_release;
@@ -212,7 +215,7 @@ struct ib_umem *ib_umem_get(struct ib_ucontext *context, unsigned long addr,
 				  umem->sg_head.sgl,
 				  umem->npages,
 				  DMA_BIDIRECTIONAL,
-				  &attrs);
+				  dma_attrs);
 
 	if (!umem->nmap) {
 		ret = -ENOMEM;

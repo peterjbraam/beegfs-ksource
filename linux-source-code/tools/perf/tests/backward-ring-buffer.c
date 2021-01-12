@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Test backward bit in event attribute, read ring buffer from end to
  * beginning
@@ -100,7 +101,7 @@ int test__backward_ring_buffer(struct test *test __maybe_unused, int subtest __m
 
 	evlist = perf_evlist__new();
 	if (!evlist) {
-		pr_debug("No enough memory to create evlist\n");
+		pr_debug("Not enough memory to create evlist\n");
 		return TEST_FAIL;
 	}
 

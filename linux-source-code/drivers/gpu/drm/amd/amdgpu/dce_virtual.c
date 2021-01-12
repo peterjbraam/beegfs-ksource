@@ -38,7 +38,7 @@
 #include "dce_virtual.h"
 #include "ivsrcid/ivsrcid_vislands30.h"
 
-#define DCE_VIRTUAL_VBLANK_PERIOD ktime_set(0, 16666666)
+#define DCE_VIRTUAL_VBLANK_PERIOD 16666666
 
 
 static void dce_virtual_set_display_funcs(struct amdgpu_device *adev);

@@ -40,8 +40,8 @@ static union acpi_object *adxl_dsm(int cmd, union acpi_object argv[])
 {
 	union acpi_object *obj, *o;
 
-	obj = acpi_evaluate_dsm_typed(handle, (const u8 *)&adxl_guid,
-				ADXL_REVISION, cmd, argv, ACPI_TYPE_PACKAGE);
+	obj = acpi_evaluate_dsm_typed(handle, &adxl_guid, ADXL_REVISION,
+				      cmd, argv, ACPI_TYPE_PACKAGE);
 	if (!obj) {
 		pr_info("DSM call failed for cmd=%d\n", cmd);
 		return NULL;
@@ -153,7 +153,7 @@ static int __init adxl_init(void)
 		return -ENODEV;
 	}
 
-	if (!acpi_check_dsm(handle, (const u8 *)&adxl_guid, ADXL_REVISION,
+	if (!acpi_check_dsm(handle, &adxl_guid, ADXL_REVISION,
 			    ADXL_IDX_GET_ADDR_PARAMS |
 			    ADXL_IDX_FORWARD_TRANSLATE)) {
 		pr_info("DSM method does not support forward translate\n");

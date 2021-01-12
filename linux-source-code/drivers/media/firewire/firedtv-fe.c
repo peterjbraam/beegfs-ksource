@@ -16,7 +16,7 @@
 #include <linux/string.h>
 #include <linux/types.h>
 
-#include <dvb_frontend.h>
+#include <media/dvb_frontend.h>
 
 #include "firedtv.h"
 
@@ -61,12 +61,12 @@ static int fdtv_diseqc_send_master_cmd(struct dvb_frontend *fe,
 }
 
 static int fdtv_diseqc_send_burst(struct dvb_frontend *fe,
-				  fe_sec_mini_cmd_t minicmd)
+				  enum fe_sec_mini_cmd minicmd)
 {
 	return 0;
 }
 
-static int fdtv_set_tone(struct dvb_frontend *fe, fe_sec_tone_mode_t tone)
+static int fdtv_set_tone(struct dvb_frontend *fe, enum fe_sec_tone_mode tone)
 {
 	struct firedtv *fdtv = fe->sec_priv;
 
@@ -75,7 +75,7 @@ static int fdtv_set_tone(struct dvb_frontend *fe, fe_sec_tone_mode_t tone)
 }
 
 static int fdtv_set_voltage(struct dvb_frontend *fe,
-			    fe_sec_voltage_t voltage)
+			    enum fe_sec_voltage voltage)
 {
 	struct firedtv *fdtv = fe->sec_priv;
 
@@ -83,7 +83,7 @@ static int fdtv_set_voltage(struct dvb_frontend *fe,
 	return 0;
 }
 
-static int fdtv_read_status(struct dvb_frontend *fe, fe_status_t *status)
+static int fdtv_read_status(struct dvb_frontend *fe, enum fe_status *status)
 {
 	struct firedtv *fdtv = fe->sec_priv;
 	struct firedtv_tuner_status stat;
@@ -165,7 +165,7 @@ void fdtv_frontend_init(struct firedtv *fdtv, const char *name)
 	ops->read_snr			= fdtv_read_snr;
 	ops->read_ucblocks		= fdtv_read_uncorrected_blocks;
 
-	ops->diseqc_send_master_cmd 	= fdtv_diseqc_send_master_cmd;
+	ops->diseqc_send_master_cmd	= fdtv_diseqc_send_master_cmd;
 	ops->diseqc_send_burst		= fdtv_diseqc_send_burst;
 	ops->set_tone			= fdtv_set_tone;
 	ops->set_voltage		= fdtv_set_voltage;
@@ -220,7 +220,7 @@ void fdtv_frontend_init(struct firedtv *fdtv, const char *name)
 		fi->symbol_rate_min	= 870000;
 		fi->symbol_rate_max	= 6900000;
 
-		fi->caps 		= FE_CAN_INVERSION_AUTO |
+		fi->caps		= FE_CAN_INVERSION_AUTO |
 					  FE_CAN_QAM_16		|
 					  FE_CAN_QAM_32		|
 					  FE_CAN_QAM_64		|
@@ -236,7 +236,7 @@ void fdtv_frontend_init(struct firedtv *fdtv, const char *name)
 		fi->frequency_max	= 861000000;
 		fi->frequency_stepsize	= 62500;
 
-		fi->caps 		= FE_CAN_INVERSION_AUTO		|
+		fi->caps		= FE_CAN_INVERSION_AUTO		|
 					  FE_CAN_FEC_2_3		|
 					  FE_CAN_TRANSMISSION_MODE_AUTO |
 					  FE_CAN_GUARD_INTERVAL_AUTO	|

@@ -44,6 +44,9 @@ enum auxtrace_type {
 	PERF_AUXTRACE_UNKNOWN,
 	PERF_AUXTRACE_INTEL_PT,
 	PERF_AUXTRACE_INTEL_BTS,
+	PERF_AUXTRACE_CS_ETM,
+	PERF_AUXTRACE_ARM_SPE,
+	PERF_AUXTRACE_S390_CPUMSF,
 };
 
 enum itrace_period_type {
@@ -383,7 +386,7 @@ struct addr_filters {
 static inline u64 auxtrace_mmap__read_snapshot_head(struct auxtrace_mmap *mm)
 {
 	struct perf_event_mmap_page *pc = mm->userpg;
-	u64 head = ACCESS_ONCE(pc->aux_head);
+	u64 head = READ_ONCE(pc->aux_head);
 
 	/* Ensure all reads are done after we read the head */
 	rmb();
@@ -394,7 +397,7 @@ static inline u64 auxtrace_mmap__read_head(struct auxtrace_mmap *mm)
 {
 	struct perf_event_mmap_page *pc = mm->userpg;
 #if BITS_PER_LONG == 64 || !defined(HAVE_SYNC_COMPARE_AND_SWAP_SUPPORT)
-	u64 head = ACCESS_ONCE(pc->aux_head);
+	u64 head = READ_ONCE(pc->aux_head);
 #else
 	u64 head = __sync_val_compare_and_swap(&pc->aux_head, 0, 0);
 #endif

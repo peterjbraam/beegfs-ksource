@@ -16,14 +16,15 @@
 #include <asm/processor.h>
 #include <asm/errno.h>
 #include <asm/ppc_asm.h>
+#include <asm/export.h>
 
 /*
  * Computes the checksum of a memory block at buff, length len,
  * and adds in "sum" (32-bit).
  *
- * csum_partial(r3=buff, r4=len, r5=sum)
+ * __csum_partial(r3=buff, r4=len, r5=sum)
  */
-_GLOBAL(csum_partial)
+_GLOBAL(__csum_partial)
 	addic	r0,r5,0			/* clear carry */
 
 	srdi.	r6,r4,3			/* less than 8 bytes? */
@@ -180,38 +181,27 @@ _GLOBAL(csum_partial)
 	add	r3,r4,r0
 	srdi	r3,r3,32
 	blr
+EXPORT_SYMBOL(__csum_partial)
 
 
 	.macro srcnr
 100:
-	.section __ex_table,"a"
-	.align 3
-	.llong 100b,.Lsrc_error_nr
-	.previous
+	EX_TABLE(100b,.Lsrc_error_nr)
 	.endm
 
 	.macro source
 150:
-	.section __ex_table,"a"
-	.align 3
-	.llong 150b,.Lsrc_error
-	.previous
+	EX_TABLE(150b,.Lsrc_error)
 	.endm
 
 	.macro dstnr
 200:
-	.section __ex_table,"a"
-	.align 3
-	.llong 200b,.Ldest_error_nr
-	.previous
+	EX_TABLE(200b,.Ldest_error_nr)
 	.endm
 
 	.macro dest
 250:
-	.section __ex_table,"a"
-	.align 3
-	.llong 250b,.Ldest_error
-	.previous
+	EX_TABLE(250b,.Ldest_error)
 	.endm
 
 /*
@@ -438,3 +428,35 @@ dstnr;	stb	r6,0(r4)
 	li	r6,-EFAULT
 	stw	r6,0(r8)
 	blr
+EXPORT_SYMBOL(csum_partial_copy_generic)
+
+/*
+ * __sum16 csum_ipv6_magic(const struct in6_addr *saddr,
+ *			   const struct in6_addr *daddr,
+ *			   __u32 len, __u8 proto, __wsum sum)
+ */
+
+_GLOBAL(csum_ipv6_magic)
+	ld	r8, 0(r3)
+	ld	r9, 8(r3)
+	add	r5, r5, r6
+	addc	r0, r8, r9
+	ld	r10, 0(r4)
+	ld	r11, 8(r4)
+#ifdef CONFIG_CPU_LITTLE_ENDIAN
+	rotldi	r5, r5, 8
+#endif
+	adde	r0, r0, r10
+	add	r5, r5, r7
+	adde	r0, r0, r11
+	adde	r0, r0, r5
+	addze	r0, r0
+	rotldi  r3, r0, 32		/* fold two 32 bit halves together */
+	add	r3, r0, r3
+	srdi	r0, r3, 32
+	rotlwi	r3, r0, 16		/* fold two 16 bit halves together */
+	add	r3, r0, r3
+	not	r3, r3
+	rlwinm	r3, r3, 16, 16, 31
+	blr
+EXPORT_SYMBOL(csum_ipv6_magic)

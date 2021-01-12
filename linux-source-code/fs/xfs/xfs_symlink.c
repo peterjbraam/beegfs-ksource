@@ -1,20 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (c) 2000-2006 Silicon Graphics, Inc.
  * Copyright (c) 2012-2013 Red Hat, Inc.
  * All rights reserved.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it would be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write the Free Software Foundation,
- * Inc.,  51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
 #include "xfs.h"
 #include "xfs_shared.h"
@@ -134,6 +122,8 @@ xfs_readlink(
 
 	trace_xfs_readlink(ip);
 
+	ASSERT(!(ip->i_df.if_flags & XFS_IFINLINE));
+
 	if (XFS_FORCED_SHUTDOWN(mp))
 		return -EIO;
 
@@ -153,12 +143,7 @@ xfs_readlink(
 	}
 
 
-	if (ip->i_df.if_flags & XFS_IFINLINE) {
-		memcpy(link, ip->i_df.if_u1.if_data, pathlen);
-		link[pathlen] = '\0';
-	} else {
-		error = xfs_readlink_bmap_ilocked(ip, link);
-	}
+	error = xfs_readlink_bmap_ilocked(ip, link);
 
  out:
 	xfs_iunlock(ip, XFS_ILOCK_SHARED);
@@ -178,8 +163,6 @@ xfs_symlink(
 	struct xfs_inode	*ip = NULL;
 	int			error = 0;
 	int			pathlen;
-	struct xfs_defer_ops	dfops;
-	xfs_fsblock_t		first_block;
 	bool                    unlock_dp_on_error = false;
 	xfs_fileoff_t		first_fsb;
 	xfs_filblks_t		fs_blocks;
@@ -239,8 +222,7 @@ xfs_symlink(
 	if (error)
 		goto out_release_inode;
 
-	xfs_ilock(dp, XFS_IOLOCK_EXCL | XFS_ILOCK_EXCL |
-		      XFS_IOLOCK_PARENT | XFS_ILOCK_PARENT);
+	xfs_ilock(dp, XFS_ILOCK_EXCL | XFS_ILOCK_PARENT);
 	unlock_dp_on_error = true;
 
 	/*
@@ -260,12 +242,6 @@ xfs_symlink(
 		goto out_trans_cancel;
 
 	/*
-	 * Initialize the bmap freelist prior to calling either
-	 * bmapi or the directory create code.
-	 */
-	xfs_defer_init(&dfops, &first_block);
-
-	/*
 	 * Allocate an inode for the symlink.
 	 */
 	error = xfs_dir_ialloc(&tp, dp, S_IFLNK | (mode & ~S_IFMT), 1, 0,
@@ -280,7 +256,7 @@ xfs_symlink(
 	 * the transaction cancel unlocking dp so don't do it explicitly in the
 	 * error path.
 	 */
-	xfs_trans_ijoin(tp, dp, XFS_IOLOCK_EXCL | XFS_ILOCK_EXCL);
+	xfs_trans_ijoin(tp, dp, XFS_ILOCK_EXCL);
 	unlock_dp_on_error = false;
 
 	/*
@@ -306,10 +282,9 @@ xfs_symlink(
 		nmaps = XFS_SYMLINK_MAPS;
 
 		error = xfs_bmapi_write(tp, ip, first_fsb, fs_blocks,
-				  XFS_BMAPI_METADATA, &first_block, resblks,
-				  mval, &nmaps, &dfops);
+				  XFS_BMAPI_METADATA, resblks, mval, &nmaps);
 		if (error)
-			goto out_bmap_cancel;
+			goto out_trans_cancel;
 
 		if (resblks)
 			resblks -= fs_blocks;
@@ -327,7 +302,7 @@ xfs_symlink(
 					       BTOBB(byte_cnt), 0);
 			if (!bp) {
 				error = -ENOMEM;
-				goto out_bmap_cancel;
+				goto out_trans_cancel;
 			}
 			bp->b_ops = &xfs_symlink_buf_ops;
 
@@ -354,10 +329,9 @@ xfs_symlink(
 	/*
 	 * Create the directory entry for the symlink.
 	 */
-	error = xfs_dir_createname(tp, dp, link_name, ip->i_ino,
-					&first_block, &dfops, resblks);
+	error = xfs_dir_createname(tp, dp, link_name, ip->i_ino, resblks);
 	if (error)
-		goto out_bmap_cancel;
+		goto out_trans_cancel;
 	xfs_trans_ichgtime(tp, dp, XFS_ICHGTIME_MOD | XFS_ICHGTIME_CHG);
 	xfs_trans_log_inode(tp, dp, XFS_ILOG_CORE);
 
@@ -370,10 +344,6 @@ xfs_symlink(
 		xfs_trans_set_sync(tp);
 	}
 
-	error = xfs_defer_finish(&tp, &dfops);
-	if (error)
-		goto out_bmap_cancel;
-
 	error = xfs_trans_commit(tp);
 	if (error)
 		goto out_release_inode;
@@ -385,8 +355,6 @@ xfs_symlink(
 	*ipp = ip;
 	return 0;
 
-out_bmap_cancel:
-	xfs_defer_cancel(&dfops);
 out_trans_cancel:
 	xfs_trans_cancel(tp);
 out_release_inode:
@@ -397,7 +365,7 @@ out_release_inode:
 	 */
 	if (ip) {
 		xfs_finish_inode_setup(ip);
-		IRELE(ip);
+		xfs_irele(ip);
 	}
 
 	xfs_qm_dqrele(udqp);
@@ -405,7 +373,7 @@ out_release_inode:
 	xfs_qm_dqrele(pdqp);
 
 	if (unlock_dp_on_error)
-		xfs_iunlock(dp, XFS_IOLOCK_EXCL | XFS_ILOCK_EXCL);
+		xfs_iunlock(dp, XFS_ILOCK_EXCL);
 	return error;
 }
 
@@ -425,8 +393,6 @@ xfs_inactive_symlink_rmt(
 	xfs_buf_t	*bp;
 	int		done;
 	int		error;
-	xfs_fsblock_t	first_block;
-	struct xfs_defer_ops	dfops;
 	int		i;
 	xfs_mount_t	*mp;
 	xfs_bmbt_irec_t	mval[XFS_SYMLINK_MAPS];
@@ -466,7 +432,6 @@ xfs_inactive_symlink_rmt(
 	 * Find the block(s) so we can inval and unmap them.
 	 */
 	done = 0;
-	xfs_defer_init(&dfops, &first_block);
 	nmaps = ARRAY_SIZE(mval);
 	error = xfs_bmapi_read(ip, 0, xfs_symlink_blocks(mp, size),
 				mval, &nmaps, 0);
@@ -481,27 +446,21 @@ xfs_inactive_symlink_rmt(
 			XFS_FSB_TO_BB(mp, mval[i].br_blockcount), 0);
 		if (!bp) {
 			error = -ENOMEM;
-			goto error_bmap_cancel;
+			goto error_trans_cancel;
 		}
 		xfs_trans_binval(tp, bp);
 	}
 	/*
 	 * Unmap the dead block(s) to the dfops.
 	 */
-	error = xfs_bunmapi(tp, ip, 0, size, 0, nmaps,
-			    &first_block, &dfops, &done);
+	error = xfs_bunmapi(tp, ip, 0, size, 0, nmaps, &done);
 	if (error)
-		goto error_bmap_cancel;
+		goto error_trans_cancel;
 	ASSERT(done);
-	/*
-	 * Commit the first transaction.  This logs the EFI and the inode.
-	 */
-	error = xfs_defer_finish(&tp, &dfops);
-	if (error)
-		goto error_bmap_cancel;
 
 	/*
-	 * Commit the transaction containing extent freeing and EFDs.
+	 * Commit the transaction. This first logs the EFI and the inode, then
+	 * rolls and commits the transaction that frees the extents.
 	 */
 	xfs_trans_log_inode(tp, ip, XFS_ILOG_CORE);
 	error = xfs_trans_commit(tp);
@@ -520,8 +479,6 @@ xfs_inactive_symlink_rmt(
 	xfs_iunlock(ip, XFS_ILOCK_EXCL);
 	return 0;
 
-error_bmap_cancel:
-	xfs_defer_cancel(&dfops);
 error_trans_cancel:
 	xfs_trans_cancel(tp);
 error_unlock:

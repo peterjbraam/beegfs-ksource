@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __SVM_H
 #define __SVM_H
 
@@ -147,6 +148,7 @@ struct __attribute__ ((__packed__)) vmcb_control_area {
 #define SVM_VM_CR_SVM_DIS_MASK  0x0010ULL
 
 #define SVM_NESTED_CTL_NP_ENABLE	BIT(0)
+#define SVM_NESTED_CTL_SEV_ENABLE	BIT(1)
 
 struct __attribute__ ((__packed__)) vmcb_seg {
 	u16 selector;
@@ -205,7 +207,6 @@ struct __attribute__ ((__packed__)) vmcb {
 	struct vmcb_save_area save;
 };
 
-#define SVM_CPUID_FEATURE_SHIFT 2
 #define SVM_CPUID_FUNC 0x8000000a
 
 #define SVM_VM_CR_SVM_DISABLE 4
@@ -288,12 +289,5 @@ struct __attribute__ ((__packed__)) vmcb {
 #define SVM_EXITINFO_REG_MASK 0x0F
 
 #define SVM_CR0_SELECTIVE_MASK (X86_CR0_TS | X86_CR0_MP)
-
-#define SVM_VMLOAD ".byte 0x0f, 0x01, 0xda"
-#define SVM_VMRUN  ".byte 0x0f, 0x01, 0xd8"
-#define SVM_VMSAVE ".byte 0x0f, 0x01, 0xdb"
-#define SVM_CLGI   ".byte 0x0f, 0x01, 0xdd"
-#define SVM_STGI   ".byte 0x0f, 0x01, 0xdc"
-#define SVM_INVLPGA ".byte 0x0f, 0x01, 0xdf"
 
 #endif

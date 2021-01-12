@@ -36,19 +36,20 @@
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <rdma/ib_verbs.h>
+#include <rdma/ib_umem.h>
 #include <rdma/ib_smi.h>
 #include <linux/mlx5/driver.h>
 #include <linux/mlx5/cq.h>
 #include <linux/mlx5/fs.h>
 #include <linux/mlx5/qp.h>
-#include <linux/mlx5/srq.h>
-#include <linux/mlx5/fs.h>
 #include <linux/types.h>
 #include <linux/mlx5/transobj.h>
 #include <rdma/ib_user_verbs.h>
 #include <rdma/mlx5-abi.h>
 #include <rdma/uverbs_ioctl.h>
 #include <rdma/mlx5_user_ioctl_cmds.h>
+
+#include "srq.h"
 
 #define mlx5_ib_dbg(_dev, format, arg...)                                      \
 	dev_dbg(&(_dev)->ib_dev.dev, "%s:%d:(pid %d): " format, __func__,      \
@@ -257,6 +258,7 @@ enum mlx5_ib_rq_flags {
 };
 
 struct mlx5_ib_wq {
+	struct mlx5_frag_buf_ctrl fbc;
 	u64		       *wrid;
 	u32		       *wr_data;
 	struct wr_list	       *w_list;
@@ -274,7 +276,7 @@ struct mlx5_ib_wq {
 	unsigned		head;
 	unsigned		tail;
 	u16			cur_post;
-	void		       *qend;
+	void			*cur_edge;
 };
 
 enum mlx5_ib_wq_flags {
@@ -429,7 +431,7 @@ struct mlx5_ib_qp {
 	struct list_head	qps_list;
 	struct list_head	cq_recv_list;
 	struct list_head	cq_send_list;
-	struct mlx5_rate_limit  rl;
+	struct mlx5_rate_limit	rl;
 	u32                     underlay_qpn;
 	u32			flags_en;
 	/* storage for qp sub type when core qp type is IB_QPT_DRIVER */
@@ -459,6 +461,7 @@ enum mlx5_ib_qp_flags {
 	MLX5_IB_QP_UNDERLAY			= 1 << 10,
 	MLX5_IB_QP_PCI_WRITE_END_PADDING	= 1 << 11,
 	MLX5_IB_QP_TUNNEL_OFFLOAD		= 1 << 12,
+	MLX5_IB_QP_PACKET_BASED_CREDIT		= 1 << 13,
 };
 
 struct mlx5_umr_wr {
@@ -471,7 +474,6 @@ struct mlx5_umr_wr {
 	u64				length;
 	int				access_flags;
 	u32				mkey;
-	u8				ignore_free_state:1;
 };
 
 static inline const struct mlx5_umr_wr *umr_wr(const struct ib_send_wr *wr)
@@ -523,6 +525,7 @@ struct mlx5_ib_srq {
 	struct mlx5_core_srq	msrq;
 	struct mlx5_frag_buf	buf;
 	struct mlx5_db		db;
+	struct mlx5_frag_buf_ctrl fbc;
 	u64		       *wrid;
 	/* protect SRQ hanlding
 	 */
@@ -585,7 +588,15 @@ struct mlx5_ib_mr {
 	struct mlx5_ib_mr      *parent;
 	atomic_t		num_leaf_free;
 	wait_queue_head_t       q_leaf_free;
+	struct mlx5_async_work  cb_work;
+	atomic_t		num_pending_prefetch;
 };
+
+static inline bool is_odp_mr(struct mlx5_ib_mr *mr)
+{
+	return IS_ENABLED(CONFIG_INFINIBAND_ON_DEMAND_PAGING) && mr->umem &&
+	       mr->umem->is_odp;
+}
 
 struct mlx5_ib_mw {
 	struct ib_mw		ibmw;
@@ -779,7 +790,9 @@ enum mlx5_ib_stages {
 	MLX5_IB_STAGE_CAPS,
 	MLX5_IB_STAGE_NON_DEFAULT_CB,
 	MLX5_IB_STAGE_ROCE,
+	MLX5_IB_STAGE_SRQ,
 	MLX5_IB_STAGE_DEVICE_RESOURCES,
+	MLX5_IB_STAGE_DEVICE_NOTIFIER,
 	MLX5_IB_STAGE_ODP,
 	MLX5_IB_STAGE_COUNTERS,
 	MLX5_IB_STAGE_CONG_DEBUGFS,
@@ -791,7 +804,6 @@ enum mlx5_ib_stages {
 	MLX5_IB_STAGE_POST_IB_REG_UMR,
 	MLX5_IB_STAGE_DELAY_DROP,
 	MLX5_IB_STAGE_CLASS_ATTR,
-	MLX5_IB_STAGE_REP_REG,
 	MLX5_IB_STAGE_MAX,
 };
 
@@ -811,6 +823,7 @@ struct mlx5_ib_multiport_info {
 	struct list_head list;
 	struct mlx5_ib_dev *ibdev;
 	struct mlx5_core_dev *mdev;
+	struct notifier_block mdev_events;
 	struct completion unref_comp;
 	u64 sys_image_guid;
 	u32 mdev_refcnt;
@@ -897,6 +910,7 @@ struct mlx5_ib_pf_eq {
 struct mlx5_ib_dev {
 	struct ib_device		ib_dev;
 	struct mlx5_core_dev		*mdev;
+	struct notifier_block		mdev_events;
 	struct mlx5_roce		roce[MLX5_MAX_PORTS];
 	int				num_ports;
 	/* serialize update of capability mask
@@ -912,7 +926,6 @@ struct mlx5_ib_dev {
 	/* Prevents soft lock on massive reg MRs */
 	struct mutex			slow_path_mutex;
 	int				fill_delay;
-#ifdef CONFIG_INFINIBAND_ON_DEMAND_PAGING
 	struct ib_odp_caps	odp_caps;
 	u64			odp_max_size;
 	struct mlx5_ib_pf_eq	odp_pf_eq;
@@ -923,7 +936,6 @@ struct mlx5_ib_dev {
 	 */
 	struct srcu_struct      mr_srcu;
 	u32			null_mkey;
-#endif
 	struct mlx5_ib_flow_db	*flow_db;
 	/* protect resources needed as part of reset flow */
 	spinlock_t		reset_flow_resource_lock;
@@ -943,6 +955,8 @@ struct mlx5_ib_dev {
 	u64			sys_image_guid;
 	struct mlx5_memic	memic;
 	u16			devx_whitelist_uid;
+	struct mlx5_srq_table   srq_table;
+	struct mlx5_async_ctx   async_ctx;
 };
 
 static inline struct mlx5_ib_cq *to_mibcq(struct mlx5_core_cq *mcq)
@@ -1041,9 +1055,9 @@ int mlx5_MAD_IFC(struct mlx5_ib_dev *dev, int ignore_mkey, int ignore_bkey,
 		 u8 port, const struct ib_wc *in_wc, const struct ib_grh *in_grh,
 		 const void *in_mad, void *response_mad);
 struct ib_ah *mlx5_ib_create_ah(struct ib_pd *pd, struct rdma_ah_attr *ah_attr,
-				struct ib_udata *udata);
+				u32 flags, struct ib_udata *udata);
 int mlx5_ib_query_ah(struct ib_ah *ibah, struct rdma_ah_attr *ah_attr);
-int mlx5_ib_destroy_ah(struct ib_ah *ah);
+int mlx5_ib_destroy_ah(struct ib_ah *ah, u32 flags);
 struct ib_srq *mlx5_ib_create_srq(struct ib_pd *pd,
 				  struct ib_srq_init_attr *init_attr,
 				  struct ib_udata *udata);
@@ -1085,6 +1099,12 @@ struct ib_mr *mlx5_ib_get_dma_mr(struct ib_pd *pd, int acc);
 struct ib_mr *mlx5_ib_reg_user_mr(struct ib_pd *pd, u64 start, u64 length,
 				  u64 virt_addr, int access_flags,
 				  struct ib_udata *udata);
+int mlx5_ib_advise_mr(struct ib_pd *pd,
+		      enum ib_uverbs_advise_mr_advice advice,
+		      u32 flags,
+		      struct ib_sge *sg_list,
+		      u32 num_sge,
+		      struct uverbs_attr_bundle *attrs);
 struct ib_mw *mlx5_ib_alloc_mw(struct ib_pd *pd, enum ib_mw_type type,
 			       struct ib_udata *udata);
 int mlx5_ib_dealloc_mw(struct ib_mw *mw);
@@ -1182,6 +1202,10 @@ void mlx5_ib_invalidate_range(struct ib_umem_odp *umem_odp, unsigned long start,
 void mlx5_odp_init_mr_cache_entry(struct mlx5_cache_ent *ent);
 void mlx5_odp_populate_klm(struct mlx5_klm *pklm, size_t offset,
 			   size_t nentries, struct mlx5_ib_mr *mr, int flags);
+
+int mlx5_ib_advise_mr_prefetch(struct ib_pd *pd,
+			       enum ib_uverbs_advise_mr_advice advice,
+			       u32 flags, struct ib_sge *sg_list, u32 num_sge);
 #else /* CONFIG_INFINIBAND_ON_DEMAND_PAGING */
 static inline void mlx5_ib_internal_fill_odp_caps(struct mlx5_ib_dev *dev)
 {
@@ -1197,6 +1221,16 @@ static inline void mlx5_odp_populate_klm(struct mlx5_klm *pklm, size_t offset,
 					 size_t nentries, struct mlx5_ib_mr *mr,
 					 int flags) {}
 
+static inline int
+mlx5_ib_advise_mr_prefetch(struct ib_pd *pd,
+			   enum ib_uverbs_advise_mr_advice advice, u32 flags,
+			   struct ib_sge *sg_list, u32 num_sge)
+{
+	return -EOPNOTSUPP;
+}
+static inline void mlx5_ib_invalidate_range(struct ib_umem_odp *umem_odp,
+					    unsigned long start,
+					    unsigned long end){};
 #endif /* CONFIG_INFINIBAND_ON_DEMAND_PAGING */
 
 /* Needed for rep profile */
@@ -1267,14 +1301,14 @@ void mlx5_ib_put_native_port_mdev(struct mlx5_ib_dev *dev,
 #if IS_ENABLED(CONFIG_INFINIBAND_USER_ACCESS)
 int mlx5_ib_devx_create(struct mlx5_ib_dev *dev, bool is_user);
 void mlx5_ib_devx_destroy(struct mlx5_ib_dev *dev, u16 uid);
-const struct uverbs_object_tree_def *mlx5_ib_get_devx_tree(void);
 extern const struct uapi_definition mlx5_ib_devx_defs[];
 extern const struct uapi_definition mlx5_ib_flow_defs[];
 struct mlx5_ib_flow_handler *mlx5_ib_raw_fs_rule_add(
 	struct mlx5_ib_dev *dev, struct mlx5_ib_flow_matcher *fs_matcher,
-	struct mlx5_flow_act *flow_act, void *cmd_in, int inlen,
-	int dest_id, int dest_type);
+	struct mlx5_flow_act *flow_act, u32 counter_id,
+	void *cmd_in, int inlen, int dest_id, int dest_type);
 bool mlx5_ib_devx_is_flow_dest(void *obj, int *dest_id, int *dest_type);
+bool mlx5_ib_devx_is_flow_counter(void *obj, u32 *counter_id);
 void mlx5_ib_destroy_flow_action_raw(struct mlx5_ib_flow_action *maction);
 #else
 static inline int

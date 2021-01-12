@@ -222,31 +222,11 @@ static void ud_loopback(struct rvt_qp *sqp, struct rvt_swqe *swqe)
 	ssge.num_sge = swqe->wr.num_sge;
 	sge = &ssge.sge;
 	while (length) {
-		u32 len = sge->length;
+		u32 len = rvt_get_sge_length(sge, length);
 
-		if (len > length)
-			len = length;
-		if (len > sge->sge_length)
-			len = sge->sge_length;
 		WARN_ON_ONCE(len == 0);
 		rvt_copy_sge(qp, &qp->r_sge, sge->vaddr, len, true, false);
-		sge->vaddr += len;
-		sge->length -= len;
-		sge->sge_length -= len;
-		if (sge->sge_length == 0) {
-			if (--ssge.num_sge)
-				*sge = *ssge.sg_list++;
-		} else if (sge->length == 0 && sge->mr->lkey) {
-			if (++sge->n >= RVT_SEGSZ) {
-				if (++sge->m >= sge->mr->mapsz)
-					break;
-				sge->n = 0;
-			}
-			sge->vaddr =
-				sge->mr->map[sge->m]->segs[sge->n].vaddr;
-			sge->length =
-				sge->mr->map[sge->m]->segs[sge->n].length;
-		}
+		rvt_update_sge(&ssge, len, false);
 		length -= len;
 	}
 	rvt_put_ss(&qp->r_sge);
@@ -511,7 +491,7 @@ int hfi1_make_ud_req(struct rvt_qp *qp, struct hfi1_pkt_state *ps)
 		if (!(ib_rvt_state_ops[qp->state] & RVT_FLUSH_SEND))
 			goto bail;
 		/* We are in the error state, flush the work request. */
-		if (qp->s_last == ACCESS_ONCE(qp->s_head))
+		if (qp->s_last == READ_ONCE(qp->s_head))
 			goto bail;
 		/* If DMAs are in progress, we can't flush immediately. */
 		if (iowait_sdma_pending(&priv->s_iowait)) {
@@ -524,7 +504,7 @@ int hfi1_make_ud_req(struct rvt_qp *qp, struct hfi1_pkt_state *ps)
 	}
 
 	/* see post_one_send() */
-	if (qp->s_cur == ACCESS_ONCE(qp->s_head))
+	if (qp->s_cur == READ_ONCE(qp->s_head))
 		goto bail;
 
 	wqe = rvt_get_swqe_ptr(qp, qp->s_cur);

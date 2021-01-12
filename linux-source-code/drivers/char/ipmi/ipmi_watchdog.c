@@ -25,7 +25,7 @@
 #include <linux/kdebug.h>
 #include <linux/rwsem.h>
 #include <linux/errno.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <linux/notifier.h>
 #include <linux/nmi.h>
 #include <linux/reboot.h>
@@ -35,6 +35,7 @@
 #include <linux/ctype.h>
 #include <linux/delay.h>
 #include <linux/atomic.h>
+#include <linux/sched/signal.h>
 
 #ifdef CONFIG_X86
 /*
@@ -121,14 +122,10 @@
 
 #define IPMI_WDOG_TIMER_NOT_INIT_RESP	0x80
 
-extern int __ipmi_get_version(ipmi_user_t   user,
-			      unsigned char *major,
-			      unsigned char *minor);
-
 static DEFINE_MUTEX(ipmi_watchdog_mutex);
 static bool nowayout = WATCHDOG_NOWAYOUT;
 
-static ipmi_user_t watchdog_user;
+static struct ipmi_user *watchdog_user;
 static int watchdog_ifnum;
 
 /* Default the timeout to 10 seconds. */
@@ -195,7 +192,7 @@ static int set_param_timeout(const char *val, const struct kernel_param *kp)
 	return rv;
 }
 
-static struct kernel_param_ops param_ops_timeout = {
+static const struct kernel_param_ops param_ops_timeout = {
 	.set = set_param_timeout,
 	.get = param_get_int,
 };
@@ -257,14 +254,14 @@ static int set_param_wdog_ifnum(const char *val, const struct kernel_param *kp)
 	return 0;
 }
 
-static struct kernel_param_ops param_ops_wdog_ifnum = {
+static const struct kernel_param_ops param_ops_wdog_ifnum = {
 	.set = set_param_wdog_ifnum,
 	.get = param_get_int,
 };
 
 #define param_check_wdog_ifnum param_check_int
 
-static struct kernel_param_ops param_ops_str = {
+static const struct kernel_param_ops param_ops_str = {
 	.set = set_param_str,
 	.get = get_param_str,
 };
@@ -781,7 +778,7 @@ static ssize_t ipmi_read(struct file *file,
 			 loff_t      *ppos)
 {
 	int          rv = 0;
-	wait_queue_t wait;
+	wait_queue_entry_t wait;
 
 	if (count <= 0)
 		return 0;
@@ -847,15 +844,15 @@ static int ipmi_open(struct inode *ino, struct file *filep)
 	}
 }
 
-static unsigned int ipmi_poll(struct file *file, poll_table *wait)
+static __poll_t ipmi_poll(struct file *file, poll_table *wait)
 {
-	unsigned int mask = 0;
+	__poll_t mask = 0;
 
 	poll_wait(file, &read_q, wait);
 
 	spin_lock_irq(&ipmi_read_lock);
 	if (data_to_read)
-		mask |= (POLLIN | POLLRDNORM);
+		mask |= (EPOLLIN | EPOLLRDNORM);
 	spin_unlock_irq(&ipmi_read_lock);
 
 	return mask;
@@ -946,9 +943,31 @@ static void ipmi_wdog_pretimeout_handler(void *handler_data)
 	atomic_set(&pretimeout_since_last_heartbeat, 1);
 }
 
-static RH_KABI_CONST struct ipmi_user_hndl ipmi_hndlrs = {
+static void ipmi_wdog_panic_handler(void *user_data)
+{
+	static int panic_event_handled;
+
+	/*
+	 * On a panic, if we have a panic timeout, make sure to extend
+	 * the watchdog timer to a reasonable value to complete the
+	 * panic, if the watchdog timer is running.  Plus the
+	 * pretimeout is meaningless at panic time.
+	 */
+	if (watchdog_user && !panic_event_handled &&
+	    ipmi_watchdog_state != WDOG_TIMEOUT_NONE) {
+		/* Make sure we do this only once. */
+		panic_event_handled = 1;
+
+		timeout = panic_wdt_timeout;
+		pretimeout = 0;
+		panic_halt_ipmi_set_timeout();
+	}
+}
+
+static const struct ipmi_user_hndl ipmi_hndlrs = {
 	.ipmi_recv_hndl           = ipmi_wdog_msg_handler,
-	.ipmi_watchdog_pretimeout = ipmi_wdog_pretimeout_handler
+	.ipmi_watchdog_pretimeout = ipmi_wdog_pretimeout_handler,
+	.ipmi_panic_handler       = ipmi_wdog_panic_handler
 };
 
 static void ipmi_register_watchdog(int ipmi_intf)
@@ -969,7 +988,7 @@ static void ipmi_register_watchdog(int ipmi_intf)
 		goto out;
 	}
 
-	rv = __ipmi_get_version(watchdog_user,
+	rv = ipmi_get_version(watchdog_user,
 			      &ipmi_version_major,
 			      &ipmi_version_minor);
 	if (rv) {
@@ -1040,7 +1059,7 @@ static void ipmi_register_watchdog(int ipmi_intf)
 static void ipmi_unregister_watchdog(int ipmi_intf)
 {
 	int rv;
-	ipmi_user_t loc_user = watchdog_user;
+	struct ipmi_user *loc_user = watchdog_user;
 
 	if (!loc_user)
 		return;
@@ -1147,36 +1166,6 @@ static struct notifier_block wdog_reboot_notifier = {
 	.next		= NULL,
 	.priority	= 0
 };
-
-static int wdog_panic_handler(struct notifier_block *this,
-			      unsigned long         event,
-			      void                  *unused)
-{
-	static int panic_event_handled;
-
-	/* On a panic, if we have a panic timeout, make sure to extend
-	   the watchdog timer to a reasonable value to complete the
-	   panic, if the watchdog timer is running.  Plus the
-	   pretimeout is meaningless at panic time. */
-	if (watchdog_user && !panic_event_handled &&
-	    ipmi_watchdog_state != WDOG_TIMEOUT_NONE) {
-		/* Make sure we do this only once. */
-		panic_event_handled = 1;
-
-		timeout = panic_wdt_timeout;
-		pretimeout = 0;
-		panic_halt_ipmi_set_timeout();
-	}
-
-	return NOTIFY_OK;
-}
-
-static struct notifier_block wdog_panic_notifier = {
-	.notifier_call	= wdog_panic_handler,
-	.next		= NULL,
-	.priority	= 150	/* priority: INT_MAX >= x >= 0 */
-};
-
 
 static void ipmi_new_smi(int if_num, struct device *device)
 {
@@ -1312,8 +1301,6 @@ static int __init ipmi_wdog_init(void)
 	check_parms();
 
 	register_reboot_notifier(&wdog_reboot_notifier);
-	atomic_notifier_chain_register(&panic_notifier_list,
-			&wdog_panic_notifier);
 
 	rv = ipmi_smi_watcher_register(&smi_watcher);
 	if (rv) {
@@ -1321,8 +1308,6 @@ static int __init ipmi_wdog_init(void)
 		if (nmi_handler_registered)
 			unregister_nmi_handler(NMI_UNKNOWN, "ipmi");
 #endif
-		atomic_notifier_chain_unregister(&panic_notifier_list,
-						 &wdog_panic_notifier);
 		unregister_reboot_notifier(&wdog_reboot_notifier);
 		pr_warn("can't register smi watcher\n");
 		return rv;
@@ -1343,8 +1328,6 @@ static void __exit ipmi_wdog_exit(void)
 		unregister_nmi_handler(NMI_UNKNOWN, "ipmi");
 #endif
 
-	atomic_notifier_chain_unregister(&panic_notifier_list,
-					 &wdog_panic_notifier);
 	unregister_reboot_notifier(&wdog_reboot_notifier);
 }
 module_exit(ipmi_wdog_exit);

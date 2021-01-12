@@ -1,12 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * MMU fault handling support.
  *
  * Copyright (C) 1998-2002 Hewlett-Packard Co
  *	David Mosberger-Tang <davidm@hpl.hp.com>
  */
-#include <linux/sched.h>
+#include <linux/sched/signal.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
+#include <linux/extable.h>
 #include <linux/interrupt.h>
 #include <linux/kprobes.h>
 #include <linux/kdebug.h>
@@ -15,6 +17,7 @@
 
 #include <asm/pgtable.h>
 #include <asm/processor.h>
+#include <asm/exception.h>
 
 extern int die(char *, struct pt_regs *, long);
 
@@ -82,15 +85,12 @@ ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_regs *re
 	int signal = SIGSEGV, code = SEGV_MAPERR;
 	struct vm_area_struct *vma, *prev_vma;
 	struct mm_struct *mm = current->mm;
-	struct siginfo si;
 	unsigned long mask;
-	int fault;
+	vm_fault_t fault;
 	unsigned int flags = FAULT_FLAG_ALLOW_RETRY | FAULT_FLAG_KILLABLE;
 
 	mask = ((((isr >> IA64_ISR_X_BIT) & 1UL) << VM_EXEC_BIT)
 		| (((isr >> IA64_ISR_W_BIT) & 1UL) << VM_WRITE_BIT));
-
-	flags |= ((mask & VM_WRITE) ? FAULT_FLAG_WRITE : 0);
 
 	/* mmap_sem is performance critical.... */
 	prefetchw(&mm->mmap_sem);
@@ -119,6 +119,10 @@ ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_regs *re
 	if (notify_page_fault(regs, TRAP_BRKPT))
 		return;
 
+	if (user_mode(regs))
+		flags |= FAULT_FLAG_USER;
+	if (mask & VM_WRITE)
+		flags |= FAULT_FLAG_WRITE;
 retry:
 	down_read(&mm->mmap_sem);
 
@@ -170,6 +174,8 @@ retry:
 		 */
 		if (fault & VM_FAULT_OOM) {
 			goto out_of_memory;
+		} else if (fault & VM_FAULT_SIGSEGV) {
+			goto bad_area;
 		} else if (fault & VM_FAULT_SIGBUS) {
 			signal = SIGBUS;
 			goto bad_area;
@@ -242,6 +248,9 @@ retry:
 		return;
 	}
 	if (user_mode(regs)) {
+		struct siginfo si;
+
+		clear_siginfo(&si);
 		si.si_signo = signal;
 		si.si_errno = 0;
 		si.si_code = code;

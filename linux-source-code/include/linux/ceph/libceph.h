@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _FS_CEPH_LIBCEPH_H
 #define _FS_CEPH_LIBCEPH_H
 
@@ -14,6 +15,7 @@
 #include <linux/wait.h>
 #include <linux/writeback.h>
 #include <linux/slab.h>
+#include <linux/refcount.h>
 
 #include <linux/ceph/types.h>
 #include <linux/ceph/messenger.h>
@@ -150,7 +152,7 @@ struct ceph_client {
  * dirtied.
  */
 struct ceph_snap_context {
-	atomic_t nref;
+	refcount_t nref;
 	u64 seq;
 	u32 num_snaps;
 	u64 snaps[];
@@ -168,8 +170,8 @@ extern void ceph_put_snap_context(struct ceph_snap_context *sc);
  */
 static inline int calc_pages_for(u64 off, u64 len)
 {
-	return ((off+len+PAGE_CACHE_SIZE-1) >> PAGE_CACHE_SHIFT) -
-		(off >> PAGE_CACHE_SHIFT);
+	return ((off+len+PAGE_SIZE-1) >> PAGE_SHIFT) -
+		(off >> PAGE_SHIFT);
 }
 
 #define RB_BYVAL(a)      (a)
@@ -190,13 +192,11 @@ static void insert_##name(struct rb_root *root, type *t)		\
 									\
 		parent = *n;						\
 		cmp = cmpexp(keyexp(t->keyfld), keyexp(cur->keyfld));	\
-		if (cmp < 0) {						\
-			gmb();						\
+		if (cmp < 0)						\
 			n = &(*n)->rb_left;				\
-		} else if (cmp > 0) {					\
-			gmb();						\
+		else if (cmp > 0)					\
 			n = &(*n)->rb_right;				\
-		} else							\
+		else							\
 			BUG();						\
 	}								\
 									\
@@ -304,8 +304,6 @@ extern void ceph_copy_to_page_vector(struct page **pages,
 				    loff_t off, size_t len);
 extern void ceph_copy_from_page_vector(struct page **pages,
 				    void *data,
-				    loff_t off, size_t len);
-extern int ceph_copy_page_vector_to_user(struct page **pages, void __user *data,
 				    loff_t off, size_t len);
 extern void ceph_zero_page_vector_range(int off, int len, struct page **pages);
 

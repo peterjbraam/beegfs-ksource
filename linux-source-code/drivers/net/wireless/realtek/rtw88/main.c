@@ -13,8 +13,6 @@
 #include "efuse.h"
 #include "debug.h"
 
-#include <linux/module.h>
-
 static bool rtw_fw_support_lps;
 unsigned int rtw_debug_mask;
 EXPORT_SYMBOL(rtw_debug_mask);
@@ -164,7 +162,8 @@ static void rtw_watch_dog_work(struct work_struct *work)
 	rtwdev->stats.tx_cnt = 0;
 	rtwdev->stats.rx_cnt = 0;
 
-	rtw_iterate_vifs(rtwdev, rtw_vif_watch_dog_iter, &data);
+	/* use atomic version to avoid taking local->iflist_mtx mutex */
+	rtw_iterate_vifs_atomic(rtwdev, rtw_vif_watch_dog_iter, &data);
 
 	/* fw supports only one station associated to enter lps, if there are
 	 * more than two stations associated to the AP, then we can not enter
@@ -365,13 +364,13 @@ static u64 get_vht_ra_mask(struct ieee80211_sta *sta)
 		vht_mcs_cap = mcs_map & 0x3;
 		switch (vht_mcs_cap) {
 		case 2: /* MCS9 */
-			ra_mask |= 0x3ff << nss;
+			ra_mask |= 0x3ffULL << nss;
 			break;
 		case 1: /* MCS8 */
-			ra_mask |= 0x1ff << nss;
+			ra_mask |= 0x1ffULL << nss;
 			break;
 		case 0: /* MCS7 */
-			ra_mask |= 0x0ff << nss;
+			ra_mask |= 0x0ffULL << nss;
 			break;
 		default:
 			break;
@@ -464,15 +463,15 @@ static u8 get_rate_id(u8 wireless_set, enum rtw_bandwidth bw_mode, u8 tx_num)
 
 #define RA_MASK_CCK_RATES	0x0000f
 #define RA_MASK_OFDM_RATES	0x00ff0
-#define RA_MASK_HT_RATES_1SS	(0xff000 << 0)
-#define RA_MASK_HT_RATES_2SS	(0xff000 << 8)
-#define RA_MASK_HT_RATES_3SS	(0xff000 << 16)
+#define RA_MASK_HT_RATES_1SS	(0xff000ULL << 0)
+#define RA_MASK_HT_RATES_2SS	(0xff000ULL << 8)
+#define RA_MASK_HT_RATES_3SS	(0xff000ULL << 16)
 #define RA_MASK_HT_RATES	(RA_MASK_HT_RATES_1SS | \
 				 RA_MASK_HT_RATES_2SS | \
 				 RA_MASK_HT_RATES_3SS)
-#define RA_MASK_VHT_RATES_1SS	(0x3ff000 << 0)
-#define RA_MASK_VHT_RATES_2SS	(0x3ff000 << 10)
-#define RA_MASK_VHT_RATES_3SS	(0x3ff000 << 20)
+#define RA_MASK_VHT_RATES_1SS	(0x3ff000ULL << 0)
+#define RA_MASK_VHT_RATES_2SS	(0x3ff000ULL << 10)
+#define RA_MASK_VHT_RATES_3SS	(0x3ff000ULL << 20)
 #define RA_MASK_VHT_RATES	(RA_MASK_VHT_RATES_1SS | \
 				 RA_MASK_VHT_RATES_2SS | \
 				 RA_MASK_VHT_RATES_3SS)

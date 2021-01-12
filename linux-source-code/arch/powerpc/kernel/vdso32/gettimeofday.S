@@ -139,6 +139,7 @@ V_FUNCTION_BEGIN(__kernel_clock_gettime)
 	 */
 99:
 	li	r0,__NR_clock_gettime
+  .cfi_restore lr
 	sc
 	blr
   .cfi_endproc
@@ -232,9 +233,9 @@ __do_get_tspec:
 	lwz	r6,(CFG_TB_ORIG_STAMP+4)(r9)
 
 	/* Get a stable TB value */
-2:	mfspr	r3, SPRN_TBRU
-	mfspr	r4, SPRN_TBRL
-	mfspr	r0, SPRN_TBRU
+2:	MFTBU(r3)
+	MFTBL(r4)
+	MFTBU(r0)
 	cmplw	cr0,r3,r0
 	bne-	2b
 

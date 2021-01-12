@@ -149,6 +149,7 @@ enum i40e_state_t {
 	__I40E_CLIENT_L2_CHANGE,
 	__I40E_CLIENT_RESET,
 	__I40E_VIRTCHNL_OP_PENDING,
+	__I40E_RECOVERY_MODE,
 	/* This must be last as it determines the size of the BITMAP */
 	__I40E_STATE_SIZE__,
 };
@@ -294,6 +295,8 @@ struct i40e_cloud_filter {
 	u8 tunnel_type;
 };
 
+#define I40E_ETH_P_LLDP			0x88cc
+
 #define I40E_DCB_PRIO_TYPE_STRICT	0
 #define I40E_DCB_PRIO_TYPE_ETS		1
 #define I40E_DCB_STRICT_PRIO_CREDITS	127
@@ -317,6 +320,29 @@ struct i40e_udp_port_config {
 	u16 port;
 	u8 type;
 	u8 filter_index;
+};
+
+#define I40_DDP_FLASH_REGION 100
+#define I40E_PROFILE_INFO_SIZE 48
+#define I40E_MAX_PROFILE_NUM 16
+#define I40E_PROFILE_LIST_SIZE \
+	(I40E_PROFILE_INFO_SIZE * I40E_MAX_PROFILE_NUM + 4)
+#define I40E_DDP_PROFILE_PATH "intel/i40e/ddp/"
+#define I40E_DDP_PROFILE_NAME_MAX 64
+
+int i40e_ddp_load(struct net_device *netdev, const u8 *data, size_t size,
+		  bool is_add);
+int i40e_ddp_flash(struct net_device *netdev, struct ethtool_flash *flash);
+
+struct i40e_ddp_profile_list {
+	u32 p_count;
+	struct i40e_profile_info p_info[0];
+};
+
+struct i40e_ddp_old_profile_list {
+	struct list_head list;
+	size_t old_ddp_size;
+	u8 old_ddp_buf[0];
 };
 
 /* macros related to FLX_PIT */
@@ -610,6 +636,8 @@ struct i40e_pf {
 	u16 override_q_count;
 	u16 last_sw_conf_flags;
 	u16 last_sw_conf_valid_flags;
+	/* List to keep previous DDP profiles to be rolled back in the future */
+	struct list_head ddp_old_prof;
 };
 
 /**
@@ -749,8 +777,7 @@ struct i40e_vsi {
 	u16 alloc_queue_pairs;	/* Allocated Tx/Rx queues */
 	u16 req_queue_pairs;	/* User requested queue pairs */
 	u16 num_queue_pairs;	/* Used tx and rx pairs */
-	u16 num_tx_desc;
-	u16 num_rx_desc;
+	u16 num_desc;
 	enum i40e_vsi_type type;  /* VSI type, e.g., LAN, FCoE, etc */
 	s16 vf_id;		/* Virtual function ID for SRIOV VSIs */
 
@@ -791,6 +818,8 @@ struct i40e_vsi {
 
 	/* VSI specific handlers */
 	irqreturn_t (*irq_handler)(int irq, void *data);
+
+	unsigned long *af_xdp_zc_qps; /* tracks AF_XDP ZC enabled qps */
 } ____cacheline_internodealigned_in_smp;
 
 struct i40e_netdev_priv {
@@ -966,7 +995,6 @@ i40e_find_vsi_by_type(struct i40e_pf *pf, u16 type)
 	return NULL;
 }
 void i40e_update_stats(struct i40e_vsi *vsi);
-void i40e_update_veb_stats(struct i40e_veb *veb);
 void i40e_update_eth_stats(struct i40e_vsi *vsi);
 struct rtnl_link_stats64 *i40e_get_vsi_stats_struct(struct i40e_vsi *vsi);
 int i40e_fetch_switch_configuration(struct i40e_pf *pf,

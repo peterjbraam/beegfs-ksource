@@ -39,7 +39,7 @@ int __kfifo_alloc(struct __kfifo *fifo, unsigned int size,
 		size_t esize, gfp_t gfp_mask)
 {
 	/*
-	 * round down to the next power of 2, since our 'let the indices
+	 * round up to the next power of 2, since our 'let the indices
 	 * wrap' technique works only in this case.
 	 */
 	size = roundup_pow_of_two(size);
@@ -54,7 +54,7 @@ int __kfifo_alloc(struct __kfifo *fifo, unsigned int size,
 		return -EINVAL;
 	}
 
-	fifo->data = kmalloc(size * esize, gfp_mask);
+	fifo->data = kmalloc_array(esize, size, gfp_mask);
 
 	if (!fifo->data) {
 		fifo->mask = 0;
@@ -215,7 +215,7 @@ static unsigned long kfifo_copy_from_user(struct __kfifo *fifo,
 	 * incrementing the fifo->in index counter
 	 */
 	smp_wmb();
-	*copied = len - ret;
+	*copied = len - ret * esize;
 	/* return the number of elements which are not copied */
 	return ret;
 }
@@ -275,7 +275,7 @@ static unsigned long kfifo_copy_to_user(struct __kfifo *fifo, void __user *to,
 	 * incrementing the fifo->out index counter
 	 */
 	smp_wmb();
-	*copied = len - ret;
+	*copied = len - ret * esize;
 	/* return the number of elements which are not copied */
 	return ret;
 }
@@ -561,8 +561,7 @@ EXPORT_SYMBOL(__kfifo_to_user_r);
 unsigned int __kfifo_dma_in_prepare_r(struct __kfifo *fifo,
 	struct scatterlist *sgl, int nents, unsigned int len, size_t recsize)
 {
-	if (!nents)
-		BUG();
+	BUG_ON(!nents);
 
 	len = __kfifo_max_r(len, recsize);
 
@@ -585,8 +584,7 @@ EXPORT_SYMBOL(__kfifo_dma_in_finish_r);
 unsigned int __kfifo_dma_out_prepare_r(struct __kfifo *fifo,
 	struct scatterlist *sgl, int nents, unsigned int len, size_t recsize)
 {
-	if (!nents)
-		BUG();
+	BUG_ON(!nents);
 
 	len = __kfifo_max_r(len, recsize);
 

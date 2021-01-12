@@ -11,8 +11,7 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ * along with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <linux/kernel.h>
@@ -49,27 +48,27 @@ static unsigned char ocr[MAXDEV] = {[0 ... (MAXDEV - 1)] = 0xff};
 static int indirect[MAXDEV] = {[0 ... (MAXDEV - 1)] = -1};
 static spinlock_t indirect_lock[MAXDEV];  /* lock for indirect access mode */
 
-module_param_array(port, ulong, NULL, S_IRUGO);
+module_param_hw_array(port, ulong, ioport, NULL, 0444);
 MODULE_PARM_DESC(port, "I/O port number");
 
-module_param_array(mem, ulong, NULL, S_IRUGO);
+module_param_hw_array(mem, ulong, iomem, NULL, 0444);
 MODULE_PARM_DESC(mem, "I/O memory address");
 
-module_param_array(indirect, int, NULL, S_IRUGO);
+module_param_hw_array(indirect, int, ioport, NULL, 0444);
 MODULE_PARM_DESC(indirect, "Indirect access via address and data port");
 
-module_param_array(irq, int, NULL, S_IRUGO);
+module_param_hw_array(irq, int, irq, NULL, 0444);
 MODULE_PARM_DESC(irq, "IRQ number");
 
-module_param_array(clk, int, NULL, S_IRUGO);
+module_param_array(clk, int, NULL, 0444);
 MODULE_PARM_DESC(clk, "External oscillator clock frequency "
 		 "(default=16000000 [16 MHz])");
 
-module_param_array(cdr, byte, NULL, S_IRUGO);
+module_param_array(cdr, byte, NULL, 0444);
 MODULE_PARM_DESC(cdr, "Clock divider register "
 		 "(default=0x48 [CDR_CBP | CDR_CLK_OFF])");
 
-module_param_array(ocr, byte, NULL, S_IRUGO);
+module_param_array(ocr, byte, NULL, 0444);
 MODULE_PARM_DESC(ocr, "Output control register "
 		 "(default=0x18 [OCR_TX0_PUSHPULL])");
 
@@ -206,7 +205,7 @@ static int sja1000_isa_probe(struct platform_device *pdev)
 	else
 		priv->cdr = CDR_DEFAULT;
 
-	dev_set_drvdata(&pdev->dev, dev);
+	platform_set_drvdata(pdev, dev);
 	SET_NETDEV_DEV(dev, &pdev->dev);
 	dev->dev_id = idx;
 
@@ -235,12 +234,11 @@ static int sja1000_isa_probe(struct platform_device *pdev)
 
 static int sja1000_isa_remove(struct platform_device *pdev)
 {
-	struct net_device *dev = dev_get_drvdata(&pdev->dev);
+	struct net_device *dev = platform_get_drvdata(pdev);
 	struct sja1000_priv *priv = netdev_priv(dev);
 	int idx = pdev->id;
 
 	unregister_sja1000dev(dev);
-	dev_set_drvdata(&pdev->dev, NULL);
 
 	if (mem[idx]) {
 		iounmap(priv->reg_base);
@@ -261,7 +259,6 @@ static struct platform_driver sja1000_isa_driver = {
 	.remove = sja1000_isa_remove,
 	.driver = {
 		.name = DRV_NAME,
-		.owner = THIS_MODULE,
 	},
 };
 

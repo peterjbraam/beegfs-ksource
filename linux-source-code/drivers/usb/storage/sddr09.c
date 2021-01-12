@@ -1231,8 +1231,8 @@ sddr09_read_map(struct us_data *us) {
 
 	kfree(info->lba_to_pba);
 	kfree(info->pba_to_lba);
-	info->lba_to_pba = kmalloc(numblocks*sizeof(int), GFP_NOIO);
-	info->pba_to_lba = kmalloc(numblocks*sizeof(int), GFP_NOIO);
+	info->lba_to_pba = kmalloc_array(numblocks, sizeof(int), GFP_NOIO);
+	info->pba_to_lba = kmalloc_array(numblocks, sizeof(int), GFP_NOIO);
 
 	if (info->lba_to_pba == NULL || info->pba_to_lba == NULL) {
 		printk(KERN_WARNING "sddr09_read_map: out of memory\n");
@@ -1496,7 +1496,7 @@ static int dpcm_transport(struct scsi_cmnd *srb, struct us_data *us)
 {
 	int ret;
 
-	usb_stor_dbg(us, "LUN=%d\n", srb->device->lun);
+	usb_stor_dbg(us, "LUN=%d\n", (u8)srb->device->lun);
 
 	switch (srb->device->lun) {
 	case 0:
@@ -1522,7 +1522,7 @@ static int dpcm_transport(struct scsi_cmnd *srb, struct us_data *us)
 		break;
 
 	default:
-		usb_stor_dbg(us, "Invalid LUN %d\n", srb->device->lun);
+	    usb_stor_dbg(us, "Invalid LUN %d\n", (u8)srb->device->lun);
 		ret = USB_STOR_TRANSPORT_ERROR;
 		break;
 	}

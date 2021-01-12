@@ -9,7 +9,7 @@
 #include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/errno.h>
-#include <linux/module.h>
+#include <linux/export.h>
 #include <linux/spinlock.h>
 #include <linux/pci_ids.h>
 #include <asm/amd_nb.h>
@@ -44,6 +44,7 @@ const struct pci_device_id amd_nb_misc_ids[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_15H_M30H_NB_F3) },
 	{ PCI_DEVICE(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_15H_M60H_NB_F3) },
 	{ PCI_DEVICE(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_16H_NB_F3) },
+	{ PCI_DEVICE(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_16H_M30H_NB_F3) },
 	{ PCI_DEVICE(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_17H_DF_F3) },
 	{ PCI_DEVICE(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_17H_M10H_DF_F3) },
 	{ PCI_DEVICE(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_17H_M30H_DF_F3) },
@@ -57,6 +58,7 @@ static const struct pci_device_id amd_nb_link_ids[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_15H_M30H_NB_F4) },
 	{ PCI_DEVICE(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_15H_M60H_NB_F4) },
 	{ PCI_DEVICE(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_16H_NB_F4) },
+	{ PCI_DEVICE(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_16H_M30H_NB_F4) },
 	{ PCI_DEVICE(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_17H_DF_F4) },
 	{ PCI_DEVICE(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_17H_M10H_DF_F4) },
 	{ PCI_DEVICE(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_17H_M30H_DF_F4) },
@@ -197,6 +199,7 @@ EXPORT_SYMBOL_GPL(amd_df_indirect_read);
 
 int amd_cache_northbridges(void)
 {
+	const struct pci_device_id *root_ids = amd_root_ids;
 	struct amd_northbridge *nb;
 	struct pci_dev *root, *misc, *link;
 	u16 roots_per_misc = 0;
@@ -215,7 +218,7 @@ int amd_cache_northbridges(void)
 		return -ENODEV;
 
 	root = NULL;
-	while ((root = next_northbridge(root, amd_root_ids)) != NULL)
+	while ((root = next_northbridge(root, root_ids)) != NULL)
 		root_count++;
 
 	if (root_count) {
@@ -257,7 +260,7 @@ int amd_cache_northbridges(void)
 		 * correct PCI roots.
 		 */
 		for (j = 1; j < roots_per_misc; j++)
-			root = next_northbridge(root, amd_root_ids);
+			root = next_northbridge(root, root_ids);
 	}
 
 	if (amd_gart_present())
@@ -276,7 +279,7 @@ int amd_cache_northbridges(void)
 	if (boot_cpu_data.x86 == 0x10 &&
 	    boot_cpu_data.x86_model >= 0x8 &&
 	    (boot_cpu_data.x86_model > 0x9 ||
-	     boot_cpu_data.x86_mask >= 0x1))
+	     boot_cpu_data.x86_stepping >= 0x1))
 		amd_northbridges.flags |= AMD_NB_L3_INDEX_DISABLE;
 
 	if (boot_cpu_data.x86 == 0x15)
@@ -350,7 +353,7 @@ int amd_get_subcaches(int cpu)
 	return (mask >> (4 * cpu_data(cpu).cpu_core_id)) & 0xf;
 }
 
-int amd_set_subcaches(int cpu, int mask)
+int amd_set_subcaches(int cpu, unsigned long mask)
 {
 	static unsigned int reset, ban;
 	struct amd_northbridge *nb = node_to_amd_nb(amd_get_nb_id(cpu));
@@ -390,22 +393,22 @@ int amd_set_subcaches(int cpu, int mask)
 	return 0;
 }
 
-static int amd_cache_gart(void)
+static void amd_cache_gart(void)
 {
 	u16 i;
 
 	if (!amd_nb_has_feature(AMD_NB_GART))
-		return 0;
+		return;
 
 	flush_words = kmalloc_array(amd_northbridges.num, sizeof(u32), GFP_KERNEL);
 	if (!flush_words) {
 		amd_northbridges.flags &= ~AMD_NB_GART;
-		return -ENOMEM;
+		pr_notice("Cannot initialize GART flush words, GART support disabled\n");
+		return;
 	}
 
 	for (i = 0; i != amd_northbridges.num; i++)
 		pci_read_config_dword(node_to_amd_nb(i)->misc, 0x9c, &flush_words[i]);
-	return 0;
 }
 
 void amd_flush_garts(void)
@@ -484,19 +487,12 @@ static __init void fix_erratum_688(void)
 
 static __init int init_amd_nbs(void)
 {
-	int err = 0;
-
-	err = amd_cache_northbridges();
-
-	if (err < 0)
-		pr_notice("Cannot enumerate AMD northbridges\n");
-
-	if (amd_cache_gart() < 0)
-		pr_notice("Cannot initialize GART flush words, GART support disabled\n");
+	amd_cache_northbridges();
+	amd_cache_gart();
 
 	fix_erratum_688();
 
-	return err;
+	return 0;
 }
 
 /* This has to go after the PCI subsystem */

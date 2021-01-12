@@ -31,7 +31,7 @@ static ssize_t cachefiles_daemon_read(struct file *, char __user *, size_t,
 				      loff_t *);
 static ssize_t cachefiles_daemon_write(struct file *, const char __user *,
 				       size_t, loff_t *);
-static unsigned int cachefiles_daemon_poll(struct file *,
+static __poll_t cachefiles_daemon_poll(struct file *,
 					   struct poll_table_struct *);
 static int cachefiles_daemon_frun(struct cachefiles_cache *, char *);
 static int cachefiles_daemon_fcull(struct cachefiles_cache *, char *);
@@ -233,15 +233,9 @@ static ssize_t cachefiles_daemon_write(struct file *file,
 		return -EOPNOTSUPP;
 
 	/* drag the command string into the kernel so we can parse it */
-	data = kmalloc(datalen + 1, GFP_KERNEL);
-	if (!data)
-		return -ENOMEM;
-
-	ret = -EFAULT;
-	if (copy_from_user(data, _data, datalen) != 0)
-		goto error;
-
-	data[datalen] = '\0';
+	data = memdup_user_nul(_data, datalen);
+	if (IS_ERR(data))
+		return PTR_ERR(data);
 
 	ret = -EINVAL;
 	if (memchr(data, '\0', datalen))
@@ -295,22 +289,22 @@ found_command:
 
 /*
  * poll for culling state
- * - use POLLOUT to indicate culling state
+ * - use EPOLLOUT to indicate culling state
  */
-static unsigned int cachefiles_daemon_poll(struct file *file,
+static __poll_t cachefiles_daemon_poll(struct file *file,
 					   struct poll_table_struct *poll)
 {
 	struct cachefiles_cache *cache = file->private_data;
-	unsigned int mask;
+	__poll_t mask;
 
 	poll_wait(file, &cache->daemon_pollwq, poll);
 	mask = 0;
 
 	if (test_bit(CACHEFILES_STATE_CHANGED, &cache->flags))
-		mask |= POLLIN;
+		mask |= EPOLLIN;
 
 	if (test_bit(CACHEFILES_CULLING, &cache->flags))
-		mask |= POLLOUT;
+		mask |= EPOLLOUT;
 
 	return mask;
 }
@@ -581,7 +575,7 @@ static int cachefiles_daemon_cull(struct cachefiles_cache *cache, char *args)
 	/* extract the directory dentry from the cwd */
 	get_fs_pwd(current->fs, &path);
 
-	if (!S_ISDIR(path.dentry->d_inode->i_mode))
+	if (!d_can_lookup(path.dentry))
 		goto notdir;
 
 	cachefiles_begin_secure(cache, &saved_cred);
@@ -653,7 +647,7 @@ static int cachefiles_daemon_inuse(struct cachefiles_cache *cache, char *args)
 	/* extract the directory dentry from the cwd */
 	get_fs_pwd(current->fs, &path);
 
-	if (!S_ISDIR(path.dentry->d_inode->i_mode))
+	if (!d_can_lookup(path.dentry))
 		goto notdir;
 
 	cachefiles_begin_secure(cache, &saved_cred);

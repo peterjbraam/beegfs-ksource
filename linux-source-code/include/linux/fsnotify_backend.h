@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Filesystem access notification for Linux
  *
@@ -16,6 +17,8 @@
 #include <linux/spinlock.h>
 #include <linux/types.h>
 #include <linux/atomic.h>
+#include <linux/user_namespace.h>
+#include <linux/refcount.h>
 
 /*
  * IN_* from inotfy.h lines up EXACTLY with FS_*, this is so we can easily
@@ -35,6 +38,7 @@
 #define FS_DELETE		0x00000200	/* Subfile was deleted */
 #define FS_DELETE_SELF		0x00000400	/* Self was deleted */
 #define FS_MOVE_SELF		0x00000800	/* Self was moved */
+#define FS_OPEN_EXEC		0x00001000	/* File was opened for exec */
 
 #define FS_UNMOUNT		0x00002000	/* inode on umount fs */
 #define FS_Q_OVERFLOW		0x00004000	/* Event queued overflowed */
@@ -42,6 +46,7 @@
 
 #define FS_OPEN_PERM		0x00010000	/* open event in an permission hook */
 #define FS_ACCESS_PERM		0x00020000	/* access event in a permissions hook */
+#define FS_OPEN_EXEC_PERM	0x00040000	/* open/exec event in a permission hook */
 
 #define FS_EXCL_UNLINK		0x04000000	/* do not send events if object is unlinked */
 #define FS_ISDIR		0x40000000	/* event occurred against dir */
@@ -59,20 +64,28 @@
 #define FS_EVENTS_POSS_ON_CHILD   (FS_ACCESS | FS_MODIFY | FS_ATTRIB |\
 				   FS_CLOSE_WRITE | FS_CLOSE_NOWRITE | FS_OPEN |\
 				   FS_MOVED_FROM | FS_MOVED_TO | FS_CREATE |\
-				   FS_DELETE | FS_OPEN_PERM | FS_ACCESS_PERM)
+				   FS_DELETE | FS_OPEN_PERM | FS_ACCESS_PERM | \
+				   FS_OPEN_EXEC | FS_OPEN_EXEC_PERM)
 
 #define FS_MOVE			(FS_MOVED_FROM | FS_MOVED_TO)
 
-#define ALL_FSNOTIFY_PERM_EVENTS (FS_OPEN_PERM | FS_ACCESS_PERM)
+#define ALL_FSNOTIFY_PERM_EVENTS (FS_OPEN_PERM | FS_ACCESS_PERM | \
+				  FS_OPEN_EXEC_PERM)
 
+/* Events that can be reported to backends */
 #define ALL_FSNOTIFY_EVENTS (FS_ACCESS | FS_MODIFY | FS_ATTRIB | \
 			     FS_CLOSE_WRITE | FS_CLOSE_NOWRITE | FS_OPEN | \
 			     FS_MOVED_FROM | FS_MOVED_TO | FS_CREATE | \
 			     FS_DELETE | FS_DELETE_SELF | FS_MOVE_SELF | \
 			     FS_UNMOUNT | FS_Q_OVERFLOW | FS_IN_IGNORED | \
-			     FS_OPEN_PERM | FS_ACCESS_PERM | FS_EXCL_UNLINK | \
-			     FS_ISDIR | FS_IN_ONESHOT | FS_DN_RENAME | \
+			     FS_OPEN_PERM | FS_ACCESS_PERM | FS_DN_RENAME | \
+			     FS_OPEN_EXEC | FS_OPEN_EXEC_PERM)
+
+/* Extra flags that may be reported with event or control handling of events */
+#define ALL_FSNOTIFY_FLAGS  (FS_EXCL_UNLINK | FS_ISDIR | FS_IN_ONESHOT | \
 			     FS_DN_MULTISHOT | FS_EVENT_ON_CHILD)
+
+#define ALL_FSNOTIFY_BITS   (ALL_FSNOTIFY_EVENTS | ALL_FSNOTIFY_FLAGS)
 
 struct fsnotify_group;
 struct fsnotify_event;
@@ -80,6 +93,8 @@ struct fsnotify_mark;
 struct fsnotify_event_private_data;
 struct fsnotify_fname;
 struct fsnotify_iter_info;
+
+struct mem_cgroup;
 
 /*
  * Each group much define these ops.  The fsnotify infrastructure will call
@@ -124,6 +139,8 @@ struct fsnotify_event {
  * everything will be cleaned up.
  */
 struct fsnotify_group {
+	const struct fsnotify_ops *ops;	/* how this group handles things */
+
 	/*
 	 * How the refcnt is used is up to each group.  When the refcnt hits 0
 	 * fsnotify will clean up all of the resources associated with this group.
@@ -132,9 +149,7 @@ struct fsnotify_group {
 	 * inotify_init() and the refcnt will hit 0 only when that fd has been
 	 * closed.
 	 */
-	atomic_t refcnt;		/* things with interest in this group */
-
-	const struct fsnotify_ops *ops;	/* how this group handles things */
+	refcount_t refcnt;		/* things with interest in this group */
 
 	/* needed to send notification to userspace */
 	spinlock_t notification_lock;		/* protect the notification_list */
@@ -157,6 +172,8 @@ struct fsnotify_group {
 	atomic_t num_marks;		/* 1 for each mark and 1 for not being
 					 * past the point of no return when freeing
 					 * a group */
+	atomic_t user_waits;		/* Number of tasks waiting for user
+					 * response */
 	struct list_head marks_list;	/* all inode marks for this group */
 
 	struct fasync_struct *fsn_fa;    /* async notification */
@@ -164,8 +181,8 @@ struct fsnotify_group {
 	struct fsnotify_event *overflow_event;	/* Event we queue when the
 						 * notification list is too
 						 * full */
-	atomic_t user_waits;		/* Number of tasks waiting for user
-					 * response */
+
+	struct mem_cgroup *memcg;	/* memcg to charge allocations */
 
 	/* groups can define private fields here or use the void *private */
 	union {
@@ -174,20 +191,18 @@ struct fsnotify_group {
 		struct inotify_group_private_data {
 			spinlock_t	idr_lock;
 			struct idr      idr;
-			struct user_struct      *user;
+			struct ucounts *ucounts;
 		} inotify_data;
 #endif
 #ifdef CONFIG_FANOTIFY
 		struct fanotify_group_private_data {
-#ifdef CONFIG_FANOTIFY_ACCESS_PERMISSIONS
 			/* allows a group to block waiting for a userspace response */
 			struct list_head access_list;
 			wait_queue_head_t access_waitq;
-#endif /* CONFIG_FANOTIFY_ACCESS_PERMISSIONS */
-			int f_flags;
+			int flags;           /* flags from fanotify_init() */
+			int f_flags; /* event_f_flags from fanotify_init() */
 			unsigned int max_marks;
 			struct user_struct *user;
-			bool audit;
 		} fanotify_data;
 #endif /* CONFIG_FANOTIFY */
 	};
@@ -298,7 +313,7 @@ struct fsnotify_mark {
 	__u32 mask;
 	/* We hold one for presence in g_list. Also one ref for each 'thing'
 	 * in kernel that found and may be using this mark. */
-	atomic_t refcnt;
+	refcount_t refcnt;
 	/* Group this mark is for. Set on mark creation, stable until last ref
 	 * is dropped */
 	struct fsnotify_group *group;
@@ -385,6 +400,12 @@ extern int fsnotify_add_event(struct fsnotify_group *group,
 			      struct fsnotify_event *event,
 			      int (*merge)(struct list_head *,
 					   struct fsnotify_event *));
+/* Queue overflow event to a notification group */
+static inline void fsnotify_queue_overflow(struct fsnotify_group *group)
+{
+	fsnotify_add_event(group, group->overflow_event, NULL);
+}
+
 /* true if the group notification queue is empty */
 extern bool fsnotify_notify_queue_is_empty(struct fsnotify_group *group);
 /* return, but do not dequeue the first event on the notification queue */
@@ -394,6 +415,8 @@ extern struct fsnotify_event *fsnotify_remove_first_event(struct fsnotify_group 
 
 /* functions used to manipulate the marks attached to inodes */
 
+/* Get mask of events for a list of marks */
+extern __u32 fsnotify_conn_mask(struct fsnotify_mark_connector *conn);
 /* Calculate mask of events for a list of marks */
 extern void fsnotify_recalc_mask(struct fsnotify_mark_connector *conn);
 extern void fsnotify_init_mark(struct fsnotify_mark *mark,
@@ -445,8 +468,8 @@ static inline void fsnotify_clear_inode_marks_by_group(struct fsnotify_group *gr
 extern void fsnotify_get_mark(struct fsnotify_mark *mark);
 extern void fsnotify_put_mark(struct fsnotify_mark *mark);
 extern void fsnotify_unmount_inodes(struct super_block *sb);
-extern bool fsnotify_prepare_user_wait(struct fsnotify_iter_info *iter_info);
 extern void fsnotify_finish_user_wait(struct fsnotify_iter_info *iter_info);
+extern bool fsnotify_prepare_user_wait(struct fsnotify_iter_info *iter_info);
 
 /* put here because inotify does some weird stuff when destroying watches */
 extern void fsnotify_init_event(struct fsnotify_event *event,

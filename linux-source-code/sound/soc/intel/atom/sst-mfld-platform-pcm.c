@@ -190,7 +190,7 @@ int sst_fill_stream_params(void *substream,
 	map = ctx->pdata->pdev_strm_map;
 	map_size = ctx->pdata->strm_map_size;
 
-	if (is_compress == true)
+	if (is_compress)
 		cstream = (struct snd_compr_stream *)substream;
 	else
 		pstream = (struct snd_pcm_substream *)substream;
@@ -399,7 +399,13 @@ static int sst_media_hw_params(struct snd_pcm_substream *substream,
 				struct snd_pcm_hw_params *params,
 				struct snd_soc_dai *dai)
 {
-	snd_pcm_lib_malloc_pages(substream, params_buffer_bytes(params));
+	int ret;
+
+	ret =
+		snd_pcm_lib_malloc_pages(substream,
+				params_buffer_bytes(params));
+	if (ret)
+		return ret;
 	memset(substream->runtime->dma_area, 0, params_buffer_bytes(params));
 	return 0;
 }
@@ -700,9 +706,17 @@ static int sst_soc_probe(struct snd_soc_component *component)
 	return sst_dsp_init_v2_dpcm(component);
 }
 
+static void sst_soc_remove(struct snd_soc_component *component)
+{
+	struct sst_data *drv = dev_get_drvdata(component->dev);
+
+	drv->soc_card = NULL;
+}
+
 static const struct snd_soc_component_driver sst_soc_platform_drv  = {
 	.name		= DRV_NAME,
 	.probe		= sst_soc_probe,
+	.remove		= sst_soc_remove,
 	.ops		= &sst_platform_ops,
 	.compr_ops	= &sst_platform_compr_ops,
 	.pcm_new	= sst_pcm_new,
@@ -760,7 +774,7 @@ static int sst_soc_prepare(struct device *dev)
 	snd_soc_poweroff(drv->soc_card->dev);
 
 	/* set the SSPs to idle */
-	list_for_each_entry(rtd, &drv->soc_card->rtd_list, list) {
+	for_each_card_rtds(drv->soc_card, rtd) {
 		struct snd_soc_dai *dai = rtd->cpu_dai;
 
 		if (dai->active) {
@@ -781,7 +795,7 @@ static void sst_soc_complete(struct device *dev)
 		return;
 
 	/* restart SSPs */
-	list_for_each_entry(rtd, &drv->soc_card->rtd_list, list) {
+	for_each_card_rtds(drv->soc_card, rtd) {
 		struct snd_soc_dai *dai = rtd->cpu_dai;
 
 		if (dai->active) {

@@ -1,6 +1,6 @@
 /*
  * QLogic Fibre Channel HBA Driver
- * Copyright (c)  2003-2013 QLogic Corporation
+ * Copyright (c)  2003-2014 QLogic Corporation
  *
  * See LICENSE.qla2xxx for copyright and licensing details.
  */
@@ -297,7 +297,7 @@ qla27xx_fwdt_entry_t262(struct scsi_qla_host *vha,
 		goto done;
 	}
 
-	if (end <= start || start == 0 || end == 0) {
+	if (end < start || start == 0 || end == 0) {
 		ql_dbg(ql_dbg_misc, vha, 0xd023,
 		    "%s: unusable range (start=%lx end=%lx)\n",
 		    __func__, start, end);

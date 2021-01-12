@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __NET_VXLAN_H
 #define __NET_VXLAN_H 1
 
@@ -5,6 +6,7 @@
 #include <net/udp_tunnel.h>
 #include <net/dst_metadata.h>
 #include <net/rtnetlink.h>
+#include <net/switchdev.h>
 
 /* VXLAN protocol (RFC 7348) header:
  * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -145,7 +147,7 @@ struct vxlanhdr_gpe {
 		np_applied:1,
 		instance_applied:1,
 		version:2,
-reserved_flags2:2;
+		reserved_flags2:2;
 #elif defined(__BIG_ENDIAN_BITFIELD)
 	u8	reserved_flags2:2,
 		version:2,
@@ -177,7 +179,7 @@ struct vxlan_sock {
 	struct hlist_node hlist;
 	struct socket	 *sock;
 	struct hlist_head vni_list[VNI_HASH_SIZE];
-	atomic_t	  refcnt;
+	refcount_t	  refcnt;
 	u32		  flags;
 };
 
@@ -190,6 +192,7 @@ union vxlan_addr {
 struct vxlan_rdst {
 	union vxlan_addr	 remote_ip;
 	__be16			 remote_port;
+	u8			 offloaded:1;
 	__be32			 remote_vni;
 	u32			 remote_ifindex;
 	struct list_head	 list;
@@ -283,7 +286,7 @@ struct vxlan_dev {
 					 VXLAN_F_COLLECT_METADATA)
 
 struct net_device *vxlan_dev_create(struct net *net, const char *name,
-				    struct vxlan_config *conf);
+				    u8 name_assign_type, struct vxlan_config *conf);
 
 static inline netdev_features_t vxlan_features_check(struct sk_buff *skb,
 						     netdev_features_t features)
@@ -301,7 +304,7 @@ static inline netdev_features_t vxlan_features_check(struct sk_buff *skb,
 		l4_hdr = ipv6_hdr(skb)->nexthdr;
 		break;
 	default:
-		return features;;
+		return features;
 	}
 
 	if ((l4_hdr == IPPROTO_UDP) &&
@@ -407,5 +410,46 @@ static inline bool netif_is_vxlan(const struct net_device *dev)
 	return dev->rtnl_link_ops &&
 	       !strcmp(dev->rtnl_link_ops->kind, "vxlan");
 }
+
+struct switchdev_notifier_vxlan_fdb_info {
+	struct switchdev_notifier_info info; /* must be first */
+	union vxlan_addr remote_ip;
+	__be16 remote_port;
+	__be32 remote_vni;
+	u32 remote_ifindex;
+	u8 eth_addr[ETH_ALEN];
+	__be32 vni;
+	bool offloaded;
+	bool added_by_user;
+};
+
+#if IS_ENABLED(CONFIG_VXLAN)
+int vxlan_fdb_find_uc(struct net_device *dev, const u8 *mac, __be32 vni,
+		      struct switchdev_notifier_vxlan_fdb_info *fdb_info);
+int vxlan_fdb_replay(const struct net_device *dev, __be32 vni,
+		     struct notifier_block *nb,
+		     struct netlink_ext_ack *extack);
+void vxlan_fdb_clear_offload(const struct net_device *dev, __be32 vni);
+
+#else
+static inline int
+vxlan_fdb_find_uc(struct net_device *dev, const u8 *mac, __be32 vni,
+		  struct switchdev_notifier_vxlan_fdb_info *fdb_info)
+{
+	return -ENOENT;
+}
+
+static inline int vxlan_fdb_replay(const struct net_device *dev, __be32 vni,
+				   struct notifier_block *nb,
+				   struct netlink_ext_ack *extack)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline void
+vxlan_fdb_clear_offload(const struct net_device *dev, __be32 vni)
+{
+}
+#endif
 
 #endif

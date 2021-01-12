@@ -1,24 +1,27 @@
+// SPDX-License-Identifier: GPL-2.0
+
 /*
- * Stack trace utility
+ * Stack trace utility functions etc.
  *
  * Copyright 2008 Christoph Hellwig, IBM Corp.
  * Copyright 2018 SUSE Linux GmbH
- *
- *      This program is free software; you can redistribute it and/or
- *      modify it under the terms of the GNU General Public License
- *      as published by the Free Software Foundation; either version
- *      2 of the License, or (at your option) any later version.
+ * Copyright 2018 Nick Piggin, Michael Ellerman, IBM Corp.
  */
 
 #include <linux/export.h>
 #include <linux/kallsyms.h>
 #include <linux/module.h>
+#include <linux/nmi.h>
 #include <linux/sched.h>
+#include <linux/sched/debug.h>
+#include <linux/sched/task_stack.h>
 #include <linux/stacktrace.h>
 #include <asm/ptrace.h>
 #include <asm/processor.h>
 #include <linux/ftrace.h>
 #include <asm/kprobes.h>
+
+#include <asm/paca.h>
 
 /*
  * Save stack-backtrace addresses into a stack_trace buffer.
@@ -54,7 +57,7 @@ void save_stack_trace(struct stack_trace *trace)
 {
 	unsigned long sp;
 
-	asm("mr %0,1" : "=r" (sp));
+	sp = current_stack_pointer();
 
 	save_context_stack(trace, sp, current, 1);
 }
@@ -62,7 +65,14 @@ EXPORT_SYMBOL_GPL(save_stack_trace);
 
 void save_stack_trace_tsk(struct task_struct *tsk, struct stack_trace *trace)
 {
-	save_context_stack(trace, tsk->thread.ksp, tsk, 0);
+	unsigned long sp;
+
+	if (tsk == current)
+		sp = current_stack_pointer();
+	else
+		sp = tsk->thread.ksp;
+
+	save_context_stack(trace, sp, tsk, 0);
 }
 EXPORT_SYMBOL_GPL(save_stack_trace_tsk);
 
@@ -117,7 +127,7 @@ save_stack_trace_tsk_reliable(struct task_struct *tsk,
 	}
 
 	if (tsk == current)
-		sp = __get_SP();
+		sp = current_stack_pointer();
 	else
 		sp = tsk->thread.ksp;
 
@@ -189,3 +199,51 @@ save_stack_trace_tsk_reliable(struct task_struct *tsk,
 }
 EXPORT_SYMBOL_GPL(save_stack_trace_tsk_reliable);
 #endif /* CONFIG_HAVE_RELIABLE_STACKTRACE */
+
+#if defined(CONFIG_PPC_BOOK3S_64) && defined(CONFIG_NMI_IPI)
+static void handle_backtrace_ipi(struct pt_regs *regs)
+{
+	nmi_cpu_backtrace(regs);
+}
+
+static void raise_backtrace_ipi(cpumask_t *mask)
+{
+	unsigned int cpu;
+
+	for_each_cpu(cpu, mask) {
+		if (cpu == smp_processor_id())
+			handle_backtrace_ipi(NULL);
+		else
+			smp_send_safe_nmi_ipi(cpu, handle_backtrace_ipi, 5 * USEC_PER_SEC);
+	}
+
+	for_each_cpu(cpu, mask) {
+		struct paca_struct *p = paca_ptrs[cpu];
+
+		cpumask_clear_cpu(cpu, mask);
+
+		pr_warn("CPU %d didn't respond to backtrace IPI, inspecting paca.\n", cpu);
+		if (!virt_addr_valid(p)) {
+			pr_warn("paca pointer appears corrupt? (%px)\n", p);
+			continue;
+		}
+
+		pr_warn("irq_soft_mask: 0x%02x in_mce: %d in_nmi: %d",
+			p->irq_soft_mask, p->in_mce, p->in_nmi);
+
+		if (virt_addr_valid(p->__current))
+			pr_cont(" current: %d (%s)\n", p->__current->pid,
+				p->__current->comm);
+		else
+			pr_cont(" current pointer corrupt? (%px)\n", p->__current);
+
+		pr_warn("Back trace of paca->saved_r1 (0x%016llx) (possibly stale):\n", p->saved_r1);
+		show_stack(p->__current, (unsigned long *)p->saved_r1);
+	}
+}
+
+void arch_trigger_cpumask_backtrace(const cpumask_t *mask, bool exclude_self)
+{
+	nmi_trigger_cpumask_backtrace(mask, exclude_self, raise_backtrace_ipi);
+}
+#endif /* defined(CONFIG_PPC_BOOK3S_64) && defined(CONFIG_NMI_IPI) */

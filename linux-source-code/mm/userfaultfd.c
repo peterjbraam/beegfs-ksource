@@ -8,6 +8,7 @@
  */
 
 #include <linux/mm.h>
+#include <linux/sched/signal.h>
 #include <linux/pagemap.h>
 #include <linux/rmap.h>
 #include <linux/swap.h>
@@ -15,7 +16,6 @@
 #include <linux/userfaultfd_k.h>
 #include <linux/mmu_notifier.h>
 #include <linux/hugetlb.h>
-#include <linux/pagemap.h>
 #include <linux/shmem_fs.h>
 #include <asm/tlbflush.h>
 #include "internal.h"
@@ -27,6 +27,7 @@ static int mcopy_atomic_pte(struct mm_struct *dst_mm,
 			    unsigned long src_addr,
 			    struct page **pagep)
 {
+	struct mem_cgroup *memcg;
 	pte_t _dst_pte, *dst_pte;
 	spinlock_t *ptl;
 	void *page_kaddr;
@@ -67,7 +68,7 @@ static int mcopy_atomic_pte(struct mm_struct *dst_mm,
 	__SetPageUptodate(page);
 
 	ret = -ENOMEM;
-	if (mem_cgroup_newpage_charge(page, dst_mm, GFP_KERNEL))
+	if (mem_cgroup_try_charge(page, dst_mm, GFP_KERNEL, &memcg, false))
 		goto out_release;
 
 	_dst_pte = mk_pte(page, dst_vma->vm_page_prot);
@@ -89,7 +90,9 @@ static int mcopy_atomic_pte(struct mm_struct *dst_mm,
 		goto out_release_uncharge_unlock;
 
 	inc_mm_counter(dst_mm, MM_ANONPAGES);
-	page_add_new_anon_rmap(page, dst_vma, dst_addr);
+	page_add_new_anon_rmap(page, dst_vma, dst_addr, false);
+	mem_cgroup_commit_charge(page, memcg, false, false);
+	lru_cache_add_active_or_unevictable(page, dst_vma);
 
 	set_pte_at(dst_mm, dst_addr, dst_pte, _dst_pte);
 
@@ -102,9 +105,9 @@ out:
 	return ret;
 out_release_uncharge_unlock:
 	pte_unmap_unlock(dst_pte, ptl);
-	mem_cgroup_uncharge_page(page);
+	mem_cgroup_cancel_charge(page, memcg, false);
 out_release:
-	page_cache_release(page);
+	put_page(page);
 	goto out;
 }
 
@@ -146,19 +149,22 @@ out_unlock:
 static pmd_t *mm_alloc_pmd(struct mm_struct *mm, unsigned long address)
 {
 	pgd_t *pgd;
+	p4d_t *p4d;
 	pud_t *pud;
-	pmd_t *pmd = NULL;
 
 	pgd = pgd_offset(mm, address);
-	pud = pud_alloc(mm, pgd, address);
-	if (pud)
-		/*
-		 * Note that we didn't run this because the pmd was
-		 * missing, the *pmd may be already established and in
-		 * turn it may also be a trans_huge_pmd.
-		 */
-		pmd = pmd_alloc(mm, pud, address);
-	return pmd;
+	p4d = p4d_alloc(mm, pgd, address);
+	if (!p4d)
+		return NULL;
+	pud = pud_alloc(mm, p4d, address);
+	if (!pud)
+		return NULL;
+	/*
+	 * Note that we didn't run this because the pmd was
+	 * missing, the *pmd may be already established and in
+	 * turn it may also be a trans_huge_pmd.
+	 */
+	return pmd_alloc(mm, pud, address);
 }
 
 #ifdef CONFIG_HUGETLB_PAGE
@@ -265,7 +271,8 @@ retry:
 		 */
 		idx = linear_page_index(dst_vma, dst_addr);
 		mapping = dst_vma->vm_file->f_mapping;
-		hash = hugetlb_fault_mutex_hash(h, mapping, idx, dst_addr);
+		hash = hugetlb_fault_mutex_hash(h, dst_mm, dst_vma, mapping,
+								idx, dst_addr);
 		mutex_lock(&hugetlb_fault_mutex_table[hash]);
 
 		err = -ENOMEM;
@@ -536,8 +543,7 @@ retry:
 			break;
 		}
 		if (unlikely(pmd_none(dst_pmdval)) &&
-		    unlikely(__pte_alloc(dst_mm, dst_vma, dst_pmd,
-					 dst_addr))) {
+		    unlikely(__pte_alloc(dst_mm, dst_pmd, dst_addr))) {
 			err = -ENOMEM;
 			break;
 		}
@@ -589,7 +595,7 @@ out_unlock:
 	up_read(&dst_mm->mmap_sem);
 out:
 	if (page)
-		page_cache_release(page);
+		put_page(page);
 	BUG_ON(copied < 0);
 	BUG_ON(err > 0);
 	BUG_ON(!copied && !err);

@@ -33,6 +33,7 @@
 #include <linux/clocksource.h>
 #include <linux/highmem.h>
 #include <rdma/mlx5-abi.h>
+#include "lib/eq.h"
 #include "en.h"
 #include "clock.h"
 
@@ -398,8 +399,9 @@ static int mlx5_init_pin_config(struct mlx5_clock *clock)
 	int i;
 
 	clock->ptp_info.pin_config =
-			kzalloc(sizeof(*clock->ptp_info.pin_config) *
-				clock->ptp_info.n_pins, GFP_KERNEL);
+			kcalloc(clock->ptp_info.n_pins,
+				sizeof(*clock->ptp_info.pin_config),
+				GFP_KERNEL);
 	if (!clock->ptp_info.pin_config)
 		return -ENOMEM;
 	clock->ptp_info.enable = mlx5_ptp_enable;
@@ -442,16 +444,17 @@ static void mlx5_get_pps_caps(struct mlx5_core_dev *mdev)
 	clock->pps_info.pin_caps[7] = MLX5_GET(mtpps_reg, out, cap_pin_7_mode);
 }
 
-void mlx5_pps_event(struct mlx5_core_dev *mdev,
-		    struct mlx5_eqe *eqe)
+static int mlx5_pps_event(struct notifier_block *nb,
+			  unsigned long type, void *data)
 {
-	struct mlx5_clock *clock = &mdev->clock;
+	struct mlx5_clock *clock = mlx5_nb_cof(nb, struct mlx5_clock, pps_nb);
+	struct mlx5_core_dev *mdev = clock->mdev;
 	struct ptp_clock_event ptp_event;
-	struct timespec64 ts;
-	u64 nsec_now, nsec_delta;
 	u64 cycles_now, cycles_delta;
+	u64 nsec_now, nsec_delta, ns;
+	struct mlx5_eqe *eqe = data;
 	int pin = eqe->data.pps.pin;
-	s64 ns;
+	struct timespec64 ts;
 	unsigned long flags;
 
 	switch (clock->ptp_info.pin_config[pin].func) {
@@ -466,6 +469,7 @@ void mlx5_pps_event(struct mlx5_core_dev *mdev,
 		} else {
 			ptp_event.type = PTP_CLOCK_EXTTS;
 		}
+		/* TODOL clock->ptp can be NULL if ptp_clock_register failes */
 		ptp_clock_event(clock->ptp, &ptp_event);
 		break;
 	case PTP_PF_PEROUT:
@@ -484,8 +488,11 @@ void mlx5_pps_event(struct mlx5_core_dev *mdev,
 		write_sequnlock_irqrestore(&clock->lock, flags);
 		break;
 	default:
-		mlx5_core_err(mdev, " Unhandled event\n");
+		mlx5_core_err(mdev, " Unhandled clock PPS event, func %d\n",
+			      clock->ptp_info.pin_config[pin].func);
 	}
+
+	return NOTIFY_OK;
 }
 
 void mlx5_init_clock(struct mlx5_core_dev *mdev)
@@ -570,6 +577,9 @@ void mlx5_init_clock(struct mlx5_core_dev *mdev)
 			       PTR_ERR(clock->ptp));
 		clock->ptp = NULL;
 	}
+
+	MLX5_NB_INIT(&clock->pps_nb, mlx5_pps_event, PPS_EVENT);
+	mlx5_eq_notifier_register(mdev, &clock->pps_nb);
 }
 
 void mlx5_cleanup_clock(struct mlx5_core_dev *mdev)
@@ -579,6 +589,7 @@ void mlx5_cleanup_clock(struct mlx5_core_dev *mdev)
 	if (!MLX5_CAP_GEN(mdev, device_frequency_khz))
 		return;
 
+	mlx5_eq_notifier_unregister(mdev, &clock->pps_nb);
 	if (clock->ptp) {
 		ptp_clock_unregister(clock->ptp);
 		clock->ptp = NULL;

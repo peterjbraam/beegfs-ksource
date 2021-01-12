@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Author(s)......: Holger Smolinski <Holger.Smolinski@de.ibm.com>
  * Bugreports.to..: <Linux390@de.ibm.com>
@@ -28,6 +29,8 @@
 #undef PRINTK_HEADER
 #endif				/* PRINTK_HEADER */
 #define PRINTK_HEADER "dasd(fba):"
+
+#define FBA_DEFAULT_RETRIES 32
 
 #define DASD_FBA_CCW_WRITE 0x41
 #define DASD_FBA_CCW_READ 0x42
@@ -165,6 +168,7 @@ dasd_fba_check_characteristics(struct dasd_device *device)
 	}
 
 	device->default_expires = DASD_EXPIRES;
+	device->default_retries = FBA_DEFAULT_RETRIES;
 	dasd_path_set_opm(device, LPM_ANYPATH);
 
 	readonly = dasd_device_is_ro(device);
@@ -352,7 +356,8 @@ static struct dasd_ccw_req *dasd_fba_build_cp_discard(
 	datasize = sizeof(struct DE_fba_data) +
 		nr_ccws * (sizeof(struct LO_fba_data) + sizeof(struct ccw1));
 
-	cqr = dasd_smalloc_request(DASD_FBA_MAGIC, cplength, datasize, memdev);
+	cqr = dasd_smalloc_request(DASD_FBA_MAGIC, cplength, datasize, memdev,
+				   blk_mq_rq_to_pdu(req));
 	if (IS_ERR(cqr))
 		return cqr;
 
@@ -422,7 +427,7 @@ static struct dasd_ccw_req *dasd_fba_build_cp_discard(
 	cqr->memdev = memdev;
 	cqr->block = block;
 	cqr->expires = memdev->default_expires * HZ;	/* default 5 minutes */
-	cqr->retries = 32;
+	cqr->retries = memdev->default_retries;
 	cqr->buildclk = get_tod_clock();
 	cqr->status = DASD_CQR_FILLED;
 
@@ -440,7 +445,7 @@ static struct dasd_ccw_req *dasd_fba_build_cp_regular(
 	struct dasd_ccw_req *cqr;
 	struct ccw1 *ccw;
 	struct req_iterator iter;
-	struct bio_vec *bv;
+	struct bio_vec bv;
 	char *dst;
 	int count, cidaw, cplength, datasize;
 	sector_t recid, first_rec, last_rec;
@@ -462,14 +467,12 @@ static struct dasd_ccw_req *dasd_fba_build_cp_regular(
 	count = 0;
 	cidaw = 0;
 	rq_for_each_segment(bv, req, iter) {
-		if (bv->bv_len & (blksize - 1))
+		if (bv.bv_len & (blksize - 1))
 			/* Fba can only do full blocks. */
 			return ERR_PTR(-EINVAL);
-		count += bv->bv_len >> (block->s2b_shift + 9);
-#if defined(CONFIG_64BIT)
-		if (idal_is_needed (page_address(bv->bv_page), bv->bv_len))
-			cidaw += bv->bv_len / blksize;
-#endif
+		count += bv.bv_len >> (block->s2b_shift + 9);
+		if (idal_is_needed (page_address(bv.bv_page), bv.bv_len))
+			cidaw += bv.bv_len / blksize;
 	}
 	/* Paranoia. */
 	if (count != last_rec - first_rec + 1)
@@ -488,7 +491,8 @@ static struct dasd_ccw_req *dasd_fba_build_cp_regular(
 		datasize += (count - 1)*sizeof(struct LO_fba_data);
 	}
 	/* Allocate the ccw request. */
-	cqr = dasd_smalloc_request(DASD_FBA_MAGIC, cplength, datasize, memdev);
+	cqr = dasd_smalloc_request(DASD_FBA_MAGIC, cplength, datasize, memdev,
+				   blk_mq_rq_to_pdu(req));
 	if (IS_ERR(cqr))
 		return cqr;
 	ccw = cqr->cpaddr;
@@ -505,16 +509,16 @@ static struct dasd_ccw_req *dasd_fba_build_cp_regular(
 	}
 	recid = first_rec;
 	rq_for_each_segment(bv, req, iter) {
-		dst = page_address(bv->bv_page) + bv->bv_offset;
+		dst = page_address(bv.bv_page) + bv.bv_offset;
 		if (dasd_page_cache) {
 			char *copy = kmem_cache_alloc(dasd_page_cache,
 						      GFP_DMA | __GFP_NOWARN);
 			if (copy && rq_data_dir(req) == WRITE)
-				memcpy(copy + bv->bv_offset, dst, bv->bv_len);
+				memcpy(copy + bv.bv_offset, dst, bv.bv_len);
 			if (copy)
-				dst = copy + bv->bv_offset;
+				dst = copy + bv.bv_offset;
 		}
-		for (off = 0; off < bv->bv_len; off += blksize) {
+		for (off = 0; off < bv.bv_len; off += blksize) {
 			/* Locate record for stupid devices. */
 			if (private->rdc_data.mode.bits.data_chain == 0) {
 				ccw[-1].flags |= CCW_FLAG_CC;
@@ -551,7 +555,7 @@ static struct dasd_ccw_req *dasd_fba_build_cp_regular(
 	cqr->memdev = memdev;
 	cqr->block = block;
 	cqr->expires = memdev->default_expires * HZ;	/* default 5 minutes */
-	cqr->retries = 32;
+	cqr->retries = memdev->default_retries;
 	cqr->buildclk = get_tod_clock();
 	cqr->status = DASD_CQR_FILLED;
 	return cqr;
@@ -561,7 +565,7 @@ static struct dasd_ccw_req *dasd_fba_build_cp(struct dasd_device *memdev,
 					      struct dasd_block *block,
 					      struct request *req)
 {
-	if (req_op(req) == REQ_OP_DISCARD)
+	if (req_op(req) == REQ_OP_DISCARD || req_op(req) == REQ_OP_WRITE_ZEROES)
 		return dasd_fba_build_cp_discard(memdev, block, req);
 	else
 		return dasd_fba_build_cp_regular(memdev, block, req);
@@ -573,7 +577,7 @@ dasd_fba_free_cp(struct dasd_ccw_req *cqr, struct request *req)
 	struct dasd_fba_private *private = cqr->block->base->private;
 	struct ccw1 *ccw;
 	struct req_iterator iter;
-	struct bio_vec *bv;
+	struct bio_vec bv;
 	char *dst, *cda;
 	unsigned int blksize, off;
 	int status;
@@ -587,8 +591,8 @@ dasd_fba_free_cp(struct dasd_ccw_req *cqr, struct request *req)
 	if (private->rdc_data.mode.bits.data_chain != 0)
 		ccw++;
 	rq_for_each_segment(bv, req, iter) {
-		dst = page_address(bv->bv_page) + bv->bv_offset;
-		for (off = 0; off < bv->bv_len; off += blksize) {
+		dst = page_address(bv.bv_page) + bv.bv_offset;
+		for (off = 0; off < bv.bv_len; off += blksize) {
 			/* Skip locate record. */
 			if (private->rdc_data.mode.bits.data_chain == 0)
 				ccw++;
@@ -599,7 +603,7 @@ dasd_fba_free_cp(struct dasd_ccw_req *cqr, struct request *req)
 					cda = (char *)((addr_t) ccw->cda);
 				if (dst != cda) {
 					if (rq_data_dir(req) == READ)
-						memcpy(dst, cda, bv->bv_len);
+						memcpy(dst, cda, bv.bv_len);
 					kmem_cache_free(dasd_page_cache,
 					    (void *)((addr_t)cda & PAGE_MASK));
 				}
@@ -616,7 +620,10 @@ out:
 
 static void dasd_fba_handle_terminated_request(struct dasd_ccw_req *cqr)
 {
-	cqr->status = DASD_CQR_FILLED;
+	if (cqr->retries < 0)
+		cqr->status = DASD_CQR_FAILED;
+	else
+		cqr->status = DASD_CQR_FILLED;
 };
 
 static int

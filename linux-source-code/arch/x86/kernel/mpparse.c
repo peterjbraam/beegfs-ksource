@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *	Intel Multiprocessor Specification 1.1 and 1.4
  *	compliant MP-table parsing routines.
@@ -16,18 +17,17 @@
 #include <linux/mc146818rtc.h>
 #include <linux/bitops.h>
 #include <linux/acpi.h>
-#include <linux/module.h>
 #include <linux/smp.h>
 #include <linux/pci.h>
-#include <linux/irqdomain.h>
 
+#include <asm/irqdomain.h>
 #include <asm/mtrr.h>
 #include <asm/mpspec.h>
 #include <asm/pgalloc.h>
 #include <asm/io_apic.h>
 #include <asm/proto.h>
 #include <asm/bios_ebda.h>
-#include <asm/e820.h>
+#include <asm/e820/api.h>
 #include <asm/setup.h>
 #include <asm/smp.h>
 
@@ -112,11 +112,6 @@ static void __init MP_bus_info(struct mpc_bus *m)
 	} else
 		pr_warn("Unknown bustype %s - ignoring\n", str);
 }
-
-static struct irq_domain_ops mp_ioapic_irqdomain_ops = {
-	.map = mp_irqdomain_map,
-	.unmap = mp_irqdomain_unmap,
-};
 
 static void __init MP_ioapic_info(struct mpc_ioapic *m)
 {
@@ -216,9 +211,6 @@ static int __init smp_read_mpc(struct mpc_table *mpc, unsigned early)
 	if (!smp_check_mpc(mpc, oem, str))
 		return 0;
 
-#ifdef CONFIG_X86_32
-	generic_mps_oem_check(mpc, oem, str);
-#endif
 	/* Initialize the lapic mapping */
 	if (!acpi_lapic)
 		register_lapic_address(mpc->lapic);
@@ -289,7 +281,7 @@ static void __init construct_default_ioirq_mptable(int mpc_default_type)
 	int ELCR_fallback = 0;
 
 	intsrc.type = MP_INTSRC;
-	intsrc.irqflag = 0;	/* conforming */
+	intsrc.irqflag = MP_IRQTRIG_DEFAULT | MP_IRQPOL_DEFAULT;
 	intsrc.srcbus = 0;
 	intsrc.dstapic = mpc_ioapic_id(0);
 
@@ -332,10 +324,13 @@ static void __init construct_default_ioirq_mptable(int mpc_default_type)
 			 *  copy that information over to the MP table in the
 			 *  irqflag field (level sensitive, active high polarity).
 			 */
-			if (ELCR_trigger(i))
-				intsrc.irqflag = 13;
-			else
-				intsrc.irqflag = 0;
+			if (ELCR_trigger(i)) {
+				intsrc.irqflag = MP_IRQTRIG_LEVEL |
+						 MP_IRQPOL_ACTIVE_HIGH;
+			} else {
+				intsrc.irqflag = MP_IRQTRIG_DEFAULT |
+						 MP_IRQPOL_DEFAULT;
+			}
 		}
 
 		intsrc.srcbusirq = i;
@@ -415,8 +410,8 @@ static inline void __init construct_default_ISA_mptable(int mpc_default_type)
 	processor.apicver = mpc_default_type > 4 ? 0x10 : 0x01;
 	processor.cpuflag = CPU_ENABLED;
 	processor.cpufeature = (boot_cpu_data.x86 << 8) |
-	    (boot_cpu_data.x86_model << 4) | boot_cpu_data.x86_mask;
-	processor.featureflag = boot_cpu_data.x86_capability[0];
+	    (boot_cpu_data.x86_model << 4) | boot_cpu_data.x86_stepping;
+	processor.featureflag = boot_cpu_data.x86_capability[CPUID_1_EDX];
 	processor.reserved[0] = 0;
 	processor.reserved[1] = 0;
 	for (i = 0; i < 2; i++) {
@@ -427,7 +422,7 @@ static inline void __init construct_default_ISA_mptable(int mpc_default_type)
 	construct_ioapic_table(mpc_default_type);
 
 	lintsrc.type = MP_LINTSRC;
-	lintsrc.irqflag = 0;		/* conforming */
+	lintsrc.irqflag = MP_IRQTRIG_DEFAULT | MP_IRQPOL_DEFAULT;
 	lintsrc.srcbusid = 0;
 	lintsrc.srcbusirq = 0;
 	lintsrc.destapic = MP_APIC_ALL;
@@ -509,6 +504,9 @@ static int __init check_physptr(struct mpf_intel *mpf, unsigned int early)
 void __init default_get_smp_config(unsigned int early)
 {
 	struct mpf_intel *mpf;
+
+	if (!smp_found_config)
+		return;
 
 	if (!mpf_found)
 		return;
@@ -669,7 +667,7 @@ static int  __init get_MP_intsrc_index(struct mpc_intsrc *m)
 	if (m->irqtype != mp_INT)
 		return 0;
 
-	if (m->irqflag != 0x0f)
+	if (m->irqflag != (MP_IRQTRIG_LEVEL | MP_IRQPOL_ACTIVE_LOW))
 		return 0;
 
 	/* not legacy */
@@ -678,7 +676,8 @@ static int  __init get_MP_intsrc_index(struct mpc_intsrc *m)
 		if (mp_irqs[i].irqtype != mp_INT)
 			continue;
 
-		if (mp_irqs[i].irqflag != 0x0f)
+		if (mp_irqs[i].irqflag != (MP_IRQTRIG_LEVEL |
+					   MP_IRQPOL_ACTIVE_LOW))
 			continue;
 
 		if (mp_irqs[i].srcbus != m->srcbus)
@@ -789,7 +788,8 @@ static int  __init replace_intsrc_all(struct mpc_table *mpc,
 		if (mp_irqs[i].irqtype != mp_INT)
 			continue;
 
-		if (mp_irqs[i].irqflag != 0x0f)
+		if (mp_irqs[i].irqflag != (MP_IRQTRIG_LEVEL |
+					   MP_IRQPOL_ACTIVE_LOW))
 			continue;
 
 		if (nr_m_spare > 0) {
@@ -848,10 +848,10 @@ static int __init parse_alloc_mptable_opt(char *p)
 }
 early_param("alloc_mptable", parse_alloc_mptable_opt);
 
-void __init early_reserve_e820_mpc_new(void)
+void __init e820__memblock_alloc_reserved_mpc_new(void)
 {
 	if (enable_update_mptable && alloc_mptable)
-		mpc_new_phys = early_reserve_e820(mpc_new_length, 4);
+		mpc_new_phys = e820__memblock_alloc_reserved(mpc_new_length, 4);
 }
 
 static int __init update_mp_table(void)

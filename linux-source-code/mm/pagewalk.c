@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <linux/mm.h>
 #include <linux/highmem.h>
 #include <linux/sched.h>
@@ -58,7 +59,7 @@ again:
 		if (!walk->pte_entry)
 			continue;
 
-		split_huge_page_pmd_mm(walk->mm, addr, pmd);
+		split_huge_pmd(walk->vma, pmd, addr);
 		if (pmd_trans_unstable(pmd))
 			goto again;
 		err = walk_pte_range(pmd, addr, next, walk);
@@ -69,19 +70,18 @@ again:
 	return err;
 }
 
-static int walk_pud_range(pgd_t *pgd, unsigned long addr, unsigned long end,
+static int walk_pud_range(p4d_t *p4d, unsigned long addr, unsigned long end,
 			  struct mm_walk *walk)
 {
 	pud_t *pud;
 	unsigned long next;
 	int err = 0;
-	struct vm_area_struct *vma = find_vma(walk->mm, addr);
 
-	pud = pud_offset(pgd, addr);
+	pud = pud_offset(p4d, addr);
 	do {
  again:
 		next = pud_addr_end(addr, end);
-		if (pud_none(*pud) || !vma) {
+		if (pud_none(*pud) || !walk->vma) {
 			if (walk->pte_hole)
 				err = walk->pte_hole(addr, next, walk);
 			if (err)
@@ -90,9 +90,9 @@ static int walk_pud_range(pgd_t *pgd, unsigned long addr, unsigned long end,
 		}
 
 		if (walk->pud_entry) {
-			spinlock_t *ptl;
+			spinlock_t *ptl = pud_trans_huge_lock(pud, walk->vma);
 
-			if (pud_trans_huge_lock(pud, vma, &ptl) == 1) {
+			if (ptl) {
 				err = walk->pud_entry(pud, addr, next, walk);
 				spin_unlock(ptl);
 				if (err)
@@ -101,7 +101,7 @@ static int walk_pud_range(pgd_t *pgd, unsigned long addr, unsigned long end,
 			}
 		}
 
-		split_huge_page_pud(vma, addr, pud);
+		split_huge_pud(walk->vma, pud, addr);
 		if (pud_none(*pud))
 			goto again;
 
@@ -110,6 +110,32 @@ static int walk_pud_range(pgd_t *pgd, unsigned long addr, unsigned long end,
 		if (err)
 			break;
 	} while (pud++, addr = next, addr != end);
+
+	return err;
+}
+
+static int walk_p4d_range(pgd_t *pgd, unsigned long addr, unsigned long end,
+			  struct mm_walk *walk)
+{
+	p4d_t *p4d;
+	unsigned long next;
+	int err = 0;
+
+	p4d = p4d_offset(pgd, addr);
+	do {
+		next = p4d_addr_end(addr, end);
+		if (p4d_none_or_clear_bad(p4d)) {
+			if (walk->pte_hole)
+				err = walk->pte_hole(addr, next, walk);
+			if (err)
+				break;
+			continue;
+		}
+		if (walk->pmd_entry || walk->pte_entry)
+			err = walk_pud_range(p4d, addr, next, walk);
+		if (err)
+			break;
+	} while (p4d++, addr = next, addr != end);
 
 	return err;
 }
@@ -132,7 +158,7 @@ static int walk_pgd_range(unsigned long addr, unsigned long end,
 			continue;
 		}
 		if (walk->pmd_entry || walk->pte_entry)
-			err = walk_pud_range(pgd, addr, next, walk);
+			err = walk_p4d_range(pgd, addr, next, walk);
 		if (err)
 			break;
 	} while (pgd++, addr = next, addr != end);
@@ -155,14 +181,19 @@ static int walk_hugetlb_range(unsigned long addr, unsigned long end,
 	struct hstate *h = hstate_vma(vma);
 	unsigned long next;
 	unsigned long hmask = huge_page_mask(h);
+	unsigned long sz = huge_page_size(h);
 	pte_t *pte;
 	int err = 0;
 
 	do {
 		next = hugetlb_entry_end(h, addr, end);
-		pte = huge_pte_offset(walk->mm, addr & hmask);
-		if (pte && walk->hugetlb_entry)
+		pte = huge_pte_offset(walk->mm, addr & hmask, sz);
+
+		if (pte)
 			err = walk->hugetlb_entry(pte, hmask, addr, next, walk);
+		else if (walk->pte_hole)
+			err = walk->pte_hole(addr, next, walk);
+
 		if (err)
 			break;
 	} while (addr = next, addr != end);
@@ -186,7 +217,7 @@ static int walk_hugetlb_range(unsigned long addr, unsigned long end,
  * error, where we abort the current walk.
  */
 static int walk_page_test(unsigned long start, unsigned long end,
-			  struct mm_walk *walk)
+			struct mm_walk *walk)
 {
 	struct vm_area_struct *vma = walk->vma;
 
@@ -211,7 +242,7 @@ static int walk_page_test(unsigned long start, unsigned long end,
 }
 
 static int __walk_page_range(unsigned long start, unsigned long end,
-			     struct mm_walk *walk)
+			struct mm_walk *walk)
 {
 	int err = 0;
 	struct vm_area_struct *vma = walk->vma;
@@ -227,6 +258,9 @@ static int __walk_page_range(unsigned long start, unsigned long end,
 
 /**
  * walk_page_range - walk page table with caller specific callbacks
+ * @start: start address of the virtual address range
+ * @end: end address of the virtual address range
+ * @walk: mm_walk structure defining the callbacks and the target address space
  *
  * Recursively walk the page table tree of the process represented by @walk->mm
  * within the virtual address range [@start, @end). During walking, we can do
@@ -234,6 +268,7 @@ static int __walk_page_range(unsigned long start, unsigned long end,
  * pte_entry(), and/or hugetlb_entry(). If you don't set up for some of these
  * callbacks, the associated entries/pages are just ignored.
  * The return values of these callbacks are commonly defined like below:
+ *
  *  - 0  : succeeded to handle the current entry, and if you don't reach the
  *         end address yet, continue to walk.
  *  - >0 : succeeded to handle the current entry, and return to the caller
@@ -268,7 +303,7 @@ int walk_page_range(unsigned long start, unsigned long end,
 	if (!walk->mm)
 		return -EINVAL;
 
-	VM_BUG_ON(!rwsem_is_locked(&walk->mm->mmap_sem));
+	VM_BUG_ON_MM(!rwsem_is_locked(&walk->mm->mmap_sem), walk->mm);
 
 	vma = find_vma(walk->mm, start);
 	do {
@@ -297,7 +332,7 @@ int walk_page_range(unsigned long start, unsigned long end,
 				break;
 		}
 		if (walk->vma || walk->pte_hole)
-			err = __walk_page_range(start, next, walk);;
+			err = __walk_page_range(start, next, walk);
 		if (err)
 			break;
 	} while (start = next, start < end);

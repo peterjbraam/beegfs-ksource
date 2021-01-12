@@ -658,10 +658,10 @@ static u8 *it821x_firmware_command(struct ata_port *ap, u8 cmd, int len)
 	u8 status;
 	int n = 0;
 	u16 *buf = kmalloc(len, GFP_KERNEL);
-	if (buf == NULL) {
-		printk(KERN_ERR "it821x_firmware_command: Out of memory\n");
+
+	if (!buf)
 		return NULL;
-	}
+
 	/* This isn't quite a normal ATA command as we are talking to the
 	   firmware not the drives */
 	ap->ctl |= ATA_NIEN;
@@ -683,7 +683,7 @@ static u8 *it821x_firmware_command(struct ata_port *ap, u8 cmd, int len)
 			ioread16_rep(ap->ioaddr.data_addr, buf, len/2);
 			return (u8 *)buf;
 		}
-		mdelay(1);
+		usleep_range(500, 1000);
 	}
 	kfree(buf);
 	printk(KERN_ERR "it821x_firmware_command: timeout\n");
@@ -935,10 +935,10 @@ static int it821x_init_one(struct pci_dev *pdev, const struct pci_device_id *id)
 	return ata_pci_bmdma_init_one(pdev, ppi, &it821x_sht, NULL, 0);
 }
 
-#ifdef CONFIG_PM
+#ifdef CONFIG_PM_SLEEP
 static int it821x_reinit_one(struct pci_dev *pdev)
 {
-	struct ata_host *host = dev_get_drvdata(&pdev->dev);
+	struct ata_host *host = pci_get_drvdata(pdev);
 	int rc;
 
 	rc = ata_pci_device_do_resume(pdev);
@@ -965,7 +965,7 @@ static struct pci_driver it821x_pci_driver = {
 	.id_table	= it821x,
 	.probe 		= it821x_init_one,
 	.remove		= ata_pci_remove_one,
-#ifdef CONFIG_PM
+#ifdef CONFIG_PM_SLEEP
 	.suspend	= ata_pci_device_suspend,
 	.resume		= it821x_reinit_one,
 #endif

@@ -284,7 +284,6 @@ enum ixgbe_ring_state_t {
 struct ixgbe_fwd_adapter {
 	unsigned long active_vlans[BITS_TO_LONGS(VLAN_N_VID)];
 	struct net_device *netdev;
-	struct ixgbe_adapter *real_adapter;
 	unsigned int tx_base_queue;
 	unsigned int rx_base_queue;
 	int pool;
@@ -467,7 +466,6 @@ struct ixgbe_q_vector {
 	/* for dynamic allocation of rings associated with this q_vector */
 	struct ixgbe_ring ring[0] ____cacheline_internodealigned_in_smp;
 };
-
 
 #ifdef CONFIG_IXGBE_HWMON
 
@@ -1004,6 +1002,9 @@ void ixgbe_ptp_check_pps_event(struct ixgbe_adapter *adapter);
 void ixgbe_sriov_reinit(struct ixgbe_adapter *adapter);
 #endif
 
+netdev_tx_t ixgbe_xmit_frame_ring(struct sk_buff *skb,
+				  struct ixgbe_adapter *adapter,
+				  struct ixgbe_ring *tx_ring);
 u32 ixgbe_rss_indir_tbl_entries(struct ixgbe_adapter *adapter);
 void ixgbe_store_key(struct ixgbe_adapter *adapter);
 void ixgbe_store_reta(struct ixgbe_adapter *adapter);

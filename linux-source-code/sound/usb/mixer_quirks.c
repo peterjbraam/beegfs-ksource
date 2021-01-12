@@ -45,7 +45,6 @@
 #include "mixer.h"
 #include "mixer_quirks.h"
 #include "mixer_scarlett.h"
-#include "mixer_scarlett_gen2.h"
 #include "mixer_us16x08.h"
 #include "helper.h"
 
@@ -240,13 +239,13 @@ static long snd_usb_sbrc_hwdep_read(struct snd_hwdep *hw, char __user *buf,
 	return err < 0 ? err : count;
 }
 
-static unsigned int snd_usb_sbrc_hwdep_poll(struct snd_hwdep *hw, struct file *file,
+static __poll_t snd_usb_sbrc_hwdep_poll(struct snd_hwdep *hw, struct file *file,
 					    poll_table *wait)
 {
 	struct usb_mixer_interface *mixer = hw->private_data;
 
 	poll_wait(file, &mixer->rc_waitq, wait);
-	return mixer->rc_code ? POLLIN | POLLRDNORM : 0;
+	return mixer->rc_code ? EPOLLIN | EPOLLRDNORM : 0;
 }
 
 static int snd_usb_soundblaster_remote_init(struct usb_mixer_interface *mixer)
@@ -755,7 +754,7 @@ static int snd_ni_control_init_val(struct usb_mixer_interface *mixer,
 		return err;
 	}
 
-	kctl->private_value |= ((unsigned int)value << 24);
+	kctl->private_value |= (value << 24);
 	return 0;
 }
 
@@ -916,7 +915,7 @@ static int snd_ftu_eff_switch_init(struct usb_mixer_interface *mixer,
 	if (err < 0)
 		return err;
 
-	kctl->private_value |= (unsigned int)value[0] << 24;
+	kctl->private_value |= value[0] << 24;
 	return 0;
 }
 
@@ -1169,17 +1168,17 @@ void snd_emuusb_set_samplerate(struct snd_usb_audio *chip,
 {
 	struct usb_mixer_interface *mixer;
 	struct usb_mixer_elem_info *cval;
-	int unitid = 12; /* SampleRate ExtensionUnit ID */
+	int unitid = 12; /* SamleRate ExtensionUnit ID */
 
 	list_for_each_entry(mixer, &chip->mixer_list, list) {
-		if (mixer->id_elems[unitid]) {
-			cval = mixer_elem_list_to_info(mixer->id_elems[unitid]);
+		cval = mixer_elem_list_to_info(mixer->id_elems[unitid]);
+		if (cval) {
 			snd_usb_mixer_set_ctl_value(cval, UAC_SET_CUR,
 						    cval->control << 8,
 						    samplerate_id);
 			snd_usb_mixer_notify_id(mixer, unitid);
-			break;
 		}
+		break;
 	}
 }
 
@@ -2270,12 +2269,6 @@ int snd_usb_mixer_apply_create_quirk(struct usb_mixer_interface *mixer)
 	case USB_ID(0x1235, 0x8014): /* Focusrite Scarlett 18i8 */
 	case USB_ID(0x1235, 0x800c): /* Focusrite Scarlett 18i20 */
 		err = snd_scarlett_controls_create(mixer);
-		break;
-
-	case USB_ID(0x1235, 0x8203): /* Focusrite Scarlett 6i6 2nd Gen */
-	case USB_ID(0x1235, 0x8204): /* Focusrite Scarlett 18i8 2nd Gen */
-	case USB_ID(0x1235, 0x8201): /* Focusrite Scarlett 18i20 2nd Gen */
-		err = snd_scarlett_gen2_controls_create(mixer);
 		break;
 
 	case USB_ID(0x041e, 0x323b): /* Creative Sound Blaster E1 */

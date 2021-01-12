@@ -30,6 +30,8 @@
 #include <linux/slab.h> /* kmem_* */
 #include <linux/types.h>
 #include <linux/sched.h>
+#include <linux/sched/user.h>
+#include <linux/sched/mm.h>
 
 #include "inotify.h"
 
@@ -97,9 +99,19 @@ int inotify_handle_event(struct fsnotify_group *group,
 	i_mark = container_of(inode_mark, struct inotify_inode_mark,
 			      fsn_mark);
 
-	event = kmalloc(alloc_len, GFP_KERNEL);
-	if (unlikely(!event))
+	/* Whoever is interested in the event, pays for the allocation. */
+	memalloc_use_memcg(group->memcg);
+	event = kmalloc(alloc_len, GFP_KERNEL_ACCOUNT);
+	memalloc_unuse_memcg();
+
+	if (unlikely(!event)) {
+		/*
+		 * Treat lost event due to ENOMEM the same way as queue
+		 * overflow to let userspace know event was lost.
+		 */
+		fsnotify_queue_overflow(group);
 		return -ENOMEM;
+	}
 
 	fsn_event = &event->fse;
 	fsnotify_init_event(fsn_event, inode, mask);
@@ -166,10 +178,8 @@ static void inotify_free_group_priv(struct fsnotify_group *group)
 	/* ideally the idr is empty and we won't hit the BUG in the callback */
 	idr_for_each(&group->inotify_data.idr, idr_callback, group);
 	idr_destroy(&group->inotify_data.idr);
-	if (group->inotify_data.user) {
-		atomic_dec(&group->inotify_data.user->inotify_devs);
-		free_uid(group->inotify_data.user);
-	}
+	if (group->inotify_data.ucounts)
+		dec_inotify_instances(group->inotify_data.ucounts);
 }
 
 static void inotify_free_event(struct fsnotify_event *fsn_event)

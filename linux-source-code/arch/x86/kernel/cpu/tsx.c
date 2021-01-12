@@ -8,12 +8,13 @@
  *	Pawan Gupta <pawan.kumar.gupta@linux.intel.com>
  */
 
-#include <asm/cpufeature.h>
+#include <linux/cpufeature.h>
+
 #include <asm/cmdline.h>
 
 #include "cpu.h"
 
-enum tsx_ctrl_states tsx_ctrl_state __read_mostly = TSX_CTRL_NOT_SUPPORTED;
+enum tsx_ctrl_states tsx_ctrl_state __ro_after_init = TSX_CTRL_NOT_SUPPORTED;
 
 void tsx_disable(void)
 {

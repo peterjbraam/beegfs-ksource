@@ -217,7 +217,7 @@ static inline void cqhci_writel(struct cqhci_host *host, u32 val, int reg)
 	if (unlikely(host->ops->write_l))
 		host->ops->write_l(host, val, reg);
 	else
-		writel(val, host->mmio + reg);
+		writel_relaxed(val, host->mmio + reg);
 }
 
 static inline u32 cqhci_readl(struct cqhci_host *host, int reg)

@@ -12,12 +12,14 @@
 #include <linux/slab.h>
 #include <linux/kernel.h>
 #include <linux/stddef.h>
-#include <linux/init.h>
 #include <linux/i2c.h>
 #include <linux/acpi.h>
 
 #define ACPI_SMBUS_HC_CLASS		"smbus"
 #define ACPI_SMBUS_HC_DEVICE_NAME	"cmi"
+
+/* SMBUS HID definition as supported by Microsoft Windows */
+#define ACPI_SMBUS_MS_HID		"SMB0001"
 
 ACPI_MODULE_NAME("smbus_cmi");
 
@@ -52,6 +54,7 @@ static const struct smbus_methods_t ibm_smbus_methods = {
 static const struct acpi_device_id acpi_smbus_cmi_ids[] = {
 	{"SMBUS01", (kernel_ulong_t)&smbus_methods},
 	{ACPI_SMBUS_IBM_HID, (kernel_ulong_t)&ibm_smbus_methods},
+	{ACPI_SMBUS_MS_HID, (kernel_ulong_t)&smbus_methods},
 	{"", 0}
 };
 MODULE_DEVICE_TABLE(acpi, acpi_smbus_cmi_ids);
@@ -179,7 +182,8 @@ acpi_smbus_cmi_access(struct i2c_adapter *adap, u16 addr, unsigned short flags,
 	status = acpi_evaluate_object(smbus_cmi->handle, method, &input,
 				      &buffer);
 	if (ACPI_FAILURE(status)) {
-		ACPI_ERROR((AE_INFO, "Evaluating %s: %i", method, status));
+		acpi_handle_err(smbus_cmi->handle,
+				"Failed to evaluate %s: %i\n", method, status);
 		return -EIO;
 	}
 
@@ -187,19 +191,19 @@ acpi_smbus_cmi_access(struct i2c_adapter *adap, u16 addr, unsigned short flags,
 	if (pkg && pkg->type == ACPI_TYPE_PACKAGE)
 		obj = pkg->package.elements;
 	else {
-		ACPI_ERROR((AE_INFO, "Invalid argument type"));
+		acpi_handle_err(smbus_cmi->handle, "Invalid argument type\n");
 		result = -EIO;
 		goto out;
 	}
 	if (obj == NULL || obj->type != ACPI_TYPE_INTEGER) {
-		ACPI_ERROR((AE_INFO, "Invalid argument type"));
+		acpi_handle_err(smbus_cmi->handle, "Invalid argument type\n");
 		result = -EIO;
 		goto out;
 	}
 
 	result = obj->integer.value;
-	ACPI_DEBUG_PRINT((ACPI_DB_INFO, "%s return status: %i\n",
-			  method, result));
+	acpi_handle_debug(smbus_cmi->handle,  "%s return status: %i\n", method,
+			  result);
 
 	switch (result) {
 	case ACPI_SMBUS_STATUS_OK:
@@ -223,8 +227,8 @@ acpi_smbus_cmi_access(struct i2c_adapter *adap, u16 addr, unsigned short flags,
 		goto out;
 
 	obj = pkg->package.elements + 1;
-	if (obj == NULL || obj->type != ACPI_TYPE_INTEGER) {
-		ACPI_ERROR((AE_INFO, "Invalid argument type"));
+	if (obj->type != ACPI_TYPE_INTEGER) {
+		acpi_handle_err(smbus_cmi->handle, "Invalid argument type\n");
 		result = -EIO;
 		goto out;
 	}
@@ -235,8 +239,9 @@ acpi_smbus_cmi_access(struct i2c_adapter *adap, u16 addr, unsigned short flags,
 	case I2C_SMBUS_BYTE:
 	case I2C_SMBUS_BYTE_DATA:
 	case I2C_SMBUS_WORD_DATA:
-		if (obj == NULL || obj->type != ACPI_TYPE_INTEGER) {
-			ACPI_ERROR((AE_INFO, "Invalid argument type"));
+		if (obj->type != ACPI_TYPE_INTEGER) {
+			acpi_handle_err(smbus_cmi->handle,
+					"Invalid argument type\n");
 			result = -EIO;
 			goto out;
 		}
@@ -246,8 +251,9 @@ acpi_smbus_cmi_access(struct i2c_adapter *adap, u16 addr, unsigned short flags,
 			data->byte = obj->integer.value;
 		break;
 	case I2C_SMBUS_BLOCK_DATA:
-		if (obj == NULL || obj->type != ACPI_TYPE_BUFFER) {
-			ACPI_ERROR((AE_INFO, "Invalid argument type"));
+		if (obj->type != ACPI_TYPE_BUFFER) {
+			acpi_handle_err(smbus_cmi->handle,
+					"Invalid argument type\n");
 			result = -EIO;
 			goto out;
 		}
@@ -297,6 +303,7 @@ static int acpi_smbus_cmi_add_cap(struct acpi_smbus_cmi *smbus_cmi,
 				  const char *name)
 {
 	struct acpi_buffer buffer = { ACPI_ALLOCATE_BUFFER, NULL };
+	struct acpi_handle *handle = smbus_cmi->handle;
 	union acpi_object *obj;
 	acpi_status status;
 
@@ -305,8 +312,8 @@ static int acpi_smbus_cmi_add_cap(struct acpi_smbus_cmi *smbus_cmi,
 					smbus_cmi->methods->mt_info,
 					NULL, &buffer);
 		if (ACPI_FAILURE(status)) {
-			ACPI_ERROR((AE_INFO, "Evaluating %s: %i",
-				   smbus_cmi->methods->mt_info, status));
+			acpi_handle_err(handle, "Failed to evaluate %s: %i\n",
+					smbus_cmi->methods->mt_info, status);
 			return -EIO;
 		}
 
@@ -314,18 +321,18 @@ static int acpi_smbus_cmi_add_cap(struct acpi_smbus_cmi *smbus_cmi,
 		if (obj && obj->type == ACPI_TYPE_PACKAGE)
 			obj = obj->package.elements;
 		else {
-			ACPI_ERROR((AE_INFO, "Invalid argument type"));
+			acpi_handle_err(handle, "Invalid argument type\n");
 			kfree(buffer.pointer);
 			return -EIO;
 		}
 
 		if (obj->type != ACPI_TYPE_INTEGER) {
-			ACPI_ERROR((AE_INFO, "Invalid argument type"));
+			acpi_handle_err(handle, "Invalid argument type\n");
 			kfree(buffer.pointer);
 			return -EIO;
 		} else
-			ACPI_DEBUG_PRINT((ACPI_DB_INFO, "SMBus CMI Version %x"
-					  "\n", (int)obj->integer.value));
+			acpi_handle_debug(handle, "SMBus CMI Version %x\n",
+					  (int)obj->integer.value);
 
 		kfree(buffer.pointer);
 		smbus_cmi->cap_info = 1;
@@ -334,8 +341,7 @@ static int acpi_smbus_cmi_add_cap(struct acpi_smbus_cmi *smbus_cmi,
 	else if (!strcmp(name, smbus_cmi->methods->mt_sbw))
 		smbus_cmi->cap_write = 1;
 	else
-		ACPI_DEBUG_PRINT((ACPI_DB_INFO, "Unsupported CMI method: %s\n",
-				 name));
+		acpi_handle_debug(handle, "Unsupported CMI method: %s\n", name);
 
 	return 0;
 }

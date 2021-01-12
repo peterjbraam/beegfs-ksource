@@ -808,6 +808,9 @@ static int iavf_set_mac(struct net_device *netdev, void *p)
 	if (ether_addr_equal(netdev->dev_addr, addr->sa_data))
 		return 0;
 
+	if (adapter->flags & IAVF_FLAG_ADDR_SET_BY_PF)
+		return -EPERM;
+
 	spin_lock_bh(&adapter->mac_vlan_list_lock);
 
 	f = iavf_find_filter(adapter, hw->mac.addr);
@@ -822,6 +825,7 @@ static int iavf_set_mac(struct net_device *netdev, void *p)
 
 	if (f) {
 		ether_addr_copy(hw->mac.addr, addr->sa_data);
+		ether_addr_copy(netdev->dev_addr, adapter->hw.mac.addr);
 	}
 
 	return (f == NULL) ? -ENOMEM : 0;
@@ -2435,6 +2439,8 @@ static int iavf_parse_cls_flower(struct iavf_adapter *adapter,
 				 struct tc_cls_flower_offload *f,
 				 struct iavf_cloud_filter *filter)
 {
+	struct flow_rule *rule = tc_cls_flower_offload_flow_rule(f);
+	struct flow_dissector *dissector = rule->match.dissector;
 	u16 n_proto_mask = 0;
 	u16 n_proto_key = 0;
 	u8 field_flags = 0;
@@ -2443,7 +2449,7 @@ static int iavf_parse_cls_flower(struct iavf_adapter *adapter,
 	int i = 0;
 	struct virtchnl_filter *vf = &filter->f;
 
-	if (f->dissector->used_keys &
+	if (dissector->used_keys &
 	    ~(BIT(FLOW_DISSECTOR_KEY_CONTROL) |
 	      BIT(FLOW_DISSECTOR_KEY_BASIC) |
 	      BIT(FLOW_DISSECTOR_KEY_ETH_ADDRS) |
@@ -2453,32 +2459,24 @@ static int iavf_parse_cls_flower(struct iavf_adapter *adapter,
 	      BIT(FLOW_DISSECTOR_KEY_PORTS) |
 	      BIT(FLOW_DISSECTOR_KEY_ENC_KEYID))) {
 		dev_err(&adapter->pdev->dev, "Unsupported key used: 0x%x\n",
-			f->dissector->used_keys);
+			dissector->used_keys);
 		return -EOPNOTSUPP;
 	}
 
-	if (dissector_uses_key(f->dissector, FLOW_DISSECTOR_KEY_ENC_KEYID)) {
-		struct flow_dissector_key_keyid *mask =
-			skb_flow_dissector_target(f->dissector,
-						  FLOW_DISSECTOR_KEY_ENC_KEYID,
-						  f->mask);
+	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_ENC_KEYID)) {
+		struct flow_match_enc_keyid match;
 
-		if (mask->keyid != 0)
+		flow_rule_match_enc_keyid(rule, &match);
+		if (match.mask->keyid != 0)
 			field_flags |= IAVF_CLOUD_FIELD_TEN_ID;
 	}
 
-	if (dissector_uses_key(f->dissector, FLOW_DISSECTOR_KEY_BASIC)) {
-		struct flow_dissector_key_basic *key =
-			skb_flow_dissector_target(f->dissector,
-						  FLOW_DISSECTOR_KEY_BASIC,
-						  f->key);
+	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_BASIC)) {
+		struct flow_match_basic match;
 
-		struct flow_dissector_key_basic *mask =
-			skb_flow_dissector_target(f->dissector,
-						  FLOW_DISSECTOR_KEY_BASIC,
-						  f->mask);
-		n_proto_key = ntohs(key->n_proto);
-		n_proto_mask = ntohs(mask->n_proto);
+		flow_rule_match_basic(rule, &match);
+		n_proto_key = ntohs(match.key->n_proto);
+		n_proto_mask = ntohs(match.mask->n_proto);
 
 		if (n_proto_key == ETH_P_ALL) {
 			n_proto_key = 0;
@@ -2492,122 +2490,103 @@ static int iavf_parse_cls_flower(struct iavf_adapter *adapter,
 			vf->flow_type = VIRTCHNL_TCP_V6_FLOW;
 		}
 
-		if (key->ip_proto != IPPROTO_TCP) {
+		if (match.key->ip_proto != IPPROTO_TCP) {
 			dev_info(&adapter->pdev->dev, "Only TCP transport is supported\n");
 			return -EINVAL;
 		}
 	}
 
-	if (dissector_uses_key(f->dissector, FLOW_DISSECTOR_KEY_ETH_ADDRS)) {
-		struct flow_dissector_key_eth_addrs *key =
-			skb_flow_dissector_target(f->dissector,
-						  FLOW_DISSECTOR_KEY_ETH_ADDRS,
-						  f->key);
+	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_ETH_ADDRS)) {
+		struct flow_match_eth_addrs match;
 
-		struct flow_dissector_key_eth_addrs *mask =
-			skb_flow_dissector_target(f->dissector,
-						  FLOW_DISSECTOR_KEY_ETH_ADDRS,
-						  f->mask);
+		flow_rule_match_eth_addrs(rule, &match);
+
 		/* use is_broadcast and is_zero to check for all 0xf or 0 */
-		if (!is_zero_ether_addr(mask->dst)) {
-			if (is_broadcast_ether_addr(mask->dst)) {
+		if (!is_zero_ether_addr(match.mask->dst)) {
+			if (is_broadcast_ether_addr(match.mask->dst)) {
 				field_flags |= IAVF_CLOUD_FIELD_OMAC;
 			} else {
 				dev_err(&adapter->pdev->dev, "Bad ether dest mask %pM\n",
-					mask->dst);
+					match.mask->dst);
 				return I40E_ERR_CONFIG;
 			}
 		}
 
-		if (!is_zero_ether_addr(mask->src)) {
-			if (is_broadcast_ether_addr(mask->src)) {
+		if (!is_zero_ether_addr(match.mask->src)) {
+			if (is_broadcast_ether_addr(match.mask->src)) {
 				field_flags |= IAVF_CLOUD_FIELD_IMAC;
 			} else {
 				dev_err(&adapter->pdev->dev, "Bad ether src mask %pM\n",
-					mask->src);
+					match.mask->src);
 				return I40E_ERR_CONFIG;
 			}
 		}
 
-		if (!is_zero_ether_addr(key->dst))
-			if (is_valid_ether_addr(key->dst) ||
-			    is_multicast_ether_addr(key->dst)) {
+		if (!is_zero_ether_addr(match.key->dst))
+			if (is_valid_ether_addr(match.key->dst) ||
+			    is_multicast_ether_addr(match.key->dst)) {
 				/* set the mask if a valid dst_mac address */
 				for (i = 0; i < ETH_ALEN; i++)
 					vf->mask.tcp_spec.dst_mac[i] |= 0xff;
 				ether_addr_copy(vf->data.tcp_spec.dst_mac,
-						key->dst);
+						match.key->dst);
 			}
 
-		if (!is_zero_ether_addr(key->src))
-			if (is_valid_ether_addr(key->src) ||
-			    is_multicast_ether_addr(key->src)) {
+		if (!is_zero_ether_addr(match.key->src))
+			if (is_valid_ether_addr(match.key->src) ||
+			    is_multicast_ether_addr(match.key->src)) {
 				/* set the mask if a valid dst_mac address */
 				for (i = 0; i < ETH_ALEN; i++)
 					vf->mask.tcp_spec.src_mac[i] |= 0xff;
 				ether_addr_copy(vf->data.tcp_spec.src_mac,
-						key->src);
+						match.key->src);
 		}
 	}
 
-	if (dissector_uses_key(f->dissector, FLOW_DISSECTOR_KEY_VLAN)) {
-		struct flow_dissector_key_vlan *key =
-			skb_flow_dissector_target(f->dissector,
-						  FLOW_DISSECTOR_KEY_VLAN,
-						  f->key);
-		struct flow_dissector_key_vlan *mask =
-			skb_flow_dissector_target(f->dissector,
-						  FLOW_DISSECTOR_KEY_VLAN,
-						  f->mask);
+	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_VLAN)) {
+		struct flow_match_vlan match;
 
-		if (mask->vlan_id) {
-			if (mask->vlan_id == VLAN_VID_MASK) {
+		flow_rule_match_vlan(rule, &match);
+		if (match.mask->vlan_id) {
+			if (match.mask->vlan_id == VLAN_VID_MASK) {
 				field_flags |= IAVF_CLOUD_FIELD_IVLAN;
 			} else {
 				dev_err(&adapter->pdev->dev, "Bad vlan mask %u\n",
-					mask->vlan_id);
+					match.mask->vlan_id);
 				return I40E_ERR_CONFIG;
 			}
 		}
 		vf->mask.tcp_spec.vlan_id |= cpu_to_be16(0xffff);
-		vf->data.tcp_spec.vlan_id = cpu_to_be16(key->vlan_id);
+		vf->data.tcp_spec.vlan_id = cpu_to_be16(match.key->vlan_id);
 	}
 
-	if (dissector_uses_key(f->dissector, FLOW_DISSECTOR_KEY_CONTROL)) {
-		struct flow_dissector_key_control *key =
-			skb_flow_dissector_target(f->dissector,
-						  FLOW_DISSECTOR_KEY_CONTROL,
-						  f->key);
+	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_CONTROL)) {
+		struct flow_match_control match;
 
-		addr_type = key->addr_type;
+		flow_rule_match_control(rule, &match);
+		addr_type = match.key->addr_type;
 	}
 
 	if (addr_type == FLOW_DISSECTOR_KEY_IPV4_ADDRS) {
-		struct flow_dissector_key_ipv4_addrs *key =
-			skb_flow_dissector_target(f->dissector,
-						  FLOW_DISSECTOR_KEY_IPV4_ADDRS,
-						  f->key);
-		struct flow_dissector_key_ipv4_addrs *mask =
-			skb_flow_dissector_target(f->dissector,
-						  FLOW_DISSECTOR_KEY_IPV4_ADDRS,
-						  f->mask);
+		struct flow_match_ipv4_addrs match;
 
-		if (mask->dst) {
-			if (mask->dst == cpu_to_be32(0xffffffff)) {
+		flow_rule_match_ipv4_addrs(rule, &match);
+		if (match.mask->dst) {
+			if (match.mask->dst == cpu_to_be32(0xffffffff)) {
 				field_flags |= IAVF_CLOUD_FIELD_IIP;
 			} else {
 				dev_err(&adapter->pdev->dev, "Bad ip dst mask 0x%08x\n",
-					be32_to_cpu(mask->dst));
+					be32_to_cpu(match.mask->dst));
 				return I40E_ERR_CONFIG;
 			}
 		}
 
-		if (mask->src) {
-			if (mask->src == cpu_to_be32(0xffffffff)) {
+		if (match.mask->src) {
+			if (match.mask->src == cpu_to_be32(0xffffffff)) {
 				field_flags |= IAVF_CLOUD_FIELD_IIP;
 			} else {
 				dev_err(&adapter->pdev->dev, "Bad ip src mask 0x%08x\n",
-					be32_to_cpu(mask->dst));
+					be32_to_cpu(match.mask->dst));
 				return I40E_ERR_CONFIG;
 			}
 		}
@@ -2616,28 +2595,23 @@ static int iavf_parse_cls_flower(struct iavf_adapter *adapter,
 			dev_info(&adapter->pdev->dev, "Tenant id not allowed for ip filter\n");
 			return I40E_ERR_CONFIG;
 		}
-		if (key->dst) {
+		if (match.key->dst) {
 			vf->mask.tcp_spec.dst_ip[0] |= cpu_to_be32(0xffffffff);
-			vf->data.tcp_spec.dst_ip[0] = key->dst;
+			vf->data.tcp_spec.dst_ip[0] = match.key->dst;
 		}
-		if (key->src) {
+		if (match.key->src) {
 			vf->mask.tcp_spec.src_ip[0] |= cpu_to_be32(0xffffffff);
-			vf->data.tcp_spec.src_ip[0] = key->src;
+			vf->data.tcp_spec.src_ip[0] = match.key->src;
 		}
 	}
 
 	if (addr_type == FLOW_DISSECTOR_KEY_IPV6_ADDRS) {
-		struct flow_dissector_key_ipv6_addrs *key =
-			skb_flow_dissector_target(f->dissector,
-						  FLOW_DISSECTOR_KEY_IPV6_ADDRS,
-						  f->key);
-		struct flow_dissector_key_ipv6_addrs *mask =
-			skb_flow_dissector_target(f->dissector,
-						  FLOW_DISSECTOR_KEY_IPV6_ADDRS,
-						  f->mask);
+		struct flow_match_ipv6_addrs match;
+
+		flow_rule_match_ipv6_addrs(rule, &match);
 
 		/* validate mask, make sure it is not IPV6_ADDR_ANY */
-		if (ipv6_addr_any(&mask->dst)) {
+		if (ipv6_addr_any(&match.mask->dst)) {
 			dev_err(&adapter->pdev->dev, "Bad ipv6 dst mask 0x%02x\n",
 				IPV6_ADDR_ANY);
 			return I40E_ERR_CONFIG;
@@ -2646,61 +2620,56 @@ static int iavf_parse_cls_flower(struct iavf_adapter *adapter,
 		/* src and dest IPv6 address should not be LOOPBACK
 		 * (0:0:0:0:0:0:0:1) which can be represented as ::1
 		 */
-		if (ipv6_addr_loopback(&key->dst) ||
-		    ipv6_addr_loopback(&key->src)) {
+		if (ipv6_addr_loopback(&match.key->dst) ||
+		    ipv6_addr_loopback(&match.key->src)) {
 			dev_err(&adapter->pdev->dev,
 				"ipv6 addr should not be loopback\n");
 			return I40E_ERR_CONFIG;
 		}
-		if (!ipv6_addr_any(&mask->dst) || !ipv6_addr_any(&mask->src))
+		if (!ipv6_addr_any(&match.mask->dst) ||
+		    !ipv6_addr_any(&match.mask->src))
 			field_flags |= IAVF_CLOUD_FIELD_IIP;
 
 		for (i = 0; i < 4; i++)
 			vf->mask.tcp_spec.dst_ip[i] |= cpu_to_be32(0xffffffff);
-		memcpy(&vf->data.tcp_spec.dst_ip, &key->dst.s6_addr32,
+		memcpy(&vf->data.tcp_spec.dst_ip, &match.key->dst.s6_addr32,
 		       sizeof(vf->data.tcp_spec.dst_ip));
 		for (i = 0; i < 4; i++)
 			vf->mask.tcp_spec.src_ip[i] |= cpu_to_be32(0xffffffff);
-		memcpy(&vf->data.tcp_spec.src_ip, &key->src.s6_addr32,
+		memcpy(&vf->data.tcp_spec.src_ip, &match.key->src.s6_addr32,
 		       sizeof(vf->data.tcp_spec.src_ip));
 	}
-	if (dissector_uses_key(f->dissector, FLOW_DISSECTOR_KEY_PORTS)) {
-		struct flow_dissector_key_ports *key =
-			skb_flow_dissector_target(f->dissector,
-						  FLOW_DISSECTOR_KEY_PORTS,
-						  f->key);
-		struct flow_dissector_key_ports *mask =
-			skb_flow_dissector_target(f->dissector,
-						  FLOW_DISSECTOR_KEY_PORTS,
-						  f->mask);
+	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_PORTS)) {
+		struct flow_match_ports match;
 
-		if (mask->src) {
-			if (mask->src == cpu_to_be16(0xffff)) {
+		flow_rule_match_ports(rule, &match);
+		if (match.mask->src) {
+			if (match.mask->src == cpu_to_be16(0xffff)) {
 				field_flags |= IAVF_CLOUD_FIELD_IIP;
 			} else {
 				dev_err(&adapter->pdev->dev, "Bad src port mask %u\n",
-					be16_to_cpu(mask->src));
+					be16_to_cpu(match.mask->src));
 				return I40E_ERR_CONFIG;
 			}
 		}
 
-		if (mask->dst) {
-			if (mask->dst == cpu_to_be16(0xffff)) {
+		if (match.mask->dst) {
+			if (match.mask->dst == cpu_to_be16(0xffff)) {
 				field_flags |= IAVF_CLOUD_FIELD_IIP;
 			} else {
 				dev_err(&adapter->pdev->dev, "Bad dst port mask %u\n",
-					be16_to_cpu(mask->dst));
+					be16_to_cpu(match.mask->dst));
 				return I40E_ERR_CONFIG;
 			}
 		}
-		if (key->dst) {
+		if (match.key->dst) {
 			vf->mask.tcp_spec.dst_port |= cpu_to_be16(0xffff);
-			vf->data.tcp_spec.dst_port = key->dst;
+			vf->data.tcp_spec.dst_port = match.key->dst;
 		}
 
-		if (key->src) {
+		if (match.key->src) {
 			vf->mask.tcp_spec.src_port |= cpu_to_be16(0xffff);
-			vf->data.tcp_spec.src_port = key->src;
+			vf->data.tcp_spec.src_port = match.key->src;
 		}
 	}
 	vf->field_flags = field_flags;
@@ -2896,7 +2865,7 @@ static int iavf_setup_tc_block(struct net_device *dev,
 	switch (f->command) {
 	case TC_BLOCK_BIND:
 		return tcf_block_cb_register(f->block, iavf_setup_tc_block_cb,
-					     adapter, adapter);
+					     adapter, adapter, f->extack);
 	case TC_BLOCK_UNBIND:
 		tcf_block_cb_unregister(f->block, iavf_setup_tc_block_cb,
 					adapter);
@@ -3187,21 +3156,20 @@ static netdev_features_t iavf_fix_features(struct net_device *netdev,
 }
 
 static const struct net_device_ops iavf_netdev_ops = {
-	.ndo_size		= sizeof(struct net_device_ops),
 	.ndo_open		= iavf_open,
 	.ndo_stop		= iavf_close,
 	.ndo_start_xmit		= iavf_xmit_frame,
 	.ndo_set_rx_mode	= iavf_set_rx_mode,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_set_mac_address	= iavf_set_mac,
-	.extended.ndo_change_mtu	= iavf_change_mtu,
+	.ndo_change_mtu		= iavf_change_mtu,
 	.ndo_tx_timeout		= iavf_tx_timeout,
 	.ndo_vlan_rx_add_vid	= iavf_vlan_rx_add_vid,
 	.ndo_vlan_rx_kill_vid	= iavf_vlan_rx_kill_vid,
 	.ndo_features_check	= iavf_features_check,
 	.ndo_fix_features	= iavf_fix_features,
 	.ndo_set_features	= iavf_set_features,
-	.extended.ndo_setup_tc_rh	= iavf_setup_tc,
+	.ndo_setup_tc		= iavf_setup_tc,
 };
 
 /**
@@ -3289,8 +3257,8 @@ int iavf_process_config(struct iavf_adapter *adapter)
 		hw_enc_features |= NETIF_F_GSO_UDP_TUNNEL	|
 				   NETIF_F_GSO_GRE		|
 				   NETIF_F_GSO_GRE_CSUM		|
-				   NETIF_F_GSO_IPIP		|
-				   NETIF_F_GSO_SIT		|
+				   NETIF_F_GSO_IPXIP4		|
+				   NETIF_F_GSO_IPXIP6		|
 				   NETIF_F_GSO_UDP_TUNNEL_CSUM	|
 				   NETIF_F_GSO_PARTIAL		|
 				   0;
@@ -3497,8 +3465,8 @@ static void iavf_init_task(struct work_struct *work)
 	netdev->watchdog_timeo = 5 * HZ;
 
 	/* MTU range: 68 - 9710 */
-	netdev->extended->min_mtu = ETH_MIN_MTU;
-	netdev->extended->max_mtu = IAVF_MAX_RXBUFFER - IAVF_PACKET_HDR_PAD;
+	netdev->min_mtu = ETH_MIN_MTU;
+	netdev->max_mtu = IAVF_MAX_RXBUFFER - IAVF_PACKET_HDR_PAD;
 
 	if (!is_valid_ether_addr(adapter->hw.mac.addr)) {
 		dev_info(&pdev->dev, "Invalid MAC address %pM, using random\n",
@@ -3506,6 +3474,7 @@ static void iavf_init_task(struct work_struct *work)
 		eth_hw_addr_random(netdev);
 		ether_addr_copy(adapter->hw.mac.addr, netdev->dev_addr);
 	} else {
+		adapter->flags |= IAVF_FLAG_ADDR_SET_BY_PF;
 		ether_addr_copy(netdev->dev_addr, adapter->hw.mac.addr);
 		ether_addr_copy(netdev->perm_addr, adapter->hw.mac.addr);
 	}

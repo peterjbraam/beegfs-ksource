@@ -1,7 +1,7 @@
 /**
- * inode.c - NTFS kernel inode handling. Part of the Linux-NTFS project.
+ * inode.c - NTFS kernel inode handling.
  *
- * Copyright (c) 2001-2007 Anton Altaparmakov
+ * Copyright (c) 2001-2014 Anton Altaparmakov and Tuxera Inc.
  *
  * This program/include file is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as published
@@ -28,7 +28,6 @@
 #include <linux/quotaops.h>
 #include <linux/slab.h>
 #include <linux/log2.h>
-#include <linux/aio.h>
 
 #include "aops.h"
 #include "attrib.h"
@@ -55,7 +54,7 @@
  *
  * Return 1 if the attributes match and 0 if not.
  *
- * NOTE: This function runs with the inode->i_lock spin lock held so it is not
+ * NOTE: This function runs with the inode_hash_lock spin lock held so it is not
  * allowed to sleep.
  */
 int ntfs_test_inode(struct inode *vi, ntfs_attr *na)
@@ -561,13 +560,6 @@ static int ntfs_read_locked_inode(struct inode *vi)
 	ntfs_debug("Entering for i_ino 0x%lx.", vi->i_ino);
 
 	/* Setup the generic vfs inode parts now. */
-
-	/*
-	 * This is for checking whether an inode has changed w.r.t. a file so
-	 * that the file can be updated if necessary (compare with f_version).
-	 */
-	vi->i_version = 1;
-
 	vi->i_uid = vol->uid;
 	vi->i_gid = vol->gid;
 	vi->i_mode = 0;
@@ -675,18 +667,18 @@ static int ntfs_read_locked_inode(struct inode *vi)
 	 * mtime is the last change of the data within the file. Not changed
 	 * when only metadata is changed, e.g. a rename doesn't affect mtime.
 	 */
-	vi->i_mtime = ntfs2utc(si->last_data_change_time);
+	vi->i_mtime = timespec_to_timespec64(ntfs2utc(si->last_data_change_time));
 	/*
 	 * ctime is the last change of the metadata of the file. This obviously
 	 * always changes, when mtime is changed. ctime can be changed on its
 	 * own, mtime is then not changed, e.g. when a file is renamed.
 	 */
-	vi->i_ctime = ntfs2utc(si->last_mft_change_time);
+	vi->i_ctime = timespec_to_timespec64(ntfs2utc(si->last_mft_change_time));
 	/*
 	 * Last access to the data within the file. Not changed during a rename
 	 * for example but changed whenever the file is written to.
 	 */
-	vi->i_atime = ntfs2utc(si->last_access_time);
+	vi->i_atime = timespec_to_timespec64(ntfs2utc(si->last_access_time));
 
 	/* Find the attribute list attribute if present. */
 	ntfs_attr_reinit_search_ctx(ctx);
@@ -869,12 +861,12 @@ skip_attr_list_load:
 					ni->itype.index.block_size);
 			goto unm_err_out;
 		}
-		if (ni->itype.index.block_size > PAGE_CACHE_SIZE) {
+		if (ni->itype.index.block_size > PAGE_SIZE) {
 			ntfs_error(vi->i_sb, "Index block size (%u) > "
-					"PAGE_CACHE_SIZE (%ld) is not "
+					"PAGE_SIZE (%ld) is not "
 					"supported.  Sorry.",
 					ni->itype.index.block_size,
-					PAGE_CACHE_SIZE);
+					PAGE_SIZE);
 			err = -EOPNOTSUPP;
 			goto unm_err_out;
 		}
@@ -1012,6 +1004,7 @@ skip_large_dir_stuff:
 		/* Setup the operations for this inode. */
 		vi->i_op = &ntfs_dir_inode_ops;
 		vi->i_fop = &ntfs_dir_ops;
+		vi->i_mapping->a_ops = &ntfs_mst_aops;
 	} else {
 		/* It is a file. */
 		ntfs_attr_reinit_search_ctx(ctx);
@@ -1160,11 +1153,12 @@ no_data_attr_special_case:
 		/* Setup the operations for this inode. */
 		vi->i_op = &ntfs_file_inode_ops;
 		vi->i_fop = &ntfs_file_ops;
+		vi->i_mapping->a_ops = &ntfs_normal_aops;
+		if (NInoMstProtected(ni))
+			vi->i_mapping->a_ops = &ntfs_mst_aops;
+		else if (NInoCompressed(ni))
+			vi->i_mapping->a_ops = &ntfs_compressed_aops;
 	}
-	if (NInoMstProtected(ni))
-		vi->i_mapping->a_ops = &ntfs_mst_aops;
-	else
-		vi->i_mapping->a_ops = &ntfs_aops;
 	/*
 	 * The number of 512-byte blocks used on disk (for stat). This is in so
 	 * far inaccurate as it doesn't account for any named streams or other
@@ -1239,7 +1233,6 @@ static int ntfs_read_locked_attr_inode(struct inode *base_vi, struct inode *vi)
 	base_ni = NTFS_I(base_vi);
 
 	/* Just mirror the values from the base inode. */
-	vi->i_version	= base_vi->i_version;
 	vi->i_uid	= base_vi->i_uid;
 	vi->i_gid	= base_vi->i_gid;
 	set_nlink(vi, base_vi->i_nlink);
@@ -1414,10 +1407,11 @@ static int ntfs_read_locked_attr_inode(struct inode *base_vi, struct inode *vi)
 		ni->allocated_size = sle64_to_cpu(
 				a->data.non_resident.allocated_size);
 	}
+	vi->i_mapping->a_ops = &ntfs_normal_aops;
 	if (NInoMstProtected(ni))
 		vi->i_mapping->a_ops = &ntfs_mst_aops;
-	else
-		vi->i_mapping->a_ops = &ntfs_aops;
+	else if (NInoCompressed(ni))
+		vi->i_mapping->a_ops = &ntfs_compressed_aops;
 	if ((NInoCompressed(ni) || NInoSparse(ni)) && ni->type != AT_INDEX_ROOT)
 		vi->i_blocks = ni->itype.compressed.size >> 9;
 	else
@@ -1505,7 +1499,6 @@ static int ntfs_read_locked_index_inode(struct inode *base_vi, struct inode *vi)
 	ni	= NTFS_I(vi);
 	base_ni = NTFS_I(base_vi);
 	/* Just mirror the values from the base inode. */
-	vi->i_version	= base_vi->i_version;
 	vi->i_uid	= base_vi->i_uid;
 	vi->i_gid	= base_vi->i_gid;
 	set_nlink(vi, base_vi->i_nlink);
@@ -1583,10 +1576,10 @@ static int ntfs_read_locked_index_inode(struct inode *base_vi, struct inode *vi)
 				"two.", ni->itype.index.block_size);
 		goto unm_err_out;
 	}
-	if (ni->itype.index.block_size > PAGE_CACHE_SIZE) {
-		ntfs_error(vi->i_sb, "Index block size (%u) > PAGE_CACHE_SIZE "
+	if (ni->itype.index.block_size > PAGE_SIZE) {
+		ntfs_error(vi->i_sb, "Index block size (%u) > PAGE_SIZE "
 				"(%ld) is not supported.  Sorry.",
-				ni->itype.index.block_size, PAGE_CACHE_SIZE);
+				ni->itype.index.block_size, PAGE_SIZE);
 		err = -EOPNOTSUPP;
 		goto unm_err_out;
 	}
@@ -1704,8 +1697,6 @@ static int ntfs_read_locked_index_inode(struct inode *base_vi, struct inode *vi)
 	iput(bvi);
 skip_large_index_stuff:
 	/* Setup the operations for this index inode. */
-	vi->i_op = NULL;
-	vi->i_fop = NULL;
 	vi->i_mapping->a_ops = &ntfs_mst_aops;
 	vi->i_blocks = ni->allocated_size >> 9;
 	/*
@@ -1854,7 +1845,7 @@ int ntfs_read_inode_mount(struct inode *vi)
 	/* Need this to sanity check attribute list references to $MFT. */
 	vi->i_generation = ni->seq_no = le16_to_cpu(m->sequence_number);
 
-	/* Provides readpage() and sync_page() for map_mft_record(). */
+	/* Provides readpage() for map_mft_record(). */
 	vi->i_mapping->a_ops = &ntfs_mst_aops;
 
 	ctx = ntfs_attr_get_search_ctx(ni, m);
@@ -2813,11 +2804,11 @@ done:
 	 * for real.
 	 */
 	if (!IS_NOCMTIME(VFS_I(base_ni)) && !IS_RDONLY(VFS_I(base_ni))) {
-		struct timespec now = current_fs_time(VFS_I(base_ni)->i_sb);
+		struct timespec64 now = current_time(VFS_I(base_ni));
 		int sync_it = 0;
 
-		if (!timespec_equal(&VFS_I(base_ni)->i_mtime, &now) ||
-		    !timespec_equal(&VFS_I(base_ni)->i_ctime, &now))
+		if (!timespec64_equal(&VFS_I(base_ni)->i_mtime, &now) ||
+		    !timespec64_equal(&VFS_I(base_ni)->i_ctime, &now))
 			sync_it = 1;
 		VFS_I(base_ni)->i_mtime = now;
 		VFS_I(base_ni)->i_ctime = now;
@@ -2889,11 +2880,11 @@ void ntfs_truncate_vfs(struct inode *vi) {
  */
 int ntfs_setattr(struct dentry *dentry, struct iattr *attr)
 {
-	struct inode *vi = dentry->d_inode;
+	struct inode *vi = d_inode(dentry);
 	int err;
 	unsigned int ia_valid = attr->ia_valid;
 
-	err = inode_change_ok(vi, attr);
+	err = setattr_prepare(dentry, attr);
 	if (err)
 		goto out;
 	/* We do not support NTFS ACLs yet. */
@@ -2932,14 +2923,14 @@ int ntfs_setattr(struct dentry *dentry, struct iattr *attr)
 		}
 	}
 	if (ia_valid & ATTR_ATIME)
-		vi->i_atime = timespec_trunc(attr->ia_atime,
-				vi->i_sb->s_time_gran);
+		vi->i_atime = timespec64_trunc(attr->ia_atime,
+					       vi->i_sb->s_time_gran);
 	if (ia_valid & ATTR_MTIME)
-		vi->i_mtime = timespec_trunc(attr->ia_mtime,
-				vi->i_sb->s_time_gran);
+		vi->i_mtime = timespec64_trunc(attr->ia_mtime,
+					       vi->i_sb->s_time_gran);
 	if (ia_valid & ATTR_CTIME)
-		vi->i_ctime = timespec_trunc(attr->ia_ctime,
-				vi->i_sb->s_time_gran);
+		vi->i_ctime = timespec64_trunc(attr->ia_ctime,
+					       vi->i_sb->s_time_gran);
 	mark_inode_dirty(vi);
 out:
 	return err;
@@ -3006,7 +2997,7 @@ int __ntfs_write_inode(struct inode *vi, int sync)
 	si = (STANDARD_INFORMATION*)((u8*)ctx->attr +
 			le16_to_cpu(ctx->attr->data.resident.value_offset));
 	/* Update the access times if they have changed. */
-	nt = utc2ntfs(vi->i_mtime);
+	nt = utc2ntfs(timespec64_to_timespec(vi->i_mtime));
 	if (si->last_data_change_time != nt) {
 		ntfs_debug("Updating mtime for inode 0x%lx: old = 0x%llx, "
 				"new = 0x%llx", vi->i_ino, (long long)
@@ -3015,7 +3006,7 @@ int __ntfs_write_inode(struct inode *vi, int sync)
 		si->last_data_change_time = nt;
 		modified = true;
 	}
-	nt = utc2ntfs(vi->i_ctime);
+	nt = utc2ntfs(timespec64_to_timespec(vi->i_ctime));
 	if (si->last_mft_change_time != nt) {
 		ntfs_debug("Updating ctime for inode 0x%lx: old = 0x%llx, "
 				"new = 0x%llx", vi->i_ino, (long long)
@@ -3024,7 +3015,7 @@ int __ntfs_write_inode(struct inode *vi, int sync)
 		si->last_mft_change_time = nt;
 		modified = true;
 	}
-	nt = utc2ntfs(vi->i_atime);
+	nt = utc2ntfs(timespec64_to_timespec(vi->i_atime));
 	if (si->last_access_time != nt) {
 		ntfs_debug("Updating atime for inode 0x%lx: old = 0x%llx, "
 				"new = 0x%llx", vi->i_ino,

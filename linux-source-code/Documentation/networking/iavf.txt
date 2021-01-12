@@ -30,8 +30,8 @@ Intel Ethernet Adaptive Virtual Function
 Identifying Your Adapter
 ========================
 
-For more information on how to identify your adapter, go to the Adapter &
-Driver ID Guide at:
+For more information on how to identify your adapter, go to the
+Adapter & Driver ID Guide at:
 
     https://www.intel.com/content/www/us/en/support/articles/000005584/network-and-i-o/ethernet-products.html
 

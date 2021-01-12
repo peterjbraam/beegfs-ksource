@@ -41,6 +41,8 @@ static int __init fm10k_init_module(void)
 	/* create driver workqueue */
 	fm10k_workqueue = alloc_workqueue("%s", WQ_MEM_RECLAIM, 0,
 					  fm10k_driver_name);
+	if (!fm10k_workqueue)
+		return -ENOMEM;
 
 	fm10k_dbg_init();
 
@@ -76,7 +78,7 @@ static bool fm10k_alloc_mapped_page(struct fm10k_ring *rx_ring,
 		return true;
 
 	/* alloc new page for storage */
-	page = alloc_page(GFP_ATOMIC | __GFP_COLD);
+	page = dev_alloc_page();
 	if (unlikely(!page)) {
 		rx_ring->rx_stats.alloc_failed++;
 		return false;
@@ -317,8 +319,8 @@ static struct sk_buff *fm10k_fetch_rx_buffer(struct fm10k_ring *rx_ring,
 #endif
 
 		/* allocate a skb to store the frags */
-		skb = netdev_alloc_skb_ip_align(rx_ring->netdev,
-						FM10K_RX_HDR_LEN);
+		skb = napi_alloc_skb(&rx_ring->q_vector->napi,
+				     FM10K_RX_HDR_LEN);
 		if (unlikely(!skb)) {
 			rx_ring->rx_stats.alloc_failed++;
 			return NULL;
@@ -636,11 +638,11 @@ static int fm10k_clean_rx_irq(struct fm10k_q_vector *q_vector,
 static struct ethhdr *fm10k_port_is_vxlan(struct sk_buff *skb)
 {
 	struct fm10k_intfc *interface = netdev_priv(skb->dev);
-	struct fm10k_vxlan_port *vxlan_port;
+	struct fm10k_udp_port *vxlan_port;
 
 	/* we can only offload a vxlan if we recognize it as such */
 	vxlan_port = list_first_entry_or_null(&interface->vxlan_port,
-					      struct fm10k_vxlan_port, list);
+					      struct fm10k_udp_port, list);
 
 	if (!vxlan_port)
 		return NULL;
@@ -675,10 +677,6 @@ static struct ethhdr *fm10k_gre_is_nvgre(struct sk_buff *skb)
 	if (nvgre_hdr->flags & FM10K_NVGRE_RESERVED0_FLAGS)
 		return NULL;
 
-	/* verify protocol is transparent Ethernet bridging */
-	if (nvgre_hdr->proto != htons(ETH_P_TEB))
-		return NULL;
-
 	/* report start of ethernet header */
 	if (nvgre_hdr->flags & NVGRE_TNI)
 		return (struct ethhdr *)(nvgre_hdr + 1);
@@ -686,15 +684,13 @@ static struct ethhdr *fm10k_gre_is_nvgre(struct sk_buff *skb)
 	return (struct ethhdr *)(&nvgre_hdr->tni);
 }
 
-static __be16 fm10k_tx_encap_offload(struct sk_buff *skb)
+__be16 fm10k_tx_encap_offload(struct sk_buff *skb)
 {
+	u8 l4_hdr = 0, inner_l4_hdr = 0, inner_l4_hlen;
 	struct ethhdr *eth_hdr;
-	u8 l4_hdr = 0;
 
-/* fm10k supports 184 octets of outer+inner headers. Minus 20 for inner L4. */
-#define FM10K_MAX_ENCAP_TRANSPORT_OFFSET	164
-	if (skb_inner_transport_header(skb) - skb_mac_header(skb) >
-	    FM10K_MAX_ENCAP_TRANSPORT_OFFSET)
+	if (skb->inner_protocol_type != ENCAP_TYPE_ETHER ||
+	    skb->inner_protocol != htons(ETH_P_TEB))
 		return 0;
 
 	switch (vlan_get_protocol(skb)) {
@@ -724,11 +720,32 @@ static __be16 fm10k_tx_encap_offload(struct sk_buff *skb)
 
 	switch (eth_hdr->h_proto) {
 	case htons(ETH_P_IP):
+		inner_l4_hdr = inner_ip_hdr(skb)->protocol;
+		break;
 	case htons(ETH_P_IPV6):
+		inner_l4_hdr = inner_ipv6_hdr(skb)->nexthdr;
 		break;
 	default:
 		return 0;
 	}
+
+	switch (inner_l4_hdr) {
+	case IPPROTO_TCP:
+		inner_l4_hlen = inner_tcp_hdrlen(skb);
+		break;
+	case IPPROTO_UDP:
+		inner_l4_hlen = 8;
+		break;
+	default:
+		return 0;
+	}
+
+	/* The hardware allows tunnel offloads only if the combined inner and
+	 * outer header is 184 bytes or less
+	 */
+	if (skb_inner_transport_header(skb) + inner_l4_hlen -
+	    skb_mac_header(skb) > FM10K_TUNNEL_HEADER_LENGTH)
+		return 0;
 
 	return eth_hdr->h_proto;
 }
@@ -1016,13 +1033,18 @@ static void fm10k_tx_map(struct fm10k_ring *tx_ring,
 
 	tx_ring->next_to_use = i;
 
-	/* notify HW of packet */
-	writel(i, tx_ring->tail);
+	/* Make sure there is space in the ring for the next send. */
+	fm10k_maybe_stop_tx(tx_ring, DESC_NEEDED);
 
-	/* we need this if more than one processor can write to our tail
-	 * at a time, it synchronizes IO on IA64/Altix systems
-	 */
-	mmiowb();
+	/* notify HW of packet */
+	if (netif_xmit_stopped(txring_txq(tx_ring)) || !skb->xmit_more) {
+		writel(i, tx_ring->tail);
+
+		/* we need this if more than one processor can write to our tail
+		 * at a time, it synchronizes IO on IA64/Altix systems
+		 */
+		mmiowb();
+	}
 
 	return;
 dma_error:
@@ -1080,8 +1102,6 @@ netdev_tx_t fm10k_xmit_frame_ring(struct sk_buff *skb,
 		fm10k_tx_csum(tx_ring, first);
 
 	fm10k_tx_map(tx_ring, first);
-
-	fm10k_maybe_stop_tx(tx_ring, DESC_NEEDED);
 
 	return NETDEV_TX_OK;
 
@@ -1447,11 +1467,11 @@ static int fm10k_poll(struct napi_struct *napi, int budget)
 	if (!clean_complete)
 		return budget;
 
-	/* all work done, exit the polling mode */
-	napi_complete_done(napi, work_done);
-
-	/* re-enable the q_vector */
-	fm10k_qv_enable(q_vector);
+	/* Exit the polling mode, but don't re-enable interrupts if stack might
+	 * poll us due to busy-polling
+	 */
+	if (likely(napi_complete_done(napi, work_done)))
+		fm10k_qv_enable(q_vector);
 
 	return min(work_done, budget - 1);
 }
@@ -1585,14 +1605,12 @@ static int fm10k_alloc_q_vector(struct fm10k_intfc *interface,
 {
 	struct fm10k_q_vector *q_vector;
 	struct fm10k_ring *ring;
-	int ring_count, size;
+	int ring_count;
 
 	ring_count = txr_count + rxr_count;
-	size = sizeof(struct fm10k_q_vector) +
-	       (sizeof(struct fm10k_ring) * ring_count);
 
 	/* allocate q_vector and rings */
-	q_vector = kzalloc(size, GFP_KERNEL);
+	q_vector = kzalloc(struct_size(q_vector, ring, ring_count), GFP_KERNEL);
 	if (!q_vector)
 		return -ENOMEM;
 

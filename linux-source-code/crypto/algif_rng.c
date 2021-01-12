@@ -55,8 +55,8 @@ struct rng_ctx {
 	struct crypto_rng *drng;
 };
 
-static int rng_recvmsg(struct kiocb *unused, struct socket *sock,
-		       struct msghdr *msg, size_t len, int flags)
+static int rng_recvmsg(struct socket *sock, struct msghdr *msg, size_t len,
+		       int flags)
 {
 	struct sock *sk = sock->sk;
 	struct alg_sock *ask = alg_sk(sk);
@@ -86,7 +86,7 @@ static int rng_recvmsg(struct kiocb *unused, struct socket *sock,
 	if (genlen < 0)
 		return genlen;
 
-	err = memcpy_toiovec(msg->msg_iov, result, len);
+	err = memcpy_to_msg(msg, result, len);
 	memzero_explicit(result, len);
 
 	return err ? err : len;
@@ -106,7 +106,6 @@ static struct proto_ops algif_rng_ops = {
 	.bind		=	sock_no_bind,
 	.accept		=	sock_no_accept,
 	.setsockopt	=	sock_no_setsockopt,
-	.poll		=	sock_no_poll,
 	.sendmsg	=	sock_no_sendmsg,
 	.sendpage	=	sock_no_sendpage,
 
@@ -160,15 +159,11 @@ static int rng_accept_parent(void *private, struct sock *sk)
 
 static int rng_setkey(void *private, const u8 *seed, unsigned int seedlen)
 {
-	/* Prevent entry into test-only code path in drbg. */
-	if (!seedlen)
-		seed = NULL;
-
 	/*
 	 * Check whether seedlen is of sufficient size is done in RNG
 	 * implementations.
 	 */
-	return crypto_rng_reset(private, (u8 *)seed, seedlen);
+	return crypto_rng_reset(private, seed, seedlen);
 }
 
 static const struct af_alg_type algif_type_rng = {

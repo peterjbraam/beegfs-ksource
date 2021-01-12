@@ -58,7 +58,7 @@ static struct scsi_host_template bnx2fc_shost_template;
 static struct fc_function_template bnx2fc_transport_function;
 static struct fcoe_sysfs_function_template bnx2fc_fcoe_sysfs_templ;
 static struct fc_function_template bnx2fc_vport_xport_function;
-static int bnx2fc_create(struct net_device *netdev, enum fip_state fip_mode);
+static int bnx2fc_create(struct net_device *netdev, enum fip_mode fip_mode);
 static void __bnx2fc_destroy(struct bnx2fc_interface *interface);
 static int bnx2fc_destroy(struct net_device *net_device);
 static int bnx2fc_enable(struct net_device *netdev);
@@ -127,13 +127,6 @@ uint bnx2fc_log_fka;
 module_param_named(log_fka, bnx2fc_log_fka, uint, S_IRUGO|S_IWUSR);
 MODULE_PARM_DESC(log_fka, " Print message to kernel log when fcoe is "
 	"initiating a FIP keep alive when debug logging is enabled.");
-
-static int bnx2fc_cpu_callback(struct notifier_block *nfb,
-			     unsigned long action, void *hcpu);
-/* notification function for CPU hotplug events */
-static struct notifier_block bnx2fc_cpu_notifier = {
-	.notifier_call = bnx2fc_cpu_callback,
-};
 
 static inline struct net_device *bnx2fc_netdev(const struct fc_lport *lport)
 {
@@ -355,7 +348,7 @@ static int bnx2fc_xmit(struct fc_lport *lport, struct fc_frame *fp)
 		frag = &skb_shinfo(skb)->frags[skb_shinfo(skb)->nr_frags - 1];
 		cp = kmap_atomic(skb_frag_page(frag)) + frag->page_offset;
 	} else {
-		cp = (struct fcoe_crc_eof *)skb_put(skb, tlen);
+		cp = skb_put(skb, tlen);
 	}
 
 	memset(cp, 0, sizeof(*cp));
@@ -435,6 +428,7 @@ static int bnx2fc_rcv(struct sk_buff *skb, struct net_device *dev,
 	struct fc_lport *lport;
 	struct bnx2fc_interface *interface;
 	struct fcoe_ctlr *ctlr;
+	struct fc_frame_header *fh;
 	struct fcoe_rcv_info *fr;
 	struct fcoe_percpu_s *bg;
 	struct sk_buff *tmp_skb;
@@ -469,6 +463,7 @@ static int bnx2fc_rcv(struct sk_buff *skb, struct net_device *dev,
 		goto err;
 
 	skb_set_transport_header(skb, sizeof(struct fcoe_hdr));
+	fh = (struct fc_frame_header *) skb_transport_header(skb);
 
 	fr = fcoe_dev_from_skb(skb);
 	fr->fr_dev = lport;
@@ -478,7 +473,7 @@ static int bnx2fc_rcv(struct sk_buff *skb, struct net_device *dev,
 
 	__skb_queue_tail(&bg->fcoe_rx_list, skb);
 	if (bg->fcoe_rx_list.qlen == 1)
-		wake_up_process(bg->thread);
+		wake_up_process(bg->kthread);
 
 	spin_unlock(&bg->fcoe_rx_list.lock);
 
@@ -493,7 +488,7 @@ static int bnx2fc_l2_rcv_thread(void *arg)
 	struct fcoe_percpu_s *bg = arg;
 	struct sk_buff *skb;
 
-	set_user_nice(current, -20);
+	set_user_nice(current, MIN_NICE);
 	set_current_state(TASK_INTERRUPTIBLE);
 	while (!kthread_should_stop()) {
 		schedule();
@@ -656,7 +651,7 @@ static int bnx2fc_percpu_io_thread(void *arg)
 	struct bnx2fc_work *work, *tmp;
 	LIST_HEAD(work_list);
 
-	set_user_nice(current, -20);
+	set_user_nice(current, MIN_NICE);
 	set_current_state(TASK_INTERRUPTIBLE);
 	while (!kthread_should_stop()) {
 		schedule();
@@ -821,7 +816,7 @@ static int bnx2fc_net_config(struct fc_lport *lport, struct net_device *netdev)
 
 	skb_queue_head_init(&port->fcoe_pending_queue);
 	port->fcoe_pending_queue_active = 0;
-	setup_timer(&port->timer, fcoe_queue_timer, (unsigned long) lport);
+	timer_setup(&port->timer, fcoe_queue_timer, 0);
 
 	fcoe_link_speed_update(lport);
 
@@ -843,9 +838,9 @@ static int bnx2fc_net_config(struct fc_lport *lport, struct net_device *netdev)
 	return 0;
 }
 
-static void bnx2fc_destroy_timer(unsigned long data)
+static void bnx2fc_destroy_timer(struct timer_list *t)
 {
-	struct bnx2fc_hba *hba = (struct bnx2fc_hba *)data;
+	struct bnx2fc_hba *hba = from_timer(hba, t, destroy_timer);
 
 	printk(KERN_ERR PFX "ERROR:bnx2fc_destroy_timer - "
 	       "Destroy compl not received!!\n");
@@ -1000,7 +995,6 @@ static int bnx2fc_libfc_config(struct fc_lport *lport)
 		sizeof(struct libfc_function_template));
 	fc_elsct_init(lport);
 	fc_exch_init(lport);
-	fc_rport_init(lport);
 	fc_disc_init(lport);
 	fc_disc_config(lport, lport);
 	return 0;
@@ -1396,7 +1390,7 @@ static struct bnx2fc_hba *bnx2fc_hba_create(struct cnic_dev *cnic)
 	hba->next_conn_id = 0;
 
 	hba->tgt_ofld_list =
-		kzalloc(sizeof(struct bnx2fc_rport *) * BNX2FC_NUM_MAX_SESS,
+		kcalloc(BNX2FC_NUM_MAX_SESS, sizeof(struct bnx2fc_rport *),
 			GFP_KERNEL);
 	if (!hba->tgt_ofld_list) {
 		printk(KERN_ERR PFX "Unable to allocate tgt offload list\n");
@@ -1444,7 +1438,7 @@ bind_err:
 static struct bnx2fc_interface *
 bnx2fc_interface_create(struct bnx2fc_hba *hba,
 			struct net_device *netdev,
-			enum fip_state fip_mode)
+			enum fip_mode fip_mode)
 {
 	struct fcoe_ctlr_device *ctlr_dev;
 	struct bnx2fc_interface *interface;
@@ -1945,11 +1939,10 @@ static void bnx2fc_fw_destroy(struct bnx2fc_hba *hba)
 {
 	if (test_and_clear_bit(BNX2FC_FLAG_FW_INIT_DONE, &hba->flags)) {
 		if (bnx2fc_send_fw_fcoe_destroy_msg(hba) == 0) {
-			init_timer(&hba->destroy_timer);
+			timer_setup(&hba->destroy_timer, bnx2fc_destroy_timer,
+				    0);
 			hba->destroy_timer.expires = BNX2FC_FW_TIMEOUT +
 								jiffies;
-			hba->destroy_timer.function = bnx2fc_destroy_timer;
-			hba->destroy_timer.data = (unsigned long)hba;
 			add_timer(&hba->destroy_timer);
 			wait_event_interruptible(hba->destroy_wait,
 					test_bit(BNX2FC_FLAG_DESTROY_CMPL,
@@ -2307,7 +2300,7 @@ enum bnx2fc_create_link_state {
  * Returns: 0 for success
  */
 static int _bnx2fc_create(struct net_device *netdev,
-			  enum fip_state fip_mode,
+			  enum fip_mode fip_mode,
 			  enum bnx2fc_create_link_state link_state)
 {
 	struct fcoe_ctlr_device *cdev;
@@ -2459,7 +2452,7 @@ mod_err:
  *
  * Returns: 0 for success
  */
-static int bnx2fc_create(struct net_device *netdev, enum fip_state fip_mode)
+static int bnx2fc_create(struct net_device *netdev, enum fip_mode fip_mode)
 {
 	return _bnx2fc_create(netdev, fip_mode, BNX2FC_CREATE_LINK_UP);
 }
@@ -2623,12 +2616,11 @@ static struct fcoe_transport bnx2fc_transport = {
 };
 
 /**
- * bnx2fc_percpu_thread_create - Create a receive thread for an
- *				 online CPU
+ * bnx2fc_cpu_online - Create a receive thread for an  online CPU
  *
  * @cpu: cpu index for the online cpu
  */
-static void bnx2fc_percpu_thread_create(unsigned int cpu)
+static int bnx2fc_cpu_online(unsigned int cpu)
 {
 	struct bnx2fc_percpu_s *p;
 	struct task_struct *thread;
@@ -2638,15 +2630,17 @@ static void bnx2fc_percpu_thread_create(unsigned int cpu)
 	thread = kthread_create_on_node(bnx2fc_percpu_io_thread,
 					(void *)p, cpu_to_node(cpu),
 					"bnx2fc_thread/%d", cpu);
+	if (IS_ERR(thread))
+		return PTR_ERR(thread);
+
 	/* bind thread to the cpu */
-	if (likely(!IS_ERR(thread))) {
-		kthread_bind(thread, cpu);
-		p->iothread = thread;
-		wake_up_process(thread);
-	}
+	kthread_bind(thread, cpu);
+	p->iothread = thread;
+	wake_up_process(thread);
+	return 0;
 }
 
-static void bnx2fc_percpu_thread_destroy(unsigned int cpu)
+static int bnx2fc_cpu_offline(unsigned int cpu)
 {
 	struct bnx2fc_percpu_s *p;
 	struct task_struct *thread;
@@ -2660,7 +2654,6 @@ static void bnx2fc_percpu_thread_destroy(unsigned int cpu)
 	thread = p->iothread;
 	p->iothread = NULL;
 
-
 	/* Free all work in the list */
 	list_for_each_entry_safe(work, tmp, &p->work_list, list) {
 		list_del_init(&work->list);
@@ -2672,39 +2665,7 @@ static void bnx2fc_percpu_thread_destroy(unsigned int cpu)
 
 	if (thread)
 		kthread_stop(thread);
-}
-
-/**
- * bnx2fc_cpu_callback - Handler for CPU hotplug events
- *
- * @nfb:    The callback data block
- * @action: The event triggering the callback
- * @hcpu:   The index of the CPU that the event is for
- *
- * This creates or destroys per-CPU data for fcoe
- *
- * Returns NOTIFY_OK always.
- */
-static int bnx2fc_cpu_callback(struct notifier_block *nfb,
-			     unsigned long action, void *hcpu)
-{
-	unsigned cpu = (unsigned long)hcpu;
-
-	switch (action) {
-	case CPU_ONLINE:
-	case CPU_ONLINE_FROZEN:
-		printk(PFX "CPU %x online: Create Rx thread\n", cpu);
-		bnx2fc_percpu_thread_create(cpu);
-		break;
-	case CPU_DEAD:
-	case CPU_DEAD_FROZEN:
-		printk(PFX "CPU %x offline: Remove Rx thread\n", cpu);
-		bnx2fc_percpu_thread_destroy(cpu);
-		break;
-	default:
-		break;
-	}
-	return NOTIFY_OK;
+	return 0;
 }
 
 static int bnx2fc_slave_configure(struct scsi_device *sdev)
@@ -2712,9 +2673,11 @@ static int bnx2fc_slave_configure(struct scsi_device *sdev)
 	if (!bnx2fc_queue_depth)
 		return 0;
 
-	scsi_adjust_queue_depth(sdev, scsi_get_tag_type(sdev), bnx2fc_queue_depth);
+	scsi_change_queue_depth(sdev, bnx2fc_queue_depth);
 	return 0;
 }
+
+static enum cpuhp_state bnx2fc_online_state;
 
 /**
  * bnx2fc_mod_init - module init entry point
@@ -2767,7 +2730,7 @@ static int __init bnx2fc_mod_init(void)
 	}
 	wake_up_process(l2_thread);
 	spin_lock_bh(&bg->fcoe_rx_list.lock);
-	bg->thread = l2_thread;
+	bg->kthread = l2_thread;
 	spin_unlock_bh(&bg->fcoe_rx_list.lock);
 
 	for_each_possible_cpu(cpu) {
@@ -2776,21 +2739,17 @@ static int __init bnx2fc_mod_init(void)
 		spin_lock_init(&p->fp_work_lock);
 	}
 
-	cpu_notifier_register_begin();
-
-	for_each_online_cpu(cpu) {
-		bnx2fc_percpu_thread_create(cpu);
-	}
-
-	/* Initialize per CPU interrupt thread */
-	__register_hotcpu_notifier(&bnx2fc_cpu_notifier);
-
-	cpu_notifier_register_done();
+	rc = cpuhp_setup_state(CPUHP_AP_ONLINE_DYN, "scsi/bnx2fc:online",
+			       bnx2fc_cpu_online, bnx2fc_cpu_offline);
+	if (rc < 0)
+		goto stop_thread;
+	bnx2fc_online_state = rc;
 
 	cnic_register_driver(CNIC_ULP_FCOE, &bnx2fc_cnic_cb);
-
 	return 0;
 
+stop_thread:
+	kthread_stop(l2_thread);
 free_wq:
 	destroy_workqueue(bnx2fc_wq);
 release_bt:
@@ -2808,7 +2767,6 @@ static void __exit bnx2fc_mod_exit(void)
 	struct fcoe_percpu_s *bg;
 	struct task_struct *l2_thread;
 	struct sk_buff *skb;
-	unsigned int cpu = 0;
 
 	/*
 	 * NOTE: Since cnic calls register_driver routine rtnl_lock,
@@ -2839,8 +2797,8 @@ static void __exit bnx2fc_mod_exit(void)
 	/* Destroy global thread */
 	bg = &bnx2fc_global;
 	spin_lock_bh(&bg->fcoe_rx_list.lock);
-	l2_thread = bg->thread;
-	bg->thread = NULL;
+	l2_thread = bg->kthread;
+	bg->kthread = NULL;
 	while ((skb = __skb_dequeue(&bg->fcoe_rx_list)) != NULL)
 		kfree_skb(skb);
 
@@ -2849,16 +2807,7 @@ static void __exit bnx2fc_mod_exit(void)
 	if (l2_thread)
 		kthread_stop(l2_thread);
 
-	cpu_notifier_register_begin();
-
-	/* Destroy per cpu threads */
-	for_each_online_cpu(cpu) {
-		bnx2fc_percpu_thread_destroy(cpu);
-	}
-
-	__unregister_hotcpu_notifier(&bnx2fc_cpu_notifier);
-
-	cpu_notifier_register_done();
+	cpuhp_remove_state(bnx2fc_online_state);
 
 	destroy_workqueue(bnx2fc_wq);
 	/*
@@ -3012,19 +2961,19 @@ static struct scsi_host_template bnx2fc_shost_template = {
 	.module			= THIS_MODULE,
 	.name			= "QLogic Offload FCoE Initiator",
 	.queuecommand		= bnx2fc_queuecommand,
+	.eh_timed_out		= fc_eh_timed_out,
 	.eh_abort_handler	= bnx2fc_eh_abort,	  /* abts */
 	.eh_device_reset_handler = bnx2fc_eh_device_reset, /* lun reset */
 	.eh_target_reset_handler = bnx2fc_eh_target_reset, /* tgt reset */
 	.eh_host_reset_handler	= fc_eh_host_reset,
 	.slave_alloc		= fc_slave_alloc,
-	.change_queue_depth	= fc_change_queue_depth,
-	.change_queue_type	= fc_change_queue_type,
+	.change_queue_depth	= scsi_change_queue_depth,
 	.this_id		= -1,
 	.cmd_per_lun		= 3,
 	.use_clustering		= ENABLE_CLUSTERING,
 	.sg_tablesize		= BNX2FC_MAX_BDS_PER_CMD,
-	.dma_boundary		= 0x7fff,
-	.max_sectors		= 0x3fbf,
+	.max_sectors		= 1024,
+	.track_queue_depth	= 1,
 	.slave_configure	= bnx2fc_slave_configure,
 	.shost_attrs		= bnx2fc_host_attrs,
 };

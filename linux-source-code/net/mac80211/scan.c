@@ -570,11 +570,8 @@ static void ieee80211_send_scan_probe_req(struct ieee80211_sub_if_data *sdata,
 	if (skb) {
 		if (flags & IEEE80211_PROBE_FLAG_RANDOM_SN) {
 			struct ieee80211_hdr *hdr = (void *)skb->data;
-#if 0 /* Not in RHEL */
 			u16 sn = get_random_u32();
-#else
-			u16 sn = prandom_u32();
-#endif
+
 			txdata_flags |= IEEE80211_TX_NO_SEQNO;
 			hdr->seq_ctrl =
 				cpu_to_le16(IEEE80211_SN_TO_SEQ(sn));

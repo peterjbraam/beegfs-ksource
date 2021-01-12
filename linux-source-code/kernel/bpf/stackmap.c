@@ -44,7 +44,7 @@ static void do_up_read(struct irq_work *entry)
 	struct stack_map_irq_work *work;
 
 	work = container_of(entry, struct stack_map_irq_work, irq_work);
-	up_read(work->sem);
+	up_read_non_owner(work->sem);
 	work->sem = NULL;
 }
 
@@ -107,9 +107,9 @@ static struct bpf_map *stack_map_alloc(union bpf_attr *attr)
 	if (attr->map_flags & BPF_F_STACK_BUILD_ID) {
 		if (value_size % sizeof(struct bpf_stack_build_id) ||
 		    value_size / sizeof(struct bpf_stack_build_id)
-		    > PERF_MAX_STACK_DEPTH)
+		    > sysctl_perf_event_max_stack)
 			return ERR_PTR(-EINVAL);
-	} else if (value_size / 8 > PERF_MAX_STACK_DEPTH)
+	} else if (value_size / 8 > sysctl_perf_event_max_stack)
 		return ERR_PTR(-EINVAL);
 
 	/* hash table size must be power of 2 */
@@ -137,7 +137,7 @@ static struct bpf_map *stack_map_alloc(union bpf_attr *attr)
 	if (err)
 		goto free_smap;
 
-	err = get_callchain_buffers();
+	err = get_callchain_buffers(sysctl_perf_event_max_stack);
 	if (err)
 		goto free_smap;
 
@@ -180,11 +180,14 @@ static inline int stack_map_parse_build_id(void *page_addr,
 
 		if (nhdr->n_type == BPF_BUILD_ID &&
 		    nhdr->n_namesz == sizeof("GNU") &&
-		    nhdr->n_descsz == BPF_BUILD_ID_SIZE) {
+		    nhdr->n_descsz > 0 &&
+		    nhdr->n_descsz <= BPF_BUILD_ID_SIZE) {
 			memcpy(build_id,
 			       note_start + note_offs +
 			       ALIGN(sizeof("GNU"), 4) + sizeof(Elf32_Nhdr),
-			       BPF_BUILD_ID_SIZE);
+			       nhdr->n_descsz);
+			memset(build_id + nhdr->n_descsz, 0,
+			       BPF_BUILD_ID_SIZE - nhdr->n_descsz);
 			return 0;
 		}
 		new_offs = note_offs + sizeof(Elf32_Nhdr) +
@@ -260,7 +263,7 @@ static int stack_map_get_build_id(struct vm_area_struct *vma,
 		return -EFAULT;	/* page not mapped */
 
 	ret = -EINVAL;
-	page_addr = page_address(page);
+	page_addr = kmap_atomic(page);
 	ehdr = (Elf32_Ehdr *)page_addr;
 
 	/* compare magic x7f "ELF" */
@@ -276,6 +279,7 @@ static int stack_map_get_build_id(struct vm_area_struct *vma,
 	else if (ehdr->e_ident[EI_CLASS] == ELFCLASS64)
 		ret = stack_map_get_build_id_64(page_addr, build_id);
 out:
+	kunmap_atomic(page_addr);
 	put_page(page);
 	return ret;
 }
@@ -310,6 +314,7 @@ static void stack_map_get_build_id_offset(struct bpf_stack_build_id *id_offs,
 		for (i = 0; i < trace_nr; i++) {
 			id_offs[i].status = BPF_STACK_BUILD_ID_IP;
 			id_offs[i].ip = ips[i];
+			memset(id_offs[i].build_id, 0, BPF_BUILD_ID_SIZE);
 		}
 		return;
 	}
@@ -320,6 +325,7 @@ static void stack_map_get_build_id_offset(struct bpf_stack_build_id *id_offs,
 			/* per entry fall back to ips */
 			id_offs[i].status = BPF_STACK_BUILD_ID_IP;
 			id_offs[i].ip = ips[i];
+			memset(id_offs[i].build_id, 0, BPF_BUILD_ID_SIZE);
 			continue;
 		}
 		id_offs[i].offset = (vma->vm_pgoff << PAGE_SHIFT) + ips[i]
@@ -332,6 +338,12 @@ static void stack_map_get_build_id_offset(struct bpf_stack_build_id *id_offs,
 	} else {
 		work->sem = &current->mm->mmap_sem;
 		irq_work_queue(&work->irq_work);
+		/*
+		 * The irq_work will release the mmap_sem with
+		 * up_read_non_owner(). The rwsem_release() is called
+		 * here to release the lock from lockdep's perspective.
+		 */
+		rwsem_release(&current->mm->mmap_sem.dep_map, 1, _RET_IP_);
 	}
 }
 
@@ -342,8 +354,8 @@ BPF_CALL_3(bpf_get_stackid, struct pt_regs *, regs, struct bpf_map *, map,
 	struct perf_callchain_entry *trace;
 	struct stack_map_bucket *bucket, *new_bucket, *old_bucket;
 	u32 max_depth = map->value_size / stack_map_data_size(map);
-	/* stack_map_alloc() checks that max_depth <= PERF_MAX_STACK_DEPTH */
-	u32 init_nr = PERF_MAX_STACK_DEPTH - max_depth;
+	/* stack_map_alloc() checks that max_depth <= sysctl_perf_event_max_stack */
+	u32 init_nr = sysctl_perf_event_max_stack - max_depth;
 	u32 skip = flags & BPF_F_SKIP_FIELD_MASK;
 	u32 hash, id, trace_nr, trace_len;
 	bool user = flags & BPF_F_USER_STACK;
@@ -355,14 +367,15 @@ BPF_CALL_3(bpf_get_stackid, struct pt_regs *, regs, struct bpf_map *, map,
 			       BPF_F_FAST_STACK_CMP | BPF_F_REUSE_STACKID)))
 		return -EINVAL;
 
-	trace = get_perf_callchain(regs, init_nr, kernel, user, false, false);
+	trace = get_perf_callchain(regs, init_nr, kernel, user,
+				   sysctl_perf_event_max_stack, false, false);
 
 	if (unlikely(!trace))
 		/* couldn't fetch the stack trace */
 		return -EFAULT;
 
 	/* get_perf_callchain() guarantees that trace->nr >= init_nr
-	 * and trace-nr <= PERF_MAX_STACK_DEPTH, so trace_nr <= max_depth
+	 * and trace-nr <= sysctl_perf_event_max_stack, so trace_nr <= max_depth
 	 */
 	trace_nr = trace->nr - init_nr;
 
@@ -458,12 +471,12 @@ BPF_CALL_4(bpf_get_stack, struct pt_regs *, regs, void *, buf, u32, size,
 		goto clear;
 
 	num_elem = size / elem_size;
-	if (PERF_MAX_STACK_DEPTH < num_elem)
+	if (sysctl_perf_event_max_stack < num_elem)
 		init_nr = 0;
 	else
-		init_nr = PERF_MAX_STACK_DEPTH - num_elem;
+		init_nr = sysctl_perf_event_max_stack - num_elem;
 	trace = get_perf_callchain(regs, init_nr, kernel, user,
-				   false, false);
+				   sysctl_perf_event_max_stack, false, false);
 	if (unlikely(!trace))
 		goto err_fault;
 
@@ -504,7 +517,7 @@ const struct bpf_func_proto bpf_get_stack_proto = {
 /* Called from eBPF program */
 static void *stack_map_lookup_elem(struct bpf_map *map, void *key)
 {
-	return NULL;
+	return ERR_PTR(-EOPNOTSUPP);
 }
 
 /* Called from syscall */
@@ -599,13 +612,14 @@ static void stack_map_free(struct bpf_map *map)
 	put_callchain_buffers();
 }
 
-const struct bpf_map_ops stack_map_ops = {
+const struct bpf_map_ops stack_trace_map_ops = {
 	.map_alloc = stack_map_alloc,
 	.map_free = stack_map_free,
 	.map_get_next_key = stack_map_get_next_key,
 	.map_lookup_elem = stack_map_lookup_elem,
 	.map_update_elem = stack_map_update_elem,
 	.map_delete_elem = stack_map_delete_elem,
+	.map_check_btf = map_check_no_btf,
 };
 
 static int __init stack_map_init(void)

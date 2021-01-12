@@ -647,13 +647,14 @@ fail:
 }
 
 /* Address Handles */
-int bnxt_re_destroy_ah(struct ib_ah *ib_ah)
+int bnxt_re_destroy_ah(struct ib_ah *ib_ah, u32 flags)
 {
 	struct bnxt_re_ah *ah = container_of(ib_ah, struct bnxt_re_ah, ib_ah);
 	struct bnxt_re_dev *rdev = ah->rdev;
 	int rc;
 
-	rc = bnxt_qplib_destroy_ah(&rdev->qplib_res, &ah->qplib_ah);
+	rc = bnxt_qplib_destroy_ah(&rdev->qplib_res, &ah->qplib_ah,
+				   !(flags & RDMA_DESTROY_AH_SLEEPABLE));
 	if (rc) {
 		dev_err(rdev_to_dev(rdev), "Failed to destroy HW AH");
 		return rc;
@@ -682,6 +683,7 @@ static u8 bnxt_re_stack_to_dev_nw_type(enum rdma_network_type ntype)
 
 struct ib_ah *bnxt_re_create_ah(struct ib_pd *ib_pd,
 				struct rdma_ah_attr *ah_attr,
+				u32 flags,
 				struct ib_udata *udata)
 {
 	struct bnxt_re_pd *pd = container_of(ib_pd, struct bnxt_re_pd, ib_pd);
@@ -717,20 +719,22 @@ struct ib_ah *bnxt_re_create_ah(struct ib_pd *ib_pd,
 	ah->qplib_ah.flow_label = grh->flow_label;
 	ah->qplib_ah.hop_limit = grh->hop_limit;
 	ah->qplib_ah.sl = rdma_ah_get_sl(ah_attr);
+
 	sgid_attr = grh->sgid_attr;
 	/* Get network header type for this GID */
 	nw_type = rdma_gid_attr_network_type(sgid_attr);
 	ah->qplib_ah.nw_type = bnxt_re_stack_to_dev_nw_type(nw_type);
 
 	memcpy(ah->qplib_ah.dmac, ah_attr->roce.dmac, ETH_ALEN);
-	rc = bnxt_qplib_create_ah(&rdev->qplib_res, &ah->qplib_ah);
+	rc = bnxt_qplib_create_ah(&rdev->qplib_res, &ah->qplib_ah,
+				  !(flags & RDMA_CREATE_AH_SLEEPABLE));
 	if (rc) {
 		dev_err(rdev_to_dev(rdev), "Failed to allocate HW AH");
 		goto fail;
 	}
 
 	/* Write AVID to shared page. */
-	if (ib_pd->uobject) {
+	if (udata) {
 		struct ib_ucontext *ib_uctx = ib_pd->uobject->context;
 		struct bnxt_re_ucontext *uctx;
 		unsigned long flag;
@@ -819,7 +823,7 @@ int bnxt_re_destroy_qp(struct ib_qp *ib_qp)
 
 	if (ib_qp->qp_type == IB_QPT_GSI && rdev->qp1_sqp) {
 		rc = bnxt_qplib_destroy_ah(&rdev->qplib_res,
-					   &rdev->sqp_ah->qplib_ah);
+					   &rdev->sqp_ah->qplib_ah, false);
 		if (rc) {
 			dev_err(rdev_to_dev(rdev),
 				"Failed to destroy HW AH for shadow QP");
@@ -963,7 +967,7 @@ static struct bnxt_re_ah *bnxt_re_create_shadow_qp_ah
 	/* Have DMAC same as SMAC */
 	ether_addr_copy(ah->qplib_ah.dmac, rdev->netdev->dev_addr);
 
-	rc = bnxt_qplib_create_ah(&rdev->qplib_res, &ah->qplib_ah);
+	rc = bnxt_qplib_create_ah(&rdev->qplib_res, &ah->qplib_ah, false);
 	if (rc) {
 		dev_err(rdev_to_dev(rdev),
 			"Failed to allocate HW AH for Shadow QP");
@@ -1539,14 +1543,13 @@ int bnxt_re_post_srq_recv(struct ib_srq *ib_srq, const struct ib_recv_wr *wr,
 					       ib_srq);
 	struct bnxt_qplib_swqe wqe;
 	unsigned long flags;
-	int rc = 0, payload_sz = 0;
+	int rc = 0;
 
 	spin_lock_irqsave(&srq->lock, flags);
 	while (wr) {
 		/* Transcribe each ib_recv_wr to qplib_swqe */
 		wqe.num_sge = wr->num_sge;
-		payload_sz = bnxt_re_build_sgl(wr->sg_list, wqe.sg_list,
-					       wr->num_sge);
+		bnxt_re_build_sgl(wr->sg_list, wqe.sg_list, wr->num_sge);
 		wqe.wr_id = wr->wr_id;
 		wqe.type = BNXT_QPLIB_SWQE_TYPE_RECV;
 

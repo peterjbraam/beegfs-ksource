@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * s390 arch random implementation.
  *
  * Copyright IBM Corp. 2017, 2018
  * Author(s): Harald Freudenberger
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License (version 2 only)
- * as published by the Free Software Foundation.
  *
  * The s390_arch_random_generate() function may be called from random.c
  * in interrupt context. So this implementation does the best to be very
@@ -32,12 +29,13 @@
 
 #include <linux/kernel.h>
 #include <linux/atomic.h>
+#include <linux/random.h>
 #include <linux/slab.h>
 #include <linux/static_key.h>
 #include <linux/workqueue.h>
 #include <asm/cpacf.h>
 
-struct static_key s390_arch_random_available = STATIC_KEY_INIT_FALSE;
+DEFINE_STATIC_KEY_FALSE(s390_arch_random_available);
 
 atomic64_t s390_arch_random_counter = ATOMIC64_INIT(0);
 EXPORT_SYMBOL(s390_arch_random_counter);
@@ -117,7 +115,7 @@ static int __init s390_arch_random_init(void)
 				   &arch_rng_work, ARCH_REFILL_TICKS);
 
 		/* enable arch random to the outside world */
-		static_key_slow_inc(&s390_arch_random_available);
+		static_branch_enable(&s390_arch_random_available);
 	}
 
 	return 0;

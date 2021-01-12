@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_X86_PGTABLE_3LEVEL_H
 #define _ASM_X86_PGTABLE_3LEVEL_H
 
@@ -26,7 +27,6 @@
  */
 static inline void native_set_pte(pte_t *ptep, pte_t pte)
 {
-	mm_track_pte(ptep);
 	ptep->pte_high = pte.pte_high;
 	smp_wmb();
 	ptep->pte_low = pte.pte_low;
@@ -88,19 +88,16 @@ static inline pmd_t pmd_read_atomic(pmd_t *pmdp)
 
 static inline void native_set_pte_atomic(pte_t *ptep, pte_t pte)
 {
-	mm_track_pte(ptep);
 	set_64bit((unsigned long long *)(ptep), native_pte_val(pte));
 }
 
 static inline void native_set_pmd(pmd_t *pmdp, pmd_t pmd)
 {
-	mm_track_pmd(pmdp);
 	set_64bit((unsigned long long *)(pmdp), native_pmd_val(pmd));
 }
 
 static inline void native_set_pud(pud_t *pudp, pud_t pud)
 {
-	mm_track_pud(pudp);
 	set_64bit((unsigned long long *)(pudp), native_pud_val(pud));
 }
 
@@ -112,7 +109,6 @@ static inline void native_set_pud(pud_t *pudp, pud_t pud)
 static inline void native_pte_clear(struct mm_struct *mm, unsigned long addr,
 				    pte_t *ptep)
 {
-	mm_track_pte(ptep);
 	ptep->pte_low = 0;
 	smp_wmb();
 	ptep->pte_high = 0;
@@ -121,23 +117,17 @@ static inline void native_pte_clear(struct mm_struct *mm, unsigned long addr,
 static inline void native_pmd_clear(pmd_t *pmd)
 {
 	u32 *tmp = (u32 *)pmd;
-
-	mm_track_pmd(pmd);
-
 	*tmp = 0;
 	smp_wmb();
 	*(tmp + 1) = 0;
 }
 
-#ifndef CONFIG_SMP
 static inline void native_pud_clear(pud_t *pudp)
 {
 }
-#endif
 
 static inline void pud_clear(pud_t *pudp)
 {
-	mm_track_pud(pudp);
 	set_pud(pudp, __pud(0));
 
 	/*
@@ -157,8 +147,6 @@ static inline pte_t native_ptep_get_and_clear(pte_t *ptep)
 {
 	pte_t res;
 
-	mm_track_pte(ptep);
-
 	/* xchg acts as a barrier before the setting of the high bits */
 	res.pte_low = xchg(&ptep->pte_low, 0);
 	res.pte_high = ptep->pte_high;
@@ -170,7 +158,6 @@ static inline pte_t native_ptep_get_and_clear(pte_t *ptep)
 #define native_ptep_get_and_clear(xp) native_local_ptep_get_and_clear(xp)
 #endif
 
-#ifdef CONFIG_SMP
 union split_pmd {
 	struct {
 		u32 pmd_low;
@@ -178,11 +165,11 @@ union split_pmd {
 	};
 	pmd_t pmd;
 };
+
+#ifdef CONFIG_SMP
 static inline pmd_t native_pmdp_get_and_clear(pmd_t *pmdp)
 {
 	union split_pmd res, *orig = (union split_pmd *)pmdp;
-
-	mm_track_pmd(pmdp);
 
 	/* xchg acts as a barrier before setting of the high bits */
 	res.pmd_low = xchg(&orig->pmd_low, 0);
@@ -193,6 +180,40 @@ static inline pmd_t native_pmdp_get_and_clear(pmd_t *pmdp)
 }
 #else
 #define native_pmdp_get_and_clear(xp) native_local_pmdp_get_and_clear(xp)
+#endif
+
+#ifndef pmdp_establish
+#define pmdp_establish pmdp_establish
+static inline pmd_t pmdp_establish(struct vm_area_struct *vma,
+		unsigned long address, pmd_t *pmdp, pmd_t pmd)
+{
+	pmd_t old;
+
+	/*
+	 * If pmd has present bit cleared we can get away without expensive
+	 * cmpxchg64: we can update pmdp half-by-half without racing with
+	 * anybody.
+	 */
+	if (!(pmd_val(pmd) & _PAGE_PRESENT)) {
+		union split_pmd old, new, *ptr;
+
+		ptr = (union split_pmd *)pmdp;
+
+		new.pmd = pmd;
+
+		/* xchg acts as a barrier before setting of the high bits */
+		old.pmd_low = xchg(&ptr->pmd_low, new.pmd_low);
+		old.pmd_high = ptr->pmd_high;
+		ptr->pmd_high = new.pmd_high;
+		return old.pmd;
+	}
+
+	do {
+		old = *pmdp;
+	} while (cmpxchg64(&pmdp->pmd, old.pmd, pmd.pmd) != old.pmd);
+
+	return old;
+}
 #endif
 
 #ifdef CONFIG_SMP
@@ -218,18 +239,6 @@ static inline pud_t native_pudp_get_and_clear(pud_t *pudp)
 #else
 #define native_pudp_get_and_clear(xp) native_local_pudp_get_and_clear(xp)
 #endif
-
-/*
- * Bits 0, 6 and 7 are taken in the low part of the pte,
- * put the 32 bits of offset into the high part.
- *
- * For soft-dirty tracking 11 bit is taken from
- * the low part of pte as well.
- */
-#define pte_to_pgoff(pte) ((pte).pte_high)
-#define pgoff_to_pte(off)						\
-	((pte_t) { { .pte_low = _PAGE_FILE, .pte_high = (off) } })
-#define PTE_FILE_MAX_BITS       32
 
 /* Encode and de-code a swap entry */
 #define SWP_TYPE_BITS		5
@@ -269,6 +278,53 @@ static inline pud_t native_pudp_get_and_clear(pud_t *pudp)
 
 #define __pte_to_swp_entry(pte)	(__swp_entry(__pteval_swp_type(pte), \
 					     __pteval_swp_offset(pte)))
+
+#define gup_get_pte gup_get_pte
+/*
+ * WARNING: only to be used in the get_user_pages_fast() implementation.
+ *
+ * With get_user_pages_fast(), we walk down the pagetables without taking
+ * any locks.  For this we would like to load the pointers atomically,
+ * but that is not possible (without expensive cmpxchg8b) on PAE.  What
+ * we do have is the guarantee that a PTE will only either go from not
+ * present to present, or present to not present or both -- it will not
+ * switch to a completely different present page without a TLB flush in
+ * between; something that we are blocking by holding interrupts off.
+ *
+ * Setting ptes from not present to present goes:
+ *
+ *   ptep->pte_high = h;
+ *   smp_wmb();
+ *   ptep->pte_low = l;
+ *
+ * And present to not present goes:
+ *
+ *   ptep->pte_low = 0;
+ *   smp_wmb();
+ *   ptep->pte_high = 0;
+ *
+ * We must ensure here that the load of pte_low sees 'l' iff pte_high
+ * sees 'h'. We load pte_high *after* loading pte_low, which ensures we
+ * don't see an older value of pte_high.  *Then* we recheck pte_low,
+ * which ensures that we haven't picked up a changed pte high. We might
+ * have gotten rubbish values from pte_low and pte_high, but we are
+ * guaranteed that pte_low will not have the present bit set *unless*
+ * it is 'l'. Because get_user_pages_fast() only operates on present ptes
+ * we're safe.
+ */
+static inline pte_t gup_get_pte(pte_t *ptep)
+{
+	pte_t pte;
+
+	do {
+		pte.pte_low = ptep->pte_low;
+		smp_rmb();
+		pte.pte_high = ptep->pte_high;
+		smp_rmb();
+	} while (unlikely(pte.pte_low != ptep->pte_low));
+
+	return pte;
+}
 
 #include <asm/pgtable-invert.h>
 

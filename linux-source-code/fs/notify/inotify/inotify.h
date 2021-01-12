@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #include <linux/fsnotify_backend.h>
 #include <linux/inotify.h>
 #include <linux/slab.h> /* struct kmem_cache */
@@ -30,3 +31,20 @@ extern int inotify_handle_event(struct fsnotify_group *group,
 
 extern const struct fsnotify_ops inotify_fsnotify_ops;
 extern struct kmem_cache *inotify_inode_mark_cachep;
+
+#ifdef CONFIG_INOTIFY_USER
+static inline void dec_inotify_instances(struct ucounts *ucounts)
+{
+	dec_ucount(ucounts, UCOUNT_INOTIFY_INSTANCES);
+}
+
+static inline struct ucounts *inc_inotify_watches(struct ucounts *ucounts)
+{
+	return inc_ucount(ucounts->ns, ucounts->uid, UCOUNT_INOTIFY_WATCHES);
+}
+
+static inline void dec_inotify_watches(struct ucounts *ucounts)
+{
+	dec_ucount(ucounts, UCOUNT_INOTIFY_WATCHES);
+}
+#endif

@@ -32,10 +32,6 @@
 
 #ifdef CONFIG_HOLTEK_FF
 
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Anssi Hannula <anssi.hannula@iki.fi>");
-MODULE_DESCRIPTION("Force feedback support for Holtek On Line Grip based devices");
-
 /*
  * These commands and parameters are currently known:
  *
@@ -98,7 +94,7 @@ static void holtekff_send(struct holtekff_device *holtekff,
 		holtekff->field->value[i] = data[i];
 	}
 
-	dbg_hid("sending %*ph\n", 7, data);
+	dbg_hid("sending %7ph\n", data);
 
 	hid_hw_request(hid, holtekff->field->report, HID_REQ_SET_REPORT);
 }
@@ -223,3 +219,7 @@ static struct hid_driver holtek_driver = {
 	.probe = holtek_probe,
 };
 module_hid_driver(holtek_driver);
+
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Anssi Hannula <anssi.hannula@iki.fi>");
+MODULE_DESCRIPTION("Force feedback support for Holtek On Line Grip based devices");

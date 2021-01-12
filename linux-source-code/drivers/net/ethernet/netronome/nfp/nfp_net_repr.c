@@ -2,9 +2,9 @@
 /* Copyright (C) 2017-2018 Netronome Systems, Inc. */
 
 #include <linux/etherdevice.h>
+#include <linux/io-64-nonatomic-hi-lo.h>
 #include <linux/lockdep.h>
 #include <net/dst_metadata.h>
-#include <net/switchdev.h>
 
 #include "nfpcore/nfp_cpp.h"
 #include "nfpcore/nfp_nsp.h"
@@ -195,7 +195,7 @@ static netdev_tx_t nfp_repr_xmit(struct sk_buff *skb, struct net_device *netdev)
 	ret = dev_queue_xmit(skb);
 	nfp_repr_inc_tx_stats(netdev, len, ret);
 
-	return ret;
+	return NETDEV_TX_OK;
 }
 
 static int nfp_repr_stop(struct net_device *netdev)
@@ -253,26 +253,26 @@ nfp_repr_fix_features(struct net_device *netdev, netdev_features_t features)
 }
 
 const struct net_device_ops nfp_repr_netdev_ops = {
-	.ndo_size		= sizeof(struct net_device_ops),
 	.ndo_init		= nfp_app_ndo_init,
 	.ndo_uninit		= nfp_app_ndo_uninit,
 	.ndo_open		= nfp_repr_open,
 	.ndo_stop		= nfp_repr_stop,
 	.ndo_start_xmit		= nfp_repr_xmit,
+	.ndo_change_mtu		= nfp_repr_change_mtu,
 	.ndo_get_stats64	= nfp_repr_get_stats64,
-	.extended.ndo_has_offload_stats	= nfp_repr_has_offload_stats,
-	.extended.ndo_get_offload_stats	= nfp_repr_get_offload_stats,
-	.extended.ndo_get_phys_port_name	= nfp_port_get_phys_port_name,
-	.extended.ndo_setup_tc_rh		= nfp_port_setup_tc,
+	.ndo_has_offload_stats	= nfp_repr_has_offload_stats,
+	.ndo_get_offload_stats	= nfp_repr_get_offload_stats,
+	.ndo_get_phys_port_name	= nfp_port_get_phys_port_name,
+	.ndo_setup_tc		= nfp_port_setup_tc,
 	.ndo_set_vf_mac		= nfp_app_set_vf_mac,
-	.extended.ndo_set_vf_vlan	= nfp_app_set_vf_vlan,
+	.ndo_set_vf_vlan	= nfp_app_set_vf_vlan,
 	.ndo_set_vf_spoofchk	= nfp_app_set_vf_spoofchk,
 	.ndo_get_vf_config	= nfp_app_get_vf_config,
 	.ndo_set_vf_link_state	= nfp_app_set_vf_link_state,
 	.ndo_fix_features	= nfp_repr_fix_features,
 	.ndo_set_features	= nfp_port_set_features,
-	.extended.ndo_change_mtu	= nfp_repr_change_mtu,
 	.ndo_set_mac_address    = eth_mac_addr,
+	.ndo_get_port_parent_id	= nfp_port_get_port_parent_id,
 };
 
 void
@@ -332,11 +332,9 @@ int nfp_repr_init(struct nfp_app *app, struct net_device *netdev,
 	repr->dst->u.port_info.lower_dev = pf_netdev;
 
 	netdev->netdev_ops = &nfp_repr_netdev_ops;
-
-	netdev->extended->max_mtu = pf_netdev->extended->max_mtu;
 	netdev->ethtool_ops = &nfp_port_ethtool_ops;
 
-	SWITCHDEV_SET_OPS(netdev, &nfp_port_switchdev_ops);
+	netdev->max_mtu = pf_netdev->max_mtu;
 
 	/* Set features the lower device can support with representors */
 	if (repr_cap & NFP_NET_CFG_CTRL_LIVE_ADDR)
@@ -420,12 +418,13 @@ void nfp_repr_free(struct net_device *netdev)
 	__nfp_repr_free(netdev_priv(netdev));
 }
 
-struct net_device *nfp_repr_alloc(struct nfp_app *app)
+struct net_device *
+nfp_repr_alloc_mqs(struct nfp_app *app, unsigned int txqs, unsigned int rxqs)
 {
 	struct net_device *netdev;
 	struct nfp_repr *repr;
 
-	netdev = alloc_etherdev(sizeof(*repr));
+	netdev = alloc_etherdev_mqs(sizeof(*repr), txqs, rxqs);
 	if (!netdev)
 		return NULL;
 

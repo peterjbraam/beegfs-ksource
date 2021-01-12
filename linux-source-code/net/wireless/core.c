@@ -1244,11 +1244,7 @@ void cfg80211_init_wdev(struct cfg80211_registered_device *rdev,
 static int cfg80211_netdev_notifier_call(struct notifier_block *nb,
 					 unsigned long state, void *ptr)
 {
-#if 0 /* We use old version of notifier */
 	struct net_device *dev = netdev_notifier_info_to_dev(ptr);
-#else
-	struct net_device *dev = ptr;
-#endif
 	struct wireless_dev *wdev = dev->ieee80211_ptr;
 	struct cfg80211_registered_device *rdev;
 	struct cfg80211_sched_scan_request *pos, *tmp;
@@ -1401,8 +1397,10 @@ static int cfg80211_netdev_notifier_call(struct notifier_block *nb,
 		}
 		break;
 	case NETDEV_PRE_UP:
-		if (!cfg80211_iftype_allowed(wdev->wiphy, wdev->iftype,
-					     wdev->use_4addr, 0))
+		if (!(wdev->wiphy->interface_modes & BIT(wdev->iftype)) &&
+		    !(wdev->iftype == NL80211_IFTYPE_AP_VLAN &&
+		      rdev->wiphy.flags & WIPHY_FLAG_4ADDR_AP &&
+		      wdev->use_4addr))
 			return notifier_from_errno(-EOPNOTSUPP);
 
 		if (rfkill_blocked(rdev->rfkill))

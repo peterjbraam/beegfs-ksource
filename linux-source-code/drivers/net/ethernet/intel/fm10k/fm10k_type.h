@@ -139,6 +139,7 @@ struct fm10k_hw;
 #define FM10K_DGLORTDEC_INNERRSS_ENABLE		0x08000000
 #define FM10K_TUNNEL_CFG	0x0040
 #define FM10K_TUNNEL_CFG_NVGRE_SHIFT		16
+#define FM10K_TUNNEL_CFG_GENEVE	0x0041
 #define FM10K_SWPRI_MAP(_n)	((_n) + 0x0050)
 #define FM10K_SWPRI_MAX		16
 #define FM10K_RSSRK(_n, _m)	(((_n) * 0x10) + (_m) + 0x0800)
@@ -351,6 +352,9 @@ struct fm10k_hw;
 /* Define timeouts for resets and disables */
 #define FM10K_QUEUE_DISABLE_TIMEOUT		100
 #define FM10K_RESET_TIMEOUT			150
+
+/* Maximum supported combined inner and outer header length for encapsulation */
+#define FM10K_TUNNEL_HEADER_LENGTH	184
 
 /* VF registers */
 #define FM10K_VFCTRL		0x00000

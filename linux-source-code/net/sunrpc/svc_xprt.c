@@ -28,7 +28,7 @@ module_param(svc_rpc_per_connection_limit, uint, 0644);
 static struct svc_deferred_req *svc_deferred_dequeue(struct svc_xprt *xprt);
 static int svc_deferred_recv(struct svc_rqst *rqstp);
 static struct cache_deferred_req *svc_defer(struct cache_req *req);
-static void svc_age_temp_xprts(unsigned long closure);
+static void svc_age_temp_xprts(struct timer_list *t);
 static void svc_delete_xprt(struct svc_xprt *xprt);
 
 /* apparently the "standard" is that clients close
@@ -251,9 +251,9 @@ void svc_add_new_perm_xprt(struct svc_serv *serv, struct svc_xprt *new)
 	svc_xprt_received(new);
 }
 
-int _svc_create_xprt(struct svc_serv *serv, const char *xprt_name,
-		    struct net *net, const int family,
-		    const unsigned short port, int flags)
+static int _svc_create_xprt(struct svc_serv *serv, const char *xprt_name,
+			    struct net *net, const int family,
+			    const unsigned short port, int flags)
 {
 	struct svc_xprt_class *xcl;
 
@@ -383,25 +383,21 @@ void svc_xprt_do_enqueue(struct svc_xprt *xprt)
 	int cpu;
 
 	if (!svc_xprt_has_something_to_do(xprt))
-		goto out;
+		return;
 
 	/* Mark transport as busy. It will remain in this state until
 	 * the provider calls svc_xprt_received. We update XPT_BUSY
 	 * atomically because it also guards against trying to enqueue
 	 * the transport twice.
 	 */
-	if (test_and_set_bit(XPT_BUSY, &xprt->xpt_flags)) {
-		/* Don't enqueue transport while already enqueued */
-		dprintk("svc: transport %p busy, not enqueued\n", xprt);
-		goto out;
-	}
+	if (test_and_set_bit(XPT_BUSY, &xprt->xpt_flags))
+		return;
 
 	cpu = get_cpu();
 	pool = svc_pool_for_cpu(xprt->xpt_server, cpu);
 
 	atomic_long_inc(&pool->sp_stats.packets);
 
-	dprintk("svc: transport %p put into queue\n", xprt);
 	spin_lock_bh(&pool->sp_lock);
 	list_add_tail(&xprt->xpt_ready, &pool->sp_sockets);
 	pool->sp_stats.sockets_queued++;
@@ -413,6 +409,7 @@ void svc_xprt_do_enqueue(struct svc_xprt *xprt)
 		if (test_and_set_bit(RQ_BUSY, &rqstp->rq_flags))
 			continue;
 		atomic_long_inc(&pool->sp_stats.threads_woken);
+		rqstp->rq_qtime = ktime_get();
 		wake_up_process(rqstp->rq_task);
 		goto out_unlock;
 	}
@@ -421,7 +418,6 @@ void svc_xprt_do_enqueue(struct svc_xprt *xprt)
 out_unlock:
 	rcu_read_unlock();
 	put_cpu();
-out:
 	trace_svc_xprt_do_enqueue(xprt, rqstp);
 }
 EXPORT_SYMBOL_GPL(svc_xprt_do_enqueue);
@@ -490,7 +486,7 @@ static void svc_xprt_release(struct svc_rqst *rqstp)
 {
 	struct svc_xprt	*xprt = rqstp->rq_xprt;
 
-	rqstp->rq_xprt->xpt_ops->xpo_release_rqst(rqstp);
+	xprt->xpt_ops->xpo_release_rqst(rqstp);
 
 	kfree(rqstp->rq_deferred);
 	rqstp->rq_deferred = NULL;
@@ -536,7 +532,6 @@ void svc_wake_up(struct svc_serv *serv)
 		if (test_bit(RQ_BUSY, &rqstp->rq_flags))
 			continue;
 		rcu_read_unlock();
-		dprintk("svc: daemon %p woken up.\n", rqstp);
 		wake_up_process(rqstp->rq_task);
 		trace_svc_wake_up(rqstp->rq_task->pid);
 		return;
@@ -623,11 +618,13 @@ static int svc_alloc_arg(struct svc_rqst *rqstp)
 	int i;
 
 	/* now allocate needed pages.  If we get a failure, sleep briefly */
-	pages = (serv->sv_max_mesg + PAGE_SIZE) / PAGE_SIZE;
-	WARN_ON_ONCE(pages >= RPCSVC_MAXPAGES);
-	if (pages >= RPCSVC_MAXPAGES)
+	pages = (serv->sv_max_mesg + 2 * PAGE_SIZE) >> PAGE_SHIFT;
+	if (pages > RPCSVC_MAXPAGES) {
+		pr_warn_once("svc: warning: pages=%u > RPCSVC_MAXPAGES=%lu\n",
+			     pages, RPCSVC_MAXPAGES);
 		/* use as many pages as possible */
-		pages = RPCSVC_MAXPAGES - 1;
+		pages = RPCSVC_MAXPAGES;
+	}
 	for (i = 0; i < pages ; i++)
 		while (rqstp->rq_pages[i] == NULL) {
 			struct page *p = alloc_page(GFP_KERNEL);
@@ -730,7 +727,7 @@ out_found:
 		rqstp->rq_chandle.thread_wait = 5*HZ;
 	else
 		rqstp->rq_chandle.thread_wait = 1*HZ;
-	trace_svc_xprt_dequeue(rqstp->rq_xprt);
+	trace_svc_xprt_dequeue(rqstp);
 	return rqstp->rq_xprt;
 }
 
@@ -742,8 +739,7 @@ static void svc_add_new_temp_xprt(struct svc_serv *serv, struct svc_xprt *newxpt
 	serv->sv_tmpcnt++;
 	if (serv->sv_temptimer.function == NULL) {
 		/* setup timer to age temp transports */
-		setup_timer(&serv->sv_temptimer, svc_age_temp_xprts,
-			    (unsigned long)serv);
+		serv->sv_temptimer.function = svc_age_temp_xprts;
 		mod_timer(&serv->sv_temptimer,
 			  jiffies + svc_conn_age_period * HZ);
 	}
@@ -787,7 +783,7 @@ static int svc_handle_xprt(struct svc_rqst *rqstp, struct svc_xprt *xprt)
 			len = svc_deferred_recv(rqstp);
 		else
 			len = xprt->xpt_ops->xpo_recvfrom(rqstp);
-		dprintk("svc: got len=%d\n", len);
+		rqstp->rq_stime = ktime_get();
 		rqstp->rq_reserved = serv->sv_max_mesg;
 		atomic_add(rqstp->rq_reserved, &xprt->xpt_reserved);
 	}
@@ -883,7 +879,7 @@ int svc_send(struct svc_rqst *rqstp)
 		goto out;
 
 	/* release the receive skb before sending the reply */
-	rqstp->rq_xprt->xpt_ops->xpo_release_rqst(rqstp);
+	xprt->xpt_ops->xpo_release_rqst(rqstp);
 
 	/* calculate over-all length */
 	xb = &rqstp->rq_res;
@@ -893,6 +889,7 @@ int svc_send(struct svc_rqst *rqstp)
 
 	/* Grab mutex to serialize outgoing data. */
 	mutex_lock(&xprt->xpt_mutex);
+	trace_svc_stats_latency(rqstp);
 	if (test_bit(XPT_DEAD, &xprt->xpt_flags)
 			|| test_bit(XPT_CLOSE, &xprt->xpt_flags))
 		len = -ENOTCONN;
@@ -913,9 +910,9 @@ out:
  * Timer function to close old temporary transports, using
  * a mark-and-sweep algorithm.
  */
-static void svc_age_temp_xprts(unsigned long closure)
+static void svc_age_temp_xprts(struct timer_list *t)
 {
-	struct svc_serv *serv = (struct svc_serv *)closure;
+	struct svc_serv *serv = from_timer(serv, t, sv_temptimer);
 	struct svc_xprt *xprt;
 	struct list_head *le, *next;
 

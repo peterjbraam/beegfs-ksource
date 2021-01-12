@@ -9,6 +9,7 @@
  */
 
 #include <linux/kernel.h>
+#include <linux/sched/signal.h>
 #include <linux/types.h>
 #include <linux/fs.h>
 #include <linux/cdev.h>
@@ -1023,7 +1024,8 @@ static long mon_bin_ioctl(struct file *file, unsigned int cmd, unsigned long arg
 			return -EINVAL;
 
 		size = CHUNK_ALIGN(arg);
-		vec = kzalloc(sizeof(struct mon_pgmap) * (size / CHUNK_SIZE), GFP_KERNEL);
+		vec = kcalloc(size / CHUNK_SIZE, sizeof(struct mon_pgmap),
+			      GFP_KERNEL);
 		if (vec == NULL) {
 			ret = -ENOMEM;
 			break;
@@ -1190,11 +1192,11 @@ static long mon_bin_compat_ioctl(struct file *file,
 }
 #endif /* CONFIG_COMPAT */
 
-static unsigned int
+static __poll_t
 mon_bin_poll(struct file *file, struct poll_table_struct *wait)
 {
 	struct mon_reader_bin *rp = file->private_data;
-	unsigned int mask = 0;
+	__poll_t mask = 0;
 	unsigned long flags;
 
 	if (file->f_mode & FMODE_READ)
@@ -1202,7 +1204,7 @@ mon_bin_poll(struct file *file, struct poll_table_struct *wait)
 
 	spin_lock_irqsave(&rp->b_lock, flags);
 	if (!MON_RING_EMPTY(rp))
-		mask |= POLLIN | POLLRDNORM;    /* readable */
+		mask |= EPOLLIN | EPOLLRDNORM;    /* readable */
 	spin_unlock_irqrestore(&rp->b_lock, flags);
 	return mask;
 }
@@ -1226,9 +1228,9 @@ static void mon_bin_vma_close(struct vm_area_struct *vma)
 /*
  * Map ring pages to user space.
  */
-static int mon_bin_vma_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
+static vm_fault_t mon_bin_vma_fault(struct vm_fault *vmf)
 {
-	struct mon_reader_bin *rp = vma->vm_private_data;
+	struct mon_reader_bin *rp = vmf->vma->vm_private_data;
 	unsigned long offset, chunk_idx;
 	struct page *pageptr;
 

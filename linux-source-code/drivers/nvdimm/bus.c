@@ -361,6 +361,7 @@ struct nvdimm_bus *nvdimm_bus_register(struct device *parent,
 	nvdimm_bus->dev.release = nvdimm_bus_release;
 	nvdimm_bus->dev.groups = nd_desc->attr_groups;
 	nvdimm_bus->dev.bus = &nvdimm_bus_type;
+	nvdimm_bus->dev.of_node = nd_desc->of_node;
 	dev_set_name(&nvdimm_bus->dev, "ndbus%d", nvdimm_bus->id);
 	rc = device_register(&nvdimm_bus->dev);
 	if (rc) {
@@ -595,7 +596,7 @@ EXPORT_SYMBOL(__nd_driver_register);
 
 int nvdimm_revalidate_disk(struct gendisk *disk)
 {
-	struct device *dev = disk->driverfs_dev;
+	struct device *dev = disk_to_dev(disk)->parent;
 	struct nd_region *nd_region = to_nd_region(dev->parent);
 	int disk_ro = get_disk_ro(disk);
 

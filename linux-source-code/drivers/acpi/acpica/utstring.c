@@ -1,45 +1,9 @@
+// SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0
 /*******************************************************************************
  *
  * Module Name: utstring - Common functions for strings and characters
  *
  ******************************************************************************/
-
-/*
- * Copyright (C) 2000 - 2013, Intel Corp.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions, and the following disclaimer,
- *    without modification.
- * 2. Redistributions in binary form must reproduce at minimum a disclaimer
- *    substantially similar to the "NO WARRANTY" disclaimer below
- *    ("Disclaimer") and any redistribution must be conditioned upon
- *    including a substantially similar Disclaimer requirement for further
- *    binary redistribution.
- * 3. Neither the names of the above-listed copyright holders nor the names
- *    of any contributors may be used to endorse or promote products derived
- *    from this software without specific prior written permission.
- *
- * Alternatively, this software may be distributed under the terms of the
- * GNU General Public License ("GPL") version 2 as published by the Free
- * Software Foundation.
- *
- * NO WARRANTY
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTIBILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * HOLDERS OR CONTRIBUTORS BE LIABLE FOR SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
- * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGES.
- */
 
 #include <acpi/acpi.h>
 #include "accommon.h"
@@ -48,115 +12,13 @@
 #define _COMPONENT          ACPI_UTILITIES
 ACPI_MODULE_NAME("utstring")
 
-/*
- * Non-ANSI C library functions - strlwr, strupr, stricmp, and "safe"
- * string functions.
- */
-#ifdef ACPI_ASL_COMPILER
-/*******************************************************************************
- *
- * FUNCTION:    acpi_ut_strlwr (strlwr)
- *
- * PARAMETERS:  src_string      - The source string to convert
- *
- * RETURN:      None
- *
- * DESCRIPTION: Convert string to lowercase
- *
- * NOTE: This is not a POSIX function, so it appears here, not in utclib.c
- *
- ******************************************************************************/
-void acpi_ut_strlwr(char *src_string)
-{
-	char *string;
-
-	ACPI_FUNCTION_ENTRY();
-
-	if (!src_string) {
-		return;
-	}
-
-	/* Walk entire string, lowercasing the letters */
-
-	for (string = src_string; *string; string++) {
-		*string = (char)tolower((int)*string);
-	}
-
-	return;
-}
-
-/******************************************************************************
- *
- * FUNCTION:    acpi_ut_stricmp (stricmp)
- *
- * PARAMETERS:  string1             - first string to compare
- *              string2             - second string to compare
- *
- * RETURN:      int that signifies string relationship. Zero means strings
- *              are equal.
- *
- * DESCRIPTION: Implementation of the non-ANSI stricmp function (compare
- *              strings with no case sensitivity)
- *
- ******************************************************************************/
-
-int acpi_ut_stricmp(char *string1, char *string2)
-{
-	int c1;
-	int c2;
-
-	do {
-		c1 = tolower((int)*string1);
-		c2 = tolower((int)*string2);
-
-		string1++;
-		string2++;
-	}
-	while ((c1 == c2) && (c1));
-
-	return (c1 - c2);
-}
-#endif
-
-/*******************************************************************************
- *
- * FUNCTION:    acpi_ut_strupr (strupr)
- *
- * PARAMETERS:  src_string      - The source string to convert
- *
- * RETURN:      None
- *
- * DESCRIPTION: Convert string to uppercase
- *
- * NOTE: This is not a POSIX function, so it appears here, not in utclib.c
- *
- ******************************************************************************/
-
-void acpi_ut_strupr(char *src_string)
-{
-	char *string;
-
-	ACPI_FUNCTION_ENTRY();
-
-	if (!src_string) {
-		return;
-	}
-
-	/* Walk entire string, uppercasing the letters */
-
-	for (string = src_string; *string; string++) {
-		*string = (char)toupper((int)*string);
-	}
-
-	return;
-}
-
 /*******************************************************************************
  *
  * FUNCTION:    acpi_ut_print_string
  *
  * PARAMETERS:  string          - Null terminated ASCII string
- *              max_length      - Maximum output length
+ *              max_length      - Maximum output length. Used to constrain the
+ *                                length of strings during debug output only.
  *
  * RETURN:      None
  *
@@ -164,8 +26,7 @@ void acpi_ut_strupr(char *src_string)
  *              sequences.
  *
  ******************************************************************************/
-
-void acpi_ut_print_string(char *string, u8 max_length)
+void acpi_ut_print_string(char *string, u16 max_length)
 {
 	u32 i;
 
@@ -233,11 +94,12 @@ void acpi_ut_print_string(char *string, u8 max_length)
 			} else {
 				/* All others will be Hex escapes */
 
-				acpi_os_printf("\\x%2.2X", (s32) string[i]);
+				acpi_os_printf("\\x%2.2X", (s32)string[i]);
 			}
 			break;
 		}
 	}
+
 	acpi_os_printf("\"");
 
 	if (i == max_length && string[i]) {
@@ -274,6 +136,14 @@ void acpi_ut_repair_name(char *name)
 	u32 original_name;
 
 	ACPI_FUNCTION_NAME(ut_repair_name);
+
+	/*
+	 * Special case for the root node. This can happen if we get an
+	 * error during the execution of module-level code.
+	 */
+	if (ACPI_COMPARE_NAME(name, ACPI_ROOT_PATHNAME)) {
+		return;
+	}
 
 	ACPI_MOVE_NAME(&original_name, name);
 

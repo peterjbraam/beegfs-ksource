@@ -561,7 +561,8 @@ try_again:
 					break;
 			}
 		}
-		wait4(child_pid, &status, 0, &stat_config.ru_data);
+		if (child_pid != -1)
+			wait4(child_pid, &status, 0, &stat_config.ru_data);
 
 		if (workload_exec_errno) {
 			const char *emsg = str_error_r(workload_exec_errno, msg, sizeof(msg));
@@ -709,7 +710,7 @@ static int parse_metric_groups(const struct option *opt,
 	return metricgroup__parse_groups(opt, str, &stat_config.metric_events);
 }
 
-static const struct option stat_options[] = {
+static struct option stat_options[] = {
 	OPT_BOOLEAN('T', "transaction", &transaction_run,
 		    "hardware transaction statistics"),
 	OPT_CALLBACK('e', "event", &evsel_list, "event",
@@ -771,8 +772,6 @@ static const struct option stat_options[] = {
 		    "stop workload and print counts after a timeout period in ms (>= 10ms)"),
 	OPT_SET_UINT(0, "per-socket", &stat_config.aggr_mode,
 		     "aggregate counts per processor socket", AGGR_SOCKET),
-	OPT_SET_UINT(0, "per-die", &stat_config.aggr_mode,
-		     "aggregate counts per processor die", AGGR_DIE),
 	OPT_SET_UINT(0, "per-core", &stat_config.aggr_mode,
 		     "aggregate counts per physical processor core", AGGR_CORE),
 	OPT_SET_UINT(0, "per-thread", &stat_config.aggr_mode,
@@ -795,12 +794,6 @@ static int perf_stat__get_socket(struct perf_stat_config *config __maybe_unused,
 				 struct cpu_map *map, int cpu)
 {
 	return cpu_map__get_socket(map, cpu, NULL);
-}
-
-static int perf_stat__get_die(struct perf_stat_config *config __maybe_unused,
-			      struct cpu_map *map, int cpu)
-{
-	return cpu_map__get_die(map, cpu, NULL);
 }
 
 static int perf_stat__get_core(struct perf_stat_config *config __maybe_unused,
@@ -843,28 +836,10 @@ static int perf_stat__get_socket_cached(struct perf_stat_config *config,
 	return perf_stat__get_aggr(config, perf_stat__get_socket, map, idx);
 }
 
-static int perf_stat__get_die_cached(struct perf_stat_config *config,
-					struct cpu_map *map, int idx)
-{
-	return perf_stat__get_aggr(config, perf_stat__get_die, map, idx);
-}
-
 static int perf_stat__get_core_cached(struct perf_stat_config *config,
 				      struct cpu_map *map, int idx)
 {
 	return perf_stat__get_aggr(config, perf_stat__get_core, map, idx);
-}
-
-static bool term_percore_set(void)
-{
-	struct perf_evsel *counter;
-
-	evlist__for_each_entry(evsel_list, counter) {
-		if (counter->percore)
-			return true;
-	}
-
-	return false;
 }
 
 static int perf_stat_init_aggr_mode(void)
@@ -879,13 +854,6 @@ static int perf_stat_init_aggr_mode(void)
 		}
 		stat_config.aggr_get_id = perf_stat__get_socket_cached;
 		break;
-	case AGGR_DIE:
-		if (cpu_map__build_die_map(evsel_list->cpus, &stat_config.aggr_map)) {
-			perror("cannot build die map");
-			return -1;
-		}
-		stat_config.aggr_get_id = perf_stat__get_die_cached;
-		break;
 	case AGGR_CORE:
 		if (cpu_map__build_core_map(evsel_list->cpus, &stat_config.aggr_map)) {
 			perror("cannot build core map");
@@ -894,15 +862,6 @@ static int perf_stat_init_aggr_mode(void)
 		stat_config.aggr_get_id = perf_stat__get_core_cached;
 		break;
 	case AGGR_NONE:
-		if (term_percore_set()) {
-			if (cpu_map__build_core_map(evsel_list->cpus,
-						    &stat_config.aggr_map)) {
-				perror("cannot build core map");
-				return -1;
-			}
-			stat_config.aggr_get_id = perf_stat__get_core_cached;
-		}
-		break;
 	case AGGR_GLOBAL:
 	case AGGR_THREAD:
 	case AGGR_UNSET:
@@ -951,55 +910,21 @@ static int perf_env__get_socket(struct cpu_map *map, int idx, void *data)
 	return cpu == -1 ? -1 : env->cpu[cpu].socket_id;
 }
 
-static int perf_env__get_die(struct cpu_map *map, int idx, void *data)
-{
-	struct perf_env *env = data;
-	int die_id = -1, cpu = perf_env__get_cpu(env, map, idx);
-
-	if (cpu != -1) {
-		/*
-		 * Encode socket in bit range 15:8
-		 * die_id is relative to socket,
-		 * we need a global id. So we combine
-		 * socket + die id
-		 */
-		if (WARN_ONCE(env->cpu[cpu].socket_id >> 8, "The socket id number is too big.\n"))
-			return -1;
-
-		if (WARN_ONCE(env->cpu[cpu].die_id >> 8, "The die id number is too big.\n"))
-			return -1;
-
-		die_id = (env->cpu[cpu].socket_id << 8) | (env->cpu[cpu].die_id & 0xff);
-	}
-
-	return die_id;
-}
-
 static int perf_env__get_core(struct cpu_map *map, int idx, void *data)
 {
 	struct perf_env *env = data;
 	int core = -1, cpu = perf_env__get_cpu(env, map, idx);
 
 	if (cpu != -1) {
+		int socket_id = env->cpu[cpu].socket_id;
+
 		/*
-		 * Encode socket in bit range 31:24
-		 * encode die id in bit range 23:16
-		 * core_id is relative to socket and die,
+		 * Encode socket in upper 16 bits
+		 * core_id is relative to socket, and
 		 * we need a global id. So we combine
-		 * socket + die id + core id
+		 * socket + core id.
 		 */
-		if (WARN_ONCE(env->cpu[cpu].socket_id >> 8, "The socket id number is too big.\n"))
-			return -1;
-
-		if (WARN_ONCE(env->cpu[cpu].die_id >> 8, "The die id number is too big.\n"))
-			return -1;
-
-		if (WARN_ONCE(env->cpu[cpu].core_id >> 16, "The core id number is too big.\n"))
-			return -1;
-
-		core = (env->cpu[cpu].socket_id << 24) |
-		       (env->cpu[cpu].die_id << 16) |
-		       (env->cpu[cpu].core_id & 0xffff);
+		core = (socket_id << 16) | (env->cpu[cpu].core_id & 0xffff);
 	}
 
 	return core;
@@ -1009,12 +934,6 @@ static int perf_env__build_socket_map(struct perf_env *env, struct cpu_map *cpus
 				      struct cpu_map **sockp)
 {
 	return cpu_map__build_map(cpus, sockp, perf_env__get_socket, env);
-}
-
-static int perf_env__build_die_map(struct perf_env *env, struct cpu_map *cpus,
-				   struct cpu_map **diep)
-{
-	return cpu_map__build_map(cpus, diep, perf_env__get_die, env);
 }
 
 static int perf_env__build_core_map(struct perf_env *env, struct cpu_map *cpus,
@@ -1027,11 +946,6 @@ static int perf_stat__get_socket_file(struct perf_stat_config *config __maybe_un
 				      struct cpu_map *map, int idx)
 {
 	return perf_env__get_socket(map, idx, &perf_stat.session->header.env);
-}
-static int perf_stat__get_die_file(struct perf_stat_config *config __maybe_unused,
-				   struct cpu_map *map, int idx)
-{
-	return perf_env__get_die(map, idx, &perf_stat.session->header.env);
 }
 
 static int perf_stat__get_core_file(struct perf_stat_config *config __maybe_unused,
@@ -1051,13 +965,6 @@ static int perf_stat_init_aggr_mode_file(struct perf_stat *st)
 			return -1;
 		}
 		stat_config.aggr_get_id = perf_stat__get_socket_file;
-		break;
-	case AGGR_DIE:
-		if (perf_env__build_die_map(env, evsel_list->cpus, &stat_config.aggr_map)) {
-			perror("cannot build die map");
-			return -1;
-		}
-		stat_config.aggr_get_id = perf_stat__get_die_file;
 		break;
 	case AGGR_CORE:
 		if (perf_env__build_core_map(env, evsel_list->cpus, &stat_config.aggr_map)) {
@@ -1608,8 +1515,6 @@ static int __cmd_report(int argc, const char **argv)
 	OPT_STRING('i', "input", &input_name, "file", "input file name"),
 	OPT_SET_UINT(0, "per-socket", &perf_stat.aggr_mode,
 		     "aggregate counts per processor socket", AGGR_SOCKET),
-	OPT_SET_UINT(0, "per-die", &perf_stat.aggr_mode,
-		     "aggregate counts per processor die", AGGR_DIE),
 	OPT_SET_UINT(0, "per-core", &perf_stat.aggr_mode,
 		     "aggregate counts per physical processor core", AGGR_CORE),
 	OPT_SET_UINT('A', "no-aggr", &perf_stat.aggr_mode,
@@ -1695,6 +1600,12 @@ int cmd_stat(int argc, const char **argv)
 		return -ENOMEM;
 
 	parse_events__shrink_config_terms();
+
+	/* String-parsing callback-based options would segfault when negated */
+	set_option_flag(stat_options, 'e', "event", PARSE_OPT_NONEG);
+	set_option_flag(stat_options, 'M', "metrics", PARSE_OPT_NONEG);
+	set_option_flag(stat_options, 'G', "cgroup", PARSE_OPT_NONEG);
+
 	argc = parse_options_subcommand(argc, argv, stat_options, stat_subcommands,
 					(const char **) stat_usage,
 					PARSE_OPT_STOP_AT_NON_OPTION);

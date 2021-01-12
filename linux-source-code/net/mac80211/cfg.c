@@ -5,7 +5,6 @@
  * Copyright 2006-2010	Johannes Berg <johannes@sipsolutions.net>
  * Copyright 2013-2015  Intel Mobile Communications GmbH
  * Copyright (C) 2015-2017 Intel Deutschland GmbH
- * Copyright (C) 2018-2019 Intel Corporation
  * Copyright (C) 2018 Intel Corporation
  */
 
@@ -351,6 +350,38 @@ static int ieee80211_set_noack_map(struct wiphy *wiphy,
 	return 0;
 }
 
+#if 0 /* Not in RHEL */
+static int ieee80211_set_tx(struct ieee80211_sub_if_data *sdata,
+			    const u8 *mac_addr, u8 key_idx)
+{
+	struct ieee80211_local *local = sdata->local;
+	struct ieee80211_key *key;
+	struct sta_info *sta;
+	int ret = -EINVAL;
+
+	if (!wiphy_ext_feature_isset(local->hw.wiphy,
+				     NL80211_EXT_FEATURE_EXT_KEY_ID))
+		return -EINVAL;
+
+	sta = sta_info_get_bss(sdata, mac_addr);
+
+	if (!sta)
+		return -EINVAL;
+
+	if (sta->ptk_idx == key_idx)
+		return 0;
+
+	mutex_lock(&local->key_mtx);
+	key = key_mtx_dereference(local, sta->ptk[key_idx]);
+
+	if (key && key->conf.flags & IEEE80211_KEY_FLAG_NO_AUTO_TX)
+		ret = ieee80211_set_tx_key(key);
+
+	mutex_unlock(&local->key_mtx);
+	return ret;
+}
+#endif
+
 static int ieee80211_add_key(struct wiphy *wiphy, struct net_device *dev,
 			     u8 key_idx, bool pairwise, const u8 *mac_addr,
 			     struct key_params *params)
@@ -364,6 +395,11 @@ static int ieee80211_add_key(struct wiphy *wiphy, struct net_device *dev,
 
 	if (!ieee80211_sdata_running(sdata))
 		return -ENETDOWN;
+
+#if 0 /* Not in RHEL */
+	if (pairwise && params->mode == NL80211_KEY_SET_TX)
+		return ieee80211_set_tx(sdata, mac_addr, key_idx);
+#endif
 
 	/* reject WEP and TKIP keys if WEP failed to initialize */
 	switch (params->cipher) {
@@ -395,6 +431,11 @@ static int ieee80211_add_key(struct wiphy *wiphy, struct net_device *dev,
 
 	if (pairwise)
 		key->conf.flags |= IEEE80211_KEY_FLAG_PAIRWISE;
+
+#if 0 /* Not in RHEL */
+	if (params->mode == NL80211_KEY_NO_TX)
+		key->conf.flags |= IEEE80211_KEY_FLAG_NO_AUTO_TX;
+#endif
 
 	mutex_lock(&local->sta_mtx);
 
@@ -900,10 +941,8 @@ static int ieee80211_assign_beacon(struct ieee80211_sub_if_data *sdata,
 
 	err = ieee80211_set_probe_resp(sdata, params->probe_resp,
 				       params->probe_resp_len, csa);
-	if (err < 0) {
-		kfree(new);
+	if (err < 0)
 		return err;
-	}
 	if (err == 0)
 		changed |= BSS_CHANGED_AP_PROBE_RESP;
 
@@ -915,10 +954,8 @@ static int ieee80211_assign_beacon(struct ieee80211_sub_if_data *sdata,
 							 params->civicloc,
 							 params->civicloc_len);
 
-		if (err < 0) {
-			kfree(new);
+		if (err < 0)
 			return err;
-		}
 
 		changed |= BSS_CHANGED_FTM_RESPONDER;
 	}
@@ -943,8 +980,7 @@ static int ieee80211_start_ap(struct wiphy *wiphy, struct net_device *dev,
 		      BSS_CHANGED_BEACON |
 		      BSS_CHANGED_SSID |
 		      BSS_CHANGED_P2P_PS |
-		      BSS_CHANGED_TXPOWER |
-		      BSS_CHANGED_TWT;
+		      BSS_CHANGED_TXPOWER;
 	int err;
 	int prev_beacon_int;
 
@@ -1014,7 +1050,6 @@ static int ieee80211_start_ap(struct wiphy *wiphy, struct net_device *dev,
 	sdata->vif.bss_conf.dtim_period = params->dtim_period;
 	sdata->vif.bss_conf.enable_beacon = true;
 	sdata->vif.bss_conf.allow_p2p_go_ps = sdata->vif.p2p;
-	sdata->vif.bss_conf.twt_responder = params->twt_responder;
 
 	sdata->vif.bss_conf.ssid_len = params->ssid_len;
 	if (params->ssid_len)
@@ -1436,7 +1471,7 @@ static int sta_apply_parameters(struct ieee80211_local *local,
 			return ret;
 	}
 
-	if (params->supported_rates && params->supported_rates_len) {
+	if (params->supported_rates) {
 		ieee80211_parse_bitrates(&sdata->vif.bss_conf.chandef,
 					 sband, params->supported_rates,
 					 params->supported_rates_len,
@@ -1493,6 +1528,7 @@ static int ieee80211_add_station(struct wiphy *wiphy, struct net_device *dev,
 	struct sta_info *sta;
 	struct ieee80211_sub_if_data *sdata;
 	int err;
+	int layer2_update;
 
 	if (params->vlan) {
 		sdata = IEEE80211_DEV_TO_SUB_IF(params->vlan);
@@ -1509,17 +1545,16 @@ static int ieee80211_add_station(struct wiphy *wiphy, struct net_device *dev,
 	if (is_multicast_ether_addr(mac))
 		return -EINVAL;
 
-	if (params->sta_flags_set & BIT(NL80211_STA_FLAG_TDLS_PEER) &&
-	    sdata->vif.type == NL80211_IFTYPE_STATION &&
-	    !sdata->u.mgd.associated)
-		return -EINVAL;
-
 	sta = sta_info_alloc(sdata, mac, GFP_KERNEL);
 	if (!sta)
 		return -ENOMEM;
 
 	if (params->sta_flags_set & BIT(NL80211_STA_FLAG_TDLS_PEER))
 		sta->sta.tdls = true;
+
+	if (sta->sta.tdls && sdata->vif.type == NL80211_IFTYPE_STATION &&
+	    !sdata->u.mgd.associated)
+		return -EINVAL;
 
 	err = sta_apply_parameters(local, sta, params);
 	if (err) {
@@ -1536,11 +1571,17 @@ static int ieee80211_add_station(struct wiphy *wiphy, struct net_device *dev,
 	    test_sta_flag(sta, WLAN_STA_ASSOC))
 		rate_control_rate_init(sta);
 
+	layer2_update = sdata->vif.type == NL80211_IFTYPE_AP_VLAN ||
+		sdata->vif.type == NL80211_IFTYPE_AP;
+
 	err = sta_info_insert_rcu(sta);
 	if (err) {
 		rcu_read_unlock();
 		return err;
 	}
+
+	if (layer2_update)
+		cfg80211_send_layer2_update(sta->sdata->dev, sta->sta.addr);
 
 	rcu_read_unlock();
 
@@ -1639,11 +1680,10 @@ static int ieee80211_change_station(struct wiphy *wiphy,
 		sta->sdata = vlansdata;
 		ieee80211_check_fast_xmit(sta);
 
-		if (test_sta_flag(sta, WLAN_STA_AUTHORIZED)) {
+		if (test_sta_flag(sta, WLAN_STA_AUTHORIZED))
 			ieee80211_vif_inc_num_mcast(sta->sdata);
-			cfg80211_send_layer2_update(sta->sdata->dev,
-						    sta->sta.addr);
-		}
+
+		cfg80211_send_layer2_update(sta->sdata->dev, sta->sta.addr);
 	}
 
 	err = sta_apply_parameters(local, sta, params);

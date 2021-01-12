@@ -13,6 +13,23 @@
 
 #define TIMEOUT_100_MS 100
 
+static const uint32_t qla8044_reg_tbl[] = {
+	QLA8044_PEG_HALT_STATUS1,
+	QLA8044_PEG_HALT_STATUS2,
+	QLA8044_PEG_ALIVE_COUNTER,
+	QLA8044_CRB_DRV_ACTIVE,
+	QLA8044_CRB_DEV_STATE,
+	QLA8044_CRB_DRV_STATE,
+	QLA8044_CRB_DRV_SCRATCH,
+	QLA8044_CRB_DEV_PART_INFO1,
+	QLA8044_CRB_IDC_VER_MAJOR,
+	QLA8044_FW_VER_MAJOR,
+	QLA8044_FW_VER_MINOR,
+	QLA8044_FW_VER_SUB,
+	QLA8044_CMDPEG_STATE,
+	QLA8044_ASIC_TEMP,
+};
+
 /* 8044 Flash Read/Write functions */
 uint32_t
 qla8044_rd_reg(struct qla_hw_data *ha, ulong addr)
@@ -2352,7 +2369,7 @@ qla8044_minidump_process_rdmem(struct scsi_qla_host *vha,
 
 	if (r_addr & 0xf) {
 		ql_dbg(ql_dbg_p3p, vha, 0xb0f1,
-		    "[%s]: Read addr 0x%x not 16 bytes alligned\n",
+		    "[%s]: Read addr 0x%x not 16 bytes aligned\n",
 		    __func__, r_addr);
 		return QLA_FUNCTION_FAILED;
 	}
@@ -2990,9 +3007,10 @@ qla8044_minidump_process_rddfe(struct scsi_qla_host *vha,
 	uint16_t count;
 	uint32_t poll, mask, modify_mask;
 	uint32_t wait_count = 0;
-	uint32_t *data_ptr = *d_ptr;
-	struct qla8044_minidump_entry_rddfe *rddfe;
 
+	uint32_t *data_ptr = *d_ptr;
+
+	struct qla8044_minidump_entry_rddfe *rddfe;
 	rddfe = (struct qla8044_minidump_entry_rddfe *) entry_hdr;
 
 	addr1 = rddfe->addr_1;

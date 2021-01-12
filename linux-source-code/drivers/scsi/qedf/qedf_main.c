@@ -354,7 +354,6 @@ static void qedf_link_recovery(struct work_struct *work)
 	int retries = 30;
 	int rval, i;
 	struct list_head rdata_login_list;
-	struct fc_lport *lport = qedf->lport;
 
 	INIT_LIST_HEAD(&rdata_login_list);
 
@@ -440,8 +439,8 @@ static void qedf_link_recovery(struct work_struct *work)
 	list_for_each_entry_safe(rdata_item, tmp_rdata_item, &rdata_login_list,
 	    list) {
 		list_del(&rdata_item->list);
-		lport->tt.rport_login(rdata_item->rdata);
-		kref_put(&rdata_item->rdata->kref, lport->tt.rport_destroy);
+		fc_rport_login(rdata_item->rdata);
+		kref_put(&rdata_item->rdata->kref, fc_rport_destroy);
 		kfree(rdata_item);
 	}
 }
@@ -761,7 +760,7 @@ static int qedf_eh_abort(struct scsi_cmnd *sc_cmd)
 			  io_req->xid);
 
 drop_rdata_kref:
-	kref_put(&rdata->kref, lport->tt.rport_destroy);
+	kref_put(&rdata->kref, fc_rport_destroy);
 out:
 	if (got_ref)
 		kref_put(&io_req->refcount, qedf_release_cmd);
@@ -885,10 +884,7 @@ static int qedf_eh_host_reset(struct scsi_cmnd *sc_cmd)
 static int qedf_slave_configure(struct scsi_device *sdev)
 {
 	if (qedf_queue_depth) {
-		if (sdev->tagged_supported)
-			scsi_activate_tcq(sdev, qedf_queue_depth);
-		else
-			scsi_deactivate_tcq(sdev, qedf_queue_depth);
+		scsi_change_queue_depth(sdev, qedf_queue_depth);
 	}
 
 	return 0;
@@ -911,7 +907,7 @@ static struct scsi_host_template qedf_host_template = {
 	.dma_boundary = QED_HW_DMA_BOUNDARY,
 	.sg_tablesize = QEDF_MAX_BDS_PER_CMD,
 	.can_queue = FCOE_PARAMS_NUM_TASKS,
-	.change_queue_depth = fc_change_queue_depth,
+	.change_queue_depth = scsi_change_queue_depth,
 };
 
 static int qedf_get_paged_crc_eof(struct sk_buff *skb, int tlen)
@@ -1021,10 +1017,10 @@ static int qedf_xmit(struct fc_lport *lport, struct fc_frame *fp)
 		QEDF_INFO(&(qedf->dbg_ctx), QEDF_LOG_LL2,
 		    "Dropping FCoE frame to %06x.\n", ntoh24(fh->fh_d_id));
 		kfree_skb(skb);
-		rdata = lport->tt.rport_lookup(lport, ntoh24(fh->fh_d_id));
+		rdata = fc_rport_lookup(lport, ntoh24(fh->fh_d_id));
 		if (rdata) {
 			rdata->retries = lport->max_rport_retry_count;
-			kref_put(&rdata->kref, lport->tt.rport_destroy);
+			kref_put(&rdata->kref, fc_rport_destroy);
 		}
 		return -EINVAL;
 	}
@@ -1087,7 +1083,7 @@ static int qedf_xmit(struct fc_lport *lport, struct fc_frame *fp)
 		frag = &skb_shinfo(skb)->frags[skb_shinfo(skb)->nr_frags - 1];
 		cp = kmap_atomic(skb_frag_page(frag)) + frag->page_offset;
 	} else {
-		cp = (struct fcoe_crc_eof *)skb_put(skb, tlen);
+		cp = skb_put(skb, tlen);
 	}
 
 	memset(cp, 0, sizeof(*cp));
@@ -1172,16 +1168,17 @@ static int qedf_alloc_sq(struct qedf_ctx *qedf, struct qedf_rport *fcport)
 	    sizeof(void *);
 	fcport->sq_pbl_size = fcport->sq_pbl_size + QEDF_PAGE_SIZE;
 
-	fcport->sq = dma_zalloc_coherent(&qedf->pdev->dev,
-	    fcport->sq_mem_size, &fcport->sq_dma, GFP_KERNEL);
+	fcport->sq = dma_alloc_coherent(&qedf->pdev->dev, fcport->sq_mem_size,
+					&fcport->sq_dma, GFP_KERNEL);
 	if (!fcport->sq) {
 		QEDF_WARN(&(qedf->dbg_ctx), "Could not allocate send queue.\n");
 		rval = 1;
 		goto out;
 	}
 
-	fcport->sq_pbl = dma_zalloc_coherent(&qedf->pdev->dev,
-	    fcport->sq_pbl_size, &fcport->sq_pbl_dma, GFP_KERNEL);
+	fcport->sq_pbl = dma_alloc_coherent(&qedf->pdev->dev,
+					    fcport->sq_pbl_size,
+					    &fcport->sq_pbl_dma, GFP_KERNEL);
 	if (!fcport->sq_pbl) {
 		QEDF_WARN(&(qedf->dbg_ctx), "Could not allocate send queue PBL.\n");
 		rval = 1;
@@ -1358,7 +1355,7 @@ static void qedf_cleanup_fcport(struct qedf_ctx *qedf,
 	qedf_free_sq(qedf, fcport);
 	fcport->rdata = NULL;
 	fcport->qedf = NULL;
-	kref_put(&rdata->kref, qedf->lport->tt.rport_destroy);
+	kref_put(&rdata->kref, fc_rport_destroy);
 }
 
 /**
@@ -1549,7 +1546,7 @@ static struct libfc_function_template qedf_lport_template = {
 
 static void qedf_fcoe_ctlr_setup(struct qedf_ctx *qedf)
 {
-	fcoe_ctlr_init(&qedf->ctlr, FIP_ST_AUTO);
+	fcoe_ctlr_init(&qedf->ctlr, FIP_MODE_AUTO);
 
 	qedf->ctlr.send = qedf_fip_send;
 	qedf->ctlr.get_src_addr = qedf_get_src_mac;
@@ -1781,7 +1778,6 @@ static int qedf_vport_create(struct fc_vport *vport, bool disabled)
 	fc_exch_init(vn_port);
 	fc_elsct_init(vn_port);
 	fc_lport_init(vn_port);
-	fc_rport_init(vn_port);
 	fc_disc_init(vn_port);
 	fc_disc_config(vn_port, vn_port);
 
@@ -2462,7 +2458,7 @@ static void qedf_ll2_process_skb(struct work_struct *work)
 	/* Undo VLAN encapsulation */
 	if (eh->h_proto == htons(ETH_P_8021Q)) {
 		memmove((u8 *)eh + VLAN_HLEN, eh, ETH_ALEN * 2);
-		eh = (struct ethhdr *)skb_pull(skb, VLAN_HLEN);
+		eh = skb_pull(skb, VLAN_HLEN);
 		skb_reset_mac_header(skb);
 	}
 
@@ -2826,8 +2822,10 @@ static int qedf_alloc_bdq(struct qedf_ctx *qedf)
 	}
 
 	/* Allocate list of PBL pages */
-	qedf->bdq_pbl_list = dma_zalloc_coherent(&qedf->pdev->dev,
-	    QEDF_PAGE_SIZE, &qedf->bdq_pbl_list_dma, GFP_KERNEL);
+	qedf->bdq_pbl_list = dma_alloc_coherent(&qedf->pdev->dev,
+						QEDF_PAGE_SIZE,
+						&qedf->bdq_pbl_list_dma,
+						GFP_KERNEL);
 	if (!qedf->bdq_pbl_list) {
 		QEDF_ERR(&(qedf->dbg_ctx), "Could not allocate list of PBL pages.\n");
 		return -ENOMEM;
@@ -2916,9 +2914,10 @@ static int qedf_alloc_global_queues(struct qedf_ctx *qedf)
 		    ALIGN(qedf->global_queues[i]->cq_pbl_size, QEDF_PAGE_SIZE);
 
 		qedf->global_queues[i]->cq =
-		    dma_zalloc_coherent(&qedf->pdev->dev,
-			qedf->global_queues[i]->cq_mem_size,
-			&qedf->global_queues[i]->cq_dma, GFP_KERNEL);
+		    dma_alloc_coherent(&qedf->pdev->dev,
+				       qedf->global_queues[i]->cq_mem_size,
+				       &qedf->global_queues[i]->cq_dma,
+				       GFP_KERNEL);
 
 		if (!qedf->global_queues[i]->cq) {
 			QEDF_WARN(&(qedf->dbg_ctx), "Could not allocate cq.\n");
@@ -2927,9 +2926,10 @@ static int qedf_alloc_global_queues(struct qedf_ctx *qedf)
 		}
 
 		qedf->global_queues[i]->cq_pbl =
-		    dma_zalloc_coherent(&qedf->pdev->dev,
-			qedf->global_queues[i]->cq_pbl_size,
-			&qedf->global_queues[i]->cq_pbl_dma, GFP_KERNEL);
+		    dma_alloc_coherent(&qedf->pdev->dev,
+				       qedf->global_queues[i]->cq_pbl_size,
+				       &qedf->global_queues[i]->cq_pbl_dma,
+				       GFP_KERNEL);
 
 		if (!qedf->global_queues[i]->cq_pbl) {
 			QEDF_WARN(&(qedf->dbg_ctx), "Could not allocate cq PBL.\n");
@@ -3000,12 +3000,12 @@ static int qedf_set_fcoe_pf_param(struct qedf_ctx *qedf)
 	QEDF_INFO(&(qedf->dbg_ctx), QEDF_LOG_DISC, "Number of CQs is %d.\n",
 		   qedf->num_queues);
 
-	qedf->p_cpuq = pci_alloc_consistent(qedf->pdev,
+	qedf->p_cpuq = dma_alloc_coherent(&qedf->pdev->dev,
 	    qedf->num_queues * sizeof(struct qedf_glbl_q_params),
-	    &qedf->hw_p_cpuq);
+	    &qedf->hw_p_cpuq, GFP_KERNEL);
 
 	if (!qedf->p_cpuq) {
-		QEDF_ERR(&(qedf->dbg_ctx), "pci_alloc_consistent failed.\n");
+		QEDF_ERR(&(qedf->dbg_ctx), "dma_alloc_coherent failed.\n");
 		return 1;
 	}
 
@@ -3074,7 +3074,7 @@ static void qedf_free_fcoe_pf_param(struct qedf_ctx *qedf)
 
 	if (qedf->p_cpuq) {
 		size = qedf->num_queues * sizeof(struct qedf_glbl_q_params);
-		pci_free_consistent(qedf->pdev, size, qedf->p_cpuq,
+		dma_free_coherent(&qedf->pdev->dev, size, qedf->p_cpuq,
 		    qedf->hw_p_cpuq);
 	}
 

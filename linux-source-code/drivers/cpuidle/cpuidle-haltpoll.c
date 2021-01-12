@@ -14,11 +14,12 @@
 #include <linux/cpu.h>
 #include <linux/cpuidle.h>
 #include <linux/module.h>
-#include <linux/sched.h>
+#include <linux/sched/idle.h>
 #include <linux/kvm_para.h>
 #include <linux/cpuidle_haltpoll.h>
 
 static struct cpuidle_device __percpu *haltpoll_cpuidle_devices;
+static enum cpuhp_state haltpoll_hp_state;
 
 static int default_enter_idle(struct cpuidle_device *dev,
 			      struct cpuidle_driver *drv, int index)
@@ -33,7 +34,6 @@ static int default_enter_idle(struct cpuidle_device *dev,
 
 static struct cpuidle_driver haltpoll_driver = {
 	.name = "haltpoll",
-	.owner = THIS_MODULE,
 	.states = {
 		{ /* entry 0 is for polling */ },
 		{
@@ -49,119 +49,84 @@ static struct cpuidle_driver haltpoll_driver = {
 	.state_count = 2,
 };
 
-static int haltpoll_cpuidle_add_cpu_notifier(struct notifier_block *n,
-					     unsigned long action, void *hcpu)
+static int haltpoll_cpu_online(unsigned int cpu)
 {
-	int hotcpu = (unsigned long)hcpu;
-	struct cpuidle_device *dev =
-		per_cpu_ptr(haltpoll_cpuidle_devices, hotcpu);
-
-	switch (action & ~CPU_TASKS_FROZEN) {
-	case CPU_ONLINE:
-		dev->cpu = hotcpu;
-		cpuidle_pause_and_lock();
-		cpuidle_enable_device(dev);
-		cpuidle_resume_and_unlock();
-		arch_haltpoll_enable(hotcpu);
-
-		break;
-
-	case CPU_DEAD:
-		cpuidle_pause_and_lock();
-		cpuidle_disable_device(dev);
-		cpuidle_resume_and_unlock();
-		arch_haltpoll_disable(hotcpu);
-
-		break;
-	default:
-		return NOTIFY_DONE;
-	}
-
-	return NOTIFY_OK;
-}
-
-static struct notifier_block cpu_hotplug_notifier = {
-	.notifier_call = haltpoll_cpuidle_add_cpu_notifier,
-};
-
-static int haltpoll_cpu_init(unsigned int cpu)
-{
-	int ret;
 	struct cpuidle_device *dev;
+
 	dev = per_cpu_ptr(haltpoll_cpuidle_devices, cpu);
-
-	dev->cpu = cpu;
-	ret = cpuidle_register_device(dev);
-	if (ret)
-		return ret;
-
-	arch_haltpoll_enable(cpu);
+	if (!dev->registered) {
+		dev->cpu = cpu;
+		if (cpuidle_register_device(dev)) {
+			pr_notice("cpuidle_register_device %d failed!\n", cpu);
+			return -EIO;
+		}
+		arch_haltpoll_enable(cpu);
+	}
 
 	return 0;
 }
 
-static void haltpoll_devices_uninit(void)
+static int haltpoll_cpu_offline(unsigned int cpu)
 {
-	int i;
 	struct cpuidle_device *dev;
 
-	for_each_possible_cpu(i) {
-		dev = per_cpu_ptr(haltpoll_cpuidle_devices, i);
-		if (dev->registered)
-			cpuidle_unregister_device(dev);
-		arch_haltpoll_disable(i);
+	dev = per_cpu_ptr(haltpoll_cpuidle_devices, cpu);
+	if (dev->registered) {
+		arch_haltpoll_disable(cpu);
+		cpuidle_unregister_device(dev);
 	}
-}
-static int __init haltpoll_init(void)
-{
-	int ret, i;
-
-	if (!kvm_para_available())
-		return -ENODEV;
-
-	ret = cpuidle_register_driver(&haltpoll_driver);
-	if (ret < 0)
-		return ret;
-
-	haltpoll_cpuidle_devices = alloc_percpu(struct cpuidle_device);
-	if (haltpoll_cpuidle_devices == NULL) {
-		cpuidle_unregister_driver(&haltpoll_driver);
-		return -ENOMEM;
-	}
-
-	cpu_notifier_register_begin();
-
-	for_each_online_cpu(i) {
-		ret = haltpoll_cpu_init(i);
-		if (ret) {
-			haltpoll_devices_uninit();
-			cpu_notifier_register_done();
-			cpuidle_unregister_driver(&haltpoll_driver);
-			free_percpu(haltpoll_cpuidle_devices);
-			haltpoll_cpuidle_devices = NULL;
-			return ret;
-		}
-	}
-
-	__register_cpu_notifier(&cpu_hotplug_notifier);
-
-	cpu_notifier_register_done();
 
 	return 0;
 }
 
-static void __exit haltpoll_exit(void)
+static void haltpoll_uninit(void)
 {
-	unregister_cpu_notifier(&cpu_hotplug_notifier);
-	haltpoll_devices_uninit();
+	if (haltpoll_hp_state)
+		cpuhp_remove_state(haltpoll_hp_state);
 	cpuidle_unregister_driver(&haltpoll_driver);
 
 	free_percpu(haltpoll_cpuidle_devices);
 	haltpoll_cpuidle_devices = NULL;
 }
 
+static int __init haltpoll_init(void)
+{
+	int ret;
+	struct cpuidle_driver *drv = &haltpoll_driver;
+
+	cpuidle_poll_state_init(drv);
+
+	if (!kvm_para_available())
+		return -ENODEV;
+
+	ret = rhel_cpuidle_register_driver_hpoll(drv);
+	if (ret < 0)
+		return ret;
+
+	haltpoll_cpuidle_devices = alloc_percpu(struct cpuidle_device);
+	if (haltpoll_cpuidle_devices == NULL) {
+		cpuidle_unregister_driver(drv);
+		return -ENOMEM;
+	}
+
+	ret = cpuhp_setup_state(CPUHP_AP_ONLINE_DYN, "cpuidle/haltpoll:online",
+				haltpoll_cpu_online, haltpoll_cpu_offline);
+	if (ret < 0) {
+		haltpoll_uninit();
+	} else {
+		haltpoll_hp_state = ret;
+		ret = 0;
+	}
+
+	return ret;
+}
+
+static void __exit haltpoll_exit(void)
+{
+	haltpoll_uninit();
+}
+
 module_init(haltpoll_init);
 module_exit(haltpoll_exit);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Marcelo Tosatti <mtosatti@redhat.com>");
-

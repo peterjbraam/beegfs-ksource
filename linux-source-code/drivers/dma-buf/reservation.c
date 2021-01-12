@@ -46,7 +46,7 @@
  * write-side updates.
  */
 
-DEFINE_WW_CLASS(reservation_ww_class);
+DEFINE_WD_CLASS(reservation_ww_class);
 EXPORT_SYMBOL(reservation_ww_class);
 
 struct lock_class_key reservation_seqcount_class;
@@ -357,6 +357,10 @@ int reservation_object_get_fences_rcu(struct reservation_object *obj,
 					   GFP_NOWAIT | __GFP_NOWARN);
 			if (!nshared) {
 				rcu_read_unlock();
+
+				dma_fence_put(fence_excl);
+				fence_excl = NULL;
+
 				nshared = krealloc(shared, sz, GFP_KERNEL);
 				if (nshared) {
 					shared = nshared;

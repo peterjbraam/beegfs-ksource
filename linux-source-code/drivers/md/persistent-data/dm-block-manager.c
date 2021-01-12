@@ -5,14 +5,15 @@
  */
 #include "dm-block-manager.h"
 #include "dm-persistent-data-internal.h"
-#include "../dm-bufio.h"
 
+#include <linux/dm-bufio.h>
 #include <linux/crc32c.h>
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/rwsem.h>
 #include <linux/device-mapper.h>
 #include <linux/stacktrace.h>
+#include <linux/sched/task.h>
 
 #define DM_MSG_PREFIX "block manager"
 
@@ -120,7 +121,7 @@ static int __check_holder(struct block_lock *lock)
 static void __wait(struct waiter *w)
 {
 	for (;;) {
-		set_task_state(current, TASK_UNINTERRUPTIBLE);
+		set_current_state(TASK_UNINTERRUPTIBLE);
 
 		if (!w->task)
 			break;
@@ -128,7 +129,7 @@ static void __wait(struct waiter *w)
 		schedule();
 	}
 
-	set_task_state(current, TASK_RUNNING);
+	set_current_state(TASK_RUNNING);
 }
 
 static void __wake_waiter(struct waiter *w)

@@ -6,9 +6,6 @@
 # tell define_trace.h where to find the xhci trace header
 CFLAGS_xhci-trace.o := -I$(src)
 
-isp1760-y := isp1760-core.o isp1760-hcd.o isp1760-if.o
-isp1760-$(CONFIG_USB_ISP1761_UDC) += isp1760-udc.o
-
 fhci-y := fhci-hcd.o fhci-hub.o fhci-q.o
 fhci-y += fhci-mem.o fhci-tds.o fhci-sched.o
 
@@ -53,7 +50,6 @@ obj-$(CONFIG_USB_EHCI_HCD_SPEAR)	+= ehci-spear.o
 obj-$(CONFIG_USB_EHCI_HCD_STI)	+= ehci-st.o
 obj-$(CONFIG_USB_EHCI_EXYNOS)	+= ehci-exynos.o
 obj-$(CONFIG_USB_EHCI_HCD_AT91) += ehci-atmel.o
-obj-$(CONFIG_USB_EHCI_MSM)	+= ehci-msm.o
 obj-$(CONFIG_USB_EHCI_TEGRA)	+= ehci-tegra.o
 obj-$(CONFIG_USB_W90X900_EHCI)	+= ehci-w90x900.o
 
@@ -66,7 +62,6 @@ obj-$(CONFIG_USB_OHCI_HCD_PCI)	+= ohci-pci.o
 obj-$(CONFIG_USB_OHCI_HCD_PLATFORM)	+= ohci-platform.o
 obj-$(CONFIG_USB_OHCI_EXYNOS)	+= ohci-exynos.o
 obj-$(CONFIG_USB_OHCI_HCD_OMAP1)	+= ohci-omap.o
-obj-$(CONFIG_USB_OHCI_HCD_OMAP3)	+= ohci-omap3.o
 obj-$(CONFIG_USB_OHCI_HCD_SPEAR)	+= ohci-spear.o
 obj-$(CONFIG_USB_OHCI_HCD_STI)	+= ohci-st.o
 obj-$(CONFIG_USB_OHCI_HCD_AT91)	+= ohci-at91.o
@@ -87,7 +82,6 @@ obj-$(CONFIG_USB_SL811_HCD)	+= sl811-hcd.o
 obj-$(CONFIG_USB_SL811_CS)	+= sl811_cs.o
 obj-$(CONFIG_USB_U132_HCD)	+= u132-hcd.o
 obj-$(CONFIG_USB_R8A66597_HCD)	+= r8a66597-hcd.o
-obj-$(CONFIG_USB_ISP1760_HCD)	+= isp1760.o
 obj-$(CONFIG_USB_HWA_HCD)	+= hwa-hc.o
 obj-$(CONFIG_USB_IMX21_HCD)	+= imx21-hcd.o
 obj-$(CONFIG_USB_FSL_USB2)	+= fsl-mph-dr-of.o

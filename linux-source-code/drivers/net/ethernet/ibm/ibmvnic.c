@@ -1410,8 +1410,8 @@ static int ibmvnic_xmit_workarounds(struct sk_buff *skb,
 	 * than the minimum MTU value provided to the driver, so
 	 * pad any packets to that length
 	 */
-	if (skb->len < netdev->extended->min_mtu)
-		return skb_put_padto(skb, netdev->extended->min_mtu);
+	if (skb->len < netdev->min_mtu)
+		return skb_put_padto(skb, netdev->min_mtu);
 
 	return 0;
 }
@@ -1533,7 +1533,7 @@ static int ibmvnic_xmit(struct sk_buff *skb, struct net_device *netdev)
 	tx_crq.v1.sge_len = cpu_to_be32(skb->len);
 	tx_crq.v1.ioba = cpu_to_be64(data_dma_addr);
 
-	if (adapter->vlan_header_insertion) {
+	if (adapter->vlan_header_insertion && skb_vlan_tag_present(skb)) {
 		tx_crq.v1.flags2 |= IBMVNIC_TX_VLAN_INSERT;
 		tx_crq.v1.vlan_id = cpu_to_be16(skb->vlan_tci);
 	}
@@ -2322,19 +2322,6 @@ restart_poll:
 	return frames_processed;
 }
 
-#ifdef CONFIG_NET_POLL_CONTROLLER
-static void ibmvnic_netpoll_controller(struct net_device *dev)
-{
-	struct ibmvnic_adapter *adapter = netdev_priv(dev);
-	int i;
-
-	replenish_pools(netdev_priv(dev));
-	for (i = 0; i < adapter->req_rx_queues; i++)
-		ibmvnic_interrupt_rx(adapter->rx_scrq[i]->irq,
-				     adapter->rx_scrq[i]);
-}
-#endif
-
 static int wait_for_reset(struct ibmvnic_adapter *adapter)
 {
 	int rc, ret;
@@ -2407,10 +2394,7 @@ static const struct net_device_ops ibmvnic_netdev_ops = {
 	.ndo_set_mac_address	= ibmvnic_set_mac,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_tx_timeout		= ibmvnic_tx_timeout,
-#ifdef CONFIG_NET_POLL_CONTROLLER
-	.ndo_poll_controller	= ibmvnic_netpoll_controller,
-#endif
-	.ndo_change_mtu_rh74	= ibmvnic_change_mtu,
+	.ndo_change_mtu		= ibmvnic_change_mtu,
 	.ndo_features_check     = ibmvnic_features_check,
 };
 
@@ -3045,14 +3029,16 @@ static int init_sub_crq_irqs(struct ibmvnic_adapter *adapter)
 		scrq = adapter->tx_scrq[i];
 		scrq->irq = irq_create_mapping(NULL, scrq->hw_irq);
 
-		if (scrq->irq == NO_IRQ) {
+		if (!scrq->irq) {
 			rc = -EINVAL;
 			dev_err(dev, "Error mapping irq\n");
 			goto req_tx_irq_failed;
 		}
 
+		snprintf(scrq->name, sizeof(scrq->name), "ibmvnic-%x-tx%d",
+			 adapter->vdev->unit_address, i);
 		rc = request_irq(scrq->irq, ibmvnic_interrupt_tx,
-				 0, "ibmvnic_tx", scrq);
+				 0, scrq->name, scrq);
 
 		if (rc) {
 			dev_err(dev, "Couldn't register tx irq 0x%x. rc=%d\n",
@@ -3067,13 +3053,15 @@ static int init_sub_crq_irqs(struct ibmvnic_adapter *adapter)
 			   i);
 		scrq = adapter->rx_scrq[i];
 		scrq->irq = irq_create_mapping(NULL, scrq->hw_irq);
-		if (scrq->irq == NO_IRQ) {
+		if (!scrq->irq) {
 			rc = -EINVAL;
 			dev_err(dev, "Error mapping irq\n");
 			goto req_rx_irq_failed;
 		}
+		snprintf(scrq->name, sizeof(scrq->name), "ibmvnic-%x-rx%d",
+			 adapter->vdev->unit_address, i);
 		rc = request_irq(scrq->irq, ibmvnic_interrupt_rx,
-				 0, "ibmvnic_rx", scrq);
+				 0, scrq->name, scrq);
 		if (rc) {
 			dev_err(dev, "Couldn't register rx irq 0x%x. rc=%d\n",
 				scrq->irq, rc);
@@ -4337,12 +4325,12 @@ static void handle_query_cap_rsp(union ibmvnic_crq *crq,
 		break;
 	case MIN_MTU:
 		adapter->min_mtu = be64_to_cpu(crq->query_capability.number);
-		netdev->extended->min_mtu = adapter->min_mtu - ETH_HLEN;
+		netdev->min_mtu = adapter->min_mtu - ETH_HLEN;
 		netdev_dbg(netdev, "min_mtu = %lld\n", adapter->min_mtu);
 		break;
 	case MAX_MTU:
 		adapter->max_mtu = be64_to_cpu(crq->query_capability.number);
-		netdev->extended->max_mtu = adapter->max_mtu - ETH_HLEN;
+		netdev->max_mtu = adapter->max_mtu - ETH_HLEN;
 		netdev_dbg(netdev, "max_mtu = %lld\n", adapter->max_mtu);
 		break;
 	case MAX_MULTICAST_FILTERS:
@@ -4804,8 +4792,9 @@ static int init_crq_queue(struct ibmvnic_adapter *adapter)
 		     (unsigned long)adapter);
 
 	netdev_dbg(adapter->netdev, "registering irq 0x%x\n", vdev->irq);
-	rc = request_irq(vdev->irq, ibmvnic_interrupt, 0, IBMVNIC_NAME,
-			 adapter);
+	snprintf(crq->name, sizeof(crq->name), "ibmvnic-%x",
+		 adapter->vdev->unit_address);
+	rc = request_irq(vdev->irq, ibmvnic_interrupt, 0, crq->name, adapter);
 	if (rc) {
 		dev_err(dev, "Couldn't register irq 0x%x. rc=%d\n",
 			vdev->irq, rc);
@@ -5008,8 +4997,8 @@ static int ibmvnic_probe(struct vio_dev *dev, const struct vio_device_id *id)
 		goto ibmvnic_stats_fail;
 
 	netdev->mtu = adapter->req_mtu - ETH_HLEN;
-	netdev->extended->min_mtu = adapter->min_mtu - ETH_HLEN;
-	netdev->extended->max_mtu = adapter->max_mtu - ETH_HLEN;
+	netdev->min_mtu = adapter->min_mtu - ETH_HLEN;
+	netdev->max_mtu = adapter->max_mtu - ETH_HLEN;
 
 	rc = device_create_file(&dev->dev, &dev_attr_failover);
 	if (rc)
@@ -5106,7 +5095,7 @@ static ssize_t failover_store(struct device *dev, struct device_attribute *attr,
 	return count;
 }
 
-static DEVICE_ATTR(failover, 0200, NULL, failover_store);
+static DEVICE_ATTR_WO(failover);
 
 static unsigned long ibmvnic_get_desired_dma(struct vio_dev *vdev)
 {

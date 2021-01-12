@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_X86_PKEYS_H
 #define _ASM_X86_PKEYS_H
 
@@ -7,6 +8,11 @@
 
 extern int arch_set_user_pkey_access(struct task_struct *tsk, int pkey,
 		unsigned long init_val);
+
+static inline bool arch_pkeys_enabled(void)
+{
+	return boot_cpu_has(X86_FEATURE_OSPKE);
+}
 
 /*
  * Try to dedicate one of the protection keys to be used as an
@@ -37,7 +43,7 @@ extern int __arch_set_user_pkey_access(struct task_struct *tsk, int pkey,
 
 #define ARCH_VM_PKEY_FLAGS (VM_PKEY_BIT0 | VM_PKEY_BIT1 | VM_PKEY_BIT2 | VM_PKEY_BIT3)
 
-#define mm_pkey_allocation_map(mm)	(mm->pkey_allocation_map)
+#define mm_pkey_allocation_map(mm)	(mm->context.pkey_allocation_map)
 #define mm_set_pkey_allocated(mm, pkey) do {		\
 	mm_pkey_allocation_map(mm) |= (1U << pkey);	\
 } while (0)
@@ -62,7 +68,7 @@ bool mm_pkey_is_allocated(struct mm_struct *mm, int pkey)
 	 * is not available to any of the user interfaces like
 	 * mprotect_pkey().
 	 */
-	if (pkey == mm->execute_only_pkey)
+	if (pkey == mm->context.execute_only_pkey)
 		return false;
 
 	return mm_pkey_allocation_map(mm) & (1U << pkey);
@@ -114,5 +120,13 @@ extern int arch_set_user_pkey_access(struct task_struct *tsk, int pkey,
 extern int __arch_set_user_pkey_access(struct task_struct *tsk, int pkey,
 		unsigned long init_val);
 extern void copy_init_pkru_to_fpregs(void);
+
+static inline int vma_pkey(struct vm_area_struct *vma)
+{
+	unsigned long vma_pkey_mask = VM_PKEY_BIT0 | VM_PKEY_BIT1 |
+				      VM_PKEY_BIT2 | VM_PKEY_BIT3;
+
+	return (vma->vm_flags & vma_pkey_mask) >> VM_PKEY_SHIFT;
+}
 
 #endif /*_ASM_X86_PKEYS_H */

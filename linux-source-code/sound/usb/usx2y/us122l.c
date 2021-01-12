@@ -139,13 +139,12 @@ static void usb_stream_hwdep_vm_open(struct vm_area_struct *area)
 	snd_printdd(KERN_DEBUG "%i\n", atomic_read(&us122l->mmap_count));
 }
 
-static int usb_stream_hwdep_vm_fault(struct vm_area_struct *area,
-				     struct vm_fault *vmf)
+static vm_fault_t usb_stream_hwdep_vm_fault(struct vm_fault *vmf)
 {
 	unsigned long offset;
 	struct page *page;
 	void *vaddr;
-	struct us122l *us122l = area->vm_private_data;
+	struct us122l *us122l = vmf->vma->vm_private_data;
 	struct usb_stream *s;
 
 	mutex_lock(&us122l->mutex);
@@ -272,16 +271,16 @@ out:
 	return err;
 }
 
-static unsigned int usb_stream_hwdep_poll(struct snd_hwdep *hw,
+static __poll_t usb_stream_hwdep_poll(struct snd_hwdep *hw,
 					  struct file *file, poll_table *wait)
 {
 	struct us122l	*us122l = hw->private_data;
 	unsigned	*polled;
-	unsigned int	mask;
+	__poll_t	mask;
 
 	poll_wait(file, &us122l->sk.sleep, wait);
 
-	mask = POLLIN | POLLOUT | POLLWRNORM | POLLERR;
+	mask = EPOLLIN | EPOLLOUT | EPOLLWRNORM | EPOLLERR;
 	if (mutex_trylock(&us122l->mutex)) {
 		struct usb_stream *s = us122l->sk.s;
 		if (s && s->state == usb_stream_ready) {
@@ -291,7 +290,7 @@ static unsigned int usb_stream_hwdep_poll(struct snd_hwdep *hw,
 				polled = &us122l->second_periods_polled;
 			if (*polled != s->periods_done) {
 				*polled = s->periods_done;
-				mask = POLLIN | POLLOUT | POLLWRNORM;
+				mask = EPOLLIN | EPOLLOUT | EPOLLWRNORM;
 			} else
 				mask = 0;
 		}

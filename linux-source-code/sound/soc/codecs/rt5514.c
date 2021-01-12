@@ -35,7 +35,7 @@
 #include "rt5514-spi.h"
 #endif
 
-static const struct reg_default rt5514_i2c_patch[] = {
+static const struct reg_sequence rt5514_i2c_patch[] = {
 	{0x1800101c, 0x00000000},
 	{0x18001100, 0x0000031f},
 	{0x18001104, 0x00000007},
@@ -57,15 +57,15 @@ static const struct reg_default rt5514_i2c_patch[] = {
 	{0xfafafafa, 0x00000000},
 };
 
-static const struct reg_default rt5514_patch[] = {
+static const struct reg_sequence rt5514_patch[] = {
 	{RT5514_DIG_IO_CTRL,		0x00000040},
 	{RT5514_CLK_CTRL1,		0x38020041},
 	{RT5514_SRC_CTRL,		0x44000eee},
 	{RT5514_ANA_CTRL_LDO10,		0x00028604},
 	{RT5514_ANA_CTRL_ADCFED,	0x00000800},
 	{RT5514_ASRC_IN_CTRL1,		0x00000003},
-	{RT5514_DOWNFILTER0_CTRL3,	0x10000362},
-	{RT5514_DOWNFILTER1_CTRL3,	0x10000362},
+	{RT5514_DOWNFILTER0_CTRL3,	0x10000342},
+	{RT5514_DOWNFILTER1_CTRL3,	0x10000342},
 };
 
 static const struct reg_default rt5514_reg[] = {
@@ -92,10 +92,10 @@ static const struct reg_default rt5514_reg[] = {
 	{RT5514_ASRC_IN_CTRL1,		0x00000003},
 	{RT5514_DOWNFILTER0_CTRL1,	0x00020c2f},
 	{RT5514_DOWNFILTER0_CTRL2,	0x00020c2f},
-	{RT5514_DOWNFILTER0_CTRL3,	0x10000362},
+	{RT5514_DOWNFILTER0_CTRL3,	0x10000342},
 	{RT5514_DOWNFILTER1_CTRL1,	0x00020c2f},
 	{RT5514_DOWNFILTER1_CTRL2,	0x00020c2f},
-	{RT5514_DOWNFILTER1_CTRL3,	0x10000362},
+	{RT5514_DOWNFILTER1_CTRL3,	0x10000342},
 	{RT5514_ANA_CTRL_LDO10,		0x00028604},
 	{RT5514_ANA_CTRL_LDO18_16,	0x02000345},
 	{RT5514_ANA_CTRL_ADC12,		0x0000a2a8},
@@ -489,6 +489,7 @@ static const struct snd_kcontrol_new rt5514_sto2_dmic_mux =
 /**
  * rt5514_calc_dmic_clk - Calculate the frequency divider parameter of dmic.
  *
+ * @component: only used for dev_warn
  * @rate: base clock rate.
  *
  * Choose divider parameter that gives the highest possible DMIC frequency in
@@ -1201,7 +1202,8 @@ static const struct regmap_config rt5514_regmap = {
 	.cache_type = REGCACHE_RBTREE,
 	.reg_defaults = rt5514_reg,
 	.num_reg_defaults = ARRAY_SIZE(rt5514_reg),
-	.use_single_rw = true,
+	.use_single_read = true,
+	.use_single_write = true,
 };
 
 static const struct i2c_device_id rt5514_i2c_id[] = {

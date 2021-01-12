@@ -3,7 +3,7 @@
  *
  *  Copyright (C) 2008 Thomas Gleixner <tglx@linutronix.de>
  *  Copyright (C) 2008-2011 Red Hat, Inc., Ingo Molnar
- *  Copyright (C) 2008-2011 Red Hat, Inc., Peter Zijlstra <pzijlstr@redhat.com>
+ *  Copyright (C) 2008-2011 Red Hat, Inc., Peter Zijlstra
  *  Copyright  ©  2009 Paul Mackerras, IBM Corp. <paulus@au1.ibm.com>
  *
  * For licensing details see kernel-base/COPYING
@@ -20,7 +20,7 @@
 
 static void perf_output_wakeup(struct perf_output_handle *handle)
 {
-	atomic_set(&handle->rb->poll, POLLIN);
+	atomic_set(&handle->rb->poll, EPOLLIN);
 
 	handle->event->pending_wakeup = 1;
 	irq_work_queue(&handle->event->pending);
@@ -158,7 +158,7 @@ __perf_output_begin(struct perf_output_handle *handle,
 	perf_output_get_handle(handle);
 
 	do {
-		tail = ACCESS_ONCE(rb->user_page->data_tail);
+		tail = READ_ONCE(rb->user_page->data_tail);
 		offset = head = local_read(&rb->head);
 		if (!rb->overwrite) {
 			if (unlikely(!ring_buffer_has_space(head, tail,
@@ -382,7 +382,7 @@ void *perf_aux_output_begin(struct perf_output_handle *handle,
 	 * (B) <-> (C) ordering is still observed by the pmu driver.
 	 */
 	if (!rb->aux_overwrite) {
-		aux_tail = ACCESS_ONCE(rb->user_page->aux_tail);
+		aux_tail = READ_ONCE(rb->user_page->aux_tail);
 		handle->wakeup = rb->aux_wakeup + rb->aux_watermark;
 		if (aux_head - aux_tail < perf_aux_size(rb))
 			handle->size = CIRC_SPACE(aux_head, aux_tail, perf_aux_size(rb));
@@ -624,7 +624,8 @@ int rb_alloc_aux(struct ring_buffer *rb, struct perf_event *event,
 		}
 	}
 
-	rb->aux_pages = kzalloc_node(nr_pages * sizeof(void *), GFP_KERNEL, node);
+	rb->aux_pages = kcalloc_node(nr_pages, sizeof(void *), GFP_KERNEL,
+				     node);
 	if (!rb->aux_pages)
 		return -ENOMEM;
 
@@ -732,6 +733,9 @@ struct ring_buffer *rb_alloc(int nr_pages, long watermark, int cpu, int flags)
 
 	size = sizeof(struct ring_buffer);
 	size += nr_pages * sizeof(void *);
+
+	if (order_base_2(size) >= PAGE_SHIFT+MAX_ORDER)
+		goto fail;
 
 	rb = kzalloc(size, GFP_KERNEL);
 	if (!rb)

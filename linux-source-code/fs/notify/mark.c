@@ -105,8 +105,25 @@ static DECLARE_WORK(connector_reaper_work, fsnotify_connector_destroy_workfn);
 
 void fsnotify_get_mark(struct fsnotify_mark *mark)
 {
-	WARN_ON_ONCE(!atomic_read(&mark->refcnt));
-	atomic_inc(&mark->refcnt);
+	WARN_ON_ONCE(!refcount_read(&mark->refcnt));
+	refcount_inc(&mark->refcnt);
+}
+
+static __u32 *fsnotify_conn_mask_p(struct fsnotify_mark_connector *conn)
+{
+	if (conn->type == FSNOTIFY_OBJ_TYPE_INODE)
+		return &fsnotify_conn_inode(conn)->i_fsnotify_mask;
+	else if (conn->type == FSNOTIFY_OBJ_TYPE_VFSMOUNT)
+		return &fsnotify_conn_mount(conn)->mnt_fsnotify_mask;
+	return NULL;
+}
+
+__u32 fsnotify_conn_mask(struct fsnotify_mark_connector *conn)
+{
+	if (WARN_ON(!fsnotify_valid_obj_type(conn->type)))
+		return 0;
+
+	return *fsnotify_conn_mask_p(conn);
 }
 
 static void __fsnotify_recalc_mask(struct fsnotify_mark_connector *conn)
@@ -115,14 +132,14 @@ static void __fsnotify_recalc_mask(struct fsnotify_mark_connector *conn)
 	struct fsnotify_mark *mark;
 
 	assert_spin_locked(&conn->lock);
+	/* We can get detached connector here when inode is getting unlinked. */
+	if (!fsnotify_valid_obj_type(conn->type))
+		return;
 	hlist_for_each_entry(mark, &conn->list, obj_list) {
 		if (mark->flags & FSNOTIFY_MARK_FLAG_ATTACHED)
 			new_mask |= mark->mask;
 	}
-	if (conn->type == FSNOTIFY_OBJ_TYPE_INODE)
-		fsnotify_conn_inode(conn)->i_fsnotify_mask = new_mask;
-	else if (conn->type == FSNOTIFY_OBJ_TYPE_VFSMOUNT)
-		fsnotify_conn_mount(conn)->mnt_fsnotify_mask = new_mask;
+	*fsnotify_conn_mask_p(conn) = new_mask;
 }
 
 /*
@@ -212,7 +229,7 @@ static void fsnotify_drop_object(unsigned int type, void *objp)
 	sb = inode->i_sb;
 	iput(inode);
 	if (atomic_long_dec_and_test(&sb->s_fsnotify_inode_refs))
-		wake_up(&sb->s_writers.wait_unfrozen);
+		wake_up_var(&sb->s_fsnotify_inode_refs);
 }
 
 void fsnotify_put_mark(struct fsnotify_mark *mark)
@@ -224,7 +241,7 @@ void fsnotify_put_mark(struct fsnotify_mark *mark)
 
 	/* Catch marks that were actually never attached to object */
 	if (!mark->connector) {
-		if (atomic_dec_and_test(&mark->refcnt))
+		if (refcount_dec_and_test(&mark->refcnt))
 			fsnotify_final_mark_destroy(mark);
 		return;
 	}
@@ -233,7 +250,7 @@ void fsnotify_put_mark(struct fsnotify_mark *mark)
 	 * We have to be careful so that traversals of obj_list under lock can
 	 * safely grab mark reference.
 	 */
-	if (!atomic_dec_and_lock(&mark->refcnt, &mark->connector->lock))
+	if (!refcount_dec_and_lock(&mark->refcnt, &mark->connector->lock))
 		return;
 
 	conn = mark->connector;
@@ -281,7 +298,7 @@ static bool fsnotify_get_mark_safe(struct fsnotify_mark *mark)
 	if (!mark)
 		return true;
 
-	if (atomic_inc_not_zero(&mark->refcnt)) {
+	if (refcount_inc_not_zero(&mark->refcnt)) {
 		spin_lock(&mark->lock);
 		if (mark->flags & FSNOTIFY_MARK_FLAG_ATTACHED) {
 			/* mark is attached, group is still alive then */
@@ -365,7 +382,7 @@ void fsnotify_detach_mark(struct fsnotify_mark *mark)
 
 	WARN_ON_ONCE(!mutex_is_locked(&group->mark_mutex));
 	WARN_ON_ONCE(!srcu_read_lock_held(&fsnotify_mark_srcu) &&
-		     atomic_read(&mark->refcnt) < 1 +
+		     refcount_read(&mark->refcnt) < 1 +
 			!!(mark->flags & FSNOTIFY_MARK_FLAG_ATTACHED));
 
 	spin_lock(&mark->lock);
@@ -615,9 +632,11 @@ int fsnotify_add_mark_locked(struct fsnotify_mark *mark,
 
 	return ret;
 err:
+	spin_lock(&mark->lock);
 	mark->flags &= ~(FSNOTIFY_MARK_FLAG_ALIVE |
 			 FSNOTIFY_MARK_FLAG_ATTACHED);
 	list_del_init(&mark->g_list);
+	spin_unlock(&mark->lock);
 	atomic_dec(&group->num_marks);
 
 	fsnotify_put_mark(mark);
@@ -754,7 +773,7 @@ void fsnotify_init_mark(struct fsnotify_mark *mark,
 {
 	memset(mark, 0, sizeof(*mark));
 	spin_lock_init(&mark->lock);
-	atomic_set(&mark->refcnt, 1);
+	refcount_set(&mark->refcnt, 1);
 	fsnotify_get_group(group);
 	mark->group = group;
 }

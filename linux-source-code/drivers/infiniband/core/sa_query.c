@@ -1013,7 +1013,8 @@ static void ib_nl_request_timeout(struct work_struct *work)
 }
 
 int ib_nl_handle_set_timeout(struct sk_buff *skb,
-			     struct nlmsghdr *nlh)
+			     struct nlmsghdr *nlh,
+			     struct netlink_ext_ack *extack)
 {
 	int timeout, delta, abs_delta;
 	const struct nlattr *attr;
@@ -1028,7 +1029,7 @@ int ib_nl_handle_set_timeout(struct sk_buff *skb,
 		return -EPERM;
 
 	ret = nla_parse(tb, LS_NLA_TYPE_MAX - 1, nlmsg_data(nlh),
-			nlmsg_len(nlh), ib_nl_policy);
+			nlmsg_len(nlh), ib_nl_policy, NULL);
 	attr = (const struct nlattr *)tb[LS_NLA_TYPE_TIMEOUT];
 	if (ret || !attr)
 		goto settimeout_out;
@@ -1080,7 +1081,7 @@ static inline int ib_nl_is_good_resolve_resp(const struct nlmsghdr *nlh)
 		return 0;
 
 	ret = nla_parse(tb, LS_NLA_TYPE_MAX - 1, nlmsg_data(nlh),
-			nlmsg_len(nlh), ib_nl_policy);
+			nlmsg_len(nlh), ib_nl_policy, NULL);
 	if (ret)
 		return 0;
 
@@ -1088,7 +1089,8 @@ static inline int ib_nl_is_good_resolve_resp(const struct nlmsghdr *nlh)
 }
 
 int ib_nl_handle_resolve_resp(struct sk_buff *skb,
-			      struct nlmsghdr *nlh)
+			      struct nlmsghdr *nlh,
+			      struct netlink_ext_ack *extack)
 {
 	unsigned long flags;
 	struct ib_sa_query *query;
@@ -1145,7 +1147,7 @@ static void free_sm_ah(struct kref *kref)
 {
 	struct ib_sa_sm_ah *sm_ah = container_of(kref, struct ib_sa_sm_ah, ref);
 
-	rdma_destroy_ah(sm_ah->ah);
+	rdma_destroy_ah(sm_ah->ah, 0);
 	kfree(sm_ah);
 }
 
@@ -1361,7 +1363,7 @@ static void init_mad(struct ib_sa_query *query, struct ib_mad_agent *agent)
 static int send_mad(struct ib_sa_query *query, unsigned long timeout_ms,
 		    gfp_t gfp_mask)
 {
-	bool preload = !!(gfp_mask & __GFP_WAIT);
+	bool preload = gfpflags_allow_blocking(gfp_mask);
 	unsigned long flags;
 	int ret, id;
 
@@ -2274,7 +2276,8 @@ static void update_sm_ah(struct work_struct *work)
 					 cpu_to_be64(IB_SA_WELL_KNOWN_GUID));
 	}
 
-	new_ah->ah = rdma_create_ah(port->agent->qp->pd, &ah_attr);
+	new_ah->ah = rdma_create_ah(port->agent->qp->pd, &ah_attr,
+				    RDMA_CREATE_AH_SLEEPABLE);
 	if (IS_ERR(new_ah->ah)) {
 		pr_warn("Couldn't create new SM AH\n");
 		kfree(new_ah);

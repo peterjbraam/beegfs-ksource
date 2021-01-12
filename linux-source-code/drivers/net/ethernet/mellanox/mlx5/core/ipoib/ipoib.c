@@ -43,13 +43,12 @@ static int mlx5i_close(struct net_device *netdev);
 static int mlx5i_change_mtu(struct net_device *netdev, int new_mtu);
 
 static const struct net_device_ops mlx5i_netdev_ops = {
-	.ndo_size                = sizeof(struct net_device_ops),
 	.ndo_open                = mlx5i_open,
 	.ndo_stop                = mlx5i_close,
 	.ndo_get_stats64         = mlx5i_get_stats,
 	.ndo_init                = mlx5i_dev_init,
 	.ndo_uninit              = mlx5i_dev_cleanup,
-	.extended.ndo_change_mtu = mlx5i_change_mtu,
+	.ndo_change_mtu          = mlx5i_change_mtu,
 	.ndo_do_ioctl            = mlx5i_ioctl,
 };
 
@@ -69,7 +68,6 @@ static void mlx5i_build_nic_params(struct mlx5_core_dev *mdev,
 
 	params->lro_en = false;
 	params->hard_mtu = MLX5_IB_GRH_BYTES + MLX5_IPOIB_HARD_LEN;
-	params->tunneled_offload_en = false;
 }
 
 /* Called directly after IPoIB netdevice was created to initialize SW structs */
@@ -260,18 +258,6 @@ void mlx5i_destroy_underlay_qp(struct mlx5_core_dev *mdev, struct mlx5_core_qp *
 	mlx5_core_destroy_qp(mdev, qp);
 }
 
-int mlx5i_create_tis(struct mlx5_core_dev *mdev, u32 underlay_qpn, u32 *tisn)
-{
-	u32 in[MLX5_ST_SZ_DW(create_tis_in)] = {};
-	void *tisc;
-
-	tisc = MLX5_ADDR_OF(create_tis_in, in, ctx);
-
-	MLX5_SET(tisc, tisc, underlay_qpn, underlay_qpn);
-
-	return mlx5e_create_tis(mdev, in, tisn);
-}
-
 static int mlx5i_init_tx(struct mlx5e_priv *priv)
 {
 	struct mlx5i_priv *ipriv = priv->ppriv;
@@ -283,7 +269,7 @@ static int mlx5i_init_tx(struct mlx5e_priv *priv)
 		return err;
 	}
 
-	err = mlx5i_create_tis(priv->mdev, ipriv->qp.qpn, &priv->tisn[0][0]);
+	err = mlx5e_create_tis(priv->mdev, 0 /* tc */, ipriv->qp.qpn, &priv->tisn[0]);
 	if (err) {
 		mlx5_core_warn(priv->mdev, "create tis failed, %d\n", err);
 		goto err_destroy_underlay_qp;
@@ -300,7 +286,7 @@ static void mlx5i_cleanup_tx(struct mlx5e_priv *priv)
 {
 	struct mlx5i_priv *ipriv = priv->ppriv;
 
-	mlx5e_destroy_tis(priv->mdev, priv->tisn[0][0]);
+	mlx5e_destroy_tis(priv->mdev, priv->tisn[0]);
 	mlx5i_destroy_underlay_qp(priv->mdev, &ipriv->qp);
 }
 
@@ -712,9 +698,7 @@ static int mlx5_rdma_setup_rn(struct ib_device *ibdev, u8 port_num,
 
 	prof->init(mdev, netdev, prof, ipriv);
 
-	err = mlx5e_attach_netdev(epriv);
-	if (err)
-		goto detach;
+	mlx5e_attach_netdev(epriv);
 	netif_carrier_off(netdev);
 
 	/* set rdma_netdev func pointers */
@@ -725,16 +709,11 @@ static int mlx5_rdma_setup_rn(struct ib_device *ibdev, u8 port_num,
 	rn->detach_mcast = mlx5i_detach_mcast;
 	rn->set_id = mlx5i_set_pkey_index;
 
-	netdev->extended->priv_destructor = mlx5_rdma_netdev_free;
-	netdev->extended->needs_free_netdev = 1;
+	netdev->priv_destructor = mlx5_rdma_netdev_free;
+	netdev->needs_free_netdev = 1;
 
 	return 0;
 
-detach:
-	prof->cleanup(epriv);
-	if (ipriv->sub_interface)
-		return err;
-	mlx5e_destroy_mdev_resources(mdev);
 destroy_ht:
 	mlx5i_pkey_qpn_ht_cleanup(netdev);
 	return err;

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  *  include/linux/userfaultfd_k.h
  *
@@ -76,8 +77,7 @@ extern void userfaultfd_unmap_complete(struct mm_struct *mm,
 #else /* CONFIG_USERFAULTFD */
 
 /* mm helpers */
-static inline int handle_userfault(struct vm_fault *vmf,
-				   unsigned long reason)
+static inline int handle_userfault(struct vm_fault *vmf, unsigned long reason)
 {
 	return VM_FAULT_SIGBUS;
 }

@@ -23,9 +23,7 @@
 #ifndef _OCTEON_MAIN_H_
 #define  _OCTEON_MAIN_H_
 
-#ifndef KBUILD_MODNAME
-#define KBUILD_MODNAME KBUILD_BASENAME
-#endif
+#include <linux/sched/signal.h>
 
 #if BITS_PER_LONG == 32
 #define CVM_CAST64(v) ((long long)(v))
@@ -152,7 +150,7 @@ static inline int
 sleep_cond(wait_queue_head_t *wait_queue, int *condition)
 {
 	int errno = 0;
-	wait_queue_t we;
+	wait_queue_entry_t we;
 
 	init_waitqueue_entry(&we, current);
 	add_wait_queue(wait_queue, &we);
@@ -179,7 +177,7 @@ sleep_timeout_cond(wait_queue_head_t *wait_queue,
 		   int *condition,
 		   int timeout)
 {
-	wait_queue_t we;
+	wait_queue_entry_t we;
 
 	init_waitqueue_entry(&we, current);
 	add_wait_queue(wait_queue, &we);

@@ -195,3 +195,4 @@ static inline u32 uobj_get_object_id(struct ib_uobject *uobj)
 }
 
 #endif
+

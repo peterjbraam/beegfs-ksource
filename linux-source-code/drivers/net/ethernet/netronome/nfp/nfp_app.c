@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
 /* Copyright (C) 2017-2018 Netronome Systems, Inc. */
 
-#undef CONFIG_BPF_SYSCALL
-
 #include <linux/bug.h>
 #include <linux/lockdep.h>
 #include <linux/rcupdate.h>
@@ -207,7 +205,7 @@ int nfp_app_start(struct nfp_app *app, struct nfp_net *ctrl)
 	}
 
 	app->netdev_nb.notifier_call = nfp_app_netdev_event;
-	err = register_netdevice_notifier_rh(&app->netdev_nb);
+	err = register_netdevice_notifier(&app->netdev_nb);
 	if (err)
 		goto err_app_stop;
 
@@ -221,7 +219,7 @@ err_app_stop:
 
 void nfp_app_stop(struct nfp_app *app)
 {
-	unregister_netdevice_notifier_rh(&app->netdev_nb);
+	unregister_netdevice_notifier(&app->netdev_nb);
 
 	if (app->type->stop)
 		app->type->stop(app);

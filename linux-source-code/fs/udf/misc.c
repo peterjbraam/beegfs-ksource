@@ -23,13 +23,12 @@
 
 #include <linux/fs.h>
 #include <linux/string.h>
-#include <linux/buffer_head.h>
 #include <linux/crc-itu-t.h>
 
 #include "udf_i.h"
 #include "udf_sb.h"
 
-struct buffer_head *udf_tgetblk(struct super_block *sb, int block)
+struct buffer_head *udf_tgetblk(struct super_block *sb, udf_pblk_t block)
 {
 	if (UDF_QUERY_FLAG(sb, UDF_FLAG_VARCONV))
 		return sb_getblk(sb, udf_fixed_to_variable(block));
@@ -37,7 +36,7 @@ struct buffer_head *udf_tgetblk(struct super_block *sb, int block)
 		return sb_getblk(sb, block);
 }
 
-struct buffer_head *udf_tread(struct super_block *sb, int block)
+struct buffer_head *udf_tread(struct super_block *sb, udf_pblk_t block)
 {
 	if (UDF_QUERY_FLAG(sb, UDF_FLAG_VARCONV))
 		return sb_bread(sb, udf_fixed_to_variable(block));
@@ -103,10 +102,8 @@ struct genericFormat *udf_add_extendedattr(struct inode *inode, uint32_t size,
 		if (type < 2048) {
 			if (le32_to_cpu(eahd->appAttrLocation) <
 					iinfo->i_lenEAttr) {
-				uint32_t aal;
-
-				gmb();
-				aal = le32_to_cpu(eahd->appAttrLocation);
+				uint32_t aal =
+					le32_to_cpu(eahd->appAttrLocation);
 				memmove(&ea[offset - aal + size],
 					&ea[aal], offset - aal);
 				offset -= aal;
@@ -115,10 +112,8 @@ struct genericFormat *udf_add_extendedattr(struct inode *inode, uint32_t size,
 			}
 			if (le32_to_cpu(eahd->impAttrLocation) <
 					iinfo->i_lenEAttr) {
-				uint32_t ial;
-
-				gmb();
-				ial = le32_to_cpu(eahd->impAttrLocation);
+				uint32_t ial =
+					le32_to_cpu(eahd->impAttrLocation);
 				memmove(&ea[offset - ial + size],
 					&ea[ial], offset - ial);
 				offset -= ial;
@@ -128,10 +123,8 @@ struct genericFormat *udf_add_extendedattr(struct inode *inode, uint32_t size,
 		} else if (type < 65536) {
 			if (le32_to_cpu(eahd->appAttrLocation) <
 					iinfo->i_lenEAttr) {
-				uint32_t aal;
-
-				gmb();
-				aal = le32_to_cpu(eahd->appAttrLocation);
+				uint32_t aal =
+					le32_to_cpu(eahd->appAttrLocation);
 				memmove(&ea[offset - aal + size],
 					&ea[aal], offset - aal);
 				offset -= aal;
@@ -148,8 +141,6 @@ struct genericFormat *udf_add_extendedattr(struct inode *inode, uint32_t size,
 		iinfo->i_lenEAttr += size;
 		return (struct genericFormat *)&ea[offset];
 	}
-	if (loc & 0x02)
-		;
 
 	return NULL;
 }
@@ -218,7 +209,7 @@ struct buffer_head *udf_read_tagged(struct super_block *sb, uint32_t block,
 
 	bh = udf_tread(sb, block);
 	if (!bh) {
-		udf_err(sb, "read failed, block=%u, location=%d\n",
+		udf_err(sb, "read failed, block=%u, location=%u\n",
 			block, location);
 		return NULL;
 	}
@@ -256,7 +247,7 @@ struct buffer_head *udf_read_tagged(struct super_block *sb, uint32_t block,
 					le16_to_cpu(tag_p->descCRCLength)))
 		return bh;
 
-	udf_debug("Crc failure block %d: crc = %d, crclen = %d\n", block,
+	udf_debug("Crc failure block %u: crc = %u, crclen = %u\n", block,
 		  le16_to_cpu(tag_p->descCRC),
 		  le16_to_cpu(tag_p->descCRCLength));
 error_out:

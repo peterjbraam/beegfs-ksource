@@ -56,11 +56,6 @@
 #include "chip_registers.h"
 #include "aspm.h"
 
-/* link speed vector for Gen3 speed - not in Linux headers */
-#define GEN1_SPEED_VECTOR 0x1
-#define GEN2_SPEED_VECTOR 0x2
-#define GEN3_SPEED_VECTOR 0x3
-
 /*
  * This file contains PCIe utility routines.
  */
@@ -259,7 +254,7 @@ static u32 extract_speed(u16 linkstat)
 	case PCI_EXP_LNKSTA_CLS_5_0GB:
 		speed = 5000; /* Gen 2, 5GHz */
 		break;
-	case GEN3_SPEED_VECTOR:
+	case PCI_EXP_LNKSTA_CLS_8_0GB:
 		speed = 8000; /* Gen 3, 8GHz */
 		break;
 	}
@@ -314,7 +309,7 @@ int pcie_speeds(struct hfi1_devdata *dd)
 		return ret;
 	}
 
-	if ((linkcap & PCI_EXP_LNKCAP_SLS) != GEN3_SPEED_VECTOR) {
+	if ((linkcap & PCI_EXP_LNKCAP_SLS) != PCI_EXP_LNKCAP_SLS_8_0GB) {
 		dd_dev_info(dd,
 			    "This HFI is not Gen3 capable, max speed 0x%x, need 0x3\n",
 			    linkcap & PCI_EXP_LNKCAP_SLS);
@@ -628,7 +623,6 @@ pci_resume(struct pci_dev *pdev)
 	struct hfi1_devdata *dd = pci_get_drvdata(pdev);
 
 	dd_dev_info(dd, "HFI1 resume function called\n");
-	pci_cleanup_aer_uncorrect_error_status(pdev);
 	/*
 	 * Running jobs will fail, since it's asynchronous
 	 * unlike sysfs-requested reset.   Better than
@@ -669,9 +663,6 @@ const struct pci_error_handlers hfi1_pci_err_handler = {
 
 /* gasket block secondary bus reset delay */
 #define SBR_DELAY_US 200000	/* 200ms */
-
-/* mask for PCIe capability register lnkctl2 target link speed */
-#define LNKCTL2_TARGET_LINK_SPEED_MASK 0xf
 
 static uint pcie_target = 3;
 module_param(pcie_target, uint, S_IRUGO);
@@ -874,16 +865,11 @@ static int trigger_sbr(struct hfi1_devdata *dd)
 		}
 
 	/*
-	 * A secondary bus reset (SBR) issues a hot reset to our device.
-	 * The following routine does a 1s wait after the reset is dropped
-	 * per PCI Trhfa (recovery time).  PCIe 3.0 section 6.6.1 -
-	 * Conventional Reset, paragraph 3, line 35 also says that a 1s
-	 * delay after a reset is required.  Per spec requirements,
-	 * the link is either working or not after that point.
+	 * This is an end around to do an SBR during probe time. A new API needs
+	 * to be implemented to have cleaner interface but this fixes the
+	 * current brokenness
 	 */
-	pci_reset_bridge_secondary_bus(dev->bus->self);
-
-	return 0;
+	return pci_bridge_secondary_bus_reset(dev->bus->self);
 }
 
 /*
@@ -1022,13 +1008,13 @@ int do_pcie_gen3_transition(struct hfi1_devdata *dd)
 		return 0;
 
 	if (pcie_target == 1) {			/* target Gen1 */
-		target_vector = GEN1_SPEED_VECTOR;
+		target_vector = PCI_EXP_LNKCTL2_TLS_2_5GT;
 		target_speed = 2500;
 	} else if (pcie_target == 2) {		/* target Gen2 */
-		target_vector = GEN2_SPEED_VECTOR;
+		target_vector = PCI_EXP_LNKCTL2_TLS_5_0GT;
 		target_speed = 5000;
 	} else if (pcie_target == 3) {		/* target Gen3 */
-		target_vector = GEN3_SPEED_VECTOR;
+		target_vector = PCI_EXP_LNKCTL2_TLS_8_0GT;
 		target_speed = 8000;
 	} else {
 		/* off or invalid target - skip */
@@ -1270,8 +1256,8 @@ retry:
 	dd_dev_info(dd, "%s: ..old link control2: 0x%x\n", __func__,
 		    (u32)lnkctl2);
 	/* only write to parent if target is not as high as ours */
-	if ((lnkctl2 & LNKCTL2_TARGET_LINK_SPEED_MASK) < target_vector) {
-		lnkctl2 &= ~LNKCTL2_TARGET_LINK_SPEED_MASK;
+	if ((lnkctl2 & PCI_EXP_LNKCTL2_TLS) < target_vector) {
+		lnkctl2 &= ~PCI_EXP_LNKCTL2_TLS;
 		lnkctl2 |= target_vector;
 		dd_dev_info(dd, "%s: ..new link control2: 0x%x\n", __func__,
 			    (u32)lnkctl2);
@@ -1296,7 +1282,7 @@ retry:
 
 	dd_dev_info(dd, "%s: ..old link control2: 0x%x\n", __func__,
 		    (u32)lnkctl2);
-	lnkctl2 &= ~LNKCTL2_TARGET_LINK_SPEED_MASK;
+	lnkctl2 &= ~PCI_EXP_LNKCTL2_TLS;
 	lnkctl2 |= target_vector;
 	dd_dev_info(dd, "%s: ..new link control2: 0x%x\n", __func__,
 		    (u32)lnkctl2);

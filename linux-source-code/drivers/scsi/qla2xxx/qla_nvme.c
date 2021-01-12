@@ -4,11 +4,11 @@
  *
  * See LICENSE.qla2xxx for copyright and licensing details.
  */
+#include "qla_nvme.h"
 #include <linux/scatterlist.h>
 #include <linux/delay.h>
 #include <linux/nvme.h>
 #include <linux/nvme-fc.h>
-#include "qla_nvme.h"
 
 static struct nvme_fc_port_template qla_nvme_fc_transport;
 
@@ -227,8 +227,8 @@ static void qla_nvme_abort_work(struct work_struct *work)
 
 	if (ha->flags.host_shutting_down) {
 		ql_log(ql_log_info, sp->fcport->vha, 0xffff,
-		    "%s Calling done on sp: %p, type: 0x%x\n",
-		    __func__, sp, sp->type);
+		    "%s Calling done on sp: %p, type: 0x%x, sp->ref_count: 0x%x\n",
+		    __func__, sp, sp->type, atomic_read(&sp->ref_count));
 		sp->done(sp, 0);
 		goto out;
 	}
@@ -353,17 +353,6 @@ static void qla_nvme_fcp_abort(struct nvme_fc_local_port *lport,
 	schedule_work(&priv->abort_work);
 }
 
-static void qla_nvme_poll(struct nvme_fc_local_port *lport, void *hw_queue_handle)
-{
-	struct qla_qpair *qpair = hw_queue_handle;
-	unsigned long flags;
-	struct scsi_qla_host *vha = lport->private;
-
-	spin_lock_irqsave(&qpair->qp_lock, flags);
-	qla24xx_process_response_queue(vha, qpair->rsp);
-	spin_unlock_irqrestore(&qpair->qp_lock, flags);
-}
-
 static inline int qla2x00_start_nvme_mq(srb_t *sp)
 {
 	unsigned long   flags;
@@ -424,7 +413,6 @@ static inline int qla2x00_start_nvme_mq(srb_t *sp)
 
 	if (unlikely(!fd->sqid)) {
 		struct nvme_fc_cmd_iu *cmd = fd->cmdaddr;
-
 		if (cmd->sqe.common.opcode == nvme_admin_async_event) {
 			nvme->u.nvme.aen_op = 1;
 			atomic_inc(&ha->nvme_active_aen_cnt);
@@ -517,8 +505,8 @@ static inline int qla2x00_start_nvme_mq(srb_t *sp)
 				req->ring_ptr++;
 			}
 			cont_pkt = (cont_a64_entry_t *)req->ring_ptr;
-			put_unaligned_le32(CONTINUE_A64_TYPE,
-					   &cont_pkt->entry_type);
+			*((uint32_t *)(&cont_pkt->entry_type)) =
+			    cpu_to_le32(CONTINUE_A64_TYPE);
 
 			cur_dsd = (uint32_t *)cont_pkt->dseg_0_address;
 			avail_dsds = 5;
@@ -649,9 +637,8 @@ static struct nvme_fc_port_template qla_nvme_fc_transport = {
 	.ls_abort	= qla_nvme_ls_abort,
 	.fcp_io		= qla_nvme_post_cmd,
 	.fcp_abort	= qla_nvme_fcp_abort,
-	.poll_queue	= qla_nvme_poll,
 	.max_hw_queues  = 8,
-	.max_sgl_segments = 1024,
+	.max_sgl_segments = 128,
 	.max_dif_sgl_segments = 64,
 	.dma_boundary = 0xFFFFFFFF,
 	.local_priv_sz  = 8,
@@ -671,9 +658,7 @@ void qla_nvme_unregister_remote_port(struct fc_port *fcport)
 	    "%s: unregister remoteport on %p %8phN\n",
 	    __func__, fcport, fcport->port_name);
 
-	if (test_bit(PFLG_DRIVER_REMOVING, &fcport->vha->pci_flags))
-		nvme_fc_set_remoteport_devloss(fcport->nvme_remote_port, 0);
-
+	nvme_fc_set_remoteport_devloss(fcport->nvme_remote_port, 0);
 	init_completion(&fcport->nvme_del_done);
 	ret = nvme_fc_unregister_remoteport(fcport->nvme_remote_port);
 	if (ret)

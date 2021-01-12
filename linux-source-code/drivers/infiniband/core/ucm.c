@@ -1135,16 +1135,16 @@ static ssize_t ib_ucm_write(struct file *filp, const char __user *buf,
 	return result;
 }
 
-static unsigned int ib_ucm_poll(struct file *filp,
+static __poll_t ib_ucm_poll(struct file *filp,
 				struct poll_table_struct *wait)
 {
 	struct ib_ucm_file *file = filp->private_data;
-	unsigned int mask = 0;
+	__poll_t mask = 0;
 
 	poll_wait(filp, &file->poll_wait, wait);
 
 	if (!list_empty(&file->events))
-		mask = POLLIN | POLLRDNORM;
+		mask = EPOLLIN | EPOLLRDNORM;
 
 	return mask;
 }
@@ -1242,7 +1242,7 @@ static void ib_ucm_add_one(struct ib_device *device)
 	dev_t base;
 	struct ib_ucm_device *ucm_dev;
 
-	if (!device->alloc_ucontext || !rdma_cap_ib_cm(device, 1))
+	if (!device->ops.alloc_ucontext || !rdma_cap_ib_cm(device, 1))
 		return;
 
 	ucm_dev = kzalloc(sizeof *ucm_dev, GFP_KERNEL);

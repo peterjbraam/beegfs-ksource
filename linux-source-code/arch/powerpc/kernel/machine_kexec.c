@@ -21,9 +21,6 @@
 #include <asm/pgalloc.h>
 #include <asm/prom.h>
 #include <asm/sections.h>
-#ifdef CONFIG_KEXEC_AUTO_RESERVE
-#include <asm/fadump.h>
-#endif
 
 void machine_kexec_mask_interrupts(void) {
 	unsigned int i;
@@ -101,64 +98,20 @@ void machine_kexec(struct kimage *image)
 	int save_ftrace_enabled;
 
 	save_ftrace_enabled = __ftrace_enabled_save();
+	this_cpu_disable_ftrace();
 
 	if (ppc_md.machine_kexec)
 		ppc_md.machine_kexec(image);
 	else
 		default_machine_kexec(image);
 
+	this_cpu_enable_ftrace();
 	__ftrace_enabled_restore(save_ftrace_enabled);
 
 	/* Fall back to normal restart if we're still alive. */
 	machine_restart(NULL);
 	for(;;);
 }
-
-#ifdef CONFIG_KEXEC_AUTO_RESERVE
-unsigned long long __init arch_default_crash_base(void)
-{
-#ifndef CONFIG_RELOCATABLE
-	return KDUMP_KERNELBASE;
-#else
-	return 0;
-#endif
-}
-
-unsigned long long __init arch_default_crash_size(unsigned long long total_size)
-{
-	/*
-	 * 'crashkernel=' can be used for fadump memory reservation as well.
-	 * So, if fadump is enabled, calculate auto value for it accordingly.
-	 */
-	if (is_fadump_enabled())
-		return fadump_default_reserve_size();
-
-	if (total_size < KEXEC_AUTO_THRESHOLD)
-		return 0;
-
-#ifdef CONFIG_64BIT
-	/*
-	 * crashkernel 'auto' reservation scheme
-	 * 2G-4G:384M,4G-16G:512M,16G-64G:1G,64G-128G:2G,128G-:4G
-	 */
-	if (total_size < (1ULL<<32)) /* 4G */
-		return ((1ULL<<28) + (1ULL<<27)); /* 384M */
-	if (total_size < (1ULL<<34)) /* 16G */
-		return 1ULL<<29; /* 512M */
-	if (total_size < (1ULL<<36)) /* 64G */
-		return 1ULL<<30; /* 1G */
-	if (total_size < (1ULL<<37)) /* 128G */
-		return 1ULL<<31; /* 2G */
-
-	return 1ULL<<32; /* 4G */
-#else
-	if (total_size < (1ULL<<32))
-		return 1ULL<<27;
-	else
-		return 1ULL<<28;
-#endif
-}
-#endif
 
 void __init reserve_crashkernel(void)
 {
@@ -282,17 +235,12 @@ static struct property memory_limit_prop = {
 
 static void __init export_crashk_values(struct device_node *node)
 {
-	struct property *prop;
-
 	/* There might be existing crash kernel properties, but we can't
 	 * be sure what's in them, so remove them. */
-	prop = of_find_property(node, "linux,crashkernel-base", NULL);
-	if (prop)
-		of_remove_property(node, prop);
-
-	prop = of_find_property(node, "linux,crashkernel-size", NULL);
-	if (prop)
-		of_remove_property(node, prop);
+	of_remove_property(node, of_find_property(node,
+				"linux,crashkernel-base", NULL));
+	of_remove_property(node, of_find_property(node,
+				"linux,crashkernel-size", NULL));
 
 	if (crashk_res.start != 0) {
 		crashk_base = cpu_to_be_ulong(crashk_res.start),
@@ -312,16 +260,13 @@ static void __init export_crashk_values(struct device_node *node)
 static int __init kexec_setup(void)
 {
 	struct device_node *node;
-	struct property *prop;
 
 	node = of_find_node_by_path("/chosen");
 	if (!node)
 		return -ENOENT;
 
 	/* remove any stale properties so ours can be found */
-	prop = of_find_property(node, kernel_end_prop.name, NULL);
-	if (prop)
-		of_remove_property(node, prop);
+	of_remove_property(node, of_find_property(node, kernel_end_prop.name, NULL));
 
 	/* information needed by userspace when using default_machine_kexec */
 	kernel_end = cpu_to_be_ulong(__pa(_end));

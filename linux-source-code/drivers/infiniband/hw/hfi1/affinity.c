@@ -143,7 +143,7 @@ void init_real_cpu_mask(void)
 	 * Remove HT cores from the real cpu mask.  Do this in two steps below.
 	 */
 	possible = cpumask_weight(&node_affinity.real_cpu_mask);
-	ht = cpumask_weight(cpu_sibling_mask(
+	ht = cpumask_weight(topology_sibling_cpumask(
 				cpumask_first(&node_affinity.real_cpu_mask)));
 	/*
 	 * Step 1.  Skip over the first N HT siblings and use them as the
@@ -1037,7 +1037,7 @@ int hfi1_get_proc_affinity(int node)
 	struct hfi1_affinity_node *entry;
 	cpumask_var_t diff, hw_thread_mask, available_mask, intrs_mask;
 	const struct cpumask *node_mask,
-		*proc_mask = tsk_cpus_allowed(current);
+		*proc_mask = &current->cpus_allowed;
 	struct hfi1_affinity_node_list *affinity = &node_affinity;
 	struct cpu_mask_set *set = &affinity->proc;
 

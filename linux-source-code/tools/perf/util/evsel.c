@@ -257,7 +257,8 @@ struct perf_evsel *perf_evsel__new_idx(struct perf_event_attr *attr, int idx)
 	perf_evsel__init(evsel, attr, idx);
 
 	if (perf_evsel__is_bpf_output(evsel)) {
-		evsel->attr.sample_type |= PERF_SAMPLE_RAW;
+		evsel->attr.sample_type |= (PERF_SAMPLE_RAW | PERF_SAMPLE_TIME |
+					    PERF_SAMPLE_CPU | PERF_SAMPLE_PERIOD),
 		evsel->attr.sample_period = 1;
 	}
 
@@ -675,6 +676,8 @@ static void __perf_evsel__config_callchain(struct perf_evsel *evsel,
 
 	perf_evsel__set_sample_bit(evsel, CALLCHAIN);
 
+	attr->sample_max_stack = param->max_stack;
+
 	if (param->record_mode == CALLCHAIN_LBR) {
 		if (!opts->branch_stack) {
 			if (attr->exclude_user) {
@@ -749,7 +752,8 @@ static void apply_config_terms(struct perf_evsel *evsel,
 		.record_mode = callchain_param.record_mode,
 	};
 	u32 dump_size = 0;
-	char *callgraph_buf = NULL;
+	int max_stack = 0;
+	const char *callgraph_buf = NULL;
 
 	list_for_each_entry(term, config_terms, list) {
 		switch (term->type) {
@@ -787,6 +791,9 @@ static void apply_config_terms(struct perf_evsel *evsel,
 		case PERF_EVSEL__CONFIG_TERM_STACK_USER:
 			dump_size = term->val.stack_user;
 			break;
+		case PERF_EVSEL__CONFIG_TERM_MAX_STACK:
+			max_stack = term->val.max_stack;
+			break;
 		case PERF_EVSEL__CONFIG_TERM_MAX_EVENTS:
 			evsel->max_events = term->val.max_events;
 			break;
@@ -804,17 +811,20 @@ static void apply_config_terms(struct perf_evsel *evsel,
 			break;
 		case PERF_EVSEL__CONFIG_TERM_DRV_CFG:
 			break;
-		case PERF_EVSEL__CONFIG_TERM_PERCORE:
-			break;
 		default:
 			break;
 		}
 	}
 
 	/* User explicitly set per-event callgraph, clear the old setting and reset. */
-	if ((callgraph_buf != NULL) || (dump_size > 0)) {
+	if ((callgraph_buf != NULL) || (dump_size > 0) || max_stack) {
 		bool sample_address = false;
 
+		if (max_stack) {
+			param.max_stack = max_stack;
+			if (callgraph_buf == NULL)
+				callgraph_buf = "fp";
+		}
 
 		/* parse callgraph parameters */
 		if (callgraph_buf != NULL) {
@@ -1025,6 +1035,9 @@ void perf_evsel__config(struct perf_evsel *evsel, struct record_opts *opts,
 	attr->mmap  = track;
 	attr->mmap2 = track && !perf_missing_features.mmap2;
 	attr->comm  = track;
+
+	if (opts->record_namespaces)
+		attr->namespaces  = track;
 
 	if (opts->record_switch_events)
 		attr->context_switch = track;
@@ -1638,6 +1651,7 @@ int perf_event_attr__fprintf(FILE *fp, struct perf_event_attr *attr,
 	PRINT_ATTRf(use_clockid, p_unsigned);
 	PRINT_ATTRf(context_switch, p_unsigned);
 	PRINT_ATTRf(write_backward, p_unsigned);
+	PRINT_ATTRf(namespaces, p_unsigned);
 
 	PRINT_ATTRn("{ wakeup_events, wakeup_watermark }", wakeup_events, p_unsigned);
 	PRINT_ATTRf(bp_type, p_unsigned);
@@ -1649,6 +1663,7 @@ int perf_event_attr__fprintf(FILE *fp, struct perf_event_attr *attr,
 	PRINT_ATTRf(clockid, p_signed);
 	PRINT_ATTRf(sample_regs_intr, p_hex);
 	PRINT_ATTRf(aux_watermark, p_unsigned);
+	PRINT_ATTRf(sample_max_stack, p_unsigned);
 
 	return ret;
 }
@@ -1850,8 +1865,9 @@ retry_open:
 			}
 
 			pr_debug2(" = %d\n", fd);
+
 			if (evsel->bpf_fd >= 0) {
-				int evt_fd = FD(evsel, cpu, thread);
+				int evt_fd = fd;
 				int bpf_fd = evsel->bpf_fd;
 
 				err = ioctl(evt_fd,
@@ -2683,15 +2699,15 @@ int perf_event__synthesize_sample(union perf_event *event, u64 type,
 	return 0;
 }
 
-struct format_field *perf_evsel__field(struct perf_evsel *evsel, const char *name)
+struct tep_format_field *perf_evsel__field(struct perf_evsel *evsel, const char *name)
 {
-	return pevent_find_field(evsel->tp_format, name);
+	return tep_find_field(evsel->tp_format, name);
 }
 
 void *perf_evsel__rawptr(struct perf_evsel *evsel, struct perf_sample *sample,
 			 const char *name)
 {
-	struct format_field *field = perf_evsel__field(evsel, name);
+	struct tep_format_field *field = perf_evsel__field(evsel, name);
 	int offset;
 
 	if (!field)
@@ -2699,7 +2715,7 @@ void *perf_evsel__rawptr(struct perf_evsel *evsel, struct perf_sample *sample,
 
 	offset = field->offset;
 
-	if (field->flags & FIELD_IS_DYNAMIC) {
+	if (field->flags & TEP_FIELD_IS_DYNAMIC) {
 		offset = *(int *)(sample->raw_data + field->offset);
 		offset &= 0xffff;
 	}
@@ -2707,7 +2723,7 @@ void *perf_evsel__rawptr(struct perf_evsel *evsel, struct perf_sample *sample,
 	return sample->raw_data + offset;
 }
 
-u64 format_field__intval(struct format_field *field, struct perf_sample *sample,
+u64 format_field__intval(struct tep_format_field *field, struct perf_sample *sample,
 			 bool needs_swap)
 {
 	u64 value;
@@ -2749,7 +2765,7 @@ u64 format_field__intval(struct format_field *field, struct perf_sample *sample,
 u64 perf_evsel__intval(struct perf_evsel *evsel, struct perf_sample *sample,
 		       const char *name)
 {
-	struct format_field *field = perf_evsel__field(evsel, name);
+	struct tep_format_field *field = perf_evsel__field(evsel, name);
 
 	if (!field)
 		return 0;
@@ -2889,7 +2905,7 @@ int perf_evsel__open_strerror(struct perf_evsel *evsel, struct target *target,
 			return scnprintf(msg, size,
 					 "Not enough memory to setup event with callchain.\n"
 					 "Hint: Try tweaking /proc/sys/kernel/perf_event_max_stack\n"
-					 "Hint: Current value: %d", sysctl_perf_event_max_stack);
+					 "Hint: Current value: %d", sysctl__max_stack());
 		break;
 	case ENODEV:
 		if (target->cpu_list)

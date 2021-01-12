@@ -1,7 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __LINUX_LOCKREF_H
 #define __LINUX_LOCKREF_H
-
-#include <linux/rh_kabi.h>
 
 /*
  * Locked reference counts.
@@ -17,27 +16,28 @@
  */
 
 #include <linux/spinlock.h>
+#include <generated/bounds.h>
+
+#define USE_CMPXCHG_LOCKREF \
+	(IS_ENABLED(CONFIG_ARCH_USE_CMPXCHG_LOCKREF) && \
+	 IS_ENABLED(CONFIG_SMP) && SPINLOCK_SIZE <= 4)
 
 struct lockref {
 	union {
-#if defined(CONFIG_PPC64) || defined(CONFIG_S390)
-#ifdef CONFIG_CMPXCHG_LOCKREF
-		RH_KABI_EXTEND(aligned_u64 lock_count)
-#endif
-#else /* CONFIG_PPC64 || CONFIG_S390 */
-#ifdef CONFIG_CMPXCHG_LOCKREF
+#if USE_CMPXCHG_LOCKREF
 		aligned_u64 lock_count;
 #endif
-#endif /* CONFIG_PPC64 */
 		struct {
 			spinlock_t lock;
-			unsigned int count;
+			int count;
 		};
 	};
 };
 
 extern void lockref_get(struct lockref *);
+extern int lockref_put_return(struct lockref *);
 extern int lockref_get_not_zero(struct lockref *);
+extern int lockref_put_not_zero(struct lockref *);
 extern int lockref_get_or_lock(struct lockref *);
 extern int lockref_put_or_lock(struct lockref *);
 
@@ -45,7 +45,7 @@ extern void lockref_mark_dead(struct lockref *);
 extern int lockref_get_not_dead(struct lockref *);
 
 /* Must be called under spinlock for reliable results */
-static inline int __lockref_is_dead(const struct lockref *l)
+static inline bool __lockref_is_dead(const struct lockref *l)
 {
 	return ((int)l->count < 0);
 }

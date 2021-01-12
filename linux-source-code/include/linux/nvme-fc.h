@@ -1,18 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Copyright (c) 2016 Avago Technologies.  All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of version 2 of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful.
- * ALL EXPRESS OR IMPLIED CONDITIONS, REPRESENTATIONS AND WARRANTIES,
- * INCLUDING ANY IMPLIED WARRANTY OF MERCHANTABILITY, FITNESS FOR A
- * PARTICULAR PURPOSE, OR NON-INFRINGEMENT, ARE DISCLAIMED, EXCEPT TO
- * THE EXTENT THAT SUCH DISCLAIMERS ARE HELD TO BE LEGALLY INVALID.
- * See the GNU General Public License for more details, a copy of which
- * can be found in the file COPYING included with this package
- *
  */
 
 /*
@@ -178,7 +166,6 @@ struct fcnvme_lsdesc_rjt {
 };
 
 
-#define FCNVME_ASSOC_HOSTID_LEN		16
 #define FCNVME_ASSOC_HOSTNQN_LEN	256
 #define FCNVME_ASSOC_SUBNQN_LEN		256
 
@@ -192,7 +179,7 @@ struct fcnvme_lsdesc_cr_assoc_cmd {
 	__be16	cntlid;
 	__be16	sqsize;
 	__be32	rsvd52;
-	u8	hostid[FCNVME_ASSOC_HOSTID_LEN];
+	uuid_t	hostid;
 	u8	hostnqn[FCNVME_ASSOC_HOSTNQN_LEN];
 	u8	subnqn[FCNVME_ASSOC_SUBNQN_LEN];
 	__be32	rsvd584[108];		/* pad to 1016 bytes,

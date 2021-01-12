@@ -1405,7 +1405,7 @@ static unsigned int xdigit2int(unsigned char c)
  * <pattern data>[/<pattern mask>][@<anchor>]
  *
  * Up to 2 filter patterns can be specified.  If 2 are supplied the first one
- * must be anchored at 0.  An omited mask is taken as a mask of 1s, an omitted
+ * must be anchored at 0.  An omitted mask is taken as a mask of 1s, an omitted
  * anchor is taken as 0.
  */
 static ssize_t mps_trc_write(struct file *file, const char __user *buf,
@@ -2620,7 +2620,7 @@ static inline struct port_info *ethqset2pinfo(struct adapter *adap, int qset)
 	}
 
 	/* should never happen! */
-	BUG_ON(1);
+	BUG();
 	return NULL;
 }
 
@@ -3116,12 +3116,6 @@ static const struct file_operations mem_debugfs_fops = {
 	.llseek  = default_llseek,
 };
 
-static void set_debugfs_file_size(struct dentry *de, loff_t size)
-{
-	if (!IS_ERR(de) && de->d_inode)
-		de->d_inode->i_size = size;
-}
-
 static int tid_info_show(struct seq_file *seq, void *v)
 {
 	unsigned int tid_start = 0;
@@ -3149,7 +3143,7 @@ static int tid_info_show(struct seq_file *seq, void *v)
 			seq_printf(seq, ", in use: %u/%u\n",
 				   atomic_read(&t->tids_in_use),
 				   atomic_read(&t->hash_tids_in_use));
-		} else if (adap->flags & FW_OFLD_CONN) {
+		} else if (adap->flags & CXGB4_FW_OFLD_CONN) {
 			seq_printf(seq, "TID range: %u..%u/%u..%u",
 				   t->aftid_base,
 				   t->aftid_end,
@@ -3204,12 +3198,9 @@ DEFINE_SHOW_ATTRIBUTE(tid_info);
 static void add_debugfs_mem(struct adapter *adap, const char *name,
 			    unsigned int idx, unsigned int size_mb)
 {
-	struct dentry *de;
-
-	de = debugfs_create_file(name, 0400, adap->debugfs_root,
-				 (void *)adap + idx, &mem_debugfs_fops);
-	if (de && de->d_inode)
-		de->d_inode->i_size = size_mb << 20;
+	debugfs_create_file_size(name, 0400, adap->debugfs_root,
+				 (void *)adap + idx, &mem_debugfs_fops,
+				 size_mb << 20);
 }
 
 static ssize_t blocked_fl_read(struct file *filp, char __user *ubuf,
@@ -3649,9 +3640,8 @@ int t4_setup_debugfs(struct adapter *adap)
 		}
 	}
 
-	de = debugfs_create_file("flash", 0400, adap->debugfs_root, adap,
-				 &flash_debugfs_fops);
-	set_debugfs_file_size(de, adap->params.sf_size);
+	de = debugfs_create_file_size("flash", 0400, adap->debugfs_root, adap,
+				      &flash_debugfs_fops, adap->params.sf_size);
 	debugfs_create_bool("use_backdoor", 0600,
 			    adap->debugfs_root, &adap->use_bd);
 	debugfs_create_bool("trace_rss", 0600,

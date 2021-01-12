@@ -1,45 +1,11 @@
+// SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0
 /******************************************************************************
  *
  * Module Name: utglobal - Global variables for the ACPI subsystem
  *
+ * Copyright (C) 2000 - 2018, Intel Corp.
+ *
  *****************************************************************************/
-
-/*
- * Copyright (C) 2000 - 2013, Intel Corp.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions, and the following disclaimer,
- *    without modification.
- * 2. Redistributions in binary form must reproduce at minimum a disclaimer
- *    substantially similar to the "NO WARRANTY" disclaimer below
- *    ("Disclaimer") and any redistribution must be conditioned upon
- *    including a substantially similar Disclaimer requirement for further
- *    binary redistribution.
- * 3. Neither the names of the above-listed copyright holders nor the names
- *    of any contributors may be used to endorse or promote products derived
- *    from this software without specific prior written permission.
- *
- * Alternatively, this software may be distributed under the terms of the
- * GNU General Public License ("GPL") version 2 as published by the Free
- * Software Foundation.
- *
- * NO WARRANTY
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTIBILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * HOLDERS OR CONTRIBUTORS BE LIABLE FOR SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
- * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGES.
- */
 
 #define EXPORT_ACPI_INTERFACES
 #define DEFINE_ACPI_GLOBALS
@@ -55,32 +21,7 @@ ACPI_MODULE_NAME("utglobal")
  * Static global variable initialization.
  *
  ******************************************************************************/
-/*
- * We want the debug switches statically initialized so they
- * are already set when the debugger is entered.
- */
-/* Debug switch - level and trace mask */
-u32 acpi_dbg_level = ACPI_DEBUG_DEFAULT;
-
-/* Debug switch - layer (component) mask */
-
-u32 acpi_dbg_layer = 0;
-u32 acpi_gbl_nesting_level = 0;
-
-/* Debugger globals */
-
-u8 acpi_gbl_db_terminate_threads = FALSE;
-u8 acpi_gbl_abort_method = FALSE;
-u8 acpi_gbl_method_executing = FALSE;
-
-/* System flags */
-
-u32 acpi_gbl_startup_flags = 0;
-
-/* System starts uninitialized */
-
-u8 acpi_gbl_shutdown = TRUE;
-
+/* Various state name strings */
 const char *acpi_gbl_sleep_state_names[ACPI_S_STATE_COUNT] = {
 	"\\_S0_",
 	"\\_S1_",
@@ -105,6 +46,11 @@ const char *acpi_gbl_highest_dstate_names[ACPI_NUM_sx_d_METHODS] = {
 	"_S4D"
 };
 
+/* Hex-to-ascii */
+
+const char acpi_gbl_lower_hex_digits[] = "0123456789abcdef";
+const char acpi_gbl_upper_hex_digits[] = "0123456789ABCDEF";
+
 /*******************************************************************************
  *
  * Namespace globals
@@ -127,12 +73,19 @@ const struct acpi_predefined_names acpi_gbl_pre_defined_names[] = {
 	{"_SB_", ACPI_TYPE_DEVICE, NULL},
 	{"_SI_", ACPI_TYPE_LOCAL_SCOPE, NULL},
 	{"_TZ_", ACPI_TYPE_DEVICE, NULL},
-	{"_REV", ACPI_TYPE_INTEGER, (char *)ACPI_CA_SUPPORT_LEVEL},
+	/*
+	 * March, 2015:
+	 * The _REV object is in the process of being deprecated, because
+	 * other ACPI implementations permanently return 2. Thus, it
+	 * has little or no value. Return 2 for compatibility with
+	 * other ACPI implementations.
+	 */
+	{"_REV", ACPI_TYPE_INTEGER, ACPI_CAST_PTR(char, 2)},
 	{"_OS_", ACPI_TYPE_STRING, ACPI_OS_NAME},
-	{"_GL_", ACPI_TYPE_MUTEX, (char *)1},
+	{"_GL_", ACPI_TYPE_MUTEX, ACPI_CAST_PTR(char, 1)},
 
 #if !defined (ACPI_NO_METHOD_EXECUTION) || defined (ACPI_CONSTANT_EVAL_ONLY)
-	{"_OSI", ACPI_TYPE_METHOD, (char *)1},
+	{"_OSI", ACPI_TYPE_METHOD, ACPI_CAST_PTR(char, 1)},
 #endif
 
 	/* Table terminator */
@@ -238,6 +191,49 @@ struct acpi_fixed_event_info acpi_gbl_fixed_event_info[ACPI_NUM_FIXED_EVENTS] = 
 					ACPI_BITMASK_RT_CLOCK_ENABLE},
 };
 #endif				/* !ACPI_REDUCED_HARDWARE */
+
+#if defined (ACPI_DISASSEMBLER) || defined (ACPI_ASL_COMPILER)
+
+/* to_pld macro: compile/disassemble strings */
+
+const char *acpi_gbl_pld_panel_list[] = {
+	"TOP",
+	"BOTTOM",
+	"LEFT",
+	"RIGHT",
+	"FRONT",
+	"BACK",
+	"UNKNOWN",
+	NULL
+};
+
+const char *acpi_gbl_pld_vertical_position_list[] = {
+	"UPPER",
+	"CENTER",
+	"LOWER",
+	NULL
+};
+
+const char *acpi_gbl_pld_horizontal_position_list[] = {
+	"LEFT",
+	"CENTER",
+	"RIGHT",
+	NULL
+};
+
+const char *acpi_gbl_pld_shape_list[] = {
+	"ROUND",
+	"OVAL",
+	"SQUARE",
+	"VERTICALRECTANGLE",
+	"HORIZONTALRECTANGLE",
+	"VERTICALTRAPEZOID",
+	"HORIZONTALTRAPEZOID",
+	"UNKNOWN",
+	"CHAMFERED",
+	NULL
+};
+#endif
 
 /* Public globals */
 

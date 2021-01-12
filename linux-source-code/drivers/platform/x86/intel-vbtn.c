@@ -13,6 +13,7 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
+#include <linux/suspend.h>
 
 /* When NOT in tablet mode, VGBS returns with the flag 0x40 */
 #define TABLET_MODE_FLAG 0x40
@@ -44,6 +45,7 @@ static const struct key_entry intel_vbtn_keymap[] = {
 
 struct intel_vbtn_priv {
 	struct input_dev *input_dev;
+	bool wakeup_mode;
 };
 
 static int intel_vbtn_input_setup(struct platform_device *device)
@@ -74,6 +76,14 @@ static void notify_handler(acpi_handle handle, u32 event, void *context)
 	const struct key_entry *ke_rel;
 	bool autorelease;
 
+	if (priv->wakeup_mode) {
+		if (sparse_keymap_entry_from_scancode(priv->input_dev, event)) {
+			pm_wakeup_hard_event(&device->dev);
+			return;
+		}
+		goto out_unknown;
+	}
+
 	/*
 	 * Even press events are autorelease if there is no corresponding odd
 	 * release event, or if the odd event is KE_IGNORE.
@@ -84,6 +94,7 @@ static void notify_handler(acpi_handle handle, u32 event, void *context)
 	if (sparse_keymap_report_event(priv->input_dev, event, val, autorelease))
 		return;
 
+out_unknown:
 	dev_dbg(&device->dev, "unknown event index 0x%x\n", event);
 }
 
@@ -147,6 +158,7 @@ static int intel_vbtn_probe(struct platform_device *device)
 	if (ACPI_FAILURE(status))
 		return -EBUSY;
 
+	device_init_wakeup(&device->dev, true);
 	return 0;
 }
 
@@ -164,10 +176,34 @@ static int intel_vbtn_remove(struct platform_device *device)
 	return 0;
 }
 
+static int intel_vbtn_pm_prepare(struct device *dev)
+{
+	struct intel_vbtn_priv *priv = dev_get_drvdata(dev);
+
+	priv->wakeup_mode = true;
+	return 0;
+}
+
+static int intel_vbtn_pm_resume(struct device *dev)
+{
+	struct intel_vbtn_priv *priv = dev_get_drvdata(dev);
+
+	priv->wakeup_mode = false;
+	return 0;
+}
+
+static const struct dev_pm_ops intel_vbtn_pm_ops = {
+	.prepare = intel_vbtn_pm_prepare,
+	.resume = intel_vbtn_pm_resume,
+	.restore = intel_vbtn_pm_resume,
+	.thaw = intel_vbtn_pm_resume,
+};
+
 static struct platform_driver intel_vbtn_pl_driver = {
 	.driver = {
 		.name = "intel-vbtn",
 		.acpi_match_table = intel_vbtn_ids,
+		.pm = &intel_vbtn_pm_ops,
 	},
 	.probe = intel_vbtn_probe,
 	.remove = intel_vbtn_remove,
@@ -184,7 +220,7 @@ check_acpi_dev(acpi_handle handle, u32 lvl, void *context, void **rv)
 		return AE_OK;
 
 	if (acpi_match_device_ids(dev, ids) == 0)
-		if (acpi_create_platform_device(dev))
+		if (acpi_create_platform_device(dev, NULL))
 			dev_info(&dev->dev,
 				 "intel-vbtn: created platform device\n");
 

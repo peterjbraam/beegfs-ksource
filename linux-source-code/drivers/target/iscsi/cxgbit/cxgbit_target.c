@@ -8,6 +8,8 @@
 
 #include <linux/workqueue.h>
 #include <linux/kthread.h>
+#include <linux/sched/signal.h>
+
 #include <asm/unaligned.h>
 #include <net/tcp.h>
 #include <target/target_core_base.h>
@@ -24,50 +26,18 @@ static const u8 cxgbit_digest_len[] = {0, 4, 4, 8};
 #define TX_HDR_LEN (sizeof(struct sge_opaque_hdr) + \
 		    sizeof(struct fw_ofld_tx_data_wr))
 
-struct sk_buff *
-cxgbit_alloc_skb_with_frags(unsigned long header_len,
-			    unsigned long data_len)
-{
-	int npages = (data_len + (PAGE_SIZE - 1)) >> PAGE_SHIFT;
-	unsigned long chunk;
-	struct sk_buff *skb;
-	struct page *page;
-	int i;
-
-	if (unlikely(npages > MAX_SKB_FRAGS))
-		return NULL;
-
-	skb = alloc_skb(header_len, GFP_KERNEL);
-	if (unlikely(!skb))
-		return NULL;
-
-	skb->truesize += npages << PAGE_SHIFT;
-
-	for (i = 0; npages > 0; i++) {
-		page = alloc_page(GFP_KERNEL);
-		if (unlikely(!page))
-			goto failure;
-		chunk = min_t(unsigned long, data_len, PAGE_SIZE);
-		skb_fill_page_desc(skb, i, page, 0, chunk);
-		data_len -= chunk;
-		npages -= 1;
-	}
-	return skb;
-
-failure:
-	kfree_skb(skb);
-	return NULL;
-}
-
 static struct sk_buff *
 __cxgbit_alloc_skb(struct cxgbit_sock *csk, u32 len, bool iso)
 {
 	struct sk_buff *skb = NULL;
 	u8 submode = 0;
+	int errcode;
 	static const u32 hdr_len = TX_HDR_LEN + ISCSI_HDR_LEN;
 
 	if (len) {
-		skb = cxgbit_alloc_skb_with_frags(hdr_len, len);
+		skb = alloc_skb_with_frags(hdr_len, len,
+					   0, &errcode,
+					   GFP_KERNEL);
 		if (!skb)
 			return NULL;
 
@@ -990,7 +960,7 @@ after_immediate_data:
 			target_put_sess_cmd(&cmd->se_cmd);
 			return 0;
 		} else if (cmd->unsolicited_data) {
-			iscsit_set_unsoliticed_dataout(cmd);
+			iscsit_set_unsolicited_dataout(cmd);
 		}
 
 	} else if (immed_ret == IMMEDIATE_DATA_ERL1_CRC_FAILURE) {

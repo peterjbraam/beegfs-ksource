@@ -106,7 +106,7 @@ module_param_array(enable, bool, NULL, 0444);
 MODULE_PARM_DESC(enable, "Enable Ensoniq AudioPCI soundcard.");
 #ifdef SUPPORT_JOYSTICK
 #ifdef CHIP1371
-module_param_array(joystick_port, int, NULL, 0444);
+module_param_hw_array(joystick_port, int, ioport, NULL, 0444);
 MODULE_PARM_DESC(joystick_port, "Joystick port address.");
 #else
 module_param_array(joystick, bool, NULL, 0444);
@@ -2035,9 +2035,6 @@ static int snd_ensoniq_suspend(struct device *dev)
 	
 	snd_power_change_state(card, SNDRV_CTL_POWER_D3hot);
 
-	snd_pcm_suspend_all(ensoniq->pcm1);
-	snd_pcm_suspend_all(ensoniq->pcm2);
-	
 #ifdef CHIP1371	
 	snd_ac97_suspend(ensoniq->u.es1371.ac97);
 #else

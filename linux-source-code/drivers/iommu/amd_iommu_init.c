@@ -98,6 +98,8 @@
  * out of it.
  */
 
+extern const struct iommu_ops amd_iommu_ops;
+
 /*
  * structure describing one IOMMU in the ACPI table. Typically followed by one
  * or more ivhd_entrys.
@@ -163,14 +165,16 @@ u16 amd_iommu_last_bdf;			/* largest PCI device id we have
 					   to handle */
 LIST_HEAD(amd_iommu_unity_map);		/* a list of required unity mappings
 					   we find in ACPI */
-u32 amd_iommu_unmap_flush;		/* if true, flush on every unmap */
+bool amd_iommu_unmap_flush;		/* if true, flush on every unmap */
 
 LIST_HEAD(amd_iommu_list);		/* list of all AMD IOMMUs in the
 					   system */
 
 /* Array to assign indices to IOMMUs*/
 struct amd_iommu *amd_iommus[MAX_IOMMUS];
-int amd_iommus_present;
+
+/* Number of IOMMUs present in the system */
+static int amd_iommus_present;
 
 /* IOMMUs have a non-present cache? */
 bool amd_iommu_np_cache __read_mostly;
@@ -264,10 +268,6 @@ static int amd_iommu_enable_interrupts(void);
 static int __init iommu_go_to_state(enum iommu_init_state state);
 static void init_device_table_dma(void);
 
-static int iommu_pc_get_set_reg_val(struct amd_iommu *iommu,
-				    u8 bank, u8 cntr, u8 fxn,
-				    u64 *value, bool is_write);
-
 static bool amd_iommu_pre_enabled = true;
 
 bool translation_pre_enabled(struct amd_iommu *iommu)
@@ -302,6 +302,11 @@ static inline unsigned long tbl_size(int entry_size)
 			 get_order(((int)amd_iommu_last_bdf + 1) * entry_size);
 
 	return 1UL << shift;
+}
+
+int amd_iommu_get_num_iommus(void)
+{
+	return amd_iommus_present;
 }
 
 /* Access to l1 and l2 indexed register spaces */
@@ -886,7 +891,7 @@ static bool copy_device_table(void)
 		hi = readl(iommu->mmio_base + MMIO_DEV_TABLE_OFFSET + 4);
 		entry = (((u64) hi) << 32) + lo;
 		if (last_entry && last_entry != entry) {
-			pr_err("IOMMU:%d should use the same dev table as others!/n",
+			pr_err("IOMMU:%d should use the same dev table as others!\n",
 				iommu->index);
 			return false;
 		}
@@ -894,7 +899,7 @@ static bool copy_device_table(void)
 
 		old_devtb_size = ((entry & ~PAGE_MASK) + 1) << 12;
 		if (old_devtb_size != dev_table_size) {
-			pr_err("The device table size of IOMMU:%d is not expected!/n",
+			pr_err("The device table size of IOMMU:%d is not expected!\n",
 				iommu->index);
 			return false;
 		}
@@ -908,7 +913,7 @@ static bool copy_device_table(void)
 	old_devtb_phys = __sme_clr(entry) & PAGE_MASK;
 
 	if (old_devtb_phys >= 0x100000000ULL) {
-		pr_err("The address of old device table is above 4G, not trustworthy!/n");
+		pr_err("The address of old device table is above 4G, not trustworthy!\n");
 		return false;
 	}
 	old_devtb = (sme_active() && is_kdump_kernel())
@@ -923,7 +928,7 @@ static bool copy_device_table(void)
 	old_dev_tbl_cpy = (void *)__get_free_pages(gfp_flag,
 				get_order(dev_table_size));
 	if (old_dev_tbl_cpy == NULL) {
-		pr_err("Failed to allocate memory for copying old device table!/n");
+		pr_err("Failed to allocate memory for copying old device table!\n");
 		return false;
 	}
 
@@ -1496,11 +1501,11 @@ static int __init init_iommu_one(struct amd_iommu *iommu, struct ivhd_header *h)
 {
 	int ret;
 
-	spin_lock_init(&iommu->lock);
+	raw_spin_lock_init(&iommu->lock);
 
 	/* Add IOMMU to internal data structures */
 	list_add_tail(&iommu->list, &amd_iommu_list);
-	iommu->index             = amd_iommus_present++;
+	iommu->index = amd_iommus_present++;
 
 	if (unlikely(iommu->index >= MAX_IOMMUS)) {
 		WARN(1, "AMD-Vi: System has more IOMMUs than supported by this driver\n");
@@ -1571,6 +1576,10 @@ static int __init init_iommu_one(struct amd_iommu *iommu, struct ivhd_header *h)
 		amd_iommu_pre_enabled = translation_pre_enabled(iommu);
 
 	ret = init_iommu_from_acpi(iommu, h);
+	if (ret)
+		return ret;
+
+	ret = amd_iommu_create_irq_domain(iommu);
 	if (ret)
 		return ret;
 
@@ -1651,6 +1660,8 @@ static int __init init_iommu_all(struct acpi_table_header *table)
 	return 0;
 }
 
+static int iommu_pc_get_set_reg(struct amd_iommu *iommu, u8 bank, u8 cntr,
+				u8 fxn, u64 *value, bool is_write);
 
 static void init_iommu_perf_ctr(struct amd_iommu *iommu)
 {
@@ -1662,8 +1673,8 @@ static void init_iommu_perf_ctr(struct amd_iommu *iommu)
 	amd_iommu_pc_present = true;
 
 	/* Check if the performance counters can be written to */
-	if ((0 != iommu_pc_get_set_reg_val(iommu, 0, 0, 0, &val, true)) ||
-	    (0 != iommu_pc_get_set_reg_val(iommu, 0, 0, 0, &val2, false)) ||
+	if ((iommu_pc_get_set_reg(iommu, 0, 0, 0, &val, true)) ||
+	    (iommu_pc_get_set_reg(iommu, 0, 0, 0, &val2, false)) ||
 	    (val != val2)) {
 		pr_err("AMD-Vi: Unable to write to IOMMU perf counter.\n");
 		amd_iommu_pc_present = false;
@@ -1677,12 +1688,11 @@ static void init_iommu_perf_ctr(struct amd_iommu *iommu)
 	iommu->max_counters = (u8) ((val >> 7) & 0xf);
 }
 
-
 static ssize_t amd_iommu_show_cap(struct device *dev,
 				  struct device_attribute *attr,
 				  char *buf)
 {
-	struct amd_iommu *iommu = dev_get_drvdata(dev);
+	struct amd_iommu *iommu = dev_to_amd_iommu(dev);
 	return sprintf(buf, "%x\n", iommu->cap);
 }
 static DEVICE_ATTR(cap, S_IRUGO, amd_iommu_show_cap, NULL);
@@ -1691,7 +1701,7 @@ static ssize_t amd_iommu_show_features(struct device *dev,
 				       struct device_attribute *attr,
 				       char *buf)
 {
-	struct amd_iommu *iommu = dev_get_drvdata(dev);
+	struct amd_iommu *iommu = dev_to_amd_iommu(dev);
 	return sprintf(buf, "%llx\n", iommu->features);
 }
 static DEVICE_ATTR(features, S_IRUGO, amd_iommu_show_features, NULL);
@@ -1718,8 +1728,8 @@ static int iommu_init_pci(struct amd_iommu *iommu)
 	u32 range, misc, low, high;
 	int ret;
 
-	iommu->dev = pci_get_bus_and_slot(PCI_BUS_NUM(iommu->devid),
-					  iommu->devid & 0xff);
+	iommu->dev = pci_get_domain_bus_and_slot(0, PCI_BUS_NUM(iommu->devid),
+						 iommu->devid & 0xff);
 	if (!iommu->dev)
 		return -ENODEV;
 
@@ -1785,8 +1795,9 @@ static int iommu_init_pci(struct amd_iommu *iommu)
 	if (is_rd890_iommu(iommu->dev)) {
 		int i, j;
 
-		iommu->root_pdev = pci_get_bus_and_slot(iommu->dev->bus->number,
-				PCI_DEVFN(0, 0));
+		iommu->root_pdev =
+			pci_get_domain_bus_and_slot(0, iommu->dev->bus->number,
+						    PCI_DEVFN(0, 0));
 
 		/*
 		 * Some rd890 systems may not be fully reconfigured by the
@@ -1812,9 +1823,10 @@ static int iommu_init_pci(struct amd_iommu *iommu)
 	amd_iommu_erratum_746_workaround(iommu);
 	amd_iommu_ats_write_check_workaround(iommu);
 
-	iommu->iommu_dev = iommu_device_create(&iommu->dev->dev, iommu,
-					       amd_iommu_groups, "ivhd%d",
-					       iommu->index);
+	iommu_device_sysfs_add(&iommu->iommu, &iommu->dev->dev,
+			       amd_iommu_groups, "ivhd%d", iommu->index);
+	iommu_device_set_ops(&iommu->iommu, &amd_iommu_ops);
+	iommu_device_register(&iommu->iommu);
 
 	return pci_enable_device(iommu->dev);
 }
@@ -2521,14 +2533,13 @@ static void __init free_dma_resources(void)
 static int __init early_amd_iommu_init(void)
 {
 	struct acpi_table_header *ivrs_base;
-	acpi_size ivrs_size;
 	acpi_status status;
 	int i, remap_cache_sz, ret = 0;
 
 	if (!amd_iommu_detected)
 		return -ENODEV;
 
-	status = acpi_get_table_with_size("IVRS", 0, &ivrs_base, &ivrs_size);
+	status = acpi_get_table("IVRS", 0, &ivrs_base);
 	if (status == AE_NOT_FOUND)
 		return -ENODEV;
 	else if (ACPI_FAILURE(status)) {
@@ -2655,7 +2666,7 @@ static int __init early_amd_iommu_init(void)
 
 out:
 	/* Don't leak any ACPI memory */
-	early_acpi_os_unmap_memory((char __iomem *)ivrs_base, ivrs_size);
+	acpi_put_table(ivrs_base);
 	ivrs_base = NULL;
 
 	return ret;
@@ -2679,10 +2690,9 @@ out:
 static bool detect_ivrs(void)
 {
 	struct acpi_table_header *ivrs_base;
-	acpi_size ivrs_size;
 	acpi_status status;
 
-	status = acpi_get_table_with_size("IVRS", 0, &ivrs_base, &ivrs_size);
+	status = acpi_get_table("IVRS", 0, &ivrs_base);
 	if (status == AE_NOT_FOUND)
 		return false;
 	else if (ACPI_FAILURE(status)) {
@@ -2691,7 +2701,7 @@ static bool detect_ivrs(void)
 		return false;
 	}
 
-	early_acpi_os_unmap_memory((char __iomem *)ivrs_base, ivrs_size);
+	acpi_put_table(ivrs_base);
 
 	/* Make sure ACS will be enabled during PCI probe */
 	pci_request_acs();
@@ -3053,6 +3063,18 @@ bool amd_iommu_v2_supported(void)
 }
 EXPORT_SYMBOL(amd_iommu_v2_supported);
 
+struct amd_iommu *get_amd_iommu(unsigned int idx)
+{
+	unsigned int i = 0;
+	struct amd_iommu *iommu;
+
+	for_each_iommu(iommu)
+		if (i++ == idx)
+			return iommu;
+	return NULL;
+}
+EXPORT_SYMBOL(get_amd_iommu);
+
 /****************************************************************************
  *
  * IOMMU EFR Performance Counter support functionality. This code allows
@@ -3060,17 +3082,14 @@ EXPORT_SYMBOL(amd_iommu_v2_supported);
  *
  ****************************************************************************/
 
-u8 amd_iommu_pc_get_max_banks(u16 devid)
+u8 amd_iommu_pc_get_max_banks(unsigned int idx)
 {
-	struct amd_iommu *iommu;
-	u8 ret = 0;
+	struct amd_iommu *iommu = get_amd_iommu(idx);
 
-	/* locate the iommu governing the devid */
-	iommu = amd_iommu_rlookup_table[devid];
 	if (iommu)
-		ret = iommu->max_banks;
+		return iommu->max_banks;
 
-	return ret;
+	return 0;
 }
 EXPORT_SYMBOL(amd_iommu_pc_get_max_banks);
 
@@ -3080,29 +3099,29 @@ bool amd_iommu_pc_supported(void)
 }
 EXPORT_SYMBOL(amd_iommu_pc_supported);
 
-u8 amd_iommu_pc_get_max_counters(u16 devid)
+u8 amd_iommu_pc_get_max_counters(unsigned int idx)
 {
-	struct amd_iommu *iommu;
-	u8 ret = 0;
+	struct amd_iommu *iommu = get_amd_iommu(idx);
 
-	/* locate the iommu governing the devid */
-	iommu = amd_iommu_rlookup_table[devid];
 	if (iommu)
-		ret = iommu->max_counters;
+		return iommu->max_counters;
 
-	return ret;
+	return 0;
 }
 EXPORT_SYMBOL(amd_iommu_pc_get_max_counters);
 
-static int iommu_pc_get_set_reg_val(struct amd_iommu *iommu,
-				    u8 bank, u8 cntr, u8 fxn,
-				    u64 *value, bool is_write)
+static int iommu_pc_get_set_reg(struct amd_iommu *iommu, u8 bank, u8 cntr,
+				u8 fxn, u64 *value, bool is_write)
 {
 	u32 offset;
 	u32 max_offset_lim;
 
+	/* Make sure the IOMMU PC resource is available */
+	if (!amd_iommu_pc_present)
+		return -ENODEV;
+
 	/* Check for valid iommu and pc register indexing */
-	if (WARN_ON((fxn > 0x28) || (fxn & 7)))
+	if (WARN_ON(!iommu || (fxn > 0x28) || (fxn & 7)))
 		return -ENODEV;
 
 	offset = (u32)(((0x40 | bank) << 12) | (cntr << 8) | fxn);
@@ -3128,17 +3147,21 @@ static int iommu_pc_get_set_reg_val(struct amd_iommu *iommu,
 
 	return 0;
 }
-EXPORT_SYMBOL(amd_iommu_pc_get_set_reg_val);
 
-int amd_iommu_pc_get_set_reg_val(u16 devid, u8 bank, u8 cntr, u8 fxn,
-				    u64 *value, bool is_write)
+int amd_iommu_pc_get_reg(struct amd_iommu *iommu, u8 bank, u8 cntr, u8 fxn, u64 *value)
 {
-	struct amd_iommu *iommu = amd_iommu_rlookup_table[devid];
+	if (!iommu)
+		return -EINVAL;
 
-	/* Make sure the IOMMU PC resource is available */
-	if (!amd_iommu_pc_present || iommu == NULL)
-		return -ENODEV;
-
-	return iommu_pc_get_set_reg_val(iommu, bank, cntr, fxn,
-					value, is_write);
+	return iommu_pc_get_set_reg(iommu, bank, cntr, fxn, value, false);
 }
+EXPORT_SYMBOL(amd_iommu_pc_get_reg);
+
+int amd_iommu_pc_set_reg(struct amd_iommu *iommu, u8 bank, u8 cntr, u8 fxn, u64 *value)
+{
+	if (!iommu)
+		return -EINVAL;
+
+	return iommu_pc_get_set_reg(iommu, bank, cntr, fxn, value, true);
+}
+EXPORT_SYMBOL(amd_iommu_pc_set_reg);

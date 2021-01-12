@@ -17,7 +17,8 @@
  ******************************************************************************/
 
 #include <linux/list.h>
-#include <linux/percpu_ida.h>
+#include <linux/sched/signal.h>
+#include <net/ipv6.h>         /* ipv6_addr_equal() */
 #include <scsi/scsi_tcq.h>
 #include <scsi/iscsi_proto.h>
 #include <target/target_core_base.h>
@@ -55,9 +56,6 @@
 extern struct list_head g_tiqn_list;
 extern spinlock_t tiqn_lock;
 
-/*
- *	Called with cmd->r2t_lock held.
- */
 int iscsit_add_r2t_to_list(
 	struct iscsi_cmd *cmd,
 	u32 offset,
@@ -66,6 +64,8 @@ int iscsit_add_r2t_to_list(
 	u32 r2t_sn)
 {
 	struct iscsi_r2t *r2t;
+
+	lockdep_assert_held(&cmd->r2t_lock);
 
 	r2t = kmem_cache_zalloc(lio_r2t_cache, GFP_ATOMIC);
 	if (!r2t) {
@@ -127,11 +127,10 @@ struct iscsi_r2t *iscsit_get_r2t_from_list(struct iscsi_cmd *cmd)
 	return NULL;
 }
 
-/*
- *	Called with cmd->r2t_lock held.
- */
 void iscsit_free_r2t(struct iscsi_r2t *r2t, struct iscsi_cmd *cmd)
 {
+	lockdep_assert_held(&cmd->r2t_lock);
+
 	list_del(&r2t->r2t_list);
 	kmem_cache_free(lio_r2t_cache, r2t);
 }
@@ -146,6 +145,32 @@ void iscsit_free_r2ts_from_list(struct iscsi_cmd *cmd)
 	spin_unlock_bh(&cmd->r2t_lock);
 }
 
+static int iscsit_wait_for_tag(struct se_session *se_sess, int state, int *cpup)
+{
+	int tag = -1;
+	DEFINE_SBQ_WAIT(wait);
+	struct sbq_wait_state *ws;
+	struct sbitmap_queue *sbq;
+
+	if (state == TASK_RUNNING)
+		return tag;
+
+	sbq = &se_sess->sess_tag_pool;
+	ws = &sbq->ws[0];
+	for (;;) {
+		sbitmap_prepare_to_wait(sbq, ws, &wait, state);
+		if (signal_pending_state(state, current))
+			break;
+		tag = sbitmap_queue_get(sbq, cpup);
+		if (tag >= 0)
+			break;
+		schedule();
+	}
+
+	sbitmap_finish_wait(sbq, ws, &wait);
+	return tag;
+}
+
 /*
  * May be called from software interrupt (timer) context for allocating
  * iSCSI NopINs.
@@ -154,9 +179,11 @@ struct iscsi_cmd *iscsit_allocate_cmd(struct iscsi_conn *conn, int state)
 {
 	struct iscsi_cmd *cmd;
 	struct se_session *se_sess = conn->sess->se_sess;
-	int size, tag;
+	int size, tag, cpu;
 
-	tag = percpu_ida_alloc(&se_sess->sess_tag_pool, state);
+	tag = sbitmap_queue_get(&se_sess->sess_tag_pool, &cpu);
+	if (tag < 0)
+		tag = iscsit_wait_for_tag(se_sess, state, &cpu);
 	if (tag < 0)
 		return NULL;
 
@@ -165,6 +192,7 @@ struct iscsi_cmd *iscsit_allocate_cmd(struct iscsi_conn *conn, int state)
 	memset(cmd, 0, size);
 
 	cmd->se_cmd.map_tag = tag;
+	cmd->se_cmd.map_cpu = cpu;
 	cmd->conn = conn;
 	cmd->data_direction = DMA_NONE;
 	INIT_LIST_HEAD(&cmd->i_conn_node);
@@ -175,6 +203,7 @@ struct iscsi_cmd *iscsit_allocate_cmd(struct iscsi_conn *conn, int state)
 	spin_lock_init(&cmd->istate_lock);
 	spin_lock_init(&cmd->error_lock);
 	spin_lock_init(&cmd->r2t_lock);
+	timer_setup(&cmd->dataout_timer, iscsit_handle_dataout_timeout, 0);
 
 	return cmd;
 }
@@ -709,7 +738,7 @@ void iscsit_release_cmd(struct iscsi_cmd *cmd)
 	kfree(cmd->iov_data);
 	kfree(cmd->text_in_ptr);
 
-	percpu_ida_free(&sess->se_sess->sess_tag_pool, se_cmd->map_tag);
+	target_free_tag(sess->se_sess, se_cmd);
 }
 EXPORT_SYMBOL(iscsit_release_cmd);
 
@@ -731,8 +760,8 @@ void __iscsit_free_cmd(struct iscsi_cmd *cmd, bool check_queues)
 		iscsit_remove_cmd_from_response_queue(cmd, conn);
 	}
 
-	if (conn && conn->conn_transport->iscsit_release_cmd)
-		conn->conn_transport->iscsit_release_cmd(conn, cmd);
+	if (conn && conn->conn_transport->iscsit_unmap_cmd)
+		conn->conn_transport->iscsit_unmap_cmd(conn, cmd);
 }
 
 void iscsit_free_cmd(struct iscsi_cmd *cmd, bool shutdown)
@@ -883,9 +912,9 @@ static int iscsit_add_nopin(struct iscsi_conn *conn, int want_response)
 	return 0;
 }
 
-static void iscsit_handle_nopin_response_timeout(unsigned long data)
+void iscsit_handle_nopin_response_timeout(struct timer_list *t)
 {
-	struct iscsi_conn *conn = (struct iscsi_conn *) data;
+	struct iscsi_conn *conn = from_timer(conn, t, nopin_response_timer);
 	struct iscsi_session *sess = conn->sess;
 
 	iscsit_inc_conn_usage_count(conn);
@@ -925,9 +954,6 @@ void iscsit_mod_nopin_response_timer(struct iscsi_conn *conn)
 	spin_unlock_bh(&conn->nopin_timer_lock);
 }
 
-/*
- *	Called with conn->nopin_timer_lock held.
- */
 void iscsit_start_nopin_response_timer(struct iscsi_conn *conn)
 {
 	struct iscsi_session *sess = conn->sess;
@@ -939,14 +965,10 @@ void iscsit_start_nopin_response_timer(struct iscsi_conn *conn)
 		return;
 	}
 
-	init_timer(&conn->nopin_response_timer);
-	conn->nopin_response_timer.expires =
-		(get_jiffies_64() + na->nopin_response_timeout * HZ);
-	conn->nopin_response_timer.data = (unsigned long)conn;
-	conn->nopin_response_timer.function = iscsit_handle_nopin_response_timeout;
 	conn->nopin_response_timer_flags &= ~ISCSI_TF_STOP;
 	conn->nopin_response_timer_flags |= ISCSI_TF_RUNNING;
-	add_timer(&conn->nopin_response_timer);
+	mod_timer(&conn->nopin_response_timer,
+		  jiffies + na->nopin_response_timeout * HZ);
 
 	pr_debug("Started NOPIN Response Timer on CID: %d to %u"
 		" seconds\n", conn->cid, na->nopin_response_timeout);
@@ -970,9 +992,9 @@ void iscsit_stop_nopin_response_timer(struct iscsi_conn *conn)
 	spin_unlock_bh(&conn->nopin_timer_lock);
 }
 
-static void iscsit_handle_nopin_timeout(unsigned long data)
+void iscsit_handle_nopin_timeout(struct timer_list *t)
 {
-	struct iscsi_conn *conn = (struct iscsi_conn *) data;
+	struct iscsi_conn *conn = from_timer(conn, t, nopin_timer);
 
 	iscsit_inc_conn_usage_count(conn);
 
@@ -989,13 +1011,13 @@ static void iscsit_handle_nopin_timeout(unsigned long data)
 	iscsit_dec_conn_usage_count(conn);
 }
 
-/*
- * Called with conn->nopin_timer_lock held.
- */
 void __iscsit_start_nopin_timer(struct iscsi_conn *conn)
 {
 	struct iscsi_session *sess = conn->sess;
 	struct iscsi_node_attrib *na = iscsit_tpg_get_node_attrib(sess);
+
+	lockdep_assert_held(&conn->nopin_timer_lock);
+
 	/*
 	* NOPIN timeout is disabled.
 	 */
@@ -1005,13 +1027,9 @@ void __iscsit_start_nopin_timer(struct iscsi_conn *conn)
 	if (conn->nopin_timer_flags & ISCSI_TF_RUNNING)
 		return;
 
-	init_timer(&conn->nopin_timer);
-	conn->nopin_timer.expires = (get_jiffies_64() + na->nopin_timeout * HZ);
-	conn->nopin_timer.data = (unsigned long)conn;
-	conn->nopin_timer.function = iscsit_handle_nopin_timeout;
 	conn->nopin_timer_flags &= ~ISCSI_TF_STOP;
 	conn->nopin_timer_flags |= ISCSI_TF_RUNNING;
-	add_timer(&conn->nopin_timer);
+	mod_timer(&conn->nopin_timer, jiffies + na->nopin_timeout * HZ);
 
 	pr_debug("Started NOPIN Timer on CID: %d at %u second"
 		" interval\n", conn->cid, na->nopin_timeout);
@@ -1019,30 +1037,8 @@ void __iscsit_start_nopin_timer(struct iscsi_conn *conn)
 
 void iscsit_start_nopin_timer(struct iscsi_conn *conn)
 {
-	struct iscsi_session *sess = conn->sess;
-	struct iscsi_node_attrib *na = iscsit_tpg_get_node_attrib(sess);
-	/*
-	 * NOPIN timeout is disabled..
-	 */
-	if (!na->nopin_timeout)
-		return;
-
 	spin_lock_bh(&conn->nopin_timer_lock);
-	if (conn->nopin_timer_flags & ISCSI_TF_RUNNING) {
-		spin_unlock_bh(&conn->nopin_timer_lock);
-		return;
-	}
-
-	init_timer(&conn->nopin_timer);
-	conn->nopin_timer.expires = (get_jiffies_64() + na->nopin_timeout * HZ);
-	conn->nopin_timer.data = (unsigned long)conn;
-	conn->nopin_timer.function = iscsit_handle_nopin_timeout;
-	conn->nopin_timer_flags &= ~ISCSI_TF_STOP;
-	conn->nopin_timer_flags |= ISCSI_TF_RUNNING;
-	add_timer(&conn->nopin_timer);
-
-	pr_debug("Started NOPIN Timer on CID: %d at %u second"
-			" interval\n", conn->cid, na->nopin_timeout);
+	__iscsit_start_nopin_timer(conn);
 	spin_unlock_bh(&conn->nopin_timer_lock);
 }
 
@@ -1239,21 +1235,18 @@ static int iscsit_do_rx_data(
 	struct iscsi_conn *conn,
 	struct iscsi_data_count *count)
 {
-	int data = count->data_length, rx_loop = 0, total_rx = 0, iov_len;
-	struct kvec *iov_p;
+	int data = count->data_length, rx_loop = 0, total_rx = 0;
 	struct msghdr msg;
 
 	if (!conn || !conn->sock || !conn->conn_ops)
 		return -1;
 
 	memset(&msg, 0, sizeof(struct msghdr));
+	iov_iter_kvec(&msg.msg_iter, READ | ITER_KVEC,
+		      count->iov, count->iov_count, data);
 
-	iov_p = count->iov;
-	iov_len = count->iov_count;
-
-	while (total_rx < data) {
-		rx_loop = kernel_recvmsg(conn->sock, &msg, iov_p, iov_len,
-					 (data - total_rx), MSG_WAITALL);
+	while (msg_data_left(&msg)) {
+		rx_loop = sock_recvmsg(conn->sock, &msg, MSG_WAITALL);
 		if (rx_loop <= 0) {
 			pr_debug("rx_loop: %d total_rx: %d\n",
 				rx_loop, total_rx);
@@ -1265,39 +1258,6 @@ static int iscsit_do_rx_data(
 	}
 
 	return total_rx;
-}
-
-static int iscsit_do_tx_data(
-	struct iscsi_conn *conn,
-	struct iscsi_data_count *count)
-{
-	int ret, iov_len;
-	struct kvec *iov_p;
-	struct msghdr msg;
-
-	if (!conn || !conn->sock || !conn->conn_ops)
-		return -1;
-
-	if (count->data_length <= 0) {
-		pr_err("Data length is: %d\n", count->data_length);
-		return -1;
-	}
-
-	memset(&msg, 0, sizeof(struct msghdr));
-
-	iov_p = count->iov;
-	iov_len = count->iov_count;
-
-	ret = kernel_sendmsg(conn->sock, &msg, iov_p, iov_len,
-			     count->data_length);
-	if (ret != count->data_length) {
-		pr_err("Unexpected ret: %d send data %d\n",
-		       ret, count->data_length);
-		return -EPIPE;
-	}
-	pr_debug("ret: %d, sent data: %d\n", ret, count->data_length);
-
-	return ret;
 }
 
 int rx_data(
@@ -1326,18 +1286,35 @@ int tx_data(
 	int iov_count,
 	int data)
 {
-	struct iscsi_data_count c;
+	struct msghdr msg;
+	int total_tx = 0;
 
 	if (!conn || !conn->sock || !conn->conn_ops)
 		return -1;
 
-	memset(&c, 0, sizeof(struct iscsi_data_count));
-	c.iov = iov;
-	c.iov_count = iov_count;
-	c.data_length = data;
-	c.type = ISCSI_TX_DATA;
+	if (data <= 0) {
+		pr_err("Data length is: %d\n", data);
+		return -1;
+	}
 
-	return iscsit_do_tx_data(conn, &c);
+	memset(&msg, 0, sizeof(struct msghdr));
+
+	iov_iter_kvec(&msg.msg_iter, WRITE | ITER_KVEC,
+		      iov, iov_count, data);
+
+	while (msg_data_left(&msg)) {
+		int tx_loop = sock_sendmsg(conn->sock, &msg);
+		if (tx_loop <= 0) {
+			pr_debug("tx_loop: %d total_tx %d\n",
+				tx_loop, total_tx);
+			return tx_loop;
+		}
+		total_tx += tx_loop;
+		pr_debug("tx_loop: %d, total_tx: %d, data: %d\n",
+					tx_loop, total_tx, data);
+	}
+
+	return total_tx;
 }
 
 void iscsit_collect_login_stats(

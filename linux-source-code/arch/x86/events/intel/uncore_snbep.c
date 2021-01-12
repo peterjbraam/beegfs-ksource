@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /* SandyBridge-EP/IvyTown uncore support */
 #include "uncore.h"
 
@@ -1221,6 +1222,8 @@ static struct pci_driver snbep_uncore_pci_driver = {
 	.id_table	= snbep_uncore_pci_ids,
 };
 
+#define NODE_ID_MASK	0x7
+
 /*
  * build pci bus to socket mapping
  */
@@ -1242,7 +1245,7 @@ static int snbep_pci2phy_map_init(int devid, int nodeid_loc, int idmap_loc, bool
 		err = pci_read_config_dword(ubox_dev, nodeid_loc, &config);
 		if (err)
 			break;
-		nodeid = config;
+		nodeid = config & NODE_ID_MASK;
 		/* get the Node ID mapping */
 		err = pci_read_config_dword(ubox_dev, idmap_loc, &config);
 		if (err)
@@ -2686,7 +2689,7 @@ static struct intel_uncore_type *hswep_msr_uncores[] = {
 
 void hswep_uncore_cpu_init(void)
 {
-	int pkg = rh_boot_cpu_data.logical_proc_id;
+	int pkg = boot_cpu_data.logical_proc_id;
 
 	if (hswep_uncore_cbox.num_boxes > boot_cpu_data.x86_max_cores)
 		hswep_uncore_cbox.num_boxes = boot_cpu_data.x86_max_cores;
@@ -3211,7 +3214,7 @@ static struct intel_uncore_type *bdx_pci_uncores[] = {
 	NULL,
 };
 
-static DEFINE_PCI_DEVICE_TABLE(bdx_uncore_pci_ids) = {
+static const struct pci_device_id bdx_uncore_pci_ids[] = {
 	{ /* Home Agent 0 */
 		PCI_DEVICE(PCI_VENDOR_ID_INTEL, 0x6f30),
 		.driver_data = UNCORE_PCI_DEV_DATA(BDX_PCI_UNCORE_HA, 0),

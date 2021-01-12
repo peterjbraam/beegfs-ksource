@@ -44,13 +44,11 @@
 #include "bus.h"
 #include "host.h"
 #include "sdio_bus.h"
+#include "pwrseq.h"
 
 #include "mmc_ops.h"
 #include "sd_ops.h"
 #include "sdio_ops.h"
-
-/* If the device is not responding */
-#define MMC_CORE_TIMEOUT_MS	(10 * 60 * 1000) /* 10 minute timeout */
 
 /* The max erase timeout, used when host->max_busy_timeout isn't specified */
 #define MMC_ERASE_TIMEOUT_MS	(60 * 1000) /* 60 s */
@@ -146,8 +144,9 @@ void mmc_request_done(struct mmc_host *host, struct mmc_request *mrq)
 	int err = cmd->error;
 
 	/* Flag re-tuning needed on CRC errors */
-	if ((cmd->opcode != MMC_SEND_TUNING_BLOCK &&
-	    cmd->opcode != MMC_SEND_TUNING_BLOCK_HS200) &&
+	if (cmd->opcode != MMC_SEND_TUNING_BLOCK &&
+	    cmd->opcode != MMC_SEND_TUNING_BLOCK_HS200 &&
+	    !host->retune_crc_disable &&
 	    (err == -EILSEQ || (mrq->sbc && mrq->sbc->error == -EILSEQ) ||
 	    (mrq->data && mrq->data->error == -EILSEQ) ||
 	    (mrq->stop && mrq->stop->error == -EILSEQ)))
@@ -1389,6 +1388,16 @@ EXPORT_SYMBOL_GPL(mmc_regulator_set_vqmmc);
 
 #endif /* CONFIG_REGULATOR */
 
+/**
+ * mmc_regulator_get_supply - try to get VMMC and VQMMC regulators for a host
+ * @mmc: the host to regulate
+ *
+ * Returns 0 or errno. errno should be handled, it is either a critical error
+ * or -EPROBE_DEFER. 0 means no critical error but it does not mean all
+ * regulators have been found because they all are optional. If you require
+ * certain regulators, you need to check separately in your driver if they got
+ * populated after calling this function.
+ */
 int mmc_regulator_get_supply(struct mmc_host *mmc)
 {
 	struct device *dev = mmc_dev(mmc);
@@ -1400,7 +1409,7 @@ int mmc_regulator_get_supply(struct mmc_host *mmc)
 	if (IS_ERR(mmc->supply.vmmc)) {
 		if (PTR_ERR(mmc->supply.vmmc) == -EPROBE_DEFER)
 			return -EPROBE_DEFER;
-		dev_info(dev, "No vmmc regulator found\n");
+		dev_dbg(dev, "No vmmc regulator found\n");
 	} else {
 		ret = mmc_regulator_get_ocrmask(mmc->supply.vmmc);
 		if (ret > 0)
@@ -1412,7 +1421,7 @@ int mmc_regulator_get_supply(struct mmc_host *mmc)
 	if (IS_ERR(mmc->supply.vqmmc)) {
 		if (PTR_ERR(mmc->supply.vqmmc) == -EPROBE_DEFER)
 			return -EPROBE_DEFER;
-		dev_info(dev, "No vqmmc regulator found\n");
+		dev_dbg(dev, "No vqmmc regulator found\n");
 	}
 
 	return 0;
@@ -1471,6 +1480,17 @@ int mmc_set_signal_voltage(struct mmc_host *host, int signal_voltage)
 
 	return err;
 
+}
+
+void mmc_set_initial_signal_voltage(struct mmc_host *host)
+{
+	/* Try to set signal voltage to 3.3V but fall back to 1.8v or 1.2v */
+	if (!mmc_set_signal_voltage(host, MMC_SIGNAL_VOLTAGE_330))
+		dev_dbg(mmc_dev(host), "Initial signal voltage of 3.3v\n");
+	else if (!mmc_set_signal_voltage(host, MMC_SIGNAL_VOLTAGE_180))
+		dev_dbg(mmc_dev(host), "Initial signal voltage of 1.8v\n");
+	else if (!mmc_set_signal_voltage(host, MMC_SIGNAL_VOLTAGE_120))
+		dev_dbg(mmc_dev(host), "Initial signal voltage of 1.2v\n");
 }
 
 int mmc_host_set_uhs_voltage(struct mmc_host *host)
@@ -1628,24 +1648,22 @@ void mmc_power_up(struct mmc_host *host, u32 ocr)
 	if (host->ios.power_mode == MMC_POWER_ON)
 		return;
 
+	mmc_pwrseq_pre_power_on(host);
+
 	host->ios.vdd = fls(ocr) - 1;
 	host->ios.power_mode = MMC_POWER_UP;
 	/* Set initial state and call mmc_set_ios */
 	mmc_set_initial_state(host);
 
-	/* Try to set signal voltage to 3.3V but fall back to 1.8v or 1.2v */
-	if (!mmc_set_signal_voltage(host, MMC_SIGNAL_VOLTAGE_330))
-		dev_dbg(mmc_dev(host), "Initial signal voltage of 3.3v\n");
-	else if (!mmc_set_signal_voltage(host, MMC_SIGNAL_VOLTAGE_180))
-		dev_dbg(mmc_dev(host), "Initial signal voltage of 1.8v\n");
-	else if (!mmc_set_signal_voltage(host, MMC_SIGNAL_VOLTAGE_120))
-		dev_dbg(mmc_dev(host), "Initial signal voltage of 1.2v\n");
+	mmc_set_initial_signal_voltage(host);
 
 	/*
 	 * This delay should be sufficient to allow the power supply
 	 * to reach the minimum voltage.
 	 */
-	mmc_delay(10);
+	mmc_delay(host->ios.power_delay_ms);
+
+	mmc_pwrseq_post_power_on(host);
 
 	host->ios.clock = host->f_init;
 
@@ -1656,13 +1674,15 @@ void mmc_power_up(struct mmc_host *host, u32 ocr)
 	 * This delay must be at least 74 clock sizes, or 1 ms, or the
 	 * time required to reach a stable voltage.
 	 */
-	mmc_delay(10);
+	mmc_delay(host->ios.power_delay_ms);
 }
 
 void mmc_power_off(struct mmc_host *host)
 {
 	if (host->ios.power_mode == MMC_POWER_OFF)
 		return;
+
+	mmc_pwrseq_power_off(host);
 
 	host->ios.clock = 0;
 	host->ios.vdd = 0;
@@ -1833,11 +1853,9 @@ void mmc_init_erase(struct mmc_card *card)
 			card->pref_erase = 2 * 1024 * 1024 / 512;
 		else
 			card->pref_erase = 4 * 1024 * 1024 / 512;
-		if (card->pref_erase < card->erase_size) {
-			gmb();
+		if (card->pref_erase < card->erase_size)
 			card->pref_erase = card->erase_size;
-		} else {
-			gmb();
+		else {
 			sz = card->pref_erase % card->erase_size;
 			if (sz)
 				card->pref_erase += card->erase_size - sz;
@@ -1952,6 +1970,7 @@ static int mmc_do_erase(struct mmc_card *card, unsigned int from,
 	unsigned int qty = 0, busy_timeout = 0;
 	bool use_r1b_resp = false;
 	unsigned long timeout;
+	int loop_udelay=64, udelay_max=32768;
 	int err;
 
 	mmc_retune_hold(card->host);
@@ -2076,9 +2095,15 @@ static int mmc_do_erase(struct mmc_card *card, unsigned int from,
 			err =  -EIO;
 			goto out;
 		}
+		if ((cmd.resp[0] & R1_READY_FOR_DATA) &&
+		    R1_CURRENT_STATE(cmd.resp[0]) != R1_STATE_PRG)
+			break;
 
-	} while (!(cmd.resp[0] & R1_READY_FOR_DATA) ||
-		 (R1_CURRENT_STATE(cmd.resp[0]) == R1_STATE_PRG));
+		usleep_range(loop_udelay, loop_udelay*2);
+		if (loop_udelay < udelay_max)
+			loop_udelay *= 2;
+	} while (1);
+
 out:
 	mmc_retune_release(card->host);
 	return err;
@@ -2354,7 +2379,7 @@ unsigned int mmc_calc_max_discard(struct mmc_card *card)
 		return card->pref_erase;
 
 	max_discard = mmc_do_calc_max_discard(card, MMC_ERASE_ARG);
-	if (mmc_can_trim(card)) {
+	if (max_discard && mmc_can_trim(card)) {
 		max_trim = mmc_do_calc_max_discard(card, MMC_TRIM_ARG);
 		if (max_trim < max_discard)
 			max_discard = max_trim;
@@ -2405,6 +2430,8 @@ EXPORT_SYMBOL(mmc_set_blockcount);
 
 static void mmc_hw_reset_for_init(struct mmc_host *host)
 {
+	mmc_pwrseq_reset(host);
+
 	if (!(host->caps & MMC_CAP_HW_RESET) || !host->ops->hw_reset)
 		return;
 	host->ops->hw_reset(host);
@@ -2418,21 +2445,45 @@ int mmc_hw_reset(struct mmc_host *host)
 		return -EINVAL;
 
 	mmc_bus_get(host);
-	if (!host->bus_ops || host->bus_dead || !host->bus_ops->reset) {
+	if (!host->bus_ops || host->bus_dead || !host->bus_ops->hw_reset) {
 		mmc_bus_put(host);
 		return -EOPNOTSUPP;
 	}
 
-	ret = host->bus_ops->reset(host);
+	ret = host->bus_ops->hw_reset(host);
 	mmc_bus_put(host);
 
 	if (ret)
-		pr_warn("%s: tried to reset card, got error %d\n",
+		pr_warn("%s: tried to HW reset card, got error %d\n",
 			mmc_hostname(host), ret);
 
 	return ret;
 }
 EXPORT_SYMBOL(mmc_hw_reset);
+
+int mmc_sw_reset(struct mmc_host *host)
+{
+	int ret;
+
+	if (!host->card)
+		return -EINVAL;
+
+	mmc_bus_get(host);
+	if (!host->bus_ops || host->bus_dead || !host->bus_ops->sw_reset) {
+		mmc_bus_put(host);
+		return -EOPNOTSUPP;
+	}
+
+	ret = host->bus_ops->sw_reset(host);
+	mmc_bus_put(host);
+
+	if (ret)
+		pr_warn("%s: tried to SW reset card, got error %d\n",
+			mmc_hostname(host), ret);
+
+	return ret;
+}
+EXPORT_SYMBOL(mmc_sw_reset);
 
 static int mmc_rescan_try_freq(struct mmc_host *host, unsigned freq)
 {
@@ -2638,8 +2689,7 @@ void mmc_start_host(struct mmc_host *host)
 void mmc_stop_host(struct mmc_host *host)
 {
 	if (host->slot.cd_irq >= 0) {
-		if (host->slot.cd_wake_enabled)
-			disable_irq_wake(host->slot.cd_irq);
+		mmc_gpio_set_cd_wake(host, false);
 		disable_irq(host->slot.cd_irq);
 	}
 
@@ -2743,6 +2793,14 @@ static int mmc_pm_notify(struct notifier_block *notify_block,
 			err = host->bus_ops->pre_suspend(host);
 		if (!err)
 			break;
+
+		if (!mmc_card_is_removable(host)) {
+			dev_warn(mmc_dev(host),
+				 "pre_suspend failed for non-removable host: "
+				 "%d\n", err);
+			/* Avoid removing non-removable hosts */
+			break;
+		}
 
 		/* Calling bus_ops->remove() with a claimed host can deadlock */
 		host->bus_ops->remove(host);

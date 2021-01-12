@@ -19,12 +19,11 @@
 #include <asm/uv/uv_hub.h>
 #include <asm/uv/uv_bau.h>
 #include <asm/apic.h>
-#include <asm/idle.h>
 #include <asm/tsc.h>
 #include <asm/irq_vectors.h>
 #include <asm/timer.h>
 
-static struct bau_operations ops __read_mostly;
+static struct bau_operations ops __ro_after_init;
 
 /* timeouts in nanoseconds (indexed by UVH_AGING_PRESCALE_SEL urgency7 30:28) */
 static const int timeout_base_ns[] = {
@@ -300,7 +299,7 @@ static void bau_process_message(struct msg_desc *mdp, struct bau_control *bcp,
 		local_flush_tlb();
 		stat->d_alltlb++;
 	} else {
-		__flush_tlb_one(msg->address);
+		__flush_tlb_one_user(msg->address);
 		stat->d_onetlb++;
 	}
 	stat->d_requestee++;
@@ -431,7 +430,7 @@ static void reset_with_ipi(struct pnmask *distribution, struct bau_control *bcp)
 	struct reset_args reset_args;
 
 	reset_args.sender = sender;
-	cpus_clear(*mask);
+	cpumask_clear(mask);
 	/* find a single cpu for each uvhub in this distribution mask */
 	maskbits = sizeof(struct pnmask) * BITSPERBYTE;
 	/* each bit is a pnode relative to the partition base pnode */
@@ -441,7 +440,7 @@ static void reset_with_ipi(struct pnmask *distribution, struct bau_control *bcp)
 			continue;
 		apnode = pnode + bcp->partition_base_pnode;
 		cpu = pnode_to_first_cpu(apnode, smaster);
-		cpu_set(cpu, *mask);
+		cpumask_set_cpu(cpu, mask);
 	}
 
 	/* IPI all cpus; preemption is already disabled */
@@ -456,26 +455,28 @@ static void reset_with_ipi(struct pnmask *distribution, struct bau_control *bcp)
  */
 static inline unsigned long long cycles_2_ns(unsigned long long cyc)
 {
-	struct cyc2ns_data *data = cyc2ns_read_begin();
+	struct cyc2ns_data data;
 	unsigned long long ns;
 
-	ns = mul_u64_u32_shr(cyc, data->cyc2ns_mul, data->cyc2ns_shift);
+	cyc2ns_read_begin(&data);
+	ns = mul_u64_u32_shr(cyc, data.cyc2ns_mul, data.cyc2ns_shift);
+	cyc2ns_read_end();
 
-	cyc2ns_read_end(data);
 	return ns;
 }
 
 /*
  * The reverse of the above; converts a duration in ns to a duration in cycles.
- */ 
+ */
 static inline unsigned long long ns_2_cycles(unsigned long long ns)
 {
-	struct cyc2ns_data *data = cyc2ns_read_begin();
+	struct cyc2ns_data data;
 	unsigned long long cyc;
 
-	cyc = (ns << data->cyc2ns_shift) / data->cyc2ns_mul;
+	cyc2ns_read_begin(&data);
+	cyc = (ns << data.cyc2ns_shift) / data.cyc2ns_mul;
+	cyc2ns_read_end();
 
-	cyc2ns_read_end(data);
 	return cyc;
 }
 
@@ -582,31 +583,7 @@ static int uv1_wait_completion(struct bau_desc *bau_desc,
  */
 static unsigned long uv2_3_read_status(unsigned long offset, int rshft, int desc)
 {
-	unsigned long descriptor_status;
-
-	descriptor_status =
-		((read_lmmr(offset) >> rshft) & UV_ACT_STATUS_MASK) << 1;
-	return descriptor_status;
-}
-
-/*
- * Return whether the status of the descriptor that is normally used for this
- * cpu (the one indexed by its hub-relative cpu number) is busy.
- * The status of the original 32 descriptors is always reflected in the 64
- * bits of UVH_LB_BAU_SB_ACTIVATION_STATUS_0.
- * The bit provided by the activation_status_2 register is irrelevant to
- * the status if it is only being tested for busy or not busy.
- */
-int normal_busy(struct bau_control *bcp)
-{
-	int cpu = bcp->uvhub_cpu;
-	int mmr_offset;
-	int right_shift;
-
-	mmr_offset = UVH_LB_BAU_SB_ACTIVATION_STATUS_0;
-	right_shift = cpu * UV_ACT_STATUS_SIZE;
-	return (((((read_lmmr(mmr_offset) >> right_shift) &
-				UV_ACT_STATUS_MASK)) << 1) == UV2H_DESC_BUSY);
+	return ((read_lmmr(offset) >> rshft) & UV_ACT_STATUS_MASK) << 1;
 }
 
 /*
@@ -614,7 +591,7 @@ int normal_busy(struct bau_control *bcp)
  * of a hardware bug.
  * Workaround the bug.
  */
-int handle_uv2_busy(struct bau_control *bcp)
+static int handle_uv2_busy(struct bau_control *bcp)
 {
 	struct ptc_stats *stat = bcp->statp;
 
@@ -638,7 +615,7 @@ static int uv2_3_wait_completion(struct bau_desc *bau_desc,
 
 	/* spin on the status MMR, waiting for it to go idle */
 	while (descriptor_stat != UV2H_DESC_IDLE) {
-		if ((descriptor_stat == UV2H_DESC_SOURCE_TIMEOUT)) {
+		if (descriptor_stat == UV2H_DESC_SOURCE_TIMEOUT) {
 			/*
 			 * A h/w bug on the destination side may
 			 * have prevented the message being marked
@@ -919,8 +896,9 @@ static void handle_cmplt(int completion_status, struct bau_desc *bau_desc,
  * Returns 1 if it gives up entirely and the original cpu mask is to be
  * returned to the kernel.
  */
-int uv_flush_send_and_wait(struct cpumask *flush_mask, struct bau_control *bcp,
-	struct bau_desc *bau_desc)
+static int uv_flush_send_and_wait(struct cpumask *flush_mask,
+				  struct bau_control *bcp,
+				  struct bau_desc *bau_desc)
 {
 	int seq_number = 0;
 	int completion_stat = 0;
@@ -1125,11 +1103,9 @@ static int set_distrib_bits(struct cpumask *flush_mask, struct bau_control *bcp,
  * done.  The returned pointer is valid till preemption is re-enabled.
  */
 const struct cpumask *uv_flush_tlb_others(const struct cpumask *cpumask,
-						struct mm_struct *mm,
-						unsigned long start,
-						unsigned long end,
-						unsigned int cpu)
+					  const struct flush_tlb_info *info)
 {
+	unsigned int cpu = smp_processor_id();
 	int locals = 0, remotes = 0, hubs = 0;
 	struct bau_desc *bau_desc;
 	struct cpumask *flush_mask;
@@ -1172,7 +1148,7 @@ const struct cpumask *uv_flush_tlb_others(const struct cpumask *cpumask,
 	/* don't actually do a shootdown of the local cpu */
 	cpumask_andnot(flush_mask, cpumask, cpumask_of(cpu));
 
-	if (cpu_isset(cpu, *cpumask))
+	if (cpumask_test_cpu(cpu, cpumask))
 		stat->s_ntargself++;
 
 	bau_desc = bcp->descriptor_base;
@@ -1183,8 +1159,8 @@ const struct cpumask *uv_flush_tlb_others(const struct cpumask *cpumask,
 
 	record_send_statistics(stat, locals, hubs, remotes, bau_desc);
 
-	if (!end || (end - start) <= PAGE_SIZE)
-		address = start;
+	if (!info->end || (info->end - info->start) <= PAGE_SIZE)
+		address = info->start;
 	else
 		address = TLB_FLUSH_ALL;
 
@@ -1216,8 +1192,8 @@ const struct cpumask *uv_flush_tlb_others(const struct cpumask *cpumask,
  * Search the message queue for any 'other' unprocessed message with the
  * same software acknowledge resource bit vector as the 'msg' message.
  */
-struct bau_pq_entry *find_another_by_swack(struct bau_pq_entry *msg,
-					   struct bau_control *bcp)
+static struct bau_pq_entry *find_another_by_swack(struct bau_pq_entry *msg,
+						  struct bau_control *bcp)
 {
 	struct bau_pq_entry *msg_next = msg + 1;
 	unsigned char swack_vec = msg->swack_vec;
@@ -1309,6 +1285,7 @@ void uv_bau_message_interrupt(struct pt_regs *regs)
 	struct msg_desc msgdesc;
 
 	ack_APIC_irq();
+	kvm_set_cpu_l1tf_flush_l1d();
 	time_start = get_cycles();
 
 	bcp = &per_cpu(bau_control, smp_processor_id());
@@ -1427,20 +1404,18 @@ static int ptc_seq_show(struct seq_file *file, void *data)
 
 	cpu = *(loff_t *)data;
 	if (!cpu) {
-		seq_printf(file,
-		 "# cpu bauoff sent stime self locals remotes ncpus localhub ");
-		seq_printf(file,
-			"remotehub numuvhubs numuvhubs16 numuvhubs8 ");
-		seq_printf(file,
-			"numuvhubs4 numuvhubs2 numuvhubs1 dto snacks retries ");
-		seq_printf(file,
-			"rok resetp resett giveup sto bz throt disable ");
-		seq_printf(file,
-			"enable wars warshw warwaits enters ipidis plugged ");
-		seq_printf(file,
-			"ipiover glim cong swack recv rtime all one mult ");
-		seq_printf(file,
-			"none retry canc nocan reset rcan\n");
+		seq_puts(file,
+			 "# cpu bauoff sent stime self locals remotes ncpus localhub ");
+		seq_puts(file, "remotehub numuvhubs numuvhubs16 numuvhubs8 ");
+		seq_puts(file,
+			 "numuvhubs4 numuvhubs2 numuvhubs1 dto snacks retries ");
+		seq_puts(file,
+			 "rok resetp resett giveup sto bz throt disable ");
+		seq_puts(file,
+			 "enable wars warshw warwaits enters ipidis plugged ");
+		seq_puts(file,
+			 "ipiover glim cong swack recv rtime all one mult ");
+		seq_puts(file, "none retry canc nocan reset rcan\n");
 	}
 	if (cpu < num_possible_cpus() && cpu_online(cpu)) {
 		bcp = &per_cpu(bau_control, cpu);
@@ -2168,7 +2143,7 @@ static int __init init_per_cpu(int nuvhubs, int base_part_pnode)
 	if (is_uv3_hub() || is_uv2_hub() || is_uv1_hub())
 		timeout_us = calculate_destination_timeout();
 
-	vp = kmalloc(nuvhubs * sizeof(struct uvhub_desc), GFP_KERNEL);
+	vp = kmalloc_array(nuvhubs, sizeof(struct uvhub_desc), GFP_KERNEL);
 	uvhub_descs = (struct uvhub_desc *)vp;
 	memset(uvhub_descs, 0, nuvhubs * sizeof(struct uvhub_desc));
 	uvhub_mask = kzalloc((nuvhubs+7)/8, GFP_KERNEL);
@@ -2280,8 +2255,6 @@ static int __init uv_bau_init(void)
 		if (uv_blade_nr_possible_cpus(uvhub))
 			init_uvhub(uvhub, vector, uv_base_pnode);
 	}
-
-	alloc_intr_gate(vector, uv_bau_message_intr1);
 
 	for_each_possible_blade(uvhub) {
 		if (uv_blade_nr_possible_cpus(uvhub)) {

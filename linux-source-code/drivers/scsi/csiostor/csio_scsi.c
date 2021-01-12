@@ -152,28 +152,6 @@ csio_scsi_itnexus_loss_error(uint16_t error)
 	return 0;
 }
 
-static inline void
-csio_scsi_tag(struct scsi_cmnd *scmnd, uint8_t *tag, uint8_t hq,
-	      uint8_t oq, uint8_t sq)
-{
-	char stag[2];
-
-	if (scsi_populate_tag_msg(scmnd, stag)) {
-		switch (stag[0]) {
-		case HEAD_OF_QUEUE_TAG:
-			*tag = hq;
-			break;
-		case ORDERED_QUEUE_TAG:
-			*tag = oq;
-			break;
-		default:
-			*tag = sq;
-			break;
-		}
-	} else
-		*tag = 0;
-}
-
 /*
  * csio_scsi_fcp_cmnd - Frame the SCSI FCP command paylod.
  * @req: IO req structure.
@@ -192,11 +170,9 @@ csio_scsi_fcp_cmnd(struct csio_ioreq *req, void *addr)
 		int_to_scsilun(scmnd->device->lun, &fcp_cmnd->fc_lun);
 		fcp_cmnd->fc_tm_flags = 0;
 		fcp_cmnd->fc_cmdref = 0;
-		fcp_cmnd->fc_pri_ta = 0;
 
 		memcpy(fcp_cmnd->fc_cdb, scmnd->cmnd, 16);
-		csio_scsi_tag(scmnd, &fcp_cmnd->fc_pri_ta,
-			      FCP_PTA_HEADQ, FCP_PTA_ORDERED, FCP_PTA_SIMPLE);
+		fcp_cmnd->fc_pri_ta = FCP_PTA_SIMPLE;
 		fcp_cmnd->fc_dl = cpu_to_be32(scsi_bufflen(scmnd));
 
 		if (req->nsge)
@@ -1657,7 +1633,7 @@ csio_scsi_err_handler(struct csio_hw *hw, struct csio_ioreq *req)
 	case FW_SCSI_UNDER_FLOW_ERR:
 		csio_warn(hw,
 			  "Under-flow error,cmnd:0x%x expected"
-			  " len:0x%x resid:0x%x lun:0x%x ssn:0x%x\n",
+			  " len:0x%x resid:0x%x lun:0x%llx ssn:0x%x\n",
 			  cmnd->cmnd[0], scsi_bufflen(cmnd),
 			  scsi_get_resid(cmnd), cmnd->device->lun,
 			  rn->flowid);
@@ -1807,16 +1783,10 @@ csio_queuecommand(struct Scsi_Host *host, struct scsi_cmnd *cmnd)
 	int nsge = 0;
 	int rv = SCSI_MLQUEUE_HOST_BUSY, nr;
 	int retval;
-	int cpu;
 	struct csio_scsi_qset *sqset;
 	struct fc_rport *rport = starget_to_rport(scsi_target(cmnd->device));
 
-	if (!blk_rq_cpu_valid(cmnd->request))
-		cpu = smp_processor_id();
-	else
-		cpu = cmnd->request->cpu;
-
-	sqset = &hw->sqset[ln->portid][cpu];
+	sqset = &hw->sqset[ln->portid][blk_mq_rq_cpu(cmnd->request)];
 
 	nr = fc_remote_port_chkready(rport);
 	if (nr) {
@@ -1960,7 +1930,7 @@ csio_eh_abort_handler(struct scsi_cmnd *cmnd)
 
 	csio_dbg(hw,
 		 "Request to abort ioreq:%p cmd:%p cdb:%08llx"
-		 " ssni:0x%x lun:%d iq:0x%x\n",
+		 " ssni:0x%x lun:%llu iq:0x%x\n",
 		ioreq, cmnd, *((uint64_t *)cmnd->cmnd), rn->flowid,
 		cmnd->device->lun, csio_q_physiqid(hw, ioreq->iq_idx));
 
@@ -2017,13 +1987,13 @@ inval_scmnd:
 	/* FW successfully aborted the request */
 	if (host_byte(cmnd->result) == DID_REQUEUE) {
 		csio_info(hw,
-			"Aborted SCSI command to (%d:%d) tag %u\n",
+			"Aborted SCSI command to (%d:%llu) tag %u\n",
 			cmnd->device->id, cmnd->device->lun,
 			cmnd->request->tag);
 		return SUCCESS;
 	} else {
 		csio_info(hw,
-			"Failed to abort SCSI command, (%d:%d) tag %u\n",
+			"Failed to abort SCSI command, (%d:%llu) tag %u\n",
 			cmnd->device->id, cmnd->device->lun,
 			cmnd->request->tag);
 		return FAILED;
@@ -2102,13 +2072,13 @@ csio_eh_lun_reset_handler(struct scsi_cmnd *cmnd)
 	if (!rn)
 		goto fail;
 
-	csio_dbg(hw, "Request to reset LUN:%d (ssni:0x%x tgtid:%d)\n",
+	csio_dbg(hw, "Request to reset LUN:%llu (ssni:0x%x tgtid:%d)\n",
 		      cmnd->device->lun, rn->flowid, rn->scsi_id);
 
 	if (!csio_is_lnode_ready(ln)) {
 		csio_err(hw,
 			 "LUN reset cannot be issued on non-ready"
-			 " local node vnpi:0x%x (LUN:%d)\n",
+			 " local node vnpi:0x%x (LUN:%llu)\n",
 			 ln->vnp_flowid, cmnd->device->lun);
 		goto fail;
 	}
@@ -2128,7 +2098,7 @@ csio_eh_lun_reset_handler(struct scsi_cmnd *cmnd)
 	if (fc_remote_port_chkready(rn->rport)) {
 		csio_err(hw,
 			 "LUN reset cannot be issued on non-ready"
-			 " remote node ssni:0x%x (LUN:%d)\n",
+			 " remote node ssni:0x%x (LUN:%llu)\n",
 			 rn->flowid, cmnd->device->lun);
 		goto fail;
 	}
@@ -2170,7 +2140,7 @@ csio_eh_lun_reset_handler(struct scsi_cmnd *cmnd)
 	sld.level = CSIO_LEV_LUN;
 	sld.lnode = ioreq->lnode;
 	sld.rnode = ioreq->rnode;
-	sld.oslun = (uint64_t)cmnd->device->lun;
+	sld.oslun = cmnd->device->lun;
 
 	spin_lock_irqsave(&hw->lock, flags);
 	/* Kick off TM SM on the ioreq */
@@ -2192,7 +2162,7 @@ csio_eh_lun_reset_handler(struct scsi_cmnd *cmnd)
 
 	/* LUN reset timed-out */
 	if (((struct scsi_cmnd *)csio_scsi_cmnd(ioreq)) == cmnd) {
-		csio_err(hw, "LUN reset (%d:%d) timed out\n",
+		csio_err(hw, "LUN reset (%d:%llu) timed out\n",
 			 cmnd->device->id, cmnd->device->lun);
 
 		spin_lock_irq(&hw->lock);
@@ -2205,7 +2175,7 @@ csio_eh_lun_reset_handler(struct scsi_cmnd *cmnd)
 
 	/* LUN reset returned, check cached status */
 	if (cmnd->SCp.Status != FW_SUCCESS) {
-		csio_err(hw, "LUN reset failed (%d:%d), status: %d\n",
+		csio_err(hw, "LUN reset failed (%d:%llu), status: %d\n",
 			 cmnd->device->id, cmnd->device->lun, cmnd->SCp.Status);
 		goto fail;
 	}
@@ -2225,7 +2195,7 @@ csio_eh_lun_reset_handler(struct scsi_cmnd *cmnd)
 	/* Aborts may have timed out */
 	if (retval != 0) {
 		csio_err(hw,
-			 "Attempt to abort I/Os during LUN reset of %d"
+			 "Attempt to abort I/Os during LUN reset of %llu"
 			 " returned %d\n", cmnd->device->lun, retval);
 		/* Return I/Os back to active_q */
 		spin_lock_irq(&hw->lock);
@@ -2236,7 +2206,7 @@ csio_eh_lun_reset_handler(struct scsi_cmnd *cmnd)
 
 	CSIO_INC_STATS(rn, n_lun_rst);
 
-	csio_info(hw, "LUN reset occurred (%d:%d)\n",
+	csio_info(hw, "LUN reset occurred (%d:%llu)\n",
 		  cmnd->device->id, cmnd->device->lun);
 
 	return SUCCESS;
@@ -2264,11 +2234,7 @@ csio_slave_alloc(struct scsi_device *sdev)
 static int
 csio_slave_configure(struct scsi_device *sdev)
 {
-	if (sdev->tagged_supported)
-		scsi_activate_tcq(sdev, csio_lun_qdepth);
-	else
-		scsi_deactivate_tcq(sdev, csio_lun_qdepth);
-
+	scsi_change_queue_depth(sdev, csio_lun_qdepth);
 	return 0;
 }
 
@@ -2301,6 +2267,7 @@ struct scsi_host_template csio_fcoe_shost_template = {
 	.name			= CSIO_DRV_DESC,
 	.proc_name		= KBUILD_MODNAME,
 	.queuecommand		= csio_queuecommand,
+	.eh_timed_out		= fc_eh_timed_out,
 	.eh_abort_handler	= csio_eh_abort_handler,
 	.eh_device_reset_handler = csio_eh_lun_reset_handler,
 	.slave_alloc		= csio_slave_alloc,
@@ -2320,6 +2287,7 @@ struct scsi_host_template csio_fcoe_shost_vport_template = {
 	.name			= CSIO_DRV_DESC,
 	.proc_name		= KBUILD_MODNAME,
 	.queuecommand		= csio_queuecommand,
+	.eh_timed_out		= fc_eh_timed_out,
 	.eh_abort_handler	= csio_eh_abort_handler,
 	.eh_device_reset_handler = csio_eh_lun_reset_handler,
 	.slave_alloc		= csio_slave_alloc,
@@ -2474,7 +2442,7 @@ csio_scsim_init(struct csio_scsim *scm, struct csio_hw *hw)
 
 		/* Allocate Dma buffers for Response Payload */
 		dma_buf = &ioreq->dma_buf;
-		dma_buf->vaddr = pci_pool_alloc(hw->scsi_pci_pool, GFP_KERNEL,
+		dma_buf->vaddr = dma_pool_alloc(hw->scsi_dma_pool, GFP_KERNEL,
 						&dma_buf->paddr);
 		if (!dma_buf->vaddr) {
 			csio_err(hw,
@@ -2514,7 +2482,7 @@ free_ioreq:
 		ioreq = (struct csio_ioreq *)tmp;
 
 		dma_buf = &ioreq->dma_buf;
-		pci_pool_free(hw->scsi_pci_pool, dma_buf->vaddr,
+		dma_pool_free(hw->scsi_dma_pool, dma_buf->vaddr,
 			      dma_buf->paddr);
 
 		kfree(ioreq);
@@ -2545,7 +2513,7 @@ csio_scsim_exit(struct csio_scsim *scm)
 		ioreq = (struct csio_ioreq *)tmp;
 
 		dma_buf = &ioreq->dma_buf;
-		pci_pool_free(scm->hw->scsi_pci_pool, dma_buf->vaddr,
+		dma_pool_free(scm->hw->scsi_dma_pool, dma_buf->vaddr,
 			      dma_buf->paddr);
 
 		kfree(ioreq);

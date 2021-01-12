@@ -820,7 +820,7 @@ static void qedf_trace_io(struct qedf_rport *fcport, struct qedf_ioreq *io_req,
 	io_log->sg_count = scsi_sg_count(sc_cmd);
 	io_log->result = sc_cmd->result;
 	io_log->jiffies = jiffies;
-	io_log->refcount = atomic_read(&io_req->refcount.refcount);
+	io_log->refcount = kref_read(&io_req->refcount);
 
 	if (direction == QEDF_IO_TRACE_REQ) {
 		/* For requests we only care abot the submission CPU */
@@ -1159,12 +1159,6 @@ void qedf_scsi_completion(struct qedf_ctx *qedf, struct fcoe_cqe *cqe,
 		return;
 	}
 
-	if (!sc_cmd->request->special) {
-		QEDF_WARN(&(qedf->dbg_ctx), "request->special is NULL so "
-		    "request not valid, sc_cmd=%p.\n", sc_cmd);
-		return;
-	}
-
 	if (!sc_cmd->request->q) {
 		QEDF_WARN(&(qedf->dbg_ctx), "request->q is NULL so request "
 		   "is not valid, sc_cmd=%p.\n", sc_cmd);
@@ -1229,9 +1223,9 @@ void qedf_scsi_completion(struct qedf_ctx *qedf, struct fcoe_cqe *cqe,
 			/* Good I/O completion */
 			sc_cmd->result = DID_OK << 16;
 		} else {
-			refcount = atomic_read(&io_req->refcount.refcount);
+			refcount = kref_read(&io_req->refcount);
 			QEDF_INFO(&(qedf->dbg_ctx), QEDF_LOG_IO,
-			    "%d:0:%d:%d xid=0x%0x op=0x%02x "
+			    "%d:0:%d:%lld xid=0x%0x op=0x%02x "
 			    "lba=%02x%02x%02x%02x cdb_status=%d "
 			    "fcp_resid=0x%x refcount=%d.\n",
 			    qedf->lport->host->host_no, sc_cmd->device->id,
@@ -1377,8 +1371,8 @@ void qedf_scsi_done(struct qedf_ctx *qedf, struct qedf_ioreq *io_req,
 	qedf_unmap_sg_list(qedf, io_req);
 
 	sc_cmd->result = result << 16;
-	refcount = atomic_read(&io_req->refcount.refcount);
-	QEDF_INFO(&(qedf->dbg_ctx), QEDF_LOG_IO, "%d:0:%d:%d: Completing "
+	refcount = kref_read(&io_req->refcount);
+	QEDF_INFO(&(qedf->dbg_ctx), QEDF_LOG_IO, "%d:0:%d:%lld: Completing "
 	    "sc_cmd=%p result=0x%08x op=0x%02x lba=0x%02x%02x%02x%02x, "
 	    "allowed=%d retries=%d refcount=%d.\n",
 	    qedf->lport->host->host_no, sc_cmd->device->id,
@@ -1517,7 +1511,7 @@ static void qedf_flush_els_req(struct qedf_ctx *qedf,
 {
 	QEDF_INFO(&(qedf->dbg_ctx), QEDF_LOG_IO,
 	    "Flushing ELS request xid=0x%x refcount=%d.\n", els_req->xid,
-	    atomic_read(&els_req->refcount.refcount));
+	    kref_read(&els_req->refcount));
 
 	/*
 	 * Need to distinguish this from a timeout when calling the
@@ -1904,7 +1898,7 @@ int qedf_initiate_abts(struct qedf_ioreq *io_req, bool return_scsi_cmd_on_abts)
 	spin_unlock_irqrestore(&fcport->rport_lock, flags);
 
 drop_rdata_kref:
-	kref_put(&rdata->kref, lport->tt.rport_destroy);
+	kref_put(&rdata->kref, fc_rport_destroy);
 out:
 	return rc;
 }
@@ -2450,7 +2444,7 @@ int qedf_initiate_tmf(struct scsi_cmnd *sc_cmd, u8 tm_flags)
 	rc = qedf_execute_tmf(fcport, sc_cmd, tm_flags);
 
 tmf_err:
-	kref_put(&rdata->kref, lport->tt.rport_destroy);
+	kref_put(&rdata->kref, fc_rport_destroy);
 	return rc;
 }
 

@@ -32,6 +32,8 @@
 
 #include <linux/types.h>
 #include <linux/sched.h>
+#include <linux/sched/mm.h>
+#include <linux/sched/task.h>
 #include <linux/pid.h>
 #include <linux/slab.h>
 #include <linux/export.h>
@@ -163,9 +165,9 @@ static void ib_umem_notifier_invalidate_range_start(struct mmu_notifier *mn,
 		return;
 	}
 
-	rbt_ib_umem_for_each_in_range(&per_mm->umem_tree, start, end,
-				      invalidate_range_start_trampoline,
-				      NULL);
+	rbt_ib_umem_for_each_in_range(&per_mm->umem_tree, start,
+				      end,
+				      invalidate_range_start_trampoline, NULL);
 }
 
 static int invalidate_range_end_trampoline(struct ib_umem_odp *item, u64 start,
@@ -236,7 +238,7 @@ static struct ib_ucontext_per_mm *alloc_per_mm(struct ib_ucontext *ctx,
 
 	per_mm->context = ctx;
 	per_mm->mm = mm;
-	per_mm->umem_tree = RB_ROOT;
+	per_mm->umem_tree = RB_ROOT_CACHED;
 	init_rwsem(&per_mm->umem_rwsem);
 	per_mm->active = ctx->invalidate_range;
 
@@ -324,7 +326,7 @@ static void put_per_mm(struct ib_umem_odp *umem_odp)
 	per_mm->active = false;
 	up_write(&per_mm->umem_rwsem);
 
-	WARN_ON(!RB_EMPTY_ROOT(&per_mm->umem_tree));
+	WARN_ON(!RB_EMPTY_ROOT(&per_mm->umem_tree.rb_root));
 	mmu_notifier_unregister_no_release(&per_mm->mn, per_mm->mm);
 	put_pid(per_mm->tgid);
 	mmu_notifier_call_srcu(&per_mm->rcu, free_per_mm);
@@ -590,6 +592,7 @@ int ib_umem_odp_map_dma_pages(struct ib_umem_odp *umem_odp, u64 user_virt,
 	struct page       **local_page_list = NULL;
 	u64 page_mask, off;
 	int j, k, ret = 0, start_idx, npages = 0, page_shift;
+	unsigned int flags = 0;
 	phys_addr_t p = 0;
 
 	if (access_mask == 0)
@@ -615,10 +618,13 @@ int ib_umem_odp_map_dma_pages(struct ib_umem_odp *umem_odp, u64 user_virt,
 	 * mmget_not_zero will fail in this case.
 	 */
 	owning_process = get_pid_task(umem_odp->per_mm->tgid, PIDTYPE_PID);
-	if (WARN_ON(!mmget_not_zero(umem_odp->umem.owning_mm))) {
+	if (!owning_process || !mmget_not_zero(owning_mm)) {
 		ret = -EINVAL;
 		goto out_put_task;
 	}
+
+	if (access_mask & ODP_WRITE_ALLOWED_BIT)
+		flags |= FOLL_WRITE;
 
 	start_idx = (user_virt - ib_umem_start(umem)) >> page_shift;
 	k = start_idx;
@@ -638,12 +644,16 @@ int ib_umem_odp_map_dma_pages(struct ib_umem_odp *umem_odp, u64 user_virt,
 		 */
 		npages = get_user_pages_remote(owning_process, owning_mm,
 				user_virt, gup_num_pages,
-				access_mask & ODP_WRITE_ALLOWED_BIT,
-				0, local_page_list, NULL);
+				flags, local_page_list, NULL, NULL);
 		up_read(&owning_mm->mmap_sem);
 
-		if (npages < 0)
+		if (npages < 0) {
+			if (npages != -EAGAIN)
+				pr_warn("fail to get %zu user pages with error %d\n", gup_num_pages, npages);
+			else
+				pr_debug("fail to get %zu user pages with error %d\n", gup_num_pages, npages);
 			break;
+		}
 
 		bcnt -= min_t(size_t, npages << PAGE_SHIFT, bcnt);
 		mutex_lock(&umem_odp->umem_mutex);
@@ -661,8 +671,13 @@ int ib_umem_odp_map_dma_pages(struct ib_umem_odp *umem_odp, u64 user_virt,
 			ret = ib_umem_odp_map_dma_single_page(
 					umem_odp, k, local_page_list[j],
 					access_mask, current_seq);
-			if (ret < 0)
+			if (ret < 0) {
+				if (ret != -EAGAIN)
+					pr_warn("ib_umem_odp_map_dma_single_page failed with error %d\n", ret);
+				else
+					pr_debug("ib_umem_odp_map_dma_single_page failed with error %d\n", ret);
 				break;
+			}
 
 			p = page_to_phys(local_page_list[j]);
 			k++;
@@ -748,7 +763,7 @@ EXPORT_SYMBOL(ib_umem_odp_unmap_dma_pages);
 /* @last is not a part of the interval. See comment for function
  * node_last.
  */
-int rbt_ib_umem_for_each_in_range(struct rb_root *root,
+int rbt_ib_umem_for_each_in_range(struct rb_root_cached *root,
 				  u64 start, u64 last,
 				  umem_call_back cb,
 				  void *cookie)
@@ -771,7 +786,7 @@ int rbt_ib_umem_for_each_in_range(struct rb_root *root,
 }
 EXPORT_SYMBOL(rbt_ib_umem_for_each_in_range);
 
-struct ib_umem_odp *rbt_ib_umem_lookup(struct rb_root *root,
+struct ib_umem_odp *rbt_ib_umem_lookup(struct rb_root_cached *root,
 				       u64 addr, u64 length)
 {
 	struct umem_odp_node *node;

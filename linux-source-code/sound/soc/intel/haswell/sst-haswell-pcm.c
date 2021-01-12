@@ -24,6 +24,7 @@
 #include <sound/core.h>
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
+#include <sound/dmaengine_pcm.h>
 #include <sound/soc.h>
 #include <sound/tlv.h>
 #include <sound/compress_driver.h>
@@ -543,7 +544,7 @@ static int hsw_pcm_hw_params(struct snd_pcm_substream *substream,
 		dev_err(rtd->dev, "error: invalid DAI ID %d\n",
 			rtd->cpu_dai->id);
 		return -EINVAL;
-	};
+	}
 
 	ret = sst_hsw_stream_format(hsw, pcm_data->stream,
 		path_id, stream_type, SST_HSW_STREAM_FORMAT_PCM_FORMAT);
@@ -860,7 +861,7 @@ static int hsw_pcm_close(struct snd_pcm_substream *substream)
 		dev_dbg(rtd->dev, "error: free stream failed %d\n", ret);
 		goto out;
 	}
-	pcm_data->allocated = 0;
+	pcm_data->allocated = false;
 	pcm_data->stream = NULL;
 
 out:

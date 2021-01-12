@@ -510,7 +510,7 @@ at86rf230_async_state_delay(void *context)
 	case STATE_TRX_OFF:
 		switch (ctx->to_state) {
 		case STATE_RX_AACK_ON:
-			tim = ktime_set(0, c->t_off_to_aack * NSEC_PER_USEC);
+			tim = c->t_off_to_aack * NSEC_PER_USEC;
 			/* state change from TRX_OFF to RX_AACK_ON to do a
 			 * calibration, we need to reset the timeout for the
 			 * next one.
@@ -519,7 +519,7 @@ at86rf230_async_state_delay(void *context)
 			goto change;
 		case STATE_TX_ARET_ON:
 		case STATE_TX_ON:
-			tim = ktime_set(0, c->t_off_to_tx_on * NSEC_PER_USEC);
+			tim = c->t_off_to_tx_on * NSEC_PER_USEC;
 			/* state change from TRX_OFF to TX_ON or ARET_ON to do
 			 * a calibration, we need to reset the timeout for the
 			 * next one.
@@ -539,8 +539,7 @@ at86rf230_async_state_delay(void *context)
 			 * to TX_ON or TRX_OFF.
 			 */
 			if (!force) {
-				tim = ktime_set(0, (c->t_frame + c->t_p_ack) *
-						   NSEC_PER_USEC);
+				tim = (c->t_frame + c->t_p_ack) * NSEC_PER_USEC;
 				goto change;
 			}
 			break;
@@ -552,7 +551,7 @@ at86rf230_async_state_delay(void *context)
 	case STATE_P_ON:
 		switch (ctx->to_state) {
 		case STATE_TRX_OFF:
-			tim = ktime_set(0, c->t_reset_to_off * NSEC_PER_USEC);
+			tim = c->t_reset_to_off * NSEC_PER_USEC;
 			goto change;
 		default:
 			break;
@@ -724,7 +723,7 @@ at86rf230_rx_read_frame_complete(void *context)
 		return;
 	}
 
-	memcpy(skb_put(skb, len), buf + 2, len);
+	skb_put_data(skb, buf + 2, len);
 	ieee802154_rx_irqsafe(lp->hw, skb, lqi);
 	kfree(ctx);
 }
@@ -941,7 +940,7 @@ at86rf230_xmit(struct ieee802154_hw *hw, struct sk_buff *skb)
 static int
 at86rf230_ed(struct ieee802154_hw *hw, u8 *level)
 {
-	BUG_ON(!level);
+	WARN_ON(!level);
 	*level = 0xbe;
 	return 0;
 }
@@ -1122,8 +1121,7 @@ at86rf230_set_hw_addr_filt(struct ieee802154_hw *hw,
 	if (changed & IEEE802154_AFILT_SADDR_CHANGED) {
 		u16 addr = le16_to_cpu(filt->short_addr);
 
-		dev_vdbg(&lp->spi->dev,
-			 "at86rf230_set_hw_addr_filt called for saddr\n");
+		dev_vdbg(&lp->spi->dev, "%s called for saddr\n", __func__);
 		__at86rf230_write(lp, RG_SHORT_ADDR_0, addr);
 		__at86rf230_write(lp, RG_SHORT_ADDR_1, addr >> 8);
 	}
@@ -1131,8 +1129,7 @@ at86rf230_set_hw_addr_filt(struct ieee802154_hw *hw,
 	if (changed & IEEE802154_AFILT_PANID_CHANGED) {
 		u16 pan = le16_to_cpu(filt->pan_id);
 
-		dev_vdbg(&lp->spi->dev,
-			 "at86rf230_set_hw_addr_filt called for pan id\n");
+		dev_vdbg(&lp->spi->dev, "%s called for pan id\n", __func__);
 		__at86rf230_write(lp, RG_PAN_ID_0, pan);
 		__at86rf230_write(lp, RG_PAN_ID_1, pan >> 8);
 	}
@@ -1141,15 +1138,13 @@ at86rf230_set_hw_addr_filt(struct ieee802154_hw *hw,
 		u8 i, addr[8];
 
 		memcpy(addr, &filt->ieee_addr, 8);
-		dev_vdbg(&lp->spi->dev,
-			 "at86rf230_set_hw_addr_filt called for IEEE addr\n");
+		dev_vdbg(&lp->spi->dev, "%s called for IEEE addr\n", __func__);
 		for (i = 0; i < 8; i++)
 			__at86rf230_write(lp, RG_IEEE_ADDR_0 + i, addr[i]);
 	}
 
 	if (changed & IEEE802154_AFILT_PANC_CHANGED) {
-		dev_vdbg(&lp->spi->dev,
-			 "at86rf230_set_hw_addr_filt called for panc change\n");
+		dev_vdbg(&lp->spi->dev, "%s called for panc change\n", __func__);
 		if (filt->pan_coord)
 			at86rf230_write_subreg(lp, SR_AACK_I_AM_COORD, 1);
 		else
@@ -1252,7 +1247,6 @@ at86rf230_set_cca_mode(struct ieee802154_hw *hw,
 
 	return at86rf230_write_subreg(lp, SR_CCA_MODE, val);
 }
-
 
 static int
 at86rf230_set_cca_ed_level(struct ieee802154_hw *hw, s32 mbm)
@@ -1662,7 +1656,7 @@ static int at86rf230_debugfs_init(struct at86rf230_local *lp)
 	if (!at86rf230_debugfs_root)
 		return -ENOMEM;
 
-	stats = debugfs_create_file("trac_stats", S_IRUGO,
+	stats = debugfs_create_file("trac_stats", 0444,
 				    at86rf230_debugfs_root, lp,
 				    &at86rf230_stats_fops);
 	if (!stats)

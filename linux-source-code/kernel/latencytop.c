@@ -55,6 +55,8 @@
 #include <linux/latencytop.h>
 #include <linux/export.h>
 #include <linux/sched.h>
+#include <linux/sched/debug.h>
+#include <linux/sched/stat.h>
 #include <linux/list.h>
 #include <linux/stacktrace.h>
 
@@ -88,7 +90,8 @@ static void clear_global_latency_tracing(void)
 }
 
 static void __sched
-account_global_scheduler_latency(struct task_struct *tsk, struct latency_record *lat)
+account_global_scheduler_latency(struct task_struct *tsk,
+				 struct latency_record *lat)
 {
 	int firstnonnull = MAXLR + 1;
 	int i;
@@ -255,7 +258,7 @@ static int lstats_show(struct seq_file *m, void *v)
 					break;
 				seq_printf(m, " %ps", (void *)bt);
 			}
-			seq_printf(m, "\n");
+			seq_puts(m, "\n");
 		}
 	}
 	return 0;

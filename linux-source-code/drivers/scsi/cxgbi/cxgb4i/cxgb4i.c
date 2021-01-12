@@ -60,7 +60,7 @@ MODULE_PARM_DESC(dbg_level, "Debug flag (default=0)");
 #define CXGB4I_DEFAULT_10G_RCV_WIN (256 * 1024)
 static int cxgb4i_rcv_win = -1;
 module_param(cxgb4i_rcv_win, int, 0644);
-MODULE_PARM_DESC(cxgb4i_rcv_win, "TCP reveive window in bytes");
+MODULE_PARM_DESC(cxgb4i_rcv_win, "TCP receive window in bytes");
 
 #define CXGB4I_DEFAULT_10G_SND_WIN (128 * 1024)
 static int cxgb4i_snd_win = -1;
@@ -104,16 +104,18 @@ static struct scsi_host_template cxgb4i_host_template = {
 	.proc_name	= DRV_MODULE_NAME,
 	.can_queue	= CXGB4I_SCSI_HOST_QDEPTH,
 	.queuecommand	= iscsi_queuecommand,
-	.change_queue_depth = iscsi_change_queue_depth,
+	.change_queue_depth = scsi_change_queue_depth,
 	.sg_tablesize	= SG_ALL,
 	.max_sectors	= 0xFFFF,
 	.cmd_per_lun	= ISCSI_DEF_CMD_PER_LUN,
+	.eh_timed_out	= iscsi_eh_cmd_timed_out,
 	.eh_abort_handler = iscsi_eh_abort,
 	.eh_device_reset_handler = iscsi_eh_device_reset,
 	.eh_target_reset_handler = iscsi_eh_recover_target,
 	.target_alloc	= iscsi_target_alloc,
 	.use_clustering	= DISABLE_CLUSTERING,
 	.this_id	= -1,
+	.track_queue_depth = 1,
 };
 
 static struct iscsi_transport cxgb4i_iscsi_transport = {
@@ -617,9 +619,9 @@ static inline int send_tx_flowc_wr(struct cxgbi_sock *csk)
 	skb = alloc_wr(flowclen, 0, GFP_ATOMIC);
 	flowc = (struct fw_flowc_wr *)skb->head;
 	flowc->op_to_nparams =
-		htonl(FW_WR_OP_V(FW_FLOWC_WR) | FW_FLOWC_WR_NPARAMS_V(8));
+		htonl(FW_WR_OP_V(FW_FLOWC_WR) | FW_FLOWC_WR_NPARAMS_V(nparams));
 	flowc->flowid_len16 =
-		htonl(FW_WR_LEN16_V(DIV_ROUND_UP(72, 16)) | FW_WR_FLOWID_V(csk->tid));
+		htonl(FW_WR_LEN16_V(flowclen16) | FW_WR_FLOWID_V(csk->tid));
 	flowc->mnemval[0].mnemonic = FW_FLOWC_MNEM_PFNVFN;
 	flowc->mnemval[0].val = htonl(csk->cdev->pfvf);
 	flowc->mnemval[1].mnemonic = FW_FLOWC_MNEM_CH;
@@ -992,8 +994,8 @@ static void do_act_open_rpl(struct cxgbi_device *cdev, struct sk_buff *skb)
 	spin_lock_bh(&csk->lock);
 
 	if (status == CPL_ERR_CONN_EXIST &&
-	    csk->retry_timer.function != (TIMER_FUNC_TYPE)csk_act_open_retry_timer) {
-		csk->retry_timer.function = (TIMER_FUNC_TYPE)csk_act_open_retry_timer;
+	    csk->retry_timer.function != csk_act_open_retry_timer) {
+		csk->retry_timer.function = csk_act_open_retry_timer;
 		mod_timer(&csk->retry_timer, jiffies + HZ / 2);
 	} else
 		cxgbi_sock_fail_act_open(csk,
@@ -1720,7 +1722,7 @@ static int init_act_open(struct cxgbi_sock *csk)
 	csk->atid = cxgb4_alloc_atid(lldi->tids, csk);
 	if (csk->atid < 0) {
 		pr_err("%s, NO atid available.\n", ndev->name);
-		goto rel_resource;
+		goto rel_resource_without_clip;
 	}
 	cxgbi_sock_set_flag(csk, CTPF_HAS_ATID);
 	cxgbi_sock_get(csk);

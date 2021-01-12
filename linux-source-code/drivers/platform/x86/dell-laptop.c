@@ -29,13 +29,16 @@
 #include <linux/mm.h>
 #include <linux/i8042.h>
 #include <linux/debugfs.h>
+#include <linux/dell-led.h>
 #include <linux/seq_file.h>
+#include <acpi/video.h>
 #include "dell-rbtn.h"
 #include "dell-smbios.h"
 
 struct quirk_entry {
 	bool touchpad_led;
 	bool kbd_led_levels_off_1;
+	bool kbd_missing_ac_tag;
 
 	bool needs_kbd_timeouts;
 	/*
@@ -66,6 +69,10 @@ static struct quirk_entry quirk_dell_xps13_9333 = {
 	.kbd_timeouts = { 0, 5, 15, 60, 5 * 60, 15 * 60, -1 },
 };
 
+static struct quirk_entry quirk_dell_xps13_9370 = {
+	.kbd_missing_ac_tag = true,
+};
+
 static struct quirk_entry quirk_dell_latitude_e6410 = {
 	.kbd_led_levels_off_1 = true,
 };
@@ -73,7 +80,6 @@ static struct quirk_entry quirk_dell_latitude_e6410 = {
 static struct platform_driver platform_driver = {
 	.driver = {
 		.name = "dell-laptop",
-		.owner = THIS_MODULE,
 	}
 };
 
@@ -105,6 +111,24 @@ static const struct dmi_system_id dell_device_table[] __initconst = {
 		.matches = {
 			DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
 			DMI_MATCH(DMI_CHASSIS_TYPE, "10"), /*Notebook*/
+		},
+	},
+	{
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
+			DMI_MATCH(DMI_CHASSIS_TYPE, "30"), /*Tablet*/
+		},
+	},
+	{
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
+			DMI_MATCH(DMI_CHASSIS_TYPE, "31"), /*Convertible*/
+		},
+	},
+	{
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
+			DMI_MATCH(DMI_CHASSIS_TYPE, "32"), /*Detachable*/
 		},
 	},
 	{
@@ -271,6 +295,15 @@ static const struct dmi_system_id dell_quirks[] __initconst = {
 			DMI_MATCH(DMI_PRODUCT_NAME, "XPS13 9333"),
 		},
 		.driver_data = &quirk_dell_xps13_9333,
+	},
+	{
+		.callback = dmi_matched,
+		.ident = "Dell XPS 13 9370",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
+			DMI_MATCH(DMI_PRODUCT_NAME, "XPS 13 9370"),
+		},
+		.driver_data = &quirk_dell_xps13_9370,
 	},
 	{
 		.callback = dmi_matched,
@@ -599,19 +632,7 @@ static int dell_debugfs_show(struct seq_file *s, void *data)
 
 	return 0;
 }
-
-static int dell_debugfs_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, dell_debugfs_show, inode->i_private);
-}
-
-static const struct file_operations dell_debugfs_fops = {
-	.owner = THIS_MODULE,
-	.open = dell_debugfs_open,
-	.read = seq_read,
-	.llseek = seq_lseek,
-	.release = single_release,
-};
+DEFINE_SHOW_ATTRIBUTE(dell_debugfs);
 
 static void dell_update_rfkill(struct work_struct *ignored)
 {
@@ -654,7 +675,7 @@ static bool dell_laptop_i8042_filter(unsigned char data, unsigned char str,
 {
 	static bool extended;
 
-	if (str & 0x20)
+	if (str & I8042_STR_AUXDATA)
 		return false;
 
 	if (unlikely(data == 0xe0)) {
@@ -1147,6 +1168,8 @@ static u8 kbd_previous_level;
 static u8 kbd_previous_mode_bit;
 
 static bool kbd_led_present;
+static DEFINE_MUTEX(kbd_led_mutex);
+static enum led_brightness kbd_led_level;
 
 /*
  * NOTE: there are three ways to set the keyboard backlight level.
@@ -1392,7 +1415,8 @@ static inline int kbd_init_info(void)
 	 *       timeout value which is shared for both battery and AC power
 	 *       settings. So do not try to set AC values on old models.
 	 */
-	if (dell_smbios_find_token(KBD_LED_AC_TOKEN))
+	if ((quirks && quirks->kbd_missing_ac_tag) ||
+	    dell_smbios_find_token(KBD_LED_AC_TOKEN))
 		kbd_timeout_ac_supported = true;
 
 	kbd_get_state(&state);
@@ -1573,9 +1597,11 @@ static ssize_t kbd_led_timeout_store(struct device *dev,
 		}
 	}
 
+	mutex_lock(&kbd_led_mutex);
+
 	ret = kbd_get_state(&state);
 	if (ret)
-		return ret;
+		goto out;
 
 	new_state = state;
 
@@ -1589,9 +1615,12 @@ static ssize_t kbd_led_timeout_store(struct device *dev,
 
 	ret = kbd_set_state_safe(&new_state, &state);
 	if (ret)
-		return ret;
+		goto out;
 
-	return count;
+	ret = count;
+out:
+	mutex_unlock(&kbd_led_mutex);
+	return ret;
 }
 
 static ssize_t kbd_led_timeout_show(struct device *dev,
@@ -1661,9 +1690,11 @@ static ssize_t kbd_led_triggers_store(struct device *dev,
 	if (trigger[0] != '+' && trigger[0] != '-')
 		return -EINVAL;
 
+	mutex_lock(&kbd_led_mutex);
+
 	ret = kbd_get_state(&state);
 	if (ret)
-		return ret;
+		goto out;
 
 	if (kbd_triggers_supported)
 		triggers_enabled = kbd_is_trigger_mode_bit(state.mode_bit);
@@ -1677,18 +1708,24 @@ static ssize_t kbd_led_triggers_store(struct device *dev,
 			if (strcmp(trigger+1, kbd_led_triggers[i]) != 0)
 				continue;
 			if (trigger[0] == '+' &&
-			    triggers_enabled && (state.triggers & BIT(i)))
-				return count;
+			    triggers_enabled && (state.triggers & BIT(i))) {
+				ret = count;
+				goto out;
+			}
 			if (trigger[0] == '-' &&
-			    (!triggers_enabled || !(state.triggers & BIT(i))))
-				return count;
+			    (!triggers_enabled || !(state.triggers & BIT(i)))) {
+				ret = count;
+				goto out;
+			}
 			trigger_bit = i;
 			break;
 		}
 	}
 
-	if (trigger_bit == -1)
-		return -EINVAL;
+	if (trigger_bit == -1) {
+		ret = -EINVAL;
+		goto out;
+	}
 
 	new_state = state;
 	if (trigger[0] == '+')
@@ -1704,22 +1741,29 @@ static ssize_t kbd_led_triggers_store(struct device *dev,
 			new_state.triggers &= ~BIT(2);
 	}
 	if ((kbd_info.triggers & new_state.triggers) !=
-	    new_state.triggers)
-		return -EINVAL;
+	    new_state.triggers) {
+		ret = -EINVAL;
+		goto out;
+	}
 	if (new_state.triggers && !triggers_enabled) {
 		new_state.mode_bit = KBD_MODE_BIT_TRIGGER;
 		kbd_set_level(&new_state, kbd_previous_level);
 	} else if (new_state.triggers == 0) {
 		kbd_set_level(&new_state, 0);
 	}
-	if (!(kbd_info.modes & BIT(new_state.mode_bit)))
-		return -EINVAL;
+	if (!(kbd_info.modes & BIT(new_state.mode_bit))) {
+		ret = -EINVAL;
+		goto out;
+	}
 	ret = kbd_set_state_safe(&new_state, &state);
 	if (ret)
-		return ret;
+		goto out;
 	if (new_state.mode_bit != KBD_MODE_BIT_OFF)
 		kbd_previous_mode_bit = new_state.mode_bit;
-	return count;
+	ret = count;
+out:
+	mutex_unlock(&kbd_led_mutex);
+	return ret;
 }
 
 static ssize_t kbd_led_triggers_show(struct device *dev,
@@ -1776,12 +1820,16 @@ static ssize_t kbd_led_als_enabled_store(struct device *dev,
 	if (ret)
 		return ret;
 
+	mutex_lock(&kbd_led_mutex);
+
 	ret = kbd_get_state(&state);
 	if (ret)
-		return ret;
+		goto out;
 
-	if (enable == kbd_is_als_mode_bit(state.mode_bit))
-		return count;
+	if (enable == kbd_is_als_mode_bit(state.mode_bit)) {
+		ret = count;
+		goto out;
+	}
 
 	new_state = state;
 
@@ -1801,15 +1849,20 @@ static ssize_t kbd_led_als_enabled_store(struct device *dev,
 			new_state.mode_bit = KBD_MODE_BIT_ON;
 		}
 	}
-	if (!(kbd_info.modes & BIT(new_state.mode_bit)))
-		return -EINVAL;
+	if (!(kbd_info.modes & BIT(new_state.mode_bit)))  {
+		ret = -EINVAL;
+		goto out;
+	}
 
 	ret = kbd_set_state_safe(&new_state, &state);
 	if (ret)
-		return ret;
+		goto out;
 	kbd_previous_mode_bit = new_state.mode_bit;
 
-	return count;
+	ret = count;
+out:
+	mutex_unlock(&kbd_led_mutex);
+	return ret;
 }
 
 static ssize_t kbd_led_als_enabled_show(struct device *dev,
@@ -1844,18 +1897,23 @@ static ssize_t kbd_led_als_setting_store(struct device *dev,
 	if (ret)
 		return ret;
 
+	mutex_lock(&kbd_led_mutex);
+
 	ret = kbd_get_state(&state);
 	if (ret)
-		return ret;
+		goto out;
 
 	new_state = state;
 	new_state.als_setting = setting;
 
 	ret = kbd_set_state_safe(&new_state, &state);
 	if (ret)
-		return ret;
+		goto out;
 
-	return count;
+	ret = count;
+out:
+	mutex_unlock(&kbd_led_mutex);
+	return ret;
 }
 
 static ssize_t kbd_led_als_setting_show(struct device *dev,
@@ -1932,44 +1990,58 @@ static enum led_brightness kbd_led_level_get(struct led_classdev *led_cdev)
 	return 0;
 }
 
-static void kbd_led_level_set(struct led_classdev *led_cdev,
-			      enum led_brightness value)
+static int kbd_led_level_set(struct led_classdev *led_cdev,
+			     enum led_brightness value)
 {
+	enum led_brightness new_value = value;
 	struct kbd_state state;
 	struct kbd_state new_state;
 	u16 num;
+	int ret;
+
+	mutex_lock(&kbd_led_mutex);
 
 	if (kbd_get_max_level()) {
-		if (kbd_get_state(&state))
-			return;
+		ret = kbd_get_state(&state);
+		if (ret)
+			goto out;
 		new_state = state;
-		if (kbd_set_level(&new_state, value))
-			return;
-		kbd_set_state_safe(&new_state, &state);
-		return;
-	}
-
-	if (kbd_get_valid_token_counts()) {
+		ret = kbd_set_level(&new_state, value);
+		if (ret)
+			goto out;
+		ret = kbd_set_state_safe(&new_state, &state);
+	} else if (kbd_get_valid_token_counts()) {
 		for (num = kbd_token_bits; num != 0 && value > 0; --value)
 			num &= num - 1; /* clear the first bit set */
 		if (num == 0)
-			return;
-		kbd_set_token_bit(ffs(num) - 1);
-		return;
+			ret = 0;
+		else
+			ret = kbd_set_token_bit(ffs(num) - 1);
+	} else {
+		pr_warn("Keyboard brightness level control not supported\n");
+		ret = -ENXIO;
 	}
 
-	pr_warn("Keyboard brightness level control not supported\n");
+out:
+	if (ret == 0)
+		kbd_led_level = new_value;
+
+	mutex_unlock(&kbd_led_mutex);
+	return ret;
 }
 
 static struct led_classdev kbd_led = {
 	.name           = "dell::kbd_backlight",
-	.brightness_set = kbd_led_level_set,
+	.flags		= LED_BRIGHT_HW_CHANGED,
+	.brightness_set_blocking = kbd_led_level_set,
 	.brightness_get = kbd_led_level_get,
 	.groups         = kbd_led_groups,
 };
 
 static int __init kbd_led_init(struct device *dev)
 {
+	int ret;
+
 	kbd_init();
 	if (!kbd_led_present)
 		return -ENODEV;
@@ -1981,7 +2053,14 @@ static int __init kbd_led_init(struct device *dev)
 		if (kbd_led.max_brightness)
 			kbd_led.max_brightness--;
 	}
-	return led_classdev_register(dev, &kbd_led);
+
+	kbd_led_level = kbd_led_level_get(NULL);
+
+	ret = led_classdev_register(dev, &kbd_led);
+	if (ret)
+		kbd_led_present = false;
+
+	return ret;
 }
 
 static void brightness_set_exit(struct led_classdev *led_cdev,
@@ -1997,6 +2076,77 @@ static void kbd_led_exit(void)
 	kbd_led.brightness_set = brightness_set_exit;
 	led_classdev_unregister(&kbd_led);
 }
+
+static int dell_laptop_notifier_call(struct notifier_block *nb,
+				     unsigned long action, void *data)
+{
+	bool changed = false;
+	enum led_brightness new_kbd_led_level;
+
+	switch (action) {
+	case DELL_LAPTOP_KBD_BACKLIGHT_BRIGHTNESS_CHANGED:
+		if (!kbd_led_present)
+			break;
+
+		mutex_lock(&kbd_led_mutex);
+		new_kbd_led_level = kbd_led_level_get(&kbd_led);
+		if (kbd_led_level != new_kbd_led_level) {
+			kbd_led_level = new_kbd_led_level;
+			changed = true;
+		}
+		mutex_unlock(&kbd_led_mutex);
+
+		if (changed)
+			led_classdev_notify_brightness_hw_changed(&kbd_led,
+								kbd_led_level);
+		break;
+	}
+
+	return NOTIFY_OK;
+}
+
+static struct notifier_block dell_laptop_notifier = {
+	.notifier_call = dell_laptop_notifier_call,
+};
+
+int dell_micmute_led_set(int state)
+{
+	struct calling_interface_buffer buffer;
+	struct calling_interface_token *token;
+
+	if (state == 0)
+		token = dell_smbios_find_token(GLOBAL_MIC_MUTE_DISABLE);
+	else if (state == 1)
+		token = dell_smbios_find_token(GLOBAL_MIC_MUTE_ENABLE);
+	else
+		return -EINVAL;
+
+	if (!token)
+		return -ENODEV;
+
+	dell_fill_request(&buffer, token->location, token->value, 0, 0);
+	dell_send_request(&buffer, CLASS_TOKEN_WRITE, SELECT_TOKEN_STD);
+
+	return state;
+}
+EXPORT_SYMBOL_GPL(dell_micmute_led_set);
+
+static int micmute_led_set(struct led_classdev *led_cdev,
+			   enum led_brightness brightness)
+{
+	int state = brightness != LED_OFF;
+	int err;
+
+	err = dell_micmute_led_set(state);
+	return err < 0 ? err : 0;
+}
+
+static struct led_classdev micmute_led_cdev = {
+	.name = "platform::micmute",
+	.max_brightness = 1,
+	.brightness_set_blocking = micmute_led_set,
+	.default_trigger = "audio-micmute",
+};
 
 static int __init dell_init(void)
 {
@@ -2040,13 +2190,15 @@ static int __init dell_init(void)
 		debugfs_create_file("rfkill", 0444, dell_laptop_dir, NULL,
 				    &dell_debugfs_fops);
 
-#ifdef CONFIG_ACPI
-	/* In the event of an ACPI backlight being available, don't
-	 * register the platform controller.
-	 */
-	if (acpi_video_backlight_support())
+	dell_laptop_register_notifier(&dell_laptop_notifier);
+
+	micmute_led_cdev.brightness = ledtrig_audio_get(LED_AUDIO_MICMUTE);
+	ret = led_classdev_register(&platform_device->dev, &micmute_led_cdev);
+	if (ret < 0)
+		goto fail_led;
+
+	if (acpi_video_get_backlight_type() != acpi_backlight_vendor)
 		return 0;
-#endif
 
 	token = dell_smbios_find_token(BRIGHTNESS_TOKEN);
 	if (token) {
@@ -2055,7 +2207,7 @@ static int __init dell_init(void)
 		dell_fill_request(&buffer, token->location, 0, 0, 0);
 		ret = dell_send_request(&buffer,
 					CLASS_TOKEN_READ, SELECT_TOKEN_AC);
-		if (ret)
+		if (ret == 0)
 			max_intensity = buffer.output[3];
 	}
 
@@ -2078,12 +2230,20 @@ static int __init dell_init(void)
 
 		dell_backlight_device->props.brightness =
 			dell_get_intensity(dell_backlight_device);
+		if (dell_backlight_device->props.brightness < 0) {
+			ret = dell_backlight_device->props.brightness;
+			goto fail_get_brightness;
+		}
 		backlight_update_status(dell_backlight_device);
 	}
 
 	return 0;
 
+fail_get_brightness:
+	backlight_device_unregister(dell_backlight_device);
 fail_backlight:
+	led_classdev_unregister(&micmute_led_cdev);
+fail_led:
 	dell_cleanup_rfkill();
 fail_rfkill:
 	platform_device_del(platform_device);
@@ -2097,11 +2257,13 @@ fail_platform_driver:
 
 static void __exit dell_exit(void)
 {
+	dell_laptop_unregister_notifier(&dell_laptop_notifier);
 	debugfs_remove_recursive(dell_laptop_dir);
 	if (quirks && quirks->touchpad_led)
 		touchpad_led_exit();
 	kbd_led_exit();
 	backlight_device_unregister(dell_backlight_device);
+	led_classdev_unregister(&micmute_led_cdev);
 	dell_cleanup_rfkill();
 	if (platform_device) {
 		platform_device_unregister(platform_device);

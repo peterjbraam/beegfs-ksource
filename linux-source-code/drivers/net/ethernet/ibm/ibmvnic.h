@@ -27,7 +27,7 @@
 /**************************************************************************/
 
 #define IBMVNIC_NAME		"ibmvnic"
-#define IBMVNIC_DRIVER_VERSION	"1.0"
+#define IBMVNIC_DRIVER_VERSION	"1.0.1"
 #define IBMVNIC_INVALID_MAP	-1
 #define IBMVNIC_STATS_TIMEOUT	1
 #define IBMVNIC_INIT_FAILED	2
@@ -858,6 +858,7 @@ struct ibmvnic_crq_queue {
 	dma_addr_t msg_token;
 	spinlock_t lock;
 	bool active;
+	char name[32];
 };
 
 union sub_crq {
@@ -884,6 +885,7 @@ struct ibmvnic_sub_crq_queue {
 	struct sk_buff *rx_skb_top;
 	struct ibmvnic_adapter *adapter;
 	atomic_t used;
+	char name[32];
 };
 
 struct ibmvnic_long_term_buff {

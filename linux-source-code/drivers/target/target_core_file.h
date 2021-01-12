@@ -1,7 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef TARGET_CORE_FILE_H
 #define TARGET_CORE_FILE_H
 
-#include <asm/page.h>
+#include <target/target_core_base.h>
 
 #define FD_VERSION		"4.0"
 
@@ -13,7 +14,7 @@
 /*
  * Limited by the number of iovecs (2048) per vfs_[writev,readv] call
  */
-#define FD_MAX_BYTES		(UIO_MAXIOV * PAGE_SIZE)
+#define FD_MAX_BYTES		8388608
 
 #define RRF_EMULATE_CDB		0x01
 #define RRF_GOT_LBA		0x02
@@ -21,6 +22,7 @@
 #define FBDF_HAS_PATH		0x01
 #define FBDF_HAS_SIZE		0x02
 #define FDBD_HAS_BUFFERED_IO_WCE 0x04
+#define FDBD_HAS_ASYNC_IO	 0x08
 #define FDBD_FORMAT_UNIT_SIZE	2048
 
 struct fd_dev {

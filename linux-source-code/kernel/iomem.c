@@ -70,7 +70,8 @@ static void *try_ram_remap(resource_size_t offset, size_t size,
  */
 void *memremap(resource_size_t offset, size_t size, unsigned long flags)
 {
-	int is_ram = region_intersects_ram(offset, size);
+	int is_ram = region_intersects(offset, size,
+				       IORESOURCE_SYSTEM_RAM, IORES_DESC_NONE);
 	void *addr = NULL;
 
 	if (!flags)
@@ -109,7 +110,7 @@ void *memremap(resource_size_t offset, size_t size, unsigned long flags)
 	}
 
 	if (!addr && (flags & MEMREMAP_WT))
-		addr = ioremap_nocache(offset, size);
+		addr = ioremap_wt(offset, size);
 
 	if (!addr && (flags & MEMREMAP_WC))
 		addr = ioremap_wc(offset, size);

@@ -24,8 +24,9 @@
 #define NHLT_ACPI_HEADER_SIG	"NHLT"
 
 /* Unique identification for getting NHLT blobs */
-static u8 OSC_UUID[16] = {0x6E, 0x88, 0x9F, 0xA6, 0xEB, 0x6C, 0x94, 0x45,
-				0xA4, 0x1F, 0x7B, 0x5D, 0xCE, 0x24, 0xC5, 0x53};
+static guid_t osc_guid =
+	GUID_INIT(0xA69F886E, 0x6CEB, 0x4594,
+		  0xA4, 0x1F, 0x7B, 0x5D, 0xCE, 0x24, 0xC5, 0x53);
 
 
 struct nhlt_acpi_table *skl_nhlt_init(struct device *dev)
@@ -41,11 +42,13 @@ struct nhlt_acpi_table *skl_nhlt_init(struct device *dev)
 		return NULL;
 	}
 
-	obj = acpi_evaluate_dsm(handle, OSC_UUID, 1, 1, NULL);
+	obj = acpi_evaluate_dsm(handle, &osc_guid, 1, 1, NULL);
 	if (obj && obj->type == ACPI_TYPE_BUFFER) {
 		nhlt_ptr = (struct nhlt_resource_desc  *)obj->buffer.pointer;
-		nhlt_table = (struct nhlt_acpi_table *)
-				ioremap_cache(nhlt_ptr->min_addr, nhlt_ptr->length);
+		if (nhlt_ptr->length)
+			nhlt_table = (struct nhlt_acpi_table *)
+				memremap(nhlt_ptr->min_addr, nhlt_ptr->length,
+				MEMREMAP_WB);
 		ACPI_FREE(obj);
 		if (nhlt_table && (strncmp(nhlt_table->header.signature,
 					NHLT_ACPI_HEADER_SIG,
@@ -63,7 +66,7 @@ struct nhlt_acpi_table *skl_nhlt_init(struct device *dev)
 
 void skl_nhlt_free(struct nhlt_acpi_table *nhlt)
 {
-	iounmap((void *) nhlt);
+	memunmap((void *) nhlt);
 }
 
 static struct nhlt_specific_cfg *skl_get_specific_cfg(
@@ -138,7 +141,7 @@ struct nhlt_specific_cfg
 {
 	struct nhlt_fmt *fmt;
 	struct nhlt_endpoint *epnt;
-	struct hdac_bus *bus = ebus_to_hbus(&skl->ebus);
+	struct hdac_bus *bus = skl_to_bus(skl);
 	struct device *dev = bus->dev;
 	struct nhlt_specific_cfg *sp_config;
 	struct nhlt_acpi_table *nhlt = skl->nhlt;
@@ -176,6 +179,9 @@ int skl_get_dmic_geo(struct skl *skl)
 	struct device *dev = &skl->pci->dev;
 	unsigned int dmic_geo = 0;
 	u8 j;
+
+	if (!nhlt)
+		return 0;
 
 	epnt = (struct nhlt_endpoint *)nhlt->desc;
 
@@ -225,7 +231,7 @@ static void skl_nhlt_trim_space(char *trim)
 int skl_nhlt_update_topology_bin(struct skl *skl)
 {
 	struct nhlt_acpi_table *nhlt = (struct nhlt_acpi_table *)skl->nhlt;
-	struct hdac_bus *bus = ebus_to_hbus(&skl->ebus);
+	struct hdac_bus *bus = skl_to_bus(skl);
 	struct device *dev = bus->dev;
 
 	dev_dbg(dev, "oem_id %.6s, oem_table_id %8s oem_revision %d\n",
@@ -245,8 +251,8 @@ static ssize_t skl_nhlt_platform_id_show(struct device *dev,
 			struct device_attribute *attr, char *buf)
 {
 	struct pci_dev *pci = to_pci_dev(dev);
-	struct hdac_ext_bus *ebus = pci_get_drvdata(pci);
-	struct skl *skl = ebus_to_skl(ebus);
+	struct hdac_bus *bus = pci_get_drvdata(pci);
+	struct skl *skl = bus_to_skl(bus);
 	struct nhlt_acpi_table *nhlt = (struct nhlt_acpi_table *)skl->nhlt;
 	char platform_id[32];
 

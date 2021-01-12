@@ -46,42 +46,52 @@ enum con_scroll {
 struct consw {
 	struct module *owner;
 	const char *(*con_startup)(void);
-	void	(*con_init)(struct vc_data *, int);
-	void	(*con_deinit)(struct vc_data *);
-	void	(*con_clear)(struct vc_data *, int, int, int, int);
-	void	(*con_putc)(struct vc_data *, int, int, int);
-	void	(*con_putcs)(struct vc_data *, const unsigned short *, int, int, int);
-	void	(*con_cursor)(struct vc_data *, int);
-	bool	(*con_scroll)(struct vc_data *, unsigned int top,
+	void	(*con_init)(struct vc_data *vc, int init);
+	void	(*con_deinit)(struct vc_data *vc);
+	void	(*con_clear)(struct vc_data *vc, int sy, int sx, int height,
+			int width);
+	void	(*con_putc)(struct vc_data *vc, int c, int ypos, int xpos);
+	void	(*con_putcs)(struct vc_data *vc, const unsigned short *s,
+			int count, int ypos, int xpos);
+	void	(*con_cursor)(struct vc_data *vc, int mode);
+	bool	(*con_scroll)(struct vc_data *vc, unsigned int top,
 			unsigned int bottom, enum con_scroll dir,
 			unsigned int lines);
-	int	(*con_switch)(struct vc_data *);
-	int	(*con_blank)(struct vc_data *, int, int);
-	int	(*con_font_set)(struct vc_data *, struct console_font *, unsigned);
-	int	(*con_font_get)(struct vc_data *, struct console_font *);
-	int	(*con_font_default)(struct vc_data *, struct console_font *, char *);
-	int	(*con_font_copy)(struct vc_data *, int);
-	int     (*con_resize)(struct vc_data *, unsigned int, unsigned int,
-			       unsigned int);
-	void	(*con_set_palette)(struct vc_data *,
+	int	(*con_switch)(struct vc_data *vc);
+	int	(*con_blank)(struct vc_data *vc, int blank, int mode_switch);
+	int	(*con_font_set)(struct vc_data *vc, struct console_font *font,
+			unsigned int flags);
+	int	(*con_font_get)(struct vc_data *vc, struct console_font *font);
+	int	(*con_font_default)(struct vc_data *vc,
+			struct console_font *font, char *name);
+	int	(*con_font_copy)(struct vc_data *vc, int con);
+	int     (*con_resize)(struct vc_data *vc, unsigned int width,
+			unsigned int height, unsigned int user);
+	void	(*con_set_palette)(struct vc_data *vc,
 			const unsigned char *table);
-	void	(*con_scrolldelta)(struct vc_data *, int lines);
-	int	(*con_set_origin)(struct vc_data *);
-	void	(*con_save_screen)(struct vc_data *);
-	u8	(*con_build_attr)(struct vc_data *, u8, u8, u8, u8, u8, u8);
-	void	(*con_invert_region)(struct vc_data *, u16 *, int);
-	u16    *(*con_screen_pos)(struct vc_data *, int);
-	unsigned long (*con_getxy)(struct vc_data *, unsigned long, int *, int *);
+	void	(*con_scrolldelta)(struct vc_data *vc, int lines);
+	int	(*con_set_origin)(struct vc_data *vc);
+	void	(*con_save_screen)(struct vc_data *vc);
+	u8	(*con_build_attr)(struct vc_data *vc, u8 color, u8 intensity,
+			u8 blink, u8 underline, u8 reverse, u8 italic);
+	void	(*con_invert_region)(struct vc_data *vc, u16 *p, int count);
+	u16    *(*con_screen_pos)(struct vc_data *vc, int offset);
+	unsigned long (*con_getxy)(struct vc_data *vc, unsigned long position,
+			int *px, int *py);
+	/*
+	 * Flush the video console driver's scrollback buffer
+	 */
+	void	(*con_flush_scrollback)(struct vc_data *vc);
 	/*
 	 * Prepare the console for the debugger.  This includes, but is not
 	 * limited to, unblanking the console, loading an appropriate
 	 * palette, and allowing debugger generated output.
 	 */
-	int	(*con_debug_enter)(struct vc_data *);
+	int	(*con_debug_enter)(struct vc_data *vc);
 	/*
 	 * Restore the console to its pre-debug state as closely as possible.
 	 */
-	int	(*con_debug_leave)(struct vc_data *);
+	int	(*con_debug_leave)(struct vc_data *vc);
 };
 
 extern const struct consw *conswitchp;
@@ -92,10 +102,7 @@ extern const struct consw newport_con;	/* SGI Newport console  */
 extern const struct consw prom_con;	/* SPARC PROM console */
 
 int con_is_bound(const struct consw *csw);
-int register_con_driver(const struct consw *csw, int first, int last);
-int unregister_con_driver(const struct consw *csw);
 int do_unregister_con_driver(const struct consw *csw);
-int take_over_console(const struct consw *sw, int first, int last, int deflt);
 int do_take_over_console(const struct consw *sw, int first, int last, int deflt);
 void give_up_console(const struct consw *sw);
 #ifdef CONFIG_HW_CONSOLE
@@ -131,6 +138,7 @@ static inline int con_debug_leave(void)
 #define CON_BOOT	(8)
 #define CON_ANYTIME	(16) /* Safe to call when cpu is offline */
 #define CON_BRL		(32) /* Used for a braille device */
+#define CON_EXTENDED	(64) /* Use the extended output format a la /dev/kmsg */
 
 struct console {
 	char	name[16];
@@ -139,7 +147,7 @@ struct console {
 	struct tty_driver *(*device)(struct console *, int *);
 	void	(*unblank)(void);
 	int	(*setup)(struct console *, char *);
-	int	(*early_setup)(void);
+	int	(*match)(struct console *, char *name, int idx, char *options);
 	short	flags;
 	short	index;
 	int	cflag;
@@ -157,7 +165,6 @@ extern int console_set_on_cmdline;
 extern struct console *early_console;
 
 extern int add_preferred_console(char *name, int idx, char *options);
-extern int update_console_cmdline(char *name, int idx, char *name_new, int idx_new, char *options);
 extern void register_console(struct console *);
 extern int unregister_console(struct console *);
 extern struct console *console_drivers;
@@ -166,6 +173,7 @@ extern int console_trylock(void);
 extern void console_unlock(void);
 extern void console_conditional_schedule(void);
 extern void console_unblank(void);
+extern void console_flush_on_panic(void);
 extern struct tty_driver *console_device(int *);
 extern void console_stop(struct console *);
 extern void console_start(struct console *);
@@ -209,5 +217,7 @@ extern bool vgacon_text_force(void);
 #else
 static inline bool vgacon_text_force(void) { return false; }
 #endif
+
+extern void console_init(void);
 
 #endif /* _LINUX_CONSOLE_H */

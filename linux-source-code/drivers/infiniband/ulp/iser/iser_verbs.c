@@ -104,8 +104,8 @@ static int iser_create_device_ib_res(struct iser_device *device)
 		}
 	}
 
-	INIT_IB_EVENT_HANDLER(&device->event_handler, device->ib_device,
-				iser_event_handler);
+	INIT_IB_EVENT_HANDLER(&device->event_handler, ib_dev,
+			      iser_event_handler);
 	ib_register_event_handler(&device->event_handler);
 	return 0;
 

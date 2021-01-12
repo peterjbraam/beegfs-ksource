@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /* Kernel object name space definitions
  *
  * Copyright (c) 2002-2003 Patrick Mochel
@@ -7,8 +8,6 @@
  *
  * Split from kobject.h by David Howells (dhowells@redhat.com)
  *
- * This file is released under the GPLv2.
- *
  * Please read Documentation/kobject.txt before using the kobject
  * interface, ESPECIALLY the parts about reference counts and object
  * destructors.
@@ -16,7 +15,6 @@
 
 #ifndef _LINUX_KOBJECT_NS_H
 #define _LINUX_KOBJECT_NS_H
-#include <linux/rh_kabi.h>
 
 struct sock;
 struct kobject;
@@ -40,11 +38,11 @@ enum kobj_ns_type {
  */
 struct kobj_ns_type_operations {
 	enum kobj_ns_type type;
+	bool (*current_may_mount)(void);
 	void *(*grab_current_ns)(void);
 	const void *(*netlink_ns)(struct sock *sk);
 	const void *(*initial_ns)(void);
 	void (*drop_ns)(void *);
-	RH_KABI_EXTEND(bool (*current_may_mount)(void))
 };
 
 int kobj_ns_type_register(const struct kobj_ns_type_operations *ops);

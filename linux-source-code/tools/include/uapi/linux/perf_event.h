@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /*
  * Performance events:
  *
@@ -142,6 +143,8 @@ enum perf_event_sample_format {
 	PERF_SAMPLE_PHYS_ADDR			= 1U << 19,
 
 	PERF_SAMPLE_MAX = 1U << 20,		/* non-ABI */
+
+	__PERF_SAMPLE_CALLCHAIN_EARLY		= 1ULL << 63, /* non-ABI; internal use */
 };
 
 /*
@@ -300,6 +303,9 @@ enum perf_event_read_format {
 
 /*
  * Hardware event_id to monitor via a performance monitoring event:
+ *
+ * @sample_max_stack: Max number of frame pointers in a callchain,
+ *		      should be < /proc/sys/kernel/perf_event_max_stack
  */
 struct perf_event_attr {
 
@@ -361,16 +367,12 @@ struct perf_event_attr {
 				exclude_callchain_kernel : 1, /* exclude kernel callchains */
 				exclude_callchain_user   : 1, /* exclude user callchains */
 				mmap2          :  1, /* include mmap with inode data     */
-
-#ifdef __GENKSYMS__
-				__reserved_1   : 40;
-#else
 				comm_exec      :  1, /* flag comm events that are due to an exec */
 				use_clockid    :  1, /* use @clockid for time fields */
 				context_switch :  1, /* context switch data */
 				write_backward :  1, /* Write ring buffer from end to beginning */
-				__reserved_1   : 36;
-#endif
+				namespaces     :  1, /* include namespaces data */
+				__reserved_1   : 35;
 
 	union {
 		__u32		wakeup_events;	  /* wakeup every n events */
@@ -380,10 +382,14 @@ struct perf_event_attr {
 	__u32			bp_type;
 	union {
 		__u64		bp_addr;
+		__u64		kprobe_func; /* for perf_kprobe */
+		__u64		uprobe_path; /* for perf_uprobe */
 		__u64		config1; /* extension of config */
 	};
 	union {
 		__u64		bp_len;
+		__u64		kprobe_addr; /* when kprobe_func == NULL */
+		__u64		probe_offset; /* for perf_[k,u]probe */
 		__u64		config2; /* extension of config1 */
 	};
 	__u64	branch_sample_type; /* enum perf_branch_sample_type */
@@ -399,13 +405,7 @@ struct perf_event_attr {
 	 */
 	__u32	sample_stack_user;
 
-#ifdef __GENKSYMS__
-	/* Align to u64. */
-	__u32	__reserved_2;
-#else
 	__s32	clockid;
-#endif
-
 	/*
 	 * Defines set of regs to dump for each sample
 	 * state captured on:
@@ -414,18 +414,15 @@ struct perf_event_attr {
 	 *
 	 * See asm/perf_regs.h for details.
 	 */
-#ifndef __GENKSYMS__
 	__u64	sample_regs_intr;
 
 	/*
 	 * Wakeup watermark for AUX area
 	 */
 	__u32	aux_watermark;
-	__u32	__reserved_3;	/* align to __u64 */
-#endif
+	__u16	sample_max_stack;
+	__u16	__reserved_2;	/* align to __u64 */
 };
-
-#define perf_flags(attr)	(*(&(attr)->read_format + 1))
 
 /*
  * Structure used by below PERF_EVENT_IOC_QUERY_BPF command
@@ -433,35 +430,38 @@ struct perf_event_attr {
  * as the given perf event.
  */
 struct perf_event_query_bpf {
-        /*
-         * The below ids array length
-         */
-        __u32   ids_len;
-        /*
-         * Set by the kernel to indicate the number of
-         * available programs
-         */
-        __u32   prog_cnt;
-        /*
-         * User provided buffer to store program ids
-         */
-        __u32   ids[0];
+	/*
+	 * The below ids array length
+	 */
+	__u32	ids_len;
+	/*
+	 * Set by the kernel to indicate the number of
+	 * available programs
+	 */
+	__u32	prog_cnt;
+	/*
+	 * User provided buffer to store program ids
+	 */
+	__u32	ids[0];
 };
+
+#define perf_flags(attr)	(*(&(attr)->read_format + 1))
 
 /*
  * Ioctls that can be done on a perf event fd:
  */
-#define PERF_EVENT_IOC_ENABLE		_IO ('$', 0)
-#define PERF_EVENT_IOC_DISABLE		_IO ('$', 1)
-#define PERF_EVENT_IOC_REFRESH		_IO ('$', 2)
-#define PERF_EVENT_IOC_RESET		_IO ('$', 3)
-#define PERF_EVENT_IOC_PERIOD		_IOW('$', 4, __u64)
-#define PERF_EVENT_IOC_SET_OUTPUT	_IO ('$', 5)
-#define PERF_EVENT_IOC_SET_FILTER	_IOW('$', 6, char *)
-#define PERF_EVENT_IOC_ID		_IOR('$', 7, __u64 *)
-#define PERF_EVENT_IOC_SET_BPF		_IOW('$', 8, __u32)
-#define PERF_EVENT_IOC_PAUSE_OUTPUT	_IOW('$', 9, __u32)
-#define PERF_EVENT_IOC_QUERY_BPF        _IOWR('$', 10, struct perf_event_query_bpf *)
+#define PERF_EVENT_IOC_ENABLE			_IO ('$', 0)
+#define PERF_EVENT_IOC_DISABLE			_IO ('$', 1)
+#define PERF_EVENT_IOC_REFRESH			_IO ('$', 2)
+#define PERF_EVENT_IOC_RESET			_IO ('$', 3)
+#define PERF_EVENT_IOC_PERIOD			_IOW('$', 4, __u64)
+#define PERF_EVENT_IOC_SET_OUTPUT		_IO ('$', 5)
+#define PERF_EVENT_IOC_SET_FILTER		_IOW('$', 6, char *)
+#define PERF_EVENT_IOC_ID			_IOR('$', 7, __u64 *)
+#define PERF_EVENT_IOC_SET_BPF			_IOW('$', 8, __u32)
+#define PERF_EVENT_IOC_PAUSE_OUTPUT		_IOW('$', 9, __u32)
+#define PERF_EVENT_IOC_QUERY_BPF		_IOWR('$', 10, struct perf_event_query_bpf *)
+#define PERF_EVENT_IOC_MODIFY_ATTRIBUTES	_IOW('$', 11, struct perf_event_attr *)
 
 enum perf_event_ioc_flags {
 	PERF_IOC_FLAG_GROUP		= 1U << 0,
@@ -680,6 +680,23 @@ struct perf_event_header {
 	__u32	type;
 	__u16	misc;
 	__u16	size;
+};
+
+struct perf_ns_link_info {
+	__u64	dev;
+	__u64	ino;
+};
+
+enum {
+	NET_NS_INDEX		= 0,
+	UTS_NS_INDEX		= 1,
+	IPC_NS_INDEX		= 2,
+	PID_NS_INDEX		= 3,
+	USER_NS_INDEX		= 4,
+	MNT_NS_INDEX		= 5,
+	CGROUP_NS_INDEX		= 6,
+
+	NR_NAMESPACES,		/* number of available namespaces */
 };
 
 enum perf_event_type {
@@ -936,11 +953,23 @@ enum perf_event_type {
 	 */
 	PERF_RECORD_SWITCH_CPU_WIDE		= 15,
 
+	/*
+	 * struct {
+	 *	struct perf_event_header	header;
+	 *	u32				pid;
+	 *	u32				tid;
+	 *	u64				nr_namespaces;
+	 *	{ u64				dev, inode; } [nr_namespaces];
+	 *	struct sample_id		sample_id;
+	 * };
+	 */
+	PERF_RECORD_NAMESPACES			= 16,
+
 	PERF_RECORD_MAX,			/* non-ABI */
 };
 
-#define PERF_MAX_CONTEXTS_PER_STACK		8
 #define PERF_MAX_STACK_DEPTH		127
+#define PERF_MAX_CONTEXTS_PER_STACK	  8
 
 enum perf_callchain_context {
 	PERF_CONTEXT_HV			= (__u64)-32,
@@ -967,19 +996,6 @@ enum perf_callchain_context {
 #define PERF_FLAG_PID_CGROUP		(1UL << 2) /* pid=cgroup id, per-cpu mode only */
 #define PERF_FLAG_FD_CLOEXEC		(1UL << 3) /* O_CLOEXEC */
 
-#ifdef __GENKSYMS__
-union perf_mem_data_src {
-	__u64 val;
-	struct {
-		__u64   mem_op:5,	/* type of opcode */
-			mem_lvl:14,	/* memory hierarchy level */
-			mem_snoop:5,	/* snoop mode */
-			mem_lock:2,	/* lock instr */
-			mem_dtlb:7,	/* tlb access */
-			mem_rsvd:31;
-	};
-};
-#else
 #if defined(__LITTLE_ENDIAN_BITFIELD)
 union perf_mem_data_src {
 	__u64 val;
@@ -1013,7 +1029,6 @@ union perf_mem_data_src {
 #else
 #error "Unknown endianness"
 #endif
-#endif /* __GENKSYMS__ */
 
 /* type of opcode (load/store/prefetch,code) */
 #define PERF_MEM_OP_NA		0x01 /* not available */
@@ -1109,13 +1124,9 @@ struct perf_branch_entry {
 		predicted:1,/* target predicted */
 		in_tx:1,    /* in transaction */
 		abort:1,    /* transaction abort */
-#ifndef __GENKSYMS__
 		cycles:16,  /* cycle count to last branch */
 		type:4,     /* branch type */
 		reserved:40;
-#else
-		reserved:60;
-#endif
 };
 
 #endif /* _UAPI_LINUX_PERF_EVENT_H */

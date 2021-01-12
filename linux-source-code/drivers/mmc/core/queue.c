@@ -1,6 +1,4 @@
 /*
- *  linux/drivers/mmc/card/queue.c
- *
  *  Copyright (C) 2003 Russell King, All Rights Reserved.
  *  Copyright 2006-2007 Pierre Ossman
  *
@@ -48,35 +46,25 @@ static inline bool mmc_cqe_can_dcmd(struct mmc_host *host)
 static enum mmc_issue_type mmc_cqe_issue_type(struct mmc_host *host,
 					      struct request *req)
 {
-	if ((req->cmd_type == REQ_TYPE_DRV_PRIV) ||
-		(req->cmd_flags & REQ_DISCARD))
+	switch (req_op(req)) {
+	case REQ_OP_DRV_IN:
+	case REQ_OP_DRV_OUT:
+	case REQ_OP_DISCARD:
+	case REQ_OP_SECURE_ERASE:
 		return MMC_ISSUE_SYNC;
-	else if (req->cmd_flags & REQ_FLUSH)
+	case REQ_OP_FLUSH:
 		return mmc_cqe_can_dcmd(host) ? MMC_ISSUE_DCMD : MMC_ISSUE_SYNC;
-	else
+	default:
 		return MMC_ISSUE_ASYNC;
+	}
 }
 
-/*
- * RHEL: We don't have the full req_op conversion done for the block
- * layer.  This means that simply testing req_op(req) == REQ_OP_READ or
- * REQ_OP_WRITE doesn't actually work as expected.  For example, it may
- * return REQ_OP_WRITE for a flush.  So, we make the logic a bit
- * convoluted, here.  The idea is to only return MMC_ISSUE_ASYNC for
- * reads and writes, so we first test for discard and flush, since they
- * are encoded as types of writes (WRITE|REQ_DISCARD, for example).
- * Then, it's safe to call req_op(req) and test for read or write.  Finally,
- * fall back to sync for everything else (WRITE_SAME, etc).
- */
 enum mmc_issue_type mmc_issue_type(struct mmc_queue *mq, struct request *req)
 {
 	struct mmc_host *host = mq->card->host;
 
 	if (mq->use_cqe)
 		return mmc_cqe_issue_type(host, req);
-
-	if (req->cmd_flags & REQ_DISCARD || req->cmd_flags & REQ_FLUSH)
-		return MMC_ISSUE_SYNC;
 
 	if (req_op(req) == REQ_OP_READ || req_op(req) == REQ_OP_WRITE)
 		return MMC_ISSUE_ASYNC;
@@ -101,9 +89,9 @@ void mmc_cqe_recovery_notifier(struct mmc_request *mrq)
 	struct mmc_queue *mq = q->queuedata;
 	unsigned long flags;
 
-	spin_lock_irqsave(q->queue_lock, flags);
+	spin_lock_irqsave(&mq->lock, flags);
 	__mmc_cqe_recovery_notifier(mq);
-	spin_unlock_irqrestore(q->queue_lock, flags);
+	spin_unlock_irqrestore(&mq->lock, flags);
 }
 
 static enum blk_eh_timer_return mmc_cqe_timed_out(struct request *req)
@@ -123,8 +111,9 @@ static enum blk_eh_timer_return mmc_cqe_timed_out(struct request *req)
 				__mmc_cqe_recovery_notifier(mq);
 			return BLK_EH_RESET_TIMER;
 		}
-		/* No timeout */
-		return BLK_EH_HANDLED;
+		/* No timeout (XXX: huh? comment doesn't make much sense) */
+		blk_mq_complete_request(req);
+		return BLK_EH_DONE;
 	default:
 		/* Timeout is handled by mmc core */
 		return BLK_EH_RESET_TIMER;
@@ -139,14 +128,14 @@ static enum blk_eh_timer_return mmc_mq_timed_out(struct request *req,
 	unsigned long flags;
 	int ret;
 
-	spin_lock_irqsave(q->queue_lock, flags);
+	spin_lock_irqsave(&mq->lock, flags);
 
 	if (mq->recovery_needed || !mq->use_cqe)
 		ret = BLK_EH_RESET_TIMER;
 	else
 		ret = mmc_cqe_timed_out(req);
 
-	spin_unlock_irqrestore(q->queue_lock, flags);
+	spin_unlock_irqrestore(&mq->lock, flags);
 
 	return ret;
 }
@@ -168,9 +157,9 @@ static void mmc_mq_recovery_handler(struct work_struct *work)
 
 	mq->in_recovery = false;
 
-	spin_lock_irq(q->queue_lock);
+	spin_lock_irq(&mq->lock);
 	mq->recovery_needed = false;
-	spin_unlock_irq(q->queue_lock);
+	spin_unlock_irq(&mq->lock);
 
 	mmc_put_card(mq->card, &mq->ctx);
 
@@ -197,14 +186,14 @@ static void mmc_queue_setup_discard(struct request_queue *q,
 	if (!max_discard)
 		return;
 
-	queue_flag_set_unlocked(QUEUE_FLAG_DISCARD, q);
+	blk_queue_flag_set(QUEUE_FLAG_DISCARD, q);
 	blk_queue_max_discard_sectors(q, max_discard);
 	q->limits.discard_granularity = card->pref_erase << 9;
 	/* granularity must not be greater than max. discard */
 	if (card->pref_erase > max_discard)
 		q->limits.discard_granularity = 0;
 	if (mmc_can_secure_erase_trim(card))
-		queue_flag_set_unlocked(QUEUE_FLAG_SECDISCARD, q);
+		blk_queue_flag_set(QUEUE_FLAG_SECERASE, q);
 }
 
 /**
@@ -249,11 +238,7 @@ static void mmc_mq_exit_request(struct blk_mq_tag_set *set, struct request *req,
 	mmc_exit_request(mq->queue, req);
 }
 
-/*
- * We use BLK_MQ_F_BLOCKING and have only 1 hardware queue, which means requests
- * will not be dispatched in parallel.
- */
-static int mmc_mq_queue_rq(struct blk_mq_hw_ctx *hctx,
+static blk_status_t mmc_mq_queue_rq(struct blk_mq_hw_ctx *hctx,
 				    const struct blk_mq_queue_data *bd)
 {
 	struct request *req = bd->rq;
@@ -267,25 +252,25 @@ static int mmc_mq_queue_rq(struct blk_mq_hw_ctx *hctx,
 	int ret;
 
 	if (mmc_card_removed(mq->card)) {
-		req->cmd_flags |= REQ_QUIET;
-		return -EIO;
+		req->rq_flags |= RQF_QUIET;
+		return BLK_STS_IOERR;
 	}
 
 	issue_type = mmc_issue_type(mq, req);
 
-	spin_lock_irq(q->queue_lock);
+	spin_lock_irq(&mq->lock);
 
-	if (mq->recovery_needed) {
-		spin_unlock_irq(q->queue_lock);
-		return -ENOMEM;
+	if (mq->recovery_needed || mq->busy) {
+		spin_unlock_irq(&mq->lock);
+		return BLK_STS_RESOURCE;
 	}
 
 	switch (issue_type) {
 	case MMC_ISSUE_DCMD:
 		if (mmc_cqe_dcmd_busy(mq)) {
 			mq->cqe_busy |= MMC_CQE_DCMD_BUSY;
-			spin_unlock_irq(q->queue_lock);
-			return -ENOMEM;
+			spin_unlock_irq(&mq->lock);
+			return BLK_STS_RESOURCE;
 		}
 		break;
 	case MMC_ISSUE_ASYNC:
@@ -302,15 +287,18 @@ static int mmc_mq_queue_rq(struct blk_mq_hw_ctx *hctx,
 		break;
 	}
 
+	/* Parallel dispatch of requests is not supported at the moment */
+	mq->busy = true;
+
 	mq->in_flight[issue_type] += 1;
 	get_card = (mmc_tot_in_flight(mq) == 1);
 	cqe_retune_ok = (mmc_cqe_qcnt(mq) == 1);
 
-	spin_unlock_irq(q->queue_lock);
+	spin_unlock_irq(&mq->lock);
 
-	if (!(req->cmd_flags & REQ_DONTPREP)) {
+	if (!(req->rq_flags & RQF_DONTPREP)) {
 		req_to_mmc_queue_req(req)->retries = 0;
-		req->cmd_flags |= REQ_DONTPREP;
+		req->rq_flags |= RQF_DONTPREP;
 	}
 
 	if (get_card)
@@ -327,26 +315,29 @@ static int mmc_mq_queue_rq(struct blk_mq_hw_ctx *hctx,
 
 	switch (issued) {
 	case MMC_REQ_BUSY:
-		ret = -ENOMEM;
+		ret = BLK_STS_RESOURCE;
 		break;
 	case MMC_REQ_FAILED_TO_START:
-		ret = -EIO;
+		ret = BLK_STS_IOERR;
 		break;
 	default:
-		ret = 0;
+		ret = BLK_STS_OK;
 		break;
 	}
 
 	if (issued != MMC_REQ_STARTED) {
 		bool put_card = false;
 
-		spin_lock_irq(q->queue_lock);
+		spin_lock_irq(&mq->lock);
 		mq->in_flight[issue_type] -= 1;
 		if (mmc_tot_in_flight(mq) == 0)
 			put_card = true;
-		spin_unlock_irq(q->queue_lock);
+		mq->busy = false;
+		spin_unlock_irq(&mq->lock);
 		if (put_card)
 			mmc_put_card(card, &mq->ctx);
+	} else {
+		WRITE_ONCE(mq->busy, false);
 	}
 
 	return ret;
@@ -363,21 +354,25 @@ static const struct blk_mq_ops mmc_mq_ops = {
 static void mmc_setup_queue(struct mmc_queue *mq, struct mmc_card *card)
 {
 	struct mmc_host *host = card->host;
-	u64 limit = BLK_BOUNCE_HIGH;
+	unsigned block_size = 512;
 
-	if (mmc_dev(host)->dma_mask && *mmc_dev(host)->dma_mask)
-		limit = (u64)dma_max_pfn(mmc_dev(host)) << PAGE_SHIFT;
-
-	queue_flag_set_unlocked(QUEUE_FLAG_NONROT, mq->queue);
-	queue_flag_clear_unlocked(QUEUE_FLAG_ADD_RANDOM, mq->queue);
+	blk_queue_flag_set(QUEUE_FLAG_NONROT, mq->queue);
+	blk_queue_flag_clear(QUEUE_FLAG_ADD_RANDOM, mq->queue);
 	if (mmc_can_erase(card))
 		mmc_queue_setup_discard(mq->queue, card);
 
-	blk_queue_bounce_limit(mq->queue, limit);
+	if (!mmc_dev(host)->dma_mask || !*mmc_dev(host)->dma_mask)
+		blk_queue_bounce_limit(mq->queue, BLK_BOUNCE_HIGH);
 	blk_queue_max_hw_sectors(mq->queue,
 		min(host->max_blk_count, host->max_req_size / 512));
 	blk_queue_max_segments(mq->queue, host->max_segs);
-	blk_queue_max_segment_size(mq->queue, host->max_seg_size);
+
+	if (mmc_card_mmc(card))
+		block_size = card->ext_csd.data_sector_size;
+
+	blk_queue_logical_block_size(mq->queue, block_size);
+	blk_queue_max_segment_size(mq->queue,
+			round_down(host->max_seg_size, block_size));
 
 	INIT_WORK(&mq->recovery_work, mmc_mq_recovery_handler);
 	INIT_WORK(&mq->complete_work, mmc_blk_mq_complete_work);
@@ -387,17 +382,39 @@ static void mmc_setup_queue(struct mmc_queue *mq, struct mmc_card *card)
 	init_waitqueue_head(&mq->wait);
 }
 
-static int mmc_mq_init_queue(struct mmc_queue *mq, int q_depth,
-			     const struct blk_mq_ops *mq_ops, spinlock_t *lock)
+/* Set queue depth to get a reasonable value for q->nr_requests */
+#define MMC_QUEUE_DEPTH 64
+
+/**
+ * mmc_init_queue - initialise a queue structure.
+ * @mq: mmc queue
+ * @card: mmc card to attach this queue
+ *
+ * Initialise a MMC card request queue.
+ */
+int mmc_init_queue(struct mmc_queue *mq, struct mmc_card *card)
 {
+	struct mmc_host *host = card->host;
 	int ret;
 
+	mq->card = card;
+	mq->use_cqe = host->cqe_enabled;
+	
+	spin_lock_init(&mq->lock);
+
 	memset(&mq->tag_set, 0, sizeof(mq->tag_set));
-	mq->tag_set.ops = mq_ops;
-	mq->tag_set.queue_depth = q_depth;
+	mq->tag_set.ops = &mmc_mq_ops;
+	/*
+	 * The queue depth for CQE must match the hardware because the request
+	 * tag is used to index the hardware queue.
+	 */
+	if (mq->use_cqe)
+		mq->tag_set.queue_depth =
+			min_t(int, card->ext_csd.cmdq_depth, host->cqe_qdepth);
+	else
+		mq->tag_set.queue_depth = MMC_QUEUE_DEPTH;
 	mq->tag_set.numa_node = NUMA_NO_NODE;
-	mq->tag_set.flags = BLK_MQ_F_SHOULD_MERGE | BLK_MQ_F_SG_MERGE |
-			    BLK_MQ_F_BLOCKING;
+	mq->tag_set.flags = BLK_MQ_F_SHOULD_MERGE | BLK_MQ_F_BLOCKING;
 	mq->tag_set.nr_hw_queues = 1;
 	mq->tag_set.cmd_size = sizeof(struct mmc_queue_req);
 	mq->tag_set.driver_data = mq;
@@ -412,66 +429,15 @@ static int mmc_mq_init_queue(struct mmc_queue *mq, int q_depth,
 		goto free_tag_set;
 	}
 
-	mq->queue->queue_lock = lock;
 	mq->queue->queuedata = mq;
+	blk_queue_rq_timeout(mq->queue, 60 * HZ);
 
+	mmc_setup_queue(mq, card);
 	return 0;
 
 free_tag_set:
 	blk_mq_free_tag_set(&mq->tag_set);
-
 	return ret;
-}
-
-/* Set queue depth to get a reasonable value for q->nr_requests */
-#define MMC_QUEUE_DEPTH 64
-
-static int mmc_mq_init(struct mmc_queue *mq, struct mmc_card *card,
-			 spinlock_t *lock)
-{
-	struct mmc_host *host = card->host;
-	int q_depth;
-	int ret;
-
-	/*
-	 * The queue depth for CQE must match the hardware because the request
-	 * tag is used to index the hardware queue.
-	 */
-	if (mq->use_cqe)
-		q_depth = min_t(int, card->ext_csd.cmdq_depth, host->cqe_qdepth);
-	else
-		q_depth = MMC_QUEUE_DEPTH;
-
-	ret = mmc_mq_init_queue(mq, q_depth, &mmc_mq_ops, lock);
-	if (ret)
-		return ret;
-
-	blk_queue_rq_timeout(mq->queue, 60 * HZ);
-
-	mmc_setup_queue(mq, card);
-
-	return 0;
-}
-
-/**
- * mmc_init_queue - initialise a queue structure.
- * @mq: mmc queue
- * @card: mmc card to attach this queue
- * @lock: queue lock
- * @subname: partition subname
- *
- * Initialise a MMC card request queue.
- */
-int mmc_init_queue(struct mmc_queue *mq, struct mmc_card *card,
-		   spinlock_t *lock, const char *subname)
-{
-	struct mmc_host *host = card->host;
-
-	mq->card = card;
-
-	mq->use_cqe = host->cqe_enabled;
-
-	return mmc_mq_init(mq, card, lock);
 }
 
 void mmc_queue_suspend(struct mmc_queue *mq)

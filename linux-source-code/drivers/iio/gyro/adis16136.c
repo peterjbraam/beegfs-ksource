@@ -124,7 +124,7 @@ static int adis16136_show_product_id(void *arg, u64 *val)
 
 	return 0;
 }
-DEFINE_SIMPLE_ATTRIBUTE(adis16136_product_id_fops,
+DEFINE_DEBUGFS_ATTRIBUTE(adis16136_product_id_fops,
 	adis16136_show_product_id, NULL, "%llu\n");
 
 static int adis16136_show_flash_count(void *arg, u64 *val)
@@ -142,18 +142,21 @@ static int adis16136_show_flash_count(void *arg, u64 *val)
 
 	return 0;
 }
-DEFINE_SIMPLE_ATTRIBUTE(adis16136_flash_count_fops,
+DEFINE_DEBUGFS_ATTRIBUTE(adis16136_flash_count_fops,
 	adis16136_show_flash_count, NULL, "%lld\n");
 
 static int adis16136_debugfs_init(struct iio_dev *indio_dev)
 {
 	struct adis16136 *adis16136 = iio_priv(indio_dev);
 
-	debugfs_create_file("serial_number", 0400, indio_dev->debugfs_dentry,
-		adis16136, &adis16136_serial_fops);
-	debugfs_create_file("product_id", 0400, indio_dev->debugfs_dentry,
+	debugfs_create_file_unsafe("serial_number", 0400,
+		indio_dev->debugfs_dentry, adis16136,
+		&adis16136_serial_fops);
+	debugfs_create_file_unsafe("product_id", 0400,
+		indio_dev->debugfs_dentry,
 		adis16136, &adis16136_product_id_fops);
-	debugfs_create_file("flash_count", 0400, indio_dev->debugfs_dentry,
+	debugfs_create_file_unsafe("flash_count", 0400,
+		indio_dev->debugfs_dentry,
 		adis16136, &adis16136_flash_count_fops);
 
 	return 0;
@@ -398,7 +401,6 @@ static const struct attribute_group adis16136_attribute_group = {
 };
 
 static const struct iio_info adis16136_info = {
-	.driver_module = THIS_MODULE,
 	.attrs = &adis16136_attribute_group,
 	.read_raw = &adis16136_read_raw,
 	.write_raw = &adis16136_write_raw,
@@ -435,7 +437,9 @@ static int adis16136_initial_setup(struct iio_dev *indio_dev)
 	if (ret)
 		return ret;
 
-	sscanf(indio_dev->name, "adis%u\n", &device_id);
+	ret = sscanf(indio_dev->name, "adis%u\n", &device_id);
+	if (ret != 1)
+		return -EINVAL;
 
 	if (prod_id != device_id)
 		dev_warn(&indio_dev->dev, "Device ID(%u) and product ID(%u) do not match.",
@@ -473,6 +477,7 @@ enum adis16136_id {
 	ID_ADIS16133,
 	ID_ADIS16135,
 	ID_ADIS16136,
+	ID_ADIS16137,
 };
 
 static const struct adis16136_chip_info adis16136_chip_info[] = {
@@ -488,6 +493,10 @@ static const struct adis16136_chip_info adis16136_chip_info[] = {
 		.precision = IIO_DEGREE_TO_RAD(450),
 		.fullscale = 24623,
 	},
+	[ID_ADIS16137] = {
+		.precision = IIO_DEGREE_TO_RAD(1000),
+		.fullscale = 24609,
+	},
 };
 
 static int adis16136_probe(struct spi_device *spi)
@@ -497,7 +506,7 @@ static int adis16136_probe(struct spi_device *spi)
 	struct iio_dev *indio_dev;
 	int ret;
 
-	indio_dev = iio_device_alloc(sizeof(*adis16136));
+	indio_dev = devm_iio_device_alloc(&spi->dev, sizeof(*adis16136));
 	if (indio_dev == NULL)
 		return -ENOMEM;
 
@@ -515,11 +524,11 @@ static int adis16136_probe(struct spi_device *spi)
 
 	ret = adis_init(&adis16136->adis, indio_dev, spi, &adis16136_data);
 	if (ret)
-		goto error_free_dev;
+		return ret;
 
 	ret = adis_setup_buffer_and_trigger(&adis16136->adis, indio_dev, NULL);
 	if (ret)
-		goto error_free_dev;
+		return ret;
 
 	ret = adis16136_initial_setup(indio_dev);
 	if (ret)
@@ -537,8 +546,6 @@ error_stop_device:
 	adis16136_stop_device(indio_dev);
 error_cleanup_buffer:
 	adis_cleanup_buffer_and_trigger(&adis16136->adis, indio_dev);
-error_free_dev:
-	iio_device_free(indio_dev);
 	return ret;
 }
 
@@ -552,8 +559,6 @@ static int adis16136_remove(struct spi_device *spi)
 
 	adis_cleanup_buffer_and_trigger(&adis16136->adis, indio_dev);
 
-	iio_device_free(indio_dev);
-
 	return 0;
 }
 
@@ -561,6 +566,7 @@ static const struct spi_device_id adis16136_ids[] = {
 	{ "adis16133", ID_ADIS16133 },
 	{ "adis16135", ID_ADIS16135 },
 	{ "adis16136", ID_ADIS16136 },
+	{ "adis16137", ID_ADIS16137 },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, adis16136_ids);
@@ -568,7 +574,6 @@ MODULE_DEVICE_TABLE(spi, adis16136_ids);
 static struct spi_driver adis16136_driver = {
 	.driver = {
 		.name = "adis16136",
-		.owner = THIS_MODULE,
 	},
 	.id_table = adis16136_ids,
 	.probe = adis16136_probe,

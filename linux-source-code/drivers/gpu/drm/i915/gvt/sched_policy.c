@@ -94,7 +94,7 @@ static void gvt_balance_timeslice(struct gvt_sched_data *sched_data)
 {
 	struct vgpu_sched_data *vgpu_data;
 	struct list_head *pos;
-	static uint64_t stage_check;
+	static u64 stage_check;
 	int stage = stage_check++ % GVT_TS_BALANCE_STAGE_NUM;
 
 	/* The timeslice accumulation reset at stage 0, which is
@@ -111,8 +111,8 @@ static void gvt_balance_timeslice(struct gvt_sched_data *sched_data)
 
 		list_for_each(pos, &sched_data->lru_runq_head) {
 			vgpu_data = container_of(pos, struct vgpu_sched_data, lru_list);
-			fair_timeslice = ktime_set(0, ktime_divns(ms_to_ktime(GVT_TS_BALANCE_PERIOD_MS),
-						     total_weight) * vgpu_data->sched_ctl.weight);
+			fair_timeslice = ktime_divns(ms_to_ktime(GVT_TS_BALANCE_PERIOD_MS),
+						     total_weight) * vgpu_data->sched_ctl.weight;
 
 			vgpu_data->allocated_ts = fair_timeslice;
 			vgpu_data->left_ts = vgpu_data->allocated_ts;
@@ -124,7 +124,7 @@ static void gvt_balance_timeslice(struct gvt_sched_data *sched_data)
 			/* timeslice for next 100ms should add the left/debt
 			 * slice of previous stages.
 			 */
-			vgpu_data->left_ts = ktime_add(vgpu_data->left_ts, vgpu_data->allocated_ts);
+			vgpu_data->left_ts += vgpu_data->allocated_ts;
 		}
 	}
 }
@@ -196,7 +196,7 @@ static struct intel_vgpu *find_busy_vgpu(struct gvt_sched_data *sched_data)
 		}
 
 		/* Return the vGPU only if it has time slice left */
-		if (ktime_to_ns(vgpu_data->left_ts) > 0) {
+		if (vgpu_data->left_ts > 0) {
 			vgpu = vgpu_data->vgpu;
 			break;
 		}
@@ -247,7 +247,7 @@ void intel_gvt_schedule(struct intel_gvt *gvt)
 
 	if (test_and_clear_bit(INTEL_GVT_REQUEST_SCHED,
 				(void *)&gvt->service_request)) {
-		if (ktime_compare(cur_time, sched_data->expire_time) >= 0) {
+		if (cur_time >= sched_data->expire_time) {
 			gvt_balance_timeslice(sched_data);
 			sched_data->expire_time = ktime_add_ms(
 				cur_time, GVT_TS_BALANCE_PERIOD_MS);
@@ -474,6 +474,6 @@ void intel_vgpu_stop_schedule(struct intel_vgpu *vgpu)
 		}
 	}
 	spin_unlock_bh(&scheduler->mmio_context_lock);
-	intel_runtime_pm_put(dev_priv);
+	intel_runtime_pm_put_unchecked(dev_priv);
 	mutex_unlock(&vgpu->gvt->sched_lock);
 }

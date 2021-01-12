@@ -1,7 +1,7 @@
 /*******************************************************************
  * This file is part of the Emulex Linux Device Driver for         *
  * Fibre Channel Host Bus Adapters.                                *
- * Copyright (C) 2017-2018 Broadcom. All Rights Reserved. The term *
+ * Copyright (C) 2017-2019 Broadcom. All Rights Reserved. The term *
  * “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.     *
  * Copyright (C) 2004-2016 Emulex.  All rights reserved.           *
  * EMULEX and SLI are trademarks of Emulex.                        *
@@ -2824,8 +2824,8 @@ out:
 		!(vport->fc_flag & FC_PT2PT_PLOGI)) {
 		phba->pport->fc_myDID = 0;
 
-		if ((phba->cfg_enable_fc4_type == LPFC_ENABLE_BOTH) ||
-		    (phba->cfg_enable_fc4_type == LPFC_ENABLE_NVME)) {
+		if ((vport->cfg_enable_fc4_type == LPFC_ENABLE_BOTH) ||
+		    (vport->cfg_enable_fc4_type == LPFC_ENABLE_NVME)) {
 			if (phba->nvmet_support)
 				lpfc_nvmet_update_targetport(phba);
 			else
@@ -3253,9 +3253,9 @@ lpfc_cancel_retry_delay_tmo(struct lpfc_vport *vport, struct lpfc_nodelist *nlp)
  * to the event associated with the ndlp.
  **/
 void
-lpfc_els_retry_delay(unsigned long ptr)
+lpfc_els_retry_delay(struct timer_list *t)
 {
-	struct lpfc_nodelist *ndlp = (struct lpfc_nodelist *) ptr;
+	struct lpfc_nodelist *ndlp = from_timer(ndlp, t, nlp_delayfunc);
 	struct lpfc_vport *vport = ndlp->vport;
 	struct lpfc_hba   *phba = vport->phba;
 	unsigned long flags;
@@ -3488,15 +3488,6 @@ lpfc_els_retry(struct lpfc_hba *phba, struct lpfc_iocbq *cmdiocb,
 	case IOSTAT_LOCAL_REJECT:
 		switch ((irsp->un.ulpWord[4] & IOERR_PARAM_MASK)) {
 		case IOERR_LOOP_OPEN_FAILURE:
-			if (cmd == ELS_CMD_FLOGI) {
-				if (PCI_DEVICE_ID_HORNET ==
-					phba->pcidev->device) {
-					phba->fc_topology = LPFC_TOPOLOGY_LOOP;
-					phba->pport->fc_myDID = 0;
-					phba->alpa_map[0] = 0;
-					phba->alpa_map[1] = 0;
-				}
-			}
 			if (cmd == ELS_CMD_PLOGI && cmdiocb->retry == 0)
 				delay = 1000;
 			retry = 1;
@@ -3993,12 +3984,14 @@ lpfc_els_free_iocb(struct lpfc_hba *phba, struct lpfc_iocbq *elsiocb)
 		} else {
 			buf_ptr1 = (struct lpfc_dmabuf *) elsiocb->context2;
 			lpfc_els_free_data(phba, buf_ptr1);
+			elsiocb->context2 = NULL;
 		}
 	}
 
 	if (elsiocb->context3) {
 		buf_ptr = (struct lpfc_dmabuf *) elsiocb->context3;
 		lpfc_els_free_bpl(phba, buf_ptr);
+		elsiocb->context3 = NULL;
 	}
 	lpfc_sli_release_iocbq(phba, elsiocb);
 	return 0;
@@ -7661,9 +7654,9 @@ lpfc_els_rcv_fan(struct lpfc_vport *vport, struct lpfc_iocbq *cmdiocb,
  * lpfc_els_timeout_handler() to work on the posted event WORKER_ELS_TMO.
  **/
 void
-lpfc_els_timeout(unsigned long ptr)
+lpfc_els_timeout(struct timer_list *t)
 {
-	struct lpfc_vport *vport = (struct lpfc_vport *) ptr;
+	struct lpfc_vport *vport = from_timer(vport, t, els_tmofunc);
 	struct lpfc_hba   *phba = vport->phba;
 	uint32_t tmo_posted;
 	unsigned long iflag;
@@ -8089,8 +8082,10 @@ lpfc_els_unsol_buffer(struct lpfc_hba *phba, struct lpfc_sli_ring *pring,
 	struct ls_rjt stat;
 	uint32_t *payload;
 	uint32_t cmd, did, newnode;
+	uint32_t vid, flag;
 	uint8_t rjt_exp, rjt_err = 0, init_link = 0;
 	IOCB_t *icmd = &elsiocb->iocb;
+	struct serv_parm *sp;
 	LPFC_MBOXQ_t *mbox;
 
 	if (!vport || !(elsiocb->context2))
@@ -8241,6 +8236,22 @@ lpfc_els_unsol_buffer(struct lpfc_hba *phba, struct lpfc_sli_ring *pring,
 			did, vport->port_state, ndlp->nlp_flag);
 
 		phba->fc_stat.elsRcvFLOGI++;
+		sp = (struct serv_parm *)
+			((uint8_t *)payload + sizeof(uint32_t));
+
+		/* Check to see if this is firmware generated */
+		if (sp->cmn.valid_vendor_ver_level) {
+			vid = be32_to_cpu(sp->un.vv.vid);
+			flag = be32_to_cpu(sp->un.vv.flags);
+			if (vid == LPFC_VV_BRCD_ID) {
+				/* Drop this FLOGI */
+				lpfc_printf_vlog(
+					vport, KERN_INFO, LOG_ELS,
+					"3316 Dropping rcv FLOGI: "
+					"flag x%x\n", flag);
+				goto lsrjt;
+			}
+		}
 
 		/* If the driver believes fabric discovery is done and is ready,
 		 * bounce the link.  There is some descrepancy.
@@ -8488,6 +8499,8 @@ lsrjt:
 	 * link and start over.
 	 */
 	if (init_link) {
+		lpfc_printf_vlog(vport, KERN_ERR, LOG_ELS,
+				 "3318 Resetting Link, multiple rcv FLOGIs\n");
 		mbox = mempool_alloc(phba->mbox_mem_pool, GFP_KERNEL);
 		if (!mbox)
 			return;
@@ -9327,9 +9340,9 @@ lpfc_issue_els_npiv_logo(struct lpfc_vport *vport, struct lpfc_nodelist *ndlp)
  * posted event WORKER_FABRIC_BLOCK_TMO.
  **/
 void
-lpfc_fabric_block_timeout(unsigned long ptr)
+lpfc_fabric_block_timeout(struct timer_list *t)
 {
-	struct lpfc_hba  *phba = (struct lpfc_hba *) ptr;
+	struct lpfc_hba  *phba = from_timer(phba, t, fabric_block_timer);
 	unsigned long iflags;
 	uint32_t tmo_posted;
 
@@ -9462,8 +9475,7 @@ lpfc_cmpl_fabric_iocb(struct lpfc_hba *phba, struct lpfc_iocbq *cmdiocb,
 {
 	struct ls_rjt stat;
 
-	if ((cmdiocb->iocb_flag & LPFC_IO_FABRIC) != LPFC_IO_FABRIC)
-		BUG();
+	BUG_ON((cmdiocb->iocb_flag & LPFC_IO_FABRIC) != LPFC_IO_FABRIC);
 
 	switch (rspiocb->iocb.ulpStatus) {
 		case IOSTAT_NPORT_RJT:

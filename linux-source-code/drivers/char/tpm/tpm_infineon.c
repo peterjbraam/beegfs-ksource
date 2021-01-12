@@ -354,7 +354,7 @@ static int tpm_inf_send(struct tpm_chip *chip, u8 * buf, size_t count)
 	for (i = 0; i < count; i++) {
 		wait_and_send(chip, buf[i]);
 	}
-	return count;
+	return 0;
 }
 
 static void tpm_inf_cancel(struct tpm_chip *chip)
@@ -621,18 +621,7 @@ static struct pnp_driver tpm_inf_pnp_driver = {
 	}
 };
 
-static int __init init_inf(void)
-{
-	return pnp_register_driver(&tpm_inf_pnp_driver);
-}
-
-static void __exit cleanup_inf(void)
-{
-	pnp_unregister_driver(&tpm_inf_pnp_driver);
-}
-
-module_init(init_inf);
-module_exit(cleanup_inf);
+module_pnp_driver(tpm_inf_pnp_driver);
 
 MODULE_AUTHOR("Marcel Selhorst <tpmdd@sirrix.com>");
 MODULE_DESCRIPTION("Driver for Infineon TPM SLD 9630 TT 1.1 / SLB 9635 TT 1.2");

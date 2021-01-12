@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Provide access to virtual console memory.
  * /dev/vcs0: the screen as it is being viewed right now (possibly scrolled)
@@ -39,7 +40,7 @@
 #include <linux/slab.h>
 #include <linux/notifier.h>
 
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/byteorder.h>
 #include <asm/unaligned.h>
 
@@ -188,22 +189,7 @@ static loff_t vcs_lseek(struct file *file, loff_t offset, int orig)
 	console_unlock();
 	if (size < 0)
 		return size;
-	switch (orig) {
-		default:
-			return -EINVAL;
-		case 2:
-			offset += size;
-			break;
-		case 1:
-			offset += file->f_pos;
-		case 0:
-			break;
-	}
-	if (offset < 0 || offset > size) {
-		return -EINVAL;
-	}
-	file->f_pos = offset;
-	return file->f_pos;
+	return fixed_size_llseek(file, offset, orig, size);
 }
 
 
@@ -573,11 +559,11 @@ unlock_out:
 	return ret;
 }
 
-static unsigned int
+static __poll_t
 vcs_poll(struct file *file, poll_table *wait)
 {
 	struct vcs_poll_data *poll = vcs_poll_data_get(file);
-	int ret = DEFAULT_POLLMASK|POLLERR|POLLPRI;
+	__poll_t ret = DEFAULT_POLLMASK|EPOLLERR|EPOLLPRI;
 
 	if (poll) {
 		poll_wait(file, &poll->waitq, wait);

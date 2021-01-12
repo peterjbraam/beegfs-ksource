@@ -1,19 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  *  Kernel Probes (KProbes)
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  *
  * Copyright IBM Corp. 2002, 2006
  *
@@ -26,10 +13,12 @@
 #include <linux/stop_machine.h>
 #include <linux/kdebug.h>
 #include <linux/uaccess.h>
+#include <linux/extable.h>
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/hardirq.h>
-#include <asm/cacheflush.h>
+#include <linux/ftrace.h>
+#include <asm/set_memory.h>
 #include <asm/sections.h>
 #include <asm/dis.h>
 
@@ -64,12 +53,24 @@ struct kprobe_insn_cache kprobe_dmainsn_slots = {
 	.insn_size = MAX_INSN_SIZE,
 };
 
-static void __kprobes copy_instruction(struct kprobe *p)
+static void copy_instruction(struct kprobe *p)
 {
+	unsigned long ip = (unsigned long) p->addr;
 	s64 disp, new_disp;
 	u64 addr, new_addr;
 
-	memcpy(p->ainsn.insn, p->addr, insn_length(p->opcode >> 8));
+	if (ftrace_location(ip) == ip) {
+		/*
+		 * If kprobes patches the instruction that is morphed by
+		 * ftrace make sure that kprobes always sees the branch
+		 * "jg .+24" that skips the mcount block or the "brcl 0,0"
+		 * in case of hotpatch.
+		 */
+		ftrace_generate_nop_insn((struct ftrace_insn *)p->ainsn.insn);
+		p->ainsn.is_ftrace_insn = 1;
+	} else
+		memcpy(p->ainsn.insn, p->addr, insn_length(*p->addr >> 8));
+	p->opcode = p->ainsn.insn[0];
 	if (!probe_is_insn_relative_long(p->ainsn.insn))
 		return;
 	/*
@@ -85,25 +86,14 @@ static void __kprobes copy_instruction(struct kprobe *p)
 	new_disp = ((addr + (disp * 2)) - new_addr) / 2;
 	*(s32 *)&p->ainsn.insn[1] = new_disp;
 }
+NOKPROBE_SYMBOL(copy_instruction);
 
 static inline int is_kernel_addr(void *addr)
 {
 	return addr < (void *)_end;
 }
 
-static inline int is_module_addr(void *addr)
-{
-#ifdef CONFIG_64BIT
-	BUILD_BUG_ON(MODULES_LEN > (1UL << 31));
-	if (addr < (void *)MODULES_VADDR)
-		return 0;
-	if (addr > (void *)MODULES_END)
-		return 0;
-#endif
-	return 1;
-}
-
-static int __kprobes s390_get_insn_slot(struct kprobe *p)
+static int s390_get_insn_slot(struct kprobe *p)
 {
 	/*
 	 * Get an insn slot that is within the same 2GB area like the original
@@ -113,12 +103,13 @@ static int __kprobes s390_get_insn_slot(struct kprobe *p)
 	p->ainsn.insn = NULL;
 	if (is_kernel_addr(p->addr))
 		p->ainsn.insn = get_dmainsn_slot();
-	if (is_module_addr(p->addr))
+	else if (is_module_addr(p->addr))
 		p->ainsn.insn = get_insn_slot();
 	return p->ainsn.insn ? 0 : -ENOMEM;
 }
+NOKPROBE_SYMBOL(s390_get_insn_slot);
 
-static void __kprobes s390_free_insn_slot(struct kprobe *p)
+static void s390_free_insn_slot(struct kprobe *p)
 {
 	if (!p->ainsn.insn)
 		return;
@@ -128,8 +119,9 @@ static void __kprobes s390_free_insn_slot(struct kprobe *p)
 		free_insn_slot(p->ainsn.insn, 0);
 	p->ainsn.insn = NULL;
 }
+NOKPROBE_SYMBOL(s390_free_insn_slot);
 
-int __kprobes arch_prepare_kprobe(struct kprobe *p)
+int arch_prepare_kprobe(struct kprobe *p)
 {
 	if ((unsigned long) p->addr & 0x01)
 		return -EINVAL;
@@ -138,54 +130,75 @@ int __kprobes arch_prepare_kprobe(struct kprobe *p)
 		return -EINVAL;
 	if (s390_get_insn_slot(p))
 		return -ENOMEM;
-	p->opcode = *p->addr;
 	copy_instruction(p);
 	return 0;
 }
+NOKPROBE_SYMBOL(arch_prepare_kprobe);
 
-struct ins_replace_args {
-	kprobe_opcode_t *ptr;
-	kprobe_opcode_t opcode;
-};
-
-static int __kprobes swap_instruction(void *aref)
+int arch_check_ftrace_location(struct kprobe *p)
 {
-	struct kprobe_ctlblk *kcb = get_kprobe_ctlblk();
-	unsigned long status = kcb->kprobe_status;
-	struct ins_replace_args *args = aref;
-
-	kcb->kprobe_status = KPROBE_SWAP_INST;
-	probe_kernel_write(args->ptr, &args->opcode, sizeof(args->opcode));
-	kcb->kprobe_status = status;
 	return 0;
 }
 
-void __kprobes arch_arm_kprobe(struct kprobe *p)
+struct swap_insn_args {
+	struct kprobe *p;
+	unsigned int arm_kprobe : 1;
+};
+
+static int swap_instruction(void *data)
 {
-	struct ins_replace_args args;
+	struct swap_insn_args *args = data;
+	struct ftrace_insn new_insn, *insn;
+	struct kprobe *p = args->p;
+	size_t len;
 
-	args.ptr = p->addr;
-	args.opcode = BREAKPOINT_INSTRUCTION;
-	stop_machine(swap_instruction, &args, NULL);
+	new_insn.opc = args->arm_kprobe ? BREAKPOINT_INSTRUCTION : p->opcode;
+	len = sizeof(new_insn.opc);
+	if (!p->ainsn.is_ftrace_insn)
+		goto skip_ftrace;
+	len = sizeof(new_insn);
+	insn = (struct ftrace_insn *) p->addr;
+	if (args->arm_kprobe) {
+		if (is_ftrace_nop(insn))
+			new_insn.disp = KPROBE_ON_FTRACE_NOP;
+		else
+			new_insn.disp = KPROBE_ON_FTRACE_CALL;
+	} else {
+		ftrace_generate_call_insn(&new_insn, (unsigned long)p->addr);
+		if (insn->disp == KPROBE_ON_FTRACE_NOP)
+			ftrace_generate_nop_insn(&new_insn);
+	}
+skip_ftrace:
+	s390_kernel_write(p->addr, &new_insn, len);
+	return 0;
 }
+NOKPROBE_SYMBOL(swap_instruction);
 
-void __kprobes arch_disarm_kprobe(struct kprobe *p)
+void arch_arm_kprobe(struct kprobe *p)
 {
-	struct ins_replace_args args;
+	struct swap_insn_args args = {.p = p, .arm_kprobe = 1};
 
-	args.ptr = p->addr;
-	args.opcode = p->opcode;
-	stop_machine(swap_instruction, &args, NULL);
+	stop_machine_cpuslocked(swap_instruction, &args, NULL);
 }
+NOKPROBE_SYMBOL(arch_arm_kprobe);
 
-void __kprobes arch_remove_kprobe(struct kprobe *p)
+void arch_disarm_kprobe(struct kprobe *p)
+{
+	struct swap_insn_args args = {.p = p, .arm_kprobe = 0};
+
+	stop_machine_cpuslocked(swap_instruction, &args, NULL);
+}
+NOKPROBE_SYMBOL(arch_disarm_kprobe);
+
+void arch_remove_kprobe(struct kprobe *p)
 {
 	s390_free_insn_slot(p);
 }
+NOKPROBE_SYMBOL(arch_remove_kprobe);
 
-static void __kprobes enable_singlestep(struct kprobe_ctlblk *kcb,
-					struct pt_regs *regs,
-					unsigned long ip)
+static void enable_singlestep(struct kprobe_ctlblk *kcb,
+			      struct pt_regs *regs,
+			      unsigned long ip)
 {
 	struct per_regs per_kprobe;
 
@@ -203,54 +216,57 @@ static void __kprobes enable_singlestep(struct kprobe_ctlblk *kcb,
 	__ctl_load(per_kprobe, 9, 11);
 	regs->psw.mask |= PSW_MASK_PER;
 	regs->psw.mask &= ~(PSW_MASK_IO | PSW_MASK_EXT);
-	regs->psw.addr = ip | PSW_ADDR_AMODE;
+	regs->psw.addr = ip;
 }
+NOKPROBE_SYMBOL(enable_singlestep);
 
-static void __kprobes disable_singlestep(struct kprobe_ctlblk *kcb,
-					 struct pt_regs *regs,
-					 unsigned long ip)
+static void disable_singlestep(struct kprobe_ctlblk *kcb,
+			       struct pt_regs *regs,
+			       unsigned long ip)
 {
 	/* Restore control regs and psw mask, set new psw address */
 	__ctl_load(kcb->kprobe_saved_ctl, 9, 11);
 	regs->psw.mask &= ~PSW_MASK_PER;
 	regs->psw.mask |= kcb->kprobe_saved_imask;
-	regs->psw.addr = ip | PSW_ADDR_AMODE;
+	regs->psw.addr = ip;
 }
+NOKPROBE_SYMBOL(disable_singlestep);
 
 /*
  * Activate a kprobe by storing its pointer to current_kprobe. The
  * previous kprobe is stored in kcb->prev_kprobe. A stack of up to
  * two kprobes can be active, see KPROBE_REENTER.
  */
-static void __kprobes push_kprobe(struct kprobe_ctlblk *kcb, struct kprobe *p)
+static void push_kprobe(struct kprobe_ctlblk *kcb, struct kprobe *p)
 {
-	kcb->prev_kprobe.kp = __get_cpu_var(current_kprobe);
+	kcb->prev_kprobe.kp = __this_cpu_read(current_kprobe);
 	kcb->prev_kprobe.status = kcb->kprobe_status;
-	__get_cpu_var(current_kprobe) = p;
+	__this_cpu_write(current_kprobe, p);
 }
+NOKPROBE_SYMBOL(push_kprobe);
 
 /*
  * Deactivate a kprobe by backing up to the previous state. If the
  * current state is KPROBE_REENTER prev_kprobe.kp will be non-NULL,
  * for any other state prev_kprobe.kp will be NULL.
  */
-static void __kprobes pop_kprobe(struct kprobe_ctlblk *kcb)
+static void pop_kprobe(struct kprobe_ctlblk *kcb)
 {
-	__get_cpu_var(current_kprobe) = kcb->prev_kprobe.kp;
+	__this_cpu_write(current_kprobe, kcb->prev_kprobe.kp);
 	kcb->kprobe_status = kcb->prev_kprobe.status;
 }
+NOKPROBE_SYMBOL(pop_kprobe);
 
-void __kprobes arch_prepare_kretprobe(struct kretprobe_instance *ri,
-					struct pt_regs *regs)
+void arch_prepare_kretprobe(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
 	ri->ret_addr = (kprobe_opcode_t *) regs->gprs[14];
 
 	/* Replace the return addr with trampoline addr */
 	regs->gprs[14] = (unsigned long) &kretprobe_trampoline;
 }
+NOKPROBE_SYMBOL(arch_prepare_kretprobe);
 
-static void __kprobes kprobe_reenter_check(struct kprobe_ctlblk *kcb,
-					   struct kprobe *p)
+static void kprobe_reenter_check(struct kprobe_ctlblk *kcb, struct kprobe *p)
 {
 	switch (kcb->kprobe_status) {
 	case KPROBE_HIT_SSDONE:
@@ -265,13 +281,14 @@ static void __kprobes kprobe_reenter_check(struct kprobe_ctlblk *kcb,
 		 * is a BUG. The code path resides in the .kprobes.text
 		 * section and is executed with interrupts disabled.
 		 */
-		printk(KERN_EMERG "Invalid kprobe detected at %p.\n", p->addr);
+		pr_err("Invalid kprobe detected.\n");
 		dump_kprobe(p);
 		BUG();
 	}
 }
+NOKPROBE_SYMBOL(kprobe_reenter_check);
 
-static int __kprobes kprobe_handler(struct pt_regs *regs)
+static int kprobe_handler(struct pt_regs *regs)
 {
 	struct kprobe_ctlblk *kcb;
 	struct kprobe *p;
@@ -283,7 +300,7 @@ static int __kprobes kprobe_handler(struct pt_regs *regs)
 	 */
 	preempt_disable();
 	kcb = get_kprobe_ctlblk();
-	p = get_kprobe((void *)((regs->psw.addr & PSW_ADDR_INSN) - 2));
+	p = get_kprobe((void *)(regs->psw.addr - 2));
 
 	if (p) {
 		if (kprobe_running()) {
@@ -317,7 +334,7 @@ static int __kprobes kprobe_handler(struct pt_regs *regs)
 		enable_singlestep(kcb, regs, (unsigned long) p->ainsn.insn);
 		return 1;
 	} else if (kprobe_running()) {
-		p = __get_cpu_var(current_kprobe);
+		p = __this_cpu_read(current_kprobe);
 		if (p->break_handler && p->break_handler(p, regs)) {
 			/*
 			 * Continuation after the jprobe completed and
@@ -345,6 +362,7 @@ static int __kprobes kprobe_handler(struct pt_regs *regs)
 	preempt_enable_no_resched();
 	return 0;
 }
+NOKPROBE_SYMBOL(kprobe_handler);
 
 /*
  * Function return probe trampoline:
@@ -361,8 +379,7 @@ static void __used kretprobe_trampoline_holder(void)
 /*
  * Called when the probe at kretprobe trampoline is hit
  */
-static int __kprobes trampoline_probe_handler(struct kprobe *p,
-					      struct pt_regs *regs)
+static int trampoline_probe_handler(struct kprobe *p, struct pt_regs *regs)
 {
 	struct kretprobe_instance *ri;
 	struct hlist_head *head, empty_rp;
@@ -433,7 +450,7 @@ static int __kprobes trampoline_probe_handler(struct kprobe *p,
 			break;
 	}
 
-	regs->psw.addr = orig_ret_address | PSW_ADDR_AMODE;
+	regs->psw.addr = orig_ret_address;
 
 	pop_kprobe(get_kprobe_ctlblk());
 	kretprobe_hash_unlock(current, &flags);
@@ -450,6 +467,7 @@ static int __kprobes trampoline_probe_handler(struct kprobe *p,
 	 */
 	return 1;
 }
+NOKPROBE_SYMBOL(trampoline_probe_handler);
 
 /*
  * Called after single-stepping.  p->addr is the address of the
@@ -459,11 +477,29 @@ static int __kprobes trampoline_probe_handler(struct kprobe *p,
  * single-stepped a copy of the instruction.  The address of this
  * copy is p->ainsn.insn.
  */
-static void __kprobes resume_execution(struct kprobe *p, struct pt_regs *regs)
+static void resume_execution(struct kprobe *p, struct pt_regs *regs)
 {
 	struct kprobe_ctlblk *kcb = get_kprobe_ctlblk();
-	unsigned long ip = regs->psw.addr & PSW_ADDR_INSN;
+	unsigned long ip = regs->psw.addr;
 	int fixup = probe_get_fixup_type(p->ainsn.insn);
+
+	/* Check if the kprobes location is an enabled ftrace caller */
+	if (p->ainsn.is_ftrace_insn) {
+		struct ftrace_insn *insn = (struct ftrace_insn *) p->addr;
+		struct ftrace_insn call_insn;
+
+		ftrace_generate_call_insn(&call_insn, (unsigned long) p->addr);
+		/*
+		 * A kprobe on an enabled ftrace call site actually single
+		 * stepped an unconditional branch (ftrace nop equivalent).
+		 * Now we need to fixup things and pretend that a brasl r0,...
+		 * was executed instead.
+		 */
+		if (insn->disp == KPROBE_ON_FTRACE_CALL) {
+			ip += call_insn.disp * 2 - MCOUNT_INSN_SIZE;
+			regs->gprs[0] = (unsigned long)p->addr + sizeof(*insn);
+		}
+	}
 
 	if (fixup & FIXUP_PSW_NORMAL)
 		ip += (unsigned long) p->addr - (unsigned long) p->ainsn.insn;
@@ -482,8 +518,9 @@ static void __kprobes resume_execution(struct kprobe *p, struct pt_regs *regs)
 
 	disable_singlestep(kcb, regs, ip);
 }
+NOKPROBE_SYMBOL(resume_execution);
 
-static int __kprobes post_kprobe_handler(struct pt_regs *regs)
+static int post_kprobe_handler(struct pt_regs *regs)
 {
 	struct kprobe_ctlblk *kcb = get_kprobe_ctlblk();
 	struct kprobe *p = kprobe_running();
@@ -510,17 +547,15 @@ static int __kprobes post_kprobe_handler(struct pt_regs *regs)
 
 	return 1;
 }
+NOKPROBE_SYMBOL(post_kprobe_handler);
 
-static int __kprobes kprobe_trap_handler(struct pt_regs *regs, int trapnr)
+static int kprobe_trap_handler(struct pt_regs *regs, int trapnr)
 {
 	struct kprobe_ctlblk *kcb = get_kprobe_ctlblk();
 	struct kprobe *p = kprobe_running();
 	const struct exception_table_entry *entry;
 
 	switch(kcb->kprobe_status) {
-	case KPROBE_SWAP_INST:
-		/* We are here because the instruction replacement failed */
-		return 0;
 	case KPROBE_HIT_SS:
 	case KPROBE_REENTER:
 		/*
@@ -538,7 +573,7 @@ static int __kprobes kprobe_trap_handler(struct pt_regs *regs, int trapnr)
 	case KPROBE_HIT_SSDONE:
 		/*
 		 * We increment the nmissed count for accounting,
-		 * we can also use npre/npostfault count for accouting
+		 * we can also use npre/npostfault count for accounting
 		 * these specific fault cases.
 		 */
 		kprobes_inc_nmissed_count(p);
@@ -557,9 +592,9 @@ static int __kprobes kprobe_trap_handler(struct pt_regs *regs, int trapnr)
 		 * In case the user-specified fault handler returned
 		 * zero, try to fix up.
 		 */
-		entry = search_exception_tables(regs->psw.addr & PSW_ADDR_INSN);
+		entry = search_exception_tables(regs->psw.addr);
 		if (entry) {
-			regs->psw.addr = extable_fixup(entry) | PSW_ADDR_AMODE;
+			regs->psw.addr = extable_fixup(entry);
 			return 1;
 		}
 
@@ -573,8 +608,9 @@ static int __kprobes kprobe_trap_handler(struct pt_regs *regs, int trapnr)
 	}
 	return 0;
 }
+NOKPROBE_SYMBOL(kprobe_trap_handler);
 
-int __kprobes kprobe_fault_handler(struct pt_regs *regs, int trapnr)
+int kprobe_fault_handler(struct pt_regs *regs, int trapnr)
 {
 	int ret;
 
@@ -585,12 +621,13 @@ int __kprobes kprobe_fault_handler(struct pt_regs *regs, int trapnr)
 		local_irq_restore(regs->psw.mask & ~PSW_MASK_PER);
 	return ret;
 }
+NOKPROBE_SYMBOL(kprobe_fault_handler);
 
 /*
  * Wrapper routine to for handling exceptions.
  */
-int __kprobes kprobe_exceptions_notify(struct notifier_block *self,
-				       unsigned long val, void *data)
+int kprobe_exceptions_notify(struct notifier_block *self,
+			     unsigned long val, void *data)
 {
 	struct die_args *args = (struct die_args *) data;
 	struct pt_regs *regs = args->regs;
@@ -622,8 +659,9 @@ int __kprobes kprobe_exceptions_notify(struct notifier_block *self,
 
 	return ret;
 }
+NOKPROBE_SYMBOL(kprobe_exceptions_notify);
 
-int __kprobes setjmp_pre_handler(struct kprobe *p, struct pt_regs *regs)
+int setjmp_pre_handler(struct kprobe *p, struct pt_regs *regs)
 {
 	struct jprobe *jp = container_of(p, struct jprobe, kp);
 	struct kprobe_ctlblk *kcb = get_kprobe_ctlblk();
@@ -632,7 +670,7 @@ int __kprobes setjmp_pre_handler(struct kprobe *p, struct pt_regs *regs)
 	memcpy(&kcb->jprobe_saved_regs, regs, sizeof(struct pt_regs));
 
 	/* setup return addr to the jprobe handler routine */
-	regs->psw.addr = (unsigned long) jp->entry | PSW_ADDR_AMODE;
+	regs->psw.addr = (unsigned long) jp->entry;
 	regs->psw.mask &= ~(PSW_MASK_IO | PSW_MASK_EXT);
 
 	/* r15 is the stack pointer */
@@ -650,18 +688,15 @@ int __kprobes setjmp_pre_handler(struct kprobe *p, struct pt_regs *regs)
 	pause_graph_tracing();
 	return 1;
 }
+NOKPROBE_SYMBOL(setjmp_pre_handler);
 
-void __kprobes jprobe_return(void)
+void jprobe_return(void)
 {
 	asm volatile(".word 0x0002");
 }
+NOKPROBE_SYMBOL(jprobe_return);
 
-static void __used __kprobes jprobe_return_end(void)
-{
-	asm volatile("bcr 0,0");
-}
-
-int __kprobes longjmp_break_handler(struct kprobe *p, struct pt_regs *regs)
+int longjmp_break_handler(struct kprobe *p, struct pt_regs *regs)
 {
 	struct kprobe_ctlblk *kcb = get_kprobe_ctlblk();
 	unsigned long stack;
@@ -678,6 +713,7 @@ int __kprobes longjmp_break_handler(struct kprobe *p, struct pt_regs *regs)
 	preempt_enable_no_resched();
 	return 1;
 }
+NOKPROBE_SYMBOL(longjmp_break_handler);
 
 static struct kprobe trampoline = {
 	.addr = (kprobe_opcode_t *) &kretprobe_trampoline,
@@ -689,7 +725,8 @@ int __init arch_init_kprobes(void)
 	return register_kprobe(&trampoline);
 }
 
-int __kprobes arch_trampoline_kprobe(struct kprobe *p)
+int arch_trampoline_kprobe(struct kprobe *p)
 {
 	return p->addr == (kprobe_opcode_t *) &kretprobe_trampoline;
 }
+NOKPROBE_SYMBOL(arch_trampoline_kprobe);

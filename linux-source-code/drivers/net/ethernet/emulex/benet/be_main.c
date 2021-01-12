@@ -47,14 +47,22 @@ MODULE_PARM_DESC(rx_frag_size, "Size of a fragment that holds rcvd data.");
 static struct workqueue_struct *be_err_recovery_workq;
 
 static const struct pci_device_id be_dev_ids[] = {
+#ifdef CONFIG_BE2NET_BE2
 	{ PCI_DEVICE(BE_VENDOR_ID, BE_DEVICE_ID1) },
-	{ PCI_DEVICE(BE_VENDOR_ID, BE_DEVICE_ID2) },
 	{ PCI_DEVICE(BE_VENDOR_ID, OC_DEVICE_ID1) },
+#endif /* CONFIG_BE2NET_BE2 */
+#ifdef CONFIG_BE2NET_BE3
+	{ PCI_DEVICE(BE_VENDOR_ID, BE_DEVICE_ID2) },
 	{ PCI_DEVICE(BE_VENDOR_ID, OC_DEVICE_ID2) },
+#endif /* CONFIG_BE2NET_BE3 */
+#ifdef CONFIG_BE2NET_LANCER
 	{ PCI_DEVICE(EMULEX_VENDOR_ID, OC_DEVICE_ID3)},
 	{ PCI_DEVICE(EMULEX_VENDOR_ID, OC_DEVICE_ID4)},
+#endif /* CONFIG_BE2NET_LANCER */
+#ifdef CONFIG_BE2NET_SKYHAWK
 	{ PCI_DEVICE(EMULEX_VENDOR_ID, OC_DEVICE_ID5)},
 	{ PCI_DEVICE(EMULEX_VENDOR_ID, OC_DEVICE_ID6)},
+#endif /* CONFIG_BE2NET_SKYHAWK */
 	{ 0 }
 };
 MODULE_DEVICE_TABLE(pci, be_dev_ids);
@@ -1257,6 +1265,10 @@ static void be_xmit_flush(struct be_adapter *adapter, struct be_tx_obj *txo)
 #define is_arp_allowed_on_bmc(adapter, skb)	\
 	(is_arp(skb) && is_arp_filt_enabled(adapter))
 
+#define is_broadcast_packet(eh, adapter)	\
+		(is_multicast_ether_addr(eh->h_dest) && \
+		!compare_ether_addr(eh->h_dest, adapter->netdev->broadcast))
+
 #define is_arp(skb)	(skb->protocol == htons(ETH_P_ARP))
 
 #define is_arp_filt_enabled(adapter)	\
@@ -1412,12 +1424,15 @@ static void be_tx_timeout(struct net_device *netdev)
 {
 	struct be_adapter *adapter = netdev_priv(netdev);
 	struct device *dev = &adapter->pdev->dev;
+#if 0 /* RHEL only: Disable queue dump in be_tx_timeout */
 	struct be_tx_obj *txo;
 	struct sk_buff *skb;
 	struct tcphdr *tcphdr;
 	struct udphdr *udphdr;
 	u32 *entry;
+#endif
 	int status;
+#if 0 /* RHEL only: Disable queue dump in be_tx_timeout */
 	int i, j;
 
 	for_all_tx_queues(adapter, txo, i) {
@@ -1475,6 +1490,7 @@ static void be_tx_timeout(struct net_device *netdev)
 		}
 	}
 
+#endif
 	if (lancer_chip(adapter)) {
 		dev_info(dev, "Initiating reset due to tx timeout\n");
 		dev_info(dev, "Resetting adapter\n");
@@ -2138,7 +2154,7 @@ static int be_get_new_eqd(struct be_eq_obj *eqo)
 	int i;
 
 	aic = &adapter->aic_obj[eqo->idx];
-	if (!adapter->aic_enabled) {
+	if (!aic->enable) {
 		if (aic->jiffies)
 			aic->jiffies = 0;
 		eqd = aic->et_eqd;
@@ -2195,7 +2211,7 @@ static u32 be_get_eq_delay_mult_enc(struct be_eq_obj *eqo)
 	int eqd;
 	u32 mult_enc;
 
-	if (!adapter->aic_enabled)
+	if (!aic->enable)
 		return 0;
 
 	if (jiffies_to_msecs(now - aic->jiffies) < 1)
@@ -2950,8 +2966,6 @@ static int be_evt_queues_create(struct be_adapter *adapter)
 				    max(adapter->cfg_num_rx_irqs,
 					adapter->cfg_num_tx_irqs));
 
-	adapter->aic_enabled = true;
-
 	for_all_evt_queues(adapter, eqo, i) {
 		int numa_node = dev_to_node(&adapter->pdev->dev);
 
@@ -2959,6 +2973,7 @@ static int be_evt_queues_create(struct be_adapter *adapter)
 		eqo->adapter = adapter;
 		eqo->idx = i;
 		aic->max_eqd = BE_MAX_EQD;
+		aic->enable = true;
 
 		eq = &eqo->q;
 		rc = be_queue_alloc(adapter, eq, EVNT_Q_LEN,
@@ -4689,17 +4704,8 @@ int be_update_queues(struct be_adapter *adapter)
 	struct net_device *netdev = adapter->netdev;
 	int status;
 
-	if (netif_running(netdev)) {
-		/* be_tx_timeout() must not run concurrently with this
-		 * function, synchronize with an already-running dev_watchdog
-		 */
-		netif_tx_lock_bh(netdev);
-		/* device cannot transmit now, avoid dev_watchdog timeouts */
-		netif_carrier_off(netdev);
-		netif_tx_unlock_bh(netdev);
-
+	if (netif_running(netdev))
 		be_close(netdev);
-	}
 
 	be_cancel_worker(adapter);
 
@@ -4948,7 +4954,7 @@ fw_exit:
 }
 
 static int be_ndo_bridge_setlink(struct net_device *dev, struct nlmsghdr *nlh,
-				 u16 flags)
+				 u16 flags, struct netlink_ext_ack *extack)
 {
 	struct be_adapter *adapter = netdev_priv(dev);
 	struct nlattr *attr, *br_spec;
@@ -5280,7 +5286,6 @@ static void be_set_rx_mode(struct net_device *dev)
 }
 
 static const struct net_device_ops be_netdev_ops = {
-	.ndo_size		= sizeof(struct net_device_ops),
 	.ndo_open		= be_open,
 	.ndo_stop		= be_close,
 	.ndo_start_xmit		= be_xmit,
@@ -5291,7 +5296,7 @@ static const struct net_device_ops be_netdev_ops = {
 	.ndo_vlan_rx_add_vid	= be_vlan_add_vid,
 	.ndo_vlan_rx_kill_vid	= be_vlan_rem_vid,
 	.ndo_set_vf_mac		= be_set_vf_mac,
-	.extended.ndo_set_vf_vlan	= be_set_vf_vlan,
+	.ndo_set_vf_vlan	= be_set_vf_vlan,
 	.ndo_set_vf_rate	= be_set_vf_tx_rate,
 	.ndo_get_vf_config	= be_get_vf_config,
 	.ndo_set_vf_link_state  = be_set_vf_link_state,
@@ -5302,8 +5307,8 @@ static const struct net_device_ops be_netdev_ops = {
 #endif
 	.ndo_bridge_setlink	= be_ndo_bridge_setlink,
 	.ndo_bridge_getlink	= be_ndo_bridge_getlink,
-	.extended.ndo_udp_tunnel_add	= be_add_vxlan_port,
-	.extended.ndo_udp_tunnel_del	= be_del_vxlan_port,
+	.ndo_udp_tunnel_add	= be_add_vxlan_port,
+	.ndo_udp_tunnel_del	= be_del_vxlan_port,
 	.ndo_features_check	= be_features_check,
 	.ndo_get_phys_port_id   = be_get_phys_port_id,
 };
@@ -5336,8 +5341,8 @@ static void be_netdev_init(struct net_device *netdev)
 	netdev->ethtool_ops = &be_ethtool_ops;
 
 	/* MTU range: 256 - 9000 */
-	netdev->extended->min_mtu = BE_MIN_MTU;
-	netdev->extended->max_mtu = BE_MAX_MTU;
+	netdev->min_mtu = BE_MIN_MTU;
+	netdev->max_mtu = BE_MAX_MTU;
 }
 
 static void be_cleanup(struct be_adapter *adapter)
@@ -5623,7 +5628,9 @@ static void be_worker(struct work_struct *work)
 	 * mcc completions
 	 */
 	if (!netif_running(adapter->netdev)) {
+		local_bh_disable();
 		be_process_mcc(adapter);
+		local_bh_enable();
 		goto reschedule;
 	}
 
@@ -6143,7 +6150,6 @@ static pci_ers_result_t be_eeh_reset(struct pci_dev *pdev)
 	if (status)
 		return PCI_ERS_RESULT_DISCONNECT;
 
-	pci_cleanup_aer_uncorrect_error_status(pdev);
 	be_clear_error(adapter, BE_CLEAR_ALL);
 	return PCI_ERS_RESULT_RECOVERED;
 }

@@ -214,7 +214,8 @@ static int mlx4_devlink_crdump_snapshot_set(struct devlink *devlink, u32 id,
 
 static int
 mlx4_devlink_max_macs_validate(struct devlink *devlink, u32 id,
-			       union devlink_param_value val)
+			       union devlink_param_value val,
+			       struct netlink_ext_ack *extack)
 {
 	u32 value = val.vu32;
 
@@ -3030,10 +3031,10 @@ static int mlx4_init_port_info(struct mlx4_dev *dev, int port)
 
 	sprintf(info->dev_name, "mlx4_port%d", port);
 	info->port_attr.attr.name = info->dev_name;
-	if (mlx4_is_mfunc(dev))
-		info->port_attr.attr.mode = S_IRUGO;
-	else {
-		info->port_attr.attr.mode = S_IRUGO | S_IWUSR;
+	if (mlx4_is_mfunc(dev)) {
+		info->port_attr.attr.mode = 0444;
+	} else {
+		info->port_attr.attr.mode = 0644;
 		info->port_attr.store     = set_port_type;
 	}
 	info->port_attr.show      = show_port_type;
@@ -3049,10 +3050,10 @@ static int mlx4_init_port_info(struct mlx4_dev *dev, int port)
 
 	sprintf(info->dev_mtu_name, "mlx4_port%d_mtu", port);
 	info->port_mtu_attr.attr.name = info->dev_mtu_name;
-	if (mlx4_is_mfunc(dev))
-		info->port_mtu_attr.attr.mode = S_IRUGO;
-	else {
-		info->port_mtu_attr.attr.mode = S_IRUGO | S_IWUSR;
+	if (mlx4_is_mfunc(dev)) {
+		info->port_mtu_attr.attr.mode = 0444;
+	} else {
+		info->port_mtu_attr.attr.mode = 0644;
 		info->port_mtu_attr.store     = set_port_ib_mtu;
 	}
 	info->port_mtu_attr.show      = show_port_ib_mtu;
@@ -3094,7 +3095,8 @@ static int mlx4_init_steering(struct mlx4_dev *dev)
 	int num_entries = dev->caps.num_ports;
 	int i, j;
 
-	priv->steer = kzalloc(sizeof(struct mlx4_steer) * num_entries, GFP_KERNEL);
+	priv->steer = kcalloc(num_entries, sizeof(struct mlx4_steer),
+			      GFP_KERNEL);
 	if (!priv->steer)
 		return -ENOMEM;
 
@@ -3215,7 +3217,7 @@ static u64 mlx4_enable_sriov(struct mlx4_dev *dev, struct pci_dev *pdev,
 		}
 	}
 
-	dev->dev_vfs = kzalloc(total_vfs * sizeof(*dev->dev_vfs), GFP_KERNEL);
+	dev->dev_vfs = kcalloc(total_vfs, sizeof(*dev->dev_vfs), GFP_KERNEL);
 	if (NULL == dev->dev_vfs) {
 		mlx4_err(dev, "Failed to allocate memory for VFs\n");
 		goto disable_sriov;
@@ -3917,7 +3919,8 @@ static void mlx4_devlink_param_load_driverinit_values(struct devlink *devlink)
 	}
 }
 
-static int mlx4_devlink_reload(struct devlink *devlink)
+static int mlx4_devlink_reload(struct devlink *devlink,
+			       struct netlink_ext_ack *extack)
 {
 	struct mlx4_priv *priv = devlink_priv(devlink);
 	struct mlx4_dev *dev = &priv->dev;
@@ -3978,6 +3981,7 @@ static int mlx4_init_one(struct pci_dev *pdev, const struct pci_device_id *id)
 	if (ret)
 		goto err_params_unregister;
 
+	devlink_params_publish(devlink);
 	pci_save_state(pdev);
 	return 0;
 

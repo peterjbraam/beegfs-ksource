@@ -7,8 +7,7 @@
 #include <linux/kernel.h>
 #include <linux/uaccess.h>
 #include <linux/debugfs.h>
-#include <linux/security.h>
-#include <acpi/acpi_drivers.h>
+#include <linux/acpi.h>
 
 #include "internal.h"
 
@@ -30,7 +29,7 @@ static ssize_t cm_write(struct file *file, const char __user * user_buf,
 	struct acpi_table_header table;
 	acpi_status status;
 
-	if (get_securelevel() > 0)
+	if (kernel_is_locked_down("ACPI custom methods"))
 		return -EPERM;
 
 	if (!(*ppos)) {
@@ -98,7 +97,7 @@ static void __exit acpi_custom_method_exit(void)
 {
 	if (cm_dentry)
 		debugfs_remove(cm_dentry);
- }
+}
 
 module_init(acpi_custom_method_init);
 module_exit(acpi_custom_method_exit);

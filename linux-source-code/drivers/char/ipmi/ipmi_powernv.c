@@ -19,7 +19,6 @@
 
 struct ipmi_smi_powernv {
 	u64			interface_id;
-	struct ipmi_device_id	ipmi_id;
 	ipmi_smi_t		intf;
 	unsigned int		irq;
 
@@ -52,8 +51,7 @@ static void send_error_reply(struct ipmi_smi_powernv *smi,
 	ipmi_smi_msg_received(smi->intf, msg);
 }
 
-static void ipmi_powernv_send(void *send_info, struct ipmi_smi_msg *msg,
-			      int priority)
+static void ipmi_powernv_send(void *send_info, struct ipmi_smi_msg *msg)
 {
 	struct ipmi_smi_powernv *smi = send_info;
 	struct opal_ipmi_msg *opal_msg;
@@ -140,8 +138,15 @@ static int ipmi_powernv_recv(struct ipmi_smi_powernv *smi)
 	pr_devel("%s:   -> %d (size %lld)\n", __func__,
 			rc, rc == 0 ? size : 0);
 	if (rc) {
+		/* If came via the poll, and response was not yet ready */
+		if (rc == OPAL_EMPTY) {
+			spin_unlock_irqrestore(&smi->msg_lock, flags);
+			return 0;
+		}
+
+		smi->cur_msg = NULL;
 		spin_unlock_irqrestore(&smi->msg_lock, flags);
-		ipmi_free_smi_msg(msg);
+		send_error_reply(smi, msg, IPMI_ERR_UNSPECIFIED);
 		return 0;
 	}
 
@@ -175,7 +180,7 @@ static void ipmi_powernv_request_events(void *send_info)
 }
 
 static void ipmi_powernv_set_run_to_completion(void *send_info,
-					       int run_to_completion)
+		bool run_to_completion)
 {
 }
 
@@ -186,7 +191,7 @@ static void ipmi_powernv_poll(void *send_info)
 	ipmi_powernv_recv(smi);
 }
 
-static struct ipmi_smi_handlers ipmi_powernv_smi_handlers = {
+static const struct ipmi_smi_handlers ipmi_powernv_smi_handlers = {
 	.owner			= THIS_MODULE,
 	.start_processing	= ipmi_powernv_start_processing,
 	.sender			= ipmi_powernv_send,
@@ -256,9 +261,7 @@ static int ipmi_powernv_probe(struct platform_device *pdev)
 		goto err_unregister;
 	}
 
-	/* todo: query actual ipmi_device_id */
-	rc = ipmi_register_smi(&ipmi_powernv_smi_handlers, ipmi,
-		       &ipmi->ipmi_id, dev, "powernv", 0);
+	rc = ipmi_register_smi(&ipmi_powernv_smi_handlers, ipmi, dev, 0);
 	if (rc) {
 		dev_warn(dev, "IPMI SMI registration failed (%d)\n", rc);
 		goto err_free_msg;

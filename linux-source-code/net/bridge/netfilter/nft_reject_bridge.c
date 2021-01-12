@@ -14,7 +14,6 @@
 #include <linux/netfilter/nf_tables.h>
 #include <net/netfilter/nf_tables.h>
 #include <net/netfilter/nft_reject.h>
-#include <net/netfilter/nf_tables_bridge.h>
 #include <net/netfilter/ipv4/nf_reject.h>
 #include <net/netfilter/ipv6/nf_reject.h>
 #include <linux/ip.h>
@@ -35,6 +34,30 @@ static void nft_reject_br_push_etherhdr(struct sk_buff *oldskb,
 	ether_addr_copy(eth->h_dest, eth_hdr(oldskb)->h_source);
 	eth->h_proto = eth_hdr(oldskb)->h_proto;
 	skb_pull(nskb, ETH_HLEN);
+}
+
+static int nft_bridge_iphdr_validate(struct sk_buff *skb)
+{
+	struct iphdr *iph;
+	u32 len;
+
+	if (!pskb_may_pull(skb, sizeof(struct iphdr)))
+		return 0;
+
+	iph = ip_hdr(skb);
+	if (iph->ihl < 5 || iph->version != 4)
+		return 0;
+
+	len = ntohs(iph->tot_len);
+	if (skb->len < len)
+		return 0;
+	else if (len < (iph->ihl*4))
+		return 0;
+
+	if (!pskb_may_pull(skb, iph->ihl*4))
+		return 0;
+
+	return 1;
 }
 
 /* We cannot use oldskb->dev, it can be either bridge device (NF_BRIDGE INPUT)
@@ -64,9 +87,9 @@ static void nft_reject_br_send_v4_tcp_reset(struct net *net,
 
 	skb_reserve(nskb, LL_MAX_HEADER);
 	niph = nf_reject_iphdr_put(nskb, oldskb, IPPROTO_TCP,
-				   net->ipv4_sysctl_ip_default_ttl);
+				   net->ipv4.sysctl_ip_default_ttl);
 	nf_reject_ip_tcphdr_put(nskb, oldskb, oth);
-	niph->ttl	= net->ipv4_sysctl_ip_default_ttl;
+	niph->ttl	= net->ipv4.sysctl_ip_default_ttl;
 	niph->tot_len	= htons(nskb->len);
 	ip_send_check(niph);
 
@@ -84,7 +107,6 @@ static void nft_reject_br_send_v4_unreach(struct net *net,
 	struct iphdr *niph;
 	struct icmphdr *icmph;
 	unsigned int len;
-	void *payload;
 	__wsum csum;
 	u8 proto;
 
@@ -121,14 +143,14 @@ static void nft_reject_br_send_v4_unreach(struct net *net,
 
 	skb_reserve(nskb, LL_MAX_HEADER);
 	niph = nf_reject_iphdr_put(nskb, oldskb, IPPROTO_ICMP,
-				   net->ipv4_sysctl_ip_default_ttl);
+				   net->ipv4.sysctl_ip_default_ttl);
 
 	skb_reset_transport_header(nskb);
 	icmph = skb_put_zero(nskb, sizeof(struct icmphdr));
 	icmph->type     = ICMP_DEST_UNREACH;
 	icmph->code	= code;
 
-	payload = skb_put_data(nskb, skb_network_header(oldskb), len);
+	skb_put_data(nskb, skb_network_header(oldskb), len);
 
 	csum = csum_partial((void *)icmph, len + sizeof(struct icmphdr), 0);
 	icmph->checksum = csum_fold(csum);
@@ -139,6 +161,25 @@ static void nft_reject_br_send_v4_unreach(struct net *net,
 	nft_reject_br_push_etherhdr(oldskb, nskb);
 
 	br_forward(br_port_get_rcu(dev), nskb, false, true);
+}
+
+static int nft_bridge_ip6hdr_validate(struct sk_buff *skb)
+{
+	struct ipv6hdr *hdr;
+	u32 pkt_len;
+
+	if (!pskb_may_pull(skb, sizeof(struct ipv6hdr)))
+		return 0;
+
+	hdr = ipv6_hdr(skb);
+	if (hdr->version != 6)
+		return 0;
+
+	pkt_len = ntohs(hdr->payload_len);
+	if (pkt_len + sizeof(struct ipv6hdr) > skb->len)
+		return 0;
+
+	return 1;
 }
 
 static void nft_reject_br_send_v6_tcp_reset(struct net *net,
@@ -189,6 +230,7 @@ static bool reject6_br_csum_ok(struct sk_buff *skb, int hook)
 	    pskb_trim_rcsum(skb, ntohs(ip6h->payload_len) + sizeof(*ip6h)))
 		return false;
 
+	ip6h = ipv6_hdr(skb);
 	thoff = ipv6_skip_exthdr(skb, ((u8*)(ip6h+1) - skb->data), &proto, &fo);
 	if (thoff < 0 || thoff >= skb->len || (fo & htons(~0x7)) != 0)
 		return false;
@@ -205,7 +247,6 @@ static void nft_reject_br_send_v6_unreach(struct net *net,
 	struct ipv6hdr *nip6h;
 	struct icmp6hdr *icmp6h;
 	unsigned int len;
-	void *payload;
 
 	if (!nft_bridge_ip6hdr_validate(oldskb))
 		return;
@@ -221,7 +262,7 @@ static void nft_reject_br_send_v6_unreach(struct net *net,
 	if (!reject6_br_csum_ok(oldskb, hook))
 		return;
 
-	nskb = alloc_skb(sizeof(struct iphdr) + sizeof(struct icmp6hdr) +
+	nskb = alloc_skb(sizeof(struct ipv6hdr) + sizeof(struct icmp6hdr) +
 			 LL_MAX_HEADER + len, GFP_ATOMIC);
 	if (!nskb)
 		return;
@@ -235,7 +276,7 @@ static void nft_reject_br_send_v6_unreach(struct net *net,
 	icmp6h->icmp6_type = ICMPV6_DEST_UNREACH;
 	icmp6h->icmp6_code = code;
 
-	payload = skb_put_data(nskb, skb_network_header(oldskb), len);
+	skb_put_data(nskb, skb_network_header(oldskb), len);
 	nip6h->payload_len = htons(nskb->len - sizeof(struct ipv6hdr));
 
 	icmp6h->icmp6_cksum =
@@ -326,11 +367,7 @@ static int nft_reject_bridge_init(const struct nft_ctx *ctx,
 				  const struct nlattr * const tb[])
 {
 	struct nft_reject *priv = nft_expr_priv(expr);
-	int icmp_code, err;
-
-	err = nft_reject_bridge_validate(ctx, expr, NULL);
-	if (err < 0)
-		return err;
+	int icmp_code;
 
 	if (tb[NFTA_REJECT_TYPE] == NULL)
 		return -EINVAL;

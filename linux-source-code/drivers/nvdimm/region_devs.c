@@ -25,7 +25,7 @@
  * For readq() and writeq() on 32-bit builds, the hi-lo, lo-hi order is
  * irrelevant.
  */
-#include <asm-generic/io-64-nonatomic-hi-lo.h>
+#include <linux/io-64-nonatomic-hi-lo.h>
 
 static DEFINE_IDA(region_ida);
 static DEFINE_PER_CPU(int, flush_idx);
@@ -400,7 +400,7 @@ resource_size_t nd_region_allocatable_dpa(struct nd_region *nd_region)
 	int i;
 
 	if (is_memory(&nd_region->dev))
-		available = (phys_addr_t)ULLONG_MAX;
+		available = PHYS_ADDR_MAX;
 
 	WARN_ON(!is_nvdimm_bus_locked(&nd_region->dev));
 	for (i = 0; i < nd_region->ndr_mappings; i++) {
@@ -1003,6 +1003,13 @@ static struct nd_region *nd_region_create(struct nvdimm_bus *nvdimm_bus,
 
 		if (test_bit(NDD_UNARMED, &nvdimm->flags))
 			ro = 1;
+
+		if (test_bit(NDD_NOBLK, &nvdimm->flags)
+				&& dev_type == &nd_blk_device_type) {
+			dev_err(&nvdimm_bus->dev, "%s: %s mapping%d is not BLK capable\n",
+					caller, dev_name(&nvdimm->dev), i);
+			return NULL;
+		}
 	}
 
 	if (dev_type == &nd_blk_device_type) {
@@ -1074,6 +1081,7 @@ static struct nd_region *nd_region_create(struct nvdimm_bus *nvdimm_bus,
 	dev->parent = &nvdimm_bus->dev;
 	dev->type = dev_type;
 	dev->groups = ndr_desc->attr_groups;
+	dev->of_node = ndr_desc->of_node;
 	nd_region->ndr_size = resource_size(ndr_desc->res);
 	nd_region->ndr_start = ndr_desc->res->start;
 	nd_device_register(dev);

@@ -54,7 +54,7 @@ static const struct kernel_param_ops param_ops_supported_features = {
 	.get = param_get_supported_features,
 };
 module_param_cb(supported_features, &param_ops_supported_features, NULL,
-		S_IRUGO);
+		0444);
 
 const char *ceph_msg_type_name(int type)
 {
@@ -192,7 +192,7 @@ void *ceph_kvmalloc(size_t size, gfp_t flags)
 			return ptr;
 	}
 
-	return __vmalloc(size, flags | __GFP_HIGHMEM, PAGE_KERNEL);
+	return __vmalloc(size, flags, PAGE_KERNEL);
 }
 
 
@@ -329,7 +329,7 @@ static int get_secret(struct ceph_crypto_key *dst, const char *name) {
 		goto out;
 	}
 
-	ckey = ukey->payload.data;
+	ckey = ukey->payload.data[0];
 	err = ceph_crypto_key_clone(dst, ckey);
 	if (err)
 		goto out_key;
@@ -616,7 +616,11 @@ struct ceph_client *ceph_create_client(struct ceph_options *opt, void *private)
 {
 	struct ceph_client *client;
 	struct ceph_entity_addr *myaddr = NULL;
-	int err = -ENOMEM;
+	int err;
+
+	err = wait_for_random_bytes();
+	if (err < 0)
+		return ERR_PTR(err);
 
 	client = kzalloc(sizeof(*client), GFP_KERNEL);
 	if (client == NULL)

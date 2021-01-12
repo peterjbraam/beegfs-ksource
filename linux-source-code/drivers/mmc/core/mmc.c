@@ -27,6 +27,7 @@
 #include "mmc_ops.h"
 #include "quirks.h"
 #include "sd_ops.h"
+#include "pwrseq.h"
 
 #define DEFAULT_CMD6_TIMEOUT_MS	500
 
@@ -791,6 +792,7 @@ MMC_DEV_ATTR(enhanced_area_size, "%u\n", card->ext_csd.enhanced_area_size);
 MMC_DEV_ATTR(raw_rpmb_size_mult, "%#x\n", card->ext_csd.raw_rpmb_size_mult);
 MMC_DEV_ATTR(rel_sectors, "%#x\n", card->ext_csd.rel_sectors);
 MMC_DEV_ATTR(ocr, "0x%08x\n", card->ocr);
+MMC_DEV_ATTR(rca, "0x%04x\n", card->rca);
 MMC_DEV_ATTR(cmdq_en, "%d\n", card->ext_csd.cmdq_en);
 
 static ssize_t mmc_fwrev_show(struct device *dev,
@@ -847,6 +849,7 @@ static struct attribute *mmc_std_attrs[] = {
 	&dev_attr_raw_rpmb_size_mult.attr,
 	&dev_attr_rel_sectors.attr,
 	&dev_attr_ocr.attr,
+	&dev_attr_rca.attr,
 	&dev_attr_dsr.attr,
 	&dev_attr_cmdq_en.attr,
 	NULL,
@@ -965,16 +968,12 @@ static void mmc_set_bus_speed(struct mmc_card *card)
 	unsigned int max_dtr = (unsigned int)-1;
 
 	if ((mmc_card_hs200(card) || mmc_card_hs400(card)) &&
-	     max_dtr > card->ext_csd.hs200_max_dtr) {
-		gmb();
+	     max_dtr > card->ext_csd.hs200_max_dtr)
 		max_dtr = card->ext_csd.hs200_max_dtr;
-	} else if (mmc_card_hs(card) && max_dtr > card->ext_csd.hs_max_dtr) {
-		gmb();
+	else if (mmc_card_hs(card) && max_dtr > card->ext_csd.hs_max_dtr)
 		max_dtr = card->ext_csd.hs_max_dtr;
-	} else if (max_dtr > card->csd.max_dtr) {
-		gmb();
+	else if (max_dtr > card->csd.max_dtr)
 		max_dtr = card->csd.max_dtr;
-	}
 
 	mmc_set_clock(card->host, max_dtr);
 }
@@ -1283,6 +1282,10 @@ int mmc_hs400_to_hs200(struct mmc_card *card)
 
 	mmc_set_bus_speed(card);
 
+	/* Prepare tuning for HS400 mode. */
+	if (host->ops->prepare_hs400_tuning)
+		host->ops->prepare_hs400_tuning(host, &host->ios);
+
 	return 0;
 
 out_err:
@@ -1294,13 +1297,18 @@ out_err:
 static void mmc_select_driver_type(struct mmc_card *card)
 {
 	int card_drv_type, drive_strength, drv_type = 0;
+	int fixed_drv_type = card->host->fixed_drv_type;
 
 	card_drv_type = card->ext_csd.raw_driver_strength |
 			mmc_driver_type_mask(0);
 
-	drive_strength = mmc_select_drive_strength(card,
-						   card->ext_csd.hs200_max_dtr,
-						   card_drv_type, &drv_type);
+	if (fixed_drv_type >= 0)
+		drive_strength = card_drv_type & mmc_driver_type_mask(fixed_drv_type)
+				 ? fixed_drv_type : 0;
+	else
+		drive_strength = mmc_select_drive_strength(card,
+							   card->ext_csd.hs200_max_dtr,
+							   card_drv_type, &drv_type);
 
 	card->drive_strength = drive_strength;
 
@@ -1826,6 +1834,14 @@ static int mmc_init_card(struct mmc_host *host, u32 ocr,
 		}
 	}
 
+	if (host->caps2 & MMC_CAP2_AVOID_3_3V &&
+	    host->ios.signal_voltage == MMC_SIGNAL_VOLTAGE_330) {
+		pr_err("%s: Host failed to negotiate down from 3.3V\n",
+			mmc_hostname(host));
+		err = -EINVAL;
+		goto free_card;
+	}
+
 	if (!oldcard)
 		host->card = card;
 
@@ -2113,7 +2129,7 @@ static int mmc_can_reset(struct mmc_card *card)
 	return 1;
 }
 
-static int mmc_reset(struct mmc_host *host)
+static int _mmc_hw_reset(struct mmc_host *host)
 {
 	struct mmc_card *card = host->card;
 
@@ -2133,6 +2149,7 @@ static int mmc_reset(struct mmc_host *host)
 	} else {
 		/* Do a brute force power cycle */
 		mmc_power_cycle(host, card->ocr);
+		mmc_pwrseq_reset(host);
 	}
 	return mmc_init_card(host, card->ocr, card);
 }
@@ -2146,7 +2163,7 @@ static const struct mmc_bus_ops mmc_ops = {
 	.runtime_resume = mmc_runtime_resume,
 	.alive = mmc_alive,
 	.shutdown = mmc_shutdown,
-	.reset = mmc_reset,
+	.hw_reset = _mmc_hw_reset,
 };
 
 /*

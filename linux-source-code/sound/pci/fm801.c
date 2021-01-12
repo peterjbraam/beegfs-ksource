@@ -30,7 +30,7 @@
 #include <sound/initval.h>
 
 #ifdef CONFIG_SND_FM801_TEA575X_BOOL
-#include <sound/tea575x-tuner.h>
+#include <media/drv-intf/tea575x.h>
 #endif
 
 MODULE_AUTHOR("Jaroslav Kysela <perex@perex.cz>");
@@ -831,7 +831,7 @@ static void snd_fm801_tea575x_set_direction(struct snd_tea575x *tea, bool output
 	fm801_writew(chip, GPIO_CTRL, reg);
 }
 
-static struct snd_tea575x_ops snd_fm801_tea_ops = {
+static const struct snd_tea575x_ops snd_fm801_tea_ops = {
 	.set_pins = snd_fm801_tea575x_set_pins,
 	.get_pins = snd_fm801_tea575x_get_pins,
 	.set_direction = snd_fm801_tea575x_set_direction,
@@ -1408,7 +1408,6 @@ static int snd_fm801_suspend(struct device *dev)
 	if (chip->tea575x_tuner & TUNER_ONLY) {
 		/* FIXME: tea575x suspend */
 	} else {
-		snd_pcm_suspend_all(chip->pcm);
 		snd_ac97_suspend(chip->ac97);
 		snd_ac97_suspend(chip->ac97_sec);
 	}

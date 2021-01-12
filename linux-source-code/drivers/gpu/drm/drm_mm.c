@@ -169,7 +169,7 @@ INTERVAL_TREE_DEFINE(struct drm_mm_node, rb,
 struct drm_mm_node *
 __drm_mm_interval_first(const struct drm_mm *mm, u64 start, u64 last)
 {
-	return drm_mm_interval_tree_iter_first((struct rb_root *)&mm->interval_tree,
+	return drm_mm_interval_tree_iter_first((struct rb_root_cached *)&mm->interval_tree,
 					       start, last) ?: (struct drm_mm_node *)&mm->head_node;
 }
 EXPORT_SYMBOL(__drm_mm_interval_first);
@@ -180,6 +180,7 @@ static void drm_mm_interval_tree_add_node(struct drm_mm_node *hole_node,
 	struct drm_mm *mm = hole_node->mm;
 	struct rb_node **link, *rb;
 	struct drm_mm_node *parent;
+	bool leftmost;
 
 	node->__subtree_last = LAST(node);
 
@@ -196,9 +197,11 @@ static void drm_mm_interval_tree_add_node(struct drm_mm_node *hole_node,
 
 		rb = &hole_node->rb;
 		link = &hole_node->rb.rb_right;
+		leftmost = false;
 	} else {
 		rb = NULL;
-		link = &mm->interval_tree.rb_node;
+		link = &mm->interval_tree.rb_root.rb_node;
+		leftmost = true;
 	}
 
 	while (*link) {
@@ -210,11 +213,12 @@ static void drm_mm_interval_tree_add_node(struct drm_mm_node *hole_node,
 			link = &parent->rb.rb_left;
 		} else {
 			link = &parent->rb.rb_right;
+			leftmost = false;
 		}
 	}
 
 	rb_link_node(&node->rb, rb, link);
-	rb_insert_augmented(&node->rb, &mm->interval_tree,
+	rb_insert_augmented_cached(&node->rb, &mm->interval_tree, leftmost,
 				   &drm_mm_interval_tree_augment);
 }
 
@@ -240,11 +244,12 @@ static u64 rb_to_hole_size(struct rb_node *rb)
 	return rb_entry(rb, struct drm_mm_node, rb_hole_size)->hole_size;
 }
 
-static void insert_hole_size(struct rb_root *root,
+static void insert_hole_size(struct rb_root_cached *root,
 			     struct drm_mm_node *node)
 {
-	struct rb_node **link = &root->rb_node, *rb = NULL;
+	struct rb_node **link = &root->rb_root.rb_node, *rb = NULL;
 	u64 x = node->hole_size;
+	bool first = true;
 
 	while (*link) {
 		rb = *link;
@@ -252,11 +257,12 @@ static void insert_hole_size(struct rb_root *root,
 			link = &rb->rb_left;
 		} else {
 			link = &rb->rb_right;
+			first = false;
 		}
 	}
 
 	rb_link_node(&node->rb_hole_size, rb, link);
-	rb_insert_color(&node->rb_hole_size, root);
+	rb_insert_color_cached(&node->rb_hole_size, root, first);
 }
 
 static void add_hole(struct drm_mm_node *node)
@@ -278,7 +284,7 @@ static void rm_hole(struct drm_mm_node *node)
 	DRM_MM_BUG_ON(!drm_mm_hole_follows(node));
 
 	list_del(&node->hole_stack);
-	rb_erase(&node->rb_hole_size, &node->mm->holes_size);
+	rb_erase_cached(&node->rb_hole_size, &node->mm->holes_size);
 	rb_erase(&node->rb_hole_addr, &node->mm->holes_addr);
 	node->hole_size = 0;
 
@@ -302,7 +308,7 @@ static inline u64 rb_hole_size(struct rb_node *rb)
 
 static struct drm_mm_node *best_hole(struct drm_mm *mm, u64 size)
 {
-	struct rb_node *rb = mm->holes_size.rb_node;
+	struct rb_node *rb = mm->holes_size.rb_root.rb_node;
 	struct drm_mm_node *best = NULL;
 
 	do {
@@ -481,7 +487,7 @@ int drm_mm_insert_node_in_range(struct drm_mm * const mm,
 	if (unlikely(size == 0 || range_end - range_start < size))
 		return -ENOSPC;
 
-	if (rb_to_hole_size_or_zero(rb_first(&mm->holes_size)) < size)
+	if (rb_to_hole_size_or_zero(rb_first_cached(&mm->holes_size)) < size)
 		return -ENOSPC;
 
 	if (alignment <= 1)
@@ -614,11 +620,11 @@ void drm_mm_replace_node(struct drm_mm_node *old, struct drm_mm_node *new)
 	*new = *old;
 
 	list_replace(&old->node_list, &new->node_list);
-	rb_replace_node(&old->rb, &new->rb, &mm->interval_tree);
+	rb_replace_node_cached(&old->rb, &new->rb, &mm->interval_tree);
 
 	if (drm_mm_hole_follows(old)) {
 		list_replace(&old->hole_stack, &new->hole_stack);
-		rb_replace_node(&old->rb_hole_size,
+		rb_replace_node_cached(&old->rb_hole_size,
 				       &new->rb_hole_size,
 				       &mm->holes_size);
 		rb_replace_node(&old->rb_hole_addr,
@@ -810,7 +816,7 @@ EXPORT_SYMBOL(drm_mm_scan_add_block);
  * When the scan list is empty, the selected memory nodes can be freed. An
  * immediately following drm_mm_insert_node_in_range_generic() or one of the
  * simpler versions of that function with !DRM_MM_SEARCH_BEST will then return
- * the just freed block (because its at the top of the free_stack list).
+ * the just freed block (because it's at the top of the free_stack list).
  *
  * Returns:
  * True if this block should be evicted, false otherwise. Will always
@@ -915,8 +921,8 @@ void drm_mm_init(struct drm_mm *mm, u64 start, u64 size)
 	mm->color_adjust = NULL;
 
 	INIT_LIST_HEAD(&mm->hole_stack);
-	mm->interval_tree = RB_ROOT;
-	mm->holes_size = RB_ROOT;
+	mm->interval_tree = RB_ROOT_CACHED;
+	mm->holes_size = RB_ROOT_CACHED;
 	mm->holes_addr = RB_ROOT;
 
 	/* Clever trick to avoid a special case in the free hole tracking. */

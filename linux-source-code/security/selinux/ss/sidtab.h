@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * A security identifier table (sidtab) is a lookup table
  * of security context structures indexed by SID value.
@@ -31,7 +32,7 @@ union sidtab_entry_inner {
 #define SIDTAB_NODE_ALLOC_SHIFT PAGE_SHIFT
 #define SIDTAB_NODE_ALLOC_SIZE  PAGE_SIZE
 
-#define size_to_shift(size) ((size) == 1 ? 1 : (ilog2((size) - 1) + 1))
+#define size_to_shift(size) ((size) == 1 ? 1 : (const_ilog2((size) - 1) + 1))
 
 #define SIDTAB_INNER_SHIFT \
 	(SIDTAB_NODE_ALLOC_SHIFT - size_to_shift(sizeof(union sidtab_entry_inner)))

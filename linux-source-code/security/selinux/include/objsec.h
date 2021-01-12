@@ -3,7 +3,7 @@
  *
  *  This file contains the SELinux security data structures for kernel objects.
  *
- *  Author(s):  Stephen Smalley, <sds@epoch.ncsc.mil>
+ *  Author(s):  Stephen Smalley, <sds@tycho.nsa.gov>
  *		Chris Vance, <cvance@nai.com>
  *		Wayne Salamon, <wsalamon@nai.com>
  *		James Morris <jmorris@redhat.com>
@@ -38,9 +38,19 @@ struct task_security_struct {
 	u32 sockcreate_sid;	/* fscreate SID */
 };
 
+/*
+ * get the subjective security ID of the current task
+ */
+static inline u32 current_sid(void)
+{
+	const struct task_security_struct *tsec = current_security();
+
+	return tsec->sid;
+}
+
 enum label_initialized {
 	LABEL_INVALID,		/* invalid or not initialized */
-	LABEL_INITIALIZED,	/* inizialized */
+	LABEL_INITIALIZED,	/* initialized */
 	LABEL_PENDING
 };
 
@@ -69,7 +79,7 @@ struct superblock_security_struct {
 	u32 sid;			/* SID of file system superblock */
 	u32 def_sid;			/* default SID for labeling */
 	u32 mntpoint_sid;		/* SECURITY_FS_USE_MNTPOINT context for files */
-	unsigned int behavior;		/* labeling behavior */
+	unsigned short behavior;	/* labeling behavior */
 	unsigned short flags;		/* which mount options were specified */
 	struct mutex lock;
 	struct list_head isec_head;
@@ -120,6 +130,10 @@ struct sk_security_struct {
 	u32 sid;			/* SID of this object */
 	u32 peer_sid;			/* SID of peer */
 	u16 sclass;			/* sock security class */
+	enum {				/* SCTP association state */
+		SCTP_ASSOC_UNSET = 0,
+		SCTP_ASSOC_SET,
+	} sctp_assoc_state;
 };
 
 struct tun_security_struct {
@@ -143,7 +157,5 @@ struct pkey_security_struct {
 struct bpf_security_struct {
 	u32 sid;  /*SID of bpf obj creater*/
 };
-
-extern unsigned int selinux_checkreqprot;
 
 #endif /* _SELINUX_OBJSEC_H_ */

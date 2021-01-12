@@ -37,7 +37,7 @@
 #include <linux/idr.h>
 #include <linux/completion.h>
 #include <linux/netdevice.h>
-#include <linux/sched.h>
+#include <linux/sched/mm.h>
 #include <linux/pci.h>
 #include <linux/dma-mapping.h>
 #include <linux/inet.h>
@@ -589,25 +589,12 @@ struct c4iw_ucontext {
 	u32 key;
 	spinlock_t mmap_lock;
 	struct list_head mmaps;
-	struct kref kref;
 	bool is_32b_cqe;
 };
 
 static inline struct c4iw_ucontext *to_c4iw_ucontext(struct ib_ucontext *c)
 {
 	return container_of(c, struct c4iw_ucontext, ibucontext);
-}
-
-void _c4iw_free_ucontext(struct kref *kref);
-
-static inline void c4iw_put_ucontext(struct c4iw_ucontext *ucontext)
-{
-	kref_put(&ucontext->kref, _c4iw_free_ucontext);
-}
-
-static inline void c4iw_get_ucontext(struct c4iw_ucontext *ucontext)
-{
-	kref_get(&ucontext->kref);
 }
 
 struct c4iw_mm_entry {
@@ -867,8 +854,7 @@ enum c4iw_ep_flags {
 	CLOSE_SENT		= 3,
 	TIMEOUT                 = 4,
 	QP_REFERENCED           = 5,
-	RELEASE_MAPINFO		= 6,
-	STOP_MPA_TIMER          = 7,
+	STOP_MPA_TIMER		= 7,
 };
 
 enum c4iw_ep_history {

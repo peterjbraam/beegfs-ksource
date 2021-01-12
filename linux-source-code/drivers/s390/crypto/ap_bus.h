@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0+ */
 /*
  * Copyright IBM Corp. 2006, 2012
  * Author(s): Cornelia Huck <cornelia.huck@de.ibm.com>
@@ -7,20 +8,6 @@
  *	      Holger Dengler <hd@linux.vnet.ibm.com>
  *
  * Adjunct processor bus header file.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #ifndef _AP_BUS_H_
@@ -28,6 +15,7 @@
 
 #include <linux/device.h>
 #include <linux/types.h>
+#include <asm/isc.h>
 #include <asm/ap.h>
 
 #define AP_DEVICES 256		/* Number of AP devices. */
@@ -103,7 +91,9 @@ enum ap_state {
 	AP_STATE_WORKING,
 	AP_STATE_QUEUE_FULL,
 	AP_STATE_SUSPEND_WAIT,
-	AP_STATE_BORKED,
+	AP_STATE_REMOVE,	/* about to be removed from driver */
+	AP_STATE_UNBOUND,	/* momentary not bound to a driver */
+	AP_STATE_BORKED,	/* broken */
 	NR_AP_STATES
 };
 
@@ -126,13 +116,6 @@ enum ap_wait {
 	AP_WAIT_NONE,		/* no wait */
 	NR_AP_WAIT
 };
-
-/*
- * AP device registration states
- */
-#define AP_DEV_UNREGISTERED		2 /* unregistered or orphaned device */
-#define AP_DEV_REGIST_IN_PROGRESS	1 /* device registration in progress */
-#define AP_DEV_REGISTERED		0 /* device fully registered */
 
 struct ap_device;
 struct ap_message;
@@ -196,7 +179,7 @@ struct ap_queue {
 	int pendingq_count;		/* # requests on pendingq list. */
 	int requestq_count;		/* # requests on requestq list. */
 	int total_request_count;	/* # requests ever for this AP device.*/
-	int request_timeout;		/* Request timout in jiffies. */
+	int request_timeout;		/* Request timeout in jiffies. */
 	struct timer_list timeout;	/* Timer for request timeouts. */
 	struct list_head pendingq;	/* List of message sent to AP queue. */
 	struct list_head requestq;	/* List of message yet to be sent. */
@@ -265,7 +248,7 @@ void ap_flush_queue(struct ap_queue *aq);
 
 void *ap_airq_ptr(void);
 void ap_wait(enum ap_wait wait);
-void ap_request_timeout(unsigned long data);
+void ap_request_timeout(struct timer_list *t);
 void ap_bus_force_rescan(void);
 
 int ap_test_config_usage_domain(unsigned int domain);
@@ -273,15 +256,14 @@ int ap_test_config_ctrl_domain(unsigned int domain);
 
 void ap_queue_init_reply(struct ap_queue *aq, struct ap_message *ap_msg);
 struct ap_queue *ap_queue_create(ap_qid_t qid, int device_type);
+void ap_queue_prepare_remove(struct ap_queue *aq);
 void ap_queue_remove(struct ap_queue *aq);
 void ap_queue_suspend(struct ap_device *ap_dev);
 void ap_queue_resume(struct ap_device *ap_dev);
+void ap_queue_reinit_state(struct ap_queue *aq);
 
 struct ap_card *ap_card_create(int id, int queue_depth, int raw_device_type,
 			       int comp_device_type, unsigned int functions);
-
-int ap_module_init(void);
-void ap_module_exit(void);
 
 struct ap_perms {
 	unsigned long ioctlm[BITS_TO_LONGS(AP_IOCTLS)];

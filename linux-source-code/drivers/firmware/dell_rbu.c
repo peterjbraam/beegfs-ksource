@@ -45,7 +45,7 @@
 #include <linux/moduleparam.h>
 #include <linux/firmware.h>
 #include <linux/dma-mapping.h>
-#include <asm/cacheflush.h>
+#include <asm/set_memory.h>
 
 MODULE_AUTHOR("Abhay Salunke <abhay_salunke@dell.com>");
 MODULE_DESCRIPTION("Driver for updating BIOS image on DELL systems");
@@ -147,7 +147,7 @@ static int create_packet(void *data, size_t length)
 	packet_array_size = max(
 	       		(unsigned int)(allocation_floor / rbu_data.packetsize),
 			(unsigned int)1);
-	invalid_addr_packet_array = kzalloc(packet_array_size * sizeof(void*),
+	invalid_addr_packet_array = kcalloc(packet_array_size, sizeof(void *),
 						GFP_KERNEL);
 
 	if (!invalid_addr_packet_array) {

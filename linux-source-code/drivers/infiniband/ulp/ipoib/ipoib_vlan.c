@@ -31,6 +31,7 @@
  */
 
 #include <linux/module.h>
+#include <linux/sched/signal.h>
 
 #include <linux/init.h>
 #include <linux/seq_file.h>
@@ -103,7 +104,7 @@ int __ipoib_vlan_add(struct ipoib_dev_priv *ppriv, struct ipoib_dev_priv *priv,
 	 * We do not need to touch priv if register_netdevice fails, so just
 	 * always use this flow.
 	 */
-	ndev->extended->priv_destructor = ipoib_intf_free;
+	ndev->priv_destructor = ipoib_intf_free;
 
 	/*
 	 * Racing with unregister of the parent must be prevented by the
@@ -156,8 +157,8 @@ sysfs_failed:
 	return -ENOMEM;
 
 out_early:
-	if (ndev->extended->priv_destructor)
-		ndev->extended->priv_destructor(ndev);
+	if (ndev->priv_destructor)
+		ndev->priv_destructor(ndev);
 	return result;
 }
 

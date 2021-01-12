@@ -31,9 +31,12 @@
  */
 static int br_device_event(struct notifier_block *unused, unsigned long event, void *ptr)
 {
+	struct netlink_ext_ack *extack = netdev_notifier_info_to_extack(ptr);
+	struct netdev_notifier_pre_changeaddr_info *prechaddr_info;
 	struct net_device *dev = netdev_notifier_info_to_dev(ptr);
 	struct net_bridge_port *p;
 	struct net_bridge *br;
+	bool notified = false;
 	bool changed_addr;
 	int err;
 
@@ -52,7 +55,18 @@ static int br_device_event(struct notifier_block *unused, unsigned long event, v
 
 	switch (event) {
 	case NETDEV_CHANGEMTU:
-		dev_set_mtu(br->dev, br_min_mtu(br));
+		br_mtu_auto_adjust(br);
+		break;
+
+	case NETDEV_PRE_CHANGEADDR:
+		if (br->dev->addr_assign_type == NET_ADDR_SET)
+			break;
+		prechaddr_info = ptr;
+		err = dev_pre_changeaddr_notify(br->dev,
+						prechaddr_info->dev_addr,
+						extack);
+		if (err)
+			return notifier_from_errno(err);
 		break;
 
 	case NETDEV_CHANGEADDR:
@@ -67,7 +81,7 @@ static int br_device_event(struct notifier_block *unused, unsigned long event, v
 		break;
 
 	case NETDEV_CHANGE:
-		br_port_carrier_check(p);
+		br_port_carrier_check(p, &notified);
 		break;
 
 	case NETDEV_FEAT_CHANGE:
@@ -76,8 +90,10 @@ static int br_device_event(struct notifier_block *unused, unsigned long event, v
 
 	case NETDEV_DOWN:
 		spin_lock_bh(&br->lock);
-		if (br->dev->flags & IFF_UP)
+		if (br->dev->flags & IFF_UP) {
 			br_stp_disable_port(p);
+			notified = true;
+		}
 		spin_unlock_bh(&br->lock);
 		break;
 
@@ -85,6 +101,7 @@ static int br_device_event(struct notifier_block *unused, unsigned long event, v
 		if (netif_running(br->dev) && netif_oper_up(dev)) {
 			spin_lock_bh(&br->lock);
 			br_stp_enable_port(p);
+			notified = true;
 			spin_unlock_bh(&br->lock);
 		}
 		break;
@@ -110,9 +127,9 @@ static int br_device_event(struct notifier_block *unused, unsigned long event, v
 	}
 
 	/* Events that may cause spanning tree to refresh */
-	if (event == NETDEV_CHANGEADDR || event == NETDEV_UP ||
-	    event == NETDEV_CHANGE || event == NETDEV_DOWN)
-		br_ifinfo_notify(RTM_NEWLINK, p);
+	if (!notified && (event == NETDEV_CHANGEADDR || event == NETDEV_UP ||
+			  event == NETDEV_CHANGE || event == NETDEV_DOWN))
+		br_ifinfo_notify(RTM_NEWLINK, NULL, p);
 
 	return NOTIFY_DONE;
 }
@@ -141,25 +158,25 @@ static int br_switchdev_event(struct notifier_block *unused,
 	case SWITCHDEV_FDB_ADD_TO_BRIDGE:
 		fdb_info = ptr;
 		err = br_fdb_external_learn_add(br, p, fdb_info->addr,
-						fdb_info->vid);
+						fdb_info->vid, false);
 		if (err) {
 			err = notifier_from_errno(err);
 			break;
 		}
 		br_fdb_offloaded_set(br, p, fdb_info->addr,
-				     fdb_info->vid);
+				     fdb_info->vid, true);
 		break;
 	case SWITCHDEV_FDB_DEL_TO_BRIDGE:
 		fdb_info = ptr;
 		err = br_fdb_external_learn_del(br, p, fdb_info->addr,
-						fdb_info->vid);
+						fdb_info->vid, false);
 		if (err)
 			err = notifier_from_errno(err);
 		break;
 	case SWITCHDEV_FDB_OFFLOADED:
 		fdb_info = ptr;
 		br_fdb_offloaded_set(br, p, fdb_info->addr,
-				     fdb_info->vid);
+				     fdb_info->vid, fdb_info->offloaded);
 		break;
 	}
 
@@ -170,6 +187,22 @@ out:
 static struct notifier_block br_switchdev_notifier = {
 	.notifier_call = br_switchdev_event,
 };
+
+void br_opt_toggle(struct net_bridge *br, enum net_bridge_opts opt, bool on)
+{
+	bool cur = !!br_opt_get(br, opt);
+
+	br_debug(br, "toggle option: %d state: %d -> %d\n",
+		 opt, cur, on);
+
+	if (cur == on)
+		return;
+
+	if (on)
+		set_bit(opt, &br->options);
+	else
+		clear_bit(opt, &br->options);
+}
 
 static void __net_exit br_net_exit(struct net *net)
 {
@@ -218,7 +251,7 @@ static int __init br_init(void)
 	if (err)
 		goto err_out2;
 
-	err = register_netdevice_notifier_rh(&br_device_notifier);
+	err = register_netdevice_notifier(&br_device_notifier);
 	if (err)
 		goto err_out3;
 
@@ -247,7 +280,7 @@ static int __init br_init(void)
 err_out5:
 	unregister_switchdev_notifier(&br_switchdev_notifier);
 err_out4:
-	unregister_netdevice_notifier_rh(&br_device_notifier);
+	unregister_netdevice_notifier(&br_device_notifier);
 err_out3:
 	br_nf_core_fini();
 err_out2:
@@ -264,7 +297,7 @@ static void __exit br_deinit(void)
 	stp_proto_unregister(&br_stp_proto);
 	br_netlink_fini();
 	unregister_switchdev_notifier(&br_switchdev_notifier);
-	unregister_netdevice_notifier_rh(&br_device_notifier);
+	unregister_netdevice_notifier(&br_device_notifier);
 	brioctl_set(NULL);
 	unregister_pernet_subsys(&br_net_ops);
 

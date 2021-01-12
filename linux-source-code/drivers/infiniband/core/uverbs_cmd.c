@@ -162,7 +162,7 @@ static const void __user *uverbs_request_next_ptr(struct uverbs_req_iter *iter,
 	const void __user *res = iter->cur;
 
 	if (iter->cur + len > iter->end)
-		return (void __force __user *)ERR_PTR(-ENOSPC);
+		return ERR_PTR(-ENOSPC);
 	iter->cur += len;
 	return res;
 }
@@ -199,6 +199,7 @@ static int ib_uverbs_get_context(struct uverbs_attr_bundle *attrs)
 	struct ib_uverbs_get_context_resp resp;
 	struct ib_ucontext		 *ucontext;
 	struct file			 *filp;
+	struct ib_rdmacg_object		 cg_obj;
 	struct ib_device *ib_dev;
 	int ret;
 
@@ -219,27 +220,28 @@ static int ib_uverbs_get_context(struct uverbs_attr_bundle *attrs)
 		goto err;
 	}
 
+	ret = ib_rdmacg_try_charge(&cg_obj, ib_dev, RDMACG_RESOURCE_HCA_HANDLE);
+	if (ret)
+		goto err;
 
-	ucontext = ib_dev->alloc_ucontext(ib_dev, &attrs->driver_udata);
+	ucontext = ib_dev->ops.alloc_ucontext(ib_dev, &attrs->driver_udata);
 	if (IS_ERR(ucontext)) {
 		ret = PTR_ERR(ucontext);
-		goto err;
+		goto err_alloc;
 	}
 
 	ucontext->device = ib_dev;
+	ucontext->cg_obj = cg_obj;
 	/* ufile is required when some objects are released */
 	ucontext->ufile = file;
 
 	ucontext->closing = false;
 	ucontext->cleanup_retryable = false;
 
-#ifdef CONFIG_INFINIBAND_ON_DEMAND_PAGING
 	mutex_init(&ucontext->per_mm_list_lock);
 	INIT_LIST_HEAD(&ucontext->per_mm_list);
 	if (!(ib_dev->attrs.device_cap_flags & IB_DEVICE_ON_DEMAND_PAGING))
 		ucontext->invalidate_range = NULL;
-
-#endif
 
 	resp.num_comp_vectors = file->device->num_comp_vectors;
 
@@ -260,6 +262,9 @@ static int ib_uverbs_get_context(struct uverbs_attr_bundle *attrs)
 
 	fd_install(resp.async_fd, filp);
 
+	ucontext->res.type = RDMA_RESTRACK_CTX;
+	rdma_restrack_uadd(&ucontext->res);
+
 	/*
 	 * Make sure that ib_uverbs_get_ucontext() sees the pointer update
 	 * only after all writes to setup the ucontext have completed
@@ -278,7 +283,10 @@ err_fd:
 	put_unused_fd(resp.async_fd);
 
 err_free:
-	ib_dev->dealloc_ucontext(ucontext);
+	ib_dev->ops.dealloc_ucontext(ucontext);
+
+err_alloc:
+	ib_rdmacg_uncharge(&cg_obj, ib_dev, RDMACG_RESOURCE_HCA_HANDLE);
 
 err:
 	mutex_unlock(&file->ucontext_lock);
@@ -354,27 +362,6 @@ static int ib_uverbs_query_device(struct uverbs_attr_bundle *attrs)
 	return uverbs_response(attrs, &resp, sizeof(resp));
 }
 
-/*
- * ib_uverbs_query_port_resp.port_cap_flags started out as just a copy of the
- * PortInfo CapabilityMask, but was extended with unique bits.
- */
-static u32 make_port_cap_flags(const struct ib_port_attr *attr)
-{
-	u32 res;
-
-	/* All IBA CapabilityMask bits are passed through here, except bit 26,
-	 * which is overridden with IP_BASED_GIDS. This is due to a historical
-	 * mistake in the implementation of IP_BASED_GIDS. Otherwise all other
-	 * bits match the IBA definition across all kernel versions.
-	 */
-	res = attr->port_cap_flags & ~(u32)IB_UVERBS_PCF_IP_BASED_GIDS;
-
-	if (attr->ip_gids)
-		res |= IB_UVERBS_PCF_IP_BASED_GIDS;
-
-	return res;
-}
-
 static int ib_uverbs_query_port(struct uverbs_attr_bundle *attrs)
 {
 	struct ib_uverbs_query_port      cmd;
@@ -398,37 +385,7 @@ static int ib_uverbs_query_port(struct uverbs_attr_bundle *attrs)
 		return ret;
 
 	memset(&resp, 0, sizeof resp);
-
-	resp.state 	     = attr.state;
-	resp.max_mtu 	     = attr.max_mtu;
-	resp.active_mtu      = attr.active_mtu;
-	resp.gid_tbl_len     = attr.gid_tbl_len;
-	resp.port_cap_flags  = make_port_cap_flags(&attr);
-	resp.max_msg_sz      = attr.max_msg_sz;
-	resp.bad_pkey_cntr   = attr.bad_pkey_cntr;
-	resp.qkey_viol_cntr  = attr.qkey_viol_cntr;
-	resp.pkey_tbl_len    = attr.pkey_tbl_len;
-
-	if (rdma_is_grh_required(ib_dev, cmd.port_num))
-		resp.flags |= IB_UVERBS_QPF_GRH_REQUIRED;
-
-	if (rdma_cap_opa_ah(ib_dev, cmd.port_num)) {
-		resp.lid     = OPA_TO_IB_UCAST_LID(attr.lid);
-		resp.sm_lid  = OPA_TO_IB_UCAST_LID(attr.sm_lid);
-	} else {
-		resp.lid     = ib_lid_cpu16(attr.lid);
-		resp.sm_lid  = ib_lid_cpu16(attr.sm_lid);
-	}
-	resp.lmc 	     = attr.lmc;
-	resp.max_vl_num      = attr.max_vl_num;
-	resp.sm_sl 	     = attr.sm_sl;
-	resp.subnet_timeout  = attr.subnet_timeout;
-	resp.init_type_reply = attr.init_type_reply;
-	resp.active_width    = attr.active_width;
-	resp.active_speed    = attr.active_speed;
-	resp.phys_state      = attr.phys_state;
-	resp.link_layer      = rdma_port_get_link_layer(ib_dev,
-							cmd.port_num);
+	copy_port_attr_to_resp(&attr, &resp, ib_dev, cmd.port_num);
 
 	return uverbs_response(attrs, &resp, sizeof(resp));
 }
@@ -450,7 +407,7 @@ static int ib_uverbs_alloc_pd(struct uverbs_attr_bundle *attrs)
 	if (IS_ERR(uobj))
 		return PTR_ERR(uobj);
 
-	pd = ib_dev->alloc_pd(ib_dev, uobj->context, &attrs->driver_udata);
+	pd = ib_dev->ops.alloc_pd(ib_dev, uobj->context, &attrs->driver_udata);
 	if (IS_ERR(pd)) {
 		ret = PTR_ERR(pd);
 		goto err;
@@ -465,7 +422,7 @@ static int ib_uverbs_alloc_pd(struct uverbs_attr_bundle *attrs)
 	memset(&resp, 0, sizeof resp);
 	resp.pd_handle = uobj->id;
 	pd->res.type = RDMA_RESTRACK_PD;
-	rdma_restrack_add(&pd->res);
+	rdma_restrack_uadd(&pd->res);
 
 	ret = uverbs_response(attrs, &resp, sizeof(resp));
 	if (ret)
@@ -627,8 +584,8 @@ static int ib_uverbs_open_xrcd(struct uverbs_attr_bundle *attrs)
 	}
 
 	if (!xrcd) {
-		xrcd = ib_dev->alloc_xrcd(ib_dev, obj->uobject.context,
-					  &attrs->driver_udata);
+		xrcd = ib_dev->ops.alloc_xrcd(ib_dev, obj->uobject.context,
+					      &attrs->driver_udata);
 		if (IS_ERR(xrcd)) {
 			ret = PTR_ERR(xrcd);
 			goto err;
@@ -767,8 +724,9 @@ static int ib_uverbs_reg_mr(struct uverbs_attr_bundle *attrs)
 		}
 	}
 
-	mr = pd->device->reg_user_mr(pd, cmd.start, cmd.length, cmd.hca_va,
-				     cmd.access_flags, &attrs->driver_udata);
+	mr = pd->device->ops.reg_user_mr(pd, cmd.start, cmd.length, cmd.hca_va,
+					 cmd.access_flags,
+					 &attrs->driver_udata);
 	if (IS_ERR(mr)) {
 		ret = PTR_ERR(mr);
 		goto err_put;
@@ -780,7 +738,7 @@ static int ib_uverbs_reg_mr(struct uverbs_attr_bundle *attrs)
 	mr->uobject = uobj;
 	atomic_inc(&pd->usecnt);
 	mr->res.type = RDMA_RESTRACK_MR;
-	rdma_restrack_add(&mr->res);
+	rdma_restrack_uadd(&mr->res);
 
 	uobj->object = mr;
 
@@ -857,9 +815,10 @@ static int ib_uverbs_rereg_mr(struct uverbs_attr_bundle *attrs)
 	}
 
 	old_pd = mr->pd;
-	ret = mr->device->rereg_user_mr(mr, cmd.flags, cmd.start, cmd.length,
-					cmd.hca_va, cmd.access_flags, pd,
-					&attrs->driver_udata);
+	ret = mr->device->ops.rereg_user_mr(mr, cmd.flags, cmd.start,
+					    cmd.length, cmd.hca_va,
+					    cmd.access_flags, pd,
+					    &attrs->driver_udata);
 	if (!ret) {
 		if (cmd.flags & IB_MR_REREG_PD) {
 			atomic_inc(&pd->usecnt);
@@ -927,7 +886,7 @@ static int ib_uverbs_alloc_mw(struct uverbs_attr_bundle *attrs)
 		goto err_put;
 	}
 
-	mw = pd->device->alloc_mw(pd, cmd.mw_type, &attrs->driver_udata);
+	mw = pd->device->ops.alloc_mw(pd, cmd.mw_type, &attrs->driver_udata);
 	if (IS_ERR(mw)) {
 		ret = PTR_ERR(mw);
 		goto err_put;
@@ -1041,8 +1000,8 @@ static struct ib_ucq_object *create_cq(struct uverbs_attr_bundle *attrs,
 	attr.comp_vector = cmd->comp_vector;
 	attr.flags = cmd->flags;
 
-	cq = ib_dev->create_cq(ib_dev, &attr, obj->uobject.context,
-			       &attrs->driver_udata);
+	cq = ib_dev->ops.create_cq(ib_dev, &attr, obj->uobject.context,
+				   &attrs->driver_udata);
 	if (IS_ERR(cq)) {
 		ret = PTR_ERR(cq);
 		goto err_file;
@@ -1062,7 +1021,7 @@ static struct ib_ucq_object *create_cq(struct uverbs_attr_bundle *attrs,
 	resp.response_length = uverbs_response_length(attrs, sizeof(resp));
 
 	cq->res.type = RDMA_RESTRACK_CQ;
-	rdma_restrack_add(&cq->res);
+	rdma_restrack_uadd(&cq->res);
 
 	ret = uverbs_response(attrs, &resp, sizeof(resp));
 	if (ret)
@@ -1142,7 +1101,7 @@ static int ib_uverbs_resize_cq(struct uverbs_attr_bundle *attrs)
 	if (!cq)
 		return -EINVAL;
 
-	ret = cq->device->resize_cq(cq, cmd.cqe, &attrs->driver_udata);
+	ret = cq->device->ops.resize_cq(cq, cmd.cqe, &attrs->driver_udata);
 	if (ret)
 		goto out;
 
@@ -1450,6 +1409,7 @@ static int create_qp(struct uverbs_attr_bundle *attrs,
 		if (ret)
 			goto err_cb;
 
+		qp->real_qp	  = qp;
 		qp->pd		  = pd;
 		qp->send_cq	  = attr.send_cq;
 		qp->recv_cq	  = attr.recv_cq;
@@ -2189,7 +2149,7 @@ static int ib_uverbs_post_send(struct uverbs_attr_bundle *attrs)
 	}
 
 	resp.bad_wr = 0;
-	ret = qp->device->post_send(qp->real_qp, wr, &bad_wr);
+	ret = qp->device->ops.post_send(qp->real_qp, wr, &bad_wr);
 	if (ret)
 		for (next = wr; next; next = next->next) {
 			++resp.bad_wr;
@@ -2342,7 +2302,7 @@ static int ib_uverbs_post_recv(struct uverbs_attr_bundle *attrs)
 	}
 
 	resp.bad_wr = 0;
-	ret = qp->device->post_recv(qp->real_qp, wr, &bad_wr);
+	ret = qp->device->ops.post_recv(qp->real_qp, wr, &bad_wr);
 
 	uobj_put_obj_read(qp);
 	if (ret) {
@@ -2392,7 +2352,7 @@ static int ib_uverbs_post_srq_recv(struct uverbs_attr_bundle *attrs)
 	}
 
 	resp.bad_wr = 0;
-	ret = srq->device->post_srq_recv(srq, wr, &bad_wr);
+	ret = srq->device->ops.post_srq_recv(srq, wr, &bad_wr);
 
 	uobj_put_obj_read(srq);
 
@@ -2485,7 +2445,7 @@ static int ib_uverbs_create_ah(struct uverbs_attr_bundle *attrs)
 	return uobj_alloc_commit(uobj);
 
 err_copy:
-	rdma_destroy_ah(ah);
+	rdma_destroy_ah(ah, RDMA_DESTROY_AH_SLEEPABLE);
 
 err_put:
 	uobj_put_obj_read(pd);
@@ -2561,7 +2521,7 @@ static int ib_uverbs_detach_mcast(struct uverbs_attr_bundle *attrs)
 	struct ib_uqp_object         *obj;
 	struct ib_qp                 *qp;
 	struct ib_uverbs_mcast_entry *mcast;
-	int                           ret;
+	int                           ret = -EINVAL;
 	bool                          found = false;
 
 	ret = uverbs_request(attrs, &cmd, sizeof(cmd));
@@ -2962,7 +2922,7 @@ static int ib_uverbs_ex_create_wq(struct uverbs_attr_bundle *attrs)
 	obj->uevent.events_reported = 0;
 	INIT_LIST_HEAD(&obj->uevent.event_list);
 
-	wq = pd->device->create_wq(pd, &wq_init_attr, &attrs->driver_udata);
+	wq = pd->device->ops.create_wq(pd, &wq_init_attr, &attrs->driver_udata);
 	if (IS_ERR(wq)) {
 		err = PTR_ERR(wq);
 		goto err_put_cq;
@@ -3062,8 +3022,8 @@ static int ib_uverbs_ex_modify_wq(struct uverbs_attr_bundle *attrs)
 		wq_attr.flags = cmd.flags;
 		wq_attr.flags_mask = cmd.flags_mask;
 	}
-	ret = wq->device->modify_wq(wq, &wq_attr, cmd.attr_mask,
-				    &attrs->driver_udata);
+	ret = wq->device->ops.modify_wq(wq, &wq_attr, cmd.attr_mask,
+					&attrs->driver_udata);
 	uobj_put_obj_read(wq);
 	return ret;
 }
@@ -3136,8 +3096,8 @@ static int ib_uverbs_ex_create_rwq_ind_table(struct uverbs_attr_bundle *attrs)
 	init_attr.log_ind_tbl_size = cmd.log_ind_tbl_size;
 	init_attr.ind_tbl = wqs;
 
-	rwq_ind_tbl = ib_dev->create_rwq_ind_table(ib_dev, &init_attr,
-						   &attrs->driver_udata);
+	rwq_ind_tbl = ib_dev->ops.create_rwq_ind_table(ib_dev, &init_attr,
+						       &attrs->driver_udata);
 
 	if (IS_ERR(rwq_ind_tbl)) {
 		err = PTR_ERR(rwq_ind_tbl);
@@ -3324,8 +3284,8 @@ static int ib_uverbs_ex_create_flow(struct uverbs_attr_bundle *attrs)
 		goto err_free;
 	}
 
-	flow_id = qp->device->create_flow(qp, flow_attr, IB_FLOW_DOMAIN_USER,
-					  &attrs->driver_udata);
+	flow_id = qp->device->ops.create_flow(
+		qp, flow_attr, IB_FLOW_DOMAIN_USER, &attrs->driver_udata);
 
 	if (IS_ERR(flow_id)) {
 		err = PTR_ERR(flow_id);
@@ -3347,7 +3307,7 @@ static int ib_uverbs_ex_create_flow(struct uverbs_attr_bundle *attrs)
 		kfree(kern_flow_attr);
 	return uobj_alloc_commit(uobj);
 err_copy:
-	if (!qp->device->destroy_flow(flow_id))
+	if (!qp->device->ops.destroy_flow(flow_id))
 		atomic_dec(&qp->usecnt);
 err_free:
 	ib_uverbs_flow_resources_free(uflow_res);
@@ -3442,7 +3402,7 @@ static int __uverbs_create_xsrq(struct uverbs_attr_bundle *attrs,
 	obj->uevent.events_reported = 0;
 	INIT_LIST_HEAD(&obj->uevent.event_list);
 
-	srq = pd->device->create_srq(pd, &attr, udata);
+	srq = pd->device->ops.create_srq(pd, &attr, udata);
 	if (IS_ERR(srq)) {
 		ret = PTR_ERR(srq);
 		goto err_put;
@@ -3564,8 +3524,8 @@ static int ib_uverbs_modify_srq(struct uverbs_attr_bundle *attrs)
 	attr.max_wr    = cmd.max_wr;
 	attr.srq_limit = cmd.srq_limit;
 
-	ret = srq->device->modify_srq(srq, &attr, cmd.attr_mask,
-				      &attrs->driver_udata);
+	ret = srq->device->ops.modify_srq(srq, &attr, cmd.attr_mask,
+					  &attrs->driver_udata);
 
 	uobj_put_obj_read(srq);
 
@@ -3653,7 +3613,7 @@ static int ib_uverbs_ex_query_device(struct uverbs_attr_bundle *attrs)
 	if (cmd.reserved)
 		return -EINVAL;
 
-	err = ib_dev->query_device(ib_dev, &attr, &attrs->driver_udata);
+	err = ib_dev->ops.query_device(ib_dev, &attr, &attrs->driver_udata);
 	if (err)
 		return err;
 

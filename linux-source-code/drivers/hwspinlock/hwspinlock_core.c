@@ -1,18 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Hardware spinlock framework
  *
  * Copyright (C) 2010 Texas Instruments Incorporated - http://www.ti.com
  *
  * Contact: Ohad Ben-Cohen <ohad@wizery.com>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published
- * by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #define pr_fmt(fmt)    "%s: " fmt, __func__
@@ -27,6 +19,7 @@
 #include <linux/hwspinlock.h>
 #include <linux/pm_runtime.h>
 #include <linux/mutex.h>
+#include <linux/of.h>
 
 #include "hwspinlock_internal.h"
 
@@ -70,10 +63,16 @@ static DEFINE_MUTEX(hwspinlock_tree_lock);
  * This function attempts to lock an hwspinlock, and will immediately
  * fail if the hwspinlock is already taken.
  *
- * Upon a successful return from this function, preemption (and possibly
- * interrupts) is disabled, so the caller must not sleep, and is advised to
- * release the hwspinlock as soon as possible. This is required in order to
- * minimize remote cores polling on the hardware interconnect.
+ * Caution: If the mode is HWLOCK_RAW, that means user must protect the routine
+ * of getting hardware lock with mutex or spinlock. Since in some scenarios,
+ * user need some time-consuming or sleepable operations under the hardware
+ * lock, they need one sleepable lock (like mutex) to protect the operations.
+ *
+ * If the mode is not HWLOCK_RAW, upon a successful return from this function,
+ * preemption (and possibly interrupts) is disabled, so the caller must not
+ * sleep, and is advised to release the hwspinlock as soon as possible. This is
+ * required in order to minimize remote cores polling on the hardware
+ * interconnect.
  *
  * The user decides whether local interrupts are disabled or not, and if yes,
  * whether he wants their previous state to be saved. It is up to the user
@@ -105,12 +104,20 @@ int __hwspin_trylock(struct hwspinlock *hwlock, int mode, unsigned long *flags)
 	 *    problems with hwspinlock usage (e.g. scheduler checks like
 	 *    'scheduling while atomic' etc.)
 	 */
-	if (mode == HWLOCK_IRQSTATE)
+	switch (mode) {
+	case HWLOCK_IRQSTATE:
 		ret = spin_trylock_irqsave(&hwlock->lock, *flags);
-	else if (mode == HWLOCK_IRQ)
+		break;
+	case HWLOCK_IRQ:
 		ret = spin_trylock_irq(&hwlock->lock);
-	else
+		break;
+	case HWLOCK_RAW:
+		ret = 1;
+		break;
+	default:
 		ret = spin_trylock(&hwlock->lock);
+		break;
+	}
 
 	/* is lock already taken by another context on the local cpu ? */
 	if (!ret)
@@ -121,12 +128,20 @@ int __hwspin_trylock(struct hwspinlock *hwlock, int mode, unsigned long *flags)
 
 	/* if hwlock is already taken, undo spin_trylock_* and exit */
 	if (!ret) {
-		if (mode == HWLOCK_IRQSTATE)
+		switch (mode) {
+		case HWLOCK_IRQSTATE:
 			spin_unlock_irqrestore(&hwlock->lock, *flags);
-		else if (mode == HWLOCK_IRQ)
+			break;
+		case HWLOCK_IRQ:
 			spin_unlock_irq(&hwlock->lock);
-		else
+			break;
+		case HWLOCK_RAW:
+			/* Nothing to do */
+			break;
+		default:
 			spin_unlock(&hwlock->lock);
+			break;
+		}
 
 		return -EBUSY;
 	}
@@ -159,9 +174,14 @@ EXPORT_SYMBOL_GPL(__hwspin_trylock);
  * is already taken, the function will busy loop waiting for it to
  * be released, but give up after @timeout msecs have elapsed.
  *
- * Upon a successful return from this function, preemption is disabled
- * (and possibly local interrupts, too), so the caller must not sleep,
- * and is advised to release the hwspinlock as soon as possible.
+ * Caution: If the mode is HWLOCK_RAW, that means user must protect the routine
+ * of getting hardware lock with mutex or spinlock. Since in some scenarios,
+ * user need some time-consuming or sleepable operations under the hardware
+ * lock, they need one sleepable lock (like mutex) to protect the operations.
+ *
+ * If the mode is not HWLOCK_RAW, upon a successful return from this function,
+ * preemption is disabled (and possibly local interrupts, too), so the caller
+ * must not sleep, and is advised to release the hwspinlock as soon as possible.
  * This is required in order to minimize remote cores polling on the
  * hardware interconnect.
  *
@@ -248,14 +268,104 @@ void __hwspin_unlock(struct hwspinlock *hwlock, int mode, unsigned long *flags)
 	hwlock->bank->ops->unlock(hwlock);
 
 	/* Undo the spin_trylock{_irq, _irqsave} called while locking */
-	if (mode == HWLOCK_IRQSTATE)
+	switch (mode) {
+	case HWLOCK_IRQSTATE:
 		spin_unlock_irqrestore(&hwlock->lock, *flags);
-	else if (mode == HWLOCK_IRQ)
+		break;
+	case HWLOCK_IRQ:
 		spin_unlock_irq(&hwlock->lock);
-	else
+		break;
+	case HWLOCK_RAW:
+		/* Nothing to do */
+		break;
+	default:
 		spin_unlock(&hwlock->lock);
+		break;
+	}
 }
 EXPORT_SYMBOL_GPL(__hwspin_unlock);
+
+/**
+ * of_hwspin_lock_simple_xlate - translate hwlock_spec to return a lock id
+ * @bank: the hwspinlock device bank
+ * @hwlock_spec: hwlock specifier as found in the device tree
+ *
+ * This is a simple translation function, suitable for hwspinlock platform
+ * drivers that only has a lock specifier length of 1.
+ *
+ * Returns a relative index of the lock within a specified bank on success,
+ * or -EINVAL on invalid specifier cell count.
+ */
+static inline int
+of_hwspin_lock_simple_xlate(const struct of_phandle_args *hwlock_spec)
+{
+	if (WARN_ON(hwlock_spec->args_count != 1))
+		return -EINVAL;
+
+	return hwlock_spec->args[0];
+}
+
+/**
+ * of_hwspin_lock_get_id() - get lock id for an OF phandle-based specific lock
+ * @np: device node from which to request the specific hwlock
+ * @index: index of the hwlock in the list of values
+ *
+ * This function provides a means for DT users of the hwspinlock module to
+ * get the global lock id of a specific hwspinlock using the phandle of the
+ * hwspinlock device, so that it can be requested using the normal
+ * hwspin_lock_request_specific() API.
+ *
+ * Returns the global lock id number on success, -EPROBE_DEFER if the hwspinlock
+ * device is not yet registered, -EINVAL on invalid args specifier value or an
+ * appropriate error as returned from the OF parsing of the DT client node.
+ */
+int of_hwspin_lock_get_id(struct device_node *np, int index)
+{
+	struct of_phandle_args args;
+	struct hwspinlock *hwlock;
+	struct radix_tree_iter iter;
+	void **slot;
+	int id;
+	int ret;
+
+	ret = of_parse_phandle_with_args(np, "hwlocks", "#hwlock-cells", index,
+					 &args);
+	if (ret)
+		return ret;
+
+	/* Find the hwspinlock device: we need its base_id */
+	ret = -EPROBE_DEFER;
+	rcu_read_lock();
+	radix_tree_for_each_slot(slot, &hwspinlock_tree, &iter, 0) {
+		hwlock = radix_tree_deref_slot(slot);
+		if (unlikely(!hwlock))
+			continue;
+		if (radix_tree_deref_retry(hwlock)) {
+			slot = radix_tree_iter_retry(&iter);
+			continue;
+		}
+
+		if (hwlock->bank->dev->of_node == args.np) {
+			ret = 0;
+			break;
+		}
+	}
+	rcu_read_unlock();
+	if (ret < 0)
+		goto out;
+
+	id = of_hwspin_lock_simple_xlate(&args);
+	if (id < 0 || id >= hwlock->bank->num_locks) {
+		ret = -EINVAL;
+		goto out;
+	}
+	id += hwlock->bank->base_id;
+
+out:
+	of_node_put(args.np);
+	return ret ? ret : id;
+}
+EXPORT_SYMBOL_GPL(of_hwspin_lock_get_id);
 
 static int hwspin_lock_register_single(struct hwspinlock *hwlock, int id)
 {

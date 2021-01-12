@@ -70,7 +70,7 @@ static const struct regmap_range_cfg rt5645_ranges[] = {
 	},
 };
 
-static const struct reg_default init_list[] = {
+static const struct reg_sequence init_list[] = {
 	{RT5645_PR_BASE + 0x3d,	0x3600},
 	{RT5645_PR_BASE + 0x1c,	0xfd70},
 	{RT5645_PR_BASE + 0x20,	0x611f},
@@ -79,7 +79,7 @@ static const struct reg_default init_list[] = {
 	{RT5645_ASRC_4, 0x0120},
 };
 
-static const struct reg_default rt5650_init_list[] = {
+static const struct reg_sequence rt5650_init_list[] = {
 	{0xf6,	0x0100},
 };
 
@@ -401,6 +401,11 @@ struct rt5645_eq_param_s {
 	unsigned short val;
 };
 
+struct rt5645_eq_param_s_be16 {
+	__be16 reg;
+	__be16 val;
+};
+
 static const char *const rt5645_supply_names[] = {
 	"avdd",
 	"cpvdd",
@@ -672,8 +677,8 @@ static int rt5645_hweq_get(struct snd_kcontrol *kcontrol,
 {
 	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct rt5645_priv *rt5645 = snd_soc_component_get_drvdata(component);
-	struct rt5645_eq_param_s *eq_param =
-		(struct rt5645_eq_param_s *)ucontrol->value.bytes.data;
+	struct rt5645_eq_param_s_be16 *eq_param =
+		(struct rt5645_eq_param_s_be16 *)ucontrol->value.bytes.data;
 	int i;
 
 	for (i = 0; i < RT5645_HWEQ_NUM; i++) {
@@ -698,35 +703,32 @@ static int rt5645_hweq_put(struct snd_kcontrol *kcontrol,
 {
 	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct rt5645_priv *rt5645 = snd_soc_component_get_drvdata(component);
-	struct rt5645_eq_param_s *eq_param =
-		(struct rt5645_eq_param_s *)ucontrol->value.bytes.data;
+	struct rt5645_eq_param_s_be16 *eq_param =
+		(struct rt5645_eq_param_s_be16 *)ucontrol->value.bytes.data;
 	int i;
 
 	for (i = 0; i < RT5645_HWEQ_NUM; i++) {
-		eq_param[i].reg = be16_to_cpu(eq_param[i].reg);
-		eq_param[i].val = be16_to_cpu(eq_param[i].val);
+		rt5645->eq_param[i].reg = be16_to_cpu(eq_param[i].reg);
+		rt5645->eq_param[i].val = be16_to_cpu(eq_param[i].val);
 	}
 
 	/* The final setting of the table should be RT5645_EQ_CTRL2 */
 	for (i = RT5645_HWEQ_NUM - 1; i >= 0; i--) {
-		if (eq_param[i].reg == 0)
+		if (rt5645->eq_param[i].reg == 0)
 			continue;
-		else if (eq_param[i].reg != RT5645_EQ_CTRL2)
+		else if (rt5645->eq_param[i].reg != RT5645_EQ_CTRL2)
 			return 0;
 		else
 			break;
 	}
 
 	for (i = 0; i < RT5645_HWEQ_NUM; i++) {
-		if (!rt5645_validate_hweq(eq_param[i].reg) &&
-			eq_param[i].reg != 0)
+		if (!rt5645_validate_hweq(rt5645->eq_param[i].reg) &&
+		    rt5645->eq_param[i].reg != 0)
 			return 0;
-		else if (eq_param[i].reg == 0)
+		else if (rt5645->eq_param[i].reg == 0)
 			break;
 	}
-
-	memcpy(rt5645->eq_param, eq_param,
-		RT5645_HWEQ_NUM * sizeof(struct rt5645_eq_param_s));
 
 	return 0;
 }
@@ -1288,30 +1290,6 @@ static SOC_ENUM_SINGLE_DECL(
 static const struct snd_kcontrol_new rt5645_dac_r2_mux =
 	SOC_DAPM_ENUM("DAC2 R source", rt5645_dac2r_enum);
 
-
-/* INL/R source */
-static const char * const rt5645_inl_src[] = {
-	"IN2P", "MonoP"
-};
-
-static SOC_ENUM_SINGLE_DECL(
-	rt5645_inl_enum, RT5645_INL1_INR1_VOL,
-	RT5645_INL_SEL_SFT, rt5645_inl_src);
-
-static const struct snd_kcontrol_new rt5645_inl_mux =
-	SOC_DAPM_ENUM("INL source", rt5645_inl_enum);
-
-static const char * const rt5645_inr_src[] = {
-	"IN2N", "MonoN"
-};
-
-static SOC_ENUM_SINGLE_DECL(
-	rt5645_inr_enum, RT5645_INL1_INR1_VOL,
-	RT5645_INR_SEL_SFT, rt5645_inr_src);
-
-static const struct snd_kcontrol_new rt5645_inr_mux =
-	SOC_DAPM_ENUM("INR source", rt5645_inr_enum);
-
 /* Stereo1 ADC source */
 /* MX-27 [12] */
 static const char * const rt5645_stereo_adc1_src[] = {
@@ -1610,18 +1588,6 @@ static SOC_ENUM_SINGLE_DECL(
 
 static const struct snd_kcontrol_new rt5645_if2_adc_in_mux =
 	SOC_DAPM_ENUM("IF2 ADC IN source", rt5645_if2_adc_in_enum);
-
-/* MX-2F [1:0] */
-static const char * const rt5645_if3_adc_in_src[] = {
-	"IF_ADC1", "IF_ADC2", "VAD_ADC"
-};
-
-static SOC_ENUM_SINGLE_DECL(
-	rt5645_if3_adc_in_enum, RT5645_DIG_INF1_DATA,
-	RT5645_IF3_ADC_IN_SFT, rt5645_if3_adc_in_src);
-
-static const struct snd_kcontrol_new rt5645_if3_adc_in_mux =
-	SOC_DAPM_ENUM("IF3 ADC IN source", rt5645_if3_adc_in_enum);
 
 /* MX-31 [15] [13] [11] [9] */
 static const char * const rt5645_pdm_src[] = {
@@ -3398,9 +3364,9 @@ static irqreturn_t rt5645_irq(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
-static void rt5645_btn_check_callback(unsigned long data)
+static void rt5645_btn_check_callback(struct timer_list *t)
 {
-	struct rt5645_priv *rt5645 = (struct rt5645_priv *)data;
+	struct rt5645_priv *rt5645 = from_timer(rt5645, t, btn_check_timer);
 
 	queue_delayed_work(system_power_efficient_wq,
 		   &rt5645->jack_detect_work, msecs_to_jiffies(5));
@@ -3449,8 +3415,12 @@ static int rt5645_probe(struct snd_soc_component *component)
 	if (rt5645->pdata.long_name)
 		component->card->long_name = rt5645->pdata.long_name;
 
-	rt5645->eq_param = devm_kzalloc(component->dev,
-		RT5645_HWEQ_NUM * sizeof(struct rt5645_eq_param_s), GFP_KERNEL);
+	rt5645->eq_param = devm_kcalloc(component->dev,
+		RT5645_HWEQ_NUM, sizeof(struct rt5645_eq_param_s),
+		GFP_KERNEL);
+
+	if (!rt5645->eq_param)
+		return -ENOMEM;
 
 	return 0;
 }
@@ -3558,7 +3528,8 @@ static const struct snd_soc_component_driver soc_component_dev_rt5645 = {
 static const struct regmap_config rt5645_regmap = {
 	.reg_bits = 8,
 	.val_bits = 16,
-	.use_single_rw = true,
+	.use_single_read = true,
+	.use_single_write = true,
 	.max_register = RT5645_VENDOR_ID2 + 1 + (ARRAY_SIZE(rt5645_ranges) *
 					       RT5645_PR_SPACING),
 	.volatile_reg = rt5645_volatile_register,
@@ -3574,7 +3545,8 @@ static const struct regmap_config rt5645_regmap = {
 static const struct regmap_config rt5650_regmap = {
 	.reg_bits = 8,
 	.val_bits = 16,
-	.use_single_rw = true,
+	.use_single_read = true,
+	.use_single_write = true,
 	.max_register = RT5645_VENDOR_ID2 + 1 + (ARRAY_SIZE(rt5645_ranges) *
 					       RT5645_PR_SPACING),
 	.volatile_reg = rt5645_volatile_register,
@@ -3591,7 +3563,8 @@ static const struct regmap_config temp_regmap = {
 	.name="nocache",
 	.reg_bits = 8,
 	.val_bits = 16,
-	.use_single_rw = true,
+	.use_single_read = true,
+	.use_single_write = true,
 	.max_register = RT5645_VENDOR_ID2 + 1,
 	.cache_type = REGCACHE_NONE,
 };
@@ -3652,8 +3625,18 @@ static const struct rt5645_platform_data asus_t100ha_platform_data = {
 	.inv_jd1_1 = true,
 };
 
+static const struct rt5645_platform_data lenovo_ideapad_miix_310_pdata = {
+	.jd_mode = 3,
+	.in2_diff = true,
+};
+
 static const struct rt5645_platform_data jd_mode3_platform_data = {
 	.jd_mode = 3,
+};
+
+static const struct rt5645_platform_data lattepanda_board_platform_data = {
+	.jd_mode = 2,
+	.inv_jd1_1 = true
 };
 
 static const struct dmi_system_id dmi_platform_data[] = {
@@ -3734,6 +3717,33 @@ static const struct dmi_system_id dmi_platform_data[] = {
 			DMI_MATCH(DMI_PRODUCT_NAME, "X80 Pro"),
 		},
 		.driver_data = (void *)&jd_mode3_platform_data,
+	},
+	{
+		.ident = "Lenovo Ideapad Miix 310",
+		.matches = {
+		  DMI_EXACT_MATCH(DMI_SYS_VENDOR, "LENOVO"),
+		  DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "80SG"),
+		  DMI_EXACT_MATCH(DMI_PRODUCT_VERSION, "MIIX 310-10ICR"),
+		},
+		.driver_data = (void *)&lenovo_ideapad_miix_310_pdata,
+	},
+	{
+		.ident = "Lenovo Ideapad Miix 320",
+		.matches = {
+		  DMI_EXACT_MATCH(DMI_SYS_VENDOR, "LENOVO"),
+		  DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "80XF"),
+		  DMI_EXACT_MATCH(DMI_PRODUCT_VERSION, "Lenovo MIIX 320-10ICR"),
+		},
+		.driver_data = (void *)&intel_braswell_platform_data,
+	},
+	{
+		.ident = "LattePanda board",
+		.matches = {
+		  DMI_EXACT_MATCH(DMI_BOARD_VENDOR, "AMI Corporation"),
+		  DMI_EXACT_MATCH(DMI_BOARD_NAME, "Cherry Trail CR"),
+		  DMI_EXACT_MATCH(DMI_BOARD_VERSION, "Default string"),
+		},
+		.driver_data = (void *)&lattepanda_board_platform_data,
 	},
 	{ }
 };
@@ -4012,8 +4022,7 @@ static int rt5645_i2c_probe(struct i2c_client *i2c,
 		regmap_update_bits(rt5645->regmap, RT5645_IRQ_CTRL2,
 			RT5645_JD_1_1_MASK, RT5645_JD_1_1_INV);
 	}
-	setup_timer(&rt5645->btn_check_timer,
-		rt5645_btn_check_callback, (unsigned long)rt5645);
+	timer_setup(&rt5645->btn_check_timer, rt5645_btn_check_callback, 0);
 
 	INIT_DELAYED_WORK(&rt5645->jack_detect_work, rt5645_jack_detect_work);
 	INIT_DELAYED_WORK(&rt5645->rcclock_work, rt5645_rcclock_work);

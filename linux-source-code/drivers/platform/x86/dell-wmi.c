@@ -37,6 +37,7 @@
 #include <linux/string.h>
 #include <linux/dmi.h>
 #include <linux/wmi.h>
+#include <acpi/video.h>
 #include "dell-smbios.h"
 #include "dell-wmi-descriptor.h"
 
@@ -47,7 +48,6 @@ MODULE_LICENSE("GPL");
 
 #define DELL_EVENT_GUID "9DBB5994-A997-11DA-B012-B622A1EF5492"
 
-static int acpi_video;
 static bool wmi_requires_smbios_request;
 
 MODULE_ALIAS("wmi:"DELL_EVENT_GUID);
@@ -233,7 +233,7 @@ static const u16 bios_to_linux_keycode[256] = {
 	[18]	= KEY_PROG1,
 	[19]	= KEY_BRIGHTNESSDOWN,
 	[20]	= KEY_BRIGHTNESSUP,
-	[21]	= KEY_UNKNOWN,
+	[21]	= KEY_BRIGHTNESS_AUTO,
 	[22]	= KEY_KBDILLUMTOGGLE,
 	[23]	= KEY_UNKNOWN,
 	[24]	= KEY_SWITCHVIDEOMODE,
@@ -261,6 +261,12 @@ static const u16 bios_to_linux_keycode[256] = {
  * override them.
  */
 static const struct key_entry dell_wmi_keymap_type_0010[] = {
+	/* Fn-lock switched to function keys */
+	{ KE_IGNORE, 0x0, { KEY_RESERVED } },
+
+	/* Fn-lock switched to multimedia keys */
+	{ KE_IGNORE, 0x1, { KEY_RESERVED } },
+
 	/* Mic mute */
 	{ KE_KEY, 0x150, { KEY_MICMUTE } },
 
@@ -296,6 +302,14 @@ static const struct key_entry dell_wmi_keymap_type_0010[] = {
 	{ KE_KEY,    0x851, { KEY_PROG2 } },
 	{ KE_KEY,    0x852, { KEY_PROG3 } },
 
+	/*
+	 * Radio disable (notify only -- there is no model for which the
+	 * WMI event is supposed to trigger an action).
+	 */
+	{ KE_IGNORE, 0xe008, { KEY_RFKILL } },
+
+	/* Fn-lock */
+	{ KE_IGNORE, 0xe035, { KEY_RESERVED } },
 };
 
 /*
@@ -333,11 +347,16 @@ static void dell_wmi_process_key(struct wmi_device *wdev, int type, int code)
 
 	/* Don't report brightness notifications that will also come via ACPI */
 	if ((key->keycode == KEY_BRIGHTNESSUP ||
-	     key->keycode == KEY_BRIGHTNESSDOWN) && acpi_video)
+	     key->keycode == KEY_BRIGHTNESSDOWN) &&
+	    acpi_video_handles_brightness_key_presses())
 		return;
 
 	if (type == 0x0000 && code == 0xe025 && !wmi_requires_smbios_request)
 		return;
+
+	if (key->keycode == KEY_KBDILLUMTOGGLE)
+		dell_laptop_call_notifier(
+			DELL_LAPTOP_KBD_BACKLIGHT_BRIGHTNESS_CHANGED, NULL);
 
 	sparse_keymap_report_entry(priv->input_dev, key, 1, true);
 }
@@ -696,8 +715,6 @@ static struct wmi_driver dell_wmi_driver = {
 static int __init dell_wmi_init(void)
 {
 	int err;
-
-	acpi_video = acpi_video_backlight_support();
 
 	dmi_check_system(dell_wmi_smbios_list);
 

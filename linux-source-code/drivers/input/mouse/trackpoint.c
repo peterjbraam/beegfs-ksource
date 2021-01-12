@@ -15,7 +15,7 @@
 #include <linux/input.h>
 #include <linux/libps2.h>
 #include <linux/proc_fs.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include "psmouse.h"
 #include "trackpoint.h"
 
@@ -365,7 +365,8 @@ static void trackpoint_defaults(struct trackpoint_data *tp)
 
 static void trackpoint_disconnect(struct psmouse *psmouse)
 {
-	sysfs_remove_group(&psmouse->ps2dev.serio->dev.kobj, &trackpoint_attr_group);
+	device_remove_group(&psmouse->ps2dev.serio->dev,
+			    &trackpoint_attr_group);
 
 	kfree(psmouse->private);
 	psmouse->private = NULL;
@@ -453,7 +454,7 @@ int trackpoint_detect(struct psmouse *psmouse, bool set_properties)
 		trackpoint_sync(psmouse, false);
 	}
 
-	error = sysfs_create_group(&ps2dev->serio->dev.kobj, &trackpoint_attr_group);
+	error = device_add_group(&ps2dev->serio->dev, &trackpoint_attr_group);
 	if (error) {
 		psmouse_err(psmouse,
 			    "failed to create sysfs attributes, error: %d\n",

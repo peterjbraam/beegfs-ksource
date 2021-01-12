@@ -60,7 +60,7 @@
  * HPSA_DRIVER_VERSION must be 3 byte values (0-255) separated by '.'
  * with an optional trailing '-' followed by a byte value (0-255).
  */
-#define HPSA_DRIVER_VERSION "3.4.20-170-RH4"
+#define HPSA_DRIVER_VERSION "3.4.20-170-RH3"
 #define DRIVER_NAME "HP HPSA Driver (v " HPSA_DRIVER_VERSION ")"
 #define HPSA "hpsa"
 
@@ -84,18 +84,10 @@ MODULE_SUPPORTED_DEVICE("HP Smart Array Controllers");
 MODULE_VERSION(HPSA_DRIVER_VERSION);
 MODULE_LICENSE("GPL");
 
-static int hpsa_allow_any;
-module_param(hpsa_allow_any, int, S_IRUGO|S_IWUSR);
-MODULE_PARM_DESC(hpsa_allow_any,
-		"Allow hpsa driver to access unknown HP Smart Array hardware");
 static int hpsa_simple_mode;
 module_param(hpsa_simple_mode, int, S_IRUGO|S_IWUSR);
 MODULE_PARM_DESC(hpsa_simple_mode,
 	"Use 'simple mode' rather than 'performant mode'");
-static bool hpsa_disable_irq_affinity;
-module_param(hpsa_disable_irq_affinity, bool, S_IRUGO|S_IWUSR);
-MODULE_PARM_DESC(hpsa_disable_irq_affinity,
-	"Turn off managed irq affinity. Allows smp_affinity to be changed.");
 
 /* define the PCI info for the cards we can control */
 static const struct pci_device_id hpsa_pci_device_id[] = {
@@ -114,12 +106,12 @@ static const struct pci_device_id hpsa_pci_device_id[] = {
 	{PCI_VENDOR_ID_HP,     PCI_DEVICE_ID_HP_CISSF,     0x103C, 0x3354},
 	{PCI_VENDOR_ID_HP,     PCI_DEVICE_ID_HP_CISSF,     0x103C, 0x3355},
 	{PCI_VENDOR_ID_HP,     PCI_DEVICE_ID_HP_CISSF,     0x103C, 0x3356},
-	{PCI_VENDOR_ID_HP,     PCI_DEVICE_ID_HP_CISSH,     0x103C, 0x1920},
+	{PCI_VENDOR_ID_HP,     PCI_DEVICE_ID_HP_CISSH,     0x103c, 0x1920},
 	{PCI_VENDOR_ID_HP,     PCI_DEVICE_ID_HP_CISSH,     0x103C, 0x1921},
 	{PCI_VENDOR_ID_HP,     PCI_DEVICE_ID_HP_CISSH,     0x103C, 0x1922},
 	{PCI_VENDOR_ID_HP,     PCI_DEVICE_ID_HP_CISSH,     0x103C, 0x1923},
 	{PCI_VENDOR_ID_HP,     PCI_DEVICE_ID_HP_CISSH,     0x103C, 0x1924},
-	{PCI_VENDOR_ID_HP,     PCI_DEVICE_ID_HP_CISSH,     0x103C, 0x1925},
+	{PCI_VENDOR_ID_HP,     PCI_DEVICE_ID_HP_CISSH,     0x103c, 0x1925},
 	{PCI_VENDOR_ID_HP,     PCI_DEVICE_ID_HP_CISSH,     0x103C, 0x1926},
 	{PCI_VENDOR_ID_HP,     PCI_DEVICE_ID_HP_CISSH,     0x103C, 0x1928},
 	{PCI_VENDOR_ID_HP,     PCI_DEVICE_ID_HP_CISSH,     0x103C, 0x1929},
@@ -152,8 +144,6 @@ static const struct pci_device_id hpsa_pci_device_id[] = {
 	{PCI_VENDOR_ID_HP_3PAR, 0x0075, 0x1590, 0x007D},
 	{PCI_VENDOR_ID_HP_3PAR, 0x0075, 0x1590, 0x0088},
 	{PCI_VENDOR_ID_HP, 0x333f, 0x103c, 0x333f},
-	{PCI_VENDOR_ID_HP,     PCI_ANY_ID,	PCI_ANY_ID, PCI_ANY_ID,
-		PCI_CLASS_STORAGE_RAID << 8, 0xffff << 8, 0},
 	{0,}
 };
 
@@ -261,8 +251,7 @@ static int hpsa_scsi_queue_command(struct Scsi_Host *h, struct scsi_cmnd *cmd);
 static void hpsa_scan_start(struct Scsi_Host *);
 static int hpsa_scan_finished(struct Scsi_Host *sh,
 	unsigned long elapsed_time);
-static int hpsa_change_queue_depth(struct scsi_device *sdev,
-	int qdepth, int reason);
+static int hpsa_change_queue_depth(struct scsi_device *sdev, int qdepth);
 
 static int hpsa_eh_device_reset_handler(struct scsi_cmnd *scsicmd);
 static int hpsa_slave_alloc(struct scsi_device *sdev);
@@ -285,7 +274,8 @@ static int hpsa_find_cfg_addrs(struct pci_dev *pdev, void __iomem *vaddr,
 			       u64 *cfg_offset);
 static int hpsa_pci_find_memory_BAR(struct pci_dev *pdev,
 				    unsigned long *memory_bar);
-static int hpsa_lookup_board_id(struct pci_dev *pdev, u32 *board_id);
+static int hpsa_lookup_board_id(struct pci_dev *pdev, u32 *board_id,
+				bool *legacy_board);
 static int wait_for_device_to_become_ready(struct ctlr_info *h,
 					   unsigned char lunaddr[],
 					   int reply_queue);
@@ -770,7 +760,7 @@ static ssize_t host_show_hp_ssd_smart_path_enabled(struct device *dev,
 	offload_enabled = hdev->offload_enabled;
 	spin_unlock_irqrestore(&h->lock, flags);
 
-	if (hdev->devtype == TYPE_DISK)
+	if (hdev->devtype == TYPE_DISK || hdev->devtype == TYPE_ZBC)
 		return snprintf(buf, 20, "%d\n", offload_enabled);
 	else
 		return snprintf(buf, 40, "%s\n",
@@ -837,7 +827,8 @@ static ssize_t path_info_show(struct device *dev,
 				PAGE_SIZE - output_len,
 				"PORT: %.2s ",
 				phys_connector);
-		if (hdev->devtype == TYPE_DISK && hdev->expose_device) {
+		if ((hdev->devtype == TYPE_DISK || hdev->devtype == TYPE_ZBC) &&
+			hdev->expose_device) {
 			if (box == 0 || box == 0xFF) {
 				output_len += scnprintf(buf + output_len,
 					PAGE_SIZE - output_len,
@@ -872,6 +863,16 @@ static ssize_t host_show_ctlr_num(struct device *dev,
 	return snprintf(buf, 20, "%d\n", h->ctlr);
 }
 
+static ssize_t host_show_legacy_board(struct device *dev,
+	struct device_attribute *attr, char *buf)
+{
+	struct ctlr_info *h;
+	struct Scsi_Host *shost = class_to_shost(dev);
+
+	h = shost_to_hba(shost);
+	return snprintf(buf, 20, "%d\n", h->legacy_board ? 1 : 0);
+}
+
 static DEVICE_ATTR_RO(raid_level);
 static DEVICE_ATTR_RO(lunid);
 static DEVICE_ATTR_RO(unique_id);
@@ -897,6 +898,8 @@ static DEVICE_ATTR(lockup_detected, S_IRUGO,
 	host_show_lockup_detected, NULL);
 static DEVICE_ATTR(ctlr_num, S_IRUGO,
 	host_show_ctlr_num, NULL);
+static DEVICE_ATTR(legacy_board, S_IRUGO,
+	host_show_legacy_board, NULL);
 
 static struct device_attribute *hpsa_sdev_attrs[] = {
 	&dev_attr_raid_level,
@@ -918,6 +921,7 @@ static struct device_attribute *hpsa_shost_attrs[] = {
 	&dev_attr_raid_offload_debug,
 	&dev_attr_lockup_detected,
 	&dev_attr_ctlr_num,
+	&dev_attr_legacy_board,
 	NULL,
 };
 
@@ -944,7 +948,7 @@ static struct scsi_host_template hpsa_driver_template = {
 #endif
 	.sdev_attrs = hpsa_sdev_attrs,
 	.shost_attrs = hpsa_shost_attrs,
-	.max_sectors = 8192,
+	.max_sectors = 2048,
 	.no_write_same = 1,
 };
 
@@ -1197,6 +1201,7 @@ static void hpsa_show_dev_msg(const char *level, struct ctlr_info *h,
 		snprintf(label, LABEL_SIZE, "enclosure");
 		break;
 	case TYPE_DISK:
+	case TYPE_ZBC:
 		if (dev->external)
 			snprintf(label, LABEL_SIZE, "external");
 		else if (!is_logical_dev_addr_mode(dev->scsi3addr))
@@ -1294,7 +1299,7 @@ static int hpsa_scsi_add_entry(struct ctlr_info *h,
 		dev_warn(&h->pdev->dev, "physical device with no LUN=0,"
 			" suspect firmware bug or unsupported hardware "
 			"configuration.\n");
-			return -1;
+		return -1;
 	}
 
 lun_assigned:
@@ -1681,7 +1686,8 @@ static void hpsa_figure_phys_disk_ptrs(struct ctlr_info *h,
 		for (j = 0; j < ndevices; j++) {
 			if (dev[j] == NULL)
 				continue;
-			if (dev[j]->devtype != TYPE_DISK)
+			if (dev[j]->devtype != TYPE_DISK &&
+			    dev[j]->devtype != TYPE_ZBC)
 				continue;
 			if (is_logical_device(dev[j]))
 				continue;
@@ -1735,7 +1741,8 @@ static void hpsa_update_log_drive_phys_drive_ptrs(struct ctlr_info *h,
 	for (i = 0; i < ndevices; i++) {
 		if (dev[i] == NULL)
 			continue;
-		if (dev[i]->devtype != TYPE_DISK)
+		if (dev[i]->devtype != TYPE_DISK &&
+		    dev[i]->devtype != TYPE_ZBC)
 			continue;
 		if (!is_logical_device(dev[i]))
 			continue;
@@ -2065,7 +2072,6 @@ static int hpsa_slave_alloc(struct scsi_device *sdev)
 	struct hpsa_scsi_dev_t *sd = NULL;
 	unsigned long flags;
 	struct ctlr_info *h;
-	int queue_depth;
 
 	h = sdev_to_hba(sdev);
 	spin_lock_irqsave(&h->devlock, flags);
@@ -2088,32 +2094,9 @@ static int hpsa_slave_alloc(struct scsi_device *sdev)
 	if (sd && sd->expose_device) {
 		atomic_set(&sd->ioaccel_cmds_out, 0);
 		sdev->hostdata = sd;
-		if (sd->external) {
-			queue_depth = EXTERNAL_QD;
-			sdev->eh_timeout = HPSA_EH_PTRAID_TIMEOUT;
-			blk_queue_rq_timeout(sdev->request_queue,
-					HPSA_EH_PTRAID_TIMEOUT);
-		} else {
-			queue_depth = sd->queue_depth != 0 ?
-				sd->queue_depth : sdev->host->can_queue;
-		}
-	} else {
+	} else
 		sdev->hostdata = NULL;
-		queue_depth = sdev->host->can_queue;
-	}
-
-	if (sd)
-		sd->was_removed = 0;
-
-	scsi_adjust_queue_depth(sdev, scsi_get_tag_type(sdev), queue_depth);
-
-	if (!shost_use_blk_mq(sdev->host)) {
-		sdev->tagged_supported = 1;
-		scsi_set_tag_type(sdev, MSG_SIMPLE_TAG);
-		scsi_activate_tcq(sdev, queue_depth);
-	}
 	spin_unlock_irqrestore(&h->devlock, flags);
-
 	return 0;
 }
 
@@ -2121,10 +2104,26 @@ static int hpsa_slave_alloc(struct scsi_device *sdev)
 static int hpsa_slave_configure(struct scsi_device *sdev)
 {
 	struct hpsa_scsi_dev_t *sd;
+	int queue_depth;
 
 	sd = sdev->hostdata;
 	sdev->no_uld_attach = !sd || !sd->expose_device;
 
+	if (sd) {
+		sd->was_removed = 0;
+		if (sd->external) {
+			queue_depth = EXTERNAL_QD;
+			sdev->eh_timeout = HPSA_EH_PTRAID_TIMEOUT;
+			blk_queue_rq_timeout(sdev->request_queue,
+						HPSA_EH_PTRAID_TIMEOUT);
+		} else {
+			queue_depth = sd->queue_depth != 0 ?
+					sd->queue_depth : sdev->host->can_queue;
+		}
+	} else
+		queue_depth = sdev->host->can_queue;
+
+	scsi_change_queue_depth(sdev, queue_depth);
 
 	return 0;
 }
@@ -3701,7 +3700,7 @@ static int hpsa_scsi_do_report_luns(struct ctlr_info *h, int logical,
 	memset(scsi3addr, 0, sizeof(scsi3addr));
 	if (fill_cmd(c, logical ? HPSA_REPORT_LOG : HPSA_REPORT_PHYS, h,
 		buf, bufsize, 0, scsi3addr, TYPE_CMD)) {
-		rc = -1;
+		rc = -EAGAIN;
 		goto out;
 	}
 	if (extended_response)
@@ -3714,16 +3713,19 @@ static int hpsa_scsi_do_report_luns(struct ctlr_info *h, int logical,
 	if (ei->CommandStatus != 0 &&
 	    ei->CommandStatus != CMD_DATA_UNDERRUN) {
 		hpsa_scsi_interpret_error(h, c);
-		rc = -1;
+		rc = -EIO;
 	} else {
 		struct ReportLUNdata *rld = buf;
 
 		if (rld->extended_response_flag != extended_response) {
-			dev_err(&h->pdev->dev,
-				"report luns requested format %u, got %u\n",
-				extended_response,
-				rld->extended_response_flag);
-			rc = -1;
+			if (!h->legacy_board) {
+				dev_err(&h->pdev->dev,
+					"report luns requested format %u, got %u\n",
+					extended_response,
+					rld->extended_response_flag);
+				rc = -EINVAL;
+			} else
+				rc = -EOPNOTSUPP;
 		}
 	}
 out:
@@ -3739,7 +3741,7 @@ static inline int hpsa_scsi_do_report_phys_luns(struct ctlr_info *h,
 
 	rc = hpsa_scsi_do_report_luns(h, 0, buf, bufsize,
 				      HPSA_REPORT_PHYS_EXTENDED);
-	if (!rc || !hpsa_allow_any)
+	if (!rc || rc != -EOPNOTSUPP)
 		return rc;
 
 	/* REPORT PHYS EXTENDED is not supported */
@@ -3927,7 +3929,7 @@ static int hpsa_update_device_info(struct ctlr_info *h,
 	memset(this_device->device_id, 0,
 		sizeof(this_device->device_id));
 	if (hpsa_get_device_id(h, scsi3addr, this_device->device_id, 8,
-		sizeof(this_device->device_id))) {
+		sizeof(this_device->device_id)) < 0) {
 		dev_err(&h->pdev->dev,
 			"hpsa%d: %s: can't get device id for [%d:%d:%d:%d]\t%s\t%.16s\n",
 			h->ctlr, __func__,
@@ -3940,7 +3942,8 @@ static int hpsa_update_device_info(struct ctlr_info *h,
 		goto bail_out;
 	}
 
-	if (this_device->devtype == TYPE_DISK &&
+	if ((this_device->devtype == TYPE_DISK ||
+		this_device->devtype == TYPE_ZBC) &&
 		is_logical_dev_addr_mode(scsi3addr)) {
 		unsigned char volume_offline;
 
@@ -3948,6 +3951,16 @@ static int hpsa_update_device_info(struct ctlr_info *h,
 		if (h->fw_support & MISC_FW_RAID_OFFLOAD_BASIC)
 			hpsa_get_ioaccel_status(h, scsi3addr, this_device);
 		volume_offline = hpsa_volume_offline(h, scsi3addr);
+		if (volume_offline == HPSA_VPD_LV_STATUS_UNSUPPORTED &&
+		    h->legacy_board) {
+			/*
+			 * Legacy boards might not support volume status
+			 */
+			dev_info(&h->pdev->dev,
+				 "C0:T%d:L%d Volume status not available, assuming online.\n",
+				 this_device->target, this_device->lun);
+			volume_offline = 0;
+		}
 		this_device->volume_offline = volume_offline;
 		if (volume_offline == HPSA_LV_FAILED) {
 			rc = HPSA_LV_FAILED;
@@ -3968,7 +3981,6 @@ static int hpsa_update_device_info(struct ctlr_info *h,
 
 	if (this_device->external)
 		this_device->queue_depth = EXTERNAL_QD;
-
 
 	if (is_OBDR_device) {
 		/* See if this is a One-Button-Disaster-Recovery device
@@ -4076,7 +4088,7 @@ static int hpsa_gather_lun_info(struct ctlr_info *h,
 			"maximum logical LUNs (%d) exceeded.  "
 			"%d LUNs ignored.\n", HPSA_MAX_LUN,
 			*nlogicals - HPSA_MAX_LUN);
-			*nlogicals = HPSA_MAX_LUN;
+		*nlogicals = HPSA_MAX_LUN;
 	}
 	if (*nlogicals + *nphysicals > HPSA_MAX_PHYS_LUN) {
 		dev_warn(&h->pdev->dev,
@@ -4426,6 +4438,7 @@ static void hpsa_update_scsi_devices(struct ctlr_info *h)
 				ncurrent++;
 			break;
 		case TYPE_DISK:
+		case TYPE_ZBC:
 			if (this_device->physical_device) {
 				/* The disk is in HBA mode. */
 				/* Never use RAID mapper in HBA mode. */
@@ -4627,6 +4640,7 @@ static int fixup_ioaccel_cdb(u8 *cdb, int *cdb_len)
 	case WRITE_6:
 	case WRITE_12:
 		is_write = 1;
+		/* fall through */
 	case READ_6:
 	case READ_12:
 		if (*cdb_len == 6) {
@@ -4884,7 +4898,6 @@ static int hpsa_scsi_ioaccel2_queue_command(struct ctlr_info *h,
 	if (use_sg) {
 		curr_sg = cp->sg;
 		if (use_sg > h->ioaccel_maxsg) {
-			gmb();
 			addr64 = le64_to_cpu(
 				h->ioaccel2_cmd_sg_list[c->cmdindex]->address);
 			curr_sg->address = cpu_to_le64(addr64);
@@ -5077,6 +5090,7 @@ static int hpsa_scsi_ioaccel_raid_map(struct ctlr_info *h,
 	switch (cmd->cmnd[0]) {
 	case WRITE_6:
 		is_write = 1;
+		/* fall through */
 	case READ_6:
 		first_block = (((cmd->cmnd[1] & 0x1F) << 16) |
 				(cmd->cmnd[2] << 8) |
@@ -5087,6 +5101,7 @@ static int hpsa_scsi_ioaccel_raid_map(struct ctlr_info *h,
 		break;
 	case WRITE_10:
 		is_write = 1;
+		/* fall through */
 	case READ_10:
 		first_block =
 			(((u64) cmd->cmnd[2]) << 24) |
@@ -5099,6 +5114,7 @@ static int hpsa_scsi_ioaccel_raid_map(struct ctlr_info *h,
 		break;
 	case WRITE_12:
 		is_write = 1;
+		/* fall through */
 	case READ_12:
 		first_block =
 			(((u64) cmd->cmnd[2]) << 24) |
@@ -5113,6 +5129,7 @@ static int hpsa_scsi_ioaccel_raid_map(struct ctlr_info *h,
 		break;
 	case WRITE_16:
 		is_write = 1;
+		/* fall through */
 	case READ_16:
 		first_block =
 			(((u64) cmd->cmnd[2]) << 56) |
@@ -5436,8 +5453,6 @@ static int hpsa_ciss_submit(struct ctlr_info *h,
 		return SCSI_MLQUEUE_HOST_BUSY;
 	}
 
-	c->device = dev;
-
 	enqueue_cmd_and_start_io(h, c);
 	/* the cmd'll come back via intr handler in complete_scsi_command()  */
 	return 0;
@@ -5509,7 +5524,6 @@ static int hpsa_ioaccel_submit(struct ctlr_info *h,
 		hpsa_cmd_init(h, c->cmdindex, c);
 		c->cmd_type = CMD_SCSI;
 		c->scsi_cmd = cmd;
-		c->device = dev;
 		rc = hpsa_scsi_ioaccel_raid_map(h, c);
 		if (rc < 0)     /* scsi_dma_map failed. */
 			rc = SCSI_MLQUEUE_HOST_BUSY;
@@ -5517,7 +5531,6 @@ static int hpsa_ioaccel_submit(struct ctlr_info *h,
 		hpsa_cmd_init(h, c->cmdindex, c);
 		c->cmd_type = CMD_SCSI;
 		c->scsi_cmd = cmd;
-		c->device = dev;
 		rc = hpsa_scsi_ioaccel_direct_map(h, c);
 		if (rc < 0)     /* scsi_dma_map failed. */
 			rc = SCSI_MLQUEUE_HOST_BUSY;
@@ -5591,14 +5604,7 @@ static int hpsa_scsi_queue_command(struct Scsi_Host *sh, struct scsi_cmnd *cmd)
 	/* Get the ptr to our adapter structure out of cmd->host. */
 	h = sdev_to_hba(cmd->device);
 
-	if (cmd->request->tag < 0) {
-		dev_crit(&h->pdev->dev,
-			"sdev %p scmd %p: bad tag %d -- rejecting\n",
-			cmd->device, cmd, cmd->request->tag);
-		cmd->result = DID_NO_CONNECT << 16;
-		cmd->scsi_done(cmd);
-		return 0;
-	}
+	BUG_ON(cmd->request->tag < 0);
 
 	dev = cmd->device->hostdata;
 	if (!dev) {
@@ -5637,8 +5643,8 @@ static int hpsa_scsi_queue_command(struct Scsi_Host *sh, struct scsi_cmnd *cmd)
 	 * Retries always go down the normal I/O path.
 	 */
 	if (likely(cmd->retries == 0 &&
-		cmd->request->cmd_type == REQ_TYPE_FS &&
-		h->acciopath_status)) {
+			!blk_rq_is_passthrough(cmd->request) &&
+			h->acciopath_status)) {
 		rc = hpsa_ioaccel_submit(h, c, cmd);
 		if (rc == 0)
 			return 0;
@@ -5723,13 +5729,9 @@ static void hpsa_scan_start(struct Scsi_Host *sh)
 	hpsa_scan_complete(h);
 }
 
-static int hpsa_change_queue_depth(struct scsi_device *sdev, 
-	int qdepth, int reason)
+static int hpsa_change_queue_depth(struct scsi_device *sdev, int qdepth)
 {
 	struct hpsa_scsi_dev_t *logical_drive = sdev->hostdata;
-
-	if (reason != SCSI_QDEPTH_DEFAULT)
-		return -ENOTSUPP;
 
 	if (!logical_drive)
 		return -ENODEV;
@@ -5739,8 +5741,7 @@ static int hpsa_change_queue_depth(struct scsi_device *sdev,
 	else if (qdepth > logical_drive->queue_depth)
 		qdepth = logical_drive->queue_depth;
 
-	scsi_adjust_queue_depth(sdev, scsi_get_tag_type(sdev), qdepth);
-	return sdev->queue_depth;
+	return scsi_change_queue_depth(sdev, qdepth);
 }
 
 static int hpsa_scan_finished(struct Scsi_Host *sh,
@@ -5759,7 +5760,6 @@ static int hpsa_scan_finished(struct Scsi_Host *sh,
 static int hpsa_scsi_host_alloc(struct ctlr_info *h)
 {
 	struct Scsi_Host *sh;
-	int error;
 
 	sh = scsi_host_alloc(&hpsa_driver_template, sizeof(h));
 	if (sh == NULL) {
@@ -5781,16 +5781,7 @@ static int hpsa_scsi_host_alloc(struct ctlr_info *h)
 	sh->hostdata[0] = (unsigned long) h;
 	sh->irq = pci_irq_vector(h->pdev, 0);
 	sh->unique_id = sh->irq;
-	if (!shost_use_blk_mq(sh)) {
-		error = scsi_init_shared_tag_map(sh, sh->can_queue);
-		if (error) {
-			dev_err(&h->pdev->dev,
-				"%s: scsi_init_shared_tag_map failed for ctlr %d\n",
-				__func__, h->ctlr);
-				scsi_host_put(sh);
-				return error;
-		}
-	}
+
 	h->scsi_host = sh;
 	return 0;
 }
@@ -6433,13 +6424,9 @@ static int hpsa_big_passthru_ioctl(struct ctlr_info *h, void __user *argp)
 		return -EINVAL;
 	if (!capable(CAP_SYS_RAWIO))
 		return -EPERM;
-	ioc = kmalloc(sizeof(*ioc), GFP_KERNEL);
-	if (!ioc) {
-		status = -ENOMEM;
-		goto cleanup1;
-	}
-	if (copy_from_user(ioc, argp, sizeof(*ioc))) {
-		status = -EFAULT;
+	ioc = vmemdup_user(argp, sizeof(*ioc));
+	if (IS_ERR(ioc)) {
+		status = PTR_ERR(ioc);
 		goto cleanup1;
 	}
 	if ((ioc->buf_size < 1) &&
@@ -6557,7 +6544,7 @@ cleanup1:
 		kfree(buff);
 	}
 	kfree(buff_size);
-	kfree(ioc);
+	kvfree(ioc);
 	return status;
 }
 
@@ -6791,7 +6778,6 @@ static int fill_cmd(struct CommandList *c, u8 cmd, struct ctlr_info *h,
 		default:
 			dev_warn(&h->pdev->dev, "unknown command 0x%c\n", cmd);
 			BUG();
-			return -1;
 		}
 	} else if (cmd_type == TYPE_MSG) {
 		switch (cmd) {
@@ -7444,7 +7430,7 @@ fallback:
  */
 static int hpsa_interrupt_mode(struct ctlr_info *h)
 {
-	unsigned int flags;
+	unsigned int flags = PCI_IRQ_LEGACY;
 	int ret;
 
 	/* Some boards advertise MSI but don't really support it */
@@ -7455,52 +7441,52 @@ static int hpsa_interrupt_mode(struct ctlr_info *h)
 	case 0x40830E11:
 		break;
 	default:
-		flags = PCI_IRQ_MSIX;
-		if (!hpsa_disable_irq_affinity)
-			flags |= PCI_IRQ_AFFINITY;
 		ret = pci_alloc_irq_vectors(h->pdev, 1, MAX_REPLY_QUEUES,
-				flags);
+				PCI_IRQ_MSIX | PCI_IRQ_AFFINITY);
 		if (ret > 0) {
 			h->msix_vectors = ret;
 			return 0;
 		}
 
+		flags |= PCI_IRQ_MSI;
 		break;
 	}
 
-	flags = PCI_IRQ_LEGACY | PCI_IRQ_MSI;
 	ret = pci_alloc_irq_vectors(h->pdev, 1, 1, flags);
 	if (ret < 0)
 		return ret;
 	return 0;
 }
 
-static int hpsa_lookup_board_id(struct pci_dev *pdev, u32 *board_id)
+static int hpsa_lookup_board_id(struct pci_dev *pdev, u32 *board_id,
+				bool *legacy_board)
 {
 	int i;
 	u32 subsystem_vendor_id, subsystem_device_id;
-	char msg[80];
 
 	subsystem_vendor_id = pdev->subsystem_vendor;
 	subsystem_device_id = pdev->subsystem_device;
 	*board_id = ((subsystem_device_id << 16) & 0xffff0000) |
 		    subsystem_vendor_id;
 
+	if (legacy_board)
+		*legacy_board = false;
 	for (i = 0; i < ARRAY_SIZE(products); i++)
-		if (*board_id == products[i].board_id)
+		if (*board_id == products[i].board_id) {
+			if (products[i].access != &SA5A_access &&
+			    products[i].access != &SA5B_access)
+				return i;
+			dev_warn(&pdev->dev,
+				 "legacy board ID: 0x%08x\n",
+				 *board_id);
+			if (legacy_board)
+			    *legacy_board = true;
 			return i;
+		}
 
-	if ((subsystem_vendor_id != PCI_VENDOR_ID_HP &&
-		subsystem_vendor_id != PCI_VENDOR_ID_COMPAQ) ||
-		!hpsa_allow_any) {
-		dev_warn(&pdev->dev, "unrecognized board ID: "
-			"0x%08x, ignoring.\n", *board_id);
-			return -ENODEV;
-	}
-
-	sprintf(msg, "hpsa: this controller (%#x)", subsystem_device_id);
-	mark_tech_preview(msg, THIS_MODULE);
-
+	dev_warn(&pdev->dev, "unrecognized board ID: 0x%08x\n", *board_id);
+	if (legacy_board)
+		*legacy_board = true;
 	return ARRAY_SIZE(products) - 1; /* generic unknown smart array */
 }
 
@@ -7793,7 +7779,7 @@ static void hpsa_free_pci_init(struct ctlr_info *h)
 	hpsa_disable_interrupt_mode(h);		/* pci_init 2 */
 	/*
 	 * call pci_disable_device before pci_release_regions per
-	 * Documentation/PCI/pci.txt
+	 * Documentation/driver-api/pci/pci.rst
 	 */
 	pci_disable_device(h->pdev);		/* pci_init 1 */
 	pci_release_regions(h->pdev);		/* pci_init 2 */
@@ -7803,13 +7789,14 @@ static void hpsa_free_pci_init(struct ctlr_info *h)
 static int hpsa_pci_init(struct ctlr_info *h)
 {
 	int prod_index, err;
+	bool legacy_board;
 
-	prod_index = hpsa_lookup_board_id(h->pdev, &h->board_id);
+	prod_index = hpsa_lookup_board_id(h->pdev, &h->board_id, &legacy_board);
 	if (prod_index < 0)
 		return prod_index;
 	h->product_name = products[prod_index].product_name;
 	h->access = *(products[prod_index].access);
-
+	h->legacy_board = legacy_board;
 	pci_disable_link_state(h->pdev, PCIE_LINK_STATE_L0S |
 			       PCIE_LINK_STATE_L1 | PCIE_LINK_STATE_CLKPM);
 
@@ -7875,7 +7862,7 @@ clean2:	/* intmode+region, pci */
 clean1:
 	/*
 	 * call pci_disable_device before pci_release_regions per
-	 * Documentation/PCI/pci.txt
+	 * Documentation/driver-api/pci/pci.rst
 	 */
 	pci_disable_device(h->pdev);
 	pci_release_regions(h->pdev);
@@ -8593,7 +8580,7 @@ static int hpsa_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	if (number_of_controllers == 0)
 		printk(KERN_INFO DRIVER_NAME "\n");
 
-	rc = hpsa_lookup_board_id(pdev, &board_id);
+	rc = hpsa_lookup_board_id(pdev, &board_id, NULL);
 	if (rc < 0) {
 		dev_warn(&pdev->dev, "Board ID not found\n");
 		return rc;
@@ -8946,7 +8933,7 @@ out:
 	kfree(options);
 }
 
-static void hpsa_shutdown(struct pci_dev *pdev)
+static void __hpsa_shutdown(struct pci_dev *pdev)
 {
 	struct ctlr_info *h;
 
@@ -8959,6 +8946,12 @@ static void hpsa_shutdown(struct pci_dev *pdev)
 	h->access.set_intr_mask(h, HPSA_INTR_OFF);
 	hpsa_free_irqs(h);			/* init_one 4 */
 	hpsa_disable_interrupt_mode(h);		/* pci_init 2 */
+}
+
+static void hpsa_shutdown(struct pci_dev *pdev)
+{
+	__hpsa_shutdown(pdev);
+	pci_disable_device(pdev);
 }
 
 static void hpsa_free_device_info(struct ctlr_info *h)
@@ -9005,7 +8998,7 @@ static void hpsa_remove_one(struct pci_dev *pdev)
 		scsi_remove_host(h->scsi_host);		/* init_one 8 */
 	/* includes hpsa_free_irqs - init_one 4 */
 	/* includes hpsa_disable_interrupt_mode - pci_init 2 */
-	hpsa_shutdown(pdev);
+	__hpsa_shutdown(pdev);
 
 	hpsa_free_device_info(h);		/* scan */
 

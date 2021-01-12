@@ -988,6 +988,8 @@ const struct dcbnl_rtnl_ops mlx5e_dcbnl_ops = {
 	.ieee_delapp    = mlx5e_dcbnl_ieee_delapp,
 	.getdcbx	= mlx5e_dcbnl_getdcbx,
 	.setdcbx	= mlx5e_dcbnl_setdcbx,
+	.dcbnl_getbuffer = mlx5e_dcbnl_getbuffer,
+	.dcbnl_setbuffer = mlx5e_dcbnl_setbuffer,
 
 /* CEE interfaces */
 	.setall         = mlx5e_dcbnl_setall,
@@ -1005,11 +1007,6 @@ const struct dcbnl_rtnl_ops mlx5e_dcbnl_ops = {
 	.getnumtcs      = mlx5e_dcbnl_getnumtcs,
 	.getpfcstate    = mlx5e_dcbnl_getpfcstate,
 	.setpfcstate    = mlx5e_dcbnl_setpfcstate,
-};
-
-const struct dcbnl_rtnl_ops_ext mlx5e_dcbnl_ops_ext = {
-	.dcbnl_getbuffer = mlx5e_dcbnl_getbuffer,
-	.dcbnl_setbuffer = mlx5e_dcbnl_setbuffer,
 };
 
 static void mlx5e_dcbnl_query_dcbx_mode(struct mlx5e_priv *priv,

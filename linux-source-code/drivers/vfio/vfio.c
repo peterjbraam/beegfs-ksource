@@ -363,20 +363,19 @@ static struct vfio_group *vfio_create_group(struct iommu_group *iommu_group)
 
 	mutex_lock(&vfio.group_lock);
 
-	minor = vfio_alloc_group_minor(group);
-	if (minor < 0) {
-		vfio_group_unlock_and_free(group);
-		return ERR_PTR(minor);
-	}
-
 	/* Did we race creating this group? */
 	list_for_each_entry(tmp, &vfio.group_list, vfio_next) {
 		if (tmp->iommu_group == iommu_group) {
 			vfio_group_get(tmp);
-			vfio_free_group_minor(minor);
 			vfio_group_unlock_and_free(group);
 			return tmp;
 		}
+	}
+
+	minor = vfio_alloc_group_minor(group);
+	if (minor < 0) {
+		vfio_group_unlock_and_free(group);
+		return ERR_PTR(minor);
 	}
 
 	dev = device_create(vfio.class, NULL,
@@ -386,7 +385,7 @@ static struct vfio_group *vfio_create_group(struct iommu_group *iommu_group)
 	if (IS_ERR(dev)) {
 		vfio_free_group_minor(minor);
 		vfio_group_unlock_and_free(group);
-		return (struct vfio_group *)dev; /* ERR_PTR */
+		return ERR_CAST(dev);
 	}
 
 	group->minor = minor;
@@ -541,7 +540,6 @@ struct vfio_device *vfio_group_create_device(struct vfio_group *group,
 					     void *device_data)
 {
 	struct vfio_device *device;
-	int ret;
 
 	device = kzalloc(sizeof(*device), GFP_KERNEL);
 	if (!device)
@@ -552,12 +550,7 @@ struct vfio_device *vfio_group_create_device(struct vfio_group *group,
 	device->group = group;
 	device->ops = ops;
 	device->device_data = device_data;
-
-	ret = dev_set_drvdata(dev, device);
-	if (ret) {
-		kfree(device);
-		return ERR_PTR(ret);
-	}
+	dev_set_drvdata(dev, device);
 
 	/* No need to get group_lock, caller has group reference */
 	vfio_group_get(group);
@@ -637,8 +630,6 @@ static const char * const vfio_driver_whitelist[] = { "pci-stub" };
 
 static bool vfio_dev_whitelisted(struct device *dev, struct device_driver *drv)
 {
-	int i;
-
 	if (dev_is_pci(dev)) {
 		struct pci_dev *pdev = to_pci_dev(dev);
 
@@ -646,12 +637,9 @@ static bool vfio_dev_whitelisted(struct device *dev, struct device_driver *drv)
 			return true;
 	}
 
-	for (i = 0; i < ARRAY_SIZE(vfio_driver_whitelist); i++) {
-		if (!strcmp(drv->name, vfio_driver_whitelist[i]))
-			return true;
-	}
-
-	return false;
+	return match_string(vfio_driver_whitelist,
+			    ARRAY_SIZE(vfio_driver_whitelist),
+			    drv->name) >= 0;
 }
 
 /*
@@ -672,7 +660,7 @@ static int vfio_dev_viable(struct device *dev, void *data)
 {
 	struct vfio_group *group = data;
 	struct vfio_device *device;
-	struct device_driver *drv = ACCESS_ONCE(dev->driver);
+	struct device_driver *drv = READ_ONCE(dev->driver);
 	struct vfio_unbound_dev *unbound;
 	int ret = -EINVAL;
 

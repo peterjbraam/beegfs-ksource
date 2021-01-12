@@ -16,14 +16,11 @@
 #include <linux/blkdev.h>
 #include <linux/slab.h>
 #include <linux/crc32c.h>
-#include <linux/flex_array.h>
 #include <linux/async_tx.h>
 #include <linux/raid/md_p.h>
 #include "md.h"
 #include "raid5.h"
-
-#define STRIPE_SIZE		PAGE_SIZE
-#define STRIPE_SECTORS		(STRIPE_SIZE>>9)
+#include "raid5-log.h"
 
 /*
  * PPL consists of a 4KB header (struct ppl_header) and at least 128KB for
@@ -88,6 +85,9 @@
  * (for a single member disk). New io_units are added to the end of the list
  * and the first io_unit is submitted, if it is not submitted already.
  * The current io_unit accepting new stripes is always at the end of the list.
+ *
+ * If write-back cache is enabled for any of the disks in the array, its data
+ * must be flushed before next io_unit is submitted.
  */
 
 #define PPL_SPACE_SIZE (128 * 1024)
@@ -105,8 +105,9 @@ struct ppl_conf {
 	atomic64_t seq;		/* current log write sequence number */
 
 	struct kmem_cache *io_kc;
-	mempool_t *io_pool;
-	struct bio_set *bs;
+	mempool_t io_pool;
+	struct bio_set bs;
+	struct bio_set flush_bs;
 
 	/* used only for recovery */
 	int recovered_entries;
@@ -115,6 +116,8 @@ struct ppl_conf {
 	/* stripes to retry if failed to allocate io_unit */
 	struct list_head no_mem_stripes;
 	spinlock_t no_mem_stripes_lock;
+
+	unsigned short write_hint;
 };
 
 struct ppl_log {
@@ -131,6 +134,8 @@ struct ppl_log {
 	sector_t next_io_sector;
 	unsigned int entry_space;
 	bool use_multippl;
+	bool wb_cache_on;
+	unsigned long disk_flush_bitmap;
 };
 
 #define PPL_IO_INLINE_BVECS 32
@@ -148,12 +153,12 @@ struct ppl_io_unit {
 
 	struct list_head stripe_list;	/* stripes added to the io_unit */
 	atomic_t pending_stripes;	/* how many stripes not written to raid */
+	atomic_t pending_flushes;	/* how many disk flushes are in progress */
 
 	bool submitted;			/* true if write to log started */
 
 	/* inline bio and its biovec for submitting the iounit */
 	struct bio bio;
-	struct bio_aux bio_aux;
 	struct bio_vec biovec[PPL_IO_INLINE_BVECS];
 };
 
@@ -162,7 +167,7 @@ ops_run_partial_parity(struct stripe_head *sh, struct raid5_percpu *percpu,
 		       struct dma_async_tx_descriptor *tx)
 {
 	int disks = sh->disks;
-	struct page **srcs = flex_array_get(percpu->scribble, 0);
+	struct page **srcs = percpu->scribble;
 	int count = 0, pd_idx = sh->pd_idx, i;
 	struct async_submit_ctl submit;
 
@@ -193,8 +198,7 @@ ops_run_partial_parity(struct stripe_head *sh, struct raid5_percpu *percpu,
 	}
 
 	init_async_submit(&submit, ASYNC_TX_FENCE|ASYNC_TX_XOR_ZERO_DST, tx,
-			  NULL, sh, flex_array_get(percpu->scribble, 0)
-			  + sizeof(struct page *) * (sh->disks + 2));
+			  NULL, sh, (void *) (srcs + sh->disks + 2));
 
 	if (count == 1)
 		tx = async_memcpy(sh->ppl_page, srcs[0], 0, 0, PAGE_SIZE,
@@ -241,7 +245,7 @@ static struct ppl_io_unit *ppl_new_iounit(struct ppl_log *log,
 	struct ppl_header *pplhdr;
 	struct page *header_page;
 
-	io = mempool_alloc(ppl_conf->io_pool, GFP_NOWAIT);
+	io = mempool_alloc(&ppl_conf->io_pool, GFP_NOWAIT);
 	if (!io)
 		return NULL;
 
@@ -253,11 +257,8 @@ static struct ppl_io_unit *ppl_new_iounit(struct ppl_log *log,
 	INIT_LIST_HEAD(&io->log_sibling);
 	INIT_LIST_HEAD(&io->stripe_list);
 	atomic_set(&io->pending_stripes, 0);
-	bio_init(&io->bio);
-	io->bio.bio_aux = &io->bio_aux;
-	atomic_set(&io->bio.bio_aux->__bi_remaining, 1);
-	io->bio.bi_io_vec = io->biovec;
-	io->bio.bi_max_vecs = PPL_IO_INLINE_BVECS;
+	atomic_set(&io->pending_flushes, 0);
+	bio_init(&io->bio, io->biovec, PPL_IO_INLINE_BVECS);
 
 	pplhdr = page_address(io->header_page);
 	clear_page(pplhdr);
@@ -401,7 +402,7 @@ int ppl_write_stripe(struct r5conf *conf, struct stripe_head *sh)
 	return 0;
 }
 
-static void ppl_log_endio(struct bio *bio, int error)
+static void ppl_log_endio(struct bio *bio)
 {
 	struct ppl_io_unit *io = bio->bi_private;
 	struct ppl_log *log = io->log;
@@ -410,7 +411,7 @@ static void ppl_log_endio(struct bio *bio, int error)
 
 	pr_debug("%s: seq: %llu\n", __func__, io->seq);
 
-	if (error)
+	if (bio->bi_status)
 		md_error(ppl_conf->mddev, log->rdev);
 
 	list_for_each_entry_safe(sh, next, &io->stripe_list, log_list) {
@@ -426,11 +427,11 @@ static void ppl_submit_iounit_bio(struct ppl_io_unit *io, struct bio *bio)
 	char b[BDEVNAME_SIZE];
 
 	pr_debug("%s: seq: %llu size: %u sector: %llu dev: %s\n",
-		 __func__, io->seq, bio->bi_size,
-		 (unsigned long long)bio->bi_sector,
-		 bdevname(bio->bi_bdev, b));
+		 __func__, io->seq, bio->bi_iter.bi_size,
+		 (unsigned long long)bio->bi_iter.bi_sector,
+		 bio_devname(bio, b));
 
-	submit_bio(bio->bi_rw, bio);
+	submit_bio(bio);
 }
 
 static void ppl_submit_iounit(struct ppl_io_unit *io)
@@ -445,7 +446,7 @@ static void ppl_submit_iounit(struct ppl_io_unit *io)
 	bio->bi_private = io;
 
 	if (!log->rdev || test_bit(Faulty, &log->rdev->flags)) {
-		ppl_log_endio(bio,0);
+		ppl_log_endio(bio);
 		return;
 	}
 
@@ -472,10 +473,11 @@ static void ppl_submit_iounit(struct ppl_io_unit *io)
 
 
 	bio->bi_end_io = ppl_log_endio;
-	bio->bi_rw = WRITE_FUA;
-	bio->bi_bdev = log->rdev->bdev;
-	bio->bi_sector = log->next_io_sector;
+	bio->bi_opf = REQ_OP_WRITE | REQ_FUA;
+	bio_set_dev(bio, log->rdev->bdev);
+	bio->bi_iter.bi_sector = log->next_io_sector;
 	bio_add_page(bio, io->header_page, PAGE_SIZE, 0);
+	bio->bi_write_hint = ppl_conf->write_hint;
 
 	pr_debug("%s: log->current_io_sector: %llu\n", __func__,
 	    (unsigned long long)log->next_io_sector);
@@ -483,7 +485,18 @@ static void ppl_submit_iounit(struct ppl_io_unit *io)
 	if (log->use_multippl)
 		log->next_io_sector += (PPL_HEADER_SIZE + io->pp_size) >> 9;
 
+	WARN_ON(log->disk_flush_bitmap != 0);
+
 	list_for_each_entry(sh, &io->stripe_list, log_list) {
+		for (i = 0; i < sh->disks; i++) {
+			struct r5dev *dev = &sh->dev[i];
+
+			if ((ppl_conf->child_logs[i].wb_cache_on) &&
+			    (test_bit(R5_Wantwrite, &dev->flags))) {
+				set_bit(i, &log->disk_flush_bitmap);
+			}
+		}
+
 		/* entries for full stripe writes have no partial parity */
 		if (test_bit(STRIPE_FULL_WRITE, &sh->state))
 			continue;
@@ -492,10 +505,11 @@ static void ppl_submit_iounit(struct ppl_io_unit *io)
 			struct bio *prev = bio;
 
 			bio = bio_alloc_bioset(GFP_NOIO, BIO_MAX_PAGES,
-					       ppl_conf->bs);
-			bio->bi_rw = prev->bi_rw;
-			bio->bi_bdev = prev->bi_bdev;
-			bio->bi_sector = bio_end_sector(prev);
+					       &ppl_conf->bs);
+			bio->bi_opf = prev->bi_opf;
+			bio->bi_write_hint = prev->bi_write_hint;
+			bio_copy_dev(bio, prev);
+			bio->bi_iter.bi_sector = bio_end_sector(prev);
 			bio_add_page(bio, sh->ppl_page, PAGE_SIZE, 0);
 
 			bio_chain(bio, prev);
@@ -548,6 +562,7 @@ static void ppl_io_unit_finished(struct ppl_io_unit *io)
 {
 	struct ppl_log *log = io->log;
 	struct ppl_conf *ppl_conf = log->ppl_conf;
+	struct r5conf *conf = ppl_conf->mddev->private;
 	unsigned long flags;
 
 	pr_debug("%s: seq: %llu\n", __func__, io->seq);
@@ -558,7 +573,7 @@ static void ppl_io_unit_finished(struct ppl_io_unit *io)
 	list_del(&io->log_sibling);
 	spin_unlock(&log->io_list_lock);
 
-	mempool_free(io, ppl_conf->io_pool);
+	mempool_free(io, &ppl_conf->io_pool);
 
 	spin_lock(&ppl_conf->no_mem_stripes_lock);
 	if (!list_empty(&ppl_conf->no_mem_stripes)) {
@@ -573,6 +588,122 @@ static void ppl_io_unit_finished(struct ppl_io_unit *io)
 	spin_unlock(&ppl_conf->no_mem_stripes_lock);
 
 	local_irq_restore(flags);
+
+	wake_up(&conf->wait_for_quiescent);
+}
+
+static void ppl_flush_endio(struct bio *bio)
+{
+	struct ppl_io_unit *io = bio->bi_private;
+	struct ppl_log *log = io->log;
+	struct ppl_conf *ppl_conf = log->ppl_conf;
+	struct r5conf *conf = ppl_conf->mddev->private;
+	char b[BDEVNAME_SIZE];
+
+	pr_debug("%s: dev: %s\n", __func__, bio_devname(bio, b));
+
+	if (bio->bi_status) {
+		struct md_rdev *rdev;
+
+		rcu_read_lock();
+		rdev = md_find_rdev_rcu(conf->mddev, bio_dev(bio));
+		if (rdev)
+			md_error(rdev->mddev, rdev);
+		rcu_read_unlock();
+	}
+
+	bio_put(bio);
+
+	if (atomic_dec_and_test(&io->pending_flushes)) {
+		ppl_io_unit_finished(io);
+		md_wakeup_thread(conf->mddev->thread);
+	}
+}
+
+static void ppl_do_flush(struct ppl_io_unit *io)
+{
+	struct ppl_log *log = io->log;
+	struct ppl_conf *ppl_conf = log->ppl_conf;
+	struct r5conf *conf = ppl_conf->mddev->private;
+	int raid_disks = conf->raid_disks;
+	int flushed_disks = 0;
+	int i;
+
+	atomic_set(&io->pending_flushes, raid_disks);
+
+	for_each_set_bit(i, &log->disk_flush_bitmap, raid_disks) {
+		struct md_rdev *rdev;
+		struct block_device *bdev = NULL;
+
+		rcu_read_lock();
+		rdev = rcu_dereference(conf->disks[i].rdev);
+		if (rdev && !test_bit(Faulty, &rdev->flags))
+			bdev = rdev->bdev;
+		rcu_read_unlock();
+
+		if (bdev) {
+			struct bio *bio;
+			char b[BDEVNAME_SIZE];
+
+			bio = bio_alloc_bioset(GFP_NOIO, 0, &ppl_conf->flush_bs);
+			bio_set_dev(bio, bdev);
+			bio->bi_private = io;
+			bio->bi_opf = REQ_OP_WRITE | REQ_PREFLUSH;
+			bio->bi_end_io = ppl_flush_endio;
+
+			pr_debug("%s: dev: %s\n", __func__,
+				 bio_devname(bio, b));
+
+			submit_bio(bio);
+			flushed_disks++;
+		}
+	}
+
+	log->disk_flush_bitmap = 0;
+
+	for (i = flushed_disks ; i < raid_disks; i++) {
+		if (atomic_dec_and_test(&io->pending_flushes))
+			ppl_io_unit_finished(io);
+	}
+}
+
+static inline bool ppl_no_io_unit_submitted(struct r5conf *conf,
+					    struct ppl_log *log)
+{
+	struct ppl_io_unit *io;
+
+	io = list_first_entry_or_null(&log->io_list, struct ppl_io_unit,
+				      log_sibling);
+
+	return !io || !io->submitted;
+}
+
+void ppl_quiesce(struct r5conf *conf, int quiesce)
+{
+	struct ppl_conf *ppl_conf = conf->log_private;
+	int i;
+
+	if (quiesce) {
+		for (i = 0; i < ppl_conf->count; i++) {
+			struct ppl_log *log = &ppl_conf->child_logs[i];
+
+			spin_lock_irq(&log->io_list_lock);
+			wait_event_lock_irq(conf->wait_for_quiescent,
+					    ppl_no_io_unit_submitted(conf, log),
+					    log->io_list_lock);
+			spin_unlock_irq(&log->io_list_lock);
+		}
+	}
+}
+
+int ppl_handle_flush_request(struct r5l_log *log, struct bio *bio)
+{
+	if (bio->bi_iter.bi_size == 0) {
+		bio_endio(bio);
+		return 0;
+	}
+	bio->bi_opf &= ~REQ_PREFLUSH;
+	return -EAGAIN;
 }
 
 void ppl_stripe_write_finished(struct stripe_head *sh)
@@ -582,8 +713,12 @@ void ppl_stripe_write_finished(struct stripe_head *sh)
 	io = sh->ppl_io;
 	sh->ppl_io = NULL;
 
-	if (io && atomic_dec_and_test(&io->pending_stripes))
-		ppl_io_unit_finished(io);
+	if (io && atomic_dec_and_test(&io->pending_stripes)) {
+		if (io->log->disk_flush_bitmap)
+			ppl_do_flush(io);
+		else
+			ppl_io_unit_finished(io);
+	}
 }
 
 static void ppl_xor(int size, struct page *page1, struct page *page2)
@@ -778,7 +913,7 @@ static int ppl_recover_entry(struct ppl_log *log, struct ppl_header_entry *e,
 				 __func__, indent, "", bdevname(rdev->bdev, b),
 				 (unsigned long long)sector);
 			if (!sync_page_io(rdev, sector, block_size, page2,
-					  READ, false)) {
+					REQ_OP_READ, 0, false)) {
 				md_error(mddev, rdev);
 				pr_debug("%s:%*s read failed!\n", __func__,
 					 indent, "");
@@ -800,7 +935,8 @@ static int ppl_recover_entry(struct ppl_log *log, struct ppl_header_entry *e,
 				 (unsigned long long)(ppl_sector + i));
 			if (!sync_page_io(log->rdev,
 					ppl_sector - log->rdev->data_offset + i,
-					block_size, page2, READ, false)) {
+					block_size, page2, REQ_OP_READ, 0,
+					false)) {
 				pr_debug("%s:%*s read failed!\n", __func__,
 					 indent, "");
 				md_error(mddev, log->rdev);
@@ -823,7 +959,7 @@ static int ppl_recover_entry(struct ppl_log *log, struct ppl_header_entry *e,
 			 (unsigned long long)parity_sector,
 			 bdevname(parity_rdev->bdev, b));
 		if (!sync_page_io(parity_rdev, parity_sector, block_size,
-				  page1, WRITE, false)) {
+				page1, REQ_OP_WRITE, 0, false)) {
 			pr_debug("%s:%*s parity write error!\n", __func__,
 				 indent, "");
 			md_error(mddev, parity_rdev);
@@ -875,7 +1011,7 @@ static int ppl_recover(struct ppl_log *log, struct ppl_header *pplhdr,
 			int s = pp_size > PAGE_SIZE ? PAGE_SIZE : pp_size;
 
 			if (!sync_page_io(rdev, sector - rdev->data_offset,
-					s, page, READ, false)) {
+					s, page, REQ_OP_READ, 0, false)) {
 				md_error(mddev, rdev);
 				ret = -EIO;
 				goto out;
@@ -932,13 +1068,14 @@ static int ppl_write_empty_header(struct ppl_log *log)
 	pplhdr = page_address(page);
 	/* zero out PPL space to avoid collision with old PPLs */
 	blkdev_issue_zeroout(rdev->bdev, rdev->ppl.sector,
-			    log->rdev->ppl.size, GFP_NOIO);
+			    log->rdev->ppl.size, GFP_NOIO, 0);
 	memset(pplhdr->reserved, 0xff, PPL_HDR_RESERVED);
 	pplhdr->signature = cpu_to_le32(log->ppl_conf->signature);
 	pplhdr->checksum = cpu_to_le32(~crc32c_le(~0, pplhdr, PAGE_SIZE));
 
 	if (!sync_page_io(rdev, rdev->ppl.sector - rdev->data_offset,
-			  PPL_HEADER_SIZE, page, WRITE_FUA, false)) {
+			  PPL_HEADER_SIZE, page, REQ_OP_WRITE | REQ_SYNC |
+			  REQ_FUA, 0, false)) {
 		md_error(rdev->mddev, rdev);
 		ret = -EIO;
 	}
@@ -975,8 +1112,8 @@ static int ppl_load_distributed(struct ppl_log *log)
 	while (pplhdr_offset < rdev->ppl.size - (PPL_HEADER_SIZE >> 9)) {
 		if (!sync_page_io(rdev,
 				  rdev->ppl.sector - rdev->data_offset +
-				  pplhdr_offset, PAGE_SIZE, page, READ,
-				  false)) {
+				  pplhdr_offset, PAGE_SIZE, page, REQ_OP_READ,
+				  0, false)) {
 			md_error(mddev, rdev);
 			ret = -EIO;
 			/* if not able to read - don't recover any PPL */
@@ -1112,9 +1249,9 @@ static void __ppl_exit_log(struct ppl_conf *ppl_conf)
 
 	kfree(ppl_conf->child_logs);
 
-	if (ppl_conf->bs)
-		bioset_free(ppl_conf->bs);
-	mempool_destroy(ppl_conf->io_pool);
+	bioset_exit(&ppl_conf->bs);
+	bioset_exit(&ppl_conf->flush_bs);
+	mempool_exit(&ppl_conf->io_pool);
 	kmem_cache_destroy(ppl_conf->io_kc);
 
 	kfree(ppl_conf);
@@ -1179,6 +1316,8 @@ static int ppl_validate_rdev(struct md_rdev *rdev)
 
 static void ppl_init_child_log(struct ppl_log *log, struct md_rdev *rdev)
 {
+	struct request_queue *q;
+
 	if ((rdev->ppl.size << 9) >= (PPL_SPACE_SIZE +
 				      PPL_HEADER_SIZE) * 2) {
 		log->use_multippl = true;
@@ -1191,6 +1330,10 @@ static void ppl_init_child_log(struct ppl_log *log, struct md_rdev *rdev)
 				   PPL_HEADER_SIZE;
 	}
 	log->next_io_sector = rdev->ppl.sector;
+
+	q = bdev_get_queue(rdev->bdev);
+	if (test_bit(QUEUE_FLAG_WC, &q->queue_flags))
+		log->wb_cache_on = true;
 }
 
 int ppl_init_log(struct r5conf *conf)
@@ -1198,8 +1341,8 @@ int ppl_init_log(struct r5conf *conf)
 	struct ppl_conf *ppl_conf;
 	struct mddev *mddev = conf->mddev;
 	int ret = 0;
+	int max_disks;
 	int i;
-	bool need_cache_flush = false;
 
 	pr_debug("md/raid:%s: enabling distributed Partial Parity Log\n",
 		 mdname(conf->mddev));
@@ -1225,6 +1368,14 @@ int ppl_init_log(struct r5conf *conf)
 		return -EINVAL;
 	}
 
+	max_disks = FIELD_SIZEOF(struct ppl_log, disk_flush_bitmap) *
+		BITS_PER_BYTE;
+	if (conf->raid_disks > max_disks) {
+		pr_warn("md/raid:%s PPL doesn't support over %d disks in the array\n",
+			mdname(mddev), max_disks);
+		return -EINVAL;
+	}
+
 	ppl_conf = kzalloc(sizeof(struct ppl_conf), GFP_KERNEL);
 	if (!ppl_conf)
 		return -ENOMEM;
@@ -1237,18 +1388,18 @@ int ppl_init_log(struct r5conf *conf)
 		goto err;
 	}
 
-	ppl_conf->io_pool = mempool_create(conf->raid_disks, ppl_io_pool_alloc,
-					   ppl_io_pool_free, ppl_conf->io_kc);
-	if (!ppl_conf->io_pool) {
-		ret = -ENOMEM;
+	ret = mempool_init(&ppl_conf->io_pool, conf->raid_disks, ppl_io_pool_alloc,
+			   ppl_io_pool_free, ppl_conf->io_kc);
+	if (ret)
 		goto err;
-	}
 
-	ppl_conf->bs = bioset_create(conf->raid_disks, 0);
-	if (!ppl_conf->bs) {
-		ret = -ENOMEM;
+	ret = bioset_init(&ppl_conf->bs, conf->raid_disks, 0, BIOSET_NEED_BVECS);
+	if (ret)
 		goto err;
-	}
+
+	ret = bioset_init(&ppl_conf->flush_bs, conf->raid_disks, 0, 0);
+	if (ret)
+		goto err;
 
 	ppl_conf->count = conf->raid_disks;
 	ppl_conf->child_logs = kcalloc(ppl_conf->count, sizeof(struct ppl_log),
@@ -1261,6 +1412,7 @@ int ppl_init_log(struct r5conf *conf)
 	atomic64_set(&ppl_conf->seq, 0);
 	INIT_LIST_HEAD(&ppl_conf->no_mem_stripes);
 	spin_lock_init(&ppl_conf->no_mem_stripes_lock);
+	ppl_conf->write_hint = RWF_WRITE_LIFE_NOT_SET;
 
 	if (!mddev->external) {
 		ppl_conf->signature = ~crc32c_le(~0, mddev->uuid, sizeof(mddev->uuid));
@@ -1281,22 +1433,13 @@ int ppl_init_log(struct r5conf *conf)
 		log->rdev = rdev;
 
 		if (rdev) {
-			struct request_queue *q;
-
 			ret = ppl_validate_rdev(rdev);
 			if (ret)
 				goto err;
 
-			q = bdev_get_queue(rdev->bdev);
-			if (q->flush_flags)
-				need_cache_flush = true;
 			ppl_init_child_log(log, rdev);
 		}
 	}
-
-	if (need_cache_flush)
-		pr_warn("md/raid:%s: Volatile write-back cache should be disabled on all member drives when using PPL!\n",
-			mdname(mddev));
 
 	/* load and possibly recover the logs from the member disks */
 	ret = ppl_load(ppl_conf);
@@ -1311,7 +1454,7 @@ int ppl_init_log(struct r5conf *conf)
 		 * without any issues, set the array as clean.
 		 */
 		mddev->recovery_cp = MaxSector;
-		set_bit(MD_SB_CHANGE_CLEAN, &mddev->flags);
+		set_bit(MD_SB_CHANGE_CLEAN, &mddev->sb_flags);
 	} else if (mddev->pers && ppl_conf->mismatch_count > 0) {
 		/* no mismatch allowed when enabling PPL for a running array */
 		ret = -EINVAL;
@@ -1364,3 +1507,60 @@ int ppl_modify_log(struct r5conf *conf, struct md_rdev *rdev, bool add)
 
 	return ret;
 }
+
+static ssize_t
+ppl_write_hint_show(struct mddev *mddev, char *buf)
+{
+	size_t ret = 0;
+	struct r5conf *conf;
+	struct ppl_conf *ppl_conf = NULL;
+
+	spin_lock(&mddev->lock);
+	conf = mddev->private;
+	if (conf && raid5_has_ppl(conf))
+		ppl_conf = conf->log_private;
+	ret = sprintf(buf, "%d\n", ppl_conf ? ppl_conf->write_hint : 0);
+	spin_unlock(&mddev->lock);
+
+	return ret;
+}
+
+static ssize_t
+ppl_write_hint_store(struct mddev *mddev, const char *page, size_t len)
+{
+	struct r5conf *conf;
+	struct ppl_conf *ppl_conf;
+	int err = 0;
+	unsigned short new;
+
+	if (len >= PAGE_SIZE)
+		return -EINVAL;
+	if (kstrtou16(page, 10, &new))
+		return -EINVAL;
+
+	err = mddev_lock(mddev);
+	if (err)
+		return err;
+
+	conf = mddev->private;
+	if (!conf) {
+		err = -ENODEV;
+	} else if (raid5_has_ppl(conf)) {
+		ppl_conf = conf->log_private;
+		if (!ppl_conf)
+			err = -EINVAL;
+		else
+			ppl_conf->write_hint = new;
+	} else {
+		err = -EINVAL;
+	}
+
+	mddev_unlock(mddev);
+
+	return err ?: len;
+}
+
+struct md_sysfs_entry
+ppl_write_hint = __ATTR(ppl_write_hint, S_IRUGO | S_IWUSR,
+			ppl_write_hint_show,
+			ppl_write_hint_store);

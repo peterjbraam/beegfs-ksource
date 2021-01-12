@@ -1,9 +1,11 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _PERF_PERF_H
 #define _PERF_PERF_H
 
 #include <time.h>
 #include <stdbool.h>
 #include <linux/types.h>
+#include <linux/stddef.h>
 #include <linux/perf_event.h>
 
 extern bool test_attr__enabled;
@@ -55,6 +57,7 @@ struct record_opts {
 	bool	     running_time;
 	bool	     full_auxtrace;
 	bool	     auxtrace_snapshot_mode;
+	bool	     record_namespaces;
 	bool	     record_switch_events;
 	bool	     all_kernel;
 	bool	     all_user;
@@ -79,7 +82,7 @@ struct record_opts {
 	bool         use_clockid;
 	clockid_t    clockid;
 	u64          clockid_res_ns;
-	unsigned int proc_map_timeout;
+	int	     nr_cblocks;
 };
 
 struct option;

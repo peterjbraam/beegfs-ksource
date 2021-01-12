@@ -96,7 +96,7 @@ kvm_start_entry:
 
 kvm_start_lightweight:
 	/* Copy registers into shadow vcpu so we can access them in real mode */
-	GET_SHADOW_VCPU(r3)
+	mr	r3, r4
 	bl	FUNC(kvmppc_copy_to_svcpu)
 	nop
 	REST_GPR(4, r1)
@@ -165,9 +165,7 @@ after_sprg3_load:
 	stw	r12, VCPU_TRAP(r3)
 
 	/* Transfer reg values from shadow vcpu back to vcpu struct */
-	/* On 64-bit, interrupts are still off at this point */
 
-	GET_SHADOW_VCPU(r4)
 	bl	FUNC(kvmppc_copy_from_svcpu)
 	nop
 
@@ -176,9 +174,8 @@ after_sprg3_load:
 	 * Reload kernel SPRG3 value.
 	 * No need to save guest value as usermode can't modify SPRG3.
 	 */
-	ld	r3, PACA_SPRG3(r13)
-	mtspr	SPRN_SPRG3, r3
-
+	ld	r3, PACA_SPRG_VDSO(r13)
+	mtspr	SPRN_SPRG_VDSO_WRITE, r3
 #endif /* CONFIG_PPC_BOOK3S_64 */
 
 	/* R7 = vcpu */

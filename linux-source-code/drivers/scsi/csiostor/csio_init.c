@@ -113,12 +113,9 @@ static const struct file_operations csio_mem_debugfs_fops = {
 void csio_add_debugfs_mem(struct csio_hw *hw, const char *name,
 				 unsigned int idx, unsigned int size_mb)
 {
-	struct dentry *de;
-
-	de = debugfs_create_file(name, S_IRUSR, hw->debugfs_root,
-				 (void *)hw + idx, &csio_mem_debugfs_fops);
-	if (de && de->d_inode)
-		de->d_inode->i_size = size_mb << 20;
+	debugfs_create_file_size(name, S_IRUSR, hw->debugfs_root,
+				 (void *)hw + idx, &csio_mem_debugfs_fops,
+				 size_mb << 20);
 }
 
 static int csio_setup_debugfs(struct csio_hw *hw)
@@ -483,9 +480,10 @@ csio_resource_alloc(struct csio_hw *hw)
 	if (!hw->rnode_mempool)
 		goto err_free_mb_mempool;
 
-	hw->scsi_pci_pool = pci_pool_create("csio_scsi_pci_pool", hw->pdev,
-					    CSIO_SCSI_RSP_LEN, 8, 0);
-	if (!hw->scsi_pci_pool)
+	hw->scsi_dma_pool = dma_pool_create("csio_scsi_dma_pool",
+					    &hw->pdev->dev, CSIO_SCSI_RSP_LEN,
+					    8, 0);
+	if (!hw->scsi_dma_pool)
 		goto err_free_rn_pool;
 
 	return 0;
@@ -503,8 +501,8 @@ err:
 static void
 csio_resource_free(struct csio_hw *hw)
 {
-	pci_pool_destroy(hw->scsi_pci_pool);
-	hw->scsi_pci_pool = NULL;
+	dma_pool_destroy(hw->scsi_dma_pool);
+	hw->scsi_dma_pool = NULL;
 	mempool_destroy(hw->rnode_mempool);
 	hw->rnode_mempool = NULL;
 	mempool_destroy(hw->mb_mempool);
@@ -1017,7 +1015,6 @@ err_lnode_exit:
 	csio_hw_stop(hw);
 	spin_unlock_irq(&hw->lock);
 	csio_lnodes_unblock_request(hw);
-	pci_set_drvdata(hw->pdev, NULL);
 	csio_lnodes_exit(hw, 0);
 	csio_hw_free(hw);
 err_pci_exit:
@@ -1051,7 +1048,6 @@ static void csio_remove_one(struct pci_dev *pdev)
 
 	csio_lnodes_exit(hw, 0);
 	csio_hw_free(hw);
-	pci_set_drvdata(pdev, NULL);
 	csio_pci_exit(pdev, &bars);
 }
 
@@ -1101,7 +1097,6 @@ csio_pci_slot_reset(struct pci_dev *pdev)
 	pci_set_master(pdev);
 	pci_restore_state(pdev);
 	pci_save_state(pdev);
-	pci_cleanup_aer_uncorrect_error_status(pdev);
 
 	/* Bring HW s/m to ready state.
 	 * but don't resume IOs.

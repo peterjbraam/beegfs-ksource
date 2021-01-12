@@ -158,8 +158,13 @@ int mlx5_core_destroy_cq(struct mlx5_core_dev *dev, struct mlx5_core_cq *cq)
 	u32 in[MLX5_ST_SZ_DW(destroy_cq_in)] = {0};
 	int err;
 
-	mlx5_eq_del_cq(mlx5_get_async_eq(dev), cq);
-	mlx5_eq_del_cq(&cq->eq->core, cq);
+	err = mlx5_eq_del_cq(mlx5_get_async_eq(dev), cq);
+	if (err)
+		return err;
+
+	err = mlx5_eq_del_cq(&cq->eq->core, cq);
+	if (err)
+		return err;
 
 	MLX5_SET(destroy_cq_in, in, opcode, MLX5_CMD_OP_DESTROY_CQ);
 	MLX5_SET(destroy_cq_in, in, cqn, cq->cqn);

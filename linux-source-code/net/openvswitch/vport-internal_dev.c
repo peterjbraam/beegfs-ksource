@@ -16,7 +16,6 @@
  * 02110-1301, USA
  */
 
-#include <linux/hardirq.h>
 #include <linux/if_vlan.h>
 #include <linux/kernel.h>
 #include <linux/netdevice.h>
@@ -44,7 +43,8 @@ static struct internal_dev *internal_dev_priv(struct net_device *netdev)
 }
 
 /* Called with rcu_read_lock_bh. */
-static int internal_dev_xmit(struct sk_buff *skb, struct net_device *netdev)
+static netdev_tx_t
+internal_dev_xmit(struct sk_buff *skb, struct net_device *netdev)
 {
 	int len, err;
 
@@ -63,7 +63,7 @@ static int internal_dev_xmit(struct sk_buff *skb, struct net_device *netdev)
 	} else {
 		netdev->stats.tx_errors++;
 	}
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 static int internal_dev_open(struct net_device *netdev)
@@ -132,7 +132,6 @@ static const struct net_device_ops internal_dev_netdev_ops = {
 	.ndo_start_xmit = internal_dev_xmit,
 	.ndo_set_mac_address = eth_mac_addr,
 	.ndo_get_stats64 = internal_get_stats,
-	.ndo_size = sizeof(struct net_device_ops),
 };
 
 static struct rtnl_link_ops internal_dev_link_ops __read_mostly = {
@@ -143,15 +142,15 @@ static void do_setup(struct net_device *netdev)
 {
 	ether_setup(netdev);
 
-	netdev->extended->max_mtu = ETH_MAX_MTU;
+	netdev->max_mtu = ETH_MAX_MTU;
 
 	netdev->netdev_ops = &internal_dev_netdev_ops;
 
 	netdev->priv_flags &= ~IFF_TX_SKB_SHARING;
 	netdev->priv_flags |= IFF_LIVE_ADDR_CHANGE | IFF_OPENVSWITCH |
 			      IFF_NO_QUEUE;
-	netdev->extended->needs_free_netdev = true;
-	netdev->extended->priv_destructor = internal_dev_destructor;
+	netdev->needs_free_netdev = true;
+	netdev->priv_destructor = internal_dev_destructor;
 	netdev->ethtool_ops = &internal_dev_ethtool_ops;
 	netdev->rtnl_link_ops = &internal_dev_link_ops;
 
@@ -180,7 +179,7 @@ static struct vport *internal_dev_create(const struct vport_parms *parms)
 	}
 
 	vport->dev = alloc_netdev(sizeof(struct internal_dev),
-				  parms->name, do_setup);
+				  parms->name, NET_NAME_USER, do_setup);
 	if (!vport->dev) {
 		err = -ENOMEM;
 		goto error_free_vport;

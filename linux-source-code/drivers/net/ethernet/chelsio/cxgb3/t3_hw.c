@@ -681,18 +681,18 @@ int t3_seeprom_wp(struct adapter *adapter, int enable)
 	return t3_seeprom_write(adapter, EEPROM_STAT_ADDR, enable ? 0xc : 0);
 }
 
-static int vpdstrtouint(char *s, int len, unsigned int base, unsigned int *val)
+static int vpdstrtouint(char *s, u8 len, unsigned int base, unsigned int *val)
 {
-	char tok[len + 1];
+	char tok[256];
 
 	memcpy(tok, s, len);
 	tok[len] = 0;
 	return kstrtouint(strim(tok), base, val);
 }
 
-static int vpdstrtou16(char *s, int len, unsigned int base, u16 *val)
+static int vpdstrtou16(char *s, u8 len, unsigned int base, u16 *val)
 {
-	char tok[len + 1];
+	char tok[256];
 
 	memcpy(tok, s, len);
 	tok[len] = 0;
@@ -761,9 +761,9 @@ static int get_vpd_params(struct adapter *adapter, struct vpd_params *p)
 			return ret;
 	}
 
-	for (i = 0; i < 6; i++)
-		p->eth_base[i] = hex_to_bin(vpd.na_data[2 * i]) * 16 +
-				 hex_to_bin(vpd.na_data[2 * i + 1]);
+	ret = hex2bin(p->eth_base, vpd.na_data, 6);
+	if (ret < 0)
+		return -EINVAL;
 	return 0;
 }
 
@@ -874,7 +874,7 @@ static int flash_wait_op(struct adapter *adapter, int attempts, int delay)
  *	Read the specified number of 32-bit words from the serial flash.
  *	If @byte_oriented is set the read data is stored as a byte array
  *	(i.e., big-endian), otherwise as 32-bit words in the platform's
- *	natural endianess.
+ *	natural endianness.
  */
 static int t3_read_flash(struct adapter *adapter, unsigned int addr,
 			 unsigned int nwords, u32 *data, int byte_oriented)

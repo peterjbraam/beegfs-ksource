@@ -20,7 +20,6 @@
 #include <linux/ndctl.h>
 #include <linux/types.h>
 #include <linux/nd.h>
-#include <linux/idr.h>
 #include "label.h"
 
 enum {
@@ -30,7 +29,6 @@ enum {
 	 * BTT instance
 	 */
 	ND_MAX_LANES = 256,
-	SECTOR_SHIFT = 9,
 	INT_LBASIZE_ALIGNMENT = 64,
 	NVDIMM_IO_ATOMIC = 1,
 };
@@ -115,12 +113,8 @@ struct nd_percpu_lane {
 	spinlock_t lock;
 };
 
-enum nd_label_flags {
-	ND_LABEL_REAP,
-};
 struct nd_label_ent {
 	struct list_head list;
-	unsigned long flags;
 	struct nd_namespace_label *label;
 };
 
@@ -408,22 +402,21 @@ int nd_region_activate(struct nd_region *nd_region);
 void __nd_iostat_start(struct bio *bio, unsigned long *start);
 static inline bool nd_iostat_start(struct bio *bio, unsigned long *start)
 {
-	struct gendisk *disk = bio->bi_bdev->bd_disk;
+	struct gendisk *disk = bio->bi_disk;
 
 	if (!blk_queue_io_stat(disk->queue))
 		return false;
 
 	*start = jiffies;
-	generic_start_io_acct(disk->queue, bio_data_dir(bio),
-			      bio_sectors(bio), &disk->part0);
+	generic_start_io_acct(disk->queue, bio_op(bio), bio_sectors(bio),
+			      &disk->part0);
 	return true;
 }
 static inline void nd_iostat_end(struct bio *bio, unsigned long start)
 {
-	struct gendisk *disk = bio->bi_bdev->bd_disk;
+	struct gendisk *disk = bio->bi_disk;
 
-	generic_end_io_acct(disk->queue, bio_data_dir(bio), &disk->part0,
-				start);
+	generic_end_io_acct(disk->queue, bio_op(bio), &disk->part0, start);
 }
 static inline bool is_bad_pmem(struct badblocks *bb, sector_t sector,
 		unsigned int len)

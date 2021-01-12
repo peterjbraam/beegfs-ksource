@@ -210,29 +210,44 @@ static const struct variable_validate variable_validate[] = {
 	{ NULL_GUID, "", NULL },
 };
 
+/*
+ * Check if @var_name matches the pattern given in @match_name.
+ *
+ * @var_name: an array of @len non-NUL characters.
+ * @match_name: a NUL-terminated pattern string, optionally ending in "*". A
+ *              final "*" character matches any trailing characters @var_name,
+ *              including the case when there are none left in @var_name.
+ * @match: on output, the number of non-wildcard characters in @match_name
+ *         that @var_name matches, regardless of the return value.
+ * @return: whether @var_name fully matches @match_name.
+ */
 static bool
 variable_matches(const char *var_name, size_t len, const char *match_name,
 		 int *match)
 {
 	for (*match = 0; ; (*match)++) {
 		char c = match_name[*match];
-		char u = var_name[*match];
 
-		/* Wildcard in the matching name means we've matched */
-		if (c == '*')
+		switch (c) {
+		case '*':
+			/* Wildcard in @match_name means we've matched. */
 			return true;
 
-		/* Case sensitive match */
-		if (!c && *match == len)
-			return true;
+		case '\0':
+			/* @match_name has ended. Has @var_name too? */
+			return (*match == len);
 
-		if (c != u)
+		default:
+			/*
+			 * We've reached a non-wildcard char in @match_name.
+			 * Continue only if there's an identical character in
+			 * @var_name.
+			 */
+			if (*match < len && c == var_name[*match])
+				continue;
 			return false;
-
-		if (!c)
-			return true;
+		}
 	}
-	return true;
 }
 
 bool
@@ -303,7 +318,12 @@ EXPORT_SYMBOL_GPL(efivar_variable_is_removable);
 static efi_status_t
 check_var_size(u32 attributes, unsigned long size)
 {
-	const struct efivar_operations *fops = __efivars->ops;
+	const struct efivar_operations *fops;
+
+	if (!__efivars)
+		return EFI_UNSUPPORTED;
+
+	fops = __efivars->ops;
 
 	if (!fops->query_variable_store)
 		return EFI_UNSUPPORTED;
@@ -314,45 +334,17 @@ check_var_size(u32 attributes, unsigned long size)
 static efi_status_t
 check_var_size_nonblocking(u32 attributes, unsigned long size)
 {
-	const struct efivar_operations *fops = __efivars->ops;
+	const struct efivar_operations *fops;
+
+	if (!__efivars)
+		return EFI_UNSUPPORTED;
+
+	fops = __efivars->ops;
 
 	if (!fops->query_variable_store)
 		return EFI_UNSUPPORTED;
 
 	return fops->query_variable_store(attributes, size, true);
-}
-
-static int efi_status_to_err(efi_status_t status)
-{
-	int err;
-
-	switch (status) {
-	case EFI_SUCCESS:
-		err = 0;
-		break;
-	case EFI_INVALID_PARAMETER:
-		err = -EINVAL;
-		break;
-	case EFI_OUT_OF_RESOURCES:
-		err = -ENOSPC;
-		break;
-	case EFI_DEVICE_ERROR:
-		err = -EIO;
-		break;
-	case EFI_WRITE_PROTECTED:
-		err = -EROFS;
-		break;
-	case EFI_SECURITY_VIOLATION:
-		err = -EACCES;
-		break;
-	case EFI_NOT_FOUND:
-		err = -ENOENT;
-		break;
-	default:
-		err = -EINVAL;
-	}
-
-	return err;
 }
 
 static bool variable_is_present(efi_char16_t *variable_name, efi_guid_t *vendor,
@@ -406,11 +398,11 @@ static unsigned long var_name_strnsize(efi_char16_t *variable_name,
  * Print a warning when duplicate EFI variables are encountered and
  * disable the sysfs workqueue since the firmware is buggy.
  */
-static void dup_variable_bug(efi_char16_t *s16, efi_guid_t *vendor_guid,
+static void dup_variable_bug(efi_char16_t *str16, efi_guid_t *vendor_guid,
 			     unsigned long len16)
 {
 	size_t i, len8 = len16 / sizeof(efi_char16_t);
-	char *s8;
+	char *str8;
 
 	/*
 	 * Disable the workqueue since the algorithm it uses for
@@ -419,16 +411,16 @@ static void dup_variable_bug(efi_char16_t *s16, efi_guid_t *vendor_guid,
 	 */
 	efivar_wq_enabled = false;
 
-	s8 = kzalloc(len8, GFP_KERNEL);
-	if (!s8)
+	str8 = kzalloc(len8, GFP_KERNEL);
+	if (!str8)
 		return;
 
 	for (i = 0; i < len8; i++)
-		s8[i] = s16[i];
+		str8[i] = str16[i];
 
 	printk(KERN_WARNING "efivars: duplicate variable: %s-%pUl\n",
-	       s8, vendor_guid);
-	kfree(s8);
+	       str8, vendor_guid);
+	kfree(str8);
 }
 
 /**
@@ -447,12 +439,17 @@ static void dup_variable_bug(efi_char16_t *s16, efi_guid_t *vendor_guid,
 int efivar_init(int (*func)(efi_char16_t *, efi_guid_t, unsigned long, void *),
 		void *data, bool duplicates, struct list_head *head)
 {
-	const struct efivar_operations *ops = __efivars->ops;
+	const struct efivar_operations *ops;
 	unsigned long variable_name_size = 1024;
 	efi_char16_t *variable_name;
 	efi_status_t status;
 	efi_guid_t vendor_guid;
 	int err = 0;
+
+	if (!__efivars)
+		return -EFAULT;
+
+	ops = __efivars->ops;
 
 	variable_name = kzalloc(variable_name_size, GFP_KERNEL);
 	if (!variable_name) {
@@ -601,12 +598,14 @@ static void efivar_entry_list_del_unlock(struct efivar_entry *entry)
  */
 int __efivar_entry_delete(struct efivar_entry *entry)
 {
-	const struct efivar_operations *ops = __efivars->ops;
 	efi_status_t status;
 
-	status = ops->set_variable(entry->var.VariableName,
-				   &entry->var.VendorGuid,
-				   0, 0, NULL);
+	if (!__efivars)
+		return -EINVAL;
+
+	status = __efivars->ops->set_variable(entry->var.VariableName,
+					      &entry->var.VendorGuid,
+					      0, 0, NULL);
 
 	return efi_status_to_err(status);
 }
@@ -625,12 +624,17 @@ EXPORT_SYMBOL_GPL(__efivar_entry_delete);
  */
 int efivar_entry_delete(struct efivar_entry *entry)
 {
-	const struct efivar_operations *ops = __efivars->ops;
+	const struct efivar_operations *ops;
 	efi_status_t status;
 
 	if (down_interruptible(&efivars_lock))
 		return -EINTR;
 
+	if (!__efivars) {
+		up(&efivars_lock);
+		return -EINVAL;
+	}
+	ops = __efivars->ops;
 	status = ops->set_variable(entry->var.VariableName,
 				   &entry->var.VendorGuid,
 				   0, 0, NULL);
@@ -668,13 +672,19 @@ EXPORT_SYMBOL_GPL(efivar_entry_delete);
 int efivar_entry_set(struct efivar_entry *entry, u32 attributes,
 		     unsigned long size, void *data, struct list_head *head)
 {
-	const struct efivar_operations *ops = __efivars->ops;
+	const struct efivar_operations *ops;
 	efi_status_t status;
 	efi_char16_t *name = entry->var.VariableName;
 	efi_guid_t vendor = entry->var.VendorGuid;
 
 	if (down_interruptible(&efivars_lock))
 		return -EINTR;
+
+	if (!__efivars) {
+		up(&efivars_lock);
+		return -EINVAL;
+	}
+	ops = __efivars->ops;
 	if (head && efivar_entry_find(name, vendor, head, false)) {
 		up(&efivars_lock);
 		return -EEXIST;
@@ -705,11 +715,16 @@ static int
 efivar_entry_set_nonblocking(efi_char16_t *name, efi_guid_t vendor,
 			     u32 attributes, unsigned long size, void *data)
 {
-	const struct efivar_operations *ops = __efivars->ops;
+	const struct efivar_operations *ops;
 	efi_status_t status;
 
 	if (down_trylock(&efivars_lock))
 		return -EBUSY;
+
+	if (!__efivars) {
+		up(&efivars_lock);
+		return -EINVAL;
+	}
 
 	status = check_var_size_nonblocking(attributes,
 					    size + ucs2_strsize(name, 1024));
@@ -718,6 +733,7 @@ efivar_entry_set_nonblocking(efi_char16_t *name, efi_guid_t vendor,
 		return -ENOSPC;
 	}
 
+	ops = __efivars->ops;
 	status = ops->set_variable_nonblocking(name, &vendor, attributes,
 					       size, data);
 
@@ -745,9 +761,13 @@ efivar_entry_set_nonblocking(efi_char16_t *name, efi_guid_t vendor,
 int efivar_entry_set_safe(efi_char16_t *name, efi_guid_t vendor, u32 attributes,
 			  bool block, unsigned long size, void *data)
 {
-	const struct efivar_operations *ops = __efivars->ops;
+	const struct efivar_operations *ops;
 	efi_status_t status;
 
+	if (!__efivars)
+		return -EINVAL;
+
+	ops = __efivars->ops;
 	if (!ops->query_variable_store)
 		return -ENOSYS;
 
@@ -847,13 +867,18 @@ EXPORT_SYMBOL_GPL(efivar_entry_find);
  */
 int efivar_entry_size(struct efivar_entry *entry, unsigned long *size)
 {
-	const struct efivar_operations *ops = __efivars->ops;
+	const struct efivar_operations *ops;
 	efi_status_t status;
 
 	*size = 0;
 
 	if (down_interruptible(&efivars_lock))
 		return -EINTR;
+	if (!__efivars) {
+		up(&efivars_lock);
+		return -EINVAL;
+	}
+	ops = __efivars->ops;
 	status = ops->get_variable(entry->var.VariableName,
 				   &entry->var.VendorGuid, NULL, size, NULL);
 	up(&efivars_lock);
@@ -879,12 +904,14 @@ EXPORT_SYMBOL_GPL(efivar_entry_size);
 int __efivar_entry_get(struct efivar_entry *entry, u32 *attributes,
 		       unsigned long *size, void *data)
 {
-	const struct efivar_operations *ops = __efivars->ops;
 	efi_status_t status;
 
-	status = ops->get_variable(entry->var.VariableName,
-				   &entry->var.VendorGuid,
-				   attributes, size, data);
+	if (!__efivars)
+		return -EINVAL;
+
+	status = __efivars->ops->get_variable(entry->var.VariableName,
+					      &entry->var.VendorGuid,
+					      attributes, size, data);
 
 	return efi_status_to_err(status);
 }
@@ -900,14 +927,19 @@ EXPORT_SYMBOL_GPL(__efivar_entry_get);
 int efivar_entry_get(struct efivar_entry *entry, u32 *attributes,
 		     unsigned long *size, void *data)
 {
-	const struct efivar_operations *ops = __efivars->ops;
 	efi_status_t status;
 
 	if (down_interruptible(&efivars_lock))
 		return -EINTR;
-	status = ops->get_variable(entry->var.VariableName,
-				   &entry->var.VendorGuid,
-				   attributes, size, data);
+
+	if (!__efivars) {
+		up(&efivars_lock);
+		return -EINVAL;
+	}
+
+	status = __efivars->ops->get_variable(entry->var.VariableName,
+					      &entry->var.VendorGuid,
+					      attributes, size, data);
 	up(&efivars_lock);
 
 	return efi_status_to_err(status);
@@ -939,7 +971,7 @@ EXPORT_SYMBOL_GPL(efivar_entry_get);
 int efivar_entry_set_get_size(struct efivar_entry *entry, u32 attributes,
 			      unsigned long *size, void *data, bool *set)
 {
-	const struct efivar_operations *ops = __efivars->ops;
+	const struct efivar_operations *ops;
 	efi_char16_t *name = entry->var.VariableName;
 	efi_guid_t *vendor = &entry->var.VendorGuid;
 	efi_status_t status;
@@ -958,6 +990,11 @@ int efivar_entry_set_get_size(struct efivar_entry *entry, u32 attributes,
 	if (down_interruptible(&efivars_lock))
 		return -EINTR;
 
+	if (!__efivars) {
+		err = -EINVAL;
+		goto out;
+	}
+
 	/*
 	 * Ensure that the available space hasn't shrunk below the safe level
 	 */
@@ -973,6 +1010,8 @@ int efivar_entry_set_get_size(struct efivar_entry *entry, u32 attributes,
 			goto out;
 		}
 	}
+
+	ops = __efivars->ops;
 
 	status = ops->set_variable(name, vendor, attributes, *size, data);
 	if (status != EFI_SUCCESS) {

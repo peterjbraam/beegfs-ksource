@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /* ld script to make s390 Linux kernel
  * Written by Martin Schwidefsky (schwidefsky@de.ibm.com)
  */
@@ -11,19 +12,16 @@
  */
 #define BSS_FIRST_SECTIONS *(.bss..swapper_pg_dir)
 
-#include <asm-generic/vmlinux.lds.h>
+/* Handle ro_after_init data on our own. */
+#define RO_AFTER_INIT_DATA
 
-#ifndef CONFIG_64BIT
-OUTPUT_FORMAT("elf32-s390", "elf32-s390", "elf32-s390")
-OUTPUT_ARCH(s390:31-bit)
-ENTRY(startup)
-jiffies = jiffies_64 + 4;
-#else
+#include <asm-generic/vmlinux.lds.h>
+#include <asm/vmlinux.lds.h>
+
 OUTPUT_FORMAT("elf64-s390", "elf64-s390", "elf64-s390")
 OUTPUT_ARCH(s390:64-bit)
-ENTRY(startup)
+ENTRY(startup_continue)
 jiffies = jiffies_64;
-#endif
 
 PHDRS {
 	text PT_LOAD FLAGS(5);	/* R_E */
@@ -33,22 +31,20 @@ PHDRS {
 
 SECTIONS
 {
-	. = 0x00000000;
+	. = 0x100000;
+	_stext = .;		/* Start of text section */
 	.text : {
 		/* Text and read-only data */
+		_text = .;
 		HEAD_TEXT
-		/*
-		 * E.g. perf doesn't like symbols starting at address zero,
-		 * therefore skip the initial PSW and channel program located
-		 * at address zero and let _text start at 0x200.
-		 */
-	_text = 0x200;
 		TEXT_TEXT
 		SCHED_TEXT
 		CPUIDLE_TEXT
 		LOCK_TEXT
 		KPROBES_TEXT
 		IRQENTRY_TEXT
+		SOFTIRQENTRY_TEXT
+		*(.text.*_indirect_*)
 		*(.fixup)
 		*(.gnu.warning)
 	} :text = 0x0700
@@ -62,17 +58,20 @@ SECTIONS
 
 	RO_DATA_SECTION(PAGE_SIZE)
 
-#ifdef CONFIG_SHARED_KERNEL
-	. = ALIGN(0x100000);	/* VM shared segments are 1MB aligned */
-#endif
-
 	. = ALIGN(PAGE_SIZE);
-	_eshared = .;		/* End of shareable data */
 	_sdata = .;		/* Start of data section */
 
-	EXCEPTION_TABLE(16) :data
+	. = ALIGN(PAGE_SIZE);
+	__start_ro_after_init = .;
+	.data..ro_after_init : {
+		 *(.data..ro_after_init)
+	}
+	EXCEPTION_TABLE(16)
+	. = ALIGN(PAGE_SIZE);
+	__end_ro_after_init = .;
 
 	RW_DATA_SECTION(0x100, PAGE_SIZE, THREAD_SIZE)
+	BOOT_DATA_PRESERVED
 
 	_edata = .;		/* End of data section */
 
@@ -82,10 +81,10 @@ SECTIONS
 
 	. = ALIGN(PAGE_SIZE);
 	.init.text : AT(ADDR(.init.text) - LOAD_OFFSET) {
-		VMLINUX_SYMBOL(_sinittext) = . ;
+		_sinittext = .;
 		INIT_TEXT
 		. = ALIGN(PAGE_SIZE);
-		VMLINUX_SYMBOL(_einittext) = . ;
+		_einittext = .;
 	}
 
 	/*
@@ -137,6 +136,8 @@ SECTIONS
 		__nospec_return_end = . ;
 	}
 
+	BOOT_DATA
+
 	/* early.c uses stsi, which requires page aligned data. */
 	. = ALIGN(PAGE_SIZE);
 	INIT_DATA_SECTION(0x100)
@@ -149,10 +150,29 @@ SECTIONS
 
 	_end = . ;
 
+	/*
+	 * uncompressed image info used by the decompressor
+	 * it should match struct vmlinux_info
+	 */
+	.vmlinux.info 0 (INFO) : {
+		QUAD(_stext)					/* default_lma */
+		QUAD(startup_continue)				/* entry */
+		QUAD(__bss_start - _stext)			/* image_size */
+		QUAD(__bss_stop - __bss_start)			/* bss_size */
+		QUAD(__boot_data_start)				/* bootdata_off */
+		QUAD(__boot_data_end - __boot_data_start)	/* bootdata_size */
+		QUAD(__boot_data_preserved_start)		/* bootdata_preserved_off */
+		QUAD(__boot_data_preserved_end -
+		     __boot_data_preserved_start)		/* bootdata_preserved_size */
+	} :NONE
+
 	/* Debugging sections.	*/
 	STABS_DEBUG
 	DWARF_DEBUG
 
 	/* Sections to be discarded */
 	DISCARDS
+	/DISCARD/ : {
+		*(.eh_frame)
+	}
 }

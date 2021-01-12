@@ -102,11 +102,15 @@ static void qed_db_recovery_dp_entry(struct qed_hwfn *p_hwfn,
 
 /* Doorbell address sanity (address within doorbell bar range) */
 static bool qed_db_rec_sanity(struct qed_dev *cdev,
-			      void __iomem *db_addr, void *db_data)
+			      void __iomem *db_addr,
+			      enum qed_db_rec_width db_width,
+			      void *db_data)
 {
+	u32 width = (db_width == DB_REC_WIDTH_32B) ? 32 : 64;
+
 	/* Make sure doorbell address is within the doorbell bar */
 	if (db_addr < cdev->doorbells ||
-	    (u8 __iomem *)db_addr >
+	    (u8 __iomem *)db_addr + width >
 	    (u8 __iomem *)cdev->doorbells + cdev->db_size) {
 		WARN(true,
 		     "Illegal doorbell address: %p. Legal range for doorbell addresses is [%p..%p]\n",
@@ -159,7 +163,7 @@ int qed_db_recovery_add(struct qed_dev *cdev,
 	}
 
 	/* Sanitize doorbell address */
-	if (!qed_db_rec_sanity(cdev, db_addr, db_data))
+	if (!qed_db_rec_sanity(cdev, db_addr, db_width, db_data))
 		return -EINVAL;
 
 	/* Obtain hwfn from doorbell address */
@@ -204,10 +208,6 @@ int qed_db_recovery_del(struct qed_dev *cdev,
 			   QED_MSG_IOV, "db recovery - skipping VF doorbell\n");
 		return 0;
 	}
-
-	/* Sanitize doorbell address */
-	if (!qed_db_rec_sanity(cdev, db_addr, db_data))
-		return -EINVAL;
 
 	/* Obtain hwfn from doorbell address */
 	p_hwfn = qed_db_rec_find_hwfn(cdev, db_addr);
@@ -300,31 +300,24 @@ void qed_db_recovery_dp(struct qed_hwfn *p_hwfn)
 
 /* Ring the doorbell of a single doorbell recovery entry */
 static void qed_db_recovery_ring(struct qed_hwfn *p_hwfn,
-				 struct qed_db_recovery_entry *db_entry,
-				 enum qed_db_rec_exec db_exec)
+				 struct qed_db_recovery_entry *db_entry)
 {
-	if (db_exec != DB_REC_ONCE) {
-		/* Print according to width */
-		if (db_entry->db_width == DB_REC_WIDTH_32B) {
-			DP_VERBOSE(p_hwfn, QED_MSG_SPQ,
-				   "%s doorbell address %p data %x\n",
-				   db_exec == DB_REC_DRY_RUN ?
-				   "would have rung" : "ringing",
-				   db_entry->db_addr,
-				   *(u32 *)db_entry->db_data);
-		} else {
-			DP_VERBOSE(p_hwfn, QED_MSG_SPQ,
-				   "%s doorbell address %p data %llx\n",
-				   db_exec == DB_REC_DRY_RUN ?
-				   "would have rung" : "ringing",
-				   db_entry->db_addr,
-				   *(u64 *)(db_entry->db_data));
-		}
+	/* Print according to width */
+	if (db_entry->db_width == DB_REC_WIDTH_32B) {
+		DP_VERBOSE(p_hwfn, QED_MSG_SPQ,
+			   "ringing doorbell address %p data %x\n",
+			   db_entry->db_addr,
+			   *(u32 *)db_entry->db_data);
+	} else {
+		DP_VERBOSE(p_hwfn, QED_MSG_SPQ,
+			   "ringing doorbell address %p data %llx\n",
+			   db_entry->db_addr,
+			   *(u64 *)(db_entry->db_data));
 	}
 
 	/* Sanity */
 	if (!qed_db_rec_sanity(p_hwfn->cdev, db_entry->db_addr,
-			       db_entry->db_data))
+			       db_entry->db_width, db_entry->db_data))
 		return;
 
 	/* Flush the write combined buffer. Since there are multiple doorbelling
@@ -334,14 +327,12 @@ static void qed_db_recovery_ring(struct qed_hwfn *p_hwfn,
 	wmb();
 
 	/* Ring the doorbell */
-	if (db_exec == DB_REC_REAL_DEAL || db_exec == DB_REC_ONCE) {
-		if (db_entry->db_width == DB_REC_WIDTH_32B)
-			DIRECT_REG_WR(db_entry->db_addr,
-				      *(u32 *)(db_entry->db_data));
-		else
-			DIRECT_REG_WR64(db_entry->db_addr,
-					*(u64 *)(db_entry->db_data));
-	}
+	if (db_entry->db_width == DB_REC_WIDTH_32B)
+		DIRECT_REG_WR(db_entry->db_addr,
+			      *(u32 *)(db_entry->db_data));
+	else
+		DIRECT_REG_WR64(db_entry->db_addr,
+				*(u64 *)(db_entry->db_data));
 
 	/* Flush the write combined buffer. Next doorbell may come from a
 	 * different entity to the same address...
@@ -350,29 +341,21 @@ static void qed_db_recovery_ring(struct qed_hwfn *p_hwfn,
 }
 
 /* Traverse the doorbell recovery entry list and ring all the doorbells */
-void qed_db_recovery_execute(struct qed_hwfn *p_hwfn,
-			     enum qed_db_rec_exec db_exec)
+void qed_db_recovery_execute(struct qed_hwfn *p_hwfn)
 {
 	struct qed_db_recovery_entry *db_entry = NULL;
 
-	if (db_exec != DB_REC_ONCE) {
-		DP_NOTICE(p_hwfn,
-			  "Executing doorbell recovery. Counter was %d\n",
-			  p_hwfn->db_recovery_info.db_recovery_counter);
+	DP_NOTICE(p_hwfn, "Executing doorbell recovery. Counter was %d\n",
+		  p_hwfn->db_recovery_info.db_recovery_counter);
 
-		/* Track amount of times recovery was executed */
-		p_hwfn->db_recovery_info.db_recovery_counter++;
-	}
+	/* Track amount of times recovery was executed */
+	p_hwfn->db_recovery_info.db_recovery_counter++;
 
 	/* Protect the list */
 	spin_lock_bh(&p_hwfn->db_recovery_info.lock);
 	list_for_each_entry(db_entry,
-			    &p_hwfn->db_recovery_info.list, list_entry) {
-		qed_db_recovery_ring(p_hwfn, db_entry, db_exec);
-		if (db_exec == DB_REC_ONCE)
-			break;
-	}
-
+			    &p_hwfn->db_recovery_info.list, list_entry)
+		qed_db_recovery_ring(p_hwfn, db_entry);
 	spin_unlock_bh(&p_hwfn->db_recovery_info.lock);
 }
 
@@ -1229,26 +1212,26 @@ static int qed_alloc_qm_data(struct qed_hwfn *p_hwfn)
 	if (rc)
 		goto alloc_err;
 
-	qm_info->qm_pq_params = kzalloc(sizeof(*qm_info->qm_pq_params) *
-					qed_init_qm_get_num_pqs(p_hwfn),
+	qm_info->qm_pq_params = kcalloc(qed_init_qm_get_num_pqs(p_hwfn),
+					sizeof(*qm_info->qm_pq_params),
 					GFP_KERNEL);
 	if (!qm_info->qm_pq_params)
 		goto alloc_err;
 
-	qm_info->qm_vport_params = kzalloc(sizeof(*qm_info->qm_vport_params) *
-					   qed_init_qm_get_num_vports(p_hwfn),
+	qm_info->qm_vport_params = kcalloc(qed_init_qm_get_num_vports(p_hwfn),
+					   sizeof(*qm_info->qm_vport_params),
 					   GFP_KERNEL);
 	if (!qm_info->qm_vport_params)
 		goto alloc_err;
 
-	qm_info->qm_port_params = kzalloc(sizeof(*qm_info->qm_port_params) *
-					  p_hwfn->cdev->num_ports_in_engine,
+	qm_info->qm_port_params = kcalloc(p_hwfn->cdev->num_ports_in_engine,
+					  sizeof(*qm_info->qm_port_params),
 					  GFP_KERNEL);
 	if (!qm_info->qm_port_params)
 		goto alloc_err;
 
-	qm_info->wfq_data = kzalloc(sizeof(*qm_info->wfq_data) *
-				    qed_init_qm_get_num_vports(p_hwfn),
+	qm_info->wfq_data = kcalloc(qed_init_qm_get_num_vports(p_hwfn),
+				    sizeof(*qm_info->wfq_data),
 				    GFP_KERNEL);
 	if (!qm_info->wfq_data)
 		goto alloc_err;
@@ -1528,7 +1511,7 @@ int qed_final_cleanup(struct qed_hwfn *p_hwfn,
 	}
 
 	DP_VERBOSE(p_hwfn, QED_MSG_IOV,
-		   "Sending final cleanup for PFVF[%d] [Command %08x\n]",
+		   "Sending final cleanup for PFVF[%d] [Command %08x]\n",
 		   id, command);
 
 	qed_wr(p_hwfn, p_ptt, XSDM_REG_OPERATION_GEN, command);
@@ -3157,12 +3140,14 @@ static int qed_hw_get_nvm_info(struct qed_hwfn *p_hwfn, struct qed_ptt *p_ptt)
 			cdev->mf_bits = BIT(QED_MF_OVLAN_CLSS) |
 					BIT(QED_MF_LLH_PROTO_CLSS) |
 					BIT(QED_MF_UFP_SPECIFIC) |
-					BIT(QED_MF_8021Q_TAGGING);
+					BIT(QED_MF_8021Q_TAGGING) |
+					BIT(QED_MF_DONT_ADD_VLAN0_TAG);
 			break;
 		case NVM_CFG1_GLOB_MF_MODE_BD:
 			cdev->mf_bits = BIT(QED_MF_OVLAN_CLSS) |
 					BIT(QED_MF_LLH_PROTO_CLSS) |
-					BIT(QED_MF_8021AD_TAGGING);
+					BIT(QED_MF_8021AD_TAGGING) |
+					BIT(QED_MF_DONT_ADD_VLAN0_TAG);
 			break;
 		case NVM_CFG1_GLOB_MF_MODE_NPAR1_0:
 			cdev->mf_bits = BIT(QED_MF_LLH_MAC_CLSS) |

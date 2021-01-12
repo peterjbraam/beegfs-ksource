@@ -61,13 +61,16 @@ static void vgem_gem_free_object(struct drm_gem_object *obj)
 	kfree(vgem_obj);
 }
 
-static int vgem_gem_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
+static vm_fault_t vgem_gem_fault(struct vm_fault *vmf)
 {
+	struct vm_area_struct *vma = vmf->vma;
 	struct drm_vgem_gem_object *obj = vma->vm_private_data;
-	int ret = VM_FAULT_SIGBUS;
+	/* We don't use vmf->pgoff since that has the fake offset */
+	unsigned long vaddr = vmf->address;
+	vm_fault_t ret = VM_FAULT_SIGBUS;
 	loff_t num_pages;
 	pgoff_t page_offset;
-	page_offset = ((unsigned long)vmf->virtual_address - vma->vm_start) >> PAGE_SHIFT;
+	page_offset = (vaddr - vma->vm_start) >> PAGE_SHIFT;
 
 	num_pages = DIV_ROUND_UP(obj->base.size, PAGE_SIZE);
 

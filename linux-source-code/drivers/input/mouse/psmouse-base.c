@@ -37,7 +37,9 @@
 #include "elantech.h"
 #include "sentelic.h"
 #include "cypress_ps2.h"
+#include "focaltech.h"
 #include "vmmouse.h"
+#include "byd.h"
 
 #define DRIVER_DESC	"PS/2 mouse driver"
 
@@ -48,7 +50,7 @@ MODULE_LICENSE("GPL");
 static unsigned int psmouse_max_proto = PSMOUSE_AUTO;
 static int psmouse_set_maxproto(const char *val, const struct kernel_param *);
 static int psmouse_get_maxproto(char *buffer, const struct kernel_param *kp);
-static struct kernel_param_ops param_ops_proto_abbrev = {
+static const struct kernel_param_ops param_ops_proto_abbrev = {
 	.set = psmouse_set_maxproto,
 	.get = psmouse_get_maxproto,
 };
@@ -64,7 +66,7 @@ static unsigned int psmouse_rate = 100;
 module_param_named(rate, psmouse_rate, uint, 0644);
 MODULE_PARM_DESC(rate, "Report rate, in reports per second.");
 
-static bool psmouse_smartscroll = 1;
+static bool psmouse_smartscroll = true;
 module_param_named(smartscroll, psmouse_smartscroll, bool, 0644);
 MODULE_PARM_DESC(smartscroll, "Logitech Smartscroll autorepeat, 1 = enabled (default), 0 = disabled.");
 
@@ -105,7 +107,7 @@ static struct attribute *psmouse_attributes[] = {
 	NULL
 };
 
-static struct attribute_group psmouse_attribute_group = {
+static const struct attribute_group psmouse_attribute_group = {
 	.attrs	= psmouse_attributes,
 };
 
@@ -480,6 +482,16 @@ static void psmouse_set_rate(struct psmouse *psmouse, unsigned int rate)
 }
 
 /*
+ * Here we set the mouse scaling.
+ */
+static void psmouse_set_scale(struct psmouse *psmouse, enum psmouse_scale scale)
+{
+	ps2_command(&psmouse->ps2dev, NULL,
+		    scale == PSMOUSE_SCALE21 ? PSMOUSE_CMD_SETSCALE21 :
+					       PSMOUSE_CMD_SETSCALE11);
+}
+
+/*
  * psmouse_poll() - default poll handler. Everyone except for ALPS uses it.
  */
 static int psmouse_poll(struct psmouse *psmouse)
@@ -488,19 +500,45 @@ static int psmouse_poll(struct psmouse *psmouse)
 			   PSMOUSE_CMD_POLL | (psmouse->pktsize << 8));
 }
 
+static bool psmouse_check_pnp_id(const char *id, const char * const ids[])
+{
+	int i;
+
+	for (i = 0; ids[i]; i++)
+		if (!strcasecmp(id, ids[i]))
+			return true;
+
+	return false;
+}
+
 /*
  * psmouse_matches_pnp_id - check if psmouse matches one of the passed in ids.
  */
 bool psmouse_matches_pnp_id(struct psmouse *psmouse, const char * const ids[])
 {
-	int i;
+	struct serio *serio = psmouse->ps2dev.serio;
+	char *p, *fw_id_copy, *save_ptr;
+	bool found = false;
 
-	if (!strncmp(psmouse->ps2dev.serio->firmware_id, "PNP:", 4))
-		for (i = 0; ids[i]; i++)
-			if (strstr(psmouse->ps2dev.serio->firmware_id, ids[i]))
-				return true;
+	if (strncmp(serio->firmware_id, "PNP: ", 5))
+		return false;
 
-	return false;
+	fw_id_copy = kstrndup(&serio->firmware_id[5],
+			      sizeof(serio->firmware_id) - 5,
+			      GFP_KERNEL);
+	if (!fw_id_copy)
+		return false;
+
+	save_ptr = fw_id_copy;
+	while ((p = strsep(&fw_id_copy, " ")) != NULL) {
+		if (psmouse_check_pnp_id(p, ids)) {
+			found = true;
+			break;
+		}
+	}
+
+	kfree(save_ptr);
+	return found;
 }
 
 /*
@@ -701,7 +739,7 @@ static const struct psmouse_protocol psmouse_protocols[] = {
 		.type		= PSMOUSE_PS2PP,
 		.name		= "PS2++",
 		.alias		= "logitech",
-		.detect		= ps2pp_init,
+		.detect		= ps2pp_detect,
 	},
 #endif
 	{
@@ -818,7 +856,17 @@ static const struct psmouse_protocol psmouse_protocols[] = {
 		.name		= "ETPS/2",
 		.alias		= "elantech",
 		.detect		= elantech_detect,
-		.init		= elantech_init,
+		.init		= elantech_init_ps2,
+	},
+#endif
+#ifdef CONFIG_MOUSE_PS2_ELANTECH_SMBUS
+	{
+		.type		= PSMOUSE_ELANTECH_SMBUS,
+		.name		= "ETSMBus",
+		.alias		= "elantech-smbus",
+		.detect		= elantech_detect,
+		.init		= elantech_init_smbus,
+		.smbus_companion = true,
 	},
 #endif
 #ifdef CONFIG_MOUSE_PS2_SENTELIC
@@ -836,6 +884,15 @@ static const struct psmouse_protocol psmouse_protocols[] = {
 		.alias		= "cortps",
 		.detect		= cortron_detect,
 	},
+#ifdef CONFIG_MOUSE_PS2_FOCALTECH
+	{
+		.type		= PSMOUSE_FOCALTECH,
+		.name		= "FocalTechPS/2",
+		.alias		= "focaltech",
+		.detect		= focaltech_detect,
+		.init		= focaltech_init,
+	},
+#endif
 #ifdef CONFIG_MOUSE_PS2_VMMOUSE
 	{
 		.type		= PSMOUSE_VMMOUSE,
@@ -843,6 +900,15 @@ static const struct psmouse_protocol psmouse_protocols[] = {
 		.alias		= "vmmouse",
 		.detect		= vmmouse_detect,
 		.init		= vmmouse_init,
+	},
+#endif
+#ifdef CONFIG_MOUSE_PS2_BYD
+	{
+		.type		= PSMOUSE_BYD,
+		.name		= "BYDPS/2",
+		.alias		= "byd",
+		.detect		= byd_detect,
+		.init		= byd_init,
 	},
 #endif
 	{
@@ -918,6 +984,7 @@ static void psmouse_apply_defaults(struct psmouse *psmouse)
 
 	psmouse->set_rate = psmouse_set_rate;
 	psmouse->set_resolution = psmouse_set_resolution;
+	psmouse->set_scale = psmouse_set_scale;
 	psmouse->poll = psmouse_poll;
 	psmouse->protocol_handler = psmouse_process_byte;
 	psmouse->pktsize = 3;
@@ -984,6 +1051,28 @@ static int psmouse_extensions(struct psmouse *psmouse,
 {
 	bool synaptics_hardware = false;
 	int ret;
+
+	/*
+	 * Always check for focaltech, this is safe as it uses pnp-id
+	 * matching.
+	 */
+	if (psmouse_do_detect(focaltech_detect,
+			      psmouse, false, set_properties)) {
+		if (max_proto > PSMOUSE_IMEX &&
+		    IS_ENABLED(CONFIG_MOUSE_PS2_FOCALTECH) &&
+		    (!set_properties || focaltech_init(psmouse) == 0)) {
+			return PSMOUSE_FOCALTECH;
+		}
+		/*
+		 * Restrict psmouse_max_proto so that psmouse_initialize()
+		 * does not try to reset rate and resolution, because even
+		 * that upsets the device.
+		 * This also causes us to basically fall through to basic
+		 * protocol detection, where we fully reset the mouse,
+		 * and set it up as bare PS/2 protocol device.
+		 */
+		psmouse_max_proto = max_proto = PSMOUSE_PS2;
+	}
 
 	/*
 	 * We always check for LifeBook because it does not disturb mouse
@@ -1079,8 +1168,13 @@ static int psmouse_extensions(struct psmouse *psmouse,
 	/* Try Elantech touchpad */
 	if (max_proto > PSMOUSE_IMEX &&
 	    psmouse_try_protocol(psmouse, PSMOUSE_ELANTECH,
-				 &max_proto, set_properties, true)) {
-		return PSMOUSE_ELANTECH;
+				 &max_proto, set_properties, false)) {
+		if (!set_properties)
+			return PSMOUSE_ELANTECH;
+
+		ret = elantech_init(psmouse);
+		if (ret >= 0)
+			return ret;
 	}
 
 	if (max_proto > PSMOUSE_IMEX) {
@@ -1198,7 +1292,7 @@ static void psmouse_initialize(struct psmouse *psmouse)
 	if (psmouse_max_proto != PSMOUSE_PS2) {
 		psmouse->set_rate(psmouse, psmouse->rate);
 		psmouse->set_resolution(psmouse, psmouse->resolution);
-		ps2_command(&psmouse->ps2dev, NULL, PSMOUSE_CMD_SETSCALE11);
+		psmouse->set_scale(psmouse, PSMOUSE_SCALE11);
 	}
 }
 
@@ -1601,16 +1695,9 @@ static int __psmouse_reconnect(struct serio *serio, bool fast_reconnect)
 {
 	struct psmouse *psmouse = serio_get_drvdata(serio);
 	struct psmouse *parent = NULL;
-	struct serio_driver *drv = serio->drv;
 	int (*reconnect_handler)(struct psmouse *);
 	enum psmouse_type type;
 	int rc = -1;
-
-	if (!drv || !psmouse) {
-		psmouse_dbg(psmouse,
-			    "reconnect request, but serio is disconnected, ignoring...\n");
-		return -1;
-	}
 
 	mutex_lock(&psmouse_mutex);
 
@@ -1972,7 +2059,7 @@ static int __init psmouse_init(void)
 	if (err)
 		return err;
 
-	kpsmoused_wq = create_singlethread_workqueue("kpsmoused");
+	kpsmoused_wq = alloc_ordered_workqueue("kpsmoused", 0);
 	if (!kpsmoused_wq) {
 		pr_err("failed to create kpsmoused workqueue\n");
 		err = -ENOMEM;

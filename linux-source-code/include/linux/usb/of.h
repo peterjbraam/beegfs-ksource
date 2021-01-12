@@ -15,8 +15,7 @@
 struct usb_device;
 
 #if IS_ENABLED(CONFIG_OF)
-enum usb_dr_mode of_usb_get_dr_mode(struct device_node *np);
-enum usb_device_speed of_usb_get_maximum_speed(struct device_node *np);
+enum usb_dr_mode of_usb_get_dr_mode_by_phy(struct device_node *np, int arg0);
 bool of_usb_host_tpl_support(struct device_node *np);
 int of_usb_update_otg_caps(struct device_node *np,
 			struct usb_otg_caps *otg_caps);
@@ -26,15 +25,10 @@ struct device_node *usb_of_get_interface_node(struct usb_device *udev,
 		u8 config, u8 ifnum);
 struct device *usb_of_get_companion_dev(struct device *dev);
 #else
-static inline enum usb_dr_mode of_usb_get_dr_mode(struct device_node *np)
+static inline enum usb_dr_mode
+of_usb_get_dr_mode_by_phy(struct device_node *np, int arg0)
 {
 	return USB_DR_MODE_UNKNOWN;
-}
-
-static inline enum usb_device_speed
-of_usb_get_maximum_speed(struct device_node *np)
-{
-	return USB_SPEED_UNKNOWN;
 }
 static inline bool of_usb_host_tpl_support(struct device_node *np)
 {

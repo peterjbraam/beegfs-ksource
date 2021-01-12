@@ -9,6 +9,7 @@
  */
 #include <linux/spinlock.h>
 #include <linux/module.h>
+#include <linux/sched/signal.h>
 #include <linux/ctype.h>
 #include <linux/list.h>
 #include <linux/virtio.h>
@@ -58,6 +59,7 @@ virtio_transport_alloc_pkt(struct virtio_vsock_pkt_info *info,
 	pkt->len		= len;
 	pkt->hdr.len		= cpu_to_le32(len);
 	pkt->reply		= info->reply;
+	pkt->vsk		= info->vsk;
 
 	if (info->msg && len > 0) {
 		pkt->buf = kmalloc(len, GFP_KERNEL);
@@ -88,25 +90,15 @@ out_pkt:
 static struct sk_buff *virtio_transport_build_skb(void *opaque)
 {
 	struct virtio_vsock_pkt *pkt = opaque;
-	unsigned char *t_hdr, *payload;
 	struct af_vsockmon_hdr *hdr;
 	struct sk_buff *skb;
-	size_t payload_len;
-	void *payload_buf;
 
-	/* A packet could be split to fit the RX buffer, so we can retrieve
-	 * the payload length from the header and the buffer pointer taking
-	 * care of the offset in the original packet.
-	 */
-	payload_len = le32_to_cpu(pkt->hdr.len);
-	payload_buf = pkt->buf + pkt->off;
-
-	skb = alloc_skb(sizeof(*hdr) + sizeof(pkt->hdr) + payload_len,
+	skb = alloc_skb(sizeof(*hdr) + sizeof(pkt->hdr) + pkt->len,
 			GFP_ATOMIC);
 	if (!skb)
 		return NULL;
 
-	hdr = (struct af_vsockmon_hdr *)skb_put(skb, sizeof(*hdr));
+	hdr = skb_put(skb, sizeof(*hdr));
 
 	/* pkt->hdr is little-endian so no need to byteswap here */
 	hdr->src_cid = pkt->hdr.src_cid;
@@ -139,12 +131,10 @@ static struct sk_buff *virtio_transport_build_skb(void *opaque)
 		break;
 	}
 
-	t_hdr = skb_put(skb, sizeof(pkt->hdr));
-	memcpy(t_hdr, &pkt->hdr, sizeof(pkt->hdr));
+	skb_put_data(skb, &pkt->hdr, sizeof(pkt->hdr));
 
-	if (payload_len) {
-		payload = skb_put(skb, payload_len);
-		memcpy(payload, payload_buf, payload_len);
+	if (pkt->len) {
+		skb_put_data(skb, pkt->buf, pkt->len);
 	}
 
 	return skb;
@@ -252,6 +242,7 @@ static int virtio_transport_send_credit_update(struct vsock_sock *vsk,
 	struct virtio_vsock_pkt_info info = {
 		.op = VIRTIO_VSOCK_OP_CREDIT_UPDATE,
 		.type = type,
+		.vsk = vsk,
 	};
 
 	return virtio_transport_send_pkt_info(vsk, &info);
@@ -277,11 +268,12 @@ virtio_transport_stream_do_dequeue(struct vsock_sock *vsk,
 			bytes = pkt->len - pkt->off;
 
 		/* sk_lock is held by caller so no one else can dequeue.
-		 * Unlock rx_lock since memcpy_toiovec() may sleep.
+		 * Unlock rx_lock since memcpy_to_msg() may sleep.
 		 */
 		spin_unlock_bh(&vvs->rx_lock);
 
-		if (memcpy_toiovec(msg->msg_iov, pkt->buf + pkt->off, bytes))
+		err = memcpy_to_msg(msg, pkt->buf + pkt->off, bytes);
+		if (err)
 			goto out;
 
 		spin_lock_bh(&vvs->rx_lock);
@@ -321,8 +313,7 @@ virtio_transport_stream_dequeue(struct vsock_sock *vsk,
 EXPORT_SYMBOL_GPL(virtio_transport_stream_dequeue);
 
 int
-virtio_transport_dgram_dequeue(struct kiocb *kiocb,
-			       struct vsock_sock *vsk,
+virtio_transport_dgram_dequeue(struct vsock_sock *vsk,
 			       struct msghdr *msg,
 			       size_t len, int flags)
 {
@@ -591,6 +582,7 @@ int virtio_transport_connect(struct vsock_sock *vsk)
 	struct virtio_vsock_pkt_info info = {
 		.op = VIRTIO_VSOCK_OP_REQUEST,
 		.type = VIRTIO_VSOCK_TYPE_STREAM,
+		.vsk = vsk,
 	};
 
 	return virtio_transport_send_pkt_info(vsk, &info);
@@ -606,6 +598,7 @@ int virtio_transport_shutdown(struct vsock_sock *vsk, int mode)
 			  VIRTIO_VSOCK_SHUTDOWN_RCV : 0) |
 			 (mode & SEND_SHUTDOWN ?
 			  VIRTIO_VSOCK_SHUTDOWN_SEND : 0),
+		.vsk = vsk,
 	};
 
 	return virtio_transport_send_pkt_info(vsk, &info);
@@ -632,6 +625,7 @@ virtio_transport_stream_enqueue(struct vsock_sock *vsk,
 		.type = VIRTIO_VSOCK_TYPE_STREAM,
 		.msg = msg,
 		.pkt_len = len,
+		.vsk = vsk,
 	};
 
 	return virtio_transport_send_pkt_info(vsk, &info);
@@ -653,6 +647,7 @@ static int virtio_transport_reset(struct vsock_sock *vsk,
 		.op = VIRTIO_VSOCK_OP_RST,
 		.type = VIRTIO_VSOCK_TYPE_STREAM,
 		.reply = !!pkt,
+		.vsk = vsk,
 	};
 
 	/* Send RST only if the original pkt is not a RST pkt */
@@ -699,17 +694,17 @@ static int virtio_transport_reset_no_sock(struct virtio_vsock_pkt *pkt)
 static void virtio_transport_wait_close(struct sock *sk, long timeout)
 {
 	if (timeout) {
-		DEFINE_WAIT(wait);
+		DEFINE_WAIT_FUNC(wait, woken_wake_function);
+
+		add_wait_queue(sk_sleep(sk), &wait);
 
 		do {
-			prepare_to_wait(sk_sleep(sk), &wait,
-					TASK_INTERRUPTIBLE);
 			if (sk_wait_event(sk, &timeout,
-					  sock_flag(sk, SOCK_DONE)))
+					  sock_flag(sk, SOCK_DONE), &wait))
 				break;
 		} while (!signal_pending(current) && timeout);
 
-		finish_wait(sk_sleep(sk), &wait);
+		remove_wait_queue(sk_sleep(sk), &wait);
 	}
 }
 
@@ -858,7 +853,7 @@ virtio_transport_recv_connected(struct sock *sk,
 		list_add_tail(&pkt->list, &vvs->rx_queue);
 		spin_unlock_bh(&vvs->rx_lock);
 
-		sk->sk_data_ready(sk, 0);
+		sk->sk_data_ready(sk);
 		return err;
 	case VIRTIO_VSOCK_OP_CREDIT_UPDATE:
 		sk->sk_write_space(sk);
@@ -906,6 +901,7 @@ virtio_transport_send_response(struct vsock_sock *vsk,
 		.remote_cid = le64_to_cpu(pkt->hdr.src_cid),
 		.remote_port = le32_to_cpu(pkt->hdr.src_port),
 		.reply = true,
+		.vsk = vsk,
 	};
 
 	return virtio_transport_send_pkt_info(vsk, &info);
@@ -930,7 +926,7 @@ virtio_transport_recv_listen(struct sock *sk, struct virtio_vsock_pkt *pkt)
 	}
 
 	child = __vsock_create(sock_net(sk), NULL, sk, GFP_KERNEL,
-			       sk->sk_type);
+			       sk->sk_type, 0);
 	if (!child) {
 		virtio_transport_reset(vsk, pkt);
 		return -ENOMEM;
@@ -954,7 +950,7 @@ virtio_transport_recv_listen(struct sock *sk, struct virtio_vsock_pkt *pkt)
 
 	release_sock(child);
 
-	sk->sk_data_ready(sk, 0);
+	sk->sk_data_ready(sk);
 	return 0;
 }
 

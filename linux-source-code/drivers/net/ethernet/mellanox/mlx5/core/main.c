@@ -43,7 +43,6 @@
 #include <linux/mlx5/driver.h>
 #include <linux/mlx5/cq.h>
 #include <linux/mlx5/qp.h>
-#include <linux/mlx5/srq.h>
 #include <linux/debugfs.h>
 #include <linux/kmod.h>
 #include <linux/mlx5/mlx5_ifc.h>
@@ -163,6 +162,26 @@ static struct mlx5_profile profile[] = {
 		.mr_cache[15]	= {
 			.size	= 8,
 			.limit	= 4
+		},
+		.mr_cache[16]	= {
+			.size	= 8,
+			.limit	= 4
+		},
+		.mr_cache[17]	= {
+			.size	= 8,
+			.limit	= 4
+		},
+		.mr_cache[18]	= {
+			.size	= 8,
+			.limit	= 4
+		},
+		.mr_cache[19]	= {
+			.size	= 4,
+			.limit	= 2
+		},
+		.mr_cache[20]	= {
+			.size	= 4,
+			.limit	= 2
 		},
 	},
 };
@@ -757,15 +776,19 @@ static int mlx5_init_once(struct mlx5_core_dev *dev, struct mlx5_priv *priv)
 		goto err_devcom;
 	}
 
-	err = mlx5_cq_debugfs_init(dev);
+	err = mlx5_events_init(dev);
 	if (err) {
-		dev_err(&pdev->dev, "failed to initialize cq debugfs\n");
+		dev_err(&pdev->dev, "failed to initialize events\n");
 		goto err_eq_cleanup;
 	}
 
-	mlx5_init_qp_table(dev);
+	err = mlx5_cq_debugfs_init(dev);
+	if (err) {
+		dev_err(&pdev->dev, "failed to initialize cq debugfs\n");
+		goto err_events_cleanup;
+	}
 
-	mlx5_init_srq_table(dev);
+	mlx5_init_qp_table(dev);
 
 	mlx5_init_mkey_table(dev);
 
@@ -820,10 +843,10 @@ err_rl_cleanup:
 err_tables_cleanup:
 	mlx5_vxlan_destroy(dev->vxlan);
 	mlx5_cleanup_mkey_table(dev);
-	mlx5_cleanup_srq_table(dev);
 	mlx5_cleanup_qp_table(dev);
 	mlx5_cq_debugfs_cleanup(dev);
-
+err_events_cleanup:
+	mlx5_events_cleanup(dev);
 err_eq_cleanup:
 	mlx5_eq_table_cleanup(dev);
 err_devcom:
@@ -844,9 +867,9 @@ static void mlx5_cleanup_once(struct mlx5_core_dev *dev)
 	mlx5_cleanup_clock(dev);
 	mlx5_cleanup_reserved_gids(dev);
 	mlx5_cleanup_mkey_table(dev);
-	mlx5_cleanup_srq_table(dev);
 	mlx5_cleanup_qp_table(dev);
 	mlx5_cq_debugfs_cleanup(dev);
+	mlx5_events_cleanup(dev);
 	mlx5_eq_table_cleanup(dev);
 	mlx5_devcom_unregister_device(dev->priv.devcom);
 }
@@ -940,16 +963,10 @@ static int mlx5_load_one(struct mlx5_core_dev *dev, struct mlx5_priv *priv,
 		goto reclaim_boot_pages;
 	}
 
-	err = mlx5_pagealloc_start(dev);
-	if (err) {
-		dev_err(&pdev->dev, "mlx5_pagealloc_start failed\n");
-		goto reclaim_boot_pages;
-	}
-
 	err = mlx5_cmd_init_hca(dev, sw_owner_id);
 	if (err) {
 		dev_err(&pdev->dev, "init hca failed\n");
-		goto err_pagealloc_stop;
+		goto reclaim_boot_pages;
 	}
 
 	mlx5_set_driver_version(dev);
@@ -976,6 +993,9 @@ static int mlx5_load_one(struct mlx5_core_dev *dev, struct mlx5_priv *priv,
 		err = PTR_ERR(dev->priv.uar);
 		goto err_get_uars;
 	}
+
+	mlx5_events_start(dev);
+	mlx5_pagealloc_start(dev);
 
 	err = mlx5_eq_table_create(dev);
 	if (err) {
@@ -1016,7 +1036,7 @@ static int mlx5_load_one(struct mlx5_core_dev *dev, struct mlx5_priv *priv,
 	err = mlx5_core_set_hca_defaults(dev);
 	if (err) {
 		dev_err(&pdev->dev, "Failed to set hca defaults\n");
-		goto err_sriov;
+		goto err_fs;
 	}
 
 	err = mlx5_sriov_attach(dev);
@@ -1063,6 +1083,8 @@ err_fw_tracer:
 	mlx5_eq_table_destroy(dev);
 
 err_eq_table:
+	mlx5_pagealloc_stop(dev);
+	mlx5_events_stop(dev);
 	mlx5_put_uars_page(dev, priv->uar);
 
 err_get_uars:
@@ -1075,9 +1097,6 @@ err_stop_poll:
 		dev_err(&dev->pdev->dev, "tear_down_hca failed, skip cleanup\n");
 		goto out_err;
 	}
-
-err_pagealloc_stop:
-	mlx5_pagealloc_stop(dev);
 
 reclaim_boot_pages:
 	mlx5_reclaim_startup_pages(dev);
@@ -1124,16 +1143,18 @@ static int mlx5_unload_one(struct mlx5_core_dev *dev, struct mlx5_priv *priv,
 	mlx5_fpga_device_stop(dev);
 	mlx5_fw_tracer_cleanup(dev->tracer);
 	mlx5_eq_table_destroy(dev);
+	mlx5_pagealloc_stop(dev);
+	mlx5_events_stop(dev);
 	mlx5_put_uars_page(dev, priv->uar);
 	if (cleanup)
 		mlx5_cleanup_once(dev);
 	mlx5_stop_health_poll(dev, cleanup);
+
 	err = mlx5_cmd_teardown_hca(dev);
 	if (err) {
 		dev_err(&dev->pdev->dev, "tear_down_hca failed, skip cleanup\n");
 		goto out;
 	}
-	mlx5_pagealloc_stop(dev);
 	mlx5_reclaim_startup_pages(dev);
 	mlx5_core_disable_hca(dev, 0);
 	mlx5_cmd_cleanup(dev);
@@ -1142,12 +1163,6 @@ out:
 	mutex_unlock(&dev->intf_state_mutex);
 	return err;
 }
-
-struct mlx5_core_event_handler {
-	void (*event)(struct mlx5_core_dev *dev,
-		      enum mlx5_dev_event event,
-		      void *data);
-};
 
 static const struct devlink_ops mlx5_devlink_ops = {
 #ifdef CONFIG_MLX5_ESWITCH
@@ -1182,16 +1197,12 @@ static int init_one(struct pci_dev *pdev,
 	pci_set_drvdata(pdev, dev);
 
 	dev->pdev = pdev;
-	dev->event = mlx5_core_event;
 	dev->profile = &profile[prof_sel];
 
 	INIT_LIST_HEAD(&priv->ctx_list);
 	spin_lock_init(&priv->ctx_lock);
 	mutex_init(&dev->pci_status_mutex);
 	mutex_init(&dev->intf_state_mutex);
-
-	INIT_LIST_HEAD(&priv->waiting_events_list);
-	priv->is_accum_events = false;
 
 	mutex_init(&priv->bfregs.reg_head.lock);
 	mutex_init(&priv->bfregs.wc_head.lock);
@@ -1210,12 +1221,14 @@ static int init_one(struct pci_dev *pdev,
 		goto close_pci;
 	}
 
-	mlx5_pagealloc_init(dev);
+	err = mlx5_pagealloc_init(dev);
+	if (err)
+		goto err_pagealloc_init;
 
 	err = mlx5_load_one(dev, priv, true);
 	if (err) {
 		dev_err(&pdev->dev, "mlx5_load_one failed with error code %d\n", err);
-		goto clean_health;
+		goto err_load_one;
 	}
 
 	request_module_nowait(MLX5_IB_MOD);
@@ -1229,8 +1242,9 @@ static int init_one(struct pci_dev *pdev,
 
 clean_load:
 	mlx5_unload_one(dev, priv, true);
-clean_health:
+err_load_one:
 	mlx5_pagealloc_cleanup(dev);
+err_pagealloc_init:
 	mlx5_health_cleanup(dev);
 close_pci:
 	mlx5_pci_close(dev, priv);
@@ -1269,7 +1283,7 @@ static pci_ers_result_t mlx5_pci_err_detected(struct pci_dev *pdev,
 
 	dev_info(&pdev->dev, "%s was called\n", __func__);
 
-	mlx5_enter_error_state(dev);
+	mlx5_enter_error_state(dev, false);
 	mlx5_unload_one(dev, priv, false);
 	/* In case of kernel call drain the health wq */
 	if (state) {
@@ -1356,13 +1370,66 @@ static const struct pci_error_handlers mlx5_err_handler = {
 	.resume		= mlx5_pci_resume
 };
 
+static int mlx5_try_fast_unload(struct mlx5_core_dev *dev)
+{
+	bool fast_teardown = false, force_teardown = false;
+	int ret = 1;
+
+	fast_teardown = MLX5_CAP_GEN(dev, fast_teardown);
+	force_teardown = MLX5_CAP_GEN(dev, force_teardown);
+
+	mlx5_core_dbg(dev, "force teardown firmware support=%d\n", force_teardown);
+	mlx5_core_dbg(dev, "fast teardown firmware support=%d\n", fast_teardown);
+
+	if (!fast_teardown && !force_teardown)
+		return -EOPNOTSUPP;
+
+	if (dev->state == MLX5_DEVICE_STATE_INTERNAL_ERROR) {
+		mlx5_core_dbg(dev, "Device in internal error state, giving up\n");
+		return -EAGAIN;
+	}
+
+	/* Panic tear down fw command will stop the PCI bus communication
+	 * with the HCA, so the health polll is no longer needed.
+	 */
+	mlx5_drain_health_wq(dev);
+	mlx5_stop_health_poll(dev, false);
+
+	ret = mlx5_cmd_fast_teardown_hca(dev);
+	if (!ret)
+		goto succeed;
+
+	ret = mlx5_cmd_force_teardown_hca(dev);
+	if (!ret)
+		goto succeed;
+
+	mlx5_core_dbg(dev, "Firmware couldn't do fast unload error: %d\n", ret);
+	mlx5_start_health_poll(dev);
+	return ret;
+
+succeed:
+	mlx5_enter_error_state(dev, true);
+
+	/* Some platforms requiring freeing the IRQ's in the shutdown
+	 * flow. If they aren't freed they can't be allocated after
+	 * kexec. There is no need to cleanup the mlx5_core software
+	 * contexts.
+	 */
+	mlx5_core_eq_free_irqs(dev);
+
+	return 0;
+}
+
 static void shutdown(struct pci_dev *pdev)
 {
 	struct mlx5_core_dev *dev  = pci_get_drvdata(pdev);
 	struct mlx5_priv *priv = &dev->priv;
+	int err;
 
 	dev_info(&pdev->dev, "Shutdown was called\n");
-	mlx5_unload_one(dev, priv, false);
+	err = mlx5_try_fast_unload(dev);
+	if (err)
+		mlx5_unload_one(dev, priv, false);
 	mlx5_pci_disable_device(dev);
 }
 

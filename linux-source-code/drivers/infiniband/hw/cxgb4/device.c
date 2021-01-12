@@ -720,40 +720,23 @@ static const struct file_operations ep_debugfs_fops = {
 	.read    = debugfs_read,
 };
 
-static int setup_debugfs(struct c4iw_dev *devp)
+static void setup_debugfs(struct c4iw_dev *devp)
 {
-	struct dentry *de;
+	debugfs_create_file_size("qps", S_IWUSR, devp->debugfs_root,
+				 (void *)devp, &qp_debugfs_fops, 4096);
 
-	if (!devp->debugfs_root)
-		return -1;
+	debugfs_create_file_size("stags", S_IWUSR, devp->debugfs_root,
+				 (void *)devp, &stag_debugfs_fops, 4096);
 
-	de = debugfs_create_file("qps", S_IWUSR, devp->debugfs_root,
-				 (void *)devp, &qp_debugfs_fops);
-	if (de && de->d_inode)
-		de->d_inode->i_size = 4096;
+	debugfs_create_file_size("stats", S_IWUSR, devp->debugfs_root,
+				 (void *)devp, &stats_debugfs_fops, 4096);
 
-	de = debugfs_create_file("stags", S_IWUSR, devp->debugfs_root,
-				 (void *)devp, &stag_debugfs_fops);
-	if (de && de->d_inode)
-		de->d_inode->i_size = 4096;
+	debugfs_create_file_size("eps", S_IWUSR, devp->debugfs_root,
+				 (void *)devp, &ep_debugfs_fops, 4096);
 
-	de = debugfs_create_file("stats", S_IWUSR, devp->debugfs_root,
-			(void *)devp, &stats_debugfs_fops);
-	if (de && de->d_inode)
-		de->d_inode->i_size = 4096;
-
-	de = debugfs_create_file("eps", S_IWUSR, devp->debugfs_root,
-			(void *)devp, &ep_debugfs_fops);
-	if (de && de->d_inode)
-		de->d_inode->i_size = 4096;
-
-	if (c4iw_wr_log) {
-		de = debugfs_create_file("wr_log", S_IWUSR, devp->debugfs_root,
-					 (void *)devp, &wr_log_debugfs_fops);
-		if (de && de->d_inode)
-			de->d_inode->i_size = 4096;
-	}
-	return 0;
+	if (c4iw_wr_log)
+		debugfs_create_file_size("wr_log", S_IWUSR, devp->debugfs_root,
+					 (void *)devp, &wr_log_debugfs_fops, 4096);
 }
 
 void c4iw_release_dev_ucontext(struct c4iw_rdev *rdev,
@@ -901,6 +884,7 @@ static int c4iw_rdev_open(struct c4iw_rdev *rdev)
 			atomic_set(&rdev->wr_log_idx, 0);
 		}
 	}
+
 	rdev->free_workq = create_singlethread_workqueue("iw_cxgb4_free");
 	if (!rdev->free_workq) {
 		err = -ENOMEM;
@@ -993,7 +977,7 @@ static struct c4iw_dev *c4iw_alloc(const struct cxgb4_lld_info *infop)
 		pr_info("%s: On-Chip Queues not supported on this device\n",
 			pci_name(infop->pdev));
 
-	devp = (struct c4iw_dev *)ib_alloc_device(sizeof(*devp));
+	devp = ib_alloc_device(c4iw_dev, ibdev);
 	if (!devp) {
 		pr_err("Cannot allocate ib device\n");
 		return ERR_PTR(-ENOMEM);
@@ -1576,8 +1560,6 @@ static int __init c4iw_init_module(void)
 		return err;
 
 	c4iw_debugfs_root = debugfs_create_dir(DRV_NAME, NULL);
-	if (!c4iw_debugfs_root)
-		pr_warn("could not create debugfs entry, continuing\n");
 
 	reg_workq = create_singlethread_workqueue("Register_iWARP_device");
 	if (!reg_workq) {

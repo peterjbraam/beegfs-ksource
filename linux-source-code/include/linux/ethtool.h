@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * ethtool.h: Defines for Linux ethtool.
  *
@@ -15,6 +16,7 @@
 #include <linux/bitmap.h>
 #include <linux/compat.h>
 #include <uapi/linux/ethtool.h>
+
 #include <linux/rh_kabi.h>
 
 #ifdef CONFIG_COMPAT
@@ -181,6 +183,9 @@ void ethtool_convert_legacy_u32_to_link_mode(unsigned long *dst,
 bool ethtool_convert_link_mode_to_legacy_u32(u32 *legacy_u32,
 				     const unsigned long *src);
 
+struct ethtool_ops_extended_rh {
+};
+
 /**
  * struct ethtool_ops - optional netdev operations
  * @get_settings: DEPRECATED, use %get_link_ksettings/%set_link_ksettings
@@ -264,13 +269,9 @@ bool ethtool_convert_link_mode_to_legacy_u32(u32 *legacy_u32,
  *	Returns zero if not supported for this specific device.
  * @get_rxfh_indir_size: Get the size of the RX flow hash indirection table.
  *	Returns zero if not supported for this specific device.
- * @get_rxfh_indir: Get the contents of the RX flow hash indirection table.
- *	Will not be called if @get_rxfh_indir_size returns zero.
  * @get_rxfh: Get the contents of the RX flow hash indirection table, hash key
  *	and/or hash function.
  *	Returns a negative error code or zero.
- * @set_rxfh_indir: Set the contents of the RX flow hash indirection table.
- *	Will not be called if @get_rxfh_indir_size returns zero.
  * @set_rxfh: Set the contents of the RX flow hash indirection table, hash
  *	key, and/or hash function.  Arguments which are set to %NULL or zero
  *	will remain unchanged.
@@ -314,6 +315,11 @@ bool ethtool_convert_link_mode_to_legacy_u32(u32 *legacy_u32,
  *	fields should be ignored (use %__ETHTOOL_LINK_MODE_MASK_NBITS
  *	instead of the latter), any change to them will be overwritten
  *	by kernel. Returns a negative error code or zero.
+ * @get_fecparam: Get the network device Forward Error Correction parameters.
+ * @set_fecparam: Set the network device Forward Error Correction parameters.
+ * @get_ethtool_phy_stats: Return extended statistics about the PHY device.
+ *	This is only useful if the device maintains PHY statistics and
+ *	cannot use the standard PHY library helpers.
  *
  * All operations are optional (i.e. the function pointer may be set
  * to %NULL) and callers must take this into account.  Callers must
@@ -327,6 +333,8 @@ bool ethtool_convert_link_mode_to_legacy_u32(u32 *legacy_u32,
  * See &struct net_device and &struct net_device_ops for documentation
  * of the generic netdev features interface.
  */
+struct ethtool_link_ksettings_rh80;
+
 struct ethtool_ops {
 	int	(*get_settings)(struct net_device *, struct ethtool_cmd *);
 	int	(*set_settings)(struct net_device *, struct ethtool_cmd *);
@@ -369,9 +377,17 @@ struct ethtool_ops {
 	int	(*set_rxnfc)(struct net_device *, struct ethtool_rxnfc *);
 	int	(*flash_device)(struct net_device *, struct ethtool_flash *);
 	int	(*reset)(struct net_device *, u32 *);
+	u32	(*get_rxfh_key_size)(struct net_device *);
 	u32	(*get_rxfh_indir_size)(struct net_device *);
-	int	(*get_rxfh_indir)(struct net_device *, u32 *);
-	int	(*set_rxfh_indir)(struct net_device *, const u32 *);
+	int	(*get_rxfh)(struct net_device *, u32 *indir, u8 *key,
+			    u8 *hfunc);
+	int	(*set_rxfh)(struct net_device *, const u32 *indir,
+			    const u8 *key, const u8 hfunc);
+	int	(*get_rxfh_context)(struct net_device *, u32 *indir, u8 *key,
+				    u8 *hfunc, u32 rss_context);
+	int	(*set_rxfh_context)(struct net_device *, const u32 *indir,
+				    const u8 *key, const u8 hfunc,
+				    u32 *rss_context, bool delete);
 	void	(*get_channels)(struct net_device *, struct ethtool_channels *);
 	int	(*set_channels)(struct net_device *, struct ethtool_channels *);
 	int	(*get_dump_flag)(struct net_device *, struct ethtool_dump *);
@@ -385,47 +401,77 @@ struct ethtool_ops {
 				     struct ethtool_eeprom *, u8 *);
 	int	(*get_eee)(struct net_device *, struct ethtool_eee *);
 	int	(*set_eee)(struct net_device *, struct ethtool_eee *);
+	int	(*get_tunable)(struct net_device *,
+			       const struct ethtool_tunable *, void *);
+	int	(*set_tunable)(struct net_device *,
+			       const struct ethtool_tunable *, const void *);
+	int	(*get_per_queue_coalesce)(struct net_device *, u32,
+					  struct ethtool_coalesce *);
+	int	(*set_per_queue_coalesce)(struct net_device *, u32,
+					  struct ethtool_coalesce *);
+	RH_KABI_REPLACE(int	(*get_link_ksettings)(struct net_device *,
+					struct ethtool_link_ksettings *),
+			int	(*get_link_ksettings_rh80)(struct net_device *,
+					struct ethtool_link_ksettings_rh80 *))
+	RH_KABI_REPLACE(int	(*set_link_ksettings)(struct net_device *,
+					const struct ethtool_link_ksettings *),
+			int	(*set_link_ksettings_rh80)(struct net_device *,
+					const struct ethtool_link_ksettings_rh80 *))
+	int	(*get_fecparam)(struct net_device *,
+				      struct ethtool_fecparam *);
+	int	(*set_fecparam)(struct net_device *,
+				      struct ethtool_fecparam *);
+	void	(*get_ethtool_phy_stats)(struct net_device *,
+					 struct ethtool_stats *, u64 *);
 
-	/* RHEL SPECIFIC
-	 *
-	 * The following padding has been inserted before ABI freeze to
-	 * allow extending the structure while preserve ABI. Feel free
-	 * to replace reserved slots with required structure field
-	 * additions of your backport.
-	 */
-	RH_KABI_USE_P(1, u32	(*get_rxfh_key_size)(struct net_device *))
-	RH_KABI_USE_P(2, int	(*get_rxfh)(struct net_device *, u32 *indir,
-					    u8 *key, u8 *hfunc))
-	RH_KABI_USE_P(3, int	(*set_rxfh)(struct net_device *,
-					    const u32 *indir, const u8 *key,
-					    const u8 hfunc))
-	RH_KABI_USE_P(4, int	(*get_tunable)(struct net_device *,
-					       const struct ethtool_tunable *,
-					       void *))
-	RH_KABI_USE_P(5, int	(*set_tunable)(struct net_device *,
-					       const struct ethtool_tunable *,
-					       const void *))
-	RH_KABI_USE_P(6, int	(*get_per_queue_coalesce)(struct net_device *,
-							  u32,
-							  struct ethtool_coalesce *))
-	RH_KABI_USE_P(7, int	(*set_per_queue_coalesce)(struct net_device *,
-							  u32,
-							  struct ethtool_coalesce *))
-	RH_KABI_USE_P(8, int	(*get_link_ksettings)(struct net_device *,
-					      struct ethtool_link_ksettings *))
-	RH_KABI_USE_P(9, int	(*set_link_ksettings)(struct net_device *,
+	RH_KABI_USE(1, int	(*get_link_ksettings)(struct net_device *,
+				      struct ethtool_link_ksettings *))
+	RH_KABI_USE(2, int	(*set_link_ksettings)(struct net_device *,
 				      const struct ethtool_link_ksettings *))
-	RH_KABI_USE_P(10,int	(*get_fecparam)(struct net_device *,
-				      struct ethtool_fecparam *))
-	RH_KABI_USE_P(11,int	(*set_fecparam)(struct net_device *,
-				      struct ethtool_fecparam *))
-	RH_KABI_USE_P(12,int	(*get_rxfh_context)(struct net_device *, u32 *indir, u8 *key,
-				    u8 *hfunc, u32 rss_context))
-	RH_KABI_USE_P(13,int	(*set_rxfh_context)(struct net_device *, const u32 *indir,
-				    const u8 *key, const u8 hfunc,
-				    u32 *rss_context, bool delete))
-	RH_KABI_RESERVE_P(14)
-	RH_KABI_RESERVE_P(15)
-	RH_KABI_RESERVE_P(16)
+	RH_KABI_RESERVE(3)
+	RH_KABI_RESERVE(4)
+	RH_KABI_RESERVE(5)
+	RH_KABI_RESERVE(6)
+	RH_KABI_RESERVE(7)
+	RH_KABI_RESERVE(8)
+	RH_KABI_RESERVE(9)
+	RH_KABI_RESERVE(10)
+	RH_KABI_RESERVE(11)
+	RH_KABI_RESERVE(12)
+	RH_KABI_RESERVE(13)
+	RH_KABI_RESERVE(14)
+	RH_KABI_RESERVE(15)
+	RH_KABI_RESERVE(16)
+	RH_KABI_RESERVE(17)
+	RH_KABI_RESERVE(18)
+	RH_KABI_RESERVE(19)
+	RH_KABI_RESERVE(20)
+	RH_KABI_RESERVE(21)
+	RH_KABI_RESERVE(22)
+	RH_KABI_RESERVE(23)
+	RH_KABI_RESERVE(24)
+	RH_KABI_RESERVE(25)
+	RH_KABI_RESERVE(26)
+	RH_KABI_RESERVE(27)
+	RH_KABI_RESERVE(28)
+	RH_KABI_RESERVE(29)
+	RH_KABI_RESERVE(30)
+	RH_KABI_RESERVE(31)
+	RH_KABI_SIZE_AND_EXTEND(ethtool_ops_extended)
 };
+
+struct ethtool_rx_flow_rule {
+	struct flow_rule	*rule;
+	unsigned long		priv[0];
+};
+
+struct ethtool_rx_flow_spec_input {
+	const struct ethtool_rx_flow_spec	*fs;
+	u32					rss_ctx;
+};
+
+struct ethtool_rx_flow_rule *
+ethtool_rx_flow_rule_create(const struct ethtool_rx_flow_spec_input *input);
+void ethtool_rx_flow_rule_destroy(struct ethtool_rx_flow_rule *rule);
+
 #endif /* _LINUX_ETHTOOL_H */
