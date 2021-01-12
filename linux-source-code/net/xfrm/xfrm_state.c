@@ -173,7 +173,7 @@ static DEFINE_SPINLOCK(xfrm_state_gc_lock);
 int __xfrm_state_delete(struct xfrm_state *x);
 
 int km_query(struct xfrm_state *x, struct xfrm_tmpl *t, struct xfrm_policy *pol);
-bool km_is_alive(const struct km_event *c);
+static bool km_is_alive(const struct km_event *c);
 void km_state_expired(struct xfrm_state *x, int hard, u32 portid);
 
 static DEFINE_SPINLOCK(xfrm_type_lock);
@@ -330,100 +330,67 @@ static void xfrm_put_type_offload(const struct xfrm_type_offload *type)
 	module_put(type->owner);
 }
 
-static DEFINE_SPINLOCK(xfrm_mode_lock);
-int xfrm_register_mode(struct xfrm_mode *mode, int family)
+static const struct xfrm_mode xfrm4_mode_map[XFRM_MODE_MAX] = {
+	[XFRM_MODE_BEET] = {
+		.encap = XFRM_MODE_BEET,
+		.flags = XFRM_MODE_FLAG_TUNNEL,
+		.family = AF_INET,
+	},
+	[XFRM_MODE_TRANSPORT] = {
+		.encap = XFRM_MODE_TRANSPORT,
+		.family = AF_INET,
+	},
+	[XFRM_MODE_TUNNEL] = {
+		.encap = XFRM_MODE_TUNNEL,
+		.flags = XFRM_MODE_FLAG_TUNNEL,
+		.family = AF_INET,
+	},
+};
+
+static const struct xfrm_mode xfrm6_mode_map[XFRM_MODE_MAX] = {
+	[XFRM_MODE_BEET] = {
+		.encap = XFRM_MODE_BEET,
+		.flags = XFRM_MODE_FLAG_TUNNEL,
+		.family = AF_INET6,
+	},
+	[XFRM_MODE_ROUTEOPTIMIZATION] = {
+		.encap = XFRM_MODE_ROUTEOPTIMIZATION,
+		.family = AF_INET6,
+	},
+	[XFRM_MODE_TRANSPORT] = {
+		.encap = XFRM_MODE_TRANSPORT,
+		.family = AF_INET6,
+	},
+	[XFRM_MODE_TUNNEL] = {
+		.encap = XFRM_MODE_TUNNEL,
+		.flags = XFRM_MODE_FLAG_TUNNEL,
+		.family = AF_INET6,
+	},
+};
+
+static const struct xfrm_mode *xfrm_get_mode(unsigned int encap, int family)
 {
-	struct xfrm_state_afinfo *afinfo;
-	struct xfrm_mode **modemap;
-	int err;
-
-	if (unlikely(mode->encap >= XFRM_MODE_MAX))
-		return -EINVAL;
-
-	afinfo = xfrm_state_get_afinfo(family);
-	if (unlikely(afinfo == NULL))
-		return -EAFNOSUPPORT;
-
-	err = -EEXIST;
-	modemap = afinfo->mode_map;
-	spin_lock_bh(&xfrm_mode_lock);
-	if (modemap[mode->encap])
-		goto out;
-
-	err = -ENOENT;
-	if (!try_module_get(afinfo->owner))
-		goto out;
-
-	mode->afinfo = afinfo;
-	modemap[mode->encap] = mode;
-	err = 0;
-
-out:
-	spin_unlock_bh(&xfrm_mode_lock);
-	rcu_read_unlock();
-	return err;
-}
-EXPORT_SYMBOL(xfrm_register_mode);
-
-int xfrm_unregister_mode(struct xfrm_mode *mode, int family)
-{
-	struct xfrm_state_afinfo *afinfo;
-	struct xfrm_mode **modemap;
-	int err;
-
-	if (unlikely(mode->encap >= XFRM_MODE_MAX))
-		return -EINVAL;
-
-	afinfo = xfrm_state_get_afinfo(family);
-	if (unlikely(afinfo == NULL))
-		return -EAFNOSUPPORT;
-
-	err = -ENOENT;
-	modemap = afinfo->mode_map;
-	spin_lock_bh(&xfrm_mode_lock);
-	if (likely(modemap[mode->encap] == mode)) {
-		modemap[mode->encap] = NULL;
-		module_put(mode->afinfo->owner);
-		err = 0;
-	}
-
-	spin_unlock_bh(&xfrm_mode_lock);
-	rcu_read_unlock();
-	return err;
-}
-EXPORT_SYMBOL(xfrm_unregister_mode);
-
-static struct xfrm_mode *xfrm_get_mode(unsigned int encap, int family)
-{
-	struct xfrm_state_afinfo *afinfo;
-	struct xfrm_mode *mode;
-	int modload_attempted = 0;
+	const struct xfrm_mode *mode;
 
 	if (unlikely(encap >= XFRM_MODE_MAX))
 		return NULL;
 
-retry:
-	afinfo = xfrm_state_get_afinfo(family);
-	if (unlikely(afinfo == NULL))
-		return NULL;
-
-	mode = READ_ONCE(afinfo->mode_map[encap]);
-	if (unlikely(mode && !try_module_get(mode->owner)))
-		mode = NULL;
-
-	rcu_read_unlock();
-	if (!mode && !modload_attempted) {
-		request_module("xfrm-mode-%d-%d", family, encap);
-		modload_attempted = 1;
-		goto retry;
+	switch (family) {
+	case AF_INET:
+		mode = &xfrm4_mode_map[encap];
+		if (mode->family == family)
+			return mode;
+		break;
+	case AF_INET6:
+		mode = &xfrm6_mode_map[encap];
+		if (mode->family == family)
+			return mode;
+		break;
+	default:
+		break;
 	}
 
-	return mode;
-}
-
-static void xfrm_put_mode(struct xfrm_mode *mode)
-{
-	module_put(mode->owner);
+	return NULL;
 }
 
 void xfrm_state_free(struct xfrm_state *x)
@@ -434,7 +401,7 @@ EXPORT_SYMBOL(xfrm_state_free);
 
 static void ___xfrm_state_destroy(struct xfrm_state *x)
 {
-	tasklet_hrtimer_cancel(&x->mtimer);
+	hrtimer_cancel(&x->mtimer);
 	del_timer_sync(&x->rtimer);
 	kfree(x->aead);
 	kfree(x->aalg);
@@ -444,18 +411,14 @@ static void ___xfrm_state_destroy(struct xfrm_state *x)
 	kfree(x->coaddr);
 	kfree(x->replay_esn);
 	kfree(x->preplay_esn);
-	if (x->inner_mode)
-		xfrm_put_mode(x->inner_mode);
-	if (x->inner_mode_iaf)
-		xfrm_put_mode(x->inner_mode_iaf);
-	if (x->outer_mode)
-		xfrm_put_mode(x->outer_mode);
 	if (x->type_offload)
 		xfrm_put_type_offload(x->type_offload);
 	if (x->type) {
 		x->type->destructor(x);
 		xfrm_put_type(x->type);
 	}
+	if (x->xfrag.page)
+		put_page(x->xfrag.page);
 	xfrm_dev_state_free(x);
 	security_xfrm_state_free(x);
 	xfrm_state_free(x);
@@ -479,10 +442,10 @@ static void xfrm_state_gc_task(struct work_struct *work)
 
 static enum hrtimer_restart xfrm_timer_handler(struct hrtimer *me)
 {
-	struct tasklet_hrtimer *thr = container_of(me, struct tasklet_hrtimer, timer);
-	struct xfrm_state *x = container_of(thr, struct xfrm_state, mtimer);
-	unsigned long now = get_seconds();
-	long next = LONG_MAX;
+	struct xfrm_state *x = container_of(me, struct xfrm_state, mtimer);
+	enum hrtimer_restart ret = HRTIMER_NORESTART;
+	time64_t now = ktime_get_real_seconds();
+	time64_t next = TIME64_MAX;
 	int warn = 0;
 	int err = 0;
 
@@ -543,8 +506,9 @@ static enum hrtimer_restart xfrm_timer_handler(struct hrtimer *me)
 	if (warn)
 		km_state_expired(x, 0, 0);
 resched:
-	if (next != LONG_MAX) {
-		tasklet_hrtimer_start(&x->mtimer, ktime_set(next, 0), HRTIMER_MODE_REL);
+	if (next != TIME64_MAX) {
+		hrtimer_forward_now(&x->mtimer, ktime_set(next, 0));
+		ret = HRTIMER_RESTART;
 	}
 
 	goto out;
@@ -561,7 +525,7 @@ expired:
 
 out:
 	spin_unlock(&x->lock);
-	return HRTIMER_NORESTART;
+	return ret;
 }
 
 static void xfrm_replay_timer_handler(struct timer_list *t);
@@ -580,10 +544,10 @@ struct xfrm_state *xfrm_state_alloc(struct net *net)
 		INIT_HLIST_NODE(&x->bydst);
 		INIT_HLIST_NODE(&x->bysrc);
 		INIT_HLIST_NODE(&x->byspi);
-		tasklet_hrtimer_init(&x->mtimer, xfrm_timer_handler,
-					CLOCK_BOOTTIME, HRTIMER_MODE_ABS);
+		hrtimer_init(&x->mtimer, CLOCK_BOOTTIME, HRTIMER_MODE_ABS_SOFT);
+		x->mtimer.function = xfrm_timer_handler;
 		timer_setup(&x->rtimer, xfrm_replay_timer_handler, 0);
-		x->curlft.add_time = get_seconds();
+		x->curlft.add_time = ktime_get_real_seconds();
 		x->lft.soft_byte_limit = XFRM_INF;
 		x->lft.soft_packet_limit = XFRM_INF;
 		x->lft.hard_byte_limit = XFRM_INF;
@@ -629,6 +593,9 @@ int __xfrm_state_delete(struct xfrm_state *x)
 			hlist_del_rcu(&x->byspi);
 		net->xfrm.state_num--;
 		spin_unlock(&net->xfrm.xfrm_state_lock);
+
+		if (x->encap_sk)
+			sock_put(rcu_dereference_raw(x->encap_sk));
 
 		xfrm_dev_state_delete(x);
 
@@ -749,10 +716,9 @@ restart:
 	}
 out:
 	spin_unlock_bh(&net->xfrm.xfrm_state_lock);
-	if (cnt) {
+	if (cnt)
 		err = 0;
-		xfrm_policy_cache_flush();
-	}
+
 	return err;
 }
 EXPORT_SYMBOL(xfrm_state_flush);
@@ -803,7 +769,7 @@ void xfrm_sad_getinfo(struct net *net, struct xfrmk_sadinfo *si)
 {
 	spin_lock_bh(&net->xfrm.xfrm_state_lock);
 	si->sadcnt = net->xfrm.state_num;
-	si->sadhcnt = net->xfrm.state_hmask;
+	si->sadhcnt = net->xfrm.state_hmask + 1;
 	si->sadhmcnt = xfrm_state_hashmax;
 	spin_unlock_bh(&net->xfrm.xfrm_state_lock);
 }
@@ -1048,7 +1014,9 @@ found:
 				hlist_add_head_rcu(&x->byspi, net->xfrm.state_byspi + h);
 			}
 			x->lft.hard_add_expires_seconds = net->xfrm.sysctl_acq_expires;
-			tasklet_hrtimer_start(&x->mtimer, ktime_set(net->xfrm.sysctl_acq_expires, 0), HRTIMER_MODE_REL);
+			hrtimer_start(&x->mtimer,
+				      ktime_set(net->xfrm.sysctl_acq_expires, 0),
+				      HRTIMER_MODE_REL_SOFT);
 			net->xfrm.state_num++;
 			xfrm_hash_grow_check(net, x->bydst.next != NULL);
 			spin_unlock_bh(&net->xfrm.xfrm_state_lock);
@@ -1160,7 +1128,7 @@ static void __xfrm_state_insert(struct xfrm_state *x)
 		hlist_add_head_rcu(&x->byspi, net->xfrm.state_byspi + h);
 	}
 
-	tasklet_hrtimer_start(&x->mtimer, ktime_set(1, 0), HRTIMER_MODE_REL);
+	hrtimer_start(&x->mtimer, ktime_set(1, 0), HRTIMER_MODE_REL_SOFT);
 	if (x->replay_maxage)
 		mod_timer(&x->rtimer, jiffies + x->replay_maxage);
 
@@ -1267,7 +1235,9 @@ static struct xfrm_state *__find_acq_core(struct net *net,
 		x->mark.m = m->m;
 		x->lft.hard_add_expires_seconds = net->xfrm.sysctl_acq_expires;
 		xfrm_state_hold(x);
-		tasklet_hrtimer_start(&x->mtimer, ktime_set(net->xfrm.sysctl_acq_expires, 0), HRTIMER_MODE_REL);
+		hrtimer_start(&x->mtimer,
+			      ktime_set(net->xfrm.sysctl_acq_expires, 0),
+			      HRTIMER_MODE_REL_SOFT);
 		list_add(&x->km.all, &net->xfrm.state_all);
 		hlist_add_head_rcu(&x->bydst, net->xfrm.state_bydst + h);
 		h = xfrm_src_hash(net, daddr, saddr, family);
@@ -1572,7 +1542,8 @@ out:
 		memcpy(&x1->lft, &x->lft, sizeof(x1->lft));
 		x1->km.dying = 0;
 
-		tasklet_hrtimer_start(&x1->mtimer, ktime_set(1, 0), HRTIMER_MODE_REL);
+		hrtimer_start(&x1->mtimer, ktime_set(1, 0),
+			      HRTIMER_MODE_REL_SOFT);
 		if (x1->curlft.use_time)
 			xfrm_state_check_expire(x1);
 
@@ -1608,12 +1579,12 @@ EXPORT_SYMBOL(xfrm_state_update);
 int xfrm_state_check_expire(struct xfrm_state *x)
 {
 	if (!x->curlft.use_time)
-		x->curlft.use_time = get_seconds();
+		x->curlft.use_time = ktime_get_real_seconds();
 
 	if (x->curlft.bytes >= x->lft.hard_byte_limit ||
 	    x->curlft.packets >= x->lft.hard_packet_limit) {
 		x->km.state = XFRM_STATE_EXPIRED;
-		tasklet_hrtimer_start(&x->mtimer, 0, HRTIMER_MODE_REL);
+		hrtimer_start(&x->mtimer, 0, HRTIMER_MODE_REL_SOFT);
 		return -EINVAL;
 	}
 
@@ -2069,7 +2040,7 @@ int km_report(struct net *net, u8 proto, struct xfrm_selector *sel, xfrm_address
 }
 EXPORT_SYMBOL(km_report);
 
-bool km_is_alive(const struct km_event *c)
+static bool km_is_alive(const struct km_event *c)
 {
 	struct xfrm_mgr *km;
 	bool is_alive = false;
@@ -2085,7 +2056,6 @@ bool km_is_alive(const struct km_event *c)
 
 	return is_alive;
 }
-EXPORT_SYMBOL(km_is_alive);
 
 int xfrm_user_policy(struct sock *sk, int optname, u8 __user *optval, int optlen)
 {
@@ -2200,6 +2170,7 @@ struct xfrm_state_afinfo *xfrm_state_afinfo_get_rcu(unsigned int family)
 
 	return rcu_dereference(xfrm_state_afinfo[family]);
 }
+EXPORT_SYMBOL_GPL(xfrm_state_afinfo_get_rcu);
 
 struct xfrm_state_afinfo *xfrm_state_get_afinfo(unsigned int family)
 {
@@ -2247,8 +2218,8 @@ int xfrm_state_mtu(struct xfrm_state *x, int mtu)
 
 int __xfrm_init_state(struct xfrm_state *x, bool init_replay, bool offload)
 {
-	struct xfrm_state_afinfo *afinfo;
-	struct xfrm_mode *inner_mode;
+	const struct xfrm_mode *inner_mode;
+	const struct xfrm_state_afinfo *afinfo;
 	int family = x->props.family;
 	int err;
 
@@ -2274,24 +2245,21 @@ int __xfrm_init_state(struct xfrm_state *x, bool init_replay, bool offload)
 			goto error;
 
 		if (!(inner_mode->flags & XFRM_MODE_FLAG_TUNNEL) &&
-		    family != x->sel.family) {
-			xfrm_put_mode(inner_mode);
+		    family != x->sel.family)
 			goto error;
-		}
 
 		x->inner_mode = inner_mode;
 	} else {
-		struct xfrm_mode *inner_mode_iaf;
+		const struct xfrm_mode *inner_mode_iaf;
 		int iafamily = AF_INET;
 
 		inner_mode = xfrm_get_mode(x->props.mode, x->props.family);
 		if (inner_mode == NULL)
 			goto error;
 
-		if (!(inner_mode->flags & XFRM_MODE_FLAG_TUNNEL)) {
-			xfrm_put_mode(inner_mode);
+		if (!(inner_mode->flags & XFRM_MODE_FLAG_TUNNEL))
 			goto error;
-		}
+
 		x->inner_mode = inner_mode;
 
 		if (x->props.family == AF_INET)
@@ -2301,8 +2269,6 @@ int __xfrm_init_state(struct xfrm_state *x, bool init_replay, bool offload)
 		if (inner_mode_iaf) {
 			if (inner_mode_iaf->flags & XFRM_MODE_FLAG_TUNNEL)
 				x->inner_mode_iaf = inner_mode_iaf;
-			else
-				xfrm_put_mode(inner_mode_iaf);
 		}
 	}
 

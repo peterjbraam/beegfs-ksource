@@ -8,6 +8,8 @@
 #include <net/rtnetlink.h>
 #include <net/switchdev.h>
 
+#define IANA_VXLAN_UDP_PORT     4789
+
 /* VXLAN protocol (RFC 7348) header:
  * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
  * |R|R|R|R|I|R|R|R|               Reserved                        |
@@ -195,6 +197,7 @@ struct vxlan_rdst {
 	u8			 offloaded:1;
 	__be32			 remote_vni;
 	u32			 remote_ifindex;
+	struct net_device	 *remote_dev;
 	struct list_head	 list;
 	struct rcu_head		 rcu;
 	struct dst_cache	 dst_cache;
@@ -216,6 +219,7 @@ struct vxlan_config {
 	unsigned long		age_interval;
 	unsigned int		addrmax;
 	bool			no_share;
+	enum ifla_vxlan_df	df;
 };
 
 struct vxlan_dev_node {

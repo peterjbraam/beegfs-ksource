@@ -449,17 +449,6 @@ void generic_end_io_acct(struct request_queue *q, int op,
 				struct hd_struct *part,
 				unsigned long start_time);
 
-#ifndef ARCH_IMPLEMENTS_FLUSH_DCACHE_PAGE
-# error	"You should define ARCH_IMPLEMENTS_FLUSH_DCACHE_PAGE for your platform"
-#endif
-#if ARCH_IMPLEMENTS_FLUSH_DCACHE_PAGE
-extern void bio_flush_dcache_pages(struct bio *bi);
-#else
-static inline void bio_flush_dcache_pages(struct bio *bi)
-{
-}
-#endif
-
 extern void bio_copy_data_iter(struct bio *dst, struct bvec_iter *dst_iter,
 			       struct bio *src, struct bvec_iter *src_iter);
 extern void bio_copy_data(struct bio *dst, struct bio *src);
@@ -472,6 +461,7 @@ extern struct bio *bio_copy_user_iov(struct request_queue *,
 				     gfp_t);
 extern int bio_uncopy_user(struct bio *);
 void zero_fill_bio_iter(struct bio *bio, struct bvec_iter iter);
+void bio_truncate(struct bio *bio, unsigned new_size);
 
 static inline void zero_fill_bio(struct bio *bio)
 {
@@ -825,6 +815,20 @@ static inline int bio_integrity_add_page(struct bio *bio, struct page *page,
 }
 
 #endif /* CONFIG_BLK_DEV_INTEGRITY */
+
+/*
+ * Mark a bio as polled. Note that for async polled IO, the caller must
+ * expect -EWOULDBLOCK if we cannot allocate a request (or other resources).
+ * We cannot block waiting for requests on polled IO, as those completions
+ * must be found by the caller. This is different than IRQ driven IO, where
+ * it's safe to wait for IO to complete.
+ */
+static inline void bio_set_polled(struct bio *bio, struct kiocb *kiocb)
+{
+	bio->bi_opf |= REQ_HIPRI;
+	if (!is_sync_kiocb(kiocb))
+		bio->bi_opf |= REQ_NOWAIT;
+}
 
 #endif /* CONFIG_BLOCK */
 #endif /* __LINUX_BIO_H */

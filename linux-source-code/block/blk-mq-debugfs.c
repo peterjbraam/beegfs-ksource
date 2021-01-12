@@ -23,11 +23,12 @@
 #include "blk-mq.h"
 #include "blk-mq-debugfs.h"
 #include "blk-mq-tag.h"
+#include "blk-rq-qos.h"
 
 static void print_stat(struct seq_file *m, struct blk_rq_stat *stat)
 {
 	if (stat->nr_samples) {
-		seq_printf(m, "samples=%d, mean=%lld, min=%llu, max=%llu",
+		seq_printf(m, "samples=%d, mean=%llu, min=%llu, max=%llu",
 			   stat->nr_samples, stat->mean, stat->min, stat->max);
 	} else {
 		seq_puts(m, "samples=0");
@@ -39,13 +40,13 @@ static int queue_poll_stat_show(void *data, struct seq_file *m)
 	struct request_queue *q = data;
 	int bucket;
 
-	for (bucket = 0; bucket < BLK_MQ_POLL_STATS_BKTS/2; bucket++) {
-		seq_printf(m, "read  (%d Bytes): ", 1 << (9+bucket));
-		print_stat(m, &q->poll_stat[2*bucket]);
+	for (bucket = 0; bucket < (BLK_MQ_POLL_STATS_BKTS / 2); bucket++) {
+		seq_printf(m, "read  (%d Bytes): ", 1 << (9 + bucket));
+		print_stat(m, &q->poll_stat[2 * bucket]);
 		seq_puts(m, "\n");
 
-		seq_printf(m, "write (%d Bytes): ",  1 << (9+bucket));
-		print_stat(m, &q->poll_stat[2*bucket+1]);
+		seq_printf(m, "write (%d Bytes): ",  1 << (9 + bucket));
+		print_stat(m, &q->poll_stat[2 * bucket + 1]);
 		seq_puts(m, "\n");
 	}
 	return 0;
@@ -114,7 +115,6 @@ static int queue_pm_only_show(void *data, struct seq_file *m)
 static const char *const blk_queue_flag_name[] = {
 	QUEUE_FLAG_NAME(STOPPED),
 	QUEUE_FLAG_NAME(DYING),
-	QUEUE_FLAG_NAME(BIDI),
 	QUEUE_FLAG_NAME(NOMERGES),
 	QUEUE_FLAG_NAME(SAME_COMP),
 	QUEUE_FLAG_NAME(FAIL_IO),
@@ -224,6 +224,7 @@ static const char *const hctx_state_name[] = {
 	HCTX_STATE_NAME(STOPPED),
 	HCTX_STATE_NAME(TAG_ACTIVE),
 	HCTX_STATE_NAME(SCHED_RESTART),
+	HCTX_STATE_NAME(INACTIVE),
 };
 #undef HCTX_STATE_NAME
 
@@ -250,6 +251,7 @@ static const char *const hctx_flag_name[] = {
 	HCTX_FLAG_NAME(TAG_SHARED),
 	HCTX_FLAG_NAME(BLOCKING),
 	HCTX_FLAG_NAME(NO_SCHED),
+	HCTX_FLAG_NAME(STACKING),
 };
 #undef HCTX_FLAG_NAME
 
@@ -271,23 +273,6 @@ static int hctx_flags_show(void *data, struct seq_file *m)
 	seq_puts(m, "\n");
 	return 0;
 }
-
-#define REQ_OP_NAME(name) [REQ_OP_##name] = #name
-static const char *const op_name[] = {
-	REQ_OP_NAME(READ),
-	REQ_OP_NAME(WRITE),
-	REQ_OP_NAME(FLUSH),
-	REQ_OP_NAME(DISCARD),
-	REQ_OP_NAME(SECURE_ERASE),
-	REQ_OP_NAME(ZONE_RESET),
-	REQ_OP_NAME(WRITE_SAME),
-	REQ_OP_NAME(WRITE_ZEROES),
-	REQ_OP_NAME(SCSI_IN),
-	REQ_OP_NAME(SCSI_OUT),
-	REQ_OP_NAME(DRV_IN),
-	REQ_OP_NAME(DRV_OUT),
-};
-#undef REQ_OP_NAME
 
 #define CMD_FLAG_NAME(name) [__REQ_##name] = #name
 static const char *const cmd_flag_name[] = {
@@ -351,13 +336,14 @@ static const char *blk_mq_rq_state_name(enum mq_rq_state rq_state)
 int __blk_mq_debugfs_rq_show(struct seq_file *m, struct request *rq)
 {
 	const struct blk_mq_ops *const mq_ops = rq->q->mq_ops;
-	const unsigned int op = rq->cmd_flags & REQ_OP_MASK;
+	const unsigned int op = req_op(rq);
+	const char *op_str = blk_op_str(op);
 
 	seq_printf(m, "%p {.op=", rq);
-	if (op < ARRAY_SIZE(op_name) && op_name[op])
-		seq_printf(m, "%s", op_name[op]);
+	if (strcmp(op_str, "UNKNOWN") == 0)
+		seq_printf(m, "%u", op);
 	else
-		seq_printf(m, "%d", op);
+		seq_printf(m, "%s", op_str);
 	seq_puts(m, ", .cmd_flags=");
 	blk_flags_show(m, rq->cmd_flags & ~REQ_OP_MASK, cmd_flag_name,
 		       ARRAY_SIZE(cmd_flag_name));
@@ -789,8 +775,8 @@ static int blk_mq_debugfs_release(struct inode *inode, struct file *file)
 
 	if (attr->show)
 		return single_release(inode, file);
-	else
-		return seq_release(inode, file);
+
+	return seq_release(inode, file);
 }
 
 static const struct file_operations blk_mq_debugfs_fops = {
@@ -876,6 +862,15 @@ int blk_mq_debugfs_register(struct request_queue *q)
 		if (q->elevator && !hctx->sched_debugfs_dir &&
 		    blk_mq_debugfs_register_sched_hctx(q, hctx))
 			goto err;
+	}
+
+	if (q->rq_qos) {
+		struct rq_qos *rqos = q->rq_qos;
+
+		while (rqos) {
+			blk_mq_debugfs_register_rqos(rqos);
+			rqos = rqos->next;
+		}
 	}
 
 	return 0;
@@ -998,6 +993,50 @@ void blk_mq_debugfs_unregister_sched(struct request_queue *q)
 {
 	debugfs_remove_recursive(q->sched_debugfs_dir);
 	q->sched_debugfs_dir = NULL;
+}
+
+void blk_mq_debugfs_unregister_rqos(struct rq_qos *rqos)
+{
+	debugfs_remove_recursive(rqos->debugfs_dir);
+	rqos->debugfs_dir = NULL;
+}
+
+int blk_mq_debugfs_register_rqos(struct rq_qos *rqos)
+{
+	struct request_queue *q = rqos->q;
+	const char *dir_name = rq_qos_id_to_name(rqos->id);
+
+	if (!q->debugfs_dir)
+		return -ENOENT;
+
+	if (rqos->debugfs_dir || !rqos->ops->debugfs_attrs)
+		return 0;
+
+	if (!q->rqos_debugfs_dir) {
+		q->rqos_debugfs_dir = debugfs_create_dir("rqos",
+							 q->debugfs_dir);
+		if (!q->rqos_debugfs_dir)
+			return -ENOMEM;
+	}
+
+	rqos->debugfs_dir = debugfs_create_dir(dir_name,
+					       rqos->q->rqos_debugfs_dir);
+	if (!rqos->debugfs_dir)
+		return -ENOMEM;
+
+	if (!debugfs_create_files(rqos->debugfs_dir, rqos,
+				  rqos->ops->debugfs_attrs))
+		goto err;
+	return 0;
+ err:
+	blk_mq_debugfs_unregister_rqos(rqos);
+	return -ENOMEM;
+}
+
+void blk_mq_debugfs_unregister_queue_rqos(struct request_queue *q)
+{
+	debugfs_remove_recursive(q->rqos_debugfs_dir);
+	q->rqos_debugfs_dir = NULL;
 }
 
 int blk_mq_debugfs_register_sched_hctx(struct request_queue *q,

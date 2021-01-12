@@ -30,6 +30,8 @@
 #include <asm/xive.h>
 #include <asm/xive-regs.h>
 #include <asm/hvcall.h>
+#include <asm/svm.h>
+#include <asm/ultravisor.h>
 
 #include "xive-internal.h"
 
@@ -211,6 +213,38 @@ static long plpar_int_set_source_config(unsigned long flags,
 		       lisn, target, prio, rc);
 		return rc;
 	}
+
+	return 0;
+}
+
+static long plpar_int_get_source_config(unsigned long flags,
+					unsigned long lisn,
+					unsigned long *target,
+					unsigned long *prio,
+					unsigned long *sw_irq)
+{
+	unsigned long retbuf[PLPAR_HCALL_BUFSIZE];
+	long rc;
+
+	pr_devel("H_INT_GET_SOURCE_CONFIG flags=%lx lisn=%lx\n", flags, lisn);
+
+	do {
+		rc = plpar_hcall(H_INT_GET_SOURCE_CONFIG, retbuf, flags, lisn,
+				 target, prio, sw_irq);
+	} while (plpar_busy_delay(rc));
+
+	if (rc) {
+		pr_err("H_INT_GET_SOURCE_CONFIG lisn=%ld failed %ld\n",
+		       lisn, rc);
+		return rc;
+	}
+
+	*target = retbuf[0];
+	*prio   = retbuf[1];
+	*sw_irq = retbuf[2];
+
+	pr_devel("H_INT_GET_SOURCE_CONFIG target=%lx prio=%lx sw_irq=%lx\n",
+		retbuf[0], retbuf[1], retbuf[2]);
 
 	return 0;
 }
@@ -398,6 +432,24 @@ static int xive_spapr_configure_irq(u32 hw_irq, u32 target, u8 prio, u32 sw_irq)
 	return rc == 0 ? 0 : -ENXIO;
 }
 
+static int xive_spapr_get_irq_config(u32 hw_irq, u32 *target, u8 *prio,
+				     u32 *sw_irq)
+{
+	long rc;
+	unsigned long h_target;
+	unsigned long h_prio;
+	unsigned long h_sw_irq;
+
+	rc = plpar_int_get_source_config(0, hw_irq, &h_target, &h_prio,
+					 &h_sw_irq);
+
+	*target = h_target;
+	*prio = h_prio;
+	*sw_irq = h_sw_irq;
+
+	return rc == 0 ? 0 : -ENXIO;
+}
+
 /* This can be called multiple time to change a queue configuration */
 static int xive_spapr_configure_queue(u32 target, struct xive_q *q, u8 prio,
 				   __be32 *qpage, u32 order)
@@ -443,6 +495,9 @@ static int xive_spapr_configure_queue(u32 target, struct xive_q *q, u8 prio,
 		rc = -EIO;
 	} else {
 		q->qpage = qpage;
+		if (is_secure_guest())
+			uv_share_page(PHYS_PFN(qpage_phys),
+					1 << xive_alloc_order(order));
 	}
 fail:
 	return rc;
@@ -476,6 +531,8 @@ static void xive_spapr_cleanup_queue(unsigned int cpu, struct xive_cpu *xc,
 		       hw_cpu, prio);
 
 	alloc_order = xive_alloc_order(xive_queue_shift);
+	if (is_secure_guest())
+		uv_unshare_page(PHYS_PFN(__pa(q->qpage)), 1 << alloc_order);
 	free_pages((unsigned long)q->qpage, alloc_order);
 	q->qpage = NULL;
 }
@@ -502,11 +559,11 @@ static int xive_spapr_get_ipi(unsigned int cpu, struct xive_cpu *xc)
 
 static void xive_spapr_put_ipi(unsigned int cpu, struct xive_cpu *xc)
 {
-	if (!xc->hw_ipi)
+	if (xc->hw_ipi == XIVE_BAD_IRQ)
 		return;
 
 	xive_irq_bitmap_free(xc->hw_ipi);
-	xc->hw_ipi = 0;
+	xc->hw_ipi = XIVE_BAD_IRQ;
 }
 #endif /* CONFIG_SMP */
 
@@ -590,6 +647,7 @@ static void xive_spapr_sync_source(u32 hw_irq)
 static const struct xive_ops xive_spapr_ops = {
 	.populate_irq_data	= xive_spapr_populate_irq_data,
 	.configure_irq		= xive_spapr_configure_irq,
+	.get_irq_config		= xive_spapr_get_irq_config,
 	.setup_queue		= xive_spapr_setup_queue,
 	.cleanup_queue		= xive_spapr_cleanup_queue,
 	.match			= xive_spapr_match,

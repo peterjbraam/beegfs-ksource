@@ -10,9 +10,21 @@
  */
 #undef mmu_notifier
 #undef mmu_notifier_ops
+#undef mmu_notifier_put
 
 #define to_rh_drm_mmu_notifier(mn) \
 	container_of(mn, struct __rh_drm_mmu_notifier, base)
+
+static inline struct mmu_notifier_range
+fill_range(struct mm_struct *mm, unsigned long start, unsigned long end)
+{
+	return (struct mmu_notifier_range) {
+		.mm = mm,
+		.start = start,
+		.end = end,
+	        .flags = MMU_NOTIFIER_RANGE_BLOCKABLE,
+	};
+}
 
 static void rh_drm_mmu_notifier_release(struct mmu_notifier *mn,
 					struct mm_struct *mm)
@@ -68,12 +80,7 @@ rh_drm_mmu_notifier_invalidate_range_start(struct mmu_notifier *mn,
 					   unsigned long end)
 {
 	struct __rh_drm_mmu_notifier *drm_mn = to_rh_drm_mmu_notifier(mn);
-	struct mmu_notifier_range range = {
-		.mm = mm,
-		.start = start,
-		.end = end,
-		.blockable = true,
-	};
+	struct mmu_notifier_range range = fill_range(mm, start, end);
 
 	drm_mn->ops->invalidate_range_start(drm_mn, &range);
 }
@@ -84,9 +91,7 @@ static void rh_drm_mmu_notifier_invalidate_range_end(struct mmu_notifier *mn,
 						     unsigned long end)
 {
 	struct __rh_drm_mmu_notifier *drm_mn = to_rh_drm_mmu_notifier(mn);
-	struct mmu_notifier_range range = {
-		.mm = mm, .start = start, .end = end
-	};
+	struct mmu_notifier_range range = fill_range(mm, start, end);
 
 	drm_mn->ops->invalidate_range_end(drm_mn, &range);
 }
@@ -101,11 +106,34 @@ void rh_drm_mmu_notifier_invalidate_range(struct mmu_notifier *mn,
 	drm_mn->ops->invalidate_range(drm_mn, mm, start, end);
 }
 
+struct mmu_notifier *rh_drm_mmu_notifier_alloc_notifier(struct mm_struct *mm)
+{
+	/* need to wrap mmu_notifier_get_locked if anyone start using it */
+	WARN_ON(1);
+	return NULL; // Unneeded in DRM at this time.
+}
+
+void rh_drm_mmu_notifier_free_notifier(struct mmu_notifier *mn)
+{
+	struct __rh_drm_mmu_notifier *drm_mn = to_rh_drm_mmu_notifier(mn);
+	drm_mn->ops->free_notifier(drm_mn);
+}
+
+void __rh_drm_mmu_notifier_put(struct __rh_drm_mmu_notifier *mn)
+{
+	mmu_notifier_put(&mn->base);
+}
+EXPORT_SYMBOL(__rh_drm_mmu_notifier_put);
+
 int __rh_drm_mmu_notifier_register(struct __rh_drm_mmu_notifier *mn,
 				   struct mm_struct *mm,
 				   int (*orig_func)(struct mmu_notifier *,
 						    struct mm_struct *))
 {
+	mn->base._rh = &mn->_rh;
+	mn->_rh.back_ptr = &mn->base;
+	RH_KABI_AUX_SET_SIZE(&mn->base, mmu_notifier);
+
 	memset(&mn->base_ops, 0, sizeof(mn->base_ops));
 	mn->base_ops.flags = mn->ops->flags;
 
@@ -121,6 +149,8 @@ int __rh_drm_mmu_notifier_register(struct __rh_drm_mmu_notifier *mn,
 	C(invalidate_range);
 	C(invalidate_range_start);
 	C(invalidate_range_end);
+	C(alloc_notifier);
+	C(free_notifier);
 #undef C
 
 	mn->base.ops = &mn->base_ops;

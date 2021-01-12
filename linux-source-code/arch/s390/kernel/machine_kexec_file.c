@@ -10,7 +10,7 @@
 #include <linux/elf.h>
 #include <linux/errno.h>
 #include <linux/kexec.h>
-#include <linux/module.h>
+#include <linux/module_signature.h>
 #include <linux/verification.h>
 #include <asm/boot_data.h>
 #include <asm/ipl.h>
@@ -22,29 +22,7 @@ const struct kexec_file_ops * const kexec_file_loaders[] = {
 	NULL,
 };
 
-#ifdef CONFIG_KEXEC_VERIFY_SIG
-/*
- * Module signature information block.
- *
- * The constituents of the signature section are, in order:
- *
- *	- Signer's name
- *	- Key identifier
- *	- Signature data
- *	- Information block
- */
-struct module_signature {
-	u8	algo;		/* Public-key crypto algorithm [0] */
-	u8	hash;		/* Digest algorithm [0] */
-	u8	id_type;	/* Key identifier type [PKEY_ID_PKCS7] */
-	u8	signer_len;	/* Length of signer's name [0] */
-	u8	key_id_len;	/* Length of key identifier [0] */
-	u8	__pad[3];
-	__be32	sig_len;	/* Length of signature data */
-};
-
-#define PKEY_ID_PKCS7 2
-
+#ifdef CONFIG_KEXEC_SIG
 int s390_verify_sig(const char *kernel, unsigned long kernel_len)
 {
 	const unsigned long marker_len = sizeof(MODULE_SIG_STRING) - 1;
@@ -90,7 +68,7 @@ int s390_verify_sig(const char *kernel, unsigned long kernel_len)
 				      VERIFYING_MODULE_SIGNATURE,
 				      NULL, NULL);
 }
-#endif /* CONFIG_KEXEC_VERIFY_SIG */
+#endif /* CONFIG_KEXEC_SIG */
 
 static int kexec_file_update_purgatory(struct kimage *image,
 				       struct s390_load_data *data)
@@ -173,7 +151,7 @@ static int kexec_file_add_initrd(struct kimage *image,
 		buf.mem += crashk_res.start;
 	buf.memsz = buf.bufsz;
 
-	data->parm->initrd_start = buf.mem;
+	data->parm->initrd_start = data->memsz;
 	data->parm->initrd_size = buf.memsz;
 	data->memsz += buf.memsz;
 
@@ -290,7 +268,7 @@ int arch_kexec_apply_relocations_add(struct purgatory_info *pi,
 				     const Elf_Shdr *symtab)
 {
 	Elf_Rela *relas;
-	int i;
+	int i, r_type;
 
 	relas = (void *)pi->ehdr + relsec->sh_offset;
 
@@ -324,46 +302,8 @@ int arch_kexec_apply_relocations_add(struct purgatory_info *pi,
 
 		addr = section->sh_addr + relas[i].r_offset;
 
-		switch (ELF64_R_TYPE(relas[i].r_info)) {
-		case R_390_8:		/* Direct 8 bit.   */
-			*(u8 *)loc = val;
-			break;
-		case R_390_12:		/* Direct 12 bit.  */
-			*(u16 *)loc &= 0xf000;
-			*(u16 *)loc |= val & 0xfff;
-			break;
-		case R_390_16:		/* Direct 16 bit.  */
-			*(u16 *)loc = val;
-			break;
-		case R_390_20:		/* Direct 20 bit.  */
-			*(u32 *)loc &= 0xf00000ff;
-			*(u32 *)loc |= (val & 0xfff) << 16;	/* DL */
-			*(u32 *)loc |= (val & 0xff000) >> 4;	/* DH */
-			break;
-		case R_390_32:		/* Direct 32 bit.  */
-			*(u32 *)loc = val;
-			break;
-		case R_390_64:		/* Direct 64 bit.  */
-			*(u64 *)loc = val;
-			break;
-		case R_390_PC16:	/* PC relative 16 bit.	*/
-			*(u16 *)loc = (val - addr);
-			break;
-		case R_390_PC16DBL:	/* PC relative 16 bit shifted by 1.  */
-			*(u16 *)loc = (val - addr) >> 1;
-			break;
-		case R_390_PC32DBL:	/* PC relative 32 bit shifted by 1.  */
-			*(u32 *)loc = (val - addr) >> 1;
-			break;
-		case R_390_PC32:	/* PC relative 32 bit.	*/
-			*(u32 *)loc = (val - addr);
-			break;
-		case R_390_PC64:	/* PC relative 64 bit.	*/
-			*(u64 *)loc = (val - addr);
-			break;
-		default:
-			break;
-		}
+		r_type = ELF64_R_TYPE(relas[i].r_info);
+		arch_kexec_do_relocs(r_type, loc, val, addr);
 	}
 	return 0;
 }
@@ -375,10 +315,8 @@ int arch_kexec_kernel_image_probe(struct kimage *image, void *buf,
 	 * load memory in head.S will be accessed, e.g. to register the next
 	 * command line. If the next kernel were smaller the current kernel
 	 * will panic at load.
-	 *
-	 * 0x11000 = sizeof(head.S)
 	 */
-	if (buf_len < 0x11000)
+	if (buf_len < HEAD_END)
 		return -ENOEXEC;
 
 	return kexec_image_probe_default(image, buf, buf_len);

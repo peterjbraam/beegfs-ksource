@@ -33,6 +33,7 @@ available subsections can be seen below.
    pci/index
    spi
    i2c
+   ipmb
    hsi
    edac
    scsi
@@ -40,6 +41,7 @@ available subsections can be seen below.
    target
    mtdnand
    miscellaneous
+   mei/index
    w1
    rapidio
    s390-drivers

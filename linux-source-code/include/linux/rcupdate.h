@@ -89,7 +89,7 @@ static inline int rcu_preempt_depth(void)
 /* Internal to kernel */
 void rcu_init(void);
 extern int rcu_scheduler_active __read_mostly;
-void rcu_check_callbacks(int user);
+void rcu_sched_clock_irq(int user);
 void rcu_report_dead(unsigned int cpu);
 void rcutree_migrate_callbacks(int cpu);
 
@@ -225,7 +225,7 @@ static inline void rcu_lock_acquire(struct lockdep_map *map)
 
 static inline void rcu_lock_release(struct lockdep_map *map)
 {
-	lock_release(map, 1, _THIS_IP_);
+	lock_release(map, _THIS_IP_);
 }
 
 extern struct lockdep_map rcu_lock_map;
@@ -236,6 +236,7 @@ int debug_lockdep_rcu_enabled(void);
 int rcu_read_lock_held(void);
 int rcu_read_lock_bh_held(void);
 int rcu_read_lock_sched_held(void);
+int rcu_read_lock_any_held(void);
 
 #else /* #ifdef CONFIG_DEBUG_LOCK_ALLOC */
 
@@ -256,6 +257,12 @@ static inline int rcu_read_lock_sched_held(void)
 {
 	return !preemptible();
 }
+
+static inline int rcu_read_lock_any_held(void)
+{
+	return !preemptible();
+}
+
 #endif /* #else #ifdef CONFIG_DEBUG_LOCK_ALLOC */
 
 #ifdef CONFIG_PROVE_RCU
@@ -309,16 +316,16 @@ static inline void rcu_preempt_sleep_check(void) { }
  */
 
 #ifdef __CHECKER__
-#define rcu_dereference_sparse(p, space) \
+#define rcu_check_sparse(p, space) \
 	((void)(((typeof(*p) space *)p) == p))
 #else /* #ifdef __CHECKER__ */
-#define rcu_dereference_sparse(p, space)
+#define rcu_check_sparse(p, space)
 #endif /* #else #ifdef __CHECKER__ */
 
 #define __rcu_access_pointer(p, space) \
 ({ \
 	typeof(*p) *_________p1 = (typeof(*p) *__force)READ_ONCE(p); \
-	rcu_dereference_sparse(p, space); \
+	rcu_check_sparse(p, space); \
 	((typeof(*p) __force __kernel *)(_________p1)); \
 })
 #define __rcu_dereference_check(p, c, space) \
@@ -326,13 +333,13 @@ static inline void rcu_preempt_sleep_check(void) { }
 	/* Dependency order vs. p above. */ \
 	typeof(*p) *________p1 = (typeof(*p) *__force)READ_ONCE(p); \
 	RCU_LOCKDEP_WARN(!(c), "suspicious rcu_dereference_check() usage"); \
-	rcu_dereference_sparse(p, space); \
+	rcu_check_sparse(p, space); \
 	((typeof(*p) __force __kernel *)(________p1)); \
 })
 #define __rcu_dereference_protected(p, c, space) \
 ({ \
 	RCU_LOCKDEP_WARN(!(c), "suspicious rcu_dereference_protected() usage"); \
-	rcu_dereference_sparse(p, space); \
+	rcu_check_sparse(p, space); \
 	((typeof(*p) __force __kernel *)(p)); \
 })
 #define rcu_dereference_raw(p) \
@@ -382,12 +389,31 @@ static inline void rcu_preempt_sleep_check(void) { }
 #define rcu_assign_pointer(p, v)					      \
 ({									      \
 	uintptr_t _r_a_p__v = (uintptr_t)(v);				      \
+	rcu_check_sparse(p, __rcu);				      \
 									      \
 	if (__builtin_constant_p(v) && (_r_a_p__v) == (uintptr_t)NULL)	      \
 		WRITE_ONCE((p), (typeof(p))(_r_a_p__v));		      \
 	else								      \
 		smp_store_release(&p, RCU_INITIALIZER((typeof(p))_r_a_p__v)); \
 	_r_a_p__v;							      \
+})
+
+/**
+ * rcu_replace_pointer() - replace an RCU pointer, returning its old value
+ * @rcu_ptr: RCU pointer, whose old value is returned
+ * @ptr: regular pointer
+ * @c: the lockdep conditions under which the dereference will take place
+ *
+ * Perform a replacement, where @rcu_ptr is an RCU-annotated
+ * pointer and @c is the lockdep argument that is passed to the
+ * rcu_dereference_protected() call used to read that pointer.  The old
+ * value of @rcu_ptr is returned, and @rcu_ptr is set to @ptr.
+ */
+#define rcu_replace_pointer(rcu_ptr, ptr, c)				\
+({									\
+	typeof(ptr) __tmp = rcu_dereference_protected((rcu_ptr), (c));	\
+	rcu_assign_pointer((rcu_ptr), (ptr));				\
+	__tmp;								\
 })
 
 /**
@@ -593,7 +619,7 @@ static inline void rcu_preempt_sleep_check(void) { }
  *
  * In non-preemptible RCU implementations (TREE_RCU and TINY_RCU),
  * it is illegal to block while in an RCU read-side critical section.
- * In preemptible RCU implementations (PREEMPT_RCU) in CONFIG_PREEMPT
+ * In preemptible RCU implementations (PREEMPT_RCU) in CONFIG_PREEMPTION
  * kernel builds, RCU read-side critical sections may be preempted,
  * but explicit blocking is illegal.  Finally, in preemptible RCU
  * implementations in real-time (with -rt patchset) kernel builds, RCU
@@ -785,7 +811,7 @@ static inline notrace void rcu_read_unlock_sched_notrace(void)
  */
 #define RCU_INIT_POINTER(p, v) \
 	do { \
-		rcu_dereference_sparse(p, __rcu); \
+		rcu_check_sparse(p, __rcu); \
 		WRITE_ONCE(p, RCU_INITIALIZER(v)); \
 	} while (0)
 
@@ -817,7 +843,7 @@ static inline notrace void rcu_read_unlock_sched_notrace(void)
 /**
  * kfree_rcu() - kfree an object after a grace period.
  * @ptr:	pointer to kfree
- * @rcu_head:	the name of the struct rcu_head within the type of @ptr.
+ * @rhf:	the name of the struct rcu_head within the type of @ptr.
  *
  * Many rcu callbacks functions just call kfree() on the base structure.
  * These functions are trivial, but their size adds up, and furthermore
@@ -840,9 +866,13 @@ static inline notrace void rcu_read_unlock_sched_notrace(void)
  * The BUILD_BUG_ON check must not involve any function calls, hence the
  * checks are done in macros here.
  */
-#define kfree_rcu(ptr, rcu_head)					\
-	__kfree_rcu(&((ptr)->rcu_head), offsetof(typeof(*(ptr)), rcu_head))
-
+#define kfree_rcu(ptr, rhf)						\
+do {									\
+	typeof (ptr) ___p = (ptr);					\
+									\
+	if (___p)							\
+		__kfree_rcu(&((___p)->rhf), offsetof(typeof(*(ptr)), rhf)); \
+} while (0)
 
 /*
  * Place this after a lock-acquisition primitive to guarantee that
@@ -859,7 +889,7 @@ static inline notrace void rcu_read_unlock_sched_notrace(void)
 
 /* Has the specified rcu_head structure been handed to call_rcu()? */
 
-/*
+/**
  * rcu_head_init - Initialize rcu_head for rcu_head_after_call_rcu()
  * @rhp: The rcu_head structure to initialize.
  *
@@ -874,10 +904,10 @@ static inline void rcu_head_init(struct rcu_head *rhp)
 	rhp->func = (rcu_callback_t)~0L;
 }
 
-/*
+/**
  * rcu_head_after_call_rcu - Has this rcu_head been passed to call_rcu()?
  * @rhp: The rcu_head structure to test.
- * @func: The function passed to call_rcu() along with @rhp.
+ * @f: The function passed to call_rcu() along with @rhp.
  *
  * Returns @true if the @rhp has been passed to call_rcu() with @func,
  * and @false otherwise.  Emits a warning in any other case, including
@@ -890,63 +920,12 @@ static inline void rcu_head_init(struct rcu_head *rhp)
 static inline bool
 rcu_head_after_call_rcu(struct rcu_head *rhp, rcu_callback_t f)
 {
-	if (READ_ONCE(rhp->func) == f)
+	rcu_callback_t func = READ_ONCE(rhp->func);
+
+	if (func == f)
 		return true;
-	WARN_ON_ONCE(READ_ONCE(rhp->func) != (rcu_callback_t)~0L);
+	WARN_ON_ONCE(func != (rcu_callback_t)~0L);
 	return false;
-}
-
-
-/* Transitional pre-consolidation compatibility definitions. */
-
-static inline void synchronize_rcu_bh(void)
-{
-	synchronize_rcu();
-}
-
-static inline void synchronize_rcu_bh_expedited(void)
-{
-	synchronize_rcu_expedited();
-}
-
-static inline void call_rcu_bh(struct rcu_head *head, rcu_callback_t func)
-{
-	call_rcu(head, func);
-}
-
-static inline void rcu_barrier_bh(void)
-{
-	rcu_barrier();
-}
-
-static inline void synchronize_sched(void)
-{
-	synchronize_rcu();
-}
-
-static inline void synchronize_sched_expedited(void)
-{
-	synchronize_rcu_expedited();
-}
-
-static inline void call_rcu_sched(struct rcu_head *head, rcu_callback_t func)
-{
-	call_rcu(head, func);
-}
-
-static inline void rcu_barrier_sched(void)
-{
-	rcu_barrier();
-}
-
-static inline unsigned long get_state_synchronize_sched(void)
-{
-	return get_state_synchronize_rcu();
-}
-
-static inline void cond_synchronize_sched(unsigned long oldstate)
-{
-	cond_synchronize_rcu(oldstate);
 }
 
 #endif /* __LINUX_RCUPDATE_H */

@@ -268,6 +268,12 @@ struct css_set {
 
 	/* For RCU-protected deletion */
 	struct rcu_head rcu_head;
+
+	/*
+	 * RHEL8: css_set structures are dynamically allocated and
+	 *	  used by core kernel only.
+	 */
+	RH_KABI_EXTEND(struct list_head dying_tasks)
 };
 
 struct cgroup_base_stat {
@@ -451,7 +457,7 @@ struct cgroup {
 	struct list_head rstat_css_list;
 
 	/* cgroup basic resource statistics */
-	struct cgroup_base_stat pending_bstat;	/* pending from children */
+	struct cgroup_base_stat RH_KABI_RENAME(pending_bstat, last_bstat);
 	struct cgroup_base_stat bstat;
 	struct prev_cputime prev_cputime;	/* for printing out cputime */
 
@@ -485,13 +491,15 @@ struct cgroup {
 	 *
 	 * The ancestor_ids[] arrary has to be at the end of structure.
 	 */
-	RH_KABI_EXTEND(struct cgroup *old_dom_cgrp) /* used while enabling threaded */
+	RH_KABI_BROKEN_INSERT_BLOCK(
+	struct cgroup *old_dom_cgrp; /* used while enabling threaded */
 
 	/* Used to store internal freezer state */
-	RH_KABI_EXTEND(struct cgroup_freezer_state freezer)
+	struct cgroup_freezer_state freezer;
 
 	/* used to track pressure stalls */
-	RH_KABI_EXTEND(struct psi_group psi)
+	struct psi_group psi;
+	) /* RH_KABI_BROKEN_INSERT_BLOCK */
 
 	/*
 	 * RHEL8:
@@ -632,8 +640,8 @@ struct cftype {
 	 * also not supposed to access this structure anyway. So it is
 	 * safe to extend it.
 	 */
-	RH_KABI_EXTEND(__poll_t (*poll)(struct kernfs_open_file *of,
-					struct poll_table_struct *pt))
+	RH_KABI_BROKEN_INSERT(__poll_t (*poll)(struct kernfs_open_file *of,
+					       struct poll_table_struct *pt))
 
 #ifdef CONFIG_DEBUG_LOCK_ALLOC
 	struct lock_class_key	lockdep_key;
@@ -663,7 +671,7 @@ struct cgroup_subsys {
 	void (*cancel_fork)(struct task_struct *task);
 	void (*fork)(struct task_struct *task);
 	void (*exit)(struct task_struct *task);
-	void (*free)(struct task_struct *task);
+	void (*RH_KABI_RENAME(free, release))(struct task_struct *task);
 	void (*bind)(struct cgroup_subsys_state *root_css);
 
 	bool early_init:1;

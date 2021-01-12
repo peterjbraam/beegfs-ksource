@@ -773,9 +773,7 @@ static bool mlx4_en_build_dma_wqe(struct mlx4_en_priv *priv,
 
 	/* Map fragments if any */
 	for (i_frag = shinfo->nr_frags - 1; i_frag >= 0; i_frag--) {
-		const struct skb_frag_struct *frag;
-
-		frag = &shinfo->frags[i_frag];
+		const skb_frag_t *frag = &shinfo->frags[i_frag];
 		byte_count = skb_frag_size(frag);
 		dma = skb_frag_dma_map(ddev, frag,
 				       0, byte_count,
@@ -1043,7 +1041,7 @@ netdev_tx_t mlx4_en_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	send_doorbell = __netdev_tx_sent_queue(ring->tx_queue,
 					       tx_info->nr_bytes,
-					       skb->xmit_more);
+					       netdev_xmit_more());
 
 	real_size = (real_size / 16) & 0x3f;
 

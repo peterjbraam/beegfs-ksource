@@ -16,6 +16,7 @@
 #include <linux/pci.h>
 #include <linux/init.h>
 #include <linux/platform_device.h>
+#include <linux/msi.h>
 #include <linux/of_address.h>
 #include <linux/of_pci.h>
 
@@ -298,7 +299,7 @@ static void advk_pcie_setup_hw(struct advk_pcie *pcie)
 
 	advk_writel(pcie, PCIE_ISR1_ALL_MASK, PCIE_ISR1_MASK_REG);
 
-	/* Unmask all MSI's */
+	/* Unmask all MSIs */
 	advk_writel(pcie, 0, PCIE_MSI_MASK_REG);
 
 	/* Enable summary interrupt for GIC SPI source */

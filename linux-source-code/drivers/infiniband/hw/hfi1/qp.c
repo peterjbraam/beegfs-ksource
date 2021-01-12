@@ -1,5 +1,5 @@
 /*
- * Copyright(c) 2015 - 2018 Intel Corporation.
+ * Copyright(c) 2015 - 2019 Intel Corporation.
  *
  * This file is provided under a dual BSD/GPLv2 license.  When using or
  * redistributing this file, you may do so under either license.
@@ -348,7 +348,7 @@ int hfi1_setup_wqe(struct rvt_qp *qp, struct rvt_swqe *wqe, bool *call_send)
 		break;
 	case IB_QPT_GSI:
 	case IB_QPT_UD:
-		ah = ibah_to_rvtah(wqe->ud_wr.ah);
+		ah = rvt_get_swqe_ah(wqe);
 		if (wqe->length > (1 << ah->log_pmtu))
 			return -EINVAL;
 		if (ibp->sl_to_sc[rdma_ah_get_sl(&ah->attr)] == 0xf)
@@ -381,7 +381,10 @@ bool _hfi1_schedule_send(struct rvt_qp *qp)
 	struct hfi1_ibport *ibp =
 		to_iport(qp->ibqp.device, qp->port_num);
 	struct hfi1_pportdata *ppd = ppd_from_ibp(ibp);
-	struct hfi1_devdata *dd = dd_from_ibdev(qp->ibqp.device);
+	struct hfi1_devdata *dd = ppd->dd;
+
+	if (dd->flags & HFI1_SHUTDOWN)
+		return true;
 
 	return iowait_schedule(&priv->s_iowait, ppd->hfi1_wq,
 			       priv->s_sde ?
@@ -702,8 +705,8 @@ void qp_iter_print(struct seq_file *s, struct rvt_qp_iter *iter)
 		   sde ? sde->this_idx : 0,
 		   send_context,
 		   send_context ? send_context->sw_index : 0,
-		   ibcq_to_rvtcq(qp->ibqp.send_cq)->queue->head,
-		   ibcq_to_rvtcq(qp->ibqp.send_cq)->queue->tail,
+		   ib_cq_head(qp->ibqp.send_cq),
+		   ib_cq_tail(qp->ibqp.send_cq),
 		   qp->pid,
 		   qp->s_state,
 		   qp->s_ack_state,
@@ -742,6 +745,8 @@ void *qp_priv_alloc(struct rvt_dev_info *rdi, struct rvt_qp *qp)
 		iowait_wakeup,
 		iowait_sdma_drained,
 		hfi1_init_priority);
+	/* Init to a value to start the running average correctly */
+	priv->s_running_pkt_size = piothreshold / 2;
 	return priv;
 }
 

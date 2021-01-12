@@ -28,8 +28,6 @@
 const struct nf_br_ops __rcu *nf_br_ops __read_mostly;
 EXPORT_SYMBOL_GPL(nf_br_ops);
 
-static struct lock_class_key bridge_netdev_addr_lock_key;
-
 /* net device transmit always called with BH disabled */
 netdev_tx_t br_dev_xmit(struct sk_buff *skb, struct net_device *dev)
 {
@@ -111,11 +109,6 @@ out:
 	return NETDEV_TX_OK;
 }
 
-static void br_set_lockdep_class(struct net_device *dev)
-{
-	lockdep_set_class(&dev->addr_list_lock, &bridge_netdev_addr_lock_key);
-}
-
 static int br_dev_init(struct net_device *dev)
 {
 	struct net_bridge *br = netdev_priv(dev);
@@ -144,7 +137,6 @@ static int br_dev_init(struct net_device *dev)
 		br_vlan_flush(br);
 		br_fdb_hash_fini(br);
 	}
-	br_set_lockdep_class(dev);
 
 	return err;
 }
@@ -344,7 +336,7 @@ void br_netpoll_disable(struct net_bridge_port *p)
 
 	p->np = NULL;
 
-	__netpoll_free_async(np);
+	__netpoll_free(np);
 }
 
 #endif
@@ -393,6 +385,7 @@ static const struct net_device_ops br_netdev_ops = {
 	.ndo_fdb_add		 = br_fdb_add,
 	.ndo_fdb_del		 = br_fdb_delete,
 	.ndo_fdb_dump		 = br_fdb_dump,
+	.ndo_fdb_get		 = br_fdb_get,
 	.ndo_bridge_getlink	 = br_getlink,
 	.ndo_bridge_setlink	 = br_setlink,
 	.ndo_bridge_dellink	 = br_dellink,

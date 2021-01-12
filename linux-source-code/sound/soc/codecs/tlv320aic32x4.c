@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * linux/sound/soc/codecs/tlv320aic32x4.c
  *
@@ -6,21 +7,6 @@
  * Author: Javier Martin <javier.martin@vista-silicon.com>
  *
  * Based on sound/soc/codecs/wm8974 and TI driver for kernel 2.6.27.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.	 See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
- * MA 02110-1301, USA.
  */
 
 #include <linux/module.h>
@@ -587,6 +573,9 @@ static int aic32x4_set_dai_sysclk(struct snd_soc_dai *codec_dai,
 	struct clk *pll;
 
 	pll = devm_clk_get(component->dev, "pll");
+	if (IS_ERR(pll))
+		return PTR_ERR(pll);
+
 	mclk = clk_get_parent(pll);
 
 	return clk_set_rate(mclk, freq);
@@ -1109,11 +1098,9 @@ static int aic32x4_setup_regulators(struct device *dev,
 			return PTR_ERR(aic32x4->supply_av);
 		}
 	} else {
-		if (IS_ERR(aic32x4->supply_dv) &&
-				PTR_ERR(aic32x4->supply_dv) == -EPROBE_DEFER)
+		if (PTR_ERR(aic32x4->supply_dv) == -EPROBE_DEFER)
 			return -EPROBE_DEFER;
-		if (IS_ERR(aic32x4->supply_av) &&
-				PTR_ERR(aic32x4->supply_av) == -EPROBE_DEFER)
+		if (PTR_ERR(aic32x4->supply_av) == -EPROBE_DEFER)
 			return -EPROBE_DEFER;
 	}
 

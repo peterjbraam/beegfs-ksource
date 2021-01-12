@@ -2,6 +2,8 @@
 #ifndef INT_BLK_MQ_H
 #define INT_BLK_MQ_H
 
+#include <linux/rh_kabi.h>
+
 #include "blk-stat.h"
 #include "blk-mq-tag.h"
 
@@ -23,9 +25,7 @@ struct blk_mq_ctx {
 
 	unsigned int		cpu;
 	unsigned short		index_hw[HCTX_MAX_TYPES];
-#ifndef __GENKSYMS__
-	struct blk_mq_hw_ctx 	*hctxs[HCTX_MAX_TYPES];
-#endif
+	RH_KABI_BROKEN_INSERT(struct blk_mq_hw_ctx	*hctxs[HCTX_MAX_TYPES])
 
 	/* incremented at dispatch time */
 	unsigned long		rq_dispatched[2];
@@ -47,7 +47,6 @@ bool blk_mq_dispatch_rq_list(struct request_queue *, struct list_head *, bool);
 void blk_mq_add_to_requeue_list(struct request *rq, bool at_head,
 				bool kick_requeue_list);
 void blk_mq_flush_busy_ctxs(struct blk_mq_hw_ctx *hctx, struct list_head *list);
-bool blk_mq_get_driver_tag(struct request *rq);
 struct request *blk_mq_dequeue_from_ctx(struct blk_mq_hw_ctx *hctx,
 					struct blk_mq_ctx *start);
 
@@ -69,7 +68,8 @@ int blk_mq_alloc_rqs(struct blk_mq_tag_set *set, struct blk_mq_tags *tags,
  */
 void __blk_mq_insert_request(struct blk_mq_hw_ctx *hctx, struct request *rq,
 				bool at_head);
-void blk_mq_request_bypass_insert(struct request *rq, bool run_queue);
+void blk_mq_request_bypass_insert(struct request *rq, bool at_head,
+				  bool run_queue);
 void blk_mq_insert_requests(struct blk_mq_hw_ctx *hctx, struct blk_mq_ctx *ctx,
 				struct list_head *list);
 
@@ -131,15 +131,6 @@ extern void blk_mq_hctx_kobj_init(struct blk_mq_hw_ctx *hctx);
 
 void blk_mq_release(struct request_queue *q);
 
-/**
- * blk_mq_rq_state() - read the current MQ_RQ_* state of a request
- * @rq: target request.
- */
-static inline enum mq_rq_state blk_mq_rq_state(struct request *rq)
-{
-	return READ_ONCE(rq->state);
-}
-
 static inline struct blk_mq_ctx *__blk_mq_get_ctx(struct request_queue *q,
 					   unsigned int cpu)
 {
@@ -167,6 +158,8 @@ struct blk_mq_alloc_data {
 	/* input & output parameter */
 	struct blk_mq_ctx *ctx;
 	struct blk_mq_hw_ctx *hctx;
+
+	RH_KABI_EXTEND(struct bio *bio)
 };
 
 static inline struct blk_mq_tags *blk_mq_tags_from_data(struct blk_mq_alloc_data *data)
@@ -211,8 +204,8 @@ static inline bool blk_mq_get_dispatch_budget(struct blk_mq_hw_ctx *hctx)
 static inline void __blk_mq_put_driver_tag(struct blk_mq_hw_ctx *hctx,
 					   struct request *rq)
 {
-	blk_mq_put_tag(hctx, hctx->tags, rq->mq_ctx, rq->tag);
-	rq->tag = -1;
+	blk_mq_put_tag(hctx->tags, rq->mq_ctx, rq->tag);
+	rq->tag = BLK_MQ_NO_TAG;
 
 	if (rq->rq_flags & RQF_MQ_INFLIGHT) {
 		rq->rq_flags &= ~RQF_MQ_INFLIGHT;
@@ -222,7 +215,7 @@ static inline void __blk_mq_put_driver_tag(struct blk_mq_hw_ctx *hctx,
 
 static inline void blk_mq_put_driver_tag(struct request *rq)
 {
-	if (rq->tag == -1 || rq->internal_tag == -1)
+	if (rq->tag == BLK_MQ_NO_TAG || rq->internal_tag == BLK_MQ_NO_TAG)
 		return;
 
 	__blk_mq_put_driver_tag(rq->mq_hctx, rq);
@@ -234,6 +227,38 @@ static inline void blk_mq_clear_mq_map(struct blk_mq_queue_map *qmap)
 
 	for_each_possible_cpu(cpu)
 		qmap->mq_map[cpu] = 0;
+}
+
+/*
+ * blk_mq_plug() - Get caller context plug
+ * @q: request queue
+ * @bio : the bio being submitted by the caller context
+ *
+ * Plugging, by design, may delay the insertion of BIOs into the elevator in
+ * order to increase BIO merging opportunities. This however can cause BIO
+ * insertion order to change from the order in which submit_bio() is being
+ * executed in the case of multiple contexts concurrently issuing BIOs to a
+ * device, even if these context are synchronized to tightly control BIO issuing
+ * order. While this is not a problem with regular block devices, this ordering
+ * change can cause write BIO failures with zoned block devices as these
+ * require sequential write patterns to zones. Prevent this from happening by
+ * ignoring the plug state of a BIO issuing context if the target request queue
+ * is for a zoned block device and the BIO to plug is a write operation.
+ *
+ * Return current->plug if the bio can be plugged and NULL otherwise
+ */
+static inline struct blk_plug *blk_mq_plug(struct request_queue *q,
+					   struct bio *bio)
+{
+	/*
+	 * For regular block devices or read operations, use the context plug
+	 * which may be NULL if blk_start_plug() was not executed.
+	 */
+	if (!blk_queue_is_zoned(q) || !op_is_write(bio_op(bio)))
+		return current->plug;
+
+	/* Zoned block device write operation case: do not plug the BIO */
+	return NULL;
 }
 
 #endif

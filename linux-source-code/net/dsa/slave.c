@@ -362,18 +362,23 @@ static int dsa_slave_port_obj_del(struct net_device *dev,
 	return err;
 }
 
-static int dsa_slave_port_attr_get(struct net_device *dev,
-				   struct switchdev_attr *attr)
+static int dsa_slave_get_port_parent_id(struct net_device *dev,
+					struct netdev_phys_item_id *ppid)
 {
 	struct dsa_port *dp = dsa_slave_to_port(dev);
 	struct dsa_switch *ds = dp->ds;
 	struct dsa_switch_tree *dst = ds->dst;
 
+	ppid->id_len = sizeof(dst->index);
+	memcpy(&ppid->id, &dst->index, ppid->id_len);
+
+	return 0;
+}
+
+static int dsa_slave_port_attr_get(struct net_device *dev,
+				   struct switchdev_attr *attr)
+{
 	switch (attr->id) {
-	case SWITCHDEV_ATTR_ID_PORT_PARENT_ID:
-		attr->u.ppid.id_len = sizeof(dst->index);
-		memcpy(&attr->u.ppid.id, &dst->index, attr->u.ppid.id_len);
-		break;
 	case SWITCHDEV_ATTR_ID_PORT_BRIDGE_FLAGS_SUPPORT:
 		attr->u.brport_flags_support = 0;
 		break;
@@ -722,7 +727,7 @@ static void dsa_slave_netpoll_cleanup(struct net_device *dev)
 
 	p->netpoll = NULL;
 
-	__netpoll_free_async(netpoll);
+	__netpoll_free(netpoll);
 }
 
 static void dsa_slave_poll_controller(struct net_device *dev)
@@ -763,27 +768,25 @@ static int dsa_slave_add_cls_matchall(struct net_device *dev,
 	struct dsa_mall_tc_entry *mall_tc_entry;
 	__be16 protocol = cls->common.protocol;
 	struct dsa_switch *ds = dp->ds;
-	struct net_device *to_dev;
-	const struct tc_action *a;
+	struct flow_action_entry *act;
 	struct dsa_port *to_dp;
 	int err = -EOPNOTSUPP;
 
 	if (!ds->ops->port_mirror_add)
 		return err;
 
-	if (!tcf_exts_has_one_action(cls->exts))
+	if (!flow_offload_has_one_action(&cls->rule->action))
 		return err;
 
-	a = tcf_exts_first_action(cls->exts);
+	act = &cls->rule->action.entries[0];
 
-	if (is_tcf_mirred_egress_mirror(a) && protocol == htons(ETH_P_ALL)) {
+	if (act->id == FLOW_ACTION_MIRRED && protocol == htons(ETH_P_ALL)) {
 		struct dsa_mall_mirror_tc_entry *mirror;
 
-		to_dev = tcf_mirred_dev(a);
-		if (!to_dev)
+		if (!act->dev)
 			return -EINVAL;
 
-		if (!dsa_slave_dev_check(to_dev))
+		if (!dsa_slave_dev_check(act->dev))
 			return -EOPNOTSUPP;
 
 		mall_tc_entry = kzalloc(sizeof(*mall_tc_entry), GFP_KERNEL);
@@ -794,7 +797,7 @@ static int dsa_slave_add_cls_matchall(struct net_device *dev,
 		mall_tc_entry->type = DSA_PORT_MALL_MIRROR;
 		mirror = &mall_tc_entry->mirror;
 
-		to_dp = dsa_slave_to_port(to_dev);
+		to_dp = dsa_slave_to_port(act->dev);
 
 		mirror->to_local_port = to_dp->index;
 		mirror->ingress = ingress;
@@ -884,23 +887,42 @@ static int dsa_slave_setup_tc_block_cb_eg(enum tc_setup_type type,
 	return dsa_slave_setup_tc_block_cb(type, type_data, cb_priv, false);
 }
 
-static int dsa_slave_setup_tc_block(struct net_device *dev,
-				    struct tc_block_offload *f)
-{
-	tc_setup_cb_t *cb;
+static LIST_HEAD(dsa_slave_block_cb_list);
 
-	if (f->binder_type == TCF_BLOCK_BINDER_TYPE_CLSACT_INGRESS)
+static int dsa_slave_setup_tc_block(struct net_device *dev,
+				    struct flow_block_offload *f)
+{
+	struct flow_block_cb *block_cb;
+	flow_setup_cb_t *cb;
+
+	if (f->binder_type == FLOW_BLOCK_BINDER_TYPE_CLSACT_INGRESS)
 		cb = dsa_slave_setup_tc_block_cb_ig;
-	else if (f->binder_type == TCF_BLOCK_BINDER_TYPE_CLSACT_EGRESS)
+	else if (f->binder_type == FLOW_BLOCK_BINDER_TYPE_CLSACT_EGRESS)
 		cb = dsa_slave_setup_tc_block_cb_eg;
 	else
 		return -EOPNOTSUPP;
 
+	f->driver_block_list = &dsa_slave_block_cb_list;
+
 	switch (f->command) {
-	case TC_BLOCK_BIND:
-		return tcf_block_cb_register(f->block, cb, dev, dev, f->extack);
-	case TC_BLOCK_UNBIND:
-		tcf_block_cb_unregister(f->block, cb, dev);
+	case FLOW_BLOCK_BIND:
+		if (flow_block_cb_is_busy(cb, dev, &dsa_slave_block_cb_list))
+			return -EBUSY;
+
+		block_cb = flow_block_cb_alloc(cb, dev, dev, NULL);
+		if (IS_ERR(block_cb))
+			return PTR_ERR(block_cb);
+
+		flow_block_cb_add(block_cb, f);
+		list_add_tail(&block_cb->driver_list, &dsa_slave_block_cb_list);
+		return 0;
+	case FLOW_BLOCK_UNBIND:
+		block_cb = flow_block_cb_lookup(f->block, cb, dev);
+		if (!block_cb)
+			return -ENOENT;
+
+		flow_block_cb_remove(block_cb, f);
+		list_del(&block_cb->driver_list);
 		return 0;
 	default:
 		return -EOPNOTSUPP;
@@ -1046,6 +1068,7 @@ static const struct net_device_ops dsa_slave_netdev_ops = {
 	.ndo_get_phys_port_name	= dsa_slave_get_phys_port_name,
 	.ndo_setup_tc		= dsa_slave_setup_tc,
 	.ndo_get_stats64	= dsa_slave_get_stats64,
+	.ndo_get_port_parent_id	= dsa_slave_get_port_parent_id,
 };
 
 static const struct switchdev_ops dsa_slave_switchdev_ops = {
@@ -1057,11 +1080,11 @@ static struct device_type dsa_type = {
 	.name	= "dsa",
 };
 
-static void dsa_slave_phylink_validate(struct net_device *dev,
+static void dsa_slave_phylink_validate(struct phylink_config *config,
 				       unsigned long *supported,
 				       struct phylink_link_state *state)
 {
-	struct dsa_port *dp = dsa_slave_to_port(dev);
+	struct dsa_port *dp = container_of(config, struct dsa_port, pl_config);
 	struct dsa_switch *ds = dp->ds;
 
 	if (!ds->ops->phylink_validate)
@@ -1070,10 +1093,10 @@ static void dsa_slave_phylink_validate(struct net_device *dev,
 	ds->ops->phylink_validate(ds, dp->index, supported, state);
 }
 
-static int dsa_slave_phylink_mac_link_state(struct net_device *dev,
+static int dsa_slave_phylink_mac_link_state(struct phylink_config *config,
 					    struct phylink_link_state *state)
 {
-	struct dsa_port *dp = dsa_slave_to_port(dev);
+	struct dsa_port *dp = container_of(config, struct dsa_port, pl_config);
 	struct dsa_switch *ds = dp->ds;
 
 	/* Only called for SGMII and 802.3z */
@@ -1083,11 +1106,11 @@ static int dsa_slave_phylink_mac_link_state(struct net_device *dev,
 	return ds->ops->phylink_mac_link_state(ds, dp->index, state);
 }
 
-static void dsa_slave_phylink_mac_config(struct net_device *dev,
+static void dsa_slave_phylink_mac_config(struct phylink_config *config,
 					 unsigned int mode,
 					 const struct phylink_link_state *state)
 {
-	struct dsa_port *dp = dsa_slave_to_port(dev);
+	struct dsa_port *dp = container_of(config, struct dsa_port, pl_config);
 	struct dsa_switch *ds = dp->ds;
 
 	if (!ds->ops->phylink_mac_config)
@@ -1096,9 +1119,9 @@ static void dsa_slave_phylink_mac_config(struct net_device *dev,
 	ds->ops->phylink_mac_config(ds, dp->index, mode, state);
 }
 
-static void dsa_slave_phylink_mac_an_restart(struct net_device *dev)
+static void dsa_slave_phylink_mac_an_restart(struct phylink_config *config)
 {
-	struct dsa_port *dp = dsa_slave_to_port(dev);
+	struct dsa_port *dp = container_of(config, struct dsa_port, pl_config);
 	struct dsa_switch *ds = dp->ds;
 
 	if (!ds->ops->phylink_mac_an_restart)
@@ -1107,11 +1130,12 @@ static void dsa_slave_phylink_mac_an_restart(struct net_device *dev)
 	ds->ops->phylink_mac_an_restart(ds, dp->index);
 }
 
-static void dsa_slave_phylink_mac_link_down(struct net_device *dev,
+static void dsa_slave_phylink_mac_link_down(struct phylink_config *config,
 					    unsigned int mode,
 					    phy_interface_t interface)
 {
-	struct dsa_port *dp = dsa_slave_to_port(dev);
+	struct dsa_port *dp = container_of(config, struct dsa_port, pl_config);
+	struct net_device *dev = dp->slave;
 	struct dsa_switch *ds = dp->ds;
 
 	if (!ds->ops->phylink_mac_link_down) {
@@ -1123,12 +1147,13 @@ static void dsa_slave_phylink_mac_link_down(struct net_device *dev,
 	ds->ops->phylink_mac_link_down(ds, dp->index, mode, interface);
 }
 
-static void dsa_slave_phylink_mac_link_up(struct net_device *dev,
+static void dsa_slave_phylink_mac_link_up(struct phylink_config *config,
 					  unsigned int mode,
 					  phy_interface_t interface,
 					  struct phy_device *phydev)
 {
-	struct dsa_port *dp = dsa_slave_to_port(dev);
+	struct dsa_port *dp = container_of(config, struct dsa_port, pl_config);
+	struct net_device *dev = dp->slave;
 	struct dsa_switch *ds = dp->ds;
 
 	if (!ds->ops->phylink_mac_link_up) {
@@ -1196,7 +1221,10 @@ static int dsa_slave_phy_setup(struct net_device *slave_dev)
 	if (mode < 0)
 		mode = PHY_INTERFACE_MODE_NA;
 
-	dp->pl = phylink_create(slave_dev, of_fwnode_handle(port_dn), mode,
+	dp->pl_config.dev = &slave_dev->dev;
+	dp->pl_config.type = PHYLINK_NETDEV;
+
+	dp->pl = phylink_create(&dp->pl_config, of_fwnode_handle(port_dn), mode,
 				&dsa_slave_phylink_mac_ops);
 	if (IS_ERR(dp->pl)) {
 		netdev_err(slave_dev,
@@ -1230,15 +1258,6 @@ static int dsa_slave_phy_setup(struct net_device *slave_dev)
 	}
 
 	return 0;
-}
-
-static struct lock_class_key dsa_slave_netdev_xmit_lock_key;
-static void dsa_slave_set_lockdep_class_one(struct net_device *dev,
-					    struct netdev_queue *txq,
-					    void *_unused)
-{
-	lockdep_set_class(&txq->_xmit_lock,
-			  &dsa_slave_netdev_xmit_lock_key);
 }
 
 int dsa_slave_suspend(struct net_device *slave_dev)
@@ -1316,9 +1335,6 @@ int dsa_slave_create(struct dsa_port *port)
 	slave_dev->min_mtu = 0;
 	slave_dev->max_mtu = ETH_MAX_MTU;
 	SET_NETDEV_DEVTYPE(slave_dev, &dsa_type);
-
-	netdev_for_each_tx_queue(slave_dev, dsa_slave_set_lockdep_class_one,
-				 NULL);
 
 	SET_NETDEV_DEV(slave_dev, port->ds->dev);
 	slave_dev->dev.of_node = port->dn;

@@ -526,6 +526,7 @@ flush_count_cache:
 	/* Save LR into r9 */
 	mflr	r9
 
+	// Flush the link stack
 	.rept 64
 	bl	.+4
 	.endr
@@ -535,6 +536,11 @@ flush_count_cache:
 	.balign 32
 	/* Restore LR */
 1:	mtlr	r9
+
+	// If we're just flushing the link stack, return here
+3:	nop
+	patch_site 3b patch__flush_link_stack_return
+
 	li	r9,0x7fff
 	mtctr	r9
 
@@ -622,6 +628,10 @@ _GLOBAL(_switch)
 
 	addi	r6,r4,-THREAD	/* Convert THREAD to 'current' */
 	std	r6,PACACURRENT(r13)	/* Set new 'current' */
+#if defined(CONFIG_STACKPROTECTOR)
+	ld	r6, TASK_CANARY(r6)
+	std	r6, PACA_CANARY(r13)
+#endif
 
 	ld	r8,KSP(r4)	/* new stack pointer */
 #ifdef CONFIG_PPC_BOOK3S_64

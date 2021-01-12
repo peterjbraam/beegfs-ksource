@@ -30,7 +30,6 @@
 #include <linux/sfi.h>
 #include <linux/apm_bios.h>
 #include <linux/initrd.h>
-#include <linux/bootmem.h>
 #include <linux/memblock.h>
 #include <linux/seq_file.h>
 #include <linux/console.h>
@@ -556,7 +555,7 @@ static void __init reserve_crashkernel(void)
 	 * region.
 	 */
 	if (mem_encrypt_active())
-		mem_enc_req = ALIGN(swiotlb_size_or_default(), SZ_1M);
+		mem_enc_req = min(ALIGN(swiotlb_size_or_default(), SZ_1M), 64UL << 20);
 	else
 		mem_enc_req = 0;
 
@@ -828,94 +827,6 @@ static void __init trim_low_memory_range(void)
 	memblock_reserve(0, ALIGN(reserve_low, PAGE_SIZE));
 }
 
-static bool valid_amd_processor(__u8 family, const char *model_id, bool guest)
-{
-	bool valid = false;
-	int len;
-
-	switch(family) {
-	case 0x15:
-		valid = true;
-		break;
-
-	case 0x17:
-		if (!guest) {
-			len = strlen("AMD EPYC 7");
-			if (!strncmp(model_id, "AMD EPYC 7", len)) {
-				len += 3;
-				/*
-				 * AMD EPYC 7xx1 == NAPLES
-				 * AMD EPYC 7xx2 == ROME
-				 */
-				if (strlen(model_id) >= len) {
-					if (model_id[len-1] == '1' ||
-					    model_id[len-1] == '2')
-						valid = true;
-				}
-			}
-		}
-		else {
-			/* guest names do not conform to bare metal */
-			if (!strncmp(model_id, "AMD EPYC", 8))
-				valid = true;
-		}
-		break;
-
-	default:
-		break;
-	}
-
-	return valid;
-}
-
-static bool valid_intel_processor(__u8 family, __u8 model, __u8 stepping)
-{
-	bool valid;
-
-	if (family != 6)
-		return false;
-
-	switch(model) {
-	case INTEL_FAM6_KABYLAKE_DESKTOP:
-		valid = (stepping <= 13);
-		break;
-
-	case INTEL_FAM6_KABYLAKE_MOBILE:
-		valid = (stepping <= 12);
-		break;
-
-	case INTEL_FAM6_XEON_PHI_KNM:
-	case INTEL_FAM6_ATOM_GOLDMONT:
-	case INTEL_FAM6_ATOM_GOLDMONT_PLUS:
-	case INTEL_FAM6_ATOM_GOLDMONT_X:
-	case INTEL_FAM6_XEON_PHI_KNL:
-	case INTEL_FAM6_BROADWELL_XEON_D:
-	case INTEL_FAM6_BROADWELL_X:
-	case INTEL_FAM6_ATOM_SILVERMONT_X:
-	case INTEL_FAM6_BROADWELL_GT3E:
-	case INTEL_FAM6_HASWELL_GT3E:
-	case INTEL_FAM6_HASWELL_ULT:
-		valid = true;
-		break;
-
-	case INTEL_FAM6_SKYLAKE_MOBILE:
-	case INTEL_FAM6_SKYLAKE_DESKTOP:
-		/* stepping > 4 is Cascade Lake and is not supported */
-		valid = (stepping <= 4);
-		break;
-
-	case INTEL_FAM6_SKYLAKE_X:
-		valid = (stepping <= 7);
-		break;
-
-	default:
-		valid = (model <= INTEL_FAM6_HASWELL_X);
-		break;
-	}
-
-	return valid;
-}
-
 static void rh_check_supported(void)
 {
 	bool guest;
@@ -935,27 +846,8 @@ static void rh_check_supported(void)
 	 */
 	switch (boot_cpu_data.x86_vendor) {
 	case X86_VENDOR_AMD:
-		if (!valid_amd_processor(boot_cpu_data.x86,
-					 boot_cpu_data.x86_model_id, guest)) {
-			pr_crit("Detected CPU family %xh model %d\n",
-				boot_cpu_data.x86,
-				boot_cpu_data.x86_model);
-			mark_hardware_unsupported("AMD Processor");
-		}
-		break;
-
 	case X86_VENDOR_INTEL:
-		if (!valid_intel_processor(boot_cpu_data.x86,
-					   boot_cpu_data.x86_model,
-					   boot_cpu_data.x86_stepping)) {
-			pr_crit("Detected CPU family %d model %d stepping %d\n",
-				boot_cpu_data.x86,
-				boot_cpu_data.x86_model,
-				boot_cpu_data.x86_stepping);
-			mark_hardware_unsupported("Intel Processor");
-		}
 		break;
-
 	default:
 		pr_crit("Detected processor %s %s\n",
 			boot_cpu_data.x86_vendor_id,
@@ -1066,6 +958,8 @@ void __init setup_arch(char **cmdline_p)
 
 	idt_setup_early_traps();
 	early_cpu_init();
+	arch_init_ideal_nops();
+	jump_label_init();
 	early_ioremap_init();
 
 	setup_olpc_ofw_pgd();
@@ -1211,6 +1105,7 @@ void __init setup_arch(char **cmdline_p)
 	 */
 	init_hypervisor_platform();
 
+	tsc_early_init();
 	x86_init.resources.probe_roms();
 
 	/* after parse_early_param, so could debug it */
@@ -1301,6 +1196,7 @@ void __init setup_arch(char **cmdline_p)
 		efi_fake_memmap();
 		efi_find_mirror();
 		efi_esrt_init();
+		efi_mokvar_table_init();
 
 		/*
 		 * The EFI specification says that boot service code won't be
@@ -1382,7 +1278,6 @@ void __init setup_arch(char **cmdline_p)
 
 	memblock_find_dma_reserve();
 
-	tsc_early_delay_calibrate();
 	if (!early_xdbc_setup_hardware())
 		early_xdbc_register_console();
 
@@ -1452,8 +1347,6 @@ void __init setup_arch(char **cmdline_p)
 	x86_init.timers.wallclock_init();
 
 	mcheck_init();
-
-	arch_init_ideal_nops();
 
 	register_refined_jiffies(CLOCK_TICK_RATE);
 

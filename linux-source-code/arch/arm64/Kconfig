@@ -11,15 +11,13 @@ config ARM64
 	select ARCH_CLOCKSOURCE_DATA
 	select ARCH_HAS_DEBUG_VIRTUAL
 	select ARCH_HAS_DEVMEM_IS_ALLOWED
-	select ARCH_HAS_DMA_COHERENT_TO_PFN
-	select ARCH_HAS_DMA_MMAP_PGPROT
 	select ARCH_HAS_DMA_PREP_COHERENT
 	select ARCH_HAS_ACPI_TABLE_UPGRADE if ACPI
 	select ARCH_HAS_ELF_RANDOMIZE
 	select ARCH_HAS_FAST_MULTIPLIER
 	select ARCH_HAS_FORTIFY_SOURCE
 	select ARCH_HAS_GCOV_PROFILE_ALL
-	select ARCH_HAS_GIGANTIC_PAGE if (MEMORY_ISOLATION && COMPACTION) || CMA
+	select ARCH_HAS_GIGANTIC_PAGE if CONTIG_ALLOC
 	select ARCH_HAS_KCOV
 	select ARCH_HAS_MEMBARRIER_SYNC_CORE
 	select ARCH_HAS_PTE_SPECIAL
@@ -68,6 +66,7 @@ config ARM64
 	select ARCH_SUPPORTS_INT128 if GCC_VERSION >= 50000 || CC_IS_CLANG
 	select ARCH_SUPPORTS_NUMA_BALANCING
 	select ARCH_WANT_COMPAT_IPC_PARSE_VERSION
+	select ARCH_WANT_DEFAULT_BPF_JIT
 	select ARCH_WANT_FRAME_POINTERS
 	select ARCH_HAS_UBSAN_SANITIZE_ALL
 	select ARM_AMBA
@@ -82,6 +81,7 @@ config ARM64
 	select CLONE_BACKWARDS
 	select COMMON_CLK
 	select CPU_PM if (SUSPEND || CPU_IDLE)
+	select CRC32
 	select DCACHE_WORD_ACCESS
 	select DMA_DIRECT_REMAP
 	select EDAC_SUPPORT
@@ -94,6 +94,7 @@ config ARM64
 	select GENERIC_CPU_VULNERABILITIES
 	select GENERIC_EARLY_IOREMAP
 	select GENERIC_IDLE_POLL_SETUP
+	select GENERIC_IRQ_MULTI_HANDLER
 	select GENERIC_IRQ_PROBE
 	select GENERIC_IRQ_SHOW
 	select GENERIC_IRQ_SHOW_LEVEL
@@ -138,7 +139,6 @@ config ARM64
 	select HAVE_GENERIC_DMA_COHERENT
 	select HAVE_HW_BREAKPOINT if PERF_EVENTS
 	select HAVE_IRQ_TIME_ACCOUNTING
-	select HAVE_MEMBLOCK
 	select HAVE_MEMBLOCK_NODE_MAP if NUMA
 	select HAVE_NMI
 	select HAVE_PATA_PLATFORM
@@ -156,10 +156,8 @@ config ARM64
 	select IRQ_DOMAIN
 	select IRQ_FORCED_THREADING
 	select MODULES_USE_ELF_RELA
-	select MULTI_IRQ_HANDLER
 	select NEED_DMA_MAP_STATE
 	select NEED_SG_DMA_LENGTH
-	select NO_BOOTMEM
 	select OF
 	select OF_EARLY_FLATTREE
 	select OF_RESERVED_MEM
@@ -253,9 +251,13 @@ config GENERIC_CALIBRATE_DELAY
 	def_bool y
 
 config ZONE_DMA32
-	def_bool y
+	bool "Support DMA32 zone" if EXPERT
+	default y
 
 config HAVE_GENERIC_GUP
+	def_bool y
+
+config ARCH_ENABLE_MEMORY_HOTPLUG
 	def_bool y
 
 config SMP
@@ -280,9 +282,6 @@ config ARCH_SUPPORTS_UPROBES
 	def_bool y
 
 config ARCH_PROC_KCORE_TEXT
-	def_bool y
-
-config MULTI_IRQ_HANDLER
 	def_bool y
 
 source "init/Kconfig"
@@ -318,7 +317,7 @@ menu "Kernel Features"
 menu "ARM errata workarounds via the alternatives framework"
 
 config ARM64_WORKAROUND_CLEAN_CACHE
-	def_bool n
+	bool
 
 config ARM64_ERRATUM_826319
 	bool "Cortex-A53: 826319: System might deadlock if a write cannot complete until read data is accepted"
@@ -485,33 +484,39 @@ config ARM64_ERRATUM_1024718
 	bool "Cortex-A55: 1024718: Update of DBM/AP bits without break before make might result in incorrect update"
 	default y
 	help
-	  This option adds work around for Arm Cortex-A55 Erratum 1024718.
+	  This option adds a workaround for ARM Cortex-A55 Erratum 1024718.
 
 	  Affected Cortex-A55 cores (r0p0, r0p1, r1p0) could cause incorrect
 	  update of the hardware dirty bit when the DBM/AP bits are updated
-	  without a break-before-make. The work around is to disable the usage
+	  without a break-before-make. The workaround is to disable the usage
 	  of hardware DBM locally on the affected cores. CPUs not affected by
-	  erratum will continue to use the feature.
+	  this erratum will continue to use the feature.
 
 	  If unsure, say Y.
 
-config ARM64_ERRATUM_1188873
-	bool "Cortex-A76: MRC read following MRRC read of specific Generic Timer in AArch32 might give incorrect result"
+config ARM64_ERRATUM_1418040
+	bool "Cortex-A76/Neoverse-N1: MRC read following MRRC read of specific Generic Timer in AArch32 might give incorrect result"
 	default y
+	depends on COMPAT
 	help
-	  This option adds work arounds for ARM Cortex-A76 erratum 1188873
+	  This option adds a workaround for ARM Cortex-A76/Neoverse-N1
+	  errata 1188873 and 1418040.
 
-	  Affected Cortex-A76 cores (r0p0, r1p0, r2p0) could cause
-	  register corruption when accessing the timer registers from
-	  AArch32 userspace.
+	  Affected Cortex-A76/Neoverse-N1 cores (r0p0 to r3p1) could
+	  cause register corruption when accessing the timer registers
+	  from AArch32 userspace.
 
 	  If unsure, say Y.
+
+config ARM64_WORKAROUND_SPECULATIVE_AT
+	bool
 
 config ARM64_ERRATUM_1165522
-	bool "Cortex-A76: Speculative AT instruction using out-of-context translation regime could cause subsequent request to generate an incorrect translation"
+	bool "Cortex-A76: 1165522: Speculative AT instruction using out-of-context translation regime could cause subsequent request to generate an incorrect translation"
 	default y
+	select ARM64_WORKAROUND_SPECULATIVE_AT
 	help
-	  This option adds work arounds for ARM Cortex-A76 erratum 1165522
+	  This option adds a workaround for ARM Cortex-A76 erratum 1165522.
 
 	  Affected Cortex-A76 cores (r0p0, r1p0, r2p0) could end-up with
 	  corrupted TLBs by speculating an AT instruction during a guest
@@ -519,14 +524,90 @@ config ARM64_ERRATUM_1165522
 
 	  If unsure, say Y.
 
+config ARM64_ERRATUM_1319367
+	bool "Cortex-A57/A72: 1319537: Speculative AT instruction using out-of-context translation regime could cause subsequent request to generate an incorrect translation"
+	default y
+	select ARM64_WORKAROUND_SPECULATIVE_AT
+	help
+	  This option adds work arounds for ARM Cortex-A57 erratum 1319537
+	  and A72 erratum 1319367
+
+	  Cortex-A57 and A72 cores could end-up with corrupted TLBs by
+	  speculating an AT instruction during a guest context switch.
+
+	  If unsure, say Y.
+
+config ARM64_ERRATUM_1530923
+	bool "Cortex-A55: 1530923: Speculative AT instruction using out-of-context translation regime could cause subsequent request to generate an incorrect translation"
+	default y
+	select ARM64_WORKAROUND_SPECULATIVE_AT
+	help
+	  This option adds a workaround for ARM Cortex-A55 erratum 1530923.
+
+	  Affected Cortex-A55 cores (r0p0, r0p1, r1p0, r2p0) could end-up with
+	  corrupted TLBs by speculating an AT instruction during a guest
+	  context switch.
+
+	  If unsure, say Y.
+
+config ARM64_ERRATUM_1286807
+	bool "Cortex-A76: Modification of the translation table for a virtual address might lead to read-after-read ordering violation"
+	default y
+	select ARM64_WORKAROUND_REPEAT_TLBI
+	help
+	  This option adds a workaround for ARM Cortex-A76 erratum 1286807.
+
+	  On the affected Cortex-A76 cores (r0p0 to r3p0), if a virtual
+	  address for a cacheable mapping of a location is being
+	  accessed by a core while another core is remapping the virtual
+	  address to a new physical page using the recommended
+	  break-before-make sequence, then under very rare circumstances
+	  TLBI+DSB completes before a read using the translation being
+	  invalidated has been observed by other observers. The
+	  workaround repeats the TLBI+DSB operation.
+
+config ARM64_ERRATUM_1463225
+	bool "Cortex-A76: Software Step might prevent interrupt recognition"
+	default y
+	help
+	  This option adds a workaround for Arm Cortex-A76 erratum 1463225.
+
+	  On the affected Cortex-A76 cores (r0p0 to r3p1), software stepping
+	  of a system call instruction (SVC) can prevent recognition of
+	  subsequent interrupts when software stepping is disabled in the
+	  exception handler of the system call and either kernel debugging
+	  is enabled or VHE is in use.
+
+	  Work around the erratum by triggering a dummy step exception
+	  when handling a system call from a task that is being stepped
+	  in a VHE configuration of the kernel.
+
+	  If unsure, say Y.
+
+config ARM64_ERRATUM_1542419
+	bool "Neoverse-N1: workaround mis-ordering of instruction fetches"
+	default y
+	help
+	  This option adds a workaround for ARM Neoverse-N1 erratum
+	  1542419.
+
+	  Affected Neoverse-N1 cores could execute a stale instruction when
+	  modified by another CPU. The workaround depends on a firmware
+	  counterpart.
+
+	  Workaround the issue by hiding the DIC feature from EL0. This
+	  forces user-space to perform cache maintenance.
+
+	  If unsure, say Y.
+
 config CAVIUM_ERRATUM_22375
 	bool "Cavium erratum 22375, 24313"
 	default y
 	help
-	  Enable workaround for erratum 22375, 24313.
+	  Enable workaround for errata 22375 and 24313.
 
 	  This implements two gicv3-its errata workarounds for ThunderX. Both
-	  with small impact affecting only ITS table allocation.
+	  with a small impact affecting only ITS table allocation.
 
 	    erratum 22375: only alloc 8MB table size
 	    erratum 24313: ignore memory access type
@@ -577,6 +658,23 @@ config CAVIUM_ERRATUM_30115
 
 	  If unsure, say Y.
 
+config CAVIUM_TX2_ERRATUM_219
+	bool "Cavium ThunderX2 erratum 219: PRFM between TTBR change and ISB fails"
+	default y
+	help
+	  On Cavium ThunderX2, a load, store or prefetch instruction between a
+	  TTBR update and the corresponding context synchronizing operation can
+	  cause a spurious Data Abort to be delivered to any hardware thread in
+	  the CPU core.
+
+	  Work around the issue by avoiding the problematic code sequence and
+	  trapping KVM guest TTBRx_EL1 writes to EL2 when SMT is enabled. The
+	  trap handler performs the corresponding register access, skips the
+	  instruction and ensures context synchronization by virtue of the
+	  exception return.
+
+	  If unsure, say Y.
+
 config QCOM_FALKOR_ERRATUM_1003
 	bool "Falkor E1003: Incorrect translation due to ASID change"
 	default y
@@ -588,9 +686,13 @@ config QCOM_FALKOR_ERRATUM_1003
 	  is unchanged. Work around the erratum by invalidating the walk cache
 	  entries for the trampoline before entering the kernel proper.
 
+config ARM64_WORKAROUND_REPEAT_TLBI
+	bool
+
 config QCOM_FALKOR_ERRATUM_1009
 	bool "Falkor E1009: Prematurely complete a DSB after a TLBI"
 	default y
+	select ARM64_WORKAROUND_REPEAT_TLBI
 	help
 	  On Falkor v1, the CPU may prematurely complete a DSB following a
 	  TLBI xxIS invalidate maintenance operation. Repeat the TLBI operation
@@ -621,7 +723,7 @@ config HISILICON_ERRATUM_161600802
 	bool "Hip07 161600802: Erroneous redistributor VLPI base"
 	default y
 	help
-	  The HiSilicon Hip07 SoC usees the wrong redistributor base
+	  The HiSilicon Hip07 SoC uses the wrong redistributor base
 	  when issued ITS commands such as VMOVP and VMAPP, and requires
 	  a 128kB offset to be applied to the target address in this commands.
 
@@ -641,7 +743,7 @@ config FUJITSU_ERRATUM_010001
 	bool "Fujitsu-A64FX erratum E#010001: Undefined fault may occur wrongly"
 	default y
 	help
-	  This option adds workaround for Fujitsu-A64FX erratum E#010001.
+	  This option adds a workaround for Fujitsu-A64FX erratum E#010001.
 	  On some variants of the Fujitsu-A64FX cores ver(1.0, 1.1), memory
 	  accesses may cause undefined fault (Data abort, DFSC=0b111111).
 	  This fault occurs under a specific hardware condition when a
@@ -652,7 +754,7 @@ config FUJITSU_ERRATUM_010001
 	  case-4  TTBR1_EL2 with TCR_EL2.NFD1 == 1.
 
 	  The workaround is to ensure these bits are clear in TCR_ELx.
-	  The workaround only affect the Fujitsu-A64FX.
+	  The workaround only affects the Fujitsu-A64FX.
 
 	  If unsure, say Y.
 
@@ -820,6 +922,7 @@ config NUMA
 	bool "Numa Memory Allocation and Scheduler Support"
 	select ACPI_NUMA if ACPI
 	select OF_NUMA
+	select CPUMASK_OFFSTACK
 	help
 	  Enable NUMA (Non Uniform Memory Access) support.
 
@@ -1259,6 +1362,31 @@ config ARM64_CNP
 
 endmenu
 
+menu "ARMv8.3 architectural features"
+
+config ARM64_PTR_AUTH
+	bool "Enable support for pointer authentication"
+	default y
+	depends on !KVM || ARM64_VHE
+	help
+	  Pointer authentication (part of the ARMv8.3 Extensions) provides
+	  instructions for signing and authenticating pointers against secret
+	  keys, which can be used to mitigate Return Oriented Programming (ROP)
+	  and other attacks.
+
+	  This option enables these instructions at EL0 (i.e. for userspace).
+
+	  Choosing this option will cause the kernel to initialise secret keys
+	  for each process at exec() time, with these keys being
+	  context-switched along with the process.
+
+	  The feature is detected at runtime. If the feature is not present in
+	  hardware it will not be advertised to userspace/KVM guest nor will it
+	  be enabled. However, KVM guest also require VHE mode and hence
+	  CONFIG_ARM64_VHE=y option to use this feature.
+
+endmenu
+
 config ARM64_SVE
 	bool "ARM Scalable Vector Extension support"
 	default y
@@ -1297,6 +1425,31 @@ config ARM64_SVE
 config ARM64_MODULE_PLTS
 	bool
 	select HAVE_MOD_ARCH_SPECIFIC
+
+config ARM64_PSEUDO_NMI
+	bool "Support for NMI-like interrupts"
+	select ARM_GIC_V3
+	help
+	  Adds support for mimicking Non-Maskable Interrupts through the use of
+	  GIC interrupt priority. This support requires version 3 or later of
+	  Arm GIC.
+
+	  This high priority configuration for interrupts needs to be
+	  explicitly enabled by setting the kernel parameter
+	  "irqchip.gicv3_pseudo_nmi" to 1.
+
+	  If unsure, say N
+
+if ARM64_PSEUDO_NMI
+config ARM64_DEBUG_PRIORITY_MASKING
+	bool "Debug interrupt priority masking"
+	help
+	  This adds runtime checks to functions enabling/disabling
+	  interrupts when using priority masking. The additional checks verify
+	  the validity of ICC_PMR_EL1 when calling concerned functions.
+
+	  If unsure, say N
+endif
 
 config RELOCATABLE
 	bool
@@ -1342,6 +1495,13 @@ config RANDOMIZE_MODULE_REGION_FULL
 	  When this option is not set, the module region will be randomized over
 	  a limited range that contains the [_stext, _etext] interval of the
 	  core kernel, so branch relocations are always in range.
+
+config CC_HAVE_STACKPROTECTOR_SYSREG
+	def_bool $(cc-option,-mstack-protector-guard=sysreg -mstack-protector-guard-reg=sp_el0 -mstack-protector-guard-offset=0)
+
+config STACKPROTECTOR_PER_TASK
+	def_bool y
+	depends on STACKPROTECTOR && CC_HAVE_STACKPROTECTOR_SYSREG
 
 endmenu
 
@@ -1435,6 +1595,10 @@ config SYSVIPC_COMPAT
 	depends on COMPAT && SYSVIPC
 
 endmenu
+
+config ARCH_ENABLE_HUGEPAGE_MIGRATION
+	def_bool y
+	depends on HUGETLB_PAGE && MIGRATION
 
 menu "Power management options"
 

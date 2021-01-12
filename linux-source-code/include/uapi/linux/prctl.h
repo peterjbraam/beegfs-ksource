@@ -221,4 +221,16 @@ struct prctl_mm_map {
 # define PR_SPEC_FORCE_DISABLE		(1UL << 3)
 # define PR_SPEC_DISABLE_NOEXEC		(1UL << 4)
 
+/* Reset arm64 pointer authentication keys */
+#define PR_PAC_RESET_KEYS		54
+# define PR_PAC_APIAKEY			(1UL << 0)
+# define PR_PAC_APIBKEY			(1UL << 1)
+# define PR_PAC_APDAKEY			(1UL << 2)
+# define PR_PAC_APDBKEY			(1UL << 3)
+# define PR_PAC_APGAKEY			(1UL << 4)
+
+/* Control reclaim behavior when allocating memory */
+#define PR_SET_IO_FLUSHER		57
+#define PR_GET_IO_FLUSHER		58
+
 #endif /* _LINUX_PRCTL_H */

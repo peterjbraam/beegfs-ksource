@@ -107,6 +107,8 @@ static void qedf_cmd_timeout(struct work_struct *work)
 		qedf_process_seq_cleanup_compl(qedf, NULL, io_req);
 		break;
 	default:
+		QEDF_INFO(&qedf->dbg_ctx, QEDF_LOG_IO,
+			  "Hit default case, xid=0x%x.\n", io_req->xid);
 		break;
 	}
 }
@@ -125,8 +127,10 @@ void qedf_cmd_mgr_free(struct qedf_cmd_mgr *cmgr)
 	num_ios = max_xid - min_xid + 1;
 
 	/* Free fcoe_bdt_ctx structures */
-	if (!cmgr->io_bdt_pool)
+	if (!cmgr->io_bdt_pool) {
+		QEDF_ERR(&qedf->dbg_ctx, "io_bdt_pool is NULL.\n");
 		goto free_cmd_pool;
+	}
 
 	bd_tbl_sz = QEDF_MAX_BDS_PER_CMD * sizeof(struct scsi_sge);
 	for (i = 0; i < num_ios; i++) {
@@ -229,8 +233,11 @@ struct qedf_cmd_mgr *qedf_cmd_mgr_alloc(struct qedf_ctx *qedf)
 		io_req->sense_buffer = dma_alloc_coherent(&qedf->pdev->dev,
 		    QEDF_SCSI_SENSE_BUFFERSIZE, &io_req->sense_buffer_dma,
 		    GFP_KERNEL);
-		if (!io_req->sense_buffer)
+		if (!io_req->sense_buffer) {
+			QEDF_ERR(&qedf->dbg_ctx,
+				 "Failed to alloc sense buffer.\n");
 			goto mem_err;
+		}
 
 		/* Allocate task parameters to pass to f/w init funcions */
 		io_req->task_params = kzalloc(sizeof(*io_req->task_params),
@@ -440,8 +447,12 @@ void qedf_release_cmd(struct kref *ref)
 	struct qedf_rport *fcport = io_req->fcport;
 	unsigned long flags;
 
-	if (io_req->cmd_type == QEDF_SCSI_CMD)
+	if (io_req->cmd_type == QEDF_SCSI_CMD) {
+		QEDF_WARN(&fcport->qedf->dbg_ctx,
+			  "Cmd released called without scsi_done called, io_req %p xid=0x%x.\n",
+			  io_req, io_req->xid);
 		WARN_ON(io_req->sc_cmd);
+	}
 
 	if (io_req->cmd_type == QEDF_ELS ||
 	    io_req->cmd_type == QEDF_TASK_MGMT_CMD)
@@ -450,8 +461,10 @@ void qedf_release_cmd(struct kref *ref)
 	atomic_inc(&cmd_mgr->free_list_cnt);
 	atomic_dec(&fcport->num_active_ios);
 	atomic_set(&io_req->state, QEDF_CMD_ST_INACTIVE);
-	if (atomic_read(&fcport->num_active_ios) < 0)
+	if (atomic_read(&fcport->num_active_ios) < 0) {
 		QEDF_WARN(&(fcport->qedf->dbg_ctx), "active_ios < 0.\n");
+		WARN_ON(1);
+	}
 
 	/* Increment task retry identifier now that the request is released */
 	io_req->task_retry_identifier++;
@@ -954,6 +967,9 @@ qedf_queuecommand(struct Scsi_Host *host, struct scsi_cmnd *sc_cmd)
 
 	if (test_bit(QEDF_UNLOADING, &qedf->flags) ||
 	    test_bit(QEDF_DBG_STOP_IO, &qedf->flags)) {
+		QEDF_INFO(&qedf->dbg_ctx, QEDF_LOG_IO,
+			  "Returning DNC as unloading or stop io, flags 0x%lx.\n",
+			  qedf->flags);
 		sc_cmd->result = DID_NO_CONNECT << 16;
 		sc_cmd->scsi_done(sc_cmd);
 		return 0;
@@ -970,6 +986,9 @@ qedf_queuecommand(struct Scsi_Host *host, struct scsi_cmnd *sc_cmd)
 
 	rval = fc_remote_port_chkready(rport);
 	if (rval) {
+		QEDF_INFO(&qedf->dbg_ctx, QEDF_LOG_IO,
+			  "fc_remote_port_chkready failed=0x%x for port_id=0x%06x.\n",
+			  rval, rport->port_id);
 		sc_cmd->result = rval;
 		sc_cmd->scsi_done(sc_cmd);
 		return 0;
@@ -977,12 +996,14 @@ qedf_queuecommand(struct Scsi_Host *host, struct scsi_cmnd *sc_cmd)
 
 	/* Retry command if we are doing a qed drain operation */
 	if (test_bit(QEDF_DRAIN_ACTIVE, &qedf->flags)) {
+		QEDF_INFO(&qedf->dbg_ctx, QEDF_LOG_IO, "Drain active.\n");
 		rc = SCSI_MLQUEUE_HOST_BUSY;
 		goto exit_qcmd;
 	}
 
 	if (lport->state != LPORT_ST_READY ||
 	    atomic_read(&qedf->link_state) != QEDF_LINK_UP) {
+		QEDF_INFO(&qedf->dbg_ctx, QEDF_LOG_IO, "Link down.\n");
 		rc = SCSI_MLQUEUE_HOST_BUSY;
 		goto exit_qcmd;
 	}
@@ -1003,14 +1024,18 @@ qedf_queuecommand(struct Scsi_Host *host, struct scsi_cmnd *sc_cmd)
 	atomic_inc(&fcport->ios_to_queue);
 
 	if (fcport->retry_delay_timestamp) {
+		/* Take fcport->rport_lock for resetting the delay_timestamp */
+		spin_lock_irqsave(&fcport->rport_lock, flags);
 		if (time_after(jiffies, fcport->retry_delay_timestamp)) {
 			fcport->retry_delay_timestamp = 0;
 		} else {
+			spin_unlock_irqrestore(&fcport->rport_lock, flags);
 			/* If retry_delay timer is active, flow off the ML */
 			rc = SCSI_MLQUEUE_TARGET_BUSY;
 			atomic_dec(&fcport->ios_to_queue);
 			goto exit_qcmd;
 		}
+		spin_unlock_irqrestore(&fcport->rport_lock, flags);
 	}
 
 	io_req = qedf_alloc_cmd(fcport, QEDF_SCSI_CMD);
@@ -1116,6 +1141,8 @@ void qedf_scsi_completion(struct qedf_ctx *qedf, struct fcoe_cqe *cqe,
 	int refcount;
 	u16 scope, qualifier = 0;
 	u8 fw_residual_flag = 0;
+	unsigned long flags = 0;
+	u16 chk_scope = 0;
 
 	if (!io_req)
 		return;
@@ -1249,16 +1276,8 @@ void qedf_scsi_completion(struct qedf_ctx *qedf, struct fcoe_cqe *cqe,
 				/* Lower 14 bits */
 				qualifier = fcp_rsp->retry_delay_timer & 0x3FFF;
 
-				if (qedf_retry_delay &&
-				    scope > 0 && qualifier > 0 &&
-				    qualifier <= 0x3FEF) {
-					/* Check we don't go over the max */
-					if (qualifier > QEDF_RETRY_DELAY_MAX)
-						qualifier =
-						    QEDF_RETRY_DELAY_MAX;
-					fcport->retry_delay_timestamp =
-					    jiffies + (qualifier * HZ / 10);
-				}
+				if (qedf_retry_delay)
+					chk_scope = 1;
 				/* Record stats */
 				if (io_req->cdb_status ==
 				    SAM_STAT_TASK_SET_FULL)
@@ -1269,6 +1288,36 @@ void qedf_scsi_completion(struct qedf_ctx *qedf, struct fcoe_cqe *cqe,
 		}
 		if (io_req->fcp_resid)
 			scsi_set_resid(sc_cmd, io_req->fcp_resid);
+
+		if (chk_scope == 1) {
+			if ((scope == 1 || scope == 2) &&
+			    (qualifier > 0 && qualifier <= 0x3FEF)) {
+				/* Check we don't go over the max */
+				if (qualifier > QEDF_RETRY_DELAY_MAX) {
+					qualifier = QEDF_RETRY_DELAY_MAX;
+					QEDF_INFO(&qedf->dbg_ctx, QEDF_LOG_IO,
+						  "qualifier = %d\n",
+						  (fcp_rsp->retry_delay_timer &
+						  0x3FFF));
+				}
+				QEDF_INFO(&qedf->dbg_ctx, QEDF_LOG_IO,
+					  "Scope = %d and qualifier = %d",
+					  scope, qualifier);
+				/*  Take fcport->rport_lock to
+				 *  update the retry_delay_timestamp
+				 */
+				spin_lock_irqsave(&fcport->rport_lock, flags);
+				fcport->retry_delay_timestamp =
+					jiffies + (qualifier * HZ / 10);
+				spin_unlock_irqrestore(&fcport->rport_lock,
+						       flags);
+
+			} else {
+				QEDF_INFO(&qedf->dbg_ctx, QEDF_LOG_IO,
+					  "combination of scope = %d and qualifier = %d is not handled in qedf.\n",
+					  scope, qualifier);
+			}
+		}
 		break;
 	default:
 		QEDF_INFO(&(qedf->dbg_ctx), QEDF_LOG_IO, "fcp_status=%d.\n",
@@ -1300,8 +1349,10 @@ void qedf_scsi_done(struct qedf_ctx *qedf, struct qedf_ioreq *io_req,
 	struct scsi_cmnd *sc_cmd;
 	int refcount;
 
-	if (!io_req)
+	if (!io_req) {
+		QEDF_INFO(&qedf->dbg_ctx, QEDF_LOG_IO, "io_req is NULL\n");
 		return;
+	}
 
 	if (test_and_set_bit(QEDF_CMD_ERR_SCSI_DONE, &io_req->flags)) {
 		QEDF_INFO(&qedf->dbg_ctx, QEDF_LOG_IO,
@@ -1417,8 +1468,12 @@ void qedf_process_warning_compl(struct qedf_ctx *qedf, struct fcoe_cqe *cqe,
 	u64 err_warn_bit_map;
 	u8 err_warn = 0xff;
 
-	if (!cqe)
+	if (!cqe) {
+		QEDF_INFO(&qedf->dbg_ctx, QEDF_LOG_IO,
+			  "cqe is NULL for io_req %p xid=0x%x\n",
+			  io_req, io_req->xid);
 		return;
+	}
 
 	QEDF_ERR(&(io_req->fcport->qedf->dbg_ctx), "Warning CQE, "
 		  "xid=0x%x\n", io_req->xid);
@@ -1480,8 +1535,11 @@ void qedf_process_error_detect(struct qedf_ctx *qedf, struct fcoe_cqe *cqe,
 {
 	int rval;
 
-	if (!cqe)
+	if (!cqe) {
+		QEDF_INFO(&qedf->dbg_ctx, QEDF_LOG_IO,
+			  "cqe is NULL for io_req %p\n", io_req);
 		return;
+	}
 
 	QEDF_ERR(&(io_req->fcport->qedf->dbg_ctx), "Error detection CQE, "
 		  "xid=0x%x\n", io_req->xid);
@@ -1546,8 +1604,10 @@ void qedf_flush_active_ios(struct qedf_rport *fcport, int lun)
 	int wait_cnt = 100;
 	int refcount = 0;
 
-	if (!fcport)
+	if (!fcport) {
+		QEDF_ERR(NULL, "fcport is NULL\n");
 		return;
+	}
 
 	/* Check that fcport is still offloaded */
 	if (!test_bit(QEDF_RPORT_SESSION_READY, &fcport->flags)) {
@@ -1979,6 +2039,10 @@ void qedf_process_abts_compl(struct qedf_ctx *qedf, struct fcoe_cqe *cqe,
 	clear_bit(QEDF_CMD_IN_ABORT, &io_req->flags);
 
 	if (io_req->sc_cmd) {
+		if (!io_req->return_scsi_cmd_on_abts)
+			QEDF_INFO(&qedf->dbg_ctx, QEDF_LOG_SCSI_TM,
+				  "Not call scsi_done for xid=0x%x.\n",
+				  io_req->xid);
 		if (io_req->return_scsi_cmd_on_abts)
 			qedf_scsi_done(qedf, io_req, DID_ERROR);
 	}
@@ -2204,6 +2268,10 @@ int qedf_initiate_cleanup(struct qedf_ioreq *io_req,
 	}
 
 	if (io_req->sc_cmd) {
+		if (!io_req->return_scsi_cmd_on_abts)
+			QEDF_INFO(&qedf->dbg_ctx, QEDF_LOG_SCSI_TM,
+				  "Not call scsi_done for xid=0x%x.\n",
+				  io_req->xid);
 		if (io_req->return_scsi_cmd_on_abts)
 			qedf_scsi_done(qedf, io_req, DID_ERROR);
 	}
@@ -2244,7 +2312,7 @@ static int qedf_execute_tmf(struct qedf_rport *fcport, struct scsi_cmnd *sc_cmd,
 	u16 sqe_idx;
 
 	if (!sc_cmd) {
-		QEDF_ERR(&(qedf->dbg_ctx), "invalid arg\n");
+		QEDF_ERR(&qedf->dbg_ctx, "sc_cmd is NULL\n");
 		return FAILED;
 	}
 
@@ -2366,8 +2434,8 @@ int qedf_initiate_tmf(struct scsi_cmnd *sc_cmd, u8 tm_flags)
 
 	QEDF_ERR(NULL,
 		 "tm_flags 0x%x sc_cmd %p op = 0x%02x target_id = 0x%x lun=%d\n",
-		 tm_flags, sc_cmd, sc_cmd->cmnd[0], rport->scsi_target_id,
-		 (int)sc_cmd->device->lun);
+		 tm_flags, sc_cmd, sc_cmd->cmd_len ? sc_cmd->cmnd[0] : 0xff,
+		 rport->scsi_target_id, (int)sc_cmd->device->lun);
 
 	if (!rdata || !kref_get_unless_zero(&rdata->kref)) {
 		QEDF_ERR(NULL, "stale rport\n");
@@ -2517,6 +2585,11 @@ void qedf_process_unsol_compl(struct qedf_ctx *qedf, uint16_t que_idx,
 	/* Copy data from BDQ buffer into fc_frame struct */
 	fh = (struct fc_frame_header *)fc_frame_header_get(fp);
 	memcpy(fh, (void *)bdq_addr, pktlen);
+
+	QEDF_WARN(&qedf->dbg_ctx,
+		  "Processing Unsolicated frame, src=%06x dest=%06x r_ctl=0x%x type=0x%x cmd=%02x\n",
+		  ntoh24(fh->fh_s_id), ntoh24(fh->fh_d_id), fh->fh_r_ctl,
+		  fh->fh_type, fc_frame_payload_op(fp));
 
 	/* Initialize the frame so libfc sees it as a valid frame */
 	crc = fcoe_fc_crc(fp);

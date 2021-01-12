@@ -482,7 +482,7 @@ static void	tc35815_txdone(struct net_device *dev);
 static int	tc35815_close(struct net_device *dev);
 static struct	net_device_stats *tc35815_get_stats(struct net_device *dev);
 static void	tc35815_set_multicast_list(struct net_device *dev);
-static void	tc35815_tx_timeout(struct net_device *dev);
+static void	tc35815_tx_timeout(struct net_device *dev, unsigned int txqueue);
 static int	tc35815_ioctl(struct net_device *dev, struct ifreq *rq, int cmd);
 #ifdef CONFIG_NET_POLL_CONTROLLER
 static void	tc35815_poll_controller(struct net_device *dev);
@@ -693,10 +693,10 @@ err_out:
  * should provide a "tc35815-mac" device with a MAC address in its
  * platform_data.
  */
-static int tc35815_mac_match(struct device *dev, void *data)
+static int tc35815_mac_match(struct device *dev, const void *data)
 {
 	struct platform_device *plat_dev = to_platform_device(dev);
-	struct pci_dev *pci_dev = data;
+	const struct pci_dev *pci_dev = data;
 	unsigned int id = pci_dev->irq;
 	return !strcmp(plat_dev->name, "tc35815-mac") && plat_dev->id == id;
 }
@@ -1188,7 +1188,7 @@ static void tc35815_schedule_restart(struct net_device *dev)
 	spin_unlock_irqrestore(&lp->lock, flags);
 }
 
-static void tc35815_tx_timeout(struct net_device *dev)
+static void tc35815_tx_timeout(struct net_device *dev, unsigned int txqueue)
 {
 	struct tc35815_regs __iomem *tr =
 		(struct tc35815_regs __iomem *)dev->base_addr;

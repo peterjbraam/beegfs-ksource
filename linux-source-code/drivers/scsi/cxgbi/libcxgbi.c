@@ -1213,7 +1213,7 @@ scmd_get_params(struct scsi_cmnd *sc, struct scatterlist **sgl,
 		unsigned int *sgcnt, unsigned int *dlen,
 		unsigned int prot)
 {
-	struct scsi_data_buffer *sdb = prot ? scsi_prot(sc) : scsi_out(sc);
+	struct scsi_data_buffer *sdb = prot ? scsi_prot(sc) : &sc->sdb;
 
 	*sgl = sdb->table.sgl;
 	*sgcnt = sdb->table.nents;
@@ -1282,14 +1282,15 @@ EXPORT_SYMBOL_GPL(cxgbi_ddp_set_one_ppod);
 
 static unsigned char padding[4];
 
-void cxgbi_ddp_ppm_setup(void **ppm_pp, struct cxgbi_device *cdev,
-			 struct cxgbi_tag_format *tformat, unsigned int ppmax,
-			 unsigned int llimit, unsigned int start,
-			 unsigned int rsvd_factor)
+int cxgbi_ddp_ppm_setup(void **ppm_pp, struct cxgbi_device *cdev,
+			struct cxgbi_tag_format *tformat,
+			unsigned int iscsi_size, unsigned int llimit,
+			unsigned int start, unsigned int rsvd_factor,
+			unsigned int edram_start, unsigned int edram_size)
 {
 	int err = cxgbi_ppm_init(ppm_pp, cdev->ports[0], cdev->pdev,
-				cdev->lldev, tformat, ppmax, llimit, start,
-				rsvd_factor);
+				cdev->lldev, tformat, iscsi_size, llimit, start,
+				rsvd_factor, edram_start, edram_size);
 
 	if (err >= 0) {
 		struct cxgbi_ppm *ppm = (struct cxgbi_ppm *)(*ppm_pp);
@@ -1301,6 +1302,8 @@ void cxgbi_ddp_ppm_setup(void **ppm_pp, struct cxgbi_device *cdev,
 	} else {
 		cdev->flags |= CXGBI_FLAG_DDP_OFF;
 	}
+
+	return err;
 }
 EXPORT_SYMBOL_GPL(cxgbi_ddp_ppm_setup);
 
@@ -1429,8 +1432,7 @@ static void task_release_itt(struct iscsi_task *task, itt_t hdr_itt)
 	log_debug(1 << CXGBI_DBG_DDP,
 		  "cdev 0x%p, task 0x%p, release tag 0x%x.\n",
 		  cdev, task, tag);
-	if (sc &&
-	    (scsi_bidi_cmnd(sc) || sc->sc_data_direction == DMA_FROM_DEVICE) &&
+	if (sc && sc->sc_data_direction == DMA_FROM_DEVICE &&
 	    cxgbi_ppm_is_ddp_tag(ppm, tag)) {
 		struct cxgbi_task_data *tdata = iscsi_task_cxgbi_data(task);
 		struct cxgbi_task_tag_info *ttinfo = &tdata->ttinfo;
@@ -1462,9 +1464,7 @@ static int task_reserve_itt(struct iscsi_task *task, itt_t *hdr_itt)
 	u32 tag = 0;
 	int err = -EINVAL;
 
-	if (sc &&
-	    (scsi_bidi_cmnd(sc) || sc->sc_data_direction == DMA_FROM_DEVICE)
-	) {
+	if (sc && sc->sc_data_direction == DMA_FROM_DEVICE) {
 		struct cxgbi_task_data *tdata = iscsi_task_cxgbi_data(task);
 		struct cxgbi_task_tag_info *ttinfo = &tdata->ttinfo;
 
@@ -1898,7 +1898,7 @@ int cxgbi_conn_alloc_pdu(struct iscsi_task *task, u8 opcode)
 	if (SKB_MAX_HEAD(cdev->skb_tx_rsvd) > (512 * MAX_SKB_FRAGS) &&
 	    (opcode == ISCSI_OP_SCSI_DATA_OUT ||
 	     (opcode == ISCSI_OP_SCSI_CMD &&
-	      (scsi_bidi_cmnd(sc) || sc->sc_data_direction == DMA_TO_DEVICE))))
+	      sc->sc_data_direction == DMA_TO_DEVICE)))
 		/* data could goes into skb head */
 		headroom += min_t(unsigned int,
 				SKB_MAX_HEAD(cdev->skb_tx_rsvd),
@@ -1973,7 +1973,7 @@ int cxgbi_conn_init_pdu(struct iscsi_task *task, unsigned int offset,
 		return 0;
 
 	if (task->sc) {
-		struct scsi_data_buffer *sdb = scsi_out(task->sc);
+		struct scsi_data_buffer *sdb = &task->sc->sdb;
 		struct scatterlist *sg = NULL;
 		int err;
 

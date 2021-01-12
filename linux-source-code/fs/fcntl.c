@@ -261,7 +261,7 @@ static int f_getowner_uids(struct file *filp, unsigned long arg)
 static bool rw_hint_valid(enum rw_hint hint)
 {
 	switch (hint) {
-	case RWF_WRITE_LIFE_NOT_SET:
+	case RWH_WRITE_LIFE_NOT_SET:
 	case RWH_WRITE_LIFE_NONE:
 	case RWH_WRITE_LIFE_SHORT:
 	case RWH_WRITE_LIFE_MEDIUM:
@@ -769,7 +769,7 @@ static void send_sigio_to_task(struct task_struct *p,
 			si.si_fd    = fd;
 			if (!do_send_sig_info(signum, &si, p, type))
 				break;
-		/* fall-through: fall back on the old plain SIGIO signal */
+		/* fall-through - fall back on the old plain SIGIO signal */
 		case 0:
 			do_send_sig_info(SIGIO, SEND_SIG_PRIV, p, type);
 	}
@@ -788,7 +788,7 @@ void send_sigio(struct fown_struct *fown, int fd, int band)
 	if (!pid)
 		goto out_unlock_fown;
 
-	if (type <= PIDTYPE_TGID) {
+	if ((type == PIDTYPE_PID) || (type == PIDTYPE_TGID)) {
 		rcu_read_lock();
 		p = pid_task(pid, PIDTYPE_PID);
 		if (p)
@@ -828,7 +828,7 @@ int send_sigurg(struct fown_struct *fown)
 
 	ret = 1;
 
-	if (type <= PIDTYPE_TGID) {
+	if ((type == PIDTYPE_PID) || (type == PIDTYPE_TGID)) {
 		rcu_read_lock();
 		p = pid_task(pid, PIDTYPE_PID);
 		if (p)

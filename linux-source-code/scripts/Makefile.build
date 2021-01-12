@@ -146,7 +146,7 @@ $(obj)/%.i: $(src)/%.c FORCE
 # These mirror gensymtypes_S and co below, keep them in synch.
 cmd_gensymtypes_c =                                                         \
     $(CPP) -D__GENKSYMS__ $(c_flags) $< |                                   \
-    $(GENKSYMS) $(if $(1), -T $(2))                                         \
+    scripts/genksyms/genksyms $(if $(1), -T $(2))                           \
      $(patsubst y,-R,$(CONFIG_MODULE_REL_CRCS))                             \
      $(if $(KBUILD_PRESERVE),-p)                                            \
      -r $(firstword $(wildcard $(2:.symtypes=.symref) /dev/null))
@@ -203,6 +203,9 @@ cmd_modversions_c =								\
 	else									\
 		mv -f $(@D)/.tmp_$(@F) $@;					\
 	fi;
+endif
+ifdef CONFIG_X86_SMAP
+  objtool_args += --uaccess
 endif
 
 ifdef CONFIG_FTRACE_MCOUNT_RECORD
@@ -354,7 +357,7 @@ cmd_gensymtypes_S =                                                         \
      grep "\<___EXPORT_SYMBOL\>" |                                          \
      sed 's/.*___EXPORT_SYMBOL[[:space:]]*\([a-zA-Z0-9_]*\)[[:space:]]*,.*/EXPORT_SYMBOL(\1);/' ) | \
     $(CPP) -D__GENKSYMS__ $(c_flags) -xc - |                                \
-    $(GENKSYMS) $(if $(1), -T $(2))                                         \
+    scripts/genksyms/genksyms $(if $(1), -T $(2))                           \
      $(patsubst y,-R,$(CONFIG_MODULE_REL_CRCS))                             \
      $(if $(KBUILD_PRESERVE),-p)                                            \
      -r $(firstword $(wildcard $(2:.symtypes=.symref) /dev/null))

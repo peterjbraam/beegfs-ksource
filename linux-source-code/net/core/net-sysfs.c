@@ -12,10 +12,10 @@
 #include <linux/capability.h>
 #include <linux/kernel.h>
 #include <linux/netdevice.h>
-#include <net/switchdev.h>
 #include <linux/if_arp.h>
 #include <linux/slab.h>
 #include <linux/sched/signal.h>
+#include <linux/sched/isolation.h>
 #include <linux/nsproxy.h>
 #include <net/sock.h>
 #include <net/net_namespace.h>
@@ -495,27 +495,17 @@ static ssize_t phys_switch_id_show(struct device *dev,
 				   struct device_attribute *attr, char *buf)
 {
 	struct net_device *netdev = to_net_dev(dev);
-	const struct net_device_ops *ops = netdev->netdev_ops;
 	ssize_t ret = -EINVAL;
 
 	if (!rtnl_trylock())
 		return restart_syscall();
 
 	if (dev_isalive(netdev)) {
-		struct switchdev_attr attr = {
-			.orig_dev = netdev,
-			.id = SWITCHDEV_ATTR_ID_PORT_PARENT_ID,
-			.flags = SWITCHDEV_F_NO_RECURSE,
-		};
+		struct netdev_phys_item_id ppid = { };
 
-		if (ops->ndo_get_port_parent_id)
-			ret = dev_get_port_parent_id(netdev, &attr.u.ppid,
-						     false);
-		else
-			ret = switchdev_port_attr_get(netdev, &attr);
+		ret = dev_get_port_parent_id(netdev, &ppid, false);
 		if (!ret)
-			ret = sprintf(buf, "%*phN\n", attr.u.ppid.id_len,
-				      attr.u.ppid.id);
+			ret = sprintf(buf, "%*phN\n", ppid.id_len, ppid.id);
 	}
 	rtnl_unlock();
 
@@ -725,7 +715,7 @@ static ssize_t store_rps_map(struct netdev_rx_queue *queue,
 {
 	struct rps_map *old_map, *map;
 	cpumask_var_t mask;
-	int err, cpu, i;
+	int err, cpu, i, hk_flags;
 	static DEFINE_MUTEX(rps_map_mutex);
 
 	if (!capable(CAP_NET_ADMIN))
@@ -738,6 +728,15 @@ static ssize_t store_rps_map(struct netdev_rx_queue *queue,
 	if (err) {
 		free_cpumask_var(mask);
 		return err;
+	}
+
+	if (!cpumask_empty(mask)) {
+		hk_flags = HK_FLAG_DOMAIN | HK_FLAG_WQ;
+		cpumask_and(mask, mask, housekeeping_cpumask(hk_flags));
+		if (cpumask_empty(mask)) {
+			free_cpumask_var(mask);
+			return -EINVAL;
+		}
 	}
 
 	map = kzalloc(max_t(unsigned int,
@@ -765,9 +764,9 @@ static ssize_t store_rps_map(struct netdev_rx_queue *queue,
 	rcu_assign_pointer(queue->rps_map, map);
 
 	if (map)
-		static_key_slow_inc(&rps_needed);
+		static_branch_inc(&rps_needed);
 	if (old_map)
-		static_key_slow_dec(&rps_needed);
+		static_branch_dec(&rps_needed);
 
 	mutex_unlock(&rps_map_mutex);
 

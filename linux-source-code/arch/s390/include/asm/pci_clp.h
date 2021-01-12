@@ -70,6 +70,17 @@ struct clp_rsp_list_pci {
 	struct clp_fh_list_entry fh_list[CLP_FH_LIST_NR_ENTRIES];
 } __packed;
 
+struct mio_info {
+	u32 valid : 6;
+	u32 : 26;
+	u32 : 32;
+	struct {
+		u64 wb;
+		u64 wt;
+	} addr[PCI_STD_NUM_BARS];
+	u32 reserved[6];
+} __packed;
+
 /* Query PCI function request */
 struct clp_req_query_pci {
 	struct clp_req_hdr hdr;
@@ -87,9 +98,9 @@ struct clp_rsp_query_pci {
 	u16 util_str_avail	:  1;	/* utility string available? */
 	u16 pfgid		:  8;	/* pci function group id */
 	u32 fid;			/* pci function id */
-	u8 bar_size[PCI_BAR_COUNT];
+	u8 bar_size[PCI_STD_NUM_BARS];
 	u16 pchid;
-	__le32 bar[PCI_BAR_COUNT];
+	__le32 bar[PCI_STD_NUM_BARS];
 	u8 pfip[CLP_PFIP_NR_SEGMENTS];	/* pci function internal path */
 	u32			: 16;
 	u8 fmb_len;
@@ -100,14 +111,7 @@ struct clp_rsp_query_pci {
 	u32 uid;			/* user defined id */
 	u8 util_str[CLP_UTIL_STR_LEN];	/* utility string */
 	u32 reserved2[16];
-	u32 mio_valid : 6;
-	u32 : 26;
-	u32 : 32;
-	struct {
-		u64 wb;
-		u64 wt;
-	} addr[PCI_BAR_COUNT];
-	u32 reserved3[6];
+	struct mio_info mio;
 } __packed;
 
 /* Query PCI function group request */
@@ -155,8 +159,9 @@ struct clp_req_set_pci {
 struct clp_rsp_set_pci {
 	struct clp_rsp_hdr hdr;
 	u32 fh;				/* function handle */
-	u32 reserved3;
-	u64 reserved4;
+	u32 reserved1;
+	u64 reserved2;
+	struct mio_info mio;
 } __packed;
 
 /* Combined request/response block structures used by clp insn */

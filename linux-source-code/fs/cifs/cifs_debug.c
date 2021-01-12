@@ -135,6 +135,27 @@ static void cifs_debug_tcon(struct seq_file *m, struct cifs_tcon *tcon)
 }
 
 static void
+cifs_dump_channel(struct seq_file *m, int i, struct cifs_chan *chan)
+{
+	struct TCP_Server_Info *server = chan->server;
+
+	seq_printf(m, "\t\tChannel %d Number of credits: %d Dialect 0x%x "
+		   "TCP status: %d Instance: %d Local Users To Server: %d "
+		   "SecMode: 0x%x Req On Wire: %d In Send: %d "
+		   "In MaxReq Wait: %d\n",
+		   i+1,
+		   server->credits,
+		   server->dialect,
+		   server->tcpStatus,
+		   server->reconnect_instance,
+		   server->srv_count,
+		   server->sec_mode,
+		   in_flight(server),
+		   atomic_read(&server->in_send),
+		   atomic_read(&server->num_waiters));
+}
+
+static void
 cifs_dump_iface(struct seq_file *m, struct cifs_server_iface *iface)
 {
 	struct sockaddr_in *ipv4 = (struct sockaddr_in *)&iface->sockaddr;
@@ -213,6 +234,8 @@ static int cifs_debug_data_proc_show(struct seq_file *m, void *v)
 	struct cifs_ses *ses;
 	struct cifs_tcon *tcon;
 	int i, j;
+	const char *security_types[] = {"Unspecified", "LANMAN", "NTLM",
+                                       "NTLMv2", "RawNTLMSSP", "Kerberos"};
 
 	seq_puts(m,
 		    "Display Internal CIFS Data Structures for Debugging\n"
@@ -253,9 +276,7 @@ static int cifs_debug_data_proc_show(struct seq_file *m, void *v)
 #ifdef CONFIG_CIFS_XATTR
 	seq_printf(m, ",XATTR");
 #endif
-#ifdef CONFIG_CIFS_ACL
 	seq_printf(m, ",ACL");
-#endif
 	seq_putc(m, '\n');
 	seq_printf(m, "CIFSMaxBufSize: %d\n", CIFSMaxBufSize);
 	seq_printf(m, "Active VFS Requests: %d\n", GlobalTotalActiveXid);
@@ -270,6 +291,11 @@ static int cifs_debug_data_proc_show(struct seq_file *m, void *v)
 #ifdef CONFIG_CIFS_SMB_DIRECT
 		if (!server->rdma)
 			goto skip_rdma;
+
+		if (!server->smbd_conn) {
+			seq_printf(m, "\nSMBDirect transport not available");
+			goto skip_rdma;
+		}
 
 		seq_printf(m, "\nSMBDirect (in hex) protocol version: %x "
 			"transport status: %x",
@@ -312,12 +338,10 @@ static int cifs_debug_data_proc_show(struct seq_file *m, void *v)
 			atomic_read(&server->smbd_conn->send_credits),
 			atomic_read(&server->smbd_conn->receive_credits),
 			server->smbd_conn->receive_credit_target);
-		seq_printf(m, "\nPending send_pending: %x send_payload_pending:"
-			" %x smbd_send_pending: %x smbd_recv_pending: %x",
+		seq_printf(m, "\nPending send_pending: %x "
+			"send_payload_pending: %x",
 			atomic_read(&server->smbd_conn->send_pending),
-			atomic_read(&server->smbd_conn->send_payload_pending),
-			server->smbd_conn->smbd_send_pending,
-			server->smbd_conn->smbd_recv_pending);
+			atomic_read(&server->smbd_conn->send_payload_pending));
 		seq_printf(m, "\nReceive buffers count_receive_queue: %x "
 			"count_empty_packet_queue: %x",
 			server->smbd_conn->count_receive_queue,
@@ -334,6 +358,12 @@ skip_rdma:
 #endif
 		seq_printf(m, "\nNumber of credits: %d Dialect 0x%x",
 			server->credits,  server->dialect);
+		if (server->compress_algorithm == SMB3_COMPRESS_LZNT1)
+			seq_printf(m, " COMPRESS_LZNT1");
+		else if (server->compress_algorithm == SMB3_COMPRESS_LZ77)
+			seq_printf(m, " COMPRESS_LZ77");
+		else if (server->compress_algorithm == SMB3_COMPRESS_LZ77_HUFF)
+			seq_printf(m, " COMPRESS_LZ77_HUFF");
 		if (server->sign)
 			seq_printf(m, " signed");
 		if (server->posix_ext_supported)
@@ -362,6 +392,10 @@ skip_rdma:
 				ses->ses_count, ses->serverOS, ses->serverNOS,
 				ses->capabilities, ses->status);
 			}
+
+			seq_printf(m,"Security type: %s\n",
+                                      security_types[server->ops->select_sectype(server, ses->sectype)]);
+
 			if (server->rdma)
 				seq_printf(m, "RDMA\n\t");
 			seq_printf(m, "TCP status: %d Instance: %d\n\tLocal Users To "
@@ -371,15 +405,23 @@ skip_rdma:
 				   server->srv_count,
 				   server->sec_mode, in_flight(server));
 
-#ifdef CONFIG_CIFS_STATS2
 			seq_printf(m, " In Send: %d In MaxReq Wait: %d",
 				atomic_read(&server->in_send),
 				atomic_read(&server->num_waiters));
-#endif
+
+			/* dump session id helpful for use with network trace */
+			seq_printf(m, " SessionId: 0x%llx", ses->Suid);
 			if (ses->session_flags & SMB2_SESSION_FLAG_ENCRYPT_DATA)
 				seq_puts(m, " encrypted");
 			if (ses->sign)
 				seq_puts(m, " signed");
+
+			if (ses->chan_count > 1) {
+				seq_printf(m, "\n\n\tExtra Channels: %zu\n",
+					   ses->chan_count-1);
+				for (j = 1; j < ses->chan_count; j++)
+					cifs_dump_channel(m, j, &ses->chans[j]);
+			}
 
 			seq_puts(m, "\n\tShares:");
 			j = 0;
@@ -419,8 +461,13 @@ skip_rdma:
 				seq_printf(m, "\n\tServer interfaces: %zu\n",
 					   ses->iface_count);
 			for (j = 0; j < ses->iface_count; j++) {
+				struct cifs_server_iface *iface;
+
+				iface = &ses->iface_list[j];
 				seq_printf(m, "\t%d)", j);
-				cifs_dump_iface(m, &ses->iface_list[j]);
+				cifs_dump_iface(m, iface);
+				if (is_ses_using_iface(ses, iface))
+					seq_puts(m, "\t\t[CONNECTED]\n");
 			}
 			spin_unlock(&ses->iface_lock);
 		}
@@ -461,9 +508,15 @@ static ssize_t cifs_stats_proc_write(struct file *file,
 		list_for_each(tmp1, &cifs_tcp_ses_list) {
 			server = list_entry(tmp1, struct TCP_Server_Info,
 					    tcp_ses_list);
+			server->max_in_flight = 0;
 #ifdef CONFIG_CIFS_STATS2
-			for (i = 0; i < NUMBER_OF_SMB2_COMMANDS; i++)
+			for (i = 0; i < NUMBER_OF_SMB2_COMMANDS; i++) {
+				atomic_set(&server->num_cmds[i], 0);
 				atomic_set(&server->smb2slowcmd[i], 0);
+				server->time_per_cmd[i] = 0;
+				server->slowest_cmd[i] = 0;
+				server->fastest_cmd[0] = 0;
+			}
 #endif /* CONFIG_CIFS_STATS2 */
 			list_for_each(tmp2, &server->smb_ses_list) {
 				ses = list_entry(tmp2, struct cifs_ses,
@@ -530,10 +583,21 @@ static int cifs_stats_proc_show(struct seq_file *m, void *v)
 	list_for_each(tmp1, &cifs_tcp_ses_list) {
 		server = list_entry(tmp1, struct TCP_Server_Info,
 				    tcp_ses_list);
+		seq_printf(m, "\nMax requests in flight: %d", server->max_in_flight);
 #ifdef CONFIG_CIFS_STATS2
+		seq_puts(m, "\nTotal time spent processing by command. Time ");
+		seq_printf(m, "units are jiffies (%d per second)\n", HZ);
+		seq_puts(m, "  SMB3 CMD\tNumber\tTotal Time\tFastest\tSlowest\n");
+		seq_puts(m, "  --------\t------\t----------\t-------\t-------\n");
+		for (j = 0; j < NUMBER_OF_SMB2_COMMANDS; j++)
+			seq_printf(m, "  %d\t\t%d\t%llu\t\t%u\t%u\n", j,
+				atomic_read(&server->num_cmds[j]),
+				server->time_per_cmd[j],
+				server->fastest_cmd[j],
+				server->slowest_cmd[j]);
 		for (j = 0; j < NUMBER_OF_SMB2_COMMANDS; j++)
 			if (atomic_read(&server->smb2slowcmd[j]))
-				seq_printf(m, "%d slow responses from %s for command %d\n",
+				seq_printf(m, "  %d slow responses from %s for command %d\n",
 					atomic_read(&server->smb2slowcmd[j]),
 					server->hostname, j);
 #endif /* STATS2 */

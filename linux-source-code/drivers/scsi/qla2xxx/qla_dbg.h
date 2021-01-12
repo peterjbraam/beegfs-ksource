@@ -374,3 +374,12 @@ extern int qla24xx_dump_ram(struct qla_hw_data *, uint32_t, uint32_t *,
 extern void qla24xx_pause_risc(struct device_reg_24xx __iomem *,
 	struct qla_hw_data *);
 extern int qla24xx_soft_reset(struct qla_hw_data *);
+
+static inline int
+ql_mask_match(uint level)
+{
+	if (ql2xextended_error_logging == 1)
+		ql2xextended_error_logging = QL_DBG_DEFAULT1_MASK;
+
+	return (level & ql2xextended_error_logging) == level;
+}

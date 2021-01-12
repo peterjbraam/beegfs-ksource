@@ -24,6 +24,7 @@ struct vm86;
 #include <asm/special_insns.h>
 #include <asm/fpu/types.h>
 #include <asm/unwind_hints.h>
+#include <asm/vmxfeatures.h>
 
 #include <linux/personality.h>
 #include <linux/cache.h>
@@ -83,6 +84,11 @@ extern u16 __read_mostly tlb_lld_4m[NR_INFO];
 extern u16 __read_mostly tlb_lld_1g[NR_INFO];
 
 struct cpuinfo_x86_extended_rh {
+	u16			cpu_die_id;
+	u16			logical_die_id;
+#ifdef CONFIG_X86_VMX_FEATURE_NAMES
+	__u32			vmx_capability[NVMXINTS];
+#endif
 };
 
 /*
@@ -121,7 +127,7 @@ struct cpuinfo_x86 {
 	int			x86_power;
 	unsigned long		loops_per_jiffy;
 	/* cpuid returned max cores value: */
-	u16			 x86_max_cores;
+	u16			x86_max_cores;
 	u16			apicid;
 	u16			initial_apicid;
 	u16			x86_clflush_size;
@@ -139,7 +145,7 @@ struct cpuinfo_x86 {
 	/* Address space bits used by the cache internally */
 	u8			x86_cache_bits;
 	unsigned		initialized : 1;
-	RH_KABI_SIZE_AND_EXTEND(cpuinfo_x86_extended);
+	RH_KABI_AUX_EMBED(cpuinfo_x86_extended);
 } __randomize_layout;
 
 struct cpuid_regs {

@@ -45,10 +45,12 @@ static inline bool switchdev_trans_ph_commit(struct switchdev_trans *trans)
 
 enum switchdev_attr_id {
 	SWITCHDEV_ATTR_ID_UNDEFINED,
-	SWITCHDEV_ATTR_ID_PORT_PARENT_ID,
+	RH_KABI_RENAME(SWITCHDEV_ATTR_ID_PORT_PARENT_ID,
+		       RH_DEPRECATED_SWITCHDEV_ATTR_ID_PORT_PARENT_ID),
 	SWITCHDEV_ATTR_ID_PORT_STP_STATE,
 	SWITCHDEV_ATTR_ID_PORT_BRIDGE_FLAGS,
-	SWITCHDEV_ATTR_ID_PORT_BRIDGE_FLAGS_SUPPORT,
+	RH_KABI_RENAME(SWITCHDEV_ATTR_ID_PORT_BRIDGE_FLAGS_SUPPORT,
+		       RH_DEPRECATED_SWITCHDEV_ATTR_ID_PORT_BRIDGE_FLAGS_SUPPORT),
 	SWITCHDEV_ATTR_ID_PORT_MROUTER,
 	SWITCHDEV_ATTR_ID_BRIDGE_AGEING_TIME,
 	SWITCHDEV_ATTR_ID_BRIDGE_VLAN_FILTERING,
@@ -66,10 +68,10 @@ struct switchdev_attr {
 	void *complete_priv;
 	void (*complete)(struct net_device *dev, int err, void *priv);
 	union {
-		struct netdev_phys_item_id ppid;	/* PORT_PARENT_ID */
+		RH_KABI_DEPRECATE(struct netdev_phys_item_id, ppid)
 		u8 stp_state;				/* PORT_STP_STATE */
 		unsigned long brport_flags;		/* PORT_{PRE}_BRIDGE_FLAGS */
-		unsigned long brport_flags_support;	/* PORT_BRIDGE_FLAGS_SUPPORT */
+		RH_KABI_DEPRECATE(unsigned long, brport_flags_support)
 		bool mrouter;				/* PORT_MROUTER */
 		clock_t ageing_time;			/* BRIDGE_AGEING_TIME */
 		bool vlan_filtering;			/* BRIDGE_VLAN_FILTERING */
@@ -131,16 +133,14 @@ struct switchdev_ops_extended_rh {
 /**
  * struct switchdev_ops - switchdev operations
  *
- * @switchdev_port_attr_get: Get a port attribute (see switchdev_attr).
- *
  * @switchdev_port_attr_set: Set a port attribute (see switchdev_attr).
  */
-struct switchdev_ops {
-	int	(*switchdev_port_attr_get)(struct net_device *dev,
-					   struct switchdev_attr *attr);
-	int	(*switchdev_port_attr_set)(struct net_device *dev,
+struct RH_KABI_RENAME(switchdev_ops, rh_deprecated_switchdev_ops) {
+	RH_KABI_DEPRECATE_FN(int, switchdev_port_attr_get, struct net_device *dev,
+					   struct switchdev_attr *attr)
+	RH_KABI_DEPRECATE_FN(int, switchdev_port_attr_set, struct net_device *dev,
 					   const struct switchdev_attr *attr,
-					   struct switchdev_trans *trans);
+					   struct switchdev_trans *trans)
 	RH_KABI_DEPRECATE_FN(int, switchdev_port_obj_add, struct net_device *dev,
 					  const struct switchdev_obj *obj,
 					  struct switchdev_trans *trans)
@@ -154,7 +154,7 @@ struct switchdev_ops {
 	RH_KABI_RESERVE(5)
 	RH_KABI_RESERVE(6)
 	RH_KABI_RESERVE(7)
-	RH_KABI_SIZE_AND_EXTEND(switchdev_ops_extended)
+	RH_KABI_AUX_EMBED(switchdev_ops_extended)
 };
 
 enum switchdev_notifier_type {
@@ -217,8 +217,6 @@ switchdev_notifier_info_to_extack(const struct switchdev_notifier_info *info)
 #ifdef CONFIG_NET_SWITCHDEV
 
 void switchdev_deferred_process(void);
-int switchdev_port_attr_get(struct net_device *dev,
-			    struct switchdev_attr *attr);
 int switchdev_port_attr_set(struct net_device *dev,
 			    const struct switchdev_attr *attr);
 int switchdev_port_obj_add(struct net_device *dev,
@@ -243,9 +241,6 @@ void switchdev_port_fwd_mark_set(struct net_device *dev,
 				 struct net_device *group_dev,
 				 bool joining);
 
-bool switchdev_port_same_parent_id(struct net_device *a,
-				   struct net_device *b);
-
 int switchdev_handle_port_obj_add(struct net_device *dev,
 			struct switchdev_notifier_port_obj_info *port_obj_info,
 			bool (*check_cb)(const struct net_device *dev),
@@ -265,19 +260,10 @@ int switchdev_handle_port_attr_set(struct net_device *dev,
 			int (*set_cb)(struct net_device *dev,
 				      const struct switchdev_attr *attr,
 				      struct switchdev_trans *trans));
-
-#define SWITCHDEV_SET_OPS(netdev, ops) ((netdev)->switchdev_ops = (ops))
-
 #else
 
 static inline void switchdev_deferred_process(void)
 {
-}
-
-static inline int switchdev_port_attr_get(struct net_device *dev,
-					  struct switchdev_attr *attr)
-{
-	return -EOPNOTSUPP;
 }
 
 static inline int switchdev_port_attr_set(struct net_device *dev,
@@ -338,12 +324,6 @@ call_switchdev_blocking_notifiers(unsigned long val,
 	return NOTIFY_DONE;
 }
 
-static inline bool switchdev_port_same_parent_id(struct net_device *a,
-						 struct net_device *b)
-{
-	return false;
-}
-
 static inline int
 switchdev_handle_port_obj_add(struct net_device *dev,
 			struct switchdev_notifier_port_obj_info *port_obj_info,
@@ -376,9 +356,6 @@ switchdev_handle_port_attr_set(struct net_device *dev,
 {
 	return 0;
 }
-
-#define SWITCHDEV_SET_OPS(netdev, ops) do {} while (0)
-
 #endif
 
 #endif /* _LINUX_SWITCHDEV_H_ */

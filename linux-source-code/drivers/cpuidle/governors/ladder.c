@@ -27,8 +27,8 @@ struct ladder_device_state {
 	struct {
 		u32 promotion_count;
 		u32 demotion_count;
-		u32 promotion_time;
-		u32 demotion_time;
+		u64 promotion_time_ns;
+		u64 demotion_time_ns;
 	} threshold;
 	struct {
 		int promotion_count;
@@ -54,7 +54,7 @@ static inline void ladder_do_selection(struct cpuidle_device *dev,
 {
 	ldev->states[old_idx].stats.promotion_count = 0;
 	ldev->states[old_idx].stats.demotion_count = 0;
-	dev->last_state_idx = new_idx;
+	dev->rh_cpuidle_dev.last_state_idx = new_idx;
 }
 
 /**
@@ -68,9 +68,10 @@ static int ladder_select_state(struct cpuidle_driver *drv,
 {
 	struct ladder_device *ldev = this_cpu_ptr(&ladder_devices);
 	struct ladder_device_state *last_state;
-	int last_residency, last_idx = dev->last_state_idx;
+	int last_idx = dev->last_state_idx;
 	int first_idx = drv->states[0].flags & CPUIDLE_FLAG_POLLING ? 1 : 0;
-	int latency_req = cpuidle_governor_latency_req(dev->cpu);
+	s64 latency_req = cpuidle_governor_latency_req(dev->cpu);
+	s64 last_residency;
 
 	/* Special case when user has set very strict latency requirement */
 	if (unlikely(latency_req == 0)) {
@@ -80,14 +81,13 @@ static int ladder_select_state(struct cpuidle_driver *drv,
 
 	last_state = &ldev->states[last_idx];
 
-	last_residency = cpuidle_get_last_residency(dev) - drv->states[last_idx].exit_latency;
+	last_residency = dev->last_residency_ns - drv->states[last_idx].exit_latency_ns;
 
 	/* consider promotion */
 	if (last_idx < drv->state_count - 1 &&
-	    !drv->states[last_idx + 1].disabled &&
 	    !dev->states_usage[last_idx + 1].disable &&
-	    last_residency > last_state->threshold.promotion_time &&
-	    drv->states[last_idx + 1].exit_latency <= latency_req) {
+	    last_residency > last_state->threshold.promotion_time_ns &&
+	    drv->states[last_idx + 1].exit_latency_ns <= latency_req) {
 		last_state->stats.promotion_count++;
 		last_state->stats.demotion_count = 0;
 		if (last_state->stats.promotion_count >= last_state->threshold.promotion_count) {
@@ -98,13 +98,12 @@ static int ladder_select_state(struct cpuidle_driver *drv,
 
 	/* consider demotion */
 	if (last_idx > first_idx &&
-	    (drv->states[last_idx].disabled ||
-	    dev->states_usage[last_idx].disable ||
-	    drv->states[last_idx].exit_latency > latency_req)) {
+	    (dev->states_usage[last_idx].disable ||
+	    drv->states[last_idx].exit_latency_ns > latency_req)) {
 		int i;
 
 		for (i = last_idx - 1; i > first_idx; i--) {
-			if (drv->states[i].exit_latency <= latency_req)
+			if (drv->states[i].exit_latency_ns <= latency_req)
 				break;
 		}
 		ladder_do_selection(dev, ldev, last_idx, i);
@@ -112,7 +111,7 @@ static int ladder_select_state(struct cpuidle_driver *drv,
 	}
 
 	if (last_idx > first_idx &&
-	    last_residency < last_state->threshold.demotion_time) {
+	    last_residency < last_state->threshold.demotion_time_ns) {
 		last_state->stats.demotion_count++;
 		last_state->stats.promotion_count = 0;
 		if (last_state->stats.demotion_count >= last_state->threshold.demotion_count) {
@@ -139,7 +138,7 @@ static int ladder_enable_device(struct cpuidle_driver *drv,
 	struct ladder_device_state *lstate;
 	struct cpuidle_state *state;
 
-	dev->last_state_idx = first_idx;
+	dev->rh_cpuidle_dev.last_state_idx = first_idx;
 
 	for (i = first_idx; i < drv->state_count; i++) {
 		state = &drv->states[i];
@@ -152,9 +151,9 @@ static int ladder_enable_device(struct cpuidle_driver *drv,
 		lstate->threshold.demotion_count = DEMOTION_COUNT;
 
 		if (i < drv->state_count - 1)
-			lstate->threshold.promotion_time = state->exit_latency;
+			lstate->threshold.promotion_time_ns = state->exit_latency_ns;
 		if (i > first_idx)
-			lstate->threshold.demotion_time = state->exit_latency;
+			lstate->threshold.demotion_time_ns = state->exit_latency_ns;
 	}
 
 	return 0;
@@ -168,7 +167,7 @@ static int ladder_enable_device(struct cpuidle_driver *drv,
 static void ladder_reflect(struct cpuidle_device *dev, int index)
 {
 	if (index > 0)
-		dev->last_state_idx = index;
+		dev->rh_cpuidle_dev.last_state_idx = index;
 }
 
 static struct cpuidle_governor ladder_governor = {

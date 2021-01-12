@@ -479,7 +479,8 @@ static struct qdisc_size_table *qdisc_get_stab(struct nlattr *opt,
 	u16 *tab = NULL;
 	int err;
 
-	err = nla_parse_nested(tb, TCA_STAB_MAX, opt, stab_policy, extack);
+	err = nla_parse_nested_deprecated(tb, TCA_STAB_MAX, opt, stab_policy,
+					  extack);
 	if (err < 0)
 		return ERR_PTR(err);
 	if (!tb[TCA_STAB_BASE]) {
@@ -542,7 +543,7 @@ static int qdisc_dump_stab(struct sk_buff *skb, struct qdisc_size_table *stab)
 {
 	struct nlattr *nest;
 
-	nest = nla_nest_start(skb, TCA_STAB);
+	nest = nla_nest_start_noflag(skb, TCA_STAB);
 	if (nest == NULL)
 		goto nla_put_failure;
 	if (nla_put(skb, TCA_STAB_BASE, sizeof(stab->szopts), &stab->szopts))
@@ -621,21 +622,28 @@ void qdisc_watchdog_init(struct qdisc_watchdog *wd, struct Qdisc *qdisc)
 }
 EXPORT_SYMBOL(qdisc_watchdog_init);
 
-void qdisc_watchdog_schedule_ns(struct qdisc_watchdog *wd, u64 expires)
+void qdisc_watchdog_schedule_range_ns(struct qdisc_watchdog *wd, u64 expires,
+				      u64 delta_ns)
 {
 	if (test_bit(__QDISC_STATE_DEACTIVATED,
 		     &qdisc_root_sleeping(wd->qdisc)->state))
 		return;
 
-	if (wd->last_expires == expires)
-		return;
+	if (hrtimer_is_queued(&wd->timer)) {
+		/* If timer is already set in [expires, expires + delta_ns],
+		 * do not reprogram it.
+		 */
+		if (wd->last_expires - expires <= delta_ns)
+			return;
+	}
 
 	wd->last_expires = expires;
-	hrtimer_start(&wd->timer,
-		      ns_to_ktime(expires),
-		      HRTIMER_MODE_ABS_PINNED);
+	hrtimer_start_range_ns(&wd->timer,
+			       ns_to_ktime(expires),
+			       delta_ns,
+			       HRTIMER_MODE_ABS_PINNED);
 }
-EXPORT_SYMBOL(qdisc_watchdog_schedule_ns);
+EXPORT_SYMBOL(qdisc_watchdog_schedule_range_ns);
 
 void qdisc_watchdog_cancel(struct qdisc_watchdog *wd)
 {
@@ -1423,8 +1431,8 @@ static int tc_get_qdisc(struct sk_buff *skb, struct nlmsghdr *n,
 	    !netlink_ns_capable(skb, net->user_ns, CAP_NET_ADMIN))
 		return -EPERM;
 
-	err = nlmsg_parse(n, sizeof(*tcm), tca, TCA_MAX, rtm_tca_policy,
-			  extack);
+	err = nlmsg_parse_deprecated(n, sizeof(*tcm), tca, TCA_MAX,
+				     rtm_tca_policy, extack);
 	if (err < 0)
 		return err;
 
@@ -1508,8 +1516,8 @@ static int tc_modify_qdisc(struct sk_buff *skb, struct nlmsghdr *n,
 
 replay:
 	/* Reinit, just in case something touches this. */
-	err = nlmsg_parse(n, sizeof(*tcm), tca, TCA_MAX, rtm_tca_policy,
-			  extack);
+	err = nlmsg_parse_deprecated(n, sizeof(*tcm), tca, TCA_MAX,
+				     rtm_tca_policy, extack);
 	if (err < 0)
 		return err;
 
@@ -1743,8 +1751,8 @@ static int tc_dump_qdisc(struct sk_buff *skb, struct netlink_callback *cb)
 	idx = 0;
 	ASSERT_RTNL();
 
-	err = nlmsg_parse(nlh, sizeof(struct tcmsg), tca, TCA_MAX,
-			  rtm_tca_policy, cb->extack);
+	err = nlmsg_parse_deprecated(nlh, sizeof(struct tcmsg), tca, TCA_MAX,
+				     rtm_tca_policy, cb->extack);
 	if (err < 0)
 		return err;
 
@@ -1894,8 +1902,9 @@ static int tclass_del_notify(struct net *net,
 
 struct tcf_bind_args {
 	struct tcf_walker w;
-	u32 classid;
+	unsigned long base;
 	unsigned long cl;
+	u32 classid;
 };
 
 static int tcf_node_bind(struct tcf_proto *tp, void *n, struct tcf_walker *arg)
@@ -1906,26 +1915,30 @@ static int tcf_node_bind(struct tcf_proto *tp, void *n, struct tcf_walker *arg)
 		struct Qdisc *q = tcf_block_q(tp->chain->block);
 
 		sch_tree_lock(q);
-		tp->ops->bind_class(n, a->classid, a->cl);
+		tp->ops->bind_class(n, a->classid, a->cl, q, a->base);
 		sch_tree_unlock(q);
 	}
 	return 0;
 }
 
-static void tc_bind_tclass(struct Qdisc *q, u32 portid, u32 clid,
-			   unsigned long new_cl)
+struct tc_bind_class_args {
+	struct qdisc_walker w;
+	unsigned long new_cl;
+	u32 portid;
+	u32 clid;
+};
+
+static int tc_bind_class_walker(struct Qdisc *q, unsigned long cl,
+				struct qdisc_walker *w)
 {
+	struct tc_bind_class_args *a = (struct tc_bind_class_args *)w;
 	const struct Qdisc_class_ops *cops = q->ops->cl_ops;
 	struct tcf_block *block;
 	struct tcf_chain *chain;
-	unsigned long cl;
 
-	cl = cops->find(q, portid);
-	if (!cl)
-		return;
 	block = cops->tcf_block(q, cl, NULL);
 	if (!block)
-		return;
+		return 0;
 	for (chain = tcf_get_next_chain(block, NULL);
 	     chain;
 	     chain = tcf_get_next_chain(block, chain)) {
@@ -1936,11 +1949,29 @@ static void tc_bind_tclass(struct Qdisc *q, u32 portid, u32 clid,
 			struct tcf_bind_args arg = {};
 
 			arg.w.fn = tcf_node_bind;
-			arg.classid = clid;
-			arg.cl = new_cl;
+			arg.classid = a->clid;
+			arg.base = cl;
+			arg.cl = a->new_cl;
 			tp->ops->walk(tp, &arg.w, true);
 		}
 	}
+
+	return 0;
+}
+
+static void tc_bind_tclass(struct Qdisc *q, u32 portid, u32 clid,
+			   unsigned long new_cl)
+{
+	const struct Qdisc_class_ops *cops = q->ops->cl_ops;
+	struct tc_bind_class_args args = {};
+
+	if (!cops->tcf_block)
+		return;
+	args.portid = portid;
+	args.clid = clid;
+	args.new_cl = new_cl;
+	args.w.fn = tc_bind_class_walker;
+	q->ops->cl_ops->walk(q, &args.w);
 }
 
 #else
@@ -1972,8 +2003,8 @@ static int tc_ctl_tclass(struct sk_buff *skb, struct nlmsghdr *n,
 	    !netlink_ns_capable(skb, net->user_ns, CAP_NET_ADMIN))
 		return -EPERM;
 
-	err = nlmsg_parse(n, sizeof(*tcm), tca, TCA_MAX, rtm_tca_policy,
-			  extack);
+	err = nlmsg_parse_deprecated(n, sizeof(*tcm), tca, TCA_MAX,
+				     rtm_tca_policy, extack);
 	if (err < 0)
 		return err;
 

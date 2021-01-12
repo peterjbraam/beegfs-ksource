@@ -511,7 +511,7 @@ void ipoib_ib_dev_cleanup(struct net_device *dev);
 
 int ipoib_ib_dev_open_default(struct net_device *dev);
 int ipoib_ib_dev_open(struct net_device *dev);
-int ipoib_ib_dev_stop(struct net_device *dev);
+void ipoib_ib_dev_stop(struct net_device *dev);
 void ipoib_ib_dev_up(struct net_device *dev);
 void ipoib_ib_dev_down(struct net_device *dev);
 int ipoib_ib_dev_stop_default(struct net_device *dev);
@@ -780,12 +780,12 @@ static inline void ipoib_cm_handle_tx_wc(struct net_device *dev, struct ib_wc *w
 #ifdef CONFIG_INFINIBAND_IPOIB_DEBUG
 void ipoib_create_debug_files(struct net_device *dev);
 void ipoib_delete_debug_files(struct net_device *dev);
-int ipoib_register_debugfs(void);
+void ipoib_register_debugfs(void);
 void ipoib_unregister_debugfs(void);
 #else
 static inline void ipoib_create_debug_files(struct net_device *dev) { }
 static inline void ipoib_delete_debug_files(struct net_device *dev) { }
-static inline int ipoib_register_debugfs(void) { return 0; }
+static inline void ipoib_register_debugfs(void) { }
 static inline void ipoib_unregister_debugfs(void) { }
 #endif
 

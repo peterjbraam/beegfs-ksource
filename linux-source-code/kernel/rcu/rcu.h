@@ -30,7 +30,7 @@
 #define RCU_TRACE(stmt)
 #endif /* #else #ifdef CONFIG_RCU_TRACE */
 
-/* Offset to allow for unmatched rcu_irq_{enter,exit}(). */
+/* Offset to allow distinguishing irq vs. task-based idle entry/exit. */
 #define DYNTICK_IRQ_NONIDLE	((LONG_MAX / 2) + 1)
 
 
@@ -246,6 +246,7 @@ static inline bool __rcu_reclaim(const char *rn, struct rcu_head *head)
 #ifdef CONFIG_RCU_STALL_COMMON
 
 extern int rcu_cpu_stall_suppress;
+extern int rcu_cpu_stall_timeout;
 int rcu_jiffies_till_stall_check(void);
 
 #define rcu_ftrace_dump_stall_suppress() \
@@ -462,9 +463,8 @@ void rcu_request_urgent_qs_task(struct task_struct *t);
 
 enum rcutorture_type {
 	RCU_FLAVOR,
-	RCU_BH_FLAVOR,
-	RCU_SCHED_FLAVOR,
 	RCU_TASKS_FLAVOR,
+	RCU_TRIVIAL_FLAVOR,
 	SRCU_FLAVOR,
 	INVALID_RCU_FLAVOR
 };
@@ -498,6 +498,10 @@ void do_trace_rcu_torture_read(const char *rcutorturename,
 #endif
 #endif
 
+#if IS_ENABLED(CONFIG_RCU_TORTURE_TEST) || IS_MODULE(CONFIG_RCU_TORTURE_TEST)
+long rcutorture_sched_setaffinity(pid_t pid, const struct cpumask *in_mask);
+#endif
+
 #ifdef CONFIG_TINY_SRCU
 
 static inline void srcutorture_get_gp_data(enum rcutorture_type test_type,
@@ -526,12 +530,14 @@ srcu_batches_completed(struct srcu_struct *sp) { return 0; }
 static inline void rcu_force_quiescent_state(void) { }
 static inline void show_rcu_gp_kthreads(void) { }
 static inline int rcu_get_gp_kthreads_prio(void) { return 0; }
+static inline void rcu_fwd_progress_check(unsigned long j) { }
 #else /* #ifdef CONFIG_TINY_RCU */
 unsigned long rcu_get_gp_seq(void);
 unsigned long rcu_exp_batches_completed(void);
 unsigned long srcu_batches_completed(struct srcu_struct *sp);
 void show_rcu_gp_kthreads(void);
 int rcu_get_gp_kthreads_prio(void);
+void rcu_fwd_progress_check(unsigned long j);
 void rcu_force_quiescent_state(void);
 extern struct workqueue_struct *rcu_gp_wq;
 extern struct workqueue_struct *rcu_par_gp_wq;
@@ -539,8 +545,10 @@ extern struct workqueue_struct *rcu_par_gp_wq;
 
 #ifdef CONFIG_RCU_NOCB_CPU
 bool rcu_is_nocb_cpu(int cpu);
+void rcu_bind_current_to_nocb(void);
 #else
 static inline bool rcu_is_nocb_cpu(int cpu) { return false; }
+static inline void rcu_bind_current_to_nocb(void) { }
 #endif
 
 #endif /* __LINUX_RCU_H */

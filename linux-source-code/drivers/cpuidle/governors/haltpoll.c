@@ -49,14 +49,14 @@ static int haltpoll_select(struct cpuidle_driver *drv,
 			   struct cpuidle_device *dev,
 			   bool *stop_tick)
 {
-	int latency_req = cpuidle_governor_latency_req(dev->cpu);
+	s64 latency_req = cpuidle_governor_latency_req(dev->cpu);
 
 	if (!drv->state_count || latency_req == 0) {
 		*stop_tick = false;
 		return 0;
 	}
 
-	if (dev->poll_limit_ns == 0)
+	if (dev->rh_cpuidle_dev.poll_limit_ns == 0)
 		return 1;
 
 	/* Last state was poll? */
@@ -75,33 +75,32 @@ static int haltpoll_select(struct cpuidle_driver *drv,
 	return 0;
 }
 
-static void adjust_poll_limit(struct cpuidle_device *dev, unsigned int block_us)
+static void adjust_poll_limit(struct cpuidle_device *dev, u64 block_ns)
 {
 	unsigned int val;
-	u64 block_ns = block_us*NSEC_PER_USEC;
 
 	/* Grow cpu_halt_poll_us if
 	 * cpu_halt_poll_us < block_ns < guest_halt_poll_us
 	 */
-	if (block_ns > dev->poll_limit_ns && block_ns <= guest_halt_poll_ns) {
-		val = dev->poll_limit_ns * guest_halt_poll_grow;
+	if (block_ns > dev->rh_cpuidle_dev.poll_limit_ns && block_ns <= guest_halt_poll_ns) {
+		val = dev->rh_cpuidle_dev.poll_limit_ns * guest_halt_poll_grow;
 
 		if (val < guest_halt_poll_grow_start)
 			val = guest_halt_poll_grow_start;
 		if (val > guest_halt_poll_ns)
 			val = guest_halt_poll_ns;
 
-		dev->poll_limit_ns = val;
+		dev->rh_cpuidle_dev.poll_limit_ns = val;
 	} else if (block_ns > guest_halt_poll_ns &&
 		   guest_halt_poll_allow_shrink) {
 		unsigned int shrink = guest_halt_poll_shrink;
 
-		val = dev->poll_limit_ns;
+		val = dev->rh_cpuidle_dev.poll_limit_ns;
 		if (shrink == 0)
 			val = 0;
 		else
 			val /= shrink;
-		dev->poll_limit_ns = val;
+		dev->rh_cpuidle_dev.poll_limit_ns = val;
 	}
 }
 
@@ -115,7 +114,7 @@ static void haltpoll_reflect(struct cpuidle_device *dev, int index)
 	dev->last_state_idx = index;
 
 	if (index != 0)
-		adjust_poll_limit(dev, dev->last_residency);
+		adjust_poll_limit(dev, dev->rh_cpuidle_dev.last_residency_ns);
 }
 
 /**
@@ -126,7 +125,7 @@ static void haltpoll_reflect(struct cpuidle_device *dev, int index)
 static int haltpoll_enable_device(struct cpuidle_driver *drv,
 				  struct cpuidle_device *dev)
 {
-	dev->poll_limit_ns = 0;
+	dev->rh_cpuidle_dev.poll_limit_ns = 0;
 
 	return 0;
 }

@@ -1017,7 +1017,7 @@ probe_event_disable(struct trace_uprobe *tu, struct trace_event_file *file)
 
 		list_del_rcu(&link->list);
 		/* synchronize with u{,ret}probe_trace_func */
-		synchronize_sched();
+		synchronize_rcu();
 		kfree(link);
 
 		if (!list_empty(&tu->tp.files))
@@ -1166,8 +1166,15 @@ static void __uprobe_perf_func(struct trace_uprobe *tu,
 	int size, esize;
 	int rctx;
 
-	if (bpf_prog_array_valid(call) && !trace_call_bpf(call, regs))
-		return;
+	if (bpf_prog_array_valid(call)) {
+		u32 ret;
+
+		preempt_disable();
+		ret = trace_call_bpf(call, regs);
+		preempt_enable();
+		if (!ret)
+			return;
+	}
 
 	esize = SIZEOF_TRACE_ENTRY(is_ret_probe(tu));
 
@@ -1369,7 +1376,7 @@ static inline void init_trace_event_call(struct trace_uprobe *tu,
 	call->event.funcs = &uprobe_funcs;
 	call->class->define_fields = uprobe_event_define_fields;
 
-	call->flags = TRACE_EVENT_FL_UPROBE;
+	call->flags = TRACE_EVENT_FL_UPROBE | TRACE_EVENT_FL_CAP_ANY;
 	call->class->reg = trace_uprobe_register;
 	call->data = tu;
 }

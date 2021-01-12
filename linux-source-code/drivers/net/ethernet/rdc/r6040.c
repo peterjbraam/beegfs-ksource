@@ -424,7 +424,7 @@ static void r6040_init_mac_regs(struct net_device *dev)
 	iowrite16(TM2TX, ioaddr + MTPR);
 }
 
-static void r6040_tx_timeout(struct net_device *dev)
+static void r6040_tx_timeout(struct net_device *dev, unsigned int txqueue)
 {
 	struct r6040_private *priv = netdev_priv(dev);
 	void __iomem *ioaddr = priv->base;
@@ -840,7 +840,7 @@ static netdev_tx_t r6040_start_xmit(struct sk_buff *skb,
 	skb_tx_timestamp(skb);
 
 	/* Trigger the MAC to check the TX descriptor */
-	if (!skb->xmit_more || netif_queue_stopped(dev))
+	if (!netdev_xmit_more() || netif_queue_stopped(dev))
 		iowrite16(TM2TX, ioaddr + MTPR);
 	lp->tx_insert_ptr = descptr->vndescp;
 
