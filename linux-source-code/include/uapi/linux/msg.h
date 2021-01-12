@@ -6,6 +6,7 @@
 /* ipcs ctl commands */
 #define MSG_STAT 11
 #define MSG_INFO 12
+#define MSG_STAT_ANY 13
 
 /* msgrcv options */
 #define MSG_NOERROR     010000  /* no error if message is too big */
@@ -34,8 +35,8 @@ struct msqid_ds {
 
 /* message buffer for msgsnd and msgrcv calls */
 struct msgbuf {
-	__kernel_long_t mtype;          /* type of message */
-	char mtext[1];                  /* message text */
+	long mtype;         /* type of message */
+	char mtext[1];      /* message text */
 };
 
 /* buffer for msgctl calls IPC_INFO, MSG_INFO */

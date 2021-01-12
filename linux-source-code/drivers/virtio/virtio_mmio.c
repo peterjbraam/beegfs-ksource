@@ -58,8 +58,6 @@
 
 #define pr_fmt(fmt) "virtio-mmio: " fmt
 
-#include <linux/acpi.h>
-#include <linux/dma-mapping.h>
 #include <linux/highmem.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
@@ -498,7 +496,6 @@ static int virtio_mmio_probe(struct platform_device *pdev)
 	struct virtio_mmio_device *vm_dev;
 	struct resource *mem;
 	unsigned long magic;
-	int rc;
 
 	mem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!mem)
@@ -524,7 +521,7 @@ static int virtio_mmio_probe(struct platform_device *pdev)
 
 	/* Check magic value */
 	magic = readl(vm_dev->base + VIRTIO_MMIO_MAGIC_VALUE);
-	if (magic != ('v' | 'i' << 8 | 'r' << 16 | 't' << 24)) {
+	if (memcmp(&magic, "virt", 4) != 0) {
 		dev_warn(&pdev->dev, "Wrong magic value 0x%08lx!\n", magic);
 		return -ENODEV;
 	}
@@ -547,24 +544,8 @@ static int virtio_mmio_probe(struct platform_device *pdev)
 	}
 	vm_dev->vdev.id.vendor = readl(vm_dev->base + VIRTIO_MMIO_VENDOR_ID);
 
-	if (vm_dev->version == 1) {
+	if (vm_dev->version == 1)
 		writel(PAGE_SIZE, vm_dev->base + VIRTIO_MMIO_GUEST_PAGE_SIZE);
-
-		rc = dma_set_mask(&pdev->dev, DMA_BIT_MASK(64));
-		/*
-		 * In the legacy case, ensure our coherently-allocated virtio
-		 * ring will be at an address expressable as a 32-bit PFN.
-		 */
-		if (!rc)
-			dma_set_coherent_mask(&pdev->dev,
-					      DMA_BIT_MASK(32 + PAGE_SHIFT));
-	} else {
-		rc = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
-	}
-	if (rc)
-		rc = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
-	if (rc)
-		dev_warn(&pdev->dev, "Failed to enable 64-bit or 32-bit DMA.  Trying to continue, but this might not work.\n");
 
 	platform_set_drvdata(pdev, vm_dev);
 
@@ -673,7 +654,7 @@ static int vm_cmdline_get(char *buffer, const struct kernel_param *kp)
 	return strlen(buffer) + 1;
 }
 
-static const struct kernel_param_ops vm_cmdline_param_ops = {
+static struct kernel_param_ops vm_cmdline_param_ops = {
 	.set = vm_cmdline_set,
 	.get = vm_cmdline_get,
 };
@@ -714,21 +695,13 @@ static struct of_device_id virtio_mmio_match[] = {
 };
 MODULE_DEVICE_TABLE(of, virtio_mmio_match);
 
-#ifdef CONFIG_ACPI
-static const struct acpi_device_id virtio_mmio_acpi_match[] = {
-	{ "LNRO0005", },
-	{ }
-};
-MODULE_DEVICE_TABLE(acpi, virtio_mmio_acpi_match);
-#endif
-
 static struct platform_driver virtio_mmio_driver = {
 	.probe		= virtio_mmio_probe,
 	.remove		= virtio_mmio_remove,
 	.driver		= {
 		.name	= "virtio-mmio",
+		.owner	= THIS_MODULE,
 		.of_match_table	= virtio_mmio_match,
-		.acpi_match_table = ACPI_PTR(virtio_mmio_acpi_match),
 	},
 };
 

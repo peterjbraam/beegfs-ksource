@@ -476,9 +476,9 @@ static int run_test(test_func_t test_func, int bitmaps, u32 sectorsize,
 
 	root->node = alloc_test_extent_buffer(root->fs_info,
 		nodesize, nodesize);
-	if (IS_ERR(root->node)) {
-		test_msg("couldn't allocate dummy buffer\n");
-		ret = PTR_ERR(root->node);
+	if (!root->node) {
+		test_msg("Couldn't allocate dummy buffer\n");
+		ret = -ENOMEM;
 		goto out;
 	}
 	btrfs_set_header_level(root->node, 0);
@@ -501,8 +501,7 @@ static int run_test(test_func_t test_func, int bitmaps, u32 sectorsize,
 	path = btrfs_alloc_path();
 	if (!path) {
 		test_msg("Couldn't allocate path\n");
-		ret = -ENOMEM;
-		goto out;
+		return -ENOMEM;
 	}
 
 	ret = add_block_group_free_space(&trans, root->fs_info, cache);

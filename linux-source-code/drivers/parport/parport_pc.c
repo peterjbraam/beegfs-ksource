@@ -1377,7 +1377,7 @@ static struct superio_struct *find_superio(struct parport *p)
 {
 	int i;
 	for (i = 0; i < NR_SUPERIOS; i++)
-		if (superios[i].io == p->base)
+		if (superios[i].io != p->base)
 			return &superios[i];
 	return NULL;
 }
@@ -1702,46 +1702,6 @@ static int parport_ECP_supported(struct parport *pb)
 }
 #endif
 
-#ifdef CONFIG_X86_32
-static int intel_bug_present_check_epp(struct parport *pb)
-{
-	const struct parport_pc_private *priv = pb->private_data;
-	int bug_present = 0;
-
-	if (priv->ecr) {
-		/* store value of ECR */
-		unsigned char ecr = inb(ECONTROL(pb));
-		unsigned char i;
-		for (i = 0x00; i < 0x80; i += 0x20) {
-			ECR_WRITE(pb, i);
-			if (clear_epp_timeout(pb)) {
-				/* Phony EPP in ECP. */
-				bug_present = 1;
-				break;
-			}
-		}
-		/* return ECR into the inital state */
-		ECR_WRITE(pb, ecr);
-	}
-
-	return bug_present;
-}
-static int intel_bug_present(struct parport *pb)
-{
-/* Check whether the device is legacy, not PCI or PCMCIA. Only legacy is known to be affected. */
-	if (pb->dev != NULL) {
-		return 0;
-	}
-
-	return intel_bug_present_check_epp(pb);
-}
-#else
-static int intel_bug_present(struct parport *pb)
-{
-	return 0;
-}
-#endif /* CONFIG_X86_32 */
-
 static int parport_ECPPS2_supported(struct parport *pb)
 {
 	const struct parport_pc_private *priv = pb->private_data;
@@ -1762,6 +1722,8 @@ static int parport_ECPPS2_supported(struct parport *pb)
 
 static int parport_EPP_supported(struct parport *pb)
 {
+	const struct parport_pc_private *priv = pb->private_data;
+
 	/*
 	 * Theory:
 	 *	Bit 0 of STR is the EPP timeout bit, this bit is 0
@@ -1780,8 +1742,16 @@ static int parport_EPP_supported(struct parport *pb)
 		return 0;  /* No way to clear timeout */
 
 	/* Check for Intel bug. */
-	if (intel_bug_present(pb))
-		return 0;
+	if (priv->ecr) {
+		unsigned char i;
+		for (i = 0x00; i < 0x80; i += 0x20) {
+			ECR_WRITE(pb, i);
+			if (clear_epp_timeout(pb)) {
+				/* Phony EPP in ECP. */
+				return 0;
+			}
+		}
+	}
 
 	pb->modes |= PARPORT_MODE_EPP;
 
@@ -2034,7 +2004,6 @@ struct parport *parport_pc_probe_port(unsigned long int base,
 	struct resource	*ECR_res = NULL;
 	struct resource	*EPP_res = NULL;
 	struct platform_device *pdev = NULL;
-	int ret;
 
 	if (!dev) {
 		/* We need a physical device to attach to, but none was
@@ -2045,11 +2014,8 @@ struct parport *parport_pc_probe_port(unsigned long int base,
 			return NULL;
 		dev = &pdev->dev;
 
-		ret = dma_coerce_mask_and_coherent(dev, DMA_BIT_MASK(24));
-		if (ret) {
-			dev_err(dev, "Unable to set coherent dma mask: disabling DMA\n");
-			dma = PARPORT_DMA_NONE;
-		}
+		dev->coherent_dma_mask = DMA_BIT_MASK(24);
+		dev->dma_mask = &dev->coherent_dma_mask;
 	}
 
 	ops = kmalloc(sizeof(struct parport_operations), GFP_KERNEL);
@@ -2255,7 +2221,7 @@ out5:
 		release_region(base+0x3, 5);
 	release_region(base, 3);
 out4:
-	parport_del_port(p);
+	parport_put_port(p);
 out3:
 	kfree(priv);
 out2:
@@ -2294,7 +2260,7 @@ void parport_pc_unregister_port(struct parport *p)
 				    priv->dma_handle);
 #endif
 	kfree(p->private_data);
-	parport_del_port(p);
+	parport_put_port(p);
 	kfree(ops); /* hope no-one cached it */
 }
 EXPORT_SYMBOL(parport_pc_unregister_port);
@@ -2630,6 +2596,8 @@ enum parport_pc_pci_cards {
 	syba_2p_epp,
 	syba_1p_ecp,
 	titan_010l,
+	titan_1284p1,
+	titan_1284p2,
 	avlab_1p,
 	avlab_2p,
 	oxsemi_952,
@@ -2646,7 +2614,6 @@ enum parport_pc_pci_cards {
 	netmos_9901,
 	netmos_9865,
 	quatech_sppxp100,
-	wch_ch382l,
 };
 
 
@@ -2689,6 +2656,8 @@ static struct parport_pc_pci {
 	/* syba_2p_epp AP138B */	{ 2, { { 0, 0x078 }, { 0, 0x178 }, } },
 	/* syba_1p_ecp W83787 */	{ 1, { { 0, 0x078 }, } },
 	/* titan_010l */		{ 1, { { 3, -1 }, } },
+	/* titan_1284p1 */              { 1, { { 0, 1 }, } },
+	/* titan_1284p2 */		{ 2, { { 0, 1 }, { 2, 3 }, } },
 	/* avlab_1p		*/	{ 1, { { 0, 1}, } },
 	/* avlab_2p		*/	{ 2, { { 0, 1}, { 2, 3 },} },
 	/* The Oxford Semi cards are unusual: 954 doesn't support ECP,
@@ -2704,12 +2673,11 @@ static struct parport_pc_pci {
 	/* netmos_9705 */               { 1, { { 0, -1 }, } },
 	/* netmos_9715 */               { 2, { { 0, 1 }, { 2, 3 },} },
 	/* netmos_9755 */               { 2, { { 0, 1 }, { 2, 3 },} },
-	/* netmos_9805 */		{ 1, { { 0, 1 }, } },
-	/* netmos_9815 */		{ 2, { { 0, 1 }, { 2, 3 }, } },
+	/* netmos_9805 */               { 1, { { 0, -1 }, } },
+	/* netmos_9815 */               { 2, { { 0, -1 }, { 2, -1 }, } },
 	/* netmos_9901 */               { 1, { { 0, -1 }, } },
 	/* netmos_9865 */               { 1, { { 0, -1 }, } },
 	/* quatech_sppxp100 */		{ 1, { { 0, 1 }, } },
-	/* wch_ch382l */		{ 1, { { 2, -1 }, } },
 };
 
 static const struct pci_device_id parport_pc_pci_tbl[] = {
@@ -2750,6 +2718,8 @@ static const struct pci_device_id parport_pc_pci_tbl[] = {
 	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, syba_1p_ecp },
 	{ PCI_VENDOR_ID_TITAN, PCI_DEVICE_ID_TITAN_010L,
 	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, titan_010l },
+	{ 0x9710, 0x9805, 0x1000, 0x0010, 0, 0, titan_1284p1 },
+	{ 0x9710, 0x9815, 0x1000, 0x0020, 0, 0, titan_1284p2 },
 	/* PCI_VENDOR_ID_AVLAB/Intek21 has another bunch of cards ...*/
 	/* AFAVLAB_TK9902 */
 	{ 0x14db, 0x2120, PCI_ANY_ID, PCI_ANY_ID, 0, 0, avlab_1p},
@@ -2799,8 +2769,6 @@ static const struct pci_device_id parport_pc_pci_tbl[] = {
 	/* Quatech SPPXP-100 Parallel port PCI ExpressCard */
 	{ PCI_VENDOR_ID_QUATECH, PCI_DEVICE_ID_QUATECH_SPPXP_100,
 	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, quatech_sppxp100 },
-	/* WCH CH382L PCI-E single parallel port card */
-	{ 0x1c00, 0x3050, 0x1c00, 0x3050, 0, 0, wch_ch382l },
 	{ 0, } /* terminate list */
 };
 MODULE_DEVICE_TABLE(pci, parport_pc_pci_tbl);
@@ -2855,12 +2823,16 @@ static int parport_pc_pci_probe(struct pci_dev *dev,
 		if (irq == IRQ_NONE) {
 			printk(KERN_DEBUG
 	"PCI parallel port detected: %04x:%04x, I/O at %#lx(%#lx)\n",
-				id->vendor, id->device, io_lo, io_hi);
+				parport_pc_pci_tbl[i + last_sio].vendor,
+				parport_pc_pci_tbl[i + last_sio].device,
+				io_lo, io_hi);
 			irq = PARPORT_IRQ_NONE;
 		} else {
 			printk(KERN_DEBUG
 	"PCI parallel port detected: %04x:%04x, I/O at %#lx(%#lx), IRQ %d\n",
-				id->vendor, id->device, io_lo, io_hi, irq);
+				parport_pc_pci_tbl[i + last_sio].vendor,
+				parport_pc_pci_tbl[i + last_sio].device,
+				io_lo, io_hi, irq);
 		}
 		data->ports[count] =
 			parport_pc_probe_port(io_lo, io_hi, irq,
@@ -2889,6 +2861,8 @@ static void parport_pc_pci_remove(struct pci_dev *dev)
 {
 	struct pci_parport_data *data = pci_get_drvdata(dev);
 	int i;
+
+	pci_set_drvdata(dev, NULL);
 
 	if (data) {
 		for (i = data->num - 1; i >= 0; i--)
@@ -3015,6 +2989,7 @@ static int parport_pc_platform_probe(struct platform_device *pdev)
 
 static struct platform_driver parport_pc_platform_driver = {
 	.driver = {
+		.owner	= THIS_MODULE,
 		.name	= "parport_pc",
 	},
 	.probe		= parport_pc_platform_probe,
@@ -3343,14 +3318,13 @@ static void __exit parport_pc_exit(void)
 	while (!list_empty(&ports_list)) {
 		struct parport_pc_private *priv;
 		struct parport *port;
-		struct device *dev;
 		priv = list_entry(ports_list.next,
 				  struct parport_pc_private, list);
 		port = priv->port;
-		dev = port->dev;
+		if (port->dev && port->dev->bus == &platform_bus_type)
+			platform_device_unregister(
+				to_platform_device(port->dev));
 		parport_pc_unregister_port(port);
-		if (dev && dev->bus == &platform_bus_type)
-			platform_device_unregister(to_platform_device(dev));
 	}
 }
 

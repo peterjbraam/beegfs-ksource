@@ -14,7 +14,8 @@
 #include <linux/skbuff.h>
 #include <linux/icmp.h>
 #include <linux/sysctl.h>
-#include <net/ipv6_frag.h>
+#include <net/ipv6.h>
+#include <net/inet_frag.h>
 
 #include <linux/netfilter_ipv6.h>
 #include <linux/netfilter_bridge.h>
@@ -34,13 +35,14 @@ static enum ip6_defrag_users nf_ct6_defrag_user(unsigned int hooknum,
 {
 	u16 zone_id = NF_CT_DEFAULT_ZONE_ID;
 #if IS_ENABLED(CONFIG_NF_CONNTRACK)
-	if (skb->nfct) {
+	if (skb_nfct(skb)) {
 		enum ip_conntrack_info ctinfo;
 		const struct nf_conn *ct = nf_ct_get(skb, &ctinfo);
 
 		zone_id = nf_ct_zone_id(nf_ct_zone(ct), CTINFO2DIR(ctinfo));
 	}
 #endif
+
 	if (nf_bridge_in_prerouting(skb))
 		return IP6_DEFRAG_CONNTRACK_BRIDGE_IN + zone_id;
 
@@ -50,36 +52,49 @@ static enum ip6_defrag_users nf_ct6_defrag_user(unsigned int hooknum,
 		return IP6_DEFRAG_CONNTRACK_OUT + zone_id;
 }
 
-static unsigned int ipv6_defrag(void *priv,
+static unsigned int ipv6_defrag(const struct nf_hook_ops *ops,
 				struct sk_buff *skb,
+				const struct net_device *in,
+				const struct net_device *out,
 				const struct nf_hook_state *state)
 {
-	int err;
+	struct sk_buff *reasm;
 
 #if IS_ENABLED(CONFIG_NF_CONNTRACK)
 	/* Previously seen (loopback)?	*/
-	if (skb->nfct && !nf_ct_is_template((struct nf_conn *)skb->nfct))
+	if (skb_nfct(skb) && !nf_ct_is_template((struct nf_conn *)skb_nfct(skb)))
 		return NF_ACCEPT;
 #endif
 
-	err = nf_ct_frag6_gather(state->net, skb,
-				 nf_ct6_defrag_user(state->hook, skb));
+	reasm = nf_ct_frag6_gather(skb, nf_ct6_defrag_user(ops->hooknum, skb));
 	/* queued */
-	if (err == -EINPROGRESS)
+	if (reasm == NULL)
 		return NF_STOLEN;
 
-	return err == 0 ? NF_ACCEPT : NF_DROP;
+	/* error occurred or not fragmented */
+	if (reasm == skb)
+		return NF_ACCEPT;
+
+	nf_ct_frag6_consume_orig(reasm);
+
+	NF_HOOK_THRESH(NFPROTO_IPV6, ops->hooknum, state->sk, reasm,
+		       state->in, state->out,
+		       state->okfn, NF_IP6_PRI_CONNTRACK_DEFRAG + 1);
+
+	return NF_STOLEN;
 }
 
 static struct nf_hook_ops ipv6_defrag_ops[] = {
 	{
 		.hook		= ipv6_defrag,
+		.owner		= THIS_MODULE,
 		.pf		= NFPROTO_IPV6,
 		.hooknum	= NF_INET_PRE_ROUTING,
 		.priority	= NF_IP6_PRI_CONNTRACK_DEFRAG,
 	},
 	{
 		.hook		= ipv6_defrag,
+		.owner		= THIS_MODULE,
 		.pf		= NFPROTO_IPV6,
 		.hooknum	= NF_INET_LOCAL_OUT,
 		.priority	= NF_IP6_PRI_CONNTRACK_DEFRAG,

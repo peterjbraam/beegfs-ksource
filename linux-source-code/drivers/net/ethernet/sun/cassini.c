@@ -14,7 +14,9 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; if not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA
+ * 02111-1307, USA.
  *
  * This driver uses the sungem driver (c) David Miller
  * (davem@redhat.com) as its basis.
@@ -246,7 +248,7 @@ static inline void cas_lock_tx(struct cas *cp)
 	int i;
 
 	for (i = 0; i < N_TX_RINGS; i++)
-		spin_lock_nested(&cp->tx_lock[i], i);
+		spin_lock(&cp->tx_lock[i]);
 }
 
 static inline void cas_lock_all(struct cas *cp)
@@ -806,42 +808,43 @@ static int cas_reset_mii_phy(struct cas *cp)
 	return limit <= 0;
 }
 
-static void cas_saturn_firmware_init(struct cas *cp)
+static int cas_saturn_firmware_init(struct cas *cp)
 {
 	const struct firmware *fw;
 	const char fw_name[] = "sun/cassini.bin";
 	int err;
 
 	if (PHY_NS_DP83065 != cp->phy_id)
-		return;
+		return 0;
 
 	err = request_firmware(&fw, fw_name, &cp->pdev->dev);
 	if (err) {
 		pr_err("Failed to load firmware \"%s\"\n",
 		       fw_name);
-		return;
+		return err;
 	}
 	if (fw->size < 2) {
 		pr_err("bogus length %zu in \"%s\"\n",
 		       fw->size, fw_name);
+		err = -EINVAL;
 		goto out;
 	}
 	cp->fw_load_addr= fw->data[1] << 8 | fw->data[0];
 	cp->fw_size = fw->size - 2;
 	cp->fw_data = vmalloc(cp->fw_size);
-	if (!cp->fw_data)
+	if (!cp->fw_data) {
+		err = -ENOMEM;
 		goto out;
+	}
 	memcpy(cp->fw_data, &fw->data[2], cp->fw_size);
 out:
 	release_firmware(fw);
+	return err;
 }
 
 static void cas_saturn_firmware_load(struct cas *cp)
 {
 	int i;
-
-	if (!cp->fw_data)
-		return;
 
 	cas_phy_powerdown(cp);
 
@@ -4958,7 +4961,7 @@ static int cas_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	pci_cmd |= PCI_COMMAND_PARITY;
 	pci_write_config_word(pdev, PCI_COMMAND, pci_cmd);
 	if (pci_try_set_mwi(pdev))
-		pr_warn("Could not enable MWI for %s\n", pci_name(pdev));
+		pr_warning("Could not enable MWI for %s\n", pci_name(pdev));
 
 	cas_program_bridge(pdev);
 
@@ -4980,7 +4983,7 @@ static int cas_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 					  cas_cacheline_size)) {
 			dev_err(&pdev->dev, "Could not set PCI cache "
 			       "line size\n");
-			goto err_out_free_res;
+			goto err_write_cacheline;
 		}
 	}
 #endif
@@ -5076,7 +5079,8 @@ static int cas_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	if (cas_check_invariants(cp))
 		goto err_out_iounmap;
 	if (cp->cas_flags & CAS_FLAG_SATURN)
-		cas_saturn_firmware_init(cp);
+		if (cas_saturn_firmware_init(cp))
+			goto err_out_iounmap;
 
 	cp->init_block = (struct cas_init_block *)
 		pci_alloc_consistent(pdev, sizeof(struct cas_init_block),
@@ -5151,6 +5155,7 @@ err_out_iounmap:
 err_out_free_res:
 	pci_release_regions(pdev);
 
+err_write_cacheline:
 	/* Try to restore it in case the error occurred after we
 	 * set it.
 	 */
@@ -5161,6 +5166,7 @@ err_out_free_netdev:
 
 err_out_disable_pdev:
 	pci_disable_device(pdev);
+	pci_set_drvdata(pdev, NULL);
 	return -ENODEV;
 }
 
@@ -5174,7 +5180,8 @@ static void cas_remove_one(struct pci_dev *pdev)
 	cp = netdev_priv(dev);
 	unregister_netdev(dev);
 
-	vfree(cp->fw_data);
+	if (cp->fw_data)
+		vfree(cp->fw_data);
 
 	mutex_lock(&cp->pm_mutex);
 	cancel_work_sync(&cp->reset_task);
@@ -5197,6 +5204,7 @@ static void cas_remove_one(struct pci_dev *pdev)
 	free_netdev(dev);
 	pci_release_regions(pdev);
 	pci_disable_device(pdev);
+	pci_set_drvdata(pdev, NULL);
 }
 
 #ifdef CONFIG_PM

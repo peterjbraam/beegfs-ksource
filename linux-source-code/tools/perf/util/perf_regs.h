@@ -15,6 +15,13 @@ struct sample_reg {
 
 extern const struct sample_reg sample_reg_masks[];
 
+enum {
+	SDT_ARG_VALID = 0,
+	SDT_ARG_SKIP,
+};
+
+int arch_sdt_arg_parse_op(char *old_op, char **new_op);
+
 #ifdef HAVE_PERF_REGS_SUPPORT
 #include <perf_regs.h>
 
@@ -26,7 +33,7 @@ int perf_reg_value(u64 *valp, struct regs_dump *regs, int id);
 
 static inline const char *perf_reg_name(int id __maybe_unused)
 {
-	return "unknown";
+	return NULL;
 }
 
 static inline int perf_reg_value(u64 *valp __maybe_unused,

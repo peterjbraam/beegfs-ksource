@@ -22,12 +22,16 @@
  * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with GNU CC; see the file COPYING.  If not, see
- * <http://www.gnu.org/licenses/>.
+ * along with GNU CC; see the file COPYING.  If not, write to
+ * the Free Software Foundation, 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
  *
  * Please send any bug reports or fixes you make to the
  * email address(es):
- *    lksctp developers <linux-sctp@vger.kernel.org>
+ *    lksctp developers <lksctp-developers@lists.sourceforge.net>
+ *
+ * Or submit a bug report through the following website:
+ *    http://www.sf.net/projects/lksctp
  *
  * Written or modified by:
  *    La Monte H.P. Yarroll <piggy@acm.org>
@@ -38,6 +42,9 @@
  *    Daisy Chang	    <daisyc@us.ibm.com>
  *    Sridhar Samudrala	    <sri@us.ibm.com>
  *    Ardelle Fan	    <ardelle.fan@intel.com>
+ *
+ * Any bugs reported given to us we will try to fix... any fixes shared will
+ * be incorporated into the next SCTP release.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -417,7 +424,7 @@ void sctp_generate_proto_unreach_event(unsigned long data)
 		/* Try again later.  */
 		if (!mod_timer(&transport->proto_unreach_timer,
 				jiffies + (HZ/20)))
-			sctp_transport_hold(transport);
+			sctp_association_hold(asoc);
 		goto out_unlock;
 	}
 
@@ -433,7 +440,7 @@ void sctp_generate_proto_unreach_event(unsigned long data)
 
 out_unlock:
 	bh_unlock_sock(sk);
-	sctp_transport_put(transport);
+	sctp_association_put(asoc);
 }
 
 
@@ -506,7 +513,7 @@ static void sctp_do_8_2_transport_strike(sctp_cmd_seq_t *commands,
 	 * is SCTP_ACTIVE, then mark this transport as Partially Failed,
 	 * see SCTP Quick Failover Draft, section 5.1
 	 */
-	if (net->sctp.pf_enable &&
+	if (net->sctp_pf_enable &&
 	   (transport->state == SCTP_ACTIVE) &&
 	   (transport->error_count < transport->pathmaxrxt) &&
 	   (transport->error_count > transport->pf_retrans)) {
@@ -723,7 +730,7 @@ static void sctp_cmd_transport_on(sctp_cmd_seq_t *cmds,
 	 * forward progress.
 	 */
 	if (t->dst)
-		dst_confirm(t->dst);
+		sctp_transport_dst_confirm(t);
 
 	/* The receiver of the HEARTBEAT ACK should also perform an
 	 * RTT measurement for that destination transport address
@@ -822,6 +829,11 @@ static void sctp_cmd_new_state(sctp_cmd_seq_t *cmds,
 						asoc->rto_initial;
 	}
 
+	if (sctp_state(asoc, ESTABLISHED)) {
+		kfree(asoc->peer.cookie);
+		asoc->peer.cookie = NULL;
+	}
+
 	if (sctp_state(asoc, ESTABLISHED) ||
 	    sctp_state(asoc, CLOSED) ||
 	    sctp_state(asoc, SHUTDOWN_RECEIVED)) {
@@ -840,6 +852,10 @@ static void sctp_cmd_new_state(sctp_cmd_seq_t *cmds,
 		if (!sctp_style(sk, UDP))
 			sk->sk_state_change(sk);
 	}
+
+	if (sctp_state(asoc, SHUTDOWN_PENDING) &&
+	    !sctp_outq_is_empty(&asoc->outqueue))
+		sctp_outq_uncork(&asoc->outqueue, GFP_ATOMIC);
 }
 
 /* Helper function to delete an association. */
@@ -1030,32 +1046,6 @@ static void sctp_cmd_send_msg(struct sctp_association *asoc,
 }
 
 
-/* Sent the next ASCONF packet currently stored in the association.
- * This happens after the ASCONF_ACK was succeffully processed.
- */
-static void sctp_cmd_send_asconf(struct sctp_association *asoc)
-{
-	struct net *net = sock_net(asoc->base.sk);
-
-	/* Send the next asconf chunk from the addip chunk
-	 * queue.
-	 */
-	if (!list_empty(&asoc->addip_chunk_list)) {
-		struct list_head *entry = asoc->addip_chunk_list.next;
-		struct sctp_chunk *asconf = list_entry(entry,
-						struct sctp_chunk, list);
-		list_del_init(entry);
-
-		/* Hold the chunk until an ASCONF_ACK is received. */
-		sctp_chunk_hold(asconf);
-		if (sctp_primitive_ASCONF(net, asoc, asconf))
-			sctp_chunk_free(asconf);
-		else
-			asoc->addip_last_asconf = asconf;
-	}
-}
-
-
 /* These three macros allow us to pull the debugging code out of the
  * main flow of sctp_do_sm() to keep attention focused on the real
  * functionality there.
@@ -1105,7 +1095,7 @@ int sctp_do_sm(struct net *net, sctp_event_t event_type, sctp_subtype_t subtype,
 	sctp_init_cmd_seq(&commands);
 
 	debug_pre_sfn();
-	status = state_fn->fn(net, ep, asoc, subtype, event_arg, &commands);
+	status = (*state_fn->fn)(net, ep, asoc, subtype, event_arg, &commands);
 	debug_post_sfn();
 
 	error = sctp_side_effects(event_type, subtype, state,
@@ -1321,10 +1311,8 @@ static int sctp_cmd_interpreter(sctp_event_t event_type,
 			/* Generate an INIT ACK chunk.  */
 			new_obj = sctp_make_init_ack(asoc, chunk, GFP_ATOMIC,
 						     0);
-			if (!new_obj) {
-				error = -ENOMEM;
-				break;
-			}
+			if (!new_obj)
+				goto nomem;
 
 			sctp_add_cmd_sf(commands, SCTP_CMD_REPLY,
 					SCTP_CHUNK(new_obj));
@@ -1346,8 +1334,7 @@ static int sctp_cmd_interpreter(sctp_event_t event_type,
 			if (!new_obj) {
 				if (cmd->obj.chunk)
 					sctp_chunk_free(cmd->obj.chunk);
-				error = -ENOMEM;
-				break;
+				goto nomem;
 			}
 			sctp_add_cmd_sf(commands, SCTP_CMD_REPLY,
 					SCTP_CHUNK(new_obj));
@@ -1394,10 +1381,8 @@ static int sctp_cmd_interpreter(sctp_event_t event_type,
 
 			/* Generate a SHUTDOWN chunk.  */
 			new_obj = sctp_make_shutdown(asoc, chunk);
-			if (!new_obj) {
-				error = -ENOMEM;
-				break;
-			}
+			if (!new_obj)
+				goto nomem;
 			sctp_add_cmd_sf(commands, SCTP_CMD_REPLY,
 					SCTP_CHUNK(new_obj));
 			break;
@@ -1626,8 +1611,8 @@ static int sctp_cmd_interpreter(sctp_event_t event_type,
 		case SCTP_CMD_PROCESS_CTSN:
 			/* Dummy up a SACK for processing. */
 			sackh.cum_tsn_ack = cmd->obj.be32;
-			sackh.a_rwnd = asoc->peer.rwnd +
-					asoc->outqueue.outstanding_bytes;
+			sackh.a_rwnd = htonl(asoc->peer.rwnd +
+					     asoc->outqueue.outstanding_bytes);
 			sackh.num_gap_ack_blocks = 0;
 			sackh.num_dup_tsns = 0;
 			chunk->subh.sack_hdr = &sackh;
@@ -1709,14 +1694,15 @@ static int sctp_cmd_interpreter(sctp_event_t event_type,
 			}
 			sctp_cmd_send_msg(asoc, cmd->obj.msg, gfp);
 			break;
-		case SCTP_CMD_SEND_NEXT_ASCONF:
-			sctp_cmd_send_asconf(asoc);
-			break;
 		case SCTP_CMD_PURGE_ASCONF_QUEUE:
 			sctp_asconf_queue_teardown(asoc);
 			break;
 
 		case SCTP_CMD_SET_ASOC:
+			if (asoc && local_cork) {
+				sctp_outq_uncork(&asoc->outqueue, gfp);
+				local_cork = 0;
+			}
 			asoc = cmd->obj.asoc;
 			break;
 
@@ -1726,17 +1712,11 @@ static int sctp_cmd_interpreter(sctp_event_t event_type,
 			break;
 		}
 
-		if (error) {
-			cmd = sctp_next_cmd(commands);
-			while (cmd) {
-				if (cmd->verb == SCTP_CMD_REPLY)
-					sctp_chunk_free(cmd->obj.chunk);
-				cmd = sctp_next_cmd(commands);
-			}
+		if (error)
 			break;
-		}
 	}
 
+out:
 	/* If this is in response to a received chunk, wait until
 	 * we are done with the packet to open the queue so that we don't
 	 * send multiple packets in response to a single request.
@@ -1751,5 +1731,8 @@ static int sctp_cmd_interpreter(sctp_event_t event_type,
 		sp->data_ready_signalled = 0;
 
 	return error;
+nomem:
+	error = -ENOMEM;
+	goto out;
 }
 

@@ -28,9 +28,17 @@ struct tty_struct;
 #define VT100ID "\033[?1;2c"
 #define VT102ID "\033[?6c"
 
+enum con_scroll {
+	SM_UP,
+	SM_DOWN,
+};
+
 /**
  * struct consw - callbacks for consoles
  *
+ * @con_scroll: move lines from @top to @bottom in direction @dir by @lines.
+ *		Return true if no generic handling should be done.
+ *		Invoked by csi_M and printing to the console.
  * @con_set_palette: sets the palette of the console to @table (optional)
  * @con_scrolldelta: the contents of the console should be scrolled by @lines.
  *		     Invoked by user. (optional)
@@ -44,7 +52,9 @@ struct consw {
 	void	(*con_putc)(struct vc_data *, int, int, int);
 	void	(*con_putcs)(struct vc_data *, const unsigned short *, int, int, int);
 	void	(*con_cursor)(struct vc_data *, int);
-	int	(*con_scroll)(struct vc_data *, int, int, int, int);
+	bool	(*con_scroll)(struct vc_data *, unsigned int top,
+			unsigned int bottom, enum con_scroll dir,
+			unsigned int lines);
 	int	(*con_switch)(struct vc_data *);
 	int	(*con_blank)(struct vc_data *, int, int);
 	int	(*con_font_set)(struct vc_data *, struct console_font *, unsigned);
@@ -82,7 +92,10 @@ extern const struct consw newport_con;	/* SGI Newport console  */
 extern const struct consw prom_con;	/* SPARC PROM console */
 
 int con_is_bound(const struct consw *csw);
+int register_con_driver(const struct consw *csw, int first, int last);
+int unregister_con_driver(const struct consw *csw);
 int do_unregister_con_driver(const struct consw *csw);
+int take_over_console(const struct consw *sw, int first, int last, int deflt);
 int do_take_over_console(const struct consw *sw, int first, int last, int deflt);
 void give_up_console(const struct consw *sw);
 #ifdef CONFIG_HW_CONSOLE
@@ -98,10 +111,6 @@ static inline int con_debug_leave(void)
 	return 0;
 }
 #endif
-
-/* scroll */
-#define SM_UP       (1)
-#define SM_DOWN     (2)
 
 /* cursor */
 #define CM_DRAW     (1)
@@ -122,7 +131,6 @@ static inline int con_debug_leave(void)
 #define CON_BOOT	(8)
 #define CON_ANYTIME	(16) /* Safe to call when cpu is offline */
 #define CON_BRL		(32) /* Used for a braille device */
-#define CON_EXTENDED	(64) /* Use the extended output format a la /dev/kmsg */
 
 struct console {
 	char	name[16];
@@ -131,7 +139,7 @@ struct console {
 	struct tty_driver *(*device)(struct console *, int *);
 	void	(*unblank)(void);
 	int	(*setup)(struct console *, char *);
-	int	(*match)(struct console *, char *name, int idx, char *options);
+	int	(*early_setup)(void);
 	short	flags;
 	short	index;
 	int	cflag;
@@ -149,6 +157,7 @@ extern int console_set_on_cmdline;
 extern struct console *early_console;
 
 extern int add_preferred_console(char *name, int idx, char *options);
+extern int update_console_cmdline(char *name, int idx, char *name_new, int idx_new, char *options);
 extern void register_console(struct console *);
 extern int unregister_console(struct console *);
 extern struct console *console_drivers;
@@ -157,7 +166,6 @@ extern int console_trylock(void);
 extern void console_unlock(void);
 extern void console_conditional_schedule(void);
 extern void console_unblank(void);
-extern void console_flush_on_panic(void);
 extern struct tty_driver *console_device(int *);
 extern void console_stop(struct console *);
 extern void console_start(struct console *);

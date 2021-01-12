@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Silicon Laboratories CP210x USB to RS232 serial adaptor driver
  *
  * Copyright (C) 2005 Craig Shelley (craig@microtron.org.uk)
- *
- *	This program is free software; you can redistribute it and/or
- *	modify it under the terms of the GNU General Public License version
- *	2 as published by the Free Software Foundation.
  *
  * Support to set flow control line levels using TIOCMGET and TIOCMSET
  * thanks to Karl Hiramoto karl@hiramoto.org. RTSCTS hardware flow
@@ -58,7 +55,6 @@ static const struct usb_device_id id_table[] = {
 	{ USB_DEVICE(0x08e6, 0x5501) }, /* Gemalto Prox-PU/CU contactless smartcard reader */
 	{ USB_DEVICE(0x08FD, 0x000A) }, /* Digianswer A/S , ZigBee/802.15.4 MAC Device */
 	{ USB_DEVICE(0x0908, 0x01FF) }, /* Siemens RUGGEDCOM USB Serial Console */
-	{ USB_DEVICE(0x0B00, 0x3070) }, /* Ingenico 3070 */
 	{ USB_DEVICE(0x0BED, 0x1100) }, /* MEI (TM) Cashflow-SC Bill/Voucher Acceptor */
 	{ USB_DEVICE(0x0BED, 0x1101) }, /* MEI series 2000 Combo Acceptor */
 	{ USB_DEVICE(0x0FCF, 0x1003) }, /* Dynastream ANT development board */
@@ -77,7 +73,6 @@ static const struct usb_device_id id_table[] = {
 	{ USB_DEVICE(0x10C4, 0x804E) }, /* Software Bisque Paramount ME build-in converter */
 	{ USB_DEVICE(0x10C4, 0x8053) }, /* Enfora EDG1228 */
 	{ USB_DEVICE(0x10C4, 0x8054) }, /* Enfora GSM2228 */
-	{ USB_DEVICE(0x10C4, 0x8056) }, /* Lorenz Messtechnik devices */
 	{ USB_DEVICE(0x10C4, 0x8066) }, /* Argussoft In-System Programmer */
 	{ USB_DEVICE(0x10C4, 0x806F) }, /* IMS USB to RS422 Converter Cable */
 	{ USB_DEVICE(0x10C4, 0x807A) }, /* Crumb128 board */
@@ -122,7 +117,6 @@ static const struct usb_device_id id_table[] = {
 	{ USB_DEVICE(0x10C4, 0x8341) }, /* Siemens MC35PU GPRS Modem */
 	{ USB_DEVICE(0x10C4, 0x8382) }, /* Cygnal Integrated Products, Inc. */
 	{ USB_DEVICE(0x10C4, 0x83A8) }, /* Amber Wireless AMB2560 */
-	{ USB_DEVICE(0x10C4, 0x83AA) }, /* Mark-10 Digital Force Gauge */
 	{ USB_DEVICE(0x10C4, 0x83D8) }, /* DekTec DTA Plus VHF/UHF Booster/Attenuator */
 	{ USB_DEVICE(0x10C4, 0x8411) }, /* Kyocera GPS Module */
 	{ USB_DEVICE(0x10C4, 0x8418) }, /* IRZ Automation Teleport SG-10 GSM/GPRS Modem */
@@ -255,8 +249,6 @@ static struct usb_serial_driver cp210x_device = {
 	.break_ctl		= cp210x_break_ctl,
 	.set_termios		= cp210x_set_termios,
 	.tx_empty		= cp210x_tx_empty,
-	.throttle		= usb_serial_generic_throttle,
-	.unthrottle		= usb_serial_generic_unthrottle,
 	.tiocmget		= cp210x_tiocmget,
 	.tiocmset		= cp210x_tiocmset,
 	.port_probe		= cp210x_port_probe,
@@ -431,7 +423,7 @@ static int cp210x_read_reg_block(struct usb_serial_port *port, u8 req,
 		dev_err(&port->dev, "failed get req 0x%x size %d status: %d\n",
 				req, bufsize, result);
 		if (result >= 0)
-			result = -EPROTO;
+			result = -EIO;
 
 		/*
 		 * FIXME Some callers don't bother to check for error,
@@ -544,7 +536,7 @@ static int cp210x_write_reg_block(struct usb_serial_port *port, u8 req,
 		dev_err(&port->dev, "failed set req 0x%x size %d status: %d\n",
 				req, bufsize, result);
 		if (result >= 0)
-			result = -EPROTO;
+			result = -EIO;
 	}
 
 	return result;
@@ -615,48 +607,6 @@ static int cp210x_get_line_ctl(struct usb_serial_port *port, u16 *ctl)
 	return 0;
 }
 
-/*
- * cp210x_quantise_baudrate
- * Quantises the baud rate as per AN205 Table 1
- */
-static unsigned int cp210x_quantise_baudrate(unsigned int baud)
-{
-	if (baud <= 300)
-		baud = 300;
-	else if (baud <= 600)      baud = 600;
-	else if (baud <= 1200)     baud = 1200;
-	else if (baud <= 1800)     baud = 1800;
-	else if (baud <= 2400)     baud = 2400;
-	else if (baud <= 4000)     baud = 4000;
-	else if (baud <= 4803)     baud = 4800;
-	else if (baud <= 7207)     baud = 7200;
-	else if (baud <= 9612)     baud = 9600;
-	else if (baud <= 14428)    baud = 14400;
-	else if (baud <= 16062)    baud = 16000;
-	else if (baud <= 19250)    baud = 19200;
-	else if (baud <= 28912)    baud = 28800;
-	else if (baud <= 38601)    baud = 38400;
-	else if (baud <= 51558)    baud = 51200;
-	else if (baud <= 56280)    baud = 56000;
-	else if (baud <= 58053)    baud = 57600;
-	else if (baud <= 64111)    baud = 64000;
-	else if (baud <= 77608)    baud = 76800;
-	else if (baud <= 117028)   baud = 115200;
-	else if (baud <= 129347)   baud = 128000;
-	else if (baud <= 156868)   baud = 153600;
-	else if (baud <= 237832)   baud = 230400;
-	else if (baud <= 254234)   baud = 250000;
-	else if (baud <= 273066)   baud = 256000;
-	else if (baud <= 491520)   baud = 460800;
-	else if (baud <= 567138)   baud = 500000;
-	else if (baud <= 670254)   baud = 576000;
-	else if (baud < 1000000)
-		baud = 921600;
-	else if (baud > 2000000)
-		baud = 2000000;
-	return baud;
-}
-
 static int cp210x_open(struct tty_struct *tty, struct usb_serial_port *port)
 {
 	int result;
@@ -712,7 +662,7 @@ static int cp210x_get_tx_queue_byte_count(struct usb_serial_port *port,
 	} else {
 		dev_err(&port->dev, "failed to get comm status: %d\n", result);
 		if (result >= 0)
-			result = -EPROTO;
+			result = -EIO;
 	}
 
 	kfree(sts);
@@ -767,7 +717,6 @@ static void cp210x_get_termios_port(struct usb_serial_port *port,
 	u32 baud;
 	u16 bits;
 	u32 ctl_hs;
-	u32 flow_repl;
 
 	cp210x_read_u32_reg(port, CP210X_GET_BAUDRATE, &baud);
 
@@ -868,22 +817,6 @@ static void cp210x_get_termios_port(struct usb_serial_port *port,
 	ctl_hs = le32_to_cpu(flow_ctl.ulControlHandshake);
 	if (ctl_hs & CP210X_SERIAL_CTS_HANDSHAKE) {
 		dev_dbg(dev, "%s - flow control = CRTSCTS\n", __func__);
-		/*
-		 * When the port is closed, the CP210x hardware disables
-		 * auto-RTS and RTS is deasserted but it leaves auto-CTS when
-		 * in hardware flow control mode. When re-opening the port, if
-		 * auto-CTS is enabled on the cp210x, then auto-RTS must be
-		 * re-enabled in the driver.
-		 */
-		flow_repl = le32_to_cpu(flow_ctl.ulFlowReplace);
-		flow_repl &= ~CP210X_SERIAL_RTS_MASK;
-		flow_repl |= CP210X_SERIAL_RTS_SHIFT(CP210X_SERIAL_RTS_FLOW_CTL);
-		flow_ctl.ulFlowReplace = cpu_to_le32(flow_repl);
-		cp210x_write_reg_block(port,
-				CP210X_SET_FLOW,
-				&flow_ctl,
-				sizeof(flow_ctl));
-
 		cflag |= CRTSCTS;
 	} else {
 		dev_dbg(dev, "%s - flow control = NONE\n", __func__);
@@ -891,6 +824,58 @@ static void cp210x_get_termios_port(struct usb_serial_port *port,
 	}
 
 	*cflagp = cflag;
+}
+
+struct cp210x_rate {
+	speed_t rate;
+	speed_t high;
+};
+
+static const struct cp210x_rate cp210x_an205_table1[] = {
+	{ 300, 300 },
+	{ 600, 600 },
+	{ 1200, 1200 },
+	{ 1800, 1800 },
+	{ 2400, 2400 },
+	{ 4000, 4000 },
+	{ 4800, 4803 },
+	{ 7200, 7207 },
+	{ 9600, 9612 },
+	{ 14400, 14428 },
+	{ 16000, 16062 },
+	{ 19200, 19250 },
+	{ 28800, 28912 },
+	{ 38400, 38601 },
+	{ 51200, 51558 },
+	{ 56000, 56280 },
+	{ 57600, 58053 },
+	{ 64000, 64111 },
+	{ 76800, 77608 },
+	{ 115200, 117028 },
+	{ 128000, 129347 },
+	{ 153600, 156868 },
+	{ 230400, 237832 },
+	{ 250000, 254234 },
+	{ 256000, 273066 },
+	{ 460800, 491520 },
+	{ 500000, 567138 },
+	{ 576000, 670254 },
+	{ 921600, UINT_MAX }
+};
+
+/*
+ * Quantises the baud rate as per AN205 Table 1
+ */
+static speed_t cp210x_get_an205_rate(speed_t baud)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(cp210x_an205_table1); ++i) {
+		if (baud <= cp210x_an205_table1[i].high)
+			break;
+	}
+
+	return cp210x_an205_table1[i].rate;
 }
 
 /*
@@ -931,7 +916,10 @@ static void cp210x_change_speed(struct tty_struct *tty,
 	 *
 	 * NOTE: B0 is not implemented.
 	 */
-	baud = cp210x_quantise_baudrate(baud);
+	if (baud < 1000000)
+		baud = cp210x_get_an205_rate(baud);
+	else if (baud > 2000000)
+		baud = 2000000;
 
 	dev_dbg(&port->dev, "%s - setting baud rate to %u\n", __func__, baud);
 	if (cp210x_write_u32_reg(port, CP210X_SET_BAUDRATE, baud)) {
@@ -976,16 +964,9 @@ static void cp210x_set_termios(struct tty_struct *tty,
 			dev_dbg(dev, "%s - data bits = 7\n", __func__);
 			break;
 		case CS8:
+		default:
 			bits |= BITS_DATA_8;
 			dev_dbg(dev, "%s - data bits = 8\n", __func__);
-			break;
-		/*case CS9:
-			bits |= BITS_DATA_9;
-			dev_dbg(dev, "%s - data bits = 9\n", __func__);
-			break;*/
-		default:
-			dev_dbg(dev, "cp210x driver does not support the number of bits requested, using 8 bit mode\n");
-			bits |= BITS_DATA_8;
 			break;
 		}
 		if (cp210x_write_u16_reg(port, CP210X_SET_LINE_CTL, bits))
@@ -1192,4 +1173,4 @@ static int cp210x_port_remove(struct usb_serial_port *port)
 module_usb_serial_driver(serial_drivers, id_table);
 
 MODULE_DESCRIPTION(DRIVER_DESC);
-MODULE_LICENSE("GPL");
+MODULE_LICENSE("GPL v2");

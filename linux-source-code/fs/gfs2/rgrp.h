@@ -71,7 +71,7 @@ extern void gfs2_rlist_add(struct gfs2_inode *ip, struct gfs2_rgrp_list *rlist,
 extern void gfs2_rlist_alloc(struct gfs2_rgrp_list *rlist, unsigned int state);
 extern void gfs2_rlist_free(struct gfs2_rgrp_list *rlist);
 extern u64 gfs2_ri_total(struct gfs2_sbd *sdp);
-extern void gfs2_rgrp_dump(struct seq_file *seq, const struct gfs2_glock *gl);
+extern int gfs2_rgrp_dump(struct seq_file *seq, const struct gfs2_glock *gl);
 extern int gfs2_rgrp_send_discards(struct gfs2_sbd *sdp, u64 offset,
 				   struct buffer_head *bh,
 				   const struct gfs2_bitmap *bi, unsigned minlen, u64 *ptrimmed);
@@ -81,6 +81,13 @@ extern int gfs2_fitrim(struct file *filp, void __user *argp);
 static inline bool gfs2_rs_active(const struct gfs2_blkreserv *rs)
 {
 	return rs && !RB_EMPTY_NODE(&rs->rs_node);
+}
+
+static inline int rgrp_contains_block(struct gfs2_rgrpd *rgd, u64 block)
+{
+	u64 first = rgd->rd_data0;
+	u64 last = first + rgd->rd_data;
+	return first <= block && block < last;
 }
 
 extern void check_and_update_goal(struct gfs2_inode *ip);

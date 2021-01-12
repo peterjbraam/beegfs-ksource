@@ -21,6 +21,7 @@
 #include <linux/cryptouser.h>
 #include <net/netlink.h>
 #include <crypto/akcipher.h>
+#include <crypto/public_key.h>
 #include <crypto/internal/akcipher.h>
 #include "internal.h"
 
@@ -145,4 +146,4 @@ int akcipher_register_instance(struct crypto_template *tmpl,
 EXPORT_SYMBOL_GPL(akcipher_register_instance);
 
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("Generic public key cipher type");
+MODULE_DESCRIPTION("Generic public key cihper type");

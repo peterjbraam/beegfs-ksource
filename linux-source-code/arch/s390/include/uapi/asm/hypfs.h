@@ -12,20 +12,6 @@
 #include <linux/types.h>
 
 /*
- * IOCTL for binary interface /sys/kernel/debug/diag_304
- */
-struct hypfs_diag304 {
-	__u32	args[2];
-	__u64	data;
-	__u64	rc;
-} __attribute__((packed));
-
-#define HYPFS_IOCTL_MAGIC 0x10
-
-#define HYPFS_DIAG304 \
-	_IOWR(HYPFS_IOCTL_MAGIC, 0x20, struct hypfs_diag304)
-
-/*
  * Structures for binary interface /sys/kernel/debug/diag_0c
  */
 struct hypfs_diag0c_hdr {

@@ -687,7 +687,6 @@ static int find_rsb_dir(struct dlm_ls *ls, char *name, int len,
 		log_error(ls, "find_rsb new from_other %d dir %d our %d %s",
 			  from_nodeid, dir_nodeid, our_nodeid, r->res_name);
 		dlm_free_rsb(r);
-		r = NULL;
 		error = -ENOTBLK;
 		goto out_unlock;
 	}
@@ -1210,7 +1209,6 @@ static int create_lkb(struct dlm_ls *ls, struct dlm_lkb **lkb_ret)
 
 	if (rv < 0) {
 		log_error(ls, "create_lkb idr error %d", rv);
-		dlm_free_lkb(lkb);
 		return rv;
 	}
 
@@ -2040,8 +2038,8 @@ static void set_lvb_lock_pc(struct dlm_rsb *r, struct dlm_lkb *lkb,
 	b = dlm_lvb_operations[lkb->lkb_grmode + 1][lkb->lkb_rqmode + 1];
 	if (b == 1) {
 		int len = receive_extralen(ms);
-		if (len > r->res_ls->ls_lvblen)
-			len = r->res_ls->ls_lvblen;
+		if (len > DLM_RESNAME_MAXLEN)
+			len = DLM_RESNAME_MAXLEN;
 		memcpy(lkb->lkb_lvbptr, ms->m_extra, len);
 		lkb->lkb_lvbseq = ms->m_lvbseq;
 	}
@@ -3895,8 +3893,8 @@ static int receive_lvb(struct dlm_ls *ls, struct dlm_lkb *lkb,
 		if (!lkb->lkb_lvbptr)
 			return -ENOMEM;
 		len = receive_extralen(ms);
-		if (len > ls->ls_lvblen)
-			len = ls->ls_lvblen;
+		if (len > DLM_RESNAME_MAXLEN)
+			len = DLM_RESNAME_MAXLEN;
 		memcpy(lkb->lkb_lvbptr, ms->m_extra, len);
 	}
 	return 0;
@@ -4178,7 +4176,6 @@ static int receive_convert(struct dlm_ls *ls, struct dlm_message *ms)
 			  (unsigned long long)lkb->lkb_recover_seq,
 			  ms->m_header.h_nodeid, ms->m_lkid);
 		error = -ENOENT;
-		dlm_put_lkb(lkb);
 		goto fail;
 	}
 
@@ -4232,7 +4229,6 @@ static int receive_unlock(struct dlm_ls *ls, struct dlm_message *ms)
 			  lkb->lkb_id, lkb->lkb_remid,
 			  ms->m_header.h_nodeid, ms->m_lkid);
 		error = -ENOENT;
-		dlm_put_lkb(lkb);
 		goto fail;
 	}
 
@@ -5466,7 +5462,7 @@ void dlm_recover_purge(struct dlm_ls *ls)
 	up_write(&ls->ls_root_sem);
 
 	if (lkb_count)
-		log_rinfo(ls, "dlm_recover_purge %u locks for %u nodes",
+		log_debug(ls, "dlm_recover_purge %u locks for %u nodes",
 			  lkb_count, nodes_count);
 }
 
@@ -5540,7 +5536,7 @@ void dlm_recover_grant(struct dlm_ls *ls)
 	}
 
 	if (lkb_count)
-		log_rinfo(ls, "dlm_recover_grant %u locks on %u resources",
+		log_debug(ls, "dlm_recover_grant %u locks on %u resources",
 			  lkb_count, rsb_count);
 }
 
@@ -5699,7 +5695,7 @@ int dlm_recover_master_copy(struct dlm_ls *ls, struct dlm_rcom *rc)
 	put_rsb(r);
  out:
 	if (error && error != -EEXIST)
-		log_rinfo(ls, "dlm_recover_master_copy remote %d %x error %d",
+		log_debug(ls, "dlm_recover_master_copy remote %d %x error %d",
 			  from_nodeid, remid, error);
 	rl->rl_result = cpu_to_le32(error);
 	return error;
@@ -5795,20 +5791,20 @@ int dlm_user_request(struct dlm_ls *ls, struct dlm_user_args *ua,
 			goto out;
 		}
 	}
-	error = set_lock_args(mode, &ua->lksb, flags, namelen, timeout_cs,
-			      fake_astfn, ua, fake_bastfn, &args);
-	if (error) {
-		kfree(ua->lksb.sb_lvbptr);
-		ua->lksb.sb_lvbptr = NULL;
-		kfree(ua);
-		__put_lkb(ls, lkb);
-		goto out;
-	}
 
 	/* After ua is attached to lkb it will be freed by dlm_free_lkb().
 	   When DLM_IFL_USER is set, the dlm knows that this is a userspace
 	   lock and that lkb_astparam is the dlm_user_args structure. */
+
+	error = set_lock_args(mode, &ua->lksb, flags, namelen, timeout_cs,
+			      fake_astfn, ua, fake_bastfn, &args);
 	lkb->lkb_flags |= DLM_IFL_USER;
+
+	if (error) {
+		__put_lkb(ls, lkb);
+		goto out;
+	}
+
 	error = request_lock(ls, lkb, name, namelen, &args);
 
 	switch (error) {

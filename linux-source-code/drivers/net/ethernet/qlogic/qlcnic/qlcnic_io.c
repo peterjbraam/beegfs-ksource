@@ -180,7 +180,7 @@ static struct qlcnic_filter *qlcnic_find_mac_filter(struct hlist_head *head,
 	struct hlist_node *n;
 
 	hlist_for_each_entry_safe(tmp_fil, n, head, fnode) {
-		if (ether_addr_equal(tmp_fil->faddr, addr) &&
+		if (!memcmp(tmp_fil->faddr, addr, ETH_ALEN) &&
 		    tmp_fil->vlan_id == vlan_id)
 			return tmp_fil;
 	}
@@ -331,7 +331,7 @@ static void qlcnic_send_filter(struct qlcnic_adapter *adapter,
 	head = &(adapter->fhash.fhead[hindex]);
 
 	hlist_for_each_entry_safe(tmp_fil, n, head, fnode) {
-		if (ether_addr_equal(tmp_fil->faddr, (u8 *)&src_addr) &&
+		if (!memcmp(tmp_fil->faddr, &src_addr, ETH_ALEN) &&
 		    tmp_fil->vlan_id == vlan_id) {
 			if (jiffies > (QLCNIC_READD_AGE * HZ + tmp_fil->ftime))
 				qlcnic_change_filter(adapter, &src_addr,
@@ -951,7 +951,6 @@ static int qlcnic_process_cmd_ring(struct qlcnic_adapter *adapter,
 	done = (sw_consumer == hw_consumer);
 
 	spin_unlock(&tx_ring->tx_clean_lock);
-
 	return done;
 }
 
@@ -975,7 +974,7 @@ static int qlcnic_poll(struct napi_struct *napi, int budget)
 		work_done = budget;
 
 	if (work_done < budget) {
-		napi_complete(&sds_ring->napi);
+		napi_complete_done(&sds_ring->napi, work_done);
 		if (test_bit(__QLCNIC_DEV_UP, &adapter->state)) {
 			qlcnic_enable_sds_intr(adapter, sds_ring);
 			qlcnic_enable_tx_intr(adapter, tx_ring);
@@ -1019,7 +1018,7 @@ static int qlcnic_rx_poll(struct napi_struct *napi, int budget)
 	work_done = qlcnic_process_rcv_ring(sds_ring, budget);
 
 	if (work_done < budget) {
-		napi_complete(&sds_ring->napi);
+		napi_complete_done(&sds_ring->napi, work_done);
 		if (test_bit(__QLCNIC_DEV_UP, &adapter->state))
 			qlcnic_enable_sds_intr(adapter, sds_ring);
 	}
@@ -1908,7 +1907,7 @@ static int qlcnic_83xx_process_rcv_ring(struct qlcnic_host_sds_ring *sds_ring,
 			break;
 		default:
 			dev_info(&adapter->pdev->dev,
-				 "Unknown opcode: 0x%x\n", opcode);
+				 "Unkonwn opcode: 0x%x\n", opcode);
 			goto skip;
 		}
 
@@ -1966,7 +1965,7 @@ static int qlcnic_83xx_msix_sriov_vf_poll(struct napi_struct *napi, int budget)
 		work_done = budget;
 
 	if (work_done < budget) {
-		napi_complete(&sds_ring->napi);
+		napi_complete_done(&sds_ring->napi, work_done);
 		qlcnic_enable_sds_intr(adapter, sds_ring);
 	}
 
@@ -1994,7 +1993,7 @@ static int qlcnic_83xx_poll(struct napi_struct *napi, int budget)
 		work_done = budget;
 
 	if (work_done < budget) {
-		napi_complete(&sds_ring->napi);
+		napi_complete_done(&sds_ring->napi, work_done);
 		qlcnic_enable_sds_intr(adapter, sds_ring);
 	}
 
@@ -2032,7 +2031,7 @@ static int qlcnic_83xx_rx_poll(struct napi_struct *napi, int budget)
 	adapter = sds_ring->adapter;
 	work_done = qlcnic_83xx_process_rcv_ring(sds_ring, budget);
 	if (work_done < budget) {
-		napi_complete(&sds_ring->napi);
+		napi_complete_done(&sds_ring->napi, work_done);
 		if (test_bit(__QLCNIC_DEV_UP, &adapter->state))
 			qlcnic_enable_sds_intr(adapter, sds_ring);
 	}

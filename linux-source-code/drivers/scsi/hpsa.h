@@ -57,6 +57,7 @@ struct hpsa_sas_phy {
 	bool added_to_port;
 };
 
+#define EXTERNAL_QD 7
 struct hpsa_scsi_dev_t {
 	unsigned int devtype;
 	int bus, target, lun;		/* as presented to the OS */
@@ -64,20 +65,23 @@ struct hpsa_scsi_dev_t {
 	u8 physical_device : 1;
 	u8 expose_device;
 	u8 removed : 1;			/* device is marked for death */
+	u8 was_removed : 1;		/* device actually removed */
 #define RAID_CTLR_LUNID "\0\0\0\0\0\0\0\0"
 	unsigned char device_id[16];    /* from inquiry pg. 0x83 */
 	u64 sas_address;
+	u64 eli;			/* from report diags. */
 	unsigned char vendor[8];        /* bytes 8-15 of inquiry data */
 	unsigned char model[16];        /* bytes 16-31 of inquiry data */
 	unsigned char rev;		/* byte 2 of inquiry data */
 	unsigned char raid_level;	/* from inquiry page 0xC1 */
 	unsigned char volume_offline;	/* discovered via TUR or VPD */
 	u16 queue_depth;		/* max queue_depth for this device */
-	atomic_t reset_cmds_out;	/* Count of commands to-be affected */
+	atomic_t commands_outstanding;	/* track commands sent to device */
 	atomic_t ioaccel_cmds_out;	/* Only used for physical devices
 					 * counts commands sent to physical
 					 * device via "ioaccel" path.
 					 */
+	bool in_reset;
 	u32 ioaccel_handle;
 	u8 active_path_index;
 	u8 path_map;
@@ -157,6 +161,7 @@ struct bmic_controller_parameters {
 #pragma pack()
 
 struct ctlr_info {
+	unsigned int *reply_map;
 	int	ctlr;
 	char	devname[8];
 	char    *product_name;
@@ -171,14 +176,13 @@ struct ctlr_info {
 	struct CfgTable __iomem *cfgtable;
 	int	interrupts_enabled;
 	int 	max_commands;
+	int	last_collision_tag; /* tags are global */
 	atomic_t commands_outstanding;
 #	define PERF_MODE_INT	0
 #	define DOORBELL_INT	1
 #	define SIMPLE_MODE_INT	2
 #	define MEMQ_MODE_INT	3
-	unsigned int intr[MAX_REPLY_QUEUES];
-	unsigned int msix_vector;
-	unsigned int msi_vector;
+	unsigned int msix_vectors;
 	int intr_mode; /* either PERF_MODE_INT or SIMPLE_MODE_INT */
 	struct access_method access;
 
@@ -246,6 +250,7 @@ struct ctlr_info {
 	u32 __percpu *lockup_detected;
 	struct delayed_work monitor_ctlr_work;
 	struct delayed_work rescan_ctlr_work;
+	struct delayed_work event_monitor_work;
 	int remove_in_progress;
 	/* Address of h->q[x] is passed to intr handler to know which queue */
 	u8 q[MAX_REPLY_QUEUES];
@@ -297,12 +302,13 @@ struct ctlr_info {
 	int	needs_abort_tags_swizzled;
 	struct workqueue_struct *resubmit_wq;
 	struct workqueue_struct *rescan_ctlr_wq;
+	struct workqueue_struct *monitor_ctlr_wq;
 	atomic_t abort_cmds_available;
-	wait_queue_head_t abort_cmd_wait_queue;
 	wait_queue_head_t event_sync_wait_queue;
 	struct mutex reset_mutex;
 	u8 reset_in_progress;
 	struct hpsa_sas_node *sas_host;
+	spinlock_t reset_lock;
 };
 
 struct offline_device_entry {
@@ -467,7 +473,7 @@ static unsigned long SA5_performant_completed(struct ctlr_info *h, u8 q)
 	unsigned long register_value = FIFO_EMPTY;
 
 	/* msi auto clears the interrupt pending bit. */
-	if (unlikely(!(h->msi_vector || h->msix_vector))) {
+	if (unlikely(!(h->pdev->msi_enabled || h->msix_vectors))) {
 		/* flush the controller write of the reply queue by reading
 		 * outbound doorbell status register.
 		 */
@@ -581,38 +587,38 @@ static unsigned long SA5_ioaccel_mode1_completed(struct ctlr_info *h, u8 q)
 }
 
 static struct access_method SA5_access = {
-	SA5_submit_command,
-	SA5_intr_mask,
-	SA5_intr_pending,
-	SA5_completed,
+	.submit_command = SA5_submit_command,
+	.set_intr_mask = SA5_intr_mask,
+	.intr_pending = SA5_intr_pending,
+	.command_completed = SA5_completed,
 };
 
 static struct access_method SA5_ioaccel_mode1_access = {
-	SA5_submit_command,
-	SA5_performant_intr_mask,
-	SA5_ioaccel_mode1_intr_pending,
-	SA5_ioaccel_mode1_completed,
+	.submit_command = SA5_submit_command,
+	.set_intr_mask = SA5_performant_intr_mask,
+	.intr_pending = SA5_ioaccel_mode1_intr_pending,
+	.command_completed = SA5_ioaccel_mode1_completed,
 };
 
 static struct access_method SA5_ioaccel_mode2_access = {
-	SA5_submit_command_ioaccel2,
-	SA5_performant_intr_mask,
-	SA5_performant_intr_pending,
-	SA5_performant_completed,
+	.submit_command = SA5_submit_command_ioaccel2,
+	.set_intr_mask = SA5_performant_intr_mask,
+	.intr_pending = SA5_performant_intr_pending,
+	.command_completed = SA5_performant_completed,
 };
 
 static struct access_method SA5_performant_access = {
-	SA5_submit_command,
-	SA5_performant_intr_mask,
-	SA5_performant_intr_pending,
-	SA5_performant_completed,
+	.submit_command = SA5_submit_command,
+	.set_intr_mask = SA5_performant_intr_mask,
+	.intr_pending = SA5_performant_intr_pending,
+	.command_completed = SA5_performant_completed,
 };
 
 static struct access_method SA5_performant_access_no_read = {
-	SA5_submit_command_no_read,
-	SA5_performant_intr_mask,
-	SA5_performant_intr_pending,
-	SA5_performant_completed,
+	.submit_command = SA5_submit_command_no_read,
+	.set_intr_mask = SA5_performant_intr_mask,
+	.intr_pending = SA5_performant_intr_pending,
+	.command_completed = SA5_performant_completed,
 };
 
 struct board_type {

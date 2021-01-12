@@ -16,7 +16,7 @@
 
 static u32 net_secret[NET_SECRET_SIZE] ____cacheline_aligned;
 
-static __always_inline void net_secret_init(void)
+static void net_secret_init(void)
 {
 	net_get_random_once(net_secret, sizeof(net_secret));
 }
@@ -101,6 +101,7 @@ __u32 secure_tcp_sequence_number(__be32 saddr, __be32 daddr,
 
 	return seq_scale(hash[0]);
 }
+EXPORT_SYMBOL_GPL(secure_tcp_sequence_number);
 
 u32 secure_ipv4_port_ephemeral(__be32 saddr, __be32 daddr, __be16 dport)
 {
@@ -154,7 +155,7 @@ u64 secure_dccpv6_sequence_number(__be32 *saddr, __be32 *daddr,
 	net_secret_init();
 	memcpy(hash, saddr, 16);
 	for (i = 0; i < 4; i++)
-		secret[i] = net_secret[i] + (__force u32)daddr[i];
+		secret[i] = net_secret[i] + daddr[i];
 	secret[4] = net_secret[4] +
 		(((__force u16)sport << 16) + (__force u16)dport);
 	for (i = 5; i < MD5_MESSAGE_BYTES / 4; i++)

@@ -56,11 +56,11 @@ static bool ipv4_invert_tuple(struct nf_conntrack_tuple *tuple,
 	return true;
 }
 
-static void ipv4_print_tuple(struct seq_file *s,
+static int ipv4_print_tuple(struct seq_file *s,
 			    const struct nf_conntrack_tuple *tuple)
 {
-	seq_printf(s, "src=%pI4 dst=%pI4 ",
-		   &tuple->src.u3.ip, &tuple->dst.u3.ip);
+	return seq_printf(s, "src=%pI4 dst=%pI4 ",
+			  &tuple->src.u3.ip, &tuple->dst.u3.ip);
 }
 
 static int ipv4_get_l4proto(const struct sk_buff *skb, unsigned int nhoff,
@@ -92,8 +92,10 @@ static int ipv4_get_l4proto(const struct sk_buff *skb, unsigned int nhoff,
 	return NF_ACCEPT;
 }
 
-static unsigned int ipv4_helper(void *priv,
+static unsigned int ipv4_helper(const struct nf_hook_ops *ops,
 				struct sk_buff *skb,
+				const struct net_device *in,
+				const struct net_device *out,
 				const struct nf_hook_state *state)
 {
 	struct nf_conn *ct;
@@ -110,7 +112,7 @@ static unsigned int ipv4_helper(void *priv,
 	if (!help)
 		return NF_ACCEPT;
 
-	/* rcu_read_lock()ed by nf_hook_thresh */
+	/* rcu_read_lock()ed by nf_hook_slow */
 	helper = rcu_dereference(help->helper);
 	if (!helper)
 		return NF_ACCEPT;
@@ -119,8 +121,10 @@ static unsigned int ipv4_helper(void *priv,
 			    ct, ctinfo);
 }
 
-static unsigned int ipv4_confirm(void *priv,
+static unsigned int ipv4_confirm(const struct nf_hook_ops *ops,
 				 struct sk_buff *skb,
+				 const struct net_device *in,
+				 const struct net_device *out,
 				 const struct nf_hook_state *state)
 {
 	struct nf_conn *ct;
@@ -143,26 +147,26 @@ out:
 	return nf_conntrack_confirm(skb);
 }
 
-static unsigned int ipv4_conntrack_in(void *priv,
+static unsigned int ipv4_conntrack_in(const struct nf_hook_ops *ops,
 				      struct sk_buff *skb,
+				      const struct net_device *in,
+				      const struct net_device *out,
 				      const struct nf_hook_state *state)
 {
-	return nf_conntrack_in(state->net, PF_INET, state->hook, skb);
+	return nf_conntrack_in(dev_net(state->in), PF_INET, ops->hooknum, skb);
 }
 
-static unsigned int ipv4_conntrack_local(void *priv,
+static unsigned int ipv4_conntrack_local(const struct nf_hook_ops *ops,
 					 struct sk_buff *skb,
+					 const struct net_device *in,
+					 const struct net_device *out,
 					 const struct nf_hook_state *state)
 {
 	/* root is playing with raw sockets. */
 	if (skb->len < sizeof(struct iphdr) ||
 	    ip_hdrlen(skb) < sizeof(struct iphdr))
 		return NF_ACCEPT;
-
-	if (ip_is_fragment(ip_hdr(skb))) /* IP_NODEFRAG setsockopt set */
-		return NF_ACCEPT;
-
-	return nf_conntrack_in(state->net, PF_INET, state->hook, skb);
+	return nf_conntrack_in(dev_net(state->out), PF_INET, ops->hooknum, skb);
 }
 
 /* Connection tracking may drop packets, but never alters them, so
@@ -170,41 +174,88 @@ static unsigned int ipv4_conntrack_local(void *priv,
 static struct nf_hook_ops ipv4_conntrack_ops[] __read_mostly = {
 	{
 		.hook		= ipv4_conntrack_in,
+		.owner		= THIS_MODULE,
 		.pf		= NFPROTO_IPV4,
 		.hooknum	= NF_INET_PRE_ROUTING,
 		.priority	= NF_IP_PRI_CONNTRACK,
 	},
 	{
 		.hook		= ipv4_conntrack_local,
+		.owner		= THIS_MODULE,
 		.pf		= NFPROTO_IPV4,
 		.hooknum	= NF_INET_LOCAL_OUT,
 		.priority	= NF_IP_PRI_CONNTRACK,
 	},
 	{
 		.hook		= ipv4_helper,
+		.owner		= THIS_MODULE,
 		.pf		= NFPROTO_IPV4,
 		.hooknum	= NF_INET_POST_ROUTING,
 		.priority	= NF_IP_PRI_CONNTRACK_HELPER,
 	},
 	{
 		.hook		= ipv4_confirm,
+		.owner		= THIS_MODULE,
 		.pf		= NFPROTO_IPV4,
 		.hooknum	= NF_INET_POST_ROUTING,
 		.priority	= NF_IP_PRI_CONNTRACK_CONFIRM,
 	},
 	{
 		.hook		= ipv4_helper,
+		.owner		= THIS_MODULE,
 		.pf		= NFPROTO_IPV4,
 		.hooknum	= NF_INET_LOCAL_IN,
 		.priority	= NF_IP_PRI_CONNTRACK_HELPER,
 	},
 	{
 		.hook		= ipv4_confirm,
+		.owner		= THIS_MODULE,
 		.pf		= NFPROTO_IPV4,
 		.hooknum	= NF_INET_LOCAL_IN,
 		.priority	= NF_IP_PRI_CONNTRACK_CONFIRM,
 	},
 };
+
+#if defined(CONFIG_SYSCTL) && defined(CONFIG_NF_CONNTRACK_PROC_COMPAT)
+static int log_invalid_proto_min = 0;
+static int log_invalid_proto_max = 255;
+
+static struct ctl_table ip_ct_sysctl_table[] = {
+	{
+		.procname	= "ip_conntrack_max",
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+	{
+		.procname	= "ip_conntrack_count",
+		.maxlen		= sizeof(int),
+		.mode		= 0444,
+		.proc_handler	= proc_dointvec,
+	},
+	{
+		.procname	= "ip_conntrack_buckets",
+		.maxlen		= sizeof(unsigned int),
+		.mode		= 0444,
+		.proc_handler	= proc_dointvec,
+	},
+	{
+		.procname	= "ip_conntrack_checksum",
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+	{
+		.procname	= "ip_conntrack_log_invalid",
+		.maxlen		= sizeof(unsigned int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &log_invalid_proto_min,
+		.extra2		= &log_invalid_proto_max,
+	},
+	{ }
+};
+#endif /* CONFIG_SYSCTL && CONFIG_NF_CONNTRACK_PROC_COMPAT */
 
 /* Fast function for those who don't want to parse /proc (and I don't
    blame them). */
@@ -267,7 +318,7 @@ getorigdst(struct sock *sk, int optval, void __user *user, int *len)
 	return -ENOENT;
 }
 
-#if IS_ENABLED(CONFIG_NF_CT_NETLINK)
+#if defined(CONFIG_NF_CT_NETLINK) || defined(CONFIG_NF_CT_NETLINK_MODULE)
 
 #include <linux/netfilter/nfnetlink.h>
 #include <linux/netfilter/nfnetlink_conntrack.h>
@@ -311,12 +362,26 @@ static struct nf_sockopt_ops so_getorigdst = {
 	.pf		= PF_INET,
 	.get_optmin	= SO_ORIGINAL_DST,
 	.get_optmax	= SO_ORIGINAL_DST+1,
-	.get		= getorigdst,
+	.get		= &getorigdst,
 	.owner		= THIS_MODULE,
 };
 
 static int ipv4_init_net(struct net *net)
 {
+#if defined(CONFIG_SYSCTL) && defined(CONFIG_NF_CONNTRACK_PROC_COMPAT)
+	struct nf_ip_net *in = &net->ct.nf_ct_proto;
+	in->ctl_table = kmemdup(ip_ct_sysctl_table,
+				sizeof(ip_ct_sysctl_table),
+				GFP_KERNEL);
+	if (!in->ctl_table)
+		return -ENOMEM;
+
+	in->ctl_table[0].data = &nf_conntrack_max;
+	in->ctl_table[1].data = &net->ct.count;
+	in->ctl_table[2].data = &net->ct.htable_size;
+	in->ctl_table[3].data = &net->ct.sysctl_checksum;
+	in->ctl_table[4].data = &net->ct.sysctl_log_invalid;
+#endif
 	return 0;
 }
 
@@ -327,11 +392,14 @@ struct nf_conntrack_l3proto nf_conntrack_l3proto_ipv4 __read_mostly = {
 	.invert_tuple	 = ipv4_invert_tuple,
 	.print_tuple	 = ipv4_print_tuple,
 	.get_l4proto	 = ipv4_get_l4proto,
-#if IS_ENABLED(CONFIG_NF_CT_NETLINK)
+#if defined(CONFIG_NF_CT_NETLINK) || defined(CONFIG_NF_CT_NETLINK_MODULE)
 	.tuple_to_nlattr = ipv4_tuple_to_nlattr,
 	.nlattr_tuple_size = ipv4_nlattr_tuple_size,
 	.nlattr_to_tuple = ipv4_nlattr_to_tuple,
 	.nla_policy	 = ipv4_nla_policy,
+#endif
+#if defined(CONFIG_SYSCTL) && defined(CONFIG_NF_CONNTRACK_PROC_COMPAT)
+	.ctl_table_path  = "net/ipv4/netfilter",
 #endif
 	.init_net	 = ipv4_init_net,
 	.me		 = THIS_MODULE,
@@ -344,47 +412,43 @@ MODULE_ALIAS("nf_conntrack-" __stringify(AF_INET));
 MODULE_ALIAS("ip_conntrack");
 MODULE_LICENSE("GPL");
 
+static struct nf_conntrack_l4proto *builtin_l4proto4[] = {
+	&nf_conntrack_l4proto_tcp4,
+	&nf_conntrack_l4proto_udp4,
+	&nf_conntrack_l4proto_icmp,
+#ifdef CONFIG_NF_CT_PROTO_DCCP
+	&nf_conntrack_l4proto_dccp4,
+#endif
+#ifdef CONFIG_NF_CT_PROTO_SCTP
+	&nf_conntrack_l4proto_sctp4,
+#endif
+#ifdef CONFIG_NF_CT_PROTO_UDPLITE
+	&nf_conntrack_l4proto_udplite4,
+#endif
+};
+
 static int ipv4_net_init(struct net *net)
 {
 	int ret = 0;
 
-	ret = nf_ct_l4proto_pernet_register(net, &nf_conntrack_l4proto_tcp4);
-	if (ret < 0) {
-		pr_err("nf_conntrack_tcp4: pernet registration failed\n");
-		goto out_tcp;
-	}
-	ret = nf_ct_l4proto_pernet_register(net, &nf_conntrack_l4proto_udp4);
-	if (ret < 0) {
-		pr_err("nf_conntrack_udp4: pernet registration failed\n");
-		goto out_udp;
-	}
-	ret = nf_ct_l4proto_pernet_register(net, &nf_conntrack_l4proto_icmp);
-	if (ret < 0) {
-		pr_err("nf_conntrack_icmp4: pernet registration failed\n");
-		goto out_icmp;
-	}
+	ret = nf_ct_l4proto_pernet_register(net, builtin_l4proto4,
+					    ARRAY_SIZE(builtin_l4proto4));
+	if (ret < 0)
+		return ret;
 	ret = nf_ct_l3proto_pernet_register(net, &nf_conntrack_l3proto_ipv4);
 	if (ret < 0) {
 		pr_err("nf_conntrack_ipv4: pernet registration failed\n");
-		goto out_ipv4;
+		nf_ct_l4proto_pernet_unregister(net, builtin_l4proto4,
+						ARRAY_SIZE(builtin_l4proto4));
 	}
-	return 0;
-out_ipv4:
-	nf_ct_l4proto_pernet_unregister(net, &nf_conntrack_l4proto_icmp);
-out_icmp:
-	nf_ct_l4proto_pernet_unregister(net, &nf_conntrack_l4proto_udp4);
-out_udp:
-	nf_ct_l4proto_pernet_unregister(net, &nf_conntrack_l4proto_tcp4);
-out_tcp:
 	return ret;
 }
 
 static void ipv4_net_exit(struct net *net)
 {
 	nf_ct_l3proto_pernet_unregister(net, &nf_conntrack_l3proto_ipv4);
-	nf_ct_l4proto_pernet_unregister(net, &nf_conntrack_l4proto_icmp);
-	nf_ct_l4proto_pernet_unregister(net, &nf_conntrack_l4proto_udp4);
-	nf_ct_l4proto_pernet_unregister(net, &nf_conntrack_l4proto_tcp4);
+	nf_ct_l4proto_pernet_unregister(net, builtin_l4proto4,
+					ARRAY_SIZE(builtin_l4proto4));
 }
 
 static struct pernet_operations ipv4_net_ops = {
@@ -401,7 +465,7 @@ static int __init nf_conntrack_l3proto_ipv4_init(void)
 
 	ret = nf_register_sockopt(&so_getorigdst);
 	if (ret < 0) {
-		pr_err("Unable to register netfilter socket option\n");
+		printk(KERN_ERR "Unable to register netfilter socket option\n");
 		return ret;
 	}
 
@@ -418,37 +482,30 @@ static int __init nf_conntrack_l3proto_ipv4_init(void)
 		goto cleanup_pernet;
 	}
 
-	ret = nf_ct_l4proto_register(&nf_conntrack_l4proto_tcp4);
-	if (ret < 0) {
-		pr_err("nf_conntrack_ipv4: can't register tcp4 proto.\n");
+	ret = nf_ct_l4proto_register(builtin_l4proto4,
+				     ARRAY_SIZE(builtin_l4proto4));
+	if (ret < 0)
 		goto cleanup_hooks;
-	}
-
-	ret = nf_ct_l4proto_register(&nf_conntrack_l4proto_udp4);
-	if (ret < 0) {
-		pr_err("nf_conntrack_ipv4: can't register udp4 proto.\n");
-		goto cleanup_tcp4;
-	}
-
-	ret = nf_ct_l4proto_register(&nf_conntrack_l4proto_icmp);
-	if (ret < 0) {
-		pr_err("nf_conntrack_ipv4: can't register icmpv4 proto.\n");
-		goto cleanup_udp4;
-	}
 
 	ret = nf_ct_l3proto_register(&nf_conntrack_l3proto_ipv4);
 	if (ret < 0) {
 		pr_err("nf_conntrack_ipv4: can't register ipv4 proto.\n");
-		goto cleanup_icmpv4;
+		goto cleanup_l4proto;
 	}
 
+#if defined(CONFIG_PROC_FS) && defined(CONFIG_NF_CONNTRACK_PROC_COMPAT)
+	ret = nf_conntrack_ipv4_compat_init();
+	if (ret < 0)
+		goto cleanup_proto;
+#endif
 	return ret;
- cleanup_icmpv4:
-	nf_ct_l4proto_unregister(&nf_conntrack_l4proto_icmp);
- cleanup_udp4:
-	nf_ct_l4proto_unregister(&nf_conntrack_l4proto_udp4);
- cleanup_tcp4:
-	nf_ct_l4proto_unregister(&nf_conntrack_l4proto_tcp4);
+#if defined(CONFIG_PROC_FS) && defined(CONFIG_NF_CONNTRACK_PROC_COMPAT)
+ cleanup_proto:
+	nf_ct_l3proto_unregister(&nf_conntrack_l3proto_ipv4);
+#endif
+cleanup_l4proto:
+	nf_ct_l4proto_unregister(builtin_l4proto4,
+				 ARRAY_SIZE(builtin_l4proto4));
  cleanup_hooks:
 	nf_unregister_hooks(ipv4_conntrack_ops, ARRAY_SIZE(ipv4_conntrack_ops));
  cleanup_pernet:
@@ -461,10 +518,12 @@ static int __init nf_conntrack_l3proto_ipv4_init(void)
 static void __exit nf_conntrack_l3proto_ipv4_fini(void)
 {
 	synchronize_net();
+#if defined(CONFIG_PROC_FS) && defined(CONFIG_NF_CONNTRACK_PROC_COMPAT)
+	nf_conntrack_ipv4_compat_fini();
+#endif
 	nf_ct_l3proto_unregister(&nf_conntrack_l3proto_ipv4);
-	nf_ct_l4proto_unregister(&nf_conntrack_l4proto_icmp);
-	nf_ct_l4proto_unregister(&nf_conntrack_l4proto_udp4);
-	nf_ct_l4proto_unregister(&nf_conntrack_l4proto_tcp4);
+	nf_ct_l4proto_unregister(builtin_l4proto4,
+				 ARRAY_SIZE(builtin_l4proto4));
 	nf_unregister_hooks(ipv4_conntrack_ops, ARRAY_SIZE(ipv4_conntrack_ops));
 	unregister_pernet_subsys(&ipv4_net_ops);
 	nf_unregister_sockopt(&so_getorigdst);
@@ -472,3 +531,9 @@ static void __exit nf_conntrack_l3proto_ipv4_fini(void)
 
 module_init(nf_conntrack_l3proto_ipv4_init);
 module_exit(nf_conntrack_l3proto_ipv4_fini);
+
+void need_ipv4_conntrack(void)
+{
+	return;
+}
+EXPORT_SYMBOL_GPL(need_ipv4_conntrack);

@@ -161,8 +161,8 @@ static u64 veth_stats_one(struct pcpu_vstats *result, struct net_device *dev)
 	return atomic64_read(&priv->dropped);
 }
 
-static struct rtnl_link_stats64 *veth_get_stats64(struct net_device *dev,
-						  struct rtnl_link_stats64 *tot)
+static void veth_get_stats64(struct net_device *dev,
+			     struct rtnl_link_stats64 *tot)
 {
 	struct veth_priv *priv = netdev_priv(dev);
 	struct net_device *peer;
@@ -180,8 +180,6 @@ static struct rtnl_link_stats64 *veth_get_stats64(struct net_device *dev,
 		tot->rx_packets = one.packets;
 	}
 	rcu_read_unlock();
-
-	return tot;
 }
 
 /* fake multicast ability */
@@ -231,32 +229,17 @@ static int veth_change_mtu(struct net_device *dev, int new_mtu)
 
 static int veth_dev_init(struct net_device *dev)
 {
-	dev->vstats = netdev_alloc_pcpu_stats(struct pcpu_vstats);
+	dev->vstats = alloc_percpu(struct pcpu_vstats);
 	if (!dev->vstats)
 		return -ENOMEM;
+
 	return 0;
 }
 
 static void veth_dev_free(struct net_device *dev)
 {
 	free_percpu(dev->vstats);
-	free_netdev(dev);
 }
-
-#ifdef CONFIG_NET_POLL_CONTROLLER
-static void veth_poll_controller(struct net_device *dev)
-{
-	/* veth only receives frames when its peer sends one
-	 * Since it's a synchronous operation, we are guaranteed
-	 * never to have pending data when we poll for it so
-	 * there is nothing to do here.
-	 *
-	 * We need this though so netpoll recognizes us as an interface that
-	 * supports polling, which enables bridge devices in virt setups to
-	 * still use netconsole
-	 */
-}
-#endif	/* CONFIG_NET_POLL_CONTROLLER */
 
 static int veth_get_iflink(const struct net_device *dev)
 {
@@ -300,16 +283,13 @@ static const struct net_device_ops veth_netdev_ops = {
 	.ndo_open            = veth_open,
 	.ndo_stop            = veth_close,
 	.ndo_start_xmit      = veth_xmit,
-	.ndo_change_mtu      = veth_change_mtu,
+	.ndo_change_mtu_rh74 = veth_change_mtu,
 	.ndo_get_stats64     = veth_get_stats64,
 	.ndo_set_rx_mode     = veth_set_multicast_list,
 	.ndo_set_mac_address = eth_mac_addr,
-#ifdef CONFIG_NET_POLL_CONTROLLER
-	.ndo_poll_controller	= veth_poll_controller,
-#endif
 	.ndo_get_iflink		= veth_get_iflink,
-	.ndo_features_check	= passthru_features_check,
-	.ndo_set_rx_headroom	= veth_set_rx_headroom,
+	.ndo_size		= sizeof(struct net_device_ops),
+	.extended.ndo_set_rx_headroom	= veth_set_rx_headroom,
 };
 
 #define VETH_FEATURES (NETIF_F_SG | NETIF_F_FRAGLIST | NETIF_F_HW_CSUM | \
@@ -332,11 +312,9 @@ static void veth_setup(struct net_device *dev)
 	dev->features |= NETIF_F_LLTX;
 	dev->features |= VETH_FEATURES;
 	dev->vlan_features = dev->features &
-			     ~(NETIF_F_HW_VLAN_CTAG_TX |
-			       NETIF_F_HW_VLAN_STAG_TX |
-			       NETIF_F_HW_VLAN_CTAG_RX |
-			       NETIF_F_HW_VLAN_STAG_RX);
-	dev->destructor = veth_dev_free;
+			     ~(NETIF_F_HW_VLAN_CTAG_TX | NETIF_F_HW_VLAN_STAG_TX);
+	dev->extended->needs_free_netdev = true;
+	dev->extended->priv_destructor = veth_dev_free;
 
 	dev->hw_features = VETH_FEATURES;
 	dev->hw_enc_features = VETH_FEATURES;
@@ -372,7 +350,6 @@ static int veth_newlink(struct net *src_net, struct net_device *dev,
 	struct veth_priv *priv;
 	char ifname[IFNAMSIZ];
 	struct nlattr *peer_tb[IFLA_MAX + 1], **tbp;
-	unsigned char name_assign_type;
 	struct ifinfomsg *ifmp;
 	struct net *net;
 
@@ -400,33 +377,26 @@ static int veth_newlink(struct net *src_net, struct net_device *dev,
 		tbp = tb;
 	}
 
-	if (tbp[IFLA_IFNAME]) {
+	if (ifmp && tbp[IFLA_IFNAME])
 		nla_strlcpy(ifname, tbp[IFLA_IFNAME], IFNAMSIZ);
-		name_assign_type = NET_NAME_USER;
-	} else {
+	else
 		snprintf(ifname, IFNAMSIZ, DRV_NAME "%%d");
-		name_assign_type = NET_NAME_ENUM;
-	}
 
 	net = rtnl_link_get_net(src_net, tbp);
 	if (IS_ERR(net))
 		return PTR_ERR(net);
 
-	peer = rtnl_create_link(net, ifname, name_assign_type,
-				&veth_link_ops, tbp);
+	peer = rtnl_create_link(net, ifname, &veth_link_ops, tbp);
 	if (IS_ERR(peer)) {
 		put_net(net);
 		return PTR_ERR(peer);
 	}
 
-	if (tbp[IFLA_ADDRESS] == NULL)
+	if (!ifmp || !tbp[IFLA_ADDRESS])
 		eth_hw_addr_random(peer);
 
 	if (ifmp && (dev->ifindex != 0))
 		peer->ifindex = ifmp->ifi_index;
-
-	peer->gso_max_size = dev->gso_max_size;
-	peer->gso_max_segs = dev->gso_max_segs;
 
 	err = register_netdevice(peer);
 	put_net(net);
@@ -455,6 +425,12 @@ static int veth_newlink(struct net *src_net, struct net_device *dev,
 	else
 		snprintf(dev->name, IFNAMSIZ, DRV_NAME "%%d");
 
+	if (strchr(dev->name, '%')) {
+		err = dev_alloc_name(dev, dev->name);
+		if (err < 0)
+			goto err_alloc_name;
+	}
+
 	err = register_netdevice(dev);
 	if (err < 0)
 		goto err_register_dev;
@@ -474,6 +450,7 @@ static int veth_newlink(struct net *src_net, struct net_device *dev,
 
 err_register_dev:
 	/* nothing to do */
+err_alloc_name:
 err_configure_peer:
 	unregister_netdevice(peer);
 	return err;

@@ -26,8 +26,83 @@
 #include <linux/hid-sensor-hub.h>
 #include <linux/iio/iio.h>
 #include <linux/iio/trigger.h>
+#include <linux/iio/buffer.h>
 #include <linux/iio/sysfs.h>
 #include "hid-sensor-trigger.h"
+
+static ssize_t _hid_sensor_set_report_latency(struct device *dev,
+					      struct device_attribute *attr,
+					      const char *buf, size_t len)
+{
+	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
+	struct hid_sensor_common *attrb = iio_device_get_drvdata(indio_dev);
+	int integer, fract, ret;
+	int latency;
+
+	ret = iio_str_to_fixpoint(buf, 100000, &integer, &fract);
+	if (ret)
+		return ret;
+
+	latency = integer * 1000 + fract / 1000;
+	ret = hid_sensor_set_report_latency(attrb, latency);
+	if (ret < 0)
+		return len;
+
+	attrb->latency_ms = hid_sensor_get_report_latency(attrb);
+
+	return len;
+}
+
+static ssize_t _hid_sensor_get_report_latency(struct device *dev,
+					      struct device_attribute *attr,
+					      char *buf)
+{
+	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
+	struct hid_sensor_common *attrb = iio_device_get_drvdata(indio_dev);
+	int latency;
+
+	latency = hid_sensor_get_report_latency(attrb);
+	if (latency < 0)
+		return latency;
+
+	return sprintf(buf, "%d.%06u\n", latency / 1000, (latency % 1000) * 1000);
+}
+
+static ssize_t _hid_sensor_get_fifo_state(struct device *dev,
+					  struct device_attribute *attr,
+					  char *buf)
+{
+	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
+	struct hid_sensor_common *attrb = iio_device_get_drvdata(indio_dev);
+	int latency;
+
+	latency = hid_sensor_get_report_latency(attrb);
+	if (latency < 0)
+		return latency;
+
+	return sprintf(buf, "%d\n", !!latency);
+}
+
+static IIO_DEVICE_ATTR(hwfifo_timeout, 0644,
+		       _hid_sensor_get_report_latency,
+		       _hid_sensor_set_report_latency, 0);
+static IIO_DEVICE_ATTR(hwfifo_enabled, 0444,
+		       _hid_sensor_get_fifo_state, NULL, 0);
+
+static const struct attribute *hid_sensor_fifo_attributes[] = {
+	&iio_dev_attr_hwfifo_timeout.dev_attr.attr,
+	&iio_dev_attr_hwfifo_enabled.dev_attr.attr,
+	NULL,
+};
+
+static void hid_sensor_setup_batch_mode(struct iio_dev *indio_dev,
+					struct hid_sensor_common *st)
+{
+	if (!hid_sensor_batch_mode_supported(st))
+		return;
+
+	iio_buffer_set_attrs(indio_dev->buffer, hid_sensor_fifo_attributes);
+}
 
 static int _hid_sensor_power_state(struct hid_sensor_common *st, bool state)
 {
@@ -36,6 +111,8 @@ static int _hid_sensor_power_state(struct hid_sensor_common *st, bool state)
 	s32 poll_value = 0;
 
 	if (state) {
+		if (!atomic_read(&st->user_requested_state))
+			return 0;
 		if (sensor_hub_device_open(st->hsdev))
 			return -EIO;
 
@@ -49,8 +126,6 @@ static int _hid_sensor_power_state(struct hid_sensor_common *st, bool state)
 			st->report_state.report_id,
 			st->report_state.index,
 			HID_USAGE_SENSOR_PROP_REPORTING_STATE_ALL_EVENTS_ENUM);
-
-		poll_value = hid_sensor_read_poll_value(st);
 	} else {
 		int val;
 
@@ -84,13 +159,12 @@ static int _hid_sensor_power_state(struct hid_sensor_common *st, bool state)
 				       &report_val);
 	}
 
-	pr_debug("HID_SENSOR %s set power_state %d report_state %d\n",
-		 st->pdev->name, state_val, report_val);
-
 	sensor_hub_get_feature(st->hsdev, st->power_state.report_id,
 			       st->power_state.index,
 			       sizeof(state_val), &state_val);
-	if (state && poll_value)
+	if (state)
+		poll_value = hid_sensor_read_poll_value(st);
+	if (poll_value > 0)
 		msleep_interruptible(poll_value * 2);
 
 	return 0;
@@ -108,7 +182,6 @@ int hid_sensor_power_state(struct hid_sensor_common *st, bool state)
 		ret = pm_runtime_get_sync(&st->pdev->dev);
 	else {
 		pm_runtime_mark_last_busy(&st->pdev->dev);
-		pm_runtime_use_autosuspend(&st->pdev->dev);
 		ret = pm_runtime_put_autosuspend(&st->pdev->dev);
 	}
 	if (ret < 0) {
@@ -143,6 +216,9 @@ static void hid_sensor_set_power_work(struct work_struct *work)
 				       sizeof(attrb->raw_hystersis),
 				       &attrb->raw_hystersis);
 
+	if (attrb->latency_ms > 0)
+		hid_sensor_set_report_latency(attrb, attrb->latency_ms);
+
 	_hid_sensor_power_state(attrb, true);
 }
 
@@ -154,6 +230,10 @@ static int hid_sensor_data_rdy_trigger_set_state(struct iio_trigger *trig,
 
 void hid_sensor_remove_trigger(struct hid_sensor_common *attrb)
 {
+	pm_runtime_disable(&attrb->pdev->dev);
+	pm_runtime_set_suspended(&attrb->pdev->dev);
+	pm_runtime_put_noidle(&attrb->pdev->dev);
+
 	cancel_work_sync(&attrb->work);
 	iio_trigger_unregister(attrb->trigger);
 	iio_trigger_free(attrb->trigger);
@@ -190,6 +270,8 @@ int hid_sensor_setup_trigger(struct iio_dev *indio_dev, const char *name,
 	attrb->trigger = trig;
 	indio_dev->trig = iio_trigger_get(trig);
 
+	hid_sensor_setup_batch_mode(indio_dev, attrb);
+
 	ret = pm_runtime_set_active(&indio_dev->dev);
 	if (ret)
 		goto error_unreg_trigger;
@@ -203,6 +285,8 @@ int hid_sensor_setup_trigger(struct iio_dev *indio_dev, const char *name,
 	/* Default to 3 seconds, but can be changed from sysfs */
 	pm_runtime_set_autosuspend_delay(&attrb->pdev->dev,
 					 3000);
+	pm_runtime_use_autosuspend(&attrb->pdev->dev);
+
 	return ret;
 error_unreg_trigger:
 	iio_trigger_unregister(trig);

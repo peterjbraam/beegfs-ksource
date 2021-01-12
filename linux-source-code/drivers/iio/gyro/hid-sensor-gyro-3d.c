@@ -409,6 +409,7 @@ static struct platform_driver hid_gyro_3d_platform_driver = {
 	.id_table = hid_gyro_3d_ids,
 	.driver = {
 		.name	= KBUILD_MODNAME,
+		.owner	= THIS_MODULE,
 		.pm	= &hid_sensor_pm_ops,
 	},
 	.probe		= hid_gyro_3d_probe,

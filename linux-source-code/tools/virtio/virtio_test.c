@@ -11,7 +11,6 @@
 #include <sys/types.h>
 #include <fcntl.h>
 #include <stdbool.h>
-#include <linux/virtio_types.h>
 #include <linux/vhost.h>
 #include <linux/virtio.h>
 #include <linux/virtio_ring.h>
@@ -172,8 +171,7 @@ static void run_test(struct vdev_info *dev, struct vq_info *vq,
 							 GFP_ATOMIC);
 				if (likely(r == 0)) {
 					++started;
-					if (unlikely(!virtqueue_kick(vq->vq)))
-						r = -1;
+					virtqueue_kick(vq->vq);
 				}
 			} else
 				r = -1;
@@ -228,14 +226,6 @@ const struct option longopts[] = {
 		.val = 'i',
 	},
 	{
-		.name = "virtio-1",
-		.val = '1',
-	},
-	{
-		.name = "no-virtio-1",
-		.val = '0',
-	},
-	{
 		.name = "delayed-interrupt",
 		.val = 'D',
 	},
@@ -252,7 +242,6 @@ static void help(void)
 	fprintf(stderr, "Usage: virtio_test [--help]"
 		" [--no-indirect]"
 		" [--no-event-idx]"
-		" [--no-virtio-1]"
 		" [--delayed-interrupt]"
 		"\n");
 }
@@ -261,7 +250,7 @@ int main(int argc, char **argv)
 {
 	struct vdev_info dev;
 	unsigned long long features = (1ULL << VIRTIO_RING_F_INDIRECT_DESC) |
-		(1ULL << VIRTIO_RING_F_EVENT_IDX) | (1ULL << VIRTIO_F_VERSION_1);
+		(1ULL << VIRTIO_RING_F_EVENT_IDX);
 	int o;
 	bool delayed = false;
 
@@ -281,9 +270,6 @@ int main(int argc, char **argv)
 			goto done;
 		case 'i':
 			features &= ~(1ULL << VIRTIO_RING_F_INDIRECT_DESC);
-			break;
-		case '0':
-			features &= ~(1ULL << VIRTIO_F_VERSION_1);
 			break;
 		case 'D':
 			delayed = true;

@@ -25,7 +25,7 @@ struct linux_dirent64;
 struct list_head;
 struct mmap_arg_struct;
 struct msgbuf;
-struct user_msghdr;
+struct msghdr;
 struct mmsghdr;
 struct msqid_ds;
 struct new_utsname;
@@ -99,8 +99,6 @@ union bpf_attr;
 #define __MAP(n,...) __MAP##n(__VA_ARGS__)
 
 #define __SC_DECL(t, a)	t a
-#define __TYPE_IS_L(t)	(__same_type((t)0, 0L))
-#define __TYPE_IS_UL(t)	(__same_type((t)0, 0UL))
 #define __TYPE_IS_LL(t) (__same_type((t)0, 0LL) || __same_type((t)0, 0ULL))
 #define __SC_LONG(t, a) __typeof(__builtin_choose_expr(__TYPE_IS_LL(t), 0LL, 0L)) a
 #define __SC_CAST(t, a)	(t) a
@@ -111,40 +109,36 @@ union bpf_attr;
 #define __SC_STR_ADECL(t, a)	#a
 #define __SC_STR_TDECL(t, a)	#t
 
-extern struct trace_event_class event_class_syscall_enter;
-extern struct trace_event_class event_class_syscall_exit;
+extern struct ftrace_event_class event_class_syscall_enter;
+extern struct ftrace_event_class event_class_syscall_exit;
 extern struct trace_event_functions enter_syscall_print_funcs;
 extern struct trace_event_functions exit_syscall_print_funcs;
 
 #define SYSCALL_TRACE_ENTER_EVENT(sname)				\
 	static struct syscall_metadata __syscall_meta_##sname;		\
-	static struct trace_event_call __used				\
+	static struct ftrace_event_call __used				\
 	  event_enter_##sname = {					\
+		.name                   = "sys_enter"#sname,		\
 		.class			= &event_class_syscall_enter,	\
-		{							\
-			.name                   = "sys_enter"#sname,	\
-		},							\
 		.event.funcs            = &enter_syscall_print_funcs,	\
-		.data			= (void *)&__syscall_meta_##sname,\
-		.flags                  = TRACE_EVENT_FL_CAP_ANY,	\
+		.rh_data		= (void *)&__syscall_meta_##sname,\
+		.flags			= TRACE_EVENT_FL_CAP_ANY,	\
 	};								\
-	static struct trace_event_call __used				\
+	static struct ftrace_event_call __used				\
 	  __attribute__((section("_ftrace_events")))			\
 	 *__event_enter_##sname = &event_enter_##sname;
 
 #define SYSCALL_TRACE_EXIT_EVENT(sname)					\
 	static struct syscall_metadata __syscall_meta_##sname;		\
-	static struct trace_event_call __used				\
+	static struct ftrace_event_call __used				\
 	  event_exit_##sname = {					\
+		.name                   = "sys_exit"#sname,		\
 		.class			= &event_class_syscall_exit,	\
-		{							\
-			.name                   = "sys_exit"#sname,	\
-		},							\
 		.event.funcs		= &exit_syscall_print_funcs,	\
-		.data			= (void *)&__syscall_meta_##sname,\
-		.flags                  = TRACE_EVENT_FL_CAP_ANY,	\
+		.rh_data		= (void *)&__syscall_meta_##sname,\
+		.flags			= TRACE_EVENT_FL_CAP_ANY,	\
 	};								\
-	static struct trace_event_call __used				\
+	static struct ftrace_event_call __used				\
 	  __attribute__((section("_ftrace_events")))			\
 	*__event_exit_##sname = &event_exit_##sname;
 
@@ -171,8 +165,20 @@ extern struct trace_event_functions exit_syscall_print_funcs;
 	static struct syscall_metadata __used			\
 	  __attribute__((section("__syscalls_metadata")))	\
 	 *__p_syscall_meta_##sname = &__syscall_meta_##sname;
+
+static inline int is_syscall_trace_event(struct ftrace_event_call *tp_event)
+{
+	return tp_event->class == &event_class_syscall_enter ||
+	       tp_event->class == &event_class_syscall_exit;
+}
+
 #else
 #define SYSCALL_METADATA(sname, nb, ...)
+
+static inline int is_syscall_trace_event(struct ftrace_event_call *tp_event)
+{
+	return 0;
+}
 #endif
 
 #define SYSCALL_DEFINE0(sname)					\
@@ -192,10 +198,8 @@ extern struct trace_event_functions exit_syscall_print_funcs;
 
 #define __PROTECT(...) asmlinkage_protect(__VA_ARGS__)
 #define __SYSCALL_DEFINEx(x, name, ...)					\
-	asmlinkage long sys##name(__MAP(x,__SC_DECL,__VA_ARGS__))	\
-		__attribute__((alias(__stringify(SyS##name))));		\
+	asmlinkage long sys##name(__MAP(x,__SC_DECL,__VA_ARGS__));	\
 	static inline long SYSC##name(__MAP(x,__SC_DECL,__VA_ARGS__));	\
-	asmlinkage long SyS##name(__MAP(x,__SC_LONG,__VA_ARGS__));	\
 	asmlinkage long SyS##name(__MAP(x,__SC_LONG,__VA_ARGS__))	\
 	{								\
 		long ret = SYSC##name(__MAP(x,__SC_CAST,__VA_ARGS__));	\
@@ -203,10 +207,9 @@ extern struct trace_event_functions exit_syscall_print_funcs;
 		__PROTECT(x, ret,__MAP(x,__SC_ARGS,__VA_ARGS__));	\
 		return ret;						\
 	}								\
+	SYSCALL_ALIAS(sys##name, SyS##name);				\
 	static inline long SYSC##name(__MAP(x,__SC_DECL,__VA_ARGS__))
 
-asmlinkage long sys32_quotactl(unsigned int cmd, const char __user *special,
-			       qid_t id, void __user *addr);
 asmlinkage long sys_time(time_t __user *tloc);
 asmlinkage long sys_stime(time_t __user *tptr);
 asmlinkage long sys_gettimeofday(struct timeval __user *tv,
@@ -371,10 +374,10 @@ asmlinkage long sys_rt_sigtimedwait(const sigset_t __user *uthese,
 				size_t sigsetsize);
 asmlinkage long sys_rt_tgsigqueueinfo(pid_t tgid, pid_t  pid, int sig,
 		siginfo_t __user *uinfo);
-asmlinkage long sys_kill(pid_t pid, int sig);
-asmlinkage long sys_tgkill(pid_t tgid, pid_t pid, int sig);
-asmlinkage long sys_tkill(pid_t pid, int sig);
-asmlinkage long sys_rt_sigqueueinfo(pid_t pid, int sig, siginfo_t __user *uinfo);
+asmlinkage long sys_kill(int pid, int sig);
+asmlinkage long sys_tgkill(int tgid, int pid, int sig);
+asmlinkage long sys_tkill(int pid, int sig);
+asmlinkage long sys_rt_sigqueueinfo(int pid, int sig, siginfo_t __user *uinfo);
 asmlinkage long sys_sgetmask(void);
 asmlinkage long sys_ssetmask(int newmask);
 asmlinkage long sys_signal(int sig, __sighandler_t handler);
@@ -410,16 +413,12 @@ asmlinkage long sys_newlstat(const char __user *filename,
 				struct stat __user *statbuf);
 asmlinkage long sys_newfstat(unsigned int fd, struct stat __user *statbuf);
 asmlinkage long sys_ustat(unsigned dev, struct ustat __user *ubuf);
-#if defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_COMPAT_STAT64)
+#if BITS_PER_LONG == 32
 asmlinkage long sys_stat64(const char __user *filename,
 				struct stat64 __user *statbuf);
 asmlinkage long sys_fstat64(unsigned long fd, struct stat64 __user *statbuf);
 asmlinkage long sys_lstat64(const char __user *filename,
 				struct stat64 __user *statbuf);
-asmlinkage long sys_fstatat64(int dfd, const char __user *filename,
-			       struct stat64 __user *statbuf, int flag);
-#endif
-#if BITS_PER_LONG == 32
 asmlinkage long sys_truncate64(const char __user *path, loff_t length);
 asmlinkage long sys_ftruncate64(unsigned int fd, loff_t length);
 #endif
@@ -524,7 +523,7 @@ asmlinkage long sys_chown(const char __user *filename,
 asmlinkage long sys_lchown(const char __user *filename,
 				uid_t user, gid_t group);
 asmlinkage long sys_fchown(unsigned int fd, uid_t user, gid_t group);
-#ifdef CONFIG_HAVE_UID16
+#ifdef CONFIG_UID16
 asmlinkage long sys_chown16(const char __user *filename,
 				old_uid_t user, old_gid_t group);
 asmlinkage long sys_lchown16(const char __user *filename,
@@ -575,14 +574,8 @@ asmlinkage long sys_pwrite64(unsigned int fd, const char __user *buf,
 			     size_t count, loff_t pos);
 asmlinkage long sys_preadv(unsigned long fd, const struct iovec __user *vec,
 			   unsigned long vlen, unsigned long pos_l, unsigned long pos_h);
-asmlinkage long sys_preadv2(unsigned long fd, const struct iovec __user *vec,
-			    unsigned long vlen, unsigned long pos_l, unsigned long pos_h,
-			    int flags);
 asmlinkage long sys_pwritev(unsigned long fd, const struct iovec __user *vec,
 			    unsigned long vlen, unsigned long pos_l, unsigned long pos_h);
-asmlinkage long sys_pwritev2(unsigned long fd, const struct iovec __user *vec,
-			    unsigned long vlen, unsigned long pos_l, unsigned long pos_h,
-			    int flags);
 asmlinkage long sys_getcwd(char __user *buf, unsigned long size);
 asmlinkage long sys_mkdir(const char __user *pathname, umode_t mode);
 asmlinkage long sys_chdir(const char __user *filename);
@@ -611,13 +604,13 @@ asmlinkage long sys_getpeername(int, struct sockaddr __user *, int __user *);
 asmlinkage long sys_send(int, void __user *, size_t, unsigned);
 asmlinkage long sys_sendto(int, void __user *, size_t, unsigned,
 				struct sockaddr __user *, int);
-asmlinkage long sys_sendmsg(int fd, struct user_msghdr __user *msg, unsigned flags);
+asmlinkage long sys_sendmsg(int fd, struct msghdr __user *msg, unsigned flags);
 asmlinkage long sys_sendmmsg(int fd, struct mmsghdr __user *msg,
 			     unsigned int vlen, unsigned flags);
 asmlinkage long sys_recv(int, void __user *, size_t, unsigned);
 asmlinkage long sys_recvfrom(int, void __user *, size_t, unsigned,
 				struct sockaddr __user *, int __user *);
-asmlinkage long sys_recvmsg(int fd, struct user_msghdr __user *msg, unsigned flags);
+asmlinkage long sys_recvmsg(int fd, struct msghdr __user *msg, unsigned flags);
 asmlinkage long sys_recvmmsg(int fd, struct mmsghdr __user *msg,
 			     unsigned int vlen, unsigned flags,
 			     struct timespec __user *timeout);
@@ -726,7 +719,7 @@ asmlinkage long sys_keyctl(int cmd, unsigned long arg2, unsigned long arg3,
 
 asmlinkage long sys_ioprio_set(int which, int who, int ioprio);
 asmlinkage long sys_ioprio_get(int which, int who);
-asmlinkage long sys_set_mempolicy(int mode, const unsigned long __user *nmask,
+asmlinkage long sys_set_mempolicy(int mode, unsigned long __user *nmask,
 				unsigned long maxnode);
 asmlinkage long sys_migrate_pages(pid_t pid, unsigned long maxnode,
 				const unsigned long __user *from,
@@ -738,7 +731,7 @@ asmlinkage long sys_move_pages(pid_t pid, unsigned long nr_pages,
 				int flags);
 asmlinkage long sys_mbind(unsigned long start, unsigned long len,
 				unsigned long mode,
-				const unsigned long __user *nmask,
+				unsigned long __user *nmask,
 				unsigned long maxnode,
 				unsigned flags);
 asmlinkage long sys_get_mempolicy(int __user *policy,
@@ -767,9 +760,6 @@ asmlinkage long sys_linkat(int olddfd, const char __user *oldname,
 			   int newdfd, const char __user *newname, int flags);
 asmlinkage long sys_renameat(int olddfd, const char __user * oldname,
 			     int newdfd, const char __user * newname);
-asmlinkage long sys_renameat2(int olddfd, const char __user *oldname,
-			      int newdfd, const char __user *newname,
-			      unsigned int flags);
 asmlinkage long sys_futimesat(int dfd, const char __user *filename,
 			      struct timeval __user *utimes);
 asmlinkage long sys_faccessat(int dfd, const char __user *filename, int mode);
@@ -781,6 +771,8 @@ asmlinkage long sys_openat(int dfd, const char __user *filename, int flags,
 			   umode_t mode);
 asmlinkage long sys_newfstatat(int dfd, const char __user *filename,
 			       struct stat __user *statbuf, int flag);
+asmlinkage long sys_fstatat64(int dfd, const char __user *filename,
+			       struct stat64 __user *statbuf, int flag);
 asmlinkage long sys_readlinkat(int dfd, const char __user *path, char __user *buf,
 			       int bufsiz);
 asmlinkage long sys_utimensat(int dfd, const char __user *filename,
@@ -834,15 +826,15 @@ asmlinkage long sys_syncfs(int fd);
 asmlinkage long sys_fork(void);
 asmlinkage long sys_vfork(void);
 #ifdef CONFIG_CLONE_BACKWARDS
-asmlinkage long sys_clone(unsigned long, unsigned long, int __user *, unsigned long,
+asmlinkage long sys_clone(unsigned long, unsigned long, int __user *, int,
 	       int __user *);
 #else
 #ifdef CONFIG_CLONE_BACKWARDS3
 asmlinkage long sys_clone(unsigned long, unsigned long, int, int __user *,
-			  int __user *, unsigned long);
+			  int __user *, int);
 #else
 asmlinkage long sys_clone(unsigned long, unsigned long, int __user *,
-	       int __user *, unsigned long);
+	       int __user *, int);
 #endif
 #endif
 
@@ -887,20 +879,16 @@ asmlinkage long sys_getrandom(char __user *buf, size_t count,
 			      unsigned int flags);
 asmlinkage long sys_bpf(int cmd, union bpf_attr *attr, unsigned int size);
 
-asmlinkage long sys_execveat(int dfd, const char __user *filename,
-			const char __user *const __user *argv,
-			const char __user *const __user *envp, int flags);
-
-asmlinkage long sys_membarrier(int cmd, int flags);
 asmlinkage long sys_copy_file_range(int fd_in, loff_t __user *off_in,
 				    int fd_out, loff_t __user *off_out,
 				    size_t len, unsigned int flags);
-
-asmlinkage long sys_mlock2(unsigned long start, size_t len, int flags);
-
 asmlinkage long sys_pkey_mprotect(unsigned long start, size_t len,
 				  unsigned long prot, int pkey);
 asmlinkage long sys_pkey_alloc(unsigned long flags, unsigned long init_val);
 asmlinkage long sys_pkey_free(int pkey);
+
+asmlinkage long sys_membarrier(int cmd, int flags);
+
+asmlinkage long sys_mlock2(unsigned long start, size_t len, int flags);
 
 #endif

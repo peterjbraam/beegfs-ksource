@@ -1,10 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright 2002-2004, Instant802 Networks, Inc.
  * Copyright 2005, Devicescape Software, Inc.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #ifndef IEEE80211_KEY_H
@@ -93,7 +90,7 @@ struct ieee80211_key {
 		} ccmp;
 		struct {
 			u8 rx_pn[IEEE80211_CMAC_PN_LEN];
-			struct crypto_cipher *tfm;
+			struct crypto_shash *tfm;
 			u32 replays; /* dot11RSNAStatsCMACReplays */
 			u32 icverrors; /* dot11RSNAStatsCMACICVErrors */
 		} aes_cmac;

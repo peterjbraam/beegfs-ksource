@@ -6,7 +6,6 @@
 #include <linux/rwsem.h>
 #include <linux/notifier.h>
 #include <linux/nsproxy.h>
-#include <linux/ns_common.h>
 
 struct user_namespace;
 
@@ -15,7 +14,11 @@ struct ipc_ids {
 	unsigned short seq;
 	struct rw_semaphore rwsem;
 	struct idr ipcs_idr;
+	int max_idx;
+	int last_idx;	/* For wrap around detection */
+#ifdef CONFIG_CHECKPOINT_RESTORE
 	int next_id;
+#endif
 };
 
 struct ipc_namespace {
@@ -58,12 +61,14 @@ struct ipc_namespace {
 
 	/* user_ns which owns the ipc ns */
 	struct user_namespace *user_ns;
-	struct ucounts *ucounts;
 
-	struct ns_common ns;
+	unsigned int	proc_inum;
+	RH_KABI_EXTEND(struct ucounts *ucounts)
 };
 
 extern struct ipc_namespace init_ipc_ns;
+extern atomic_t nr_ipc_ns;
+
 extern spinlock_t mq_lock;
 
 #ifdef CONFIG_SYSVIPC

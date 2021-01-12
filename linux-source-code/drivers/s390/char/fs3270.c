@@ -217,7 +217,7 @@ fs3270_deactivate(struct raw3270_view *view)
 		fp->init->callback(fp->init, NULL);
 }
 
-static void
+static int
 fs3270_irq(struct fs3270 *fp, struct raw3270_request *rq, struct irb *irb)
 {
 	/* Handle ATTN. Set indication and wake waiters for attention. */
@@ -233,6 +233,7 @@ fs3270_irq(struct fs3270 *fp, struct raw3270_request *rq, struct irb *irb)
 			/* Normal end. Copy residual count. */
 			rq->rescnt = irb->scsw.cmd.count;
 	}
+	return RAW3270_IO_DONE;
 }
 
 /*
@@ -462,8 +463,7 @@ fs3270_open(struct inode *inode, struct file *filp)
 
 	init_waitqueue_head(&fp->wait);
 	fp->fs_pid = get_pid(task_pid(current));
-	rc = raw3270_add_view(&fp->view, &fs3270_fn, minor,
-			      RAW3270_VIEW_LOCK_BH);
+	rc = raw3270_add_view(&fp->view, &fs3270_fn, minor);
 	if (rc) {
 		fs3270_free_view(&fp->view);
 		goto out;
@@ -524,20 +524,20 @@ static const struct file_operations fs3270_fops = {
 	.llseek		= no_llseek,
 };
 
-static void fs3270_create_cb(int minor)
+void fs3270_create_cb(int minor)
 {
 	__register_chrdev(IBM_FS3270_MAJOR, minor, 1, "tub", &fs3270_fops);
 	device_create(class3270, NULL, MKDEV(IBM_FS3270_MAJOR, minor),
 		      NULL, "3270/tub%d", minor);
 }
 
-static void fs3270_destroy_cb(int minor)
+void fs3270_destroy_cb(int minor)
 {
 	device_destroy(class3270, MKDEV(IBM_FS3270_MAJOR, minor));
 	__unregister_chrdev(IBM_FS3270_MAJOR, minor, 1, "tub");
 }
 
-static struct raw3270_notifier fs3270_notifier =
+struct raw3270_notifier fs3270_notifier =
 {
 	.create = fs3270_create_cb,
 	.destroy = fs3270_destroy_cb,

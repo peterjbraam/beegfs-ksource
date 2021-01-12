@@ -295,12 +295,26 @@ static struct nfs_client *nfs_match_client(const struct nfs_client_initdata *dat
 	struct nfs_client *clp;
 	const struct sockaddr *sap = data->addr;
 	struct nfs_net *nn = net_generic(data->net, nfs_net_id);
+	int error;
 
+again:
 	list_for_each_entry(clp, &nn->nfs_client_list, cl_share_link) {
 	        const struct sockaddr *clap = (struct sockaddr *)&clp->cl_addr;
 		/* Don't match clients that failed to initialise properly */
 		if (clp->cl_cons_state < 0)
 			continue;
+
+		/* If a client is still initializing then we need to wait */
+		if (clp->cl_cons_state > NFS_CS_READY) {
+			atomic_inc(&clp->cl_count);
+			spin_unlock(&nn->nfs_client_lock);
+			error = nfs_wait_client_init_complete(clp);
+			nfs_put_client(clp);
+			spin_lock(&nn->nfs_client_lock);
+			if (error < 0)
+				return ERR_PTR(error);
+			goto again;
+		}
 
 		/* Different NFS versions cannot share the same nfs_client */
 		if (clp->rpc_ops != data->nfs_mod->rpc_ops)
@@ -325,10 +339,33 @@ static struct nfs_client *nfs_match_client(const struct nfs_client_initdata *dat
 	return NULL;
 }
 
-static bool nfs_client_init_is_complete(const struct nfs_client *clp)
+/*
+ * Return true if @clp is done initializing, false if still working on it.
+ *
+ * Use nfs_client_init_status to check if it was successful.
+ */
+bool nfs_client_init_is_complete(const struct nfs_client *clp)
 {
 	return clp->cl_cons_state <= NFS_CS_READY;
 }
+EXPORT_SYMBOL_GPL(nfs_client_init_is_complete);
+
+/*
+ * Return 0 if @clp was successfully initialized, -errno otherwise.
+ *
+ * This must be called *after* nfs_client_init_is_complete() returns true,
+ * otherwise it will pop WARN_ON_ONCE and return -EINVAL
+ */
+int nfs_client_init_status(const struct nfs_client *clp)
+{
+	/* called without checking nfs_client_init_is_complete */
+	if (clp->cl_cons_state > NFS_CS_READY) {
+		WARN_ON_ONCE(1);
+		return -EINVAL;
+	}
+	return clp->cl_cons_state;
+}
+EXPORT_SYMBOL_GPL(nfs_client_init_status);
 
 int nfs_wait_client_init_complete(const struct nfs_client *clp)
 {
@@ -394,6 +431,8 @@ nfs_get_client(const struct nfs_client_initdata *cl_init,
 			spin_unlock(&nn->nfs_client_lock);
 			if (new)
 				new->rpc_ops->free_client(new);
+			if (IS_ERR(clp))
+				return clp;
 			return nfs_found_client(cl_init, clp);
 		}
 		if (new) {
@@ -537,6 +576,7 @@ static int nfs_start_lockd(struct nfs_server *server)
 		.noresvport	= server->flags & NFS_MOUNT_NORESVPORT ?
 					1 : 0,
 		.net		= clp->cl_net,
+		.nlmclnt_ops 	= clp->cl_nfs_mod->rpc_ops->nlmclnt_ops,
 	};
 
 	if (nlm_init.nfs_version > 3)
@@ -738,7 +778,7 @@ static void nfs_server_set_fsinfo(struct nfs_server *server,
 		server->rsize = max_rpc_payload;
 	if (server->rsize > NFS_MAX_FILE_IO_SIZE)
 		server->rsize = NFS_MAX_FILE_IO_SIZE;
-	server->rpages = (server->rsize + PAGE_SIZE - 1) >> PAGE_SHIFT;
+	server->rpages = (server->rsize + PAGE_CACHE_SIZE - 1) >> PAGE_CACHE_SHIFT;
 
 	server->backing_dev_info.name = "nfs";
 	server->backing_dev_info.ra_pages = server->rpages * NFS_MAX_READAHEAD;
@@ -747,13 +787,13 @@ static void nfs_server_set_fsinfo(struct nfs_server *server,
 		server->wsize = max_rpc_payload;
 	if (server->wsize > NFS_MAX_FILE_IO_SIZE)
 		server->wsize = NFS_MAX_FILE_IO_SIZE;
-	server->wpages = (server->wsize + PAGE_SIZE - 1) >> PAGE_SHIFT;
+	server->wpages = (server->wsize + PAGE_CACHE_SIZE - 1) >> PAGE_CACHE_SHIFT;
 
 	server->wtmult = nfs_block_bits(fsinfo->wtmult, NULL);
 
 	server->dtsize = nfs_block_size(fsinfo->dtpref, NULL);
-	if (server->dtsize > PAGE_SIZE * NFS_MAX_READDIR_PAGES)
-		server->dtsize = PAGE_SIZE * NFS_MAX_READDIR_PAGES;
+	if (server->dtsize > PAGE_CACHE_SIZE * NFS_MAX_READDIR_PAGES)
+		server->dtsize = PAGE_CACHE_SIZE * NFS_MAX_READDIR_PAGES;
 	if (server->dtsize > server->rsize)
 		server->dtsize = server->rsize;
 
@@ -832,6 +872,7 @@ void nfs_server_copy_userdata(struct nfs_server *target, struct nfs_server *sour
 	target->caps = source->caps;
 	target->options = source->options;
 	target->auth_info = source->auth_info;
+	target->port = source->port;
 }
 EXPORT_SYMBOL_GPL(nfs_server_copy_userdata);
 
@@ -905,6 +946,7 @@ struct nfs_server *nfs_alloc_server(void)
 	ida_init(&server->openowner_id);
 	ida_init(&server->lockowner_id);
 	pnfs_init_server(server);
+	rpc_init_wait_queue(&server->uoc_rpcwaitq, "NFS UOC");
 
 	return server;
 }
@@ -1083,7 +1125,7 @@ void nfs_clients_init(struct net *net)
 	idr_init(&nn->cb_ident_idr);
 #endif
 	spin_lock_init(&nn->nfs_client_lock);
-	nn->boot_time = ktime_get_real();
+	nn->boot_time = CURRENT_TIME;
 }
 
 #ifdef CONFIG_PROC_FS
@@ -1105,6 +1147,7 @@ static const struct file_operations nfs_server_list_fops = {
 	.read		= seq_read,
 	.llseek		= seq_lseek,
 	.release	= seq_release_net,
+	.owner		= THIS_MODULE,
 };
 
 static int nfs_volume_list_open(struct inode *inode, struct file *file);
@@ -1125,6 +1168,7 @@ static const struct file_operations nfs_volume_list_fops = {
 	.read		= seq_read,
 	.llseek		= seq_lseek,
 	.release	= seq_release_net,
+	.owner		= THIS_MODULE,
 };
 
 /*

@@ -251,32 +251,6 @@ xfs_compat_ioc_bulkstat(
 	int			done;
 	int			error;
 
-	/*
-	 * Output structure handling functions.  Depending on the command,
-	 * either the xfs_bstat and xfs_inogrp structures are written out
-	 * to userpace memory via bulkreq.ubuffer.  Normally the compat
-	 * functions and structure size are the correct ones to use ...
-	 */
-	inumbers_fmt_pf inumbers_func = xfs_inumbers_fmt_compat;
-	bulkstat_one_pf	bs_one_func = xfs_bulkstat_one_compat;
-	size_t bs_one_size = sizeof(struct compat_xfs_bstat);
-
-#ifdef CONFIG_X86_X32
-	if (in_x32_syscall()) {
-		/*
-		 * ... but on x32 the input xfs_fsop_bulkreq has pointers
-		 * which must be handled in the "compat" (32-bit) way, while
-		 * the xfs_bstat and xfs_inogrp structures follow native 64-
-		 * bit layout convention.  So adjust accordingly, otherwise
-		 * the data written out in compat layout will not match what
-		 * x32 userspace expects.
-		 */
-		inumbers_func = xfs_inumbers_fmt;
-		bs_one_func = xfs_bulkstat_one;
-		bs_one_size = sizeof(struct xfs_bstat);
-	}
-#endif
-
 	/* done = 1 if there are more stats to get and if bulkstat */
 	/* should be called again (unused here, but used in dmapi) */
 
@@ -308,15 +282,15 @@ xfs_compat_ioc_bulkstat(
 
 	if (cmd == XFS_IOC_FSINUMBERS_32) {
 		error = xfs_inumbers(mp, &inlast, &count,
-				bulkreq.ubuffer, inumbers_func);
+				bulkreq.ubuffer, xfs_inumbers_fmt_compat);
 	} else if (cmd == XFS_IOC_FSBULKSTAT_SINGLE_32) {
 		int res;
 
-		error = bs_one_func(mp, inlast, bulkreq.ubuffer,
-				bs_one_size, NULL, &res);
+		error = xfs_bulkstat_one_compat(mp, inlast, bulkreq.ubuffer,
+				sizeof(compat_xfs_bstat_t), NULL, &res);
 	} else if (cmd == XFS_IOC_FSBULKSTAT_32) {
 		error = xfs_bulkstat(mp, &inlast, &count,
-			bs_one_func, bs_one_size,
+			xfs_bulkstat_one_compat, sizeof(compat_xfs_bstat_t),
 			bulkreq.ubuffer, &done);
 	} else
 		error = -EINVAL;
@@ -372,7 +346,6 @@ xfs_compat_attrlist_by_handle(
 {
 	int			error;
 	attrlist_cursor_kern_t	*cursor;
-	compat_xfs_fsop_attrlist_handlereq_t __user *p = arg;
 	compat_xfs_fsop_attrlist_handlereq_t al_hreq;
 	struct dentry		*dentry;
 	char			*kbuf;
@@ -402,15 +375,10 @@ xfs_compat_attrlist_by_handle(
 		goto out_dput;
 
 	cursor = (attrlist_cursor_kern_t *)&al_hreq.pos;
-	error = xfs_attr_list(XFS_I(d_inode(dentry)), kbuf, al_hreq.buflen,
+	error = xfs_attr_list(XFS_I(dentry->d_inode), kbuf, al_hreq.buflen,
 					al_hreq.flags, cursor);
 	if (error)
 		goto out_kfree;
-
-	if (copy_to_user(&p->pos, cursor, sizeof(attrlist_cursor_kern_t))) {
-		error = -EFAULT;
-		goto out_kfree;
-	}
 
 	if (copy_to_user(compat_ptr(al_hreq.buffer), kbuf, al_hreq.buflen))
 		error = -EFAULT;
@@ -477,7 +445,7 @@ xfs_compat_attrmulti_by_handle(
 		switch (ops[i].am_opcode) {
 		case ATTR_OP_GET:
 			ops[i].am_error = xfs_attrmulti_attr_get(
-					d_inode(dentry), attr_name,
+					dentry->d_inode, attr_name,
 					compat_ptr(ops[i].am_attrvalue),
 					&ops[i].am_length, ops[i].am_flags);
 			break;
@@ -486,7 +454,7 @@ xfs_compat_attrmulti_by_handle(
 			if (ops[i].am_error)
 				break;
 			ops[i].am_error = xfs_attrmulti_attr_set(
-					d_inode(dentry), attr_name,
+					dentry->d_inode, attr_name,
 					compat_ptr(ops[i].am_attrvalue),
 					ops[i].am_length, ops[i].am_flags);
 			mnt_drop_write_file(parfilp);
@@ -496,7 +464,7 @@ xfs_compat_attrmulti_by_handle(
 			if (ops[i].am_error)
 				break;
 			ops[i].am_error = xfs_attrmulti_attr_remove(
-					d_inode(dentry), attr_name,
+					dentry->d_inode, attr_name,
 					ops[i].am_flags);
 			mnt_drop_write_file(parfilp);
 			break;
@@ -536,7 +504,7 @@ xfs_compat_fssetdm_by_handle(
 	if (IS_ERR(dentry))
 		return PTR_ERR(dentry);
 
-	if (IS_IMMUTABLE(d_inode(dentry)) || IS_APPEND(d_inode(dentry))) {
+	if (IS_IMMUTABLE(dentry->d_inode) || IS_APPEND(dentry->d_inode)) {
 		error = -EPERM;
 		goto out;
 	}
@@ -546,7 +514,7 @@ xfs_compat_fssetdm_by_handle(
 		goto out;
 	}
 
-	error = xfs_set_dmattrs(XFS_I(d_inode(dentry)), fsd.fsd_dmevmask,
+	error = xfs_set_dmattrs(XFS_I(dentry->d_inode), fsd.fsd_dmevmask,
 				 fsd.fsd_dmstate);
 
 out:

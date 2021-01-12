@@ -20,12 +20,32 @@
 extern int smp_num_siblings;
 extern unsigned int num_processors;
 
+static inline bool cpu_has_ht_siblings(void)
+{
+	bool has_siblings = false;
+#ifdef CONFIG_SMP
+	has_siblings = cpu_has_ht && smp_num_siblings > 1;
+#endif
+	return has_siblings;
+}
+
 DECLARE_PER_CPU_READ_MOSTLY(cpumask_var_t, cpu_sibling_map);
 DECLARE_PER_CPU_READ_MOSTLY(cpumask_var_t, cpu_core_map);
+DECLARE_PER_CPU_READ_MOSTLY(cpumask_var_t, cpu_die_map);
 /* cpus sharing the last level cache: */
 DECLARE_PER_CPU_READ_MOSTLY(cpumask_var_t, cpu_llc_shared_map);
 DECLARE_PER_CPU_READ_MOSTLY(u16, cpu_llc_id);
 DECLARE_PER_CPU_READ_MOSTLY(int, cpu_number);
+
+static inline struct cpumask *cpu_sibling_mask(int cpu)
+{
+	return per_cpu(cpu_sibling_map, cpu);
+}
+
+static inline struct cpumask *cpu_core_mask(int cpu)
+{
+	return per_cpu(cpu_core_map, cpu);
+}
 
 static inline struct cpumask *cpu_llc_shared_mask(int cpu)
 {
@@ -63,6 +83,9 @@ struct smp_ops {
 extern void set_cpu_sibling_map(int cpu);
 
 #ifdef CONFIG_SMP
+#ifndef CONFIG_PARAVIRT
+#define startup_ipi_hook(phys_apicid, start_eip, start_esp) do { } while (0)
+#endif
 extern struct smp_ops smp_ops;
 
 static inline void smp_send_stop(void)
@@ -129,10 +152,8 @@ void cpu_disable_common(void);
 void native_smp_prepare_boot_cpu(void);
 void native_smp_prepare_cpus(unsigned int max_cpus);
 void native_smp_cpus_done(unsigned int max_cpus);
-void common_cpu_up(unsigned int cpunum, struct task_struct *tidle);
 int native_cpu_up(unsigned int cpunum, struct task_struct *tidle);
 int native_cpu_disable(void);
-int common_cpu_die(unsigned int cpu);
 void native_cpu_die(unsigned int cpu);
 void hlt_play_dead(void);
 void native_play_dead(void);
@@ -156,9 +177,11 @@ static inline int wbinvd_on_all_cpus(void)
 	wbinvd();
 	return 0;
 }
+#define smp_num_siblings	1
 #endif /* CONFIG_SMP */
 
 extern unsigned disabled_cpus;
+extern unsigned rh_invalid_cpus;
 
 #ifdef CONFIG_X86_32_SMP
 /*
@@ -172,11 +195,27 @@ extern int safe_smp_processor_id(void);
 #elif defined(CONFIG_X86_64_SMP)
 #define raw_smp_processor_id() (this_cpu_read(cpu_number))
 
+#define stack_smp_processor_id()					\
+({								\
+	struct thread_info *ti;						\
+	__asm__("andq %%rsp,%0; ":"=r" (ti) : "0" (CURRENT_MASK));	\
+	ti->cpu;							\
+})
 #define safe_smp_processor_id()		smp_processor_id()
 
 #endif
 
 #ifdef CONFIG_X86_LOCAL_APIC
+
+#ifndef CONFIG_X86_64
+static inline int logical_smp_processor_id(void)
+{
+	/* we don't want to mark this access volatile - bad code generation */
+	return GET_APIC_LOGICAL_ID(apic_read(APIC_LDR));
+}
+
+#endif
+
 extern int hard_smp_processor_id(void);
 
 #else /* CONFIG_X86_LOCAL_APIC */

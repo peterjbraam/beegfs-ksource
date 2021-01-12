@@ -21,12 +21,16 @@
  * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with GNU CC; see the file COPYING.  If not, see
- * <http://www.gnu.org/licenses/>.
+ * along with GNU CC; see the file COPYING.  If not, write to
+ * the Free Software Foundation, 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
  *
  * Please send any bug reports or fixes you make to the
  * email address(es):
- *    lksctp developers <linux-sctp@vger.kernel.org>
+ *    lksctp developers <lksctp-developers@lists.sourceforge.net>
+ *
+ * Or submit a bug report through the following website:
+ *    http://www.sf.net/projects/lksctp
  *
  * Written or modified by:
  *    La Monte H.P. Yarroll <piggy@acm.org>
@@ -37,6 +41,9 @@
  *    Ardelle Fan           <ardelle.fan@intel.com>
  *    Ryan Layer            <rmlayer@us.ibm.com>
  *    Kevin Gao             <kevin.gao@intel.com> 
+ *
+ * Any bugs reported given to us we will try to fix... any fixes shared will
+ * be incorporated into the next SCTP release.
  */
 
 #ifndef __net_sctp_h__
@@ -103,12 +110,10 @@ void sctp_addr_wq_mgmt(struct net *, struct sctp_sockaddr_entry *, int);
 /*
  * sctp/socket.c
  */
-int sctp_inet_connect(struct socket *sock, struct sockaddr *uaddr,
-		      int addr_len, int flags);
 int sctp_backlog_rcv(struct sock *sk, struct sk_buff *skb);
 int sctp_inet_listen(struct socket *sock, int backlog);
 void sctp_write_space(struct sock *sk);
-void sctp_data_ready(struct sock *sk);
+void sctp_data_ready(struct sock *sk, int len);
 unsigned int sctp_poll(struct file *file, struct socket *sock,
 		poll_table *wait);
 void sctp_sock_rfree(struct sk_buff *skb);
@@ -129,7 +134,8 @@ int sctp_transport_lookup_process(int (*cb)(struct sctp_transport *, void *),
 				  const union sctp_addr *laddr,
 				  const union sctp_addr *paddr, void *p);
 int sctp_for_each_transport(int (*cb)(struct sctp_transport *, void *),
-			    struct net *net, int pos, void *p);
+			    int (*cb_done)(struct sctp_transport *, void *),
+			    struct net *net, int *pos, void *p);
 int sctp_for_each_endpoint(int (*cb)(struct sctp_endpoint *, void *), void *p);
 int sctp_get_sctp_info(struct sock *sk, struct sctp_association *asoc,
 		       struct sctp_info *info);
@@ -166,7 +172,7 @@ void sctp_backlog_migrate(struct sctp_association *assoc,
 			  struct sock *oldsk, struct sock *newsk);
 int sctp_transport_hashtable_init(void);
 void sctp_transport_hashtable_destroy(void);
-void sctp_hash_transport(struct sctp_transport *t);
+int sctp_hash_transport(struct sctp_transport *t);
 void sctp_unhash_transport(struct sctp_transport *t);
 struct sctp_transport *sctp_addrs_lookup_transport(
 				struct net *net,
@@ -202,18 +208,16 @@ int sctp_offload_init(void);
   */
 extern struct kmem_cache *sctp_chunk_cachep __read_mostly;
 extern struct kmem_cache *sctp_bucket_cachep __read_mostly;
-extern long sysctl_sctp_mem[3];
-extern int sysctl_sctp_rmem[3];
-extern int sysctl_sctp_wmem[3];
 
 /*
  *  Section:  Macros, externs, and inlines
  */
 
 /* SCTP SNMP MIB stats handlers */
-#define SCTP_INC_STATS(net, field)	SNMP_INC_STATS((net)->sctp.sctp_statistics, field)
-#define __SCTP_INC_STATS(net, field)	__SNMP_INC_STATS((net)->sctp.sctp_statistics, field)
-#define SCTP_DEC_STATS(net, field)	SNMP_DEC_STATS((net)->sctp.sctp_statistics, field)
+#define SCTP_INC_STATS(net, field)      SNMP_INC_STATS((net)->sctp.sctp_statistics, field)
+#define SCTP_INC_STATS_BH(net, field)   SNMP_INC_STATS_BH((net)->sctp.sctp_statistics, field)
+#define SCTP_INC_STATS_USER(net, field) SNMP_INC_STATS_USER((net)->sctp.sctp_statistics, field)
+#define SCTP_DEC_STATS(net, field)      SNMP_DEC_STATS((net)->sctp.sctp_statistics, field)
 
 /* sctp mib definitions */
 enum {
@@ -392,9 +396,11 @@ static inline struct list_head *sctp_list_dequeue(struct list_head *list)
 {
 	struct list_head *result = NULL;
 
-	if (!list_empty(list)) {
+	if (list->next != list) {
 		result = list->next;
-		list_del_init(result);
+		list->next = result->next;
+		list->next->prev = list;
+		INIT_LIST_HEAD(result);
 	}
 	return result;
 }
@@ -441,10 +447,9 @@ static inline int sctp_frag_point(const struct sctp_association *asoc, int pmtu)
 	return frag;
 }
 
-static inline void sctp_assoc_pending_pmtu(struct sock *sk, struct sctp_association *asoc)
+static inline void sctp_assoc_pending_pmtu(struct sctp_association *asoc)
 {
-
-	sctp_assoc_sync_pmtu(sk, asoc);
+	sctp_assoc_sync_pmtu(asoc);
 	asoc->pmtu_pending = 0;
 }
 
@@ -463,7 +468,7 @@ _sctp_walk_params((pos), (chunk), ntohs((chunk)->chunk_hdr.length), member)
 
 #define _sctp_walk_params(pos, chunk, end, member)\
 for (pos.v = chunk->member;\
-     (pos.v + offsetof(struct sctp_paramhdr, length) + sizeof(pos.p->length) <=\
+     (pos.v + offsetof(sctp_paramhdr_t, length) + sizeof(pos.p->length) <=\
       (void *)chunk + end) &&\
      pos.v <= (void *)chunk + end - ntohs(pos.p->length) &&\
      ntohs(pos.p->length) >= sizeof(sctp_paramhdr_t);\
@@ -488,6 +493,7 @@ _sctp_walk_fwdtsn((pos), (chunk), ntohs((chunk)->chunk_hdr->length) - sizeof(str
 for (pos = chunk->subh.fwdtsn_hdr->skip;\
      (void *)pos <= (void *)chunk->subh.fwdtsn_hdr->skip + end - sizeof(struct sctp_fwdtsn_skip);\
      pos++)
+
 
 /* External references. */
 
@@ -593,12 +599,23 @@ static inline void sctp_v4_map_v6(union sctp_addr *addr)
  */
 static inline struct dst_entry *sctp_transport_dst_check(struct sctp_transport *t)
 {
-	if (t->dst && !dst_check(t->dst, t->dst_cookie)) {
-		dst_release(t->dst);
-		t->dst = NULL;
-	}
+	if (t->dst && !dst_check(t->dst, t->dst_cookie))
+		sctp_transport_dst_release(t);
 
 	return t->dst;
+}
+
+static inline bool sctp_transport_pmtu_check(struct sctp_transport *t)
+{
+	__u32 pmtu = max_t(size_t, SCTP_TRUNC4(dst_mtu(t->dst)),
+			   SCTP_DEFAULT_MINSEGMENT);
+
+	if (t->pathmtu == pmtu)
+		return true;
+
+	t->pathmtu = pmtu;
+
+	return false;
 }
 
 #endif /* __net_sctp_h__ */

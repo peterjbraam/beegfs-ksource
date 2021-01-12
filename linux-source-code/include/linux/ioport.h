@@ -20,7 +20,6 @@ struct resource {
 	resource_size_t end;
 	const char *name;
 	unsigned long flags;
-	unsigned long desc;
 	struct resource *parent, *sibling, *child;
 };
 
@@ -109,28 +108,14 @@ struct resource {
 
 /* PCI ROM control bits (IORESOURCE_BITS) */
 #define IORESOURCE_ROM_ENABLE		(1<<0)	/* ROM is enabled, same as PCI_ROM_ADDRESS_ENABLE */
-#define IORESOURCE_ROM_SHADOW		(1<<1)	/* Use RAM image, not ROM BAR */
+#define IORESOURCE_ROM_SHADOW		(1<<1)	/* ROM is copy at C000:0 */
+#define IORESOURCE_ROM_COPY		(1<<2)	/* ROM is alloc'd copy, resource field overlaid */
+#define IORESOURCE_ROM_BIOS_COPY	(1<<3)	/* ROM is BIOS copy, resource field overlaid */
 
 /* PCI control bits.  Shares IORESOURCE_BITS with above PCI ROM.  */
 #define IORESOURCE_PCI_FIXED		(1<<4)	/* Do not move resource */
 #define IORESOURCE_PCI_EA_BEI		(1<<5)	/* BAR Equivalent Indicator */
 
-/*
- * I/O Resource Descriptors
- *
- * Descriptors are used by walk_iomem_res_desc() and region_intersects()
- * for searching a specific resource range in the iomem table.  Assign
- * a new descriptor when a resource range supports the search interfaces.
- * Otherwise, resource.desc must be set to IORES_DESC_NONE (0).
- */
-enum {
-	IORES_DESC_NONE				= 0,
-	IORES_DESC_CRASH_KERNEL			= 1,
-	IORES_DESC_ACPI_TABLES			= 2,
-	IORES_DESC_ACPI_NV_STORAGE		= 3,
-	IORES_DESC_PERSISTENT_MEMORY		= 4,
-	IORES_DESC_PERSISTENT_MEMORY_LEGACY	= 5,
-};
 
 /* helpers to define resources */
 #define DEFINE_RES_NAMED(_start, _size, _name, _flags)			\
@@ -139,7 +124,6 @@ enum {
 		.end = (_start) + (_size) - 1,				\
 		.name = (_name),					\
 		.flags = (_flags),					\
-		.desc = IORES_DESC_NONE,				\
 	}
 
 #define DEFINE_RES_IO_NAMED(_start, _size, _name)			\
@@ -229,14 +213,22 @@ extern struct resource * __request_region(struct resource *,
 
 /* Compatibility cruft */
 #define release_region(start,n)	__release_region(&ioport_resource, (start), (n))
+#define check_mem_region(start,n)	__check_region(&iomem_resource, (start), (n))
 #define release_mem_region(start,n)	__release_region(&iomem_resource, (start), (n))
 
+extern int __check_region(struct resource *, resource_size_t, resource_size_t);
 extern void __release_region(struct resource *, resource_size_t,
 				resource_size_t);
 #ifdef CONFIG_MEMORY_HOTREMOVE
 extern int release_mem_region_adjustable(struct resource *, resource_size_t,
 				resource_size_t);
 #endif
+
+static inline int __deprecated check_region(resource_size_t s,
+						resource_size_t n)
+{
+	return __check_region(&ioport_resource, s, n);
+}
 
 /* Wrappers for managed devices */
 struct device;
@@ -268,11 +260,14 @@ extern int
 walk_system_ram_range(unsigned long start_pfn, unsigned long nr_pages,
 		void *arg, int (*func)(unsigned long, unsigned long, void *));
 extern int
-walk_system_ram_res(u64 start, u64 end, void *arg,
-		    int (*func)(u64, u64, void *));
+walk_mem_res(u64 start, u64 end, void *arg,
+	     int (*func)(struct resource *, void *));
 extern int
-walk_iomem_res_desc(unsigned long desc, unsigned long flags, u64 start, u64 end,
-		    void *arg, int (*func)(u64, u64, void *));
+walk_system_ram_res(u64 start, u64 end, void *arg,
+		    int (*func)(struct resource *, void *));
+extern int
+walk_iomem_res(char *name, unsigned long flags, u64 start, u64 end, void *arg,
+	       int (*func)(struct resource *, void *));
 
 /* True if any part of r1 overlaps r2 */
 static inline bool resource_overlaps(struct resource *r1, struct resource *r2)

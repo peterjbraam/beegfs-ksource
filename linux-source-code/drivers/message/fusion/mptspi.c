@@ -461,7 +461,8 @@ static int mptspi_target_alloc(struct scsi_target *starget)
 static void
 mptspi_target_destroy(struct scsi_target *starget)
 {
-	kfree(starget->hostdata);
+	if (starget->hostdata)
+		kfree(starget->hostdata);
 	starget->hostdata = NULL;
 }
 
@@ -619,7 +620,7 @@ static void mptspi_read_parameters(struct scsi_target *starget)
 	spi_width(starget) = (nego & MPI_SCSIDEVPAGE0_NP_WIDE) ? 1 : 0;
 }
 
-static int
+int
 mptscsih_quiesce_raid(MPT_SCSI_HOST *hd, int quiesce, u8 channel, u8 id)
 {
 	MPT_ADAPTER	*ioc = hd->ioc;
@@ -1419,11 +1420,6 @@ mptspi_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		goto out_mptspi_probe;
         }
 
-	/* VMWare emulation doesn't properly implement WRITE_SAME
-	 */
-	if (pdev->subsystem_vendor == 0x15AD)
-		sh->no_write_same = 1;
-
 	spin_lock_irqsave(&ioc->FreeQlock, flags);
 
 	/* Attach the SCSI Host to the IOC structure
@@ -1548,11 +1544,19 @@ out_mptspi_probe:
 	return error;
 }
 
+static void mptspi_remove(struct pci_dev *pdev)
+{
+	MPT_ADAPTER *ioc = pci_get_drvdata(pdev);
+
+	scsi_remove_host(ioc->sh);
+	mptscsih_remove(pdev);
+}
+
 static struct pci_driver mptspi_driver = {
 	.name		= "mptspi",
 	.id_table	= mptspi_pci_table,
 	.probe		= mptspi_probe,
-	.remove		= mptscsih_remove,
+	.remove		= mptspi_remove,
 	.shutdown	= mptscsih_shutdown,
 #ifdef CONFIG_PM
 	.suspend	= mptscsih_suspend,

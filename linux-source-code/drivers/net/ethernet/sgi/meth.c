@@ -10,6 +10,7 @@
  */
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
+#include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
@@ -211,8 +212,9 @@ static void meth_check_link(struct net_device *dev)
 static int meth_init_tx_ring(struct meth_private *priv)
 {
 	/* Init TX ring */
-	priv->tx_ring = dma_zalloc_coherent(NULL, TX_RING_BUFFER_SIZE,
-					    &priv->tx_ring_dma, GFP_ATOMIC);
+	priv->tx_ring = dma_alloc_coherent(NULL, TX_RING_BUFFER_SIZE,
+	                                   &priv->tx_ring_dma,
+					   GFP_ATOMIC | __GFP_ZERO);
 	if (!priv->tx_ring)
 		return -ENOMEM;
 
@@ -861,6 +863,7 @@ static int __exit meth_remove(struct platform_device *pdev)
 
 	unregister_netdev(dev);
 	free_netdev(dev);
+	platform_set_drvdata(pdev, NULL);
 
 	return 0;
 }
@@ -870,6 +873,7 @@ static struct platform_driver meth_driver = {
 	.remove	= __exit_p(meth_remove),
 	.driver = {
 		.name	= "meth",
+		.owner	= THIS_MODULE,
 	}
 };
 

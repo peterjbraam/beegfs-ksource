@@ -71,6 +71,9 @@ struct exception_table_entry {
 	unsigned long insn, fixup;
 };
 
+/* Returns 0 if exception not found and fixup otherwise.  */
+extern unsigned long search_exception_table(unsigned long);
+
 #ifndef CONFIG_MMU
 
 /* Check against bounds of physical memory */
@@ -95,13 +98,13 @@ static inline int access_ok(int type, const void __user *addr,
 
 	if ((get_fs().seg < ((unsigned long)addr)) ||
 			(get_fs().seg < ((unsigned long)addr + size - 1))) {
-		pr_devel("ACCESS fail: %s at 0x%08x (size 0x%x), seg 0x%08x\n",
+		pr_debug("ACCESS fail: %s at 0x%08x (size 0x%x), seg 0x%08x\n",
 			type ? "WRITE" : "READ ", (__force u32)addr, (u32)size,
 			(u32)get_fs().seg);
 		return 0;
 	}
 ok:
-	pr_devel("ACCESS OK: %s at 0x%08x (size 0x%x), seg 0x%08x\n",
+	pr_debug("ACCESS OK: %s at 0x%08x (size 0x%x), seg 0x%08x\n",
 			type ? "WRITE" : "READ ", (__force u32)addr, (u32)size,
 			(u32)get_fs().seg);
 	return 1;
@@ -142,7 +145,7 @@ static inline unsigned long __must_check __clear_user(void __user *to,
 static inline unsigned long __must_check clear_user(void __user *to,
 							unsigned long n)
 {
-	might_fault();
+	might_sleep();
 	if (unlikely(!access_ok(VERIFY_WRITE, to, n)))
 		return n;
 
@@ -218,13 +221,13 @@ extern long __user_bad(void);
 	} else {							\
 		__gu_err = -EFAULT;					\
 	}								\
-	x = (__force typeof(*(ptr)))__gu_val;				\
+	x = (typeof(*(ptr)))__gu_val;					\
 	__gu_err;							\
 })
 
 #define __get_user(x, ptr)						\
 ({									\
-	unsigned long __gu_val = 0;					\
+	unsigned long __gu_val;						\
 	/*unsigned long __gu_ptr = (unsigned long)(ptr);*/		\
 	long __gu_err;							\
 	switch (sizeof(*(ptr))) {					\
@@ -240,7 +243,7 @@ extern long __user_bad(void);
 	default:							\
 		/* __gu_val = 0; __gu_err = -EINVAL;*/ __gu_err = __user_bad();\
 	}								\
-	x = (__force __typeof__(*(ptr))) __gu_val;			\
+	x = (__typeof__(*(ptr))) __gu_val;				\
 	__gu_err;							\
 })
 
@@ -305,7 +308,7 @@ extern long __user_bad(void);
 
 #define __put_user_check(x, ptr, size)					\
 ({									\
-	typeof(*(ptr)) volatile __pu_val = x;				\
+	typeof(*(ptr)) volatile __pu_val = x;					\
 	typeof(*(ptr)) __user *__pu_addr = (ptr);			\
 	int __pu_err = 0;						\
 									\
@@ -370,13 +373,10 @@ extern long __user_bad(void);
 static inline long copy_from_user(void *to,
 		const void __user *from, unsigned long n)
 {
-	unsigned long res = n;
-	might_fault();
-	if (likely(access_ok(VERIFY_READ, from, n)))
-		res = __copy_from_user(to, from, n);
-	if (unlikely(res))
-		memset(to + (n - res), 0, res);
-	return res;
+	might_sleep();
+	if (access_ok(VERIFY_READ, from, n))
+		return __copy_from_user(to, from, n);
+	return n;
 }
 
 #define __copy_to_user(to, from, n)	\
@@ -387,7 +387,7 @@ static inline long copy_from_user(void *to,
 static inline long copy_to_user(void __user *to,
 		const void *from, unsigned long n)
 {
-	might_fault();
+	might_sleep();
 	if (access_ok(VERIFY_WRITE, to, n))
 		return __copy_to_user(to, from, n);
 	return n;

@@ -683,7 +683,7 @@ static int snd_opl3sa2_probe(struct snd_card *card, int dev)
 		return err;
 	}
 	chip->wss = wss;
-	err = snd_wss_pcm(wss, 0);
+	err = snd_wss_pcm(wss, 0, NULL);
 	if (err < 0)
 		return err;
 	err = snd_wss_mixer(wss);
@@ -692,7 +692,7 @@ static int snd_opl3sa2_probe(struct snd_card *card, int dev)
 	err = snd_opl3sa2_mixer(card);
 	if (err < 0)
 		return err;
-	err = snd_wss_timer(wss, 0);
+	err = snd_wss_timer(wss, 0, NULL);
 	if (err < 0)
 		return err;
 	if (fm_port[dev] >= 0x340 && fm_port[dev] < 0x400) {
@@ -756,6 +756,7 @@ static int snd_opl3sa2_pnp_detect(struct pnp_dev *pdev,
 static void snd_opl3sa2_pnp_remove(struct pnp_dev *pdev)
 {
 	snd_card_free(pnp_get_drvdata(pdev));
+	pnp_set_drvdata(pdev, NULL);
 }
 
 #ifdef CONFIG_PM
@@ -896,6 +897,7 @@ static int snd_opl3sa2_isa_remove(struct device *devptr,
 				  unsigned int dev)
 {
 	snd_card_free(dev_get_drvdata(devptr));
+	dev_set_drvdata(devptr, NULL);
 	return 0;
 }
 

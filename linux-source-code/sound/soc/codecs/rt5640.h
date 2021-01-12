@@ -1970,6 +1970,12 @@
 #define RT5640_ZCD_HP_DIS			(0x0 << 15)
 #define RT5640_ZCD_HP_EN			(0x1 << 15)
 
+/* General Control 1 (0xfa) */
+#define RT5640_M_MONO_ADC_L			(0x1 << 13)
+#define RT5640_M_MONO_ADC_L_SFT			13
+#define RT5640_M_MONO_ADC_R			(0x1 << 12)
+#define RT5640_M_MONO_ADC_R_SFT			12
+#define RT5640_MCLK_DET				(0x1 << 11)
 
 /* Codec Private Register definition */
 /* 3D Speaker Control (0x63) */
@@ -2096,7 +2102,7 @@ enum {
 };
 
 struct rt5640_priv {
-	struct snd_soc_codec *codec;
+	struct snd_soc_component *component;
 	struct rt5640_platform_data pdata;
 	struct regmap *regmap;
 	struct clk *mclk;
@@ -2115,9 +2121,9 @@ struct rt5640_priv {
 	bool asrc_en;
 };
 
-int rt5640_dmic_enable(struct snd_soc_codec *codec,
+int rt5640_dmic_enable(struct snd_soc_component *component,
 		       bool dmic1_data_pin, bool dmic2_data_pin);
-int rt5640_sel_asrc_clk_src(struct snd_soc_codec *codec,
+int rt5640_sel_asrc_clk_src(struct snd_soc_component *component,
 		unsigned int filter_mask, unsigned int clk_src);
 
 #endif

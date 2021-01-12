@@ -91,7 +91,7 @@ MODULE_PARM_DESC (rx_copybreak, "de2104x Breakpoint at which Rx packets are copi
 #define DSL			CONFIG_DE2104X_DSL
 #endif
 
-#define DE_RX_RING_SIZE		128
+#define DE_RX_RING_SIZE		64
 #define DE_TX_RING_SIZE		64
 #define DE_RING_BYTES		\
 		((sizeof(struct de_desc) * DE_RX_RING_SIZE) +	\
@@ -1956,7 +1956,7 @@ static const struct net_device_ops de_netdev_ops = {
 	.ndo_start_xmit		= de_start_xmit,
 	.ndo_get_stats		= de_get_stats,
 	.ndo_tx_timeout 	= de_tx_timeout,
-	.ndo_change_mtu		= eth_change_mtu,
+	.ndo_change_mtu_rh74	= eth_change_mtu,
 	.ndo_set_mac_address 	= eth_mac_addr,
 	.ndo_validate_addr	= eth_validate_addr,
 };
@@ -2109,6 +2109,7 @@ static void de_remove_one(struct pci_dev *pdev)
 	iounmap(de->regs);
 	pci_release_regions(pdev);
 	pci_disable_device(pdev);
+	pci_set_drvdata(pdev, NULL);
 	free_netdev(dev);
 }
 

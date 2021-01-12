@@ -138,11 +138,8 @@ static void rds_ib_add_one(struct ib_device *device)
 	atomic_set(&rds_ibdev->refcount, 1);
 	INIT_WORK(&rds_ibdev->free_work, rds_ib_dev_free);
 
-	INIT_LIST_HEAD(&rds_ibdev->ipaddr_list);
-	INIT_LIST_HEAD(&rds_ibdev->conn_list);
-
 	rds_ibdev->max_wrs = device->attrs.max_qp_wr;
-	rds_ibdev->max_sge = min(device->attrs.max_sge, RDS_IB_MAX_SGE);
+	rds_ibdev->max_sge = min(device->attrs.max_send_sge, RDS_IB_MAX_SGE);
 
 	rds_ibdev->has_fr = (device->attrs.device_cap_flags &
 				  IB_DEVICE_MEM_MGT_EXTENSIONS);
@@ -191,6 +188,9 @@ static void rds_ib_add_one(struct ib_device *device)
 	pr_info("RDS/IB: %s: %s supported and preferred\n",
 		device->name,
 		rds_ibdev->use_fastreg ? "FRMR" : "FMR");
+
+	INIT_LIST_HEAD(&rds_ibdev->ipaddr_list);
+	INIT_LIST_HEAD(&rds_ibdev->conn_list);
 
 	down_write(&rds_ib_devices_lock);
 	list_add_tail_rcu(&rds_ibdev->list, &rds_ib_devices);
@@ -336,8 +336,7 @@ static int rds_ib_laddr_check(struct net *net, __be32 addr)
 	/* Create a CMA ID and try to bind it. This catches both
 	 * IB and iWARP capable NICs.
 	 */
-	cm_id = rdma_create_id(&init_net, rds_rdma_cm_event_handler,
-			       NULL, RDMA_PS_TCP, IB_QPT_RC);
+	cm_id = rdma_create_id(&init_net, NULL, NULL, RDMA_PS_TCP, IB_QPT_RC);
 	if (IS_ERR(cm_id))
 		return PTR_ERR(cm_id);
 
@@ -349,8 +348,7 @@ static int rds_ib_laddr_check(struct net *net, __be32 addr)
 	ret = rdma_bind_addr(cm_id, (struct sockaddr *)&sin);
 	/* due to this, we will claim to support iWARP devices unless we
 	   check node_type. */
-	if (ret || !cm_id->device ||
-	    cm_id->device->node_type != RDMA_NODE_IB_CA)
+	if (ret || cm_id->device->node_type != RDMA_NODE_IB_CA)
 		ret = -EADDRNOTAVAIL;
 
 	rdsdebug("addr %pI4 ret %d node type %d\n",

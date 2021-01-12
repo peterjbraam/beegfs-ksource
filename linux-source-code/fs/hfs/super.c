@@ -14,7 +14,6 @@
 
 #include <linux/module.h>
 #include <linux/blkdev.h>
-#include <linux/backing-dev.h>
 #include <linux/mount.h>
 #include <linux/init.h>
 #include <linux/nls.h>
@@ -113,7 +112,6 @@ static int hfs_statfs(struct dentry *dentry, struct kstatfs *buf)
 
 static int hfs_remount(struct super_block *sb, int *flags, char *data)
 {
-	sync_filesystem(sb);
 	*flags |= MS_NODIRATIME;
 	if ((*flags & MS_RDONLY) == (sb->s_flags & MS_RDONLY))
 		return 0;
@@ -406,7 +404,6 @@ static int hfs_fill_super(struct super_block *sb, void *data, int silent)
 	}
 
 	sb->s_op = &hfs_super_operations;
-	sb->s_xattr = hfs_xattr_handlers;
 	sb->s_flags |= MS_NODIRATIME;
 	mutex_init(&sbi->bitmap_lock);
 

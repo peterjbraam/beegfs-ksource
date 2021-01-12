@@ -75,6 +75,7 @@ static const char *pci_bus_speed_strings[] = {
 	"2.5 GT/s PCIe",	/* 0x14 */
 	"5.0 GT/s PCIe",	/* 0x15 */
 	"8.0 GT/s PCIe",	/* 0x16 */
+	"16.0 GT/s PCIe",	/* 0x17 */
 };
 
 static ssize_t bus_speed_read(enum pci_bus_speed speed, char *buf)
@@ -119,11 +120,11 @@ static void pci_slot_release(struct kobject *kobj)
 }
 
 static struct pci_slot_attribute pci_slot_attr_address =
-	__ATTR(address, S_IRUGO, address_read_file, NULL);
+	__ATTR(address, (S_IFREG | S_IRUGO), address_read_file, NULL);
 static struct pci_slot_attribute pci_slot_attr_max_speed =
-	__ATTR(max_bus_speed, S_IRUGO, max_speed_read_file, NULL);
+	__ATTR(max_bus_speed, (S_IFREG | S_IRUGO), max_speed_read_file, NULL);
 static struct pci_slot_attribute pci_slot_attr_cur_speed =
-	__ATTR(cur_bus_speed, S_IRUGO, cur_speed_read_file, NULL);
+	__ATTR(cur_bus_speed, (S_IFREG | S_IRUGO), cur_speed_read_file, NULL);
 
 static struct attribute *pci_slot_default_attrs[] = {
 	&pci_slot_attr_address.attr,
@@ -303,19 +304,16 @@ placeholder:
 	slot_name = make_slot_name(name);
 	if (!slot_name) {
 		err = -ENOMEM;
-		kfree(slot);
 		goto err;
 	}
-
-	INIT_LIST_HEAD(&slot->list);
-	list_add(&slot->list, &parent->slots);
 
 	err = kobject_init_and_add(&slot->kobj, &pci_slot_ktype, NULL,
 				   "%s", slot_name);
-	if (err) {
-		kobject_put(&slot->kobj);
+	if (err)
 		goto err;
-	}
+
+	INIT_LIST_HEAD(&slot->list);
+	list_add(&slot->list, &parent->slots);
 
 	down_read(&pci_bus_sem);
 	list_for_each_entry(dev, &parent->devices, bus_list)
@@ -331,6 +329,7 @@ out:
 	mutex_unlock(&pci_slot_mutex);
 	return slot;
 err:
+	kfree(slot);
 	slot = ERR_PTR(err);
 	goto out;
 }
@@ -347,7 +346,7 @@ EXPORT_SYMBOL_GPL(pci_create_slot);
 void pci_destroy_slot(struct pci_slot *slot)
 {
 	dev_dbg(&slot->bus->dev, "dev %02x, dec refcount to %d\n",
-		slot->number, atomic_read(&slot->kobj.kref.refcount) - 1);
+		slot->number, kref_read(&slot->kobj.kref) - 1);
 
 	mutex_lock(&pci_slot_mutex);
 	kobject_put(&slot->kobj);

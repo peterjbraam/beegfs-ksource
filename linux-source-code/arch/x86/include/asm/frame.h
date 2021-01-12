@@ -12,6 +12,8 @@
 
 #ifdef __ASSEMBLY__
 
+#include <asm/dwarf2.h>
+
 .macro FRAME_BEGIN
 	push %_ASM_BP
 	_ASM_MOV %_ASM_SP, %_ASM_BP

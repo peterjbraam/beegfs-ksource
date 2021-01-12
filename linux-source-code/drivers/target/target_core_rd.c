@@ -29,7 +29,8 @@
 #include <linux/timer.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
-#include <scsi/scsi_proto.h>
+#include <scsi/scsi.h>
+#include <scsi/scsi_host.h>
 
 #include <target/target_core_base.h>
 #include <target/target_core_backend.h>
@@ -45,11 +46,9 @@ static int rd_attach_hba(struct se_hba *hba, u32 host_id)
 {
 	struct rd_host *rd_host;
 
-	rd_host = kzalloc(sizeof(struct rd_host), GFP_KERNEL);
-	if (!rd_host) {
-		pr_err("Unable to allocate memory for struct rd_host\n");
+	rd_host = kzalloc(sizeof(*rd_host), GFP_KERNEL);
+	if (!rd_host)
 		return -ENOMEM;
-	}
 
 	rd_host->rd_host_id = host_id;
 
@@ -146,11 +145,8 @@ static int rd_allocate_sgl_table(struct rd_dev *rd_dev, struct rd_dev_sg_table *
 
 		sg = kcalloc(sg_per_table + chain_entry, sizeof(*sg),
 				GFP_KERNEL);
-		if (!sg) {
-			pr_err("Unable to allocate scatterlist array"
-				" for struct rd_dev\n");
+		if (!sg)
 			return -ENOMEM;
-		}
 
 		sg_init_table(sg, sg_per_table + chain_entry);
 
@@ -208,13 +204,9 @@ static int rd_build_device_space(struct rd_dev *rd_dev)
 	total_sg_needed = rd_dev->rd_page_count;
 
 	sg_tables = (total_sg_needed / max_sg_per_table) + 1;
-
-	sg_table = kzalloc(sg_tables * sizeof(struct rd_dev_sg_table), GFP_KERNEL);
-	if (!sg_table) {
-		pr_err("Unable to allocate memory for Ramdisk"
-		       " scatterlist tables\n");
+	sg_table = kcalloc(sg_tables, sizeof(*sg_table), GFP_KERNEL);
+	if (!sg_table)
 		return -ENOMEM;
-	}
 
 	rd_dev->sg_table_array = sg_table;
 	rd_dev->sg_table_count = sg_tables;
@@ -269,13 +261,9 @@ static int rd_build_prot_space(struct rd_dev *rd_dev, int prot_length, int block
 	total_sg_needed = (rd_dev->rd_page_count * prot_length / block_size) + 1;
 
 	sg_tables = (total_sg_needed / max_sg_per_table) + 1;
-
-	sg_table = kzalloc(sg_tables * sizeof(struct rd_dev_sg_table), GFP_KERNEL);
-	if (!sg_table) {
-		pr_err("Unable to allocate memory for Ramdisk protection"
-		       " scatterlist tables\n");
+	sg_table = kcalloc(sg_tables, sizeof(*sg_table), GFP_KERNEL);
+	if (!sg_table)
 		return -ENOMEM;
-	}
 
 	rd_dev->sg_prot_array = sg_table;
 	rd_dev->sg_prot_count = sg_tables;
@@ -296,11 +284,9 @@ static struct se_device *rd_alloc_device(struct se_hba *hba, const char *name)
 	struct rd_dev *rd_dev;
 	struct rd_host *rd_host = hba->hba_ptr;
 
-	rd_dev = kzalloc(sizeof(struct rd_dev), GFP_KERNEL);
-	if (!rd_dev) {
-		pr_err("Unable to allocate memory for struct rd_dev\n");
+	rd_dev = kzalloc(sizeof(*rd_dev), GFP_KERNEL);
+	if (!rd_dev)
 		return NULL;
-	}
 
 	rd_dev->rd_host = rd_host;
 
@@ -366,6 +352,7 @@ static struct rd_dev_sg_table *rd_get_sg_table(struct rd_dev *rd_dev, u32 page)
 
 	i = page / sg_per_table;
 	if (i < rd_dev->sg_table_count) {
+		gmb();
 		sg_table = &rd_dev->sg_table_array[i];
 		if ((sg_table->page_start_offset <= page) &&
 		    (sg_table->page_end_offset >= page))
@@ -386,6 +373,7 @@ static struct rd_dev_sg_table *rd_get_prot_table(struct rd_dev *rd_dev, u32 page
 
 	i = page / sg_per_table;
 	if (i < rd_dev->sg_prot_count) {
+		gmb();
 		sg_table = &rd_dev->sg_prot_array[i];
 		if ((sg_table->page_start_offset <= page) &&
 		     (sg_table->page_end_offset >= page))
@@ -408,7 +396,7 @@ static sense_reason_t rd_do_prot_rw(struct se_cmd *cmd, bool is_read)
 	u32 prot_offset, prot_page;
 	u32 prot_npages __maybe_unused;
 	u64 tmp;
-	sense_reason_t rc = TCM_LOGICAL_UNIT_COMMUNICATION_FAILURE;
+	sense_reason_t rc = 0;
 
 	tmp = cmd->t_task_lba * se_dev->prot_length;
 	prot_offset = do_div(tmp, PAGE_SIZE);
@@ -421,13 +409,14 @@ static sense_reason_t rd_do_prot_rw(struct se_cmd *cmd, bool is_read)
 	prot_sg = &prot_table->sg_table[prot_page -
 					prot_table->page_start_offset];
 
-	if (is_read)
-		rc = sbc_dif_verify(cmd, cmd->t_task_lba, sectors, 0,
-				    prot_sg, prot_offset);
-	else
-		rc = sbc_dif_verify(cmd, cmd->t_task_lba, sectors, 0,
-				    cmd->t_prot_sg, 0);
-
+	if (se_dev->dev_attrib.pi_prot_verify) {
+		if (is_read)
+			rc = sbc_dif_verify(cmd, cmd->t_task_lba, sectors, 0,
+					    prot_sg, prot_offset);
+		else
+			rc = sbc_dif_verify(cmd, cmd->t_task_lba, sectors, 0,
+					    cmd->t_prot_sg, 0);
+	}
 	if (!rc)
 		sbc_dif_copy_prot(cmd, sectors, is_read, prot_sg, prot_offset);
 
@@ -566,7 +555,7 @@ static ssize_t rd_set_configfs_dev_params(struct se_device *dev,
 	struct rd_dev *rd_dev = RD_DEV(dev);
 	char *orig, *ptr, *opts;
 	substring_t args[MAX_OPT_ARGS];
-	int ret = 0, arg, token;
+	int arg, token;
 
 	opts = kstrdup(page, GFP_KERNEL);
 	if (!opts)
@@ -601,7 +590,7 @@ static ssize_t rd_set_configfs_dev_params(struct se_device *dev,
 	}
 
 	kfree(orig);
-	return (!ret) ? count : ret;
+	return count;
 }
 
 static ssize_t rd_show_configfs_dev_params(struct se_device *dev, char *b)

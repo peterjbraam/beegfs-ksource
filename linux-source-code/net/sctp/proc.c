@@ -16,15 +16,22 @@
  * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with GNU CC; see the file COPYING.  If not, see
- * <http://www.gnu.org/licenses/>.
+ * along with GNU CC; see the file COPYING.  If not, write to
+ * the Free Software Foundation, 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
  *
  * Please send any bug reports or fixes you make to the
  * email address(es):
- *    lksctp developers <linux-sctp@vger.kernel.org>
+ *    lksctp developers <lksctp-developers@lists.sourceforge.net>
+ *
+ * Or submit a bug report through the following website:
+ *    http://www.sf.net/projects/lksctp
  *
  * Written or modified by:
  *    Sridhar Samudrala <sri@us.ibm.com>
+ *
+ * Any bugs reported given to us we will try to fix... any fixes shared will
+ * be incorporated into the next SCTP release.
  */
 
 #include <linux/types.h>
@@ -73,17 +80,13 @@ static const struct snmp_mib sctp_snmp_list[] = {
 /* Display sctp snmp mib statistics(/proc/net/sctp/snmp). */
 static int sctp_snmp_seq_show(struct seq_file *seq, void *v)
 {
-	unsigned long buff[SCTP_MIB_MAX];
 	struct net *net = seq->private;
 	int i;
 
-	memset(buff, 0, sizeof(unsigned long) * SCTP_MIB_MAX);
-
-	snmp_get_cpu_field_batch(buff, sctp_snmp_list,
-				 net->sctp.sctp_statistics);
-	for (i = 0; sctp_snmp_list[i].name; i++)
+	for (i = 0; sctp_snmp_list[i].name != NULL; i++)
 		seq_printf(seq, "%-32s\t%ld\n", sctp_snmp_list[i].name,
-						buff[i]);
+			   snmp_fold_field((void __percpu **)net->sctp.sctp_statistics,
+				      sctp_snmp_list[i].entry));
 
 	return 0;
 }
@@ -135,7 +138,7 @@ static void sctp_seq_dump_local_addrs(struct seq_file *seq, struct sctp_ep_commo
 
 		peer = asoc->peer.primary_path;
 		if (unlikely(peer == NULL)) {
-			WARN(1, "Association %p with NULL primary path!\n", asoc);
+			WARN(1, "Association %p with NULL primary path!", asoc);
 			return;
 		}
 

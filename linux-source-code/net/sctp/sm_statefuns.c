@@ -22,12 +22,16 @@
  * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with GNU CC; see the file COPYING.  If not, see
- * <http://www.gnu.org/licenses/>.
+ * along with GNU CC; see the file COPYING.  If not, write to
+ * the Free Software Foundation, 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
  *
  * Please send any bug reports or fixes you make to the
  * email address(es):
- *    lksctp developers <linux-sctp@vger.kernel.org>
+ *    lksctp developers <lksctp-developers@lists.sourceforge.net>
+ *
+ * Or submit a bug report through the following website:
+ *    http://www.sf.net/projects/lksctp
  *
  * Written or modified by:
  *    La Monte H.P. Yarroll <piggy@acm.org>
@@ -41,6 +45,9 @@
  *    Ardelle Fan	    <ardelle.fan@intel.com>
  *    Ryan Layer	    <rmlayer@us.ibm.com>
  *    Kevin Gao		    <kevin.gao@intel.com>
+ *
+ * Any bugs reported given to us we will try to fix... any fixes shared will
+ * be incorporated into the next SCTP release.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -175,16 +182,6 @@ sctp_chunk_length_valid(struct sctp_chunk *chunk,
 		return 0;
 
 	return 1;
-}
-
-/* Check for format error in an ABORT chunk */
-static inline bool sctp_err_chunk_valid(struct sctp_chunk *chunk)
-{
-	struct sctp_errhdr *err;
-
-	sctp_walk_errors(err, chunk->chunk_hdr);
-
-	return (void *)err == (void *)chunk->chunk_end;
 }
 
 /**********************************************************
@@ -866,7 +863,7 @@ nomem:
 
 /*
  * Respond to a normal COOKIE ACK chunk.
- * We are the side that is asking for an association.
+ * We are the side that is being asked for an association.
  *
  * RFC 2960 5.1 Normal Establishment of an Association
  *
@@ -1730,6 +1727,9 @@ static sctp_disposition_t sctp_sf_do_dupcook_a(struct net *net,
 			       GFP_ATOMIC))
 		goto nomem;
 
+	if (sctp_auth_asoc_init_active_key(new_asoc, GFP_ATOMIC))
+		goto nomem;
+
 	if (!sctp_auth_chunk_verify(net, chunk, new_asoc))
 		return SCTP_DISPOSITION_DISCARD;
 
@@ -1793,13 +1793,12 @@ static sctp_disposition_t sctp_sf_do_dupcook_a(struct net *net,
 	/* Update the content of current association. */
 	sctp_add_cmd_sf(commands, SCTP_CMD_UPDATE_ASSOC, SCTP_ASOC(new_asoc));
 	sctp_add_cmd_sf(commands, SCTP_CMD_EVENT_ULP, SCTP_ULPEVENT(ev));
-	if ((sctp_state(asoc, SHUTDOWN_PENDING) ||
-	     sctp_state(asoc, SHUTDOWN_SENT)) &&
+	if (sctp_state(asoc, SHUTDOWN_PENDING) &&
 	    (sctp_sstate(asoc->base.sk, CLOSING) ||
 	     sock_flag(asoc->base.sk, SOCK_DEAD))) {
-		/* If the socket has been closed by user, don't
-		 * transition to ESTABLISHED. Instead trigger SHUTDOWN
-		 * bundled with COOKIE_ACK.
+		/* if were currently in SHUTDOWN_PENDING, but the socket
+		 * has been closed by user, don't transition to ESTABLISHED.
+		 * Instead trigger SHUTDOWN bundled with COOKIE_ACK.
 		 */
 		sctp_add_cmd_sf(commands, SCTP_CMD_REPLY, SCTP_CHUNK(repl));
 		return sctp_sf_do_9_2_start_shutdown(net, ep, asoc,
@@ -1842,6 +1841,9 @@ static sctp_disposition_t sctp_sf_do_dupcook_b(struct net *net,
 	peer_init = &chunk->subh.cookie_hdr->c.peer_init[0];
 	if (!sctp_process_init(new_asoc, chunk, sctp_source(chunk), peer_init,
 			       GFP_ATOMIC))
+		goto nomem;
+
+	if (sctp_auth_asoc_init_active_key(new_asoc, GFP_ATOMIC))
 		goto nomem;
 
 	if (!sctp_auth_chunk_verify(net, chunk, new_asoc))
@@ -2083,6 +2085,9 @@ sctp_disposition_t sctp_sf_do_5_2_4_dupcook(struct net *net,
 		}
 	}
 
+	/* Set temp so that it won't be added into hashtable */
+	new_asoc->temp = 1;
+
 	/* Compare the tie_tag in cookie with the verification tag of
 	 * current association.
 	 */
@@ -2170,9 +2175,6 @@ sctp_disposition_t sctp_sf_shutdown_pending_abort(
 		    sctp_bind_addr_state(&asoc->base.bind_addr, &chunk->dest))
 		return sctp_sf_discard_chunk(net, ep, asoc, type, arg, commands);
 
-	if (!sctp_err_chunk_valid(chunk))
-		return sctp_sf_pdiscard(net, ep, asoc, type, arg, commands);
-
 	return __sctp_sf_do_9_1_abort(net, ep, asoc, type, arg, commands);
 }
 
@@ -2214,9 +2216,6 @@ sctp_disposition_t sctp_sf_shutdown_sent_abort(struct net *net,
 	if (SCTP_ADDR_DEL ==
 		    sctp_bind_addr_state(&asoc->base.bind_addr, &chunk->dest))
 		return sctp_sf_discard_chunk(net, ep, asoc, type, arg, commands);
-
-	if (!sctp_err_chunk_valid(chunk))
-		return sctp_sf_pdiscard(net, ep, asoc, type, arg, commands);
 
 	/* Stop the T2-shutdown timer. */
 	sctp_add_cmd_sf(commands, SCTP_CMD_TIMER_STOP,
@@ -2483,9 +2482,6 @@ sctp_disposition_t sctp_sf_do_9_1_abort(struct net *net,
 		    sctp_bind_addr_state(&asoc->base.bind_addr, &chunk->dest))
 		return sctp_sf_discard_chunk(net, ep, asoc, type, arg, commands);
 
-	if (!sctp_err_chunk_valid(chunk))
-		return sctp_sf_pdiscard(net, ep, asoc, type, arg, commands);
-
 	return __sctp_sf_do_9_1_abort(net, ep, asoc, type, arg, commands);
 }
 
@@ -2502,9 +2498,15 @@ static sctp_disposition_t __sctp_sf_do_9_1_abort(struct net *net,
 
 	/* See if we have an error cause code in the chunk.  */
 	len = ntohs(chunk->chunk_hdr->length);
+	if (len >= sizeof(struct sctp_chunkhdr) + sizeof(struct sctp_errhdr)) {
 
-	if (len >= sizeof(struct sctp_chunkhdr) + sizeof(struct sctp_errhdr))
+		sctp_errhdr_t *err;
+		sctp_walk_errors(err, chunk->chunk_hdr);
+		if ((void *)err != (void *)chunk->chunk_end)
+			return sctp_sf_pdiscard(net, ep, asoc, type, arg, commands);
+
 		error = ((sctp_errhdr_t *)chunk->skb->data)->cause;
+	}
 
 	sctp_add_cmd_sf(commands, SCTP_CMD_SET_SK_ERR, SCTP_ERROR(ECONNRESET));
 	/* ASSOC_FAILED will DELETE_TCB. */
@@ -3716,6 +3718,28 @@ sctp_disposition_t sctp_sf_do_asconf(struct net *net,
 	return SCTP_DISPOSITION_CONSUME;
 }
 
+sctp_disposition_t sctp_send_next_asconf(struct net *net,
+					 const struct sctp_endpoint *ep,
+					 struct sctp_association *asoc,
+					 const sctp_subtype_t type,
+					 sctp_cmd_seq_t *commands)
+{
+	struct sctp_chunk *asconf;
+	struct list_head *entry;
+
+	if (list_empty(&asoc->addip_chunk_list))
+		return SCTP_DISPOSITION_CONSUME;
+
+	entry = asoc->addip_chunk_list.next;
+	asconf = list_entry(entry, struct sctp_chunk, list);
+
+	list_del_init(entry);
+	sctp_chunk_hold(asconf);
+	asoc->addip_last_asconf = asconf;
+
+	return sctp_sf_do_prm_asconf(net, ep, asoc, type, asconf, commands);
+}
+
 /*
  * ADDIP Section 4.3 General rules for address manipulation
  * When building TLV parameters for the ASCONF Chunk that will add or
@@ -3804,14 +3828,10 @@ sctp_disposition_t sctp_sf_do_asconf_ack(struct net *net,
 				SCTP_TO(SCTP_EVENT_TIMEOUT_T4_RTO));
 
 		if (!sctp_process_asconf_ack((struct sctp_association *)asoc,
-					     asconf_ack)) {
-			/* Successfully processed ASCONF_ACK.  We can
-			 * release the next asconf if we have one.
-			 */
-			sctp_add_cmd_sf(commands, SCTP_CMD_SEND_NEXT_ASCONF,
-					SCTP_NULL());
-			return SCTP_DISPOSITION_CONSUME;
-		}
+					     asconf_ack))
+			return sctp_send_next_asconf(net, ep,
+					(struct sctp_association *)asoc,
+							type, commands);
 
 		abort = sctp_make_abort(asoc, asconf_ack,
 					sizeof(sctp_errhdr_t));
@@ -3868,6 +3888,9 @@ sctp_disposition_t sctp_sf_eat_fwd_tsn(struct net *net,
 				SCTP_NULL());
 		return sctp_sf_pdiscard(net, ep, asoc, type, arg, commands);
 	}
+
+	if (!asoc->peer.prsctp_capable)
+		return sctp_sf_unk_chunk(net, ep, asoc, type, arg, commands);
 
 	/* Make sure that the FORWARD_TSN chunk has valid length.  */
 	if (!sctp_chunk_length_valid(chunk, sizeof(struct sctp_fwdtsn_chunk)))
@@ -3936,6 +3959,9 @@ sctp_disposition_t sctp_sf_eat_fwd_tsn_fast(
 				SCTP_NULL());
 		return sctp_sf_pdiscard(net, ep, asoc, type, arg, commands);
 	}
+
+	if (!asoc->peer.prsctp_capable)
+		return sctp_sf_unk_chunk(net, ep, asoc, type, arg, commands);
 
 	/* Make sure that the FORWARD_TSN chunk has a valid length.  */
 	if (!sctp_chunk_length_valid(chunk, sizeof(struct sctp_fwdtsn_chunk)))
@@ -4203,6 +4229,7 @@ sctp_disposition_t sctp_sf_unk_chunk(struct net *net,
 	case SCTP_CID_ACTION_DISCARD:
 		/* Discard the packet.  */
 		return sctp_sf_pdiscard(net, ep, asoc, type, arg, commands);
+		break;
 	case SCTP_CID_ACTION_DISCARD_ERR:
 		/* Generate an ERROR chunk as response. */
 		hdr = unk_chunk->chunk_hdr;
@@ -4218,9 +4245,11 @@ sctp_disposition_t sctp_sf_unk_chunk(struct net *net,
 		/* Discard the packet.  */
 		sctp_sf_pdiscard(net, ep, asoc, type, arg, commands);
 		return SCTP_DISPOSITION_CONSUME;
+		break;
 	case SCTP_CID_ACTION_SKIP:
 		/* Skip the chunk.  */
 		return SCTP_DISPOSITION_DISCARD;
+		break;
 	case SCTP_CID_ACTION_SKIP_ERR:
 		/* Generate an ERROR chunk as response. */
 		hdr = unk_chunk->chunk_hdr;
@@ -4234,6 +4263,7 @@ sctp_disposition_t sctp_sf_unk_chunk(struct net *net,
 		}
 		/* Skip the chunk.  */
 		return SCTP_DISPOSITION_CONSUME;
+		break;
 	default:
 		break;
 	}
@@ -6059,8 +6089,9 @@ static struct sctp_packet *sctp_ootb_pkt_new(struct net *net,
 	sctp_transport_route(transport, (union sctp_addr *)&chunk->dest,
 			     sctp_sk(net->sctp.ctl_sock));
 
-	packet = sctp_packet_init(&transport->packet, transport, sport, dport);
-	packet = sctp_packet_config(packet, vtag, 0);
+	packet = &transport->packet;
+	sctp_packet_init(packet, transport, sport, dport);
+	sctp_packet_config(packet, vtag, 0);
 
 	return packet;
 
@@ -6141,11 +6172,15 @@ static int sctp_eat_data(const struct sctp_association *asoc,
 	 * chunk later.
 	 */
 
-	if (asoc->peer.ecn_capable && !chunk->ecn_ce_done) {
-		struct sctp_af *af = SCTP_INPUT_CB(chunk->skb)->af;
+	if (!chunk->ecn_ce_done) {
+		struct sctp_af *af;
 		chunk->ecn_ce_done = 1;
 
-		if (af->is_ce(sctp_gso_headskb(chunk->skb))) {
+		af = sctp_get_af_specific(
+			ipver2af(ip_hdr(chunk->skb)->version));
+
+		if (af && af->is_ce(sctp_gso_headskb(chunk->skb)) &&
+		    asoc->peer.ecn_capable) {
 			/* Do real work as sideffect. */
 			sctp_add_cmd_sf(commands, SCTP_CMD_ECN_CE,
 					SCTP_U32(tsn));

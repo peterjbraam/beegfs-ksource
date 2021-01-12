@@ -220,8 +220,8 @@ static void ipcomp_free_scratches(void)
 
 static void * __percpu *ipcomp_alloc_scratches(void)
 {
-	void * __percpu *scratches;
 	int i;
+	void * __percpu *scratches;
 
 	if (ipcomp_scratch_users++)
 		return ipcomp_scratches;
@@ -233,9 +233,7 @@ static void * __percpu *ipcomp_alloc_scratches(void)
 	ipcomp_scratches = scratches;
 
 	for_each_possible_cpu(i) {
-		void *scratch;
-
-		scratch = vmalloc_node(IPCOMP_SCRATCH_SIZE, cpu_to_node(i));
+		void *scratch = vmalloc(IPCOMP_SCRATCH_SIZE);
 		if (!scratch)
 			return NULL;
 		*per_cpu_ptr(scratches, i) = scratch;
@@ -283,7 +281,7 @@ static struct crypto_comp * __percpu *ipcomp_alloc_tfms(const char *alg_name)
 		struct crypto_comp *tfm;
 
 		/* This can be any valid CPU ID so we don't need locking. */
-		tfm = this_cpu_read(*pos->tfms);
+		tfm = __this_cpu_read(*pos->tfms);
 
 		if (!strcmp(crypto_comp_name(tfm), alg_name)) {
 			pos->users++;

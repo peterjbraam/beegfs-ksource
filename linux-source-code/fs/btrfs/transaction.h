@@ -82,7 +82,6 @@ struct btrfs_transaction {
 	spinlock_t dropped_roots_lock;
 	struct btrfs_delayed_ref_root delayed_refs;
 	int aborted;
-	struct btrfs_fs_info *fs_info;
 };
 
 #define __TRANS_FREEZABLE	(1U << 0)
@@ -129,7 +128,6 @@ struct btrfs_trans_handle {
 	 * Subvolume quota depends on this
 	 */
 	struct btrfs_root *root;
-	struct btrfs_fs_info *fs_info;
 	struct seq_list delayed_ref_elem;
 	struct list_head qgroup_ref_list;
 	struct list_head new_bgs;
@@ -146,7 +144,7 @@ struct btrfs_pending_snapshot {
 	/* block reservation for the operation */
 	struct btrfs_block_rsv block_rsv;
 	u64 qgroup_reserved;
-	/* extra metadata reservation for relocation */
+	/* extra metadata reseration for relocation */
 	int error;
 	bool readonly;
 	struct list_head list;

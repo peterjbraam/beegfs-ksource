@@ -103,6 +103,13 @@
 #define HWCAP_S390_HIGH_GPRS	512
 #define HWCAP_S390_TE		1024
 #define HWCAP_S390_VXRS		2048
+#define HWCAP_S390_VXRS_BCD	4096
+#define HWCAP_S390_VXRS_EXT	8192
+#define HWCAP_S390_GS		16384
+#define HWCAP_S390_VXRS_EXT2	32768
+#define HWCAP_S390_VXRS_PDE	65536
+#define HWCAP_S390_SORT		131072
+#define HWCAP_S390_DFLT		262144
 
 /* Internal bits, not exposed via elf */
 #define HWCAP_INT_SIE		1UL
@@ -110,7 +117,11 @@
 /*
  * These are used to set parameters in the core dumps.
  */
+#ifndef CONFIG_64BIT
+#define ELF_CLASS	ELFCLASS32
+#else /* CONFIG_64BIT */
 #define ELF_CLASS	ELFCLASS64
+#endif /* CONFIG_64BIT */
 #define ELF_DATA	ELFDATA2MSB
 #define ELF_ARCH	EM_S390
 
@@ -129,7 +140,6 @@ typedef s390_regs elf_gregset_t;
 typedef s390_fp_regs compat_elf_fpregset_t;
 typedef s390_compat_regs compat_elf_gregset_t;
 
-#include <linux/compat.h>
 #include <linux/sched.h>	/* for task_struct */
 #include <asm/mmu_context.h>
 
@@ -158,13 +168,14 @@ extern unsigned int vdso_enabled;
 #define CORE_DUMP_USE_REGSET
 #define ELF_EXEC_PAGESIZE	4096
 
-/*
- * This is the base location for PIE (ET_DYN with INTERP) loads. On
- * 64-bit, this is raised to 4GB to leave the entire 32-bit address
- * space open for things that want to use the area for 32-bit pointers.
- */
-#define ELF_ET_DYN_BASE		(is_compat_task() ? 0x000400000UL : \
-						    0x100000000UL)
+/* This is the location that an ET_DYN program is loaded if exec'ed.  Typical
+   use of this is to invoke "./ld.so someprog" to test out a new version of
+   the loader.  We need to make sure that it is out of the way of the program
+   that it will "exec", and that there is sufficient room for the brk. 64-bit
+   tasks are aligned to 4GB. */
+#define ELF_ET_DYN_BASE (is_32bit_task() ? \
+				(STACK_TOP / 3 * 2) : \
+				(STACK_TOP / 3 * 2) & ~((1UL << 32) - 1))
 
 /* This yields a mask that user programs can use to figure out what
    instruction set this CPU supports. */
@@ -213,21 +224,10 @@ do {								\
 } while (0)
 #endif /* CONFIG_COMPAT */
 
-/*
- * Cache aliasing on the latest machines calls for a mapping granularity
- * of 512KB for the anonymous mapping base. For 64-bit processes use a
- * 512KB alignment and a randomization of up to 1GB. For 31-bit processes
- * the virtual address space is limited, use no alignment and limit the
- * randomization to 8MB.
- * For the additional randomization of the program break use 32MB for
- * 64-bit and 8MB for 31-bit.
- */
-#define BRK_RND_MASK	(is_compat_task() ? 0x7ffUL : 0x1fffUL)
-#define MMAP_RND_MASK	(is_compat_task() ? 0x7ffUL : 0x3ff80UL)
-#define MMAP_ALIGN_MASK	(is_compat_task() ? 0 : 0x7fUL)
-#define STACK_RND_MASK	MMAP_RND_MASK
+extern unsigned long mmap_rnd_mask;
 
-/* update AT_VECTOR_SIZE_ARCH if the number of NEW_AUX_ENT entries changes */
+#define STACK_RND_MASK	(test_thread_flag(TIF_31BIT) ? 0x7ff : mmap_rnd_mask)
+
 #define ARCH_DLINFO							    \
 do {									    \
 	if (vdso_enabled)						    \
@@ -239,5 +239,7 @@ struct linux_binprm;
 
 #define ARCH_HAS_SETUP_ADDITIONAL_PAGES 1
 int arch_setup_additional_pages(struct linux_binprm *, int);
+
+void *fill_cpu_elf_notes(void *ptr, struct save_area *sa, __vector128 *vxrs);
 
 #endif

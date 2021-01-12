@@ -17,21 +17,12 @@
 
 /* verdict bit breakdown 
  *
-bit 0: when set -> this packet has been munged already
-
-bit 1: when set -> It is ok to munge this packet
-
-bit 2,3,4,5: Reclassify counter - sort of reverse TTL - if exceeded
-assume loop
-
 bit 6,7: Where this packet was last seen 
 0: Above the transmit example at the socket level
 1: on the Ingress
 2: on the Egress
 
 bit 8: when set --> Request not to classify on ingress. 
-
-bits 9,10,11: redirect counter -  redirect TTL. Loop avoidance
 
  *
  * */
@@ -54,10 +45,9 @@ bits 9,10,11: redirect counter -  redirect TTL. Loop avoidance
 #define G_TC_AT(x)       _TC_GETVALUE(x,S_TC_AT,M_TC_AT)
 #define V_TC_AT(x)       _TC_MAKEVALUE(x,S_TC_AT)
 #define SET_TC_AT(v,n)   ((V_TC_AT(n)) | (v & ~M_TC_AT))
-
-#define MAX_REC_LOOP 4
-#define MAX_RED_LOOP 4
 #endif
+
+#define TC_COOKIE_MAX_SIZE 16
 
 /* Action attributes */
 enum {
@@ -67,6 +57,7 @@ enum {
 	TCA_ACT_INDEX,
 	TCA_ACT_STATS,
 	TCA_ACT_PAD,
+	TCA_ACT_COOKIE,
 	__TCA_ACT_MAX
 };
 
@@ -88,8 +79,28 @@ enum {
 #define TC_ACT_STOLEN		4
 #define TC_ACT_QUEUED		5
 #define TC_ACT_REPEAT		6
-#define TC_ACT_REDIRECT		7
-#define TC_ACT_JUMP		0x10000000
+#define TC_ACT_TRAP		8 /* For hw path, this means "trap to cpu"
+				   * and don't further process the frame
+				   * in hardware. For sw path, this is
+				   * equivalent of TC_ACT_STOLEN - drop
+				   * the skb and act like everything
+				   * is alright.
+				   */
+
+/* There is a special kind of actions called "extended actions",
+ * which need a value parameter. These have a local opcode located in
+ * the highest nibble, starting from 1. The rest of the bits
+ * are used to carry the value. These two parts together make
+ * a combined opcode.
+ */
+#define __TC_ACT_EXT_SHIFT 28
+#define __TC_ACT_EXT(local) ((local) << __TC_ACT_EXT_SHIFT)
+#define TC_ACT_EXT_VAL_MASK ((1 << __TC_ACT_EXT_SHIFT) - 1)
+#define TC_ACT_EXT_CMP(combined, opcode) \
+	(((combined) & (~TC_ACT_EXT_VAL_MASK)) == opcode)
+
+#define TC_ACT_JUMP __TC_ACT_EXT(1)
+#define TC_ACT_GOTO_CHAIN __TC_ACT_EXT(2)
 
 /* Action type identifiers*/
 enum {
@@ -155,8 +166,10 @@ enum {
 #define TCA_POLICE_MAX (__TCA_POLICE_MAX - 1)
 
 /* tca flags definitions */
-#define TCA_CLS_FLAGS_SKIP_HW	(1 << 0)
-#define TCA_CLS_FLAGS_SKIP_SW	(1 << 1)
+#define TCA_CLS_FLAGS_SKIP_HW	(1 << 0) /* don't offload filter to HW */
+#define TCA_CLS_FLAGS_SKIP_SW	(1 << 1) /* don't use filter in SW */
+#define TCA_CLS_FLAGS_IN_HW	(1 << 2) /* filter is offloaded to HW */
+#define TCA_CLS_FLAGS_NOT_IN_HW (1 << 3) /* filter isn't offloaded to HW */
 
 /* U32 filters */
 
@@ -384,8 +397,6 @@ enum {
 
 /* BPF classifier */
 
-#define TCA_BPF_FLAG_ACT_DIRECT		(1 << 0)
-
 enum {
 	TCA_BPF_UNSPEC,
 	TCA_BPF_ACT,
@@ -393,10 +404,6 @@ enum {
 	TCA_BPF_CLASSID,
 	TCA_BPF_OPS_LEN,
 	TCA_BPF_OPS,
-	TCA_BPF_FD,
-	TCA_BPF_NAME,
-	TCA_BPF_FLAGS,
-	TCA_BPF_FLAGS_GEN,
 	__TCA_BPF_MAX,
 };
 
@@ -447,10 +454,97 @@ enum {
 	TCA_FLOWER_KEY_TCP_DST_MASK,	/* be16 */
 	TCA_FLOWER_KEY_UDP_SRC_MASK,	/* be16 */
 	TCA_FLOWER_KEY_UDP_DST_MASK,	/* be16 */
+	TCA_FLOWER_KEY_SCTP_SRC_MASK,	/* be16 */
+	TCA_FLOWER_KEY_SCTP_DST_MASK,	/* be16 */
+
+	TCA_FLOWER_KEY_SCTP_SRC,	/* be16 */
+	TCA_FLOWER_KEY_SCTP_DST,	/* be16 */
+
+	TCA_FLOWER_KEY_ENC_UDP_SRC_PORT,	/* be16 */
+	TCA_FLOWER_KEY_ENC_UDP_SRC_PORT_MASK,	/* be16 */
+	TCA_FLOWER_KEY_ENC_UDP_DST_PORT,	/* be16 */
+	TCA_FLOWER_KEY_ENC_UDP_DST_PORT_MASK,	/* be16 */
+
+	TCA_FLOWER_KEY_FLAGS,		/* be32 */
+	TCA_FLOWER_KEY_FLAGS_MASK,	/* be32 */
+
+	TCA_FLOWER_KEY_ICMPV4_CODE,	/* u8 */
+	TCA_FLOWER_KEY_ICMPV4_CODE_MASK,/* u8 */
+	TCA_FLOWER_KEY_ICMPV4_TYPE,	/* u8 */
+	TCA_FLOWER_KEY_ICMPV4_TYPE_MASK,/* u8 */
+	TCA_FLOWER_KEY_ICMPV6_CODE,	/* u8 */
+	TCA_FLOWER_KEY_ICMPV6_CODE_MASK,/* u8 */
+	TCA_FLOWER_KEY_ICMPV6_TYPE,	/* u8 */
+	TCA_FLOWER_KEY_ICMPV6_TYPE_MASK,/* u8 */
+
+	TCA_FLOWER_KEY_ARP_SIP,		/* be32 */
+	TCA_FLOWER_KEY_ARP_SIP_MASK,	/* be32 */
+	TCA_FLOWER_KEY_ARP_TIP,		/* be32 */
+	TCA_FLOWER_KEY_ARP_TIP_MASK,	/* be32 */
+	TCA_FLOWER_KEY_ARP_OP,		/* u8 */
+	TCA_FLOWER_KEY_ARP_OP_MASK,	/* u8 */
+	TCA_FLOWER_KEY_ARP_SHA,		/* ETH_ALEN */
+	TCA_FLOWER_KEY_ARP_SHA_MASK,	/* ETH_ALEN */
+	TCA_FLOWER_KEY_ARP_THA,		/* ETH_ALEN */
+	TCA_FLOWER_KEY_ARP_THA_MASK,	/* ETH_ALEN */
+
+	TCA_FLOWER_KEY_MPLS_TTL,	/* u8 - 8 bits */
+	TCA_FLOWER_KEY_MPLS_BOS,	/* u8 - 1 bit */
+	TCA_FLOWER_KEY_MPLS_TC,		/* u8 - 3 bits */
+	TCA_FLOWER_KEY_MPLS_LABEL,	/* be32 - 20 bits */
+
+	TCA_FLOWER_KEY_TCP_FLAGS,	/* be16 */
+	TCA_FLOWER_KEY_TCP_FLAGS_MASK,	/* be16 */
+
+	TCA_FLOWER_KEY_IP_TOS,		/* u8 */
+	TCA_FLOWER_KEY_IP_TOS_MASK,	/* u8 */
+	TCA_FLOWER_KEY_IP_TTL,		/* u8 */
+	TCA_FLOWER_KEY_IP_TTL_MASK,	/* u8 */
+
+	TCA_FLOWER_KEY_CVLAN_ID,	/* be16 */
+	TCA_FLOWER_KEY_CVLAN_PRIO,	/* u8   */
+	TCA_FLOWER_KEY_CVLAN_ETH_TYPE,	/* be16 */
+
+	TCA_FLOWER_KEY_ENC_IP_TOS,	/* u8 */
+	TCA_FLOWER_KEY_ENC_IP_TOS_MASK,	/* u8 */
+	TCA_FLOWER_KEY_ENC_IP_TTL,	/* u8 */
+	TCA_FLOWER_KEY_ENC_IP_TTL_MASK,	/* u8 */
+
+	TCA_FLOWER_KEY_ENC_OPTS,
+	TCA_FLOWER_KEY_ENC_OPTS_MASK,
+
 	__TCA_FLOWER_MAX,
 };
 
 #define TCA_FLOWER_MAX (__TCA_FLOWER_MAX - 1)
+
+enum {
+	TCA_FLOWER_KEY_ENC_OPTS_UNSPEC,
+	TCA_FLOWER_KEY_ENC_OPTS_GENEVE, /* Nested
+					 * TCA_FLOWER_KEY_ENC_OPT_GENEVE_
+					 * attributes
+					 */
+	__TCA_FLOWER_KEY_ENC_OPTS_MAX,
+};
+
+#define TCA_FLOWER_KEY_ENC_OPTS_MAX (__TCA_FLOWER_KEY_ENC_OPTS_MAX - 1)
+
+enum {
+	TCA_FLOWER_KEY_ENC_OPT_GENEVE_UNSPEC,
+	TCA_FLOWER_KEY_ENC_OPT_GENEVE_CLASS,            /* u16 */
+	TCA_FLOWER_KEY_ENC_OPT_GENEVE_TYPE,             /* u8 */
+	TCA_FLOWER_KEY_ENC_OPT_GENEVE_DATA,             /* 4 to 128 bytes */
+
+	__TCA_FLOWER_KEY_ENC_OPT_GENEVE_MAX,
+};
+
+#define TCA_FLOWER_KEY_ENC_OPT_GENEVE_MAX \
+		(__TCA_FLOWER_KEY_ENC_OPT_GENEVE_MAX - 1)
+
+enum {
+	TCA_FLOWER_KEY_FLAGS_IS_FRAGMENT = (1 << 0),
+	TCA_FLOWER_KEY_FLAGS_FRAG_IS_FIRST = (1 << 1),
+};
 
 /* Match-all classifier */
 

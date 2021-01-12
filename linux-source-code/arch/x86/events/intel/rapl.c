@@ -1,5 +1,5 @@
 /*
- * perf_event_intel_rapl.c: support Intel RAPL energy consumption counters
+ * Support Intel RAPL energy consumption counters
  * Copyright (C) 2013 Google, Inc., Stephane Eranian
  *
  * Intel RAPL interface is specified in the IA-32 Manual Vol3b
@@ -115,6 +115,24 @@ static const char *const rapl_domain_names[NR_RAPL_DOMAINS] __initconst = {
  * any other bit is reserved
  */
 #define RAPL_EVENT_MASK	0xFFULL
+
+#define DEFINE_RAPL_FORMAT_ATTR(_var, _name, _format)		\
+static ssize_t __rapl_##_var##_show(struct kobject *kobj,	\
+				struct kobj_attribute *attr,	\
+				char *page)			\
+{								\
+	BUILD_BUG_ON(sizeof(_format) >= PAGE_SIZE);		\
+	return sprintf(page, _format "\n");			\
+}								\
+static struct kobj_attribute format_attr_##_var =		\
+	__ATTR(_name, 0444, __rapl_##_var##_show, NULL)
+
+#define RAPL_EVENT_DESC(_name, _config)				\
+{								\
+	.attr	= __ATTR(_name, 0444, rapl_event_show, NULL),	\
+	.config	= _config,					\
+}
+
 #define RAPL_CNTR_WIDTH 32
 
 #define RAPL_EVENT_ATTR_STR(_name, v, str)					\
@@ -149,7 +167,7 @@ static u64 rapl_timer_ms;
 
 static inline struct rapl_pmu *cpu_to_rapl_pmu(unsigned int cpu)
 {
-	unsigned int pkgid = topology_logical_package_id(cpu);
+	unsigned int pkgid = topology_logical_die_id(cpu);
 
 	/*
 	 * The unsigned check also catches the '-1' return value for non
@@ -351,8 +369,6 @@ static int rapl_pmu_event_init(struct perf_event *event)
 	if (event->cpu < 0)
 		return -EINVAL;
 
-	event->event_caps |= PERF_EV_CAP_READ_ACTIVE_PKG;
-
 	/*
 	 * check event is known (determines counter)
 	 */
@@ -415,7 +431,11 @@ static void rapl_pmu_event_read(struct perf_event *event)
 static ssize_t rapl_get_attr_cpumask(struct device *dev,
 				struct device_attribute *attr, char *buf)
 {
-	return cpumap_print_to_pagebuf(true, buf, &rapl_cpu_mask);
+	int n = cpulist_scnprintf(buf, PAGE_SIZE - 2, &rapl_cpu_mask);
+
+	buf[n++] = '\n';
+	buf[n] = '\0';
+	return n;
 }
 
 static DEVICE_ATTR(cpumask, S_IRUGO, rapl_get_attr_cpumask, NULL);
@@ -536,7 +556,7 @@ static struct attribute_group rapl_pmu_events_group = {
 	.attrs = NULL, /* patched at runtime */
 };
 
-PMU_FORMAT_ATTR(event, "config:0-7");
+DEFINE_RAPL_FORMAT_ATTR(event, event, "config:0-7");
 static struct attribute *rapl_formats_attr[] = {
 	&format_attr_event.attr,
 	NULL,
@@ -547,7 +567,7 @@ static struct attribute_group rapl_pmu_format_group = {
 	.attrs = rapl_formats_attr,
 };
 
-const struct attribute_group *rapl_attr_groups[] = {
+static const struct attribute_group *rapl_attr_groups[] = {
 	&rapl_pmu_attr_group,
 	&rapl_pmu_format_group,
 	&rapl_pmu_events_group,
@@ -565,7 +585,7 @@ static int rapl_cpu_offline(unsigned int cpu)
 
 	pmu->cpu = -1;
 	/* Find a new cpu to collect rapl events */
-	target = cpumask_any_but(topology_core_cpumask(cpu), cpu);
+	target = cpumask_any_but(topology_die_cpumask(cpu), cpu);
 
 	/* Migrate rapl events to the new target */
 	if (target < nr_cpu_ids) {
@@ -592,13 +612,14 @@ static int rapl_cpu_online(unsigned int cpu)
 		pmu->timer_interval = ms_to_ktime(rapl_timer_ms);
 		rapl_hrtimer_init(pmu);
 
-		rapl_pmus->pmus[topology_logical_package_id(cpu)] = pmu;
+		rapl_pmus->pmus[topology_logical_die_id(cpu)] = pmu;
 	}
+
 	/*
 	 * Check if there is an online cpu in the package which collects rapl
 	 * events already.
 	 */
-	target = cpumask_any_and(&rapl_cpu_mask, topology_core_cpumask(cpu));
+	target = cpumask_any_and(&rapl_cpu_mask, topology_die_cpumask(cpu));
 	if (target < nr_cpu_ids)
 		return 0;
 
@@ -606,6 +627,29 @@ static int rapl_cpu_online(unsigned int cpu)
 	pmu->cpu = cpu;
 	return 0;
 }
+
+static int rapl_cpu_notifier(struct notifier_block *self,
+			     unsigned long action, void *hcpu)
+{
+	unsigned int cpu = (long)hcpu;
+
+	switch (action & ~CPU_TASKS_FROZEN) {
+	case CPU_DOWN_FAILED:
+	case CPU_ONLINE:
+		rapl_cpu_online(cpu);
+		break;
+
+	case CPU_DOWN_PREPARE:
+		rapl_cpu_offline(cpu);
+		break;
+	}
+	return NOTIFY_OK;
+}
+
+static struct notifier_block rapl_cpu_nb = {
+	.notifier_call	= rapl_cpu_notifier,
+	.priority       = CPU_PRI_PERF + 1,
+};
 
 static int rapl_check_hw_unit(bool apply_quirk)
 {
@@ -657,6 +701,23 @@ static void __init rapl_advertise(void)
 	}
 }
 
+static int __init rapl_prepare_cpus(void)
+{
+	unsigned int cpu, pkg;
+	int ret;
+
+	for_each_online_cpu(cpu) {
+		pkg = topology_logical_die_id(cpu);
+		if (rapl_pmus->pmus[pkg])
+			continue;
+
+		ret = rapl_cpu_online(cpu);
+		if (ret)
+			return ret;
+	}
+	return 0;
+}
+
 static void cleanup_rapl_pmus(void)
 {
 	int i;
@@ -668,7 +729,7 @@ static void cleanup_rapl_pmus(void)
 
 static int __init init_rapl_pmus(void)
 {
-	int maxpkg = topology_max_packages();
+	int maxpkg = topology_max_packages() * topology_max_die_per_package();
 	size_t size;
 
 	size = sizeof(*rapl_pmus) + maxpkg * sizeof(struct rapl_pmu *);
@@ -742,14 +803,14 @@ static const struct x86_cpu_id rapl_cpu_match[] __initconst = {
 	X86_RAPL_MODEL_MATCH(INTEL_FAM6_IVYBRIDGE_X, snbep_rapl_init),
 
 	X86_RAPL_MODEL_MATCH(INTEL_FAM6_HASWELL_CORE, hsw_rapl_init),
-	X86_RAPL_MODEL_MATCH(INTEL_FAM6_HASWELL_X,    hsw_rapl_init),
+	X86_RAPL_MODEL_MATCH(INTEL_FAM6_HASWELL_X,    hsx_rapl_init),
 	X86_RAPL_MODEL_MATCH(INTEL_FAM6_HASWELL_ULT,  hsw_rapl_init),
 	X86_RAPL_MODEL_MATCH(INTEL_FAM6_HASWELL_GT3E, hsw_rapl_init),
 
 	X86_RAPL_MODEL_MATCH(INTEL_FAM6_BROADWELL_CORE,   hsw_rapl_init),
 	X86_RAPL_MODEL_MATCH(INTEL_FAM6_BROADWELL_GT3E,   hsw_rapl_init),
 	X86_RAPL_MODEL_MATCH(INTEL_FAM6_BROADWELL_X,	  hsx_rapl_init),
-	X86_RAPL_MODEL_MATCH(INTEL_FAM6_BROADWELL_XEON_D, hsw_rapl_init),
+	X86_RAPL_MODEL_MATCH(INTEL_FAM6_BROADWELL_XEON_D, hsx_rapl_init),
 
 	X86_RAPL_MODEL_MATCH(INTEL_FAM6_XEON_PHI_KNL, knl_rapl_init),
 	X86_RAPL_MODEL_MATCH(INTEL_FAM6_XEON_PHI_KNM, knl_rapl_init),
@@ -758,7 +819,15 @@ static const struct x86_cpu_id rapl_cpu_match[] __initconst = {
 	X86_RAPL_MODEL_MATCH(INTEL_FAM6_SKYLAKE_DESKTOP, skl_rapl_init),
 	X86_RAPL_MODEL_MATCH(INTEL_FAM6_SKYLAKE_X,	 hsx_rapl_init),
 
+	X86_RAPL_MODEL_MATCH(INTEL_FAM6_KABYLAKE_MOBILE,  skl_rapl_init),
+	X86_RAPL_MODEL_MATCH(INTEL_FAM6_KABYLAKE_DESKTOP, skl_rapl_init),
+
+	X86_RAPL_MODEL_MATCH(INTEL_FAM6_CANNONLAKE_MOBILE,  skl_rapl_init),
+
 	X86_RAPL_MODEL_MATCH(INTEL_FAM6_ATOM_GOLDMONT, hsw_rapl_init),
+	X86_RAPL_MODEL_MATCH(INTEL_FAM6_ATOM_GOLDMONT_X, hsw_rapl_init),
+
+	X86_RAPL_MODEL_MATCH(INTEL_FAM6_ATOM_GOLDMONT_PLUS, hsw_rapl_init),
 	{},
 };
 
@@ -788,36 +857,35 @@ static int __init rapl_pmu_init(void)
 	if (ret)
 		return ret;
 
-	/*
-	 * Install callbacks. Core will call them for each online cpu.
-	 */
+	cpu_notifier_register_begin();
 
-	ret = cpuhp_setup_state(CPUHP_AP_PERF_X86_RAPL_ONLINE,
-				"AP_PERF_X86_RAPL_ONLINE",
-				rapl_cpu_online, rapl_cpu_offline);
+	ret = rapl_prepare_cpus();
 	if (ret)
 		goto out;
 
 	ret = perf_pmu_register(&rapl_pmus->pmu, "power", -1);
 	if (ret)
-		goto out1;
+		goto out;
 
+	__register_cpu_notifier(&rapl_cpu_nb);
+	cpu_notifier_register_done();
 	rapl_advertise();
 	return 0;
 
-out1:
-	cpuhp_remove_state(CPUHP_AP_PERF_X86_RAPL_ONLINE);
 out:
 	pr_warn("Initialization failed (%d), disabled\n", ret);
 	cleanup_rapl_pmus();
+	cpu_notifier_register_done();
 	return ret;
 }
 module_init(rapl_pmu_init);
 
 static void __exit intel_rapl_exit(void)
 {
-	cpuhp_remove_state_nocalls(CPUHP_AP_PERF_X86_RAPL_ONLINE);
+	cpu_notifier_register_begin();
+	__unregister_cpu_notifier(&rapl_cpu_nb);
 	perf_pmu_unregister(&rapl_pmus->pmu);
 	cleanup_rapl_pmus();
+	cpu_notifier_register_done();
 }
 module_exit(intel_rapl_exit);

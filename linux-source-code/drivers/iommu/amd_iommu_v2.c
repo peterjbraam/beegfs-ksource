@@ -48,7 +48,7 @@ struct pasid_state {
 	unsigned mmu_notifier_count;		/* Counting nested mmu_notifier
 						   calls */
 	struct mm_struct *mm;			/* mm_struct for the faults */
-	struct mmu_notifier mn;                 /* mmu_notifier handle */
+	struct mmu_notifier_rhel7 mn;		/* mmu_otifier handle */
 	struct pri_queue pri[PRI_QUEUE_SIZE];	/* PRI tag states */
 	struct device_state *device_state;	/* Link to our device_state */
 	int pasid;				/* PASID index */
@@ -343,7 +343,8 @@ static void free_pasid_states(struct device_state *dev_state)
 		 * This will call the mn_release function and
 		 * unbind the PASID
 		 */
-		mmu_notifier_unregister(&pasid_state->mn, pasid_state->mm);
+		mmu_notifier_unregister_rhel7(&pasid_state->mn,
+					      pasid_state->mm);
 
 		put_pasid_state_wait(pasid_state); /* Reference taken in
 						      amd_iommu_bind_pasid */
@@ -362,12 +363,12 @@ static void free_pasid_states(struct device_state *dev_state)
 	free_page((unsigned long)dev_state->states);
 }
 
-static struct pasid_state *mn_to_state(struct mmu_notifier *mn)
+static struct pasid_state *mn_to_state(struct mmu_notifier_rhel7 *mn)
 {
 	return container_of(mn, struct pasid_state, mn);
 }
 
-static void __mn_flush_page(struct mmu_notifier *mn,
+static void __mn_flush_page(struct mmu_notifier_rhel7 *mn,
 			    unsigned long address)
 {
 	struct pasid_state *pasid_state;
@@ -379,25 +380,23 @@ static void __mn_flush_page(struct mmu_notifier *mn,
 	amd_iommu_flush_page(dev_state->domain, pasid_state->pasid, address);
 }
 
-static int mn_clear_flush_young(struct mmu_notifier *mn,
+static int mn_clear_flush_young(struct mmu_notifier_rhel7 *mn,
 				struct mm_struct *mm,
-				unsigned long start,
-				unsigned long end)
+				unsigned long address)
 {
-	for (; start < end; start += PAGE_SIZE)
-		__mn_flush_page(mn, start);
+	__mn_flush_page(mn, address);
 
 	return 0;
 }
 
-static void mn_invalidate_page(struct mmu_notifier *mn,
+static void mn_invalidate_page(struct mmu_notifier_rhel7 *mn,
 			       struct mm_struct *mm,
 			       unsigned long address)
 {
 	__mn_flush_page(mn, address);
 }
 
-static void mn_invalidate_range(struct mmu_notifier *mn,
+static void mn_invalidate_range(struct mmu_notifier_rhel7 *mn,
 				struct mm_struct *mm,
 				unsigned long start, unsigned long end)
 {
@@ -414,7 +413,7 @@ static void mn_invalidate_range(struct mmu_notifier *mn,
 		amd_iommu_flush_tlb(dev_state->domain, pasid_state->pasid);
 }
 
-static void mn_release(struct mmu_notifier *mn, struct mm_struct *mm)
+static void mn_release(struct mmu_notifier_rhel7 *mn, struct mm_struct *mm)
 {
 	struct pasid_state *pasid_state;
 	struct device_state *dev_state;
@@ -432,7 +431,7 @@ static void mn_release(struct mmu_notifier *mn, struct mm_struct *mm)
 	unbind_pasid(pasid_state);
 }
 
-static const struct mmu_notifier_ops iommu_mn = {
+static const struct mmu_notifier_ops_rhel7 iommu_mn = {
 	.release		= mn_release,
 	.clear_flush_young      = mn_clear_flush_young,
 	.invalidate_page        = mn_invalidate_page,
@@ -539,6 +538,7 @@ static void do_fault(struct work_struct *work)
 		goto out;
 
 	ret = handle_mm_fault(vma, address, flags);
+
 out:
 	up_read(&mm->mmap_sem);
 
@@ -561,14 +561,30 @@ static int ppr_notifier(struct notifier_block *nb, unsigned long e, void *data)
 	unsigned long flags;
 	struct fault *fault;
 	bool finish;
-	u16 tag;
+	u16 tag, devid;
 	int ret;
+	struct iommu_dev_data *dev_data;
+	struct pci_dev *pdev = NULL;
 
 	iommu_fault = data;
 	tag         = iommu_fault->tag & 0x1ff;
 	finish      = (iommu_fault->tag >> 9) & 1;
 
+	devid = iommu_fault->device_id;
+	pdev = pci_get_bus_and_slot(PCI_BUS_NUM(devid), devid & 0xff);
+	if (!pdev)
+		return -ENODEV;
+	dev_data = get_dev_data(&pdev->dev);
+
+	/* In kdump kernel pci dev is not initialized yet -> send INVALID */
 	ret = NOTIFY_DONE;
+	if (translation_pre_enabled(amd_iommu_rlookup_table[devid])
+		&& dev_data->defer_attach) {
+		amd_iommu_complete_ppr(pdev, iommu_fault->pasid,
+				       PPR_INVALID, tag);
+		goto out;
+	}
+
 	dev_state = get_device_state(iommu_fault->device_id);
 	if (dev_state == NULL)
 		goto out;
@@ -667,7 +683,7 @@ int amd_iommu_bind_pasid(struct pci_dev *pdev, int pasid,
 	if (pasid_state->mm == NULL)
 		goto out_free;
 
-	mmu_notifier_register(&pasid_state->mn, mm);
+	mmu_notifier_register_rhel7(&pasid_state->mn, mm);
 
 	ret = set_pasid_state(dev_state, pasid_state, pasid);
 	if (ret)
@@ -694,7 +710,7 @@ out_clear_state:
 	clear_pasid_state(dev_state, pasid);
 
 out_unregister:
-	mmu_notifier_unregister(&pasid_state->mn, mm);
+	mmu_notifier_unregister_rhel7(&pasid_state->mn, mm);
 	mmput(mm);
 
 out_free:
@@ -742,7 +758,7 @@ void amd_iommu_unbind_pasid(struct pci_dev *pdev, int pasid)
 	 * Call mmu_notifier_unregister to drop our reference
 	 * to pasid_state->mm
 	 */
-	mmu_notifier_unregister(&pasid_state->mn, pasid_state->mm);
+	mmu_notifier_unregister_rhel7(&pasid_state->mn, pasid_state->mm);
 
 	put_pasid_state_wait(pasid_state); /* Reference taken in
 					      amd_iommu_bind_pasid */

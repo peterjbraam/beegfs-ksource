@@ -36,6 +36,7 @@
 #include <linux/atomic.h>
 #include <linux/cgroup.h>
 #include <linux/slab.h>
+#include <linux/seq_file.h>
 
 #define PIDS_MAX (PID_MAX_LIMIT + 1ULL)
 #define PIDS_MAX_STR "max"
@@ -48,13 +49,7 @@ struct pids_cgroup {
 	 * %PIDS_MAX = (%PID_MAX_LIMIT + 1).
 	 */
 	atomic64_t			counter;
-	atomic64_t			limit;
-
-	/* Handle for "pids.events" */
-	struct cgroup_file		events_file;
-
-	/* Number of times fork failed because limit was hit. */
-	atomic64_t			events_limit;
+	int64_t				limit;
 };
 
 static struct pids_cgroup *css_pids(struct cgroup_subsys_state *css)
@@ -62,13 +57,18 @@ static struct pids_cgroup *css_pids(struct cgroup_subsys_state *css)
 	return container_of(css, struct pids_cgroup, css);
 }
 
-static struct pids_cgroup *parent_pids(struct pids_cgroup *pids)
+static inline struct pids_cgroup *cgroup_pids(struct cgroup *cgroup)
 {
-	return css_pids(pids->css.parent);
+	return css_pids(cgroup_subsys_state(cgroup, pids_subsys_id));
 }
 
-static struct cgroup_subsys_state *
-pids_css_alloc(struct cgroup_subsys_state *parent)
+static struct pids_cgroup *parent_pids(struct pids_cgroup *pids)
+{
+	struct cgroup *pcg = pids->css.cgroup->parent;
+	return pcg ? cgroup_pids(pcg) : NULL;
+}
+
+static struct cgroup_subsys_state *pids_css_alloc(struct cgroup *cgroup)
 {
 	struct pids_cgroup *pids;
 
@@ -76,15 +76,14 @@ pids_css_alloc(struct cgroup_subsys_state *parent)
 	if (!pids)
 		return ERR_PTR(-ENOMEM);
 
+	pids->limit = PIDS_MAX;
 	atomic64_set(&pids->counter, 0);
-	atomic64_set(&pids->limit, PIDS_MAX);
-	atomic64_set(&pids->events_limit, 0);
 	return &pids->css;
 }
 
-static void pids_css_free(struct cgroup_subsys_state *css)
+static void pids_css_free(struct cgroup *cgroup)
 {
-	kfree(css_pids(css));
+	kfree(cgroup_pids(cgroup));
 }
 
 /**
@@ -113,7 +112,7 @@ static void pids_uncharge(struct pids_cgroup *pids, int num)
 {
 	struct pids_cgroup *p;
 
-	for (p = pids; parent_pids(p); p = parent_pids(p))
+	for (p = pids; p; p = parent_pids(p))
 		pids_cancel(p, num);
 }
 
@@ -130,7 +129,7 @@ static void pids_charge(struct pids_cgroup *pids, int num)
 {
 	struct pids_cgroup *p;
 
-	for (p = pids; parent_pids(p); p = parent_pids(p))
+	for (p = pids; p; p = parent_pids(p))
 		atomic64_add(num, &p->counter);
 }
 
@@ -141,22 +140,21 @@ static void pids_charge(struct pids_cgroup *pids, int num)
  *
  * This function follows the set limit. It will fail if the charge would cause
  * the new value to exceed the hierarchical limit. Returns 0 if the charge
- * succeeded, otherwise -EAGAIN.
+ * succeded, otherwise -EAGAIN.
  */
 static int pids_try_charge(struct pids_cgroup *pids, int num)
 {
 	struct pids_cgroup *p, *q;
 
-	for (p = pids; parent_pids(p); p = parent_pids(p)) {
+	for (p = pids; p; p = parent_pids(p)) {
 		int64_t new = atomic64_add_return(num, &p->counter);
-		int64_t limit = atomic64_read(&p->limit);
 
 		/*
 		 * Since new is capped to the maximum number of pid_t, if
 		 * p->limit is %PIDS_MAX then we know that this test will never
 		 * fail.
 		 */
-		if (new > limit)
+		if (new > p->limit)
 			goto revert;
 	}
 
@@ -170,13 +168,13 @@ revert:
 	return -EAGAIN;
 }
 
-static int pids_can_attach(struct cgroup_taskset *tset)
+static int pids_can_attach(struct cgroup *cgrp,
+			   struct cgroup_taskset *tset)
 {
+	struct pids_cgroup *pids = cgroup_pids(cgrp);
 	struct task_struct *task;
-	struct cgroup_subsys_state *dst_css;
 
-	cgroup_taskset_for_each(task, dst_css, tset) {
-		struct pids_cgroup *pids = css_pids(dst_css);
+	cgroup_taskset_for_each(task, cgrp, tset) {
 		struct cgroup_subsys_state *old_css;
 		struct pids_cgroup *old_pids;
 
@@ -185,7 +183,7 @@ static int pids_can_attach(struct cgroup_taskset *tset)
 		 * because cgroup core protects it from being freed before
 		 * the migration completes or fails.
 		 */
-		old_css = task_css(task, pids_cgrp_id);
+		old_css = task_subsys_state(task, pids_subsys_id);
 		old_pids = css_pids(old_css);
 
 		pids_charge(pids, 1);
@@ -195,17 +193,17 @@ static int pids_can_attach(struct cgroup_taskset *tset)
 	return 0;
 }
 
-static void pids_cancel_attach(struct cgroup_taskset *tset)
+static void pids_cancel_attach(struct cgroup *cgrp,
+			       struct cgroup_taskset *tset)
 {
+	struct pids_cgroup *pids = cgroup_pids(cgrp);
 	struct task_struct *task;
-	struct cgroup_subsys_state *dst_css;
 
-	cgroup_taskset_for_each(task, dst_css, tset) {
-		struct pids_cgroup *pids = css_pids(dst_css);
+	cgroup_taskset_for_each(task, cgrp, tset) {
 		struct cgroup_subsys_state *old_css;
 		struct pids_cgroup *old_pids;
 
-		old_css = task_css(task, pids_cgrp_id);
+		old_css = task_subsys_state(task, pids_subsys_id);
 		old_pids = css_pids(old_css);
 
 		pids_charge(old_pids, 1);
@@ -213,57 +211,109 @@ static void pids_cancel_attach(struct cgroup_taskset *tset)
 	}
 }
 
-/*
- * task_css_check(true) in pids_can_fork() and pids_cancel_fork() relies
- * on threadgroup_change_begin() held by the copy_process().
- */
-static int pids_can_fork(struct task_struct *task)
+static int pids_can_fork(struct task_struct *task, void **priv_p)
 {
 	struct cgroup_subsys_state *css;
 	struct pids_cgroup *pids;
 	int err;
 
-	css = task_css_check(current, pids_cgrp_id, true);
+	/*
+	 * Use the "current" task_css for the pids subsystem as the tentative
+	 * css. It is possible we will charge the wrong hierarchy, in which
+	 * case we will forcefully revert/reapply the charge on the right
+	 * hierarchy after it is committed to the task proper.
+	 */
+	css = task_get_css(current, pids_subsys_id);
 	pids = css_pids(css);
+
 	err = pids_try_charge(pids, 1);
-	if (err) {
-		/* Only log the first time events_limit is incremented. */
-		if (atomic64_inc_return(&pids->events_limit) == 1) {
-			pr_info("cgroup: fork rejected by pids controller in ");
-			pr_cont_cgroup_path(css->cgroup);
-			pr_cont("\n");
-		}
-		cgroup_file_notify(&pids->events_file);
-	}
+	if (err)
+		goto err_css_put;
+
+	*priv_p = css;
+	return 0;
+
+err_css_put:
+	css_put(css);
 	return err;
 }
 
-static void pids_cancel_fork(struct task_struct *task)
+static void pids_cancel_fork(struct task_struct *task, void *priv)
+{
+	struct cgroup_subsys_state *css = priv;
+	struct pids_cgroup *pids = css_pids(css);
+
+	pids_uncharge(pids, 1);
+	css_put(css);
+}
+
+static void pids_fork(struct task_struct *task, void *priv)
 {
 	struct cgroup_subsys_state *css;
+	struct cgroup_subsys_state *old_css = priv;
 	struct pids_cgroup *pids;
+	struct pids_cgroup *old_pids = css_pids(old_css);
 
-	css = task_css_check(current, pids_cgrp_id, true);
+	css = task_get_css(task, pids_subsys_id);
 	pids = css_pids(css);
-	pids_uncharge(pids, 1);
+
+	/*
+	 * If the association has changed, we have to revert and reapply the
+	 * charge/uncharge on the wrong hierarchy to the current one. Since
+	 * the association can only change due to an organisation event, its
+	 * okay for us to ignore the limit in this case.
+	 */
+	if (pids != old_pids) {
+		pids_uncharge(old_pids, 1);
+		pids_charge(pids, 1);
+	}
+
+	css_put(css);
+	css_put(old_css);
 }
 
-static void pids_free(struct task_struct *task)
+void cgroup_pids_release(struct task_struct *task)
 {
-	struct pids_cgroup *pids = css_pids(task_css(task, pids_cgrp_id));
+	struct list_head *cg_list = &task->cg_list;
+	struct cgroup_subsys_state *css;
 
-	pids_uncharge(pids, 1);
+	if (WARN_ON(!list_empty(cg_list)))
+		return;
+	if (WARN_ON(cg_list->prev == cg_list))
+		return;
+
+	css = (void *)cg_list->prev;
+	pids_uncharge(css_pids(css), 1);
+	css_put(css);
 }
 
-static ssize_t pids_max_write(struct kernfs_open_file *of, char *buf,
-			      size_t nbytes, loff_t off)
+static void pids_exit(struct cgroup *cgroup,
+		      struct cgroup *old_cgroup,
+		      struct task_struct *task)
 {
-	struct cgroup_subsys_state *css = of_css(of);
-	struct pids_cgroup *pids = css_pids(css);
+	struct list_head *cg_list = &task->cg_list;
+	struct cgroup_subsys_state *css;
+
+	if (WARN_ON(cg_list->prev != cg_list))
+		return;
+	/*
+	 * This preserves list_empty(cg_list) == T and nobody else can use
+	 * ->cg_list after cgroup_exit(). Abuse cg_list->prev to pass this
+	 * css to cgroup_pids_release().
+	 */
+	css = cgroup_subsys_state(old_cgroup, pids_subsys_id);
+	cg_list->prev = (void *)css;
+	css_get(css);
+}
+
+static int pids_max_write(struct cgroup *cgroup, struct cftype *cft,
+			  const char *buf)
+{
+	struct pids_cgroup *pids = cgroup_pids(cgroup);
 	int64_t limit;
 	int err;
 
-	buf = strstrip(buf);
+	buf = strstrip((char *)buf);
 	if (!strcmp(buf, PIDS_MAX_STR)) {
 		limit = PIDS_MAX;
 		goto set_limit;
@@ -281,15 +331,15 @@ set_limit:
 	 * Limit updates don't need to be mutex'd, since it isn't
 	 * critical that any racing fork()s follow the new limit.
 	 */
-	atomic64_set(&pids->limit, limit);
-	return nbytes;
+	pids->limit = limit;
+	return 0;
 }
 
-static int pids_max_show(struct seq_file *sf, void *v)
+static int pids_max_show(struct cgroup *cgroup, struct cftype *cft,
+                         struct seq_file *sf)
 {
-	struct cgroup_subsys_state *css = seq_css(sf);
-	struct pids_cgroup *pids = css_pids(css);
-	int64_t limit = atomic64_read(&pids->limit);
+	struct pids_cgroup *pids = cgroup_pids(cgroup);
+	int64_t limit = pids->limit;
 
 	if (limit >= PIDS_MAX)
 		seq_printf(sf, "%s\n", PIDS_MAX_STR);
@@ -299,51 +349,38 @@ static int pids_max_show(struct seq_file *sf, void *v)
 	return 0;
 }
 
-static s64 pids_current_read(struct cgroup_subsys_state *css,
+static s64 pids_current_read(struct cgroup *cgroup,
 			     struct cftype *cft)
 {
-	struct pids_cgroup *pids = css_pids(css);
+	struct pids_cgroup *pids = cgroup_pids(cgroup);
 
 	return atomic64_read(&pids->counter);
-}
-
-static int pids_events_show(struct seq_file *sf, void *v)
-{
-	struct pids_cgroup *pids = css_pids(seq_css(sf));
-
-	seq_printf(sf, "max %lld\n", (s64)atomic64_read(&pids->events_limit));
-	return 0;
 }
 
 static struct cftype pids_files[] = {
 	{
 		.name = "max",
-		.write = pids_max_write,
-		.seq_show = pids_max_show,
+		.write_string = pids_max_write,
+		.read_seq_string = pids_max_show,
 		.flags = CFTYPE_NOT_ON_ROOT,
 	},
 	{
 		.name = "current",
 		.read_s64 = pids_current_read,
-		.flags = CFTYPE_NOT_ON_ROOT,
-	},
-	{
-		.name = "events",
-		.seq_show = pids_events_show,
-		.file_offset = offsetof(struct pids_cgroup, events_file),
-		.flags = CFTYPE_NOT_ON_ROOT,
 	},
 	{ }	/* terminate */
 };
 
-struct cgroup_subsys pids_cgrp_subsys = {
+struct cgroup_subsys pids_subsys = {
+	.name		= "pids",
+	.subsys_id	= pids_subsys_id,
 	.css_alloc	= pids_css_alloc,
 	.css_free	= pids_css_free,
 	.can_attach 	= pids_can_attach,
 	.cancel_attach 	= pids_cancel_attach,
 	.can_fork	= pids_can_fork,
 	.cancel_fork	= pids_cancel_fork,
-	.free		= pids_free,
-	.legacy_cftypes	= pids_files,
-	.dfl_cftypes	= pids_files,
+	.fork		= pids_fork,
+	.exit		= pids_exit,
+	.base_cftypes	= pids_files,
 };

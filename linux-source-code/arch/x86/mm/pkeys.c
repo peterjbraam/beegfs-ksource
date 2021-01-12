@@ -18,12 +18,13 @@
 
 #include <asm/cpufeature.h>             /* boot_cpu_has, ...            */
 #include <asm/mmu_context.h>            /* vma_pkey()                   */
-#include <asm/fpu/internal.h>           /* fpregs_active()              */
+#include <asm/i387.h>
+#include <asm/fpu-internal.h>           /* user_has_fpu()              */
 
 int __execute_only_pkey(struct mm_struct *mm)
 {
 	bool need_to_set_mm_pkey = false;
-	int execute_only_pkey = mm->context.execute_only_pkey;
+	int execute_only_pkey = mm->execute_only_pkey;
 	int ret;
 
 	/* Do we need to assign a pkey for mm's execute-only maps? */
@@ -45,7 +46,7 @@ int __execute_only_pkey(struct mm_struct *mm)
 	 */
 	preempt_disable();
 	if (!need_to_set_mm_pkey &&
-	    fpregs_active() &&
+	    user_has_fpu() &&
 	    !__pkru_allows_read(read_pkru(), execute_only_pkey)) {
 		preempt_enable();
 		return execute_only_pkey;
@@ -69,7 +70,7 @@ int __execute_only_pkey(struct mm_struct *mm)
 
 	/* We got one, store it and use it from here on out */
 	if (need_to_set_mm_pkey)
-		mm->context.execute_only_pkey = execute_only_pkey;
+		mm->execute_only_pkey = execute_only_pkey;
 	return execute_only_pkey;
 }
 
@@ -78,7 +79,7 @@ static inline bool vma_is_pkey_exec_only(struct vm_area_struct *vma)
 	/* Do this check first since the vm_flags should be hot */
 	if ((vma->vm_flags & (VM_READ | VM_WRITE | VM_EXEC)) != VM_EXEC)
 		return false;
-	if (vma_pkey(vma) != vma->vm_mm->context.execute_only_pkey)
+	if (vma_pkey(vma) != vma->vm_mm->execute_only_pkey)
 		return false;
 
 	return true;
@@ -142,7 +143,8 @@ u32 init_pkru_value = PKRU_AD_KEY( 1) | PKRU_AD_KEY( 2) | PKRU_AD_KEY( 3) |
  * Called from the FPU code when creating a fresh set of FPU
  * registers.  This is called from a very specific context where
  * we know the FPU regstiers are safe for use and we can use PKRU
- * directly.
+ * directly.  The fact that PKRU is only available when we are
+ * using eagerfpu mode makes this possible.
  */
 void copy_init_pkru_to_fpregs(void)
 {

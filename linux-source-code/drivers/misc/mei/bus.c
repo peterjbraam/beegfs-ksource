@@ -36,12 +36,12 @@
  * @cl: host client
  * @buf: buffer to send
  * @length: buffer length
- * @blocking: wait for write completion
+ * @mode: sending mode
  *
  * Return: written size bytes or < 0 on error
  */
 ssize_t __mei_cl_send(struct mei_cl *cl, u8 *buf, size_t length,
-			bool blocking)
+		      unsigned int mode)
 {
 	struct mei_device *bus;
 	struct mei_cl_cb *cb;
@@ -80,9 +80,11 @@ ssize_t __mei_cl_send(struct mei_cl *cl, u8 *buf, size_t length,
 		goto out;
 	}
 
+	cb->internal = !!(mode & MEI_CL_IO_TX_INTERNAL);
+	cb->blocking = !!(mode & MEI_CL_IO_TX_BLOCKING);
 	memcpy(cb->buf.data, buf, length);
 
-	rets = mei_cl_write(cl, cb, blocking);
+	rets = mei_cl_write(cl, cb);
 
 out:
 	mutex_unlock(&bus->device_lock);
@@ -188,7 +190,7 @@ ssize_t mei_cldev_send(struct mei_cl_device *cldev, u8 *buf, size_t length)
 	if (cl == NULL)
 		return -ENODEV;
 
-	return __mei_cl_send(cl, buf, length, 1);
+	return __mei_cl_send(cl, buf, length, MEI_CL_IO_TX_BLOCKING);
 }
 EXPORT_SYMBOL_GPL(mei_cldev_send);
 
@@ -408,7 +410,7 @@ bool mei_cldev_enabled(struct mei_cl_device *cldev)
 EXPORT_SYMBOL_GPL(mei_cldev_enabled);
 
 /**
- * mei_cldev_enable - enable me client device
+ * mei_cldev_enable_device - enable me client device
  *     create connection with me client
  *
  * @cldev: me client device
@@ -483,7 +485,7 @@ int mei_cldev_disable(struct mei_cl_device *cldev)
 	mutex_lock(&bus->device_lock);
 
 	if (!mei_cl_is_connected(cl)) {
-		dev_err(bus->dev, "Already disconnected");
+		dev_dbg(bus->dev, "Already disconnected");
 		err = 0;
 		goto out;
 	}
@@ -639,8 +641,9 @@ static int mei_cl_device_remove(struct device *dev)
 		ret = cldrv->remove(cldev);
 
 	module_put(THIS_MODULE);
-
+	dev->driver = NULL;
 	return ret;
+
 }
 
 static ssize_t name_show(struct device *dev, struct device_attribute *a,
@@ -764,16 +767,15 @@ static struct device_type mei_cl_device_type = {
 
 /**
  * mei_cl_bus_set_name - set device name for me client device
- *  <controller>-<client device>
- *  Example: 0000:00:16.0-55213584-9a29-4916-badf-0fb7ed682aeb
  *
  * @cldev: me client device
  */
 static inline void mei_cl_bus_set_name(struct mei_cl_device *cldev)
 {
-	dev_set_name(&cldev->dev, "%s-%pUl",
-		     dev_name(cldev->bus->dev),
-		     mei_me_cl_uuid(cldev->me_cl));
+	dev_set_name(&cldev->dev, "mei:%s:%pUl:%02X",
+		     cldev->name,
+		     mei_me_cl_uuid(cldev->me_cl),
+		     mei_me_cl_ver(cldev->me_cl));
 }
 
 /**
@@ -946,7 +948,7 @@ static void mei_cl_bus_dev_init(struct mei_device *bus,
  *
  * @bus: mei device
  */
-void mei_cl_bus_rescan(struct mei_device *bus)
+static void mei_cl_bus_rescan(struct mei_device *bus)
 {
 	struct mei_cl_device *cldev, *n;
 	struct mei_me_client *me_cl;
@@ -984,12 +986,6 @@ void mei_cl_bus_rescan_work(struct work_struct *work)
 {
 	struct mei_device *bus =
 		container_of(work, struct mei_device, bus_rescan_work);
-	struct mei_me_client *me_cl;
-
-	me_cl = mei_me_cl_by_uuid(bus, &mei_amthif_guid);
-	if (me_cl)
-		mei_amthif_host_init(bus, me_cl);
-	mei_me_cl_put(me_cl);
 
 	mei_cl_bus_rescan(bus);
 }

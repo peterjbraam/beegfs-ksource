@@ -32,15 +32,13 @@ struct msr_regs_info {
 	int err;
 };
 
-struct saved_msr {
-	bool valid;
-	struct msr_info info;
-};
-
-struct saved_msrs {
-	unsigned int num;
-	struct saved_msr *array;
-};
+static inline unsigned long long native_read_tscp(unsigned int *aux)
+{
+	unsigned long low, high;
+	asm volatile(".byte 0x0f,0x01,0xf9"
+		     : "=a" (low), "=d" (high), "=c" (*aux));
+	return low | ((u64)high << 32);
+}
 
 /*
  * both i386 and x86_64 returns 64-bit value in edx:eax, but gcc's "A"
@@ -49,47 +47,22 @@ struct saved_msrs {
  * it means rax *or* rdx.
  */
 #ifdef CONFIG_X86_64
-/* Using 64-bit values saves one instruction clearing the high half of low */
-#define DECLARE_ARGS(val, low, high)	unsigned long low, high
-#define EAX_EDX_VAL(val, low, high)	((low) | (high) << 32)
+#define DECLARE_ARGS(val, low, high)	unsigned low, high
+#define EAX_EDX_VAL(val, low, high)	((low) | ((u64)(high) << 32))
+#define EAX_EDX_ARGS(val, low, high)	"a" (low), "d" (high)
 #define EAX_EDX_RET(val, low, high)	"=a" (low), "=d" (high)
 #else
 #define DECLARE_ARGS(val, low, high)	unsigned long long val
 #define EAX_EDX_VAL(val, low, high)	(val)
+#define EAX_EDX_ARGS(val, low, high)	"A" (val)
 #define EAX_EDX_RET(val, low, high)	"=A" (val)
 #endif
 
-#ifdef CONFIG_TRACEPOINTS
-/*
- * Be very careful with includes. This header is prone to include loops.
- */
-#include <asm/atomic.h>
-#include <linux/tracepoint-defs.h>
-
-extern struct tracepoint __tracepoint_read_msr;
-extern struct tracepoint __tracepoint_write_msr;
-extern struct tracepoint __tracepoint_rdpmc;
-#define msr_tracepoint_active(t) static_key_false(&(t).key)
-extern void do_trace_write_msr(unsigned msr, u64 val, int failed);
-extern void do_trace_read_msr(unsigned msr, u64 val, int failed);
-extern void do_trace_rdpmc(unsigned msr, u64 val, int failed);
-#else
-#define msr_tracepoint_active(t) false
-static inline void do_trace_write_msr(unsigned msr, u64 val, int failed) {}
-static inline void do_trace_read_msr(unsigned msr, u64 val, int failed) {}
-static inline void do_trace_rdpmc(unsigned msr, u64 val, int failed) {}
-#endif
-
-static inline unsigned long long native_read_msr(unsigned int msr)
+static __always_inline unsigned long long native_read_msr(unsigned int msr)
 {
 	DECLARE_ARGS(val, low, high);
 
-	asm volatile("1: rdmsr\n"
-		     "2:\n"
-		     _ASM_EXTABLE_HANDLE(1b, 2b, ex_handler_rdmsr_unsafe)
-		     : EAX_EDX_RET(val, low, high) : "c" (msr));
-	if (msr_tracepoint_active(__tracepoint_read_msr))
-		do_trace_read_msr(msr, EAX_EDX_VAL(val, low, high), 0);
+	asm volatile("rdmsr" : EAX_EDX_RET(val, low, high) : "c" (msr));
 	return EAX_EDX_VAL(val, low, high);
 }
 
@@ -101,29 +74,18 @@ static inline unsigned long long native_read_msr_safe(unsigned int msr,
 	asm volatile("2: rdmsr ; xor %[err],%[err]\n"
 		     "1:\n\t"
 		     ".section .fixup,\"ax\"\n\t"
-		     "3: mov %[fault],%[err]\n\t"
-		     "xorl %%eax, %%eax\n\t"
-		     "xorl %%edx, %%edx\n\t"
-		     "jmp 1b\n\t"
+		     "3:  mov %[fault],%[err] ; jmp 1b\n\t"
 		     ".previous\n\t"
 		     _ASM_EXTABLE(2b, 3b)
 		     : [err] "=r" (*err), EAX_EDX_RET(val, low, high)
 		     : "c" (msr), [fault] "i" (-EIO));
-	if (msr_tracepoint_active(__tracepoint_read_msr))
-		do_trace_read_msr(msr, EAX_EDX_VAL(val, low, high), *err);
 	return EAX_EDX_VAL(val, low, high);
 }
 
-/* Can be uninlined because referenced by paravirt */
-notrace static inline void native_write_msr(unsigned int msr,
-					    unsigned low, unsigned high)
+static __always_inline void native_write_msr(unsigned int msr,
+				    unsigned low, unsigned high)
 {
-	asm volatile("1: wrmsr\n"
-		     "2:\n"
-		     _ASM_EXTABLE_HANDLE(1b, 2b, ex_handler_wrmsr_unsafe)
-		     : : "c" (msr), "a"(low), "d" (high) : "memory");
-	if (msr_tracepoint_active(__tracepoint_write_msr))
-		do_trace_write_msr(msr, ((u64)high << 32 | low), 0);
+	asm volatile("wrmsr" : : "c" (msr), "a"(low), "d" (high) : "memory");
 }
 
 /* Can be uninlined because referenced by paravirt */
@@ -141,8 +103,6 @@ notrace static inline int native_write_msr_safe(unsigned int msr,
 		     : "c" (msr), "0" (low), "d" (high),
 		       [fault] "i" (-EIO)
 		     : "memory");
-	if (msr_tracepoint_active(__tracepoint_write_msr))
-		do_trace_write_msr(msr, ((u64)high << 32 | low), err);
 	return err;
 }
 
@@ -166,6 +126,12 @@ static __always_inline unsigned long long rdtsc(void)
 
 	return EAX_EDX_VAL(val, low, high);
 }
+
+/*
+ * RHEL7: This is only defined to maintain KABI.  New code in the kernel should
+ * not use this function.
+ */
+extern unsigned long long native_read_tsc(void);
 
 /**
  * rdtsc_ordered() - read the current TSC in program order
@@ -200,8 +166,6 @@ static inline unsigned long long native_read_pmc(int counter)
 	DECLARE_ARGS(val, low, high);
 
 	asm volatile("rdpmc" : EAX_EDX_RET(val, low, high) : "c" (counter));
-	if (msr_tracepoint_active(__tracepoint_rdpmc))
-		do_trace_rdpmc(counter, EAX_EDX_VAL(val, low, high), 0);
 	return EAX_EDX_VAL(val, low, high);
 }
 
@@ -230,10 +194,8 @@ static inline void wrmsr(unsigned msr, unsigned low, unsigned high)
 #define rdmsrl(msr, val)			\
 	((val) = native_read_msr((msr)))
 
-static inline void wrmsrl(unsigned msr, u64 val)
-{
-	native_write_msr(msr, (u32)(val & 0xffffffffULL), (u32)(val >> 32));
-}
+#define wrmsrl(msr, val)						\
+	native_write_msr((msr), (u32)((u64)(val)), (u32)((u64)(val) >> 32))
 
 /* wrmsr with exception handling */
 static inline int wrmsr_safe(unsigned msr, unsigned low, unsigned high)
@@ -270,13 +232,8 @@ do {							\
 
 #endif	/* !CONFIG_PARAVIRT */
 
-/*
- * 64-bit version of wrmsr_safe():
- */
-static inline int wrmsrl_safe(u32 msr, u64 val)
-{
-	return wrmsr_safe(msr, (u32)val,  (u32)(val >> 32));
-}
+#define wrmsrl_safe(msr, val) wrmsr_safe((msr), (u32)(val),		\
+					     (u32)((val) >> 32))
 
 #define write_tsc(low, high) wrmsr(MSR_IA32_TSC, (low), (high))
 

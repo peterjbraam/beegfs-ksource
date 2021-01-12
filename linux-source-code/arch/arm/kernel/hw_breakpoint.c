@@ -29,13 +29,14 @@
 #include <linux/hw_breakpoint.h>
 #include <linux/smp.h>
 #include <linux/cpu_pm.h>
-#include <linux/coresight.h>
 
 #include <asm/cacheflush.h>
 #include <asm/cputype.h>
 #include <asm/current.h>
 #include <asm/hw_breakpoint.h>
+#include <asm/kdebug.h>
 #include <asm/traps.h>
+#include <asm/hardware/coresight.h>
 
 /* Breakpoint currently in use for each BRP. */
 static DEFINE_PER_CPU(struct perf_event *, bp_on_reg[ARM_MAX_BRP]);
@@ -112,8 +113,8 @@ static u32 read_wb_reg(int n)
 	GEN_READ_WB_REG_CASES(ARM_OP2_WVR, val);
 	GEN_READ_WB_REG_CASES(ARM_OP2_WCR, val);
 	default:
-		pr_warn("attempt to read from unknown breakpoint register %d\n",
-			n);
+		pr_warning("attempt to read from unknown breakpoint "
+				"register %d\n", n);
 	}
 
 	return val;
@@ -127,8 +128,8 @@ static void write_wb_reg(int n, u32 val)
 	GEN_WRITE_WB_REG_CASES(ARM_OP2_WVR, val);
 	GEN_WRITE_WB_REG_CASES(ARM_OP2_WCR, val);
 	default:
-		pr_warn("attempt to write to unknown breakpoint register %d\n",
-			n);
+		pr_warning("attempt to write to unknown breakpoint "
+				"register %d\n", n);
 	}
 	isb();
 }
@@ -166,7 +167,7 @@ static int debug_arch_supported(void)
 /* Can we determine the watchpoint access type from the fsr? */
 static int debug_exception_updates_fsr(void)
 {
-	return get_debug_arch() >= ARM_DEBUG_ARCH_V8;
+	return 0;
 }
 
 /* Determine number of WRP registers available. */
@@ -256,7 +257,6 @@ static int enable_monitor_mode(void)
 		break;
 	case ARM_DEBUG_ARCH_V7_ECP14:
 	case ARM_DEBUG_ARCH_V7_1:
-	case ARM_DEBUG_ARCH_V8:
 		ARM_DBG_WRITE(c0, c2, 2, (dscr | ARM_DSCR_MDBGEN));
 		isb();
 		break;
@@ -291,7 +291,7 @@ int hw_breakpoint_slots(int type)
 	case TYPE_DATA:
 		return get_num_wrps();
 	default:
-		pr_warn("unknown slot type: %d\n", type);
+		pr_warning("unknown slot type: %d\n", type);
 		return 0;
 	}
 }
@@ -344,13 +344,13 @@ int arch_install_hw_breakpoint(struct perf_event *bp)
 		/* Breakpoint */
 		ctrl_base = ARM_BASE_BCR;
 		val_base = ARM_BASE_BVR;
-		slots = this_cpu_ptr(bp_on_reg);
+		slots = (struct perf_event **)__get_cpu_var(bp_on_reg);
 		max_slots = core_num_brps;
 	} else {
 		/* Watchpoint */
 		ctrl_base = ARM_BASE_WCR;
 		val_base = ARM_BASE_WVR;
-		slots = this_cpu_ptr(wp_on_reg);
+		slots = (struct perf_event **)__get_cpu_var(wp_on_reg);
 		max_slots = core_num_wrps;
 	}
 
@@ -364,7 +364,7 @@ int arch_install_hw_breakpoint(struct perf_event *bp)
 	}
 
 	if (i == max_slots) {
-		pr_warn("Can't find any breakpoint slot\n");
+		pr_warning("Can't find any breakpoint slot\n");
 		return -EBUSY;
 	}
 
@@ -396,12 +396,12 @@ void arch_uninstall_hw_breakpoint(struct perf_event *bp)
 	if (info->ctrl.type == ARM_BREAKPOINT_EXECUTE) {
 		/* Breakpoint */
 		base = ARM_BASE_BCR;
-		slots = this_cpu_ptr(bp_on_reg);
+		slots = (struct perf_event **)__get_cpu_var(bp_on_reg);
 		max_slots = core_num_brps;
 	} else {
 		/* Watchpoint */
 		base = ARM_BASE_WCR;
-		slots = this_cpu_ptr(wp_on_reg);
+		slots = (struct perf_event **)__get_cpu_var(wp_on_reg);
 		max_slots = core_num_wrps;
 	}
 
@@ -416,7 +416,7 @@ void arch_uninstall_hw_breakpoint(struct perf_event *bp)
 	}
 
 	if (i == max_slots) {
-		pr_warn("Can't find any breakpoint slot\n");
+		pr_warning("Can't find any breakpoint slot\n");
 		return;
 	}
 
@@ -688,68 +688,26 @@ static void disable_single_step(struct perf_event *bp)
 	arch_install_hw_breakpoint(bp);
 }
 
-/*
- * Arm32 hardware does not always report a watchpoint hit address that matches
- * one of the watchpoints set. It can also report an address "near" the
- * watchpoint if a single instruction access both watched and unwatched
- * addresses. There is no straight-forward way, short of disassembling the
- * offending instruction, to map that address back to the watchpoint. This
- * function computes the distance of the memory access from the watchpoint as a
- * heuristic for the likelyhood that a given access triggered the watchpoint.
- *
- * See this same function in the arm64 platform code, which has the same
- * problem.
- *
- * The function returns the distance of the address from the bytes watched by
- * the watchpoint. In case of an exact match, it returns 0.
- */
-static u32 get_distance_from_watchpoint(unsigned long addr, u32 val,
-					struct arch_hw_breakpoint_ctrl *ctrl)
-{
-	u32 wp_low, wp_high;
-	u32 lens, lene;
-
-	lens = __ffs(ctrl->len);
-	lene = __fls(ctrl->len);
-
-	wp_low = val + lens;
-	wp_high = val + lene;
-	if (addr < wp_low)
-		return wp_low - addr;
-	else if (addr > wp_high)
-		return addr - wp_high;
-	else
-		return 0;
-}
-
-static int watchpoint_fault_on_uaccess(struct pt_regs *regs,
-				       struct arch_hw_breakpoint *info)
-{
-	return !user_mode(regs) && info->ctrl.privilege == ARM_BREAKPOINT_USER;
-}
-
 static void watchpoint_handler(unsigned long addr, unsigned int fsr,
 			       struct pt_regs *regs)
 {
-	int i, access, closest_match = 0;
-	u32 min_dist = -1, dist;
-	u32 val, ctrl_reg;
+	int i, access;
+	u32 val, ctrl_reg, alignment_mask;
 	struct perf_event *wp, **slots;
 	struct arch_hw_breakpoint *info;
 	struct arch_hw_breakpoint_ctrl ctrl;
 
-	slots = this_cpu_ptr(wp_on_reg);
+	slots = (struct perf_event **)__get_cpu_var(wp_on_reg);
 
-	/*
-	 * Find all watchpoints that match the reported address. If no exact
-	 * match is found. Attribute the hit to the closest watchpoint.
-	 */
-	rcu_read_lock();
 	for (i = 0; i < core_num_wrps; ++i) {
-		wp = slots[i];
-		if (wp == NULL)
-			continue;
+		rcu_read_lock();
 
+		wp = slots[i];
+
+		if (wp == NULL)
+			goto unlock;
+
+		info = counter_arch_bp(wp);
 		/*
 		 * The DFAR is an unknown value on debug architectures prior
 		 * to 7.1. Since we only allow a single watchpoint on these
@@ -758,69 +716,50 @@ static void watchpoint_handler(unsigned long addr, unsigned int fsr,
 		 */
 		if (debug_arch < ARM_DEBUG_ARCH_V7_1) {
 			BUG_ON(i > 0);
-			info = counter_arch_bp(wp);
 			info->trigger = wp->attr.bp_addr;
 		} else {
+			if (info->ctrl.len == ARM_BREAKPOINT_LEN_8)
+				alignment_mask = 0x7;
+			else
+				alignment_mask = 0x3;
+
+			/* Check if the watchpoint value matches. */
+			val = read_wb_reg(ARM_BASE_WVR + i);
+			if (val != (addr & ~alignment_mask))
+				goto unlock;
+
+			/* Possible match, check the byte address select. */
+			ctrl_reg = read_wb_reg(ARM_BASE_WCR + i);
+			decode_ctrl_reg(ctrl_reg, &ctrl);
+			if (!((1 << (addr & alignment_mask)) & ctrl.len))
+				goto unlock;
+
 			/* Check that the access type matches. */
 			if (debug_exception_updates_fsr()) {
 				access = (fsr & ARM_FSR_ACCESS_MASK) ?
 					  HW_BREAKPOINT_W : HW_BREAKPOINT_R;
 				if (!(access & hw_breakpoint_type(wp)))
-					continue;
+					goto unlock;
 			}
-
-			val = read_wb_reg(ARM_BASE_WVR + i);
-			ctrl_reg = read_wb_reg(ARM_BASE_WCR + i);
-			decode_ctrl_reg(ctrl_reg, &ctrl);
-			dist = get_distance_from_watchpoint(addr, val, &ctrl);
-			if (dist < min_dist) {
-				min_dist = dist;
-				closest_match = i;
-			}
-			/* Is this an exact match? */
-			if (dist != 0)
-				continue;
 
 			/* We have a winner. */
-			info = counter_arch_bp(wp);
 			info->trigger = addr;
 		}
 
 		pr_debug("watchpoint fired: address = 0x%x\n", info->trigger);
-
-		/*
-		 * If we triggered a user watchpoint from a uaccess routine,
-		 * then handle the stepping ourselves since userspace really
-		 * can't help us with this.
-		 */
-		if (watchpoint_fault_on_uaccess(regs, info))
-			goto step;
-
 		perf_bp_event(wp, regs);
 
 		/*
-		 * Defer stepping to the overflow handler if one is installed.
-		 * Otherwise, insert a temporary mismatch breakpoint so that
-		 * we can single-step over the watchpoint trigger.
+		 * If no overflow handler is present, insert a temporary
+		 * mismatch breakpoint so we can single-step over the
+		 * watchpoint trigger.
 		 */
-		if (!is_default_overflow_handler(wp))
-			continue;
-step:
-		enable_single_step(wp, instruction_pointer(regs));
-	}
-
-	if (min_dist > 0 && min_dist != -1) {
-		/* No exact match found. */
-		wp = slots[closest_match];
-		info = counter_arch_bp(wp);
-		info->trigger = addr;
-		pr_debug("watchpoint fired: address = 0x%x\n", info->trigger);
-		perf_bp_event(wp, regs);
 		if (is_default_overflow_handler(wp))
 			enable_single_step(wp, instruction_pointer(regs));
-	}
 
-	rcu_read_unlock();
+unlock:
+		rcu_read_unlock();
+	}
 }
 
 static void watchpoint_single_step_handler(unsigned long pc)
@@ -829,7 +768,7 @@ static void watchpoint_single_step_handler(unsigned long pc)
 	struct perf_event *wp, **slots;
 	struct arch_hw_breakpoint *info;
 
-	slots = this_cpu_ptr(wp_on_reg);
+	slots = (struct perf_event **)__get_cpu_var(wp_on_reg);
 
 	for (i = 0; i < core_num_wrps; ++i) {
 		rcu_read_lock();
@@ -863,7 +802,7 @@ static void breakpoint_handler(unsigned long unknown, struct pt_regs *regs)
 	struct arch_hw_breakpoint *info;
 	struct arch_hw_breakpoint_ctrl ctrl;
 
-	slots = this_cpu_ptr(bp_on_reg);
+	slots = (struct perf_event **)__get_cpu_var(bp_on_reg);
 
 	/* The exception entry code places the amended lr in the PC. */
 	addr = regs->ARM_pc;
@@ -954,8 +893,8 @@ static int debug_reg_trap(struct pt_regs *regs, unsigned int instr)
 {
 	int cpu = smp_processor_id();
 
-	pr_warn("Debug register access (0x%x) caused undefined instruction on CPU %d\n",
-		instr, cpu);
+	pr_warning("Debug register access (0x%x) caused undefined instruction on CPU %d\n",
+		   instr, cpu);
 
 	/* Set the error flag for this CPU and skip the faulting instruction. */
 	cpumask_set_cpu(cpu, &debug_err_mask);
@@ -1036,7 +975,7 @@ static void reset_ctrl_regs(void *unused)
 	 * Unconditionally clear the OS lock by writing a value
 	 * other than CS_LAR_KEY to the access register.
 	 */
-	ARM_DBG_WRITE(c1, c0, 4, ~CORESIGHT_UNLOCK);
+	ARM_DBG_WRITE(c1, c0, 4, ~CS_LAR_KEY);
 	isb();
 
 	/*
@@ -1081,7 +1020,7 @@ out_mdbgen:
 		cpumask_or(&debug_err_mask, &debug_err_mask, cpumask_of(cpu));
 }
 
-static int dbg_reset_notify(struct notifier_block *self,
+static int __cpuinit dbg_reset_notify(struct notifier_block *self,
 				      unsigned long action, void *cpu)
 {
 	if ((action & ~CPU_TASKS_FROZEN) == CPU_ONLINE)
@@ -1090,7 +1029,7 @@ static int dbg_reset_notify(struct notifier_block *self,
 	return NOTIFY_OK;
 }
 
-static struct notifier_block dbg_reset_nb = {
+static struct notifier_block __cpuinitdata dbg_reset_nb = {
 	.notifier_call = dbg_reset_notify,
 };
 
@@ -1127,29 +1066,11 @@ static int __init arch_hw_breakpoint_init(void)
 		return 0;
 	}
 
-	/*
-	 * Scorpion CPUs (at least those in APQ8060) seem to set DBGPRSR.SPD
-	 * whenever a WFI is issued, even if the core is not powered down, in
-	 * violation of the architecture.  When DBGPRSR.SPD is set, accesses to
-	 * breakpoint and watchpoint registers are treated as undefined, so
-	 * this results in boot time and runtime failures when these are
-	 * accessed and we unexpectedly take a trap.
-	 *
-	 * It's not clear if/how this can be worked around, so we blacklist
-	 * Scorpion CPUs to avoid these issues.
-	*/
-	if (read_cpuid_part() == ARM_CPU_PART_SCORPION) {
-		pr_info("Scorpion CPU detected. Hardware breakpoints and watchpoints disabled\n");
-		return 0;
-	}
-
 	has_ossr = core_has_os_save_restore();
 
 	/* Determine how many BRPs/WRPs are available. */
 	core_num_brps = get_num_brps();
 	core_num_wrps = get_num_wrps();
-
-	cpu_notifier_register_begin();
 
 	/*
 	 * We need to tread carefully here because DBGSWENABLE may be
@@ -1167,7 +1088,6 @@ static int __init arch_hw_breakpoint_init(void)
 	if (!cpumask_empty(&debug_err_mask)) {
 		core_num_brps = 0;
 		core_num_wrps = 0;
-		cpu_notifier_register_done();
 		return 0;
 	}
 
@@ -1187,10 +1107,7 @@ static int __init arch_hw_breakpoint_init(void)
 			TRAP_HWBKPT, "breakpoint debug exception");
 
 	/* Register hotplug and PM notifiers. */
-	__register_cpu_notifier(&dbg_reset_nb);
-
-	cpu_notifier_register_done();
-
+	register_cpu_notifier(&dbg_reset_nb);
 	pm_init();
 	return 0;
 }

@@ -69,7 +69,6 @@ static int ccp_get_msix_irqs(struct ccp_device *ccp)
 			goto e_irq;
 		}
 	}
-	ccp->use_tasklet = true;
 
 	return 0;
 
@@ -101,7 +100,6 @@ static int ccp_get_msi_irq(struct ccp_device *ccp)
 		dev_notice(dev, "unable to allocate MSI IRQ (%d)\n", ret);
 		goto e_msi;
 	}
-	ccp->use_tasklet = true;
 
 	return 0;
 
@@ -325,7 +323,7 @@ static int ccp_pci_resume(struct pci_dev *pdev)
 }
 #endif
 
-static const struct pci_device_id ccp_pci_table[] = {
+static DEFINE_PCI_DEVICE_TABLE(ccp_pci_table) = {
 	{ PCI_VDEVICE(AMD, 0x1537), (kernel_ulong_t)&ccpv3 },
 	{ PCI_VDEVICE(AMD, 0x1456), (kernel_ulong_t)&ccpv5a },
 	{ PCI_VDEVICE(AMD, 0x1468), (kernel_ulong_t)&ccpv5b },

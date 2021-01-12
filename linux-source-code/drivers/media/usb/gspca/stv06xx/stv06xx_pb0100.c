@@ -198,10 +198,6 @@ static int pb0100_start(struct sd *sd)
 	alt = usb_altnum_to_altsetting(intf, sd->gspca_dev.alt);
 	if (!alt)
 		return -ENODEV;
-
-	if (alt->desc.bNumEndpoints < 1)
-		return -ENODEV;
-
 	packet_size = le16_to_cpu(alt->endpoint[0].desc.wMaxPacketSize);
 
 	/* If we don't have enough bandwidth use a lower framerate */
@@ -425,7 +421,7 @@ static int pb0100_set_autogain_target(struct gspca_dev *gspca_dev, __s32 val)
 
 	/* Number of pixels counted by the sensor when subsampling the pixels.
 	 * Slightly larger than the real value to avoid oscillation */
-	totalpixels = gspca_dev->pixfmt.width * gspca_dev->pixfmt.height;
+	totalpixels = gspca_dev->width * gspca_dev->height;
 	totalpixels = totalpixels/(8*8) + totalpixels/(64*64);
 
 	brightpixels = (totalpixels * val) >> 8;

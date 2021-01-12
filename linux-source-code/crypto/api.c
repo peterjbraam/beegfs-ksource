@@ -195,9 +195,21 @@ static struct crypto_alg *crypto_larval_wait(struct crypto_alg *alg)
 struct crypto_alg *crypto_alg_lookup(const char *name, u32 type, u32 mask)
 {
 	struct crypto_alg *alg;
+	u32 test = 0;
+
+	if (!((type | mask) & CRYPTO_ALG_TESTED))
+		test |= CRYPTO_ALG_TESTED;
 
 	down_read(&crypto_alg_sem);
-	alg = __crypto_alg_lookup(name, type, mask);
+	alg = __crypto_alg_lookup(name, type | test, mask | test);
+	if (!alg && test) {
+		alg = __crypto_alg_lookup(name, type, mask);
+		if (alg && !crypto_is_larval(alg)) {
+			/* Test failed */
+			crypto_mod_put(alg);
+			alg = ERR_PTR(-ELIBBAD);
+		}
+	}
 	up_read(&crypto_alg_sem);
 
 	return alg;
@@ -215,7 +227,7 @@ struct crypto_alg *crypto_larval_lookup(const char *name, u32 type, u32 mask)
 	type &= mask;
 
 	alg = crypto_alg_lookup(name, type, mask);
-	if (!alg && !(mask & CRYPTO_NOLOAD)) {
+	if (!alg) {
 		request_module("crypto-%s", name);
 
 		if (!((type ^ CRYPTO_ALG_NEED_FALLBACK) & mask &
@@ -225,10 +237,12 @@ struct crypto_alg *crypto_larval_lookup(const char *name, u32 type, u32 mask)
 		alg = crypto_alg_lookup(name, type, mask);
 	}
 
-	if (alg)
-		return crypto_is_larval(alg) ? crypto_larval_wait(alg) : alg;
+	if (!IS_ERR_OR_NULL(alg) && crypto_is_larval(alg))
+		alg = crypto_larval_wait(alg);
+	else if (!alg)
+		alg = crypto_larval_add(name, type, mask);
 
-	return crypto_larval_add(name, type, mask);
+	return alg;
 }
 EXPORT_SYMBOL_GPL(crypto_larval_lookup);
 
@@ -251,11 +265,6 @@ struct crypto_alg *crypto_alg_mod_lookup(const char *name, u32 type, u32 mask)
 	struct crypto_alg *alg;
 	struct crypto_alg *larval;
 	int ok;
-
-	if (!((type | mask) & CRYPTO_ALG_TESTED)) {
-		type |= CRYPTO_ALG_TESTED;
-		mask |= CRYPTO_ALG_TESTED;
-	}
 
 	/*
 	 * If the internal flag is set for a cipher, require a caller to
@@ -355,12 +364,13 @@ static unsigned int crypto_ctxsize(struct crypto_alg *alg, u32 type, u32 mask)
 	return len;
 }
 
-static void crypto_shoot_alg(struct crypto_alg *alg)
+void crypto_shoot_alg(struct crypto_alg *alg)
 {
 	down_write(&crypto_alg_sem);
 	alg->cra_flags |= CRYPTO_ALG_DYING;
 	up_write(&crypto_alg_sem);
 }
+EXPORT_SYMBOL_GPL(crypto_shoot_alg);
 
 struct crypto_tfm *__crypto_alloc_tfm(struct crypto_alg *alg, u32 type,
 				      u32 mask)
@@ -405,7 +415,7 @@ EXPORT_SYMBOL_GPL(__crypto_alloc_tfm);
  *	@mask: Mask for type comparison
  *
  *	This function should not be used by new algorithm types.
- *	Please use crypto_alloc_tfm instead.
+ *	Plesae use crypto_alloc_tfm instead.
  *
  *	crypto_alloc_base() will first attempt to locate an already loaded
  *	algorithm.  If that fails and the kernel supports dynamically loadable

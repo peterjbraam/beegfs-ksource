@@ -49,21 +49,17 @@ static irqreturn_t itg3200_trigger_handler(int irq, void *p)
 	struct iio_poll_func *pf = p;
 	struct iio_dev *indio_dev = pf->indio_dev;
 	struct itg3200 *st = iio_priv(indio_dev);
-	/*
-	 * Ensure correct alignment and padding including for the
-	 * timestamp that may be inserted.
-	 */
-	struct {
-		__be16 buf[ITG3200_SCAN_ELEMENTS];
-		s64 ts __aligned(8);
-	} scan;
+	__be16 buf[ITG3200_SCAN_ELEMENTS + sizeof(s64)/sizeof(u16)];
 
-	int ret = itg3200_read_all_channels(st->i2c, scan.buf);
+	int ret = itg3200_read_all_channels(st->i2c, buf);
 	if (ret < 0)
 		goto error_ret;
 
-	iio_push_to_buffers_with_timestamp(indio_dev, &scan, pf->timestamp);
+	if (indio_dev->scan_timestamp)
+		memcpy(buf + indio_dev->scan_bytes - sizeof(s64),
+				&pf->timestamp, sizeof(pf->timestamp));
 
+	iio_push_to_buffers(indio_dev, buf);
 	iio_trigger_notify_done(indio_dev->trig);
 
 error_ret:
@@ -139,7 +135,7 @@ int itg3200_probe_trigger(struct iio_dev *indio_dev)
 		goto error_free_irq;
 
 	/* select default trigger */
-	indio_dev->trig = iio_trigger_get(st->trig);
+	indio_dev->trig = st->trig;
 
 	return 0;
 

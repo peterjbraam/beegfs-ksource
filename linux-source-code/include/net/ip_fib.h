@@ -19,6 +19,7 @@
 #include <net/flow.h>
 #include <linux/seq_file.h>
 #include <linux/rcupdate.h>
+#include <net/fib_notifier.h>
 #include <net/fib_rules.h>
 #include <net/inetpeer.h>
 #include <linux/percpu.h>
@@ -113,7 +114,6 @@ struct fib_info {
 	unsigned char		fib_scope;
 	unsigned char		fib_type;
 	__be32			fib_prefsrc;
-	u32			fib_tb_id;
 	u32			fib_priority;
 	struct dst_metrics	*fib_metrics;
 #define fib_mtu fib_metrics->metrics[RTAX_MTU-1]
@@ -200,10 +200,6 @@ static inline void fib_info_offload_dec(struct fib_info *fi)
 #define FIB_RES_PREFSRC(net, res)	((res).fi->fib_prefsrc ? : \
 					 FIB_RES_SADDR(net, res))
 
-struct fib_notifier_info {
-	struct net *net;
-};
-
 struct fib_entry_notifier_info {
 	struct fib_notifier_info info; /* must be first */
 	u32 dst;
@@ -212,24 +208,33 @@ struct fib_entry_notifier_info {
 	u8 tos;
 	u8 type;
 	u32 tb_id;
-	u32 nlflags;
 };
 
-enum fib_event_type {
-	FIB_EVENT_ENTRY_ADD,
-	FIB_EVENT_ENTRY_DEL,
-	FIB_EVENT_RULE_ADD,
-	FIB_EVENT_RULE_DEL,
+struct fib_nh_notifier_info {
+	struct fib_notifier_info info; /* must be first */
+	struct fib_nh *fib_nh;
 };
 
-int register_fib_notifier(struct notifier_block *nb);
-int unregister_fib_notifier(struct notifier_block *nb);
-int call_fib_notifiers(struct net *net, enum fib_event_type event_type,
+int call_fib4_notifier(struct notifier_block *nb, struct net *net,
+		       enum fib_event_type event_type,
 		       struct fib_notifier_info *info);
+int call_fib4_notifiers(struct net *net, enum fib_event_type event_type,
+			struct fib_notifier_info *info);
+
+int __net_init fib4_notifier_init(struct net *net);
+void __net_exit fib4_notifier_exit(struct net *net);
+
+void fib_notify(struct net *net, struct notifier_block *nb);
 
 struct fib_table {
 	struct hlist_node	tb_hlist;
 	u32			tb_id;
+	/* Remove the field would cause some functions checksum changed,
+	 * which may affect some customers' symbol list. Use
+	 * RH_KABI_DEPRECATE is just a courtesy and the struct is not kABI
+	 * frozen
+	 */
+	RH_KABI_DEPRECATE(int,	tb_default)
 	int			tb_num_default;
 	struct rcu_head		rcu;
 	unsigned long 		*tb_data;
@@ -272,7 +277,7 @@ static inline struct fib_table *fib_new_table(struct net *net, u32 id)
 }
 
 static inline int fib_lookup(struct net *net, const struct flowi4 *flp,
-			     struct fib_result *res, unsigned int flags)
+			     struct fib_result *res)
 {
 	struct fib_table *tb;
 	int err = -ENETUNREACH;
@@ -281,7 +286,7 @@ static inline int fib_lookup(struct net *net, const struct flowi4 *flp,
 
 	tb = fib_get_table(net, RT_TABLE_MAIN);
 	if (tb)
-		err = fib_table_lookup(tb, flp, res, flags | FIB_LOOKUP_NOREF);
+		err = fib_table_lookup(tb, flp, res, FIB_LOOKUP_NOREF);
 
 	if (err == -EAGAIN)
 		err = -ENETUNREACH;
@@ -289,6 +294,21 @@ static inline int fib_lookup(struct net *net, const struct flowi4 *flp,
 	rcu_read_unlock();
 
 	return err;
+}
+
+static inline bool fib4_rule_default(const struct fib_rule *rule)
+{
+	return true;
+}
+
+static inline int fib4_rules_dump(struct net *net, struct notifier_block *nb)
+{
+	return 0;
+}
+
+static inline unsigned int fib4_rules_seq_read(struct net *net)
+{
+	return 0;
 }
 
 #else /* CONFIG_IP_MULTIPLE_TABLES */
@@ -298,18 +318,16 @@ void __net_exit fib4_rules_exit(struct net *net);
 struct fib_table *fib_new_table(struct net *net, u32 id);
 struct fib_table *fib_get_table(struct net *net, u32 id);
 
-int __fib_lookup(struct net *net, struct flowi4 *flp,
-		 struct fib_result *res, unsigned int flags);
+int __fib_lookup(struct net *net, struct flowi4 *flp, struct fib_result *res);
 
 static inline int fib_lookup(struct net *net, struct flowi4 *flp,
-			     struct fib_result *res, unsigned int flags)
+			     struct fib_result *res)
 {
 	struct fib_table *tb;
 	int err = -ENETUNREACH;
 
-	flags |= FIB_LOOKUP_NOREF;
 	if (net->ipv4.fib_has_custom_rules)
-		return __fib_lookup(net, flp, res, flags);
+		return __fib_lookup(net, flp, res);
 
 	rcu_read_lock();
 
@@ -317,14 +335,14 @@ static inline int fib_lookup(struct net *net, struct flowi4 *flp,
 
 	tb = rcu_dereference_rtnl(net->ipv4.fib_main);
 	if (tb)
-		err = fib_table_lookup(tb, flp, res, flags);
+		err = fib_table_lookup(tb, flp, res, FIB_LOOKUP_NOREF);
 
 	if (!err)
 		goto out;
 
 	tb = rcu_dereference_rtnl(net->ipv4.fib_default);
 	if (tb)
-		err = fib_table_lookup(tb, flp, res, flags);
+		err = fib_table_lookup(tb, flp, res, FIB_LOOKUP_NOREF);
 
 out:
 	if (err == -EAGAIN)
@@ -334,6 +352,10 @@ out:
 
 	return err;
 }
+
+bool fib4_rule_default(const struct fib_rule *rule);
+int fib4_rules_dump(struct net *net, struct notifier_block *nb);
+unsigned int fib4_rules_seq_read(struct net *net);
 
 #endif /* CONFIG_IP_MULTIPLE_TABLES */
 
@@ -360,22 +382,18 @@ int fib_unmerge(struct net *net);
 
 /* Exported by fib_semantics.c */
 int ip_fib_check_default(__be32 gw, struct net_device *dev);
-int fib_sync_down_dev(struct net_device *dev, unsigned long event, bool force);
-int fib_sync_down_addr(struct net_device *dev, __be32 local);
-int fib_sync_up(struct net_device *dev, unsigned int nh_flags);
+int fib_sync_down_dev(struct net_device *dev, int force);
+int fib_sync_down_addr(struct net *net, __be32 local);
+int fib_sync_up(struct net_device *dev);
 void fib_sync_mtu(struct net_device *dev, u32 orig_mtu);
 
-extern u32 fib_multipath_secret __read_mostly;
-
-static inline int fib_multipath_hash(__be32 saddr, __be32 daddr)
-{
-	return jhash_2words((__force u32)saddr, (__force u32)daddr,
-			    fib_multipath_secret) >> 1;
-}
-
+#ifdef CONFIG_IP_ROUTE_MULTIPATH
+int fib_multipath_hash(const struct fib_info *fi, const struct flowi4 *fl4,
+		       const struct sk_buff *skb);
+#endif
 void fib_select_multipath(struct fib_result *res, int hash);
 void fib_select_path(struct net *net, struct fib_result *res,
-		     struct flowi4 *fl4, int mp_hash);
+		     struct flowi4 *fl4, const struct sk_buff *skb);
 
 /* Exported by fib_trie.c */
 void fib_trie_init(void);
@@ -398,6 +416,11 @@ static inline void fib_combine_itag(u32 *itag, const struct fib_result *res)
 }
 
 void free_fib_info(struct fib_info *fi);
+
+static inline void fib_info_hold(struct fib_info *fi)
+{
+	atomic_inc(&fi->fib_clntref);
+}
 
 static inline void fib_info_put(struct fib_info *fi)
 {

@@ -115,25 +115,9 @@ void iio_trigger_unregister(struct iio_trigger *trig_info)
 
 	ida_simple_remove(&iio_trigger_ida, trig_info->id);
 	/* Possible issue in here */
-	device_del(&trig_info->dev);
+	device_unregister(&trig_info->dev);
 }
 EXPORT_SYMBOL(iio_trigger_unregister);
-
-int iio_trigger_set_immutable(struct iio_dev *indio_dev, struct iio_trigger *trig)
-{
-	if (!indio_dev || !trig)
-		return -EINVAL;
-
-	mutex_lock(&indio_dev->mlock);
-	WARN_ON(indio_dev->trig_readonly);
-
-	indio_dev->trig = iio_trigger_get(trig);
-	indio_dev->trig_readonly = true;
-	mutex_unlock(&indio_dev->mlock);
-
-	return 0;
-}
-EXPORT_SYMBOL(iio_trigger_set_immutable);
 
 /* Search for trigger by name, assuming iio_trigger_list_lock held */
 static struct iio_trigger *__iio_trigger_find_by_name(const char *name)
@@ -265,7 +249,7 @@ static int iio_trigger_attach_poll_func(struct iio_trigger *trig,
 		goto out_put_irq;
 
 	/* Enable trigger in driver */
-	if (trig->ops->set_trigger_state && notinuse) {
+	if (trig->ops && trig->ops->set_trigger_state && notinuse) {
 		ret = trig->ops->set_trigger_state(trig, true);
 		if (ret < 0)
 			goto out_free_irq;
@@ -315,7 +299,7 @@ static int iio_trigger_detach_poll_func(struct iio_trigger *trig,
 irqreturn_t iio_pollfunc_store_time(int irq, void *p)
 {
 	struct iio_poll_func *pf = p;
-	pf->timestamp = iio_get_time_ns(pf->indio_dev);
+	pf->timestamp = iio_get_time_ns();
 	return IRQ_WAKE_THREAD;
 }
 EXPORT_SYMBOL(iio_pollfunc_store_time);
@@ -409,10 +393,6 @@ static ssize_t iio_trigger_write_current(struct device *dev,
 	if (indio_dev->currentmode == INDIO_BUFFER_TRIGGERED) {
 		mutex_unlock(&indio_dev->mlock);
 		return -EBUSY;
-	}
-	if (indio_dev->trig_readonly) {
-		mutex_unlock(&indio_dev->mlock);
-		return -EPERM;
 	}
 	mutex_unlock(&indio_dev->mlock);
 
@@ -716,6 +696,27 @@ bool iio_trigger_using_own(struct iio_dev *indio_dev)
 	return indio_dev->trig->attached_own_device;
 }
 EXPORT_SYMBOL(iio_trigger_using_own);
+
+/**
+ * iio_trigger_validate_own_device - Check if a trigger and IIO device belong to
+ *  the same device
+ * @trig: The IIO trigger to check
+ * @indio_dev: the IIO device to check
+ *
+ * This function can be used as the validate_device callback for triggers that
+ * can only be attached to their own device.
+ *
+ * Return: 0 if both the trigger and the IIO device belong to the same
+ * device, -EINVAL otherwise.
+ */
+int iio_trigger_validate_own_device(struct iio_trigger *trig,
+	struct iio_dev *indio_dev)
+{
+	if (indio_dev->dev.parent != trig->dev.parent)
+		return -EINVAL;
+	return 0;
+}
+EXPORT_SYMBOL(iio_trigger_validate_own_device);
 
 void iio_device_register_trigger_consumer(struct iio_dev *indio_dev)
 {

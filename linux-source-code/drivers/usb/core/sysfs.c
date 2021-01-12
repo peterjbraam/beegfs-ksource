@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * drivers/usb/core/sysfs.c
  *
@@ -7,6 +8,7 @@
  *
  * All of the sysfs file attributes for usb devices and interfaces.
  *
+ * Released under the GPLv2 only.
  */
 
 
@@ -14,6 +16,7 @@
 #include <linux/string.h>
 #include <linux/usb.h>
 #include <linux/usb/quirks.h>
+#include <linux/of.h>
 #include "usb.h"
 
 /* Active configuration fields */
@@ -104,6 +107,17 @@ static ssize_t bConfigurationValue_store(struct device *dev,
 static DEVICE_ATTR_IGNORE_LOCKDEP(bConfigurationValue, S_IRUGO | S_IWUSR,
 		bConfigurationValue_show, bConfigurationValue_store);
 
+#ifdef CONFIG_OF
+static ssize_t devspec_show(struct device *dev, struct device_attribute *attr,
+			    char *buf)
+{
+	struct device_node *of_node = dev->of_node;
+
+	return sprintf(buf, "%pOF\n", of_node);
+}
+static DEVICE_ATTR_RO(devspec);
+#endif
+
 /* String fields */
 #define usb_string_attr(name)						\
 static ssize_t  name##_show(struct device *dev,				\
@@ -160,6 +174,26 @@ static ssize_t speed_show(struct device *dev, struct device_attribute *attr,
 	return sprintf(buf, "%s\n", speed);
 }
 static DEVICE_ATTR_RO(speed);
+
+static ssize_t rx_lanes_show(struct device *dev, struct device_attribute *attr,
+			  char *buf)
+{
+	struct usb_device *udev;
+
+	udev = to_usb_device(dev);
+	return sprintf(buf, "%d\n", udev->rx_lanes);
+}
+static DEVICE_ATTR_RO(rx_lanes);
+
+static ssize_t tx_lanes_show(struct device *dev, struct device_attribute *attr,
+			  char *buf)
+{
+	struct usb_device *udev;
+
+	udev = to_usb_device(dev);
+	return sprintf(buf, "%d\n", udev->tx_lanes);
+}
+static DEVICE_ATTR_RO(tx_lanes);
 
 static ssize_t busnum_show(struct device *dev, struct device_attribute *attr,
 			   char *buf)
@@ -494,10 +528,7 @@ static ssize_t usb2_hardware_lpm_store(struct device *dev,
 
 	if (!ret) {
 		udev->usb2_hw_lpm_allowed = value;
-		if (value)
-			ret = usb_enable_usb2_hardware_lpm(udev);
-		else
-			ret = usb_disable_usb2_hardware_lpm(udev);
+		ret = usb_set_usb2_hardware_lpm(udev, value);
 	}
 
 	usb_unlock_device(udev);
@@ -643,7 +674,8 @@ static int add_power_attributes(struct device *dev)
 		if (udev->usb2_hw_lpm_capable == 1)
 			rc = sysfs_merge_group(&dev->kobj,
 					&usb2_hardware_lpm_attr_group);
-		if (udev->speed == USB_SPEED_SUPER &&
+		if ((udev->speed == USB_SPEED_SUPER ||
+		     udev->speed == USB_SPEED_SUPER_PLUS) &&
 				udev->lpm_capable == 1)
 			rc = sysfs_merge_group(&dev->kobj,
 					&usb3_hardware_lpm_attr_group);
@@ -778,6 +810,8 @@ static struct attribute *dev_attrs[] = {
 	&dev_attr_bNumConfigurations.attr,
 	&dev_attr_bMaxPacketSize0.attr,
 	&dev_attr_speed.attr,
+	&dev_attr_rx_lanes.attr,
+	&dev_attr_tx_lanes.attr,
 	&dev_attr_busnum.attr,
 	&dev_attr_devnum.attr,
 	&dev_attr_devpath.attr,
@@ -789,6 +823,9 @@ static struct attribute *dev_attrs[] = {
 	&dev_attr_remove.attr,
 	&dev_attr_removable.attr,
 	&dev_attr_ltm_capable.attr,
+#ifdef CONFIG_OF
+	&dev_attr_devspec.attr,
+#endif
 	NULL,
 };
 static struct attribute_group dev_attr_grp = {
@@ -848,11 +885,7 @@ read_descriptors(struct file *filp, struct kobject *kobj,
 	size_t srclen, n;
 	int cfgno;
 	void *src;
-	int retval;
 
-	retval = usb_lock_device_interruptible(udev);
-	if (retval < 0)
-		return -EINTR;
 	/* The binary attribute begins with the device descriptor.
 	 * Following that are the raw descriptor entries for all the
 	 * configurations (config plus subsidiary descriptors).
@@ -877,7 +910,6 @@ read_descriptors(struct file *filp, struct kobject *kobj,
 			off -= srclen;
 		}
 	}
-	usb_unlock_device(udev);
 	return count - nleft;
 }
 

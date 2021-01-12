@@ -15,10 +15,27 @@
 #define __pa(x)  ((unsigned long)(x))
 #define __va(x)  ((void *)((unsigned long)(x)))
 
+/*
+ * The pgtable.h and mm/ident_map.c includes make use of the SME related
+ * information which is not used in the compressed image support. Un-define
+ * the SME support to avoid any compile and link errors.
+ */
+#undef CONFIG_AMD_MEM_ENCRYPT
+
 #include "misc.h"
 
 /* These actually do the work of building the kernel identity maps. */
 #include <asm/init.h>
+
+/* This disables the mm tracking functions during boot stage */
+#define __X86_64_MMTRACK_H__
+static inline void mm_track_pte(pte_t *ptep)	{}
+static inline void mm_track_pmd(pmd_t *pmdp)	{}
+static inline void mm_track_pud(pud_t *pudp)	{}
+static inline void mm_track_pgd(pgd_t *pgdp) 	{}
+static inline void mm_track_phys(void *physp)	{}
+static inline int harvest_user(void) { return 0; }
+
 #include <asm/pgtable.h>
 /* Use the static base for this part of the boot process */
 #undef __PAGE_OFFSET
@@ -69,16 +86,18 @@ static unsigned long level4p;
  * Mapping information structure passed to kernel_ident_mapping_init().
  * Due to relocation, pointers must be assigned at run time not build time.
  */
-static struct x86_mapping_info mapping_info = {
-	.pmd_flag       = __PAGE_KERNEL_LARGE_EXEC,
-};
+static struct x86_mapping_info mapping_info;
 
 /* Locates and clears a region for a new top level page table. */
 void initialize_identity_maps(void)
 {
+	unsigned long sev_me_mask = get_sev_encryption_mask();
+
 	/* Init mapping_info with run-time function/buffer pointers. */
 	mapping_info.alloc_pgt_page = alloc_pgt_page;
 	mapping_info.context = &pgt_data;
+	mapping_info.page_flag = __PAGE_KERNEL_LARGE_EXEC | sev_me_mask;
+	mapping_info.kernpg_flag = _KERNPG_TABLE | sev_me_mask;
 
 	/*
 	 * It should be impossible for this not to already be true,

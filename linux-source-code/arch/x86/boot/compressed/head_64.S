@@ -27,6 +27,8 @@
 #include <linux/init.h>
 #include <linux/linkage.h>
 #include <asm/segment.h>
+#include <asm/pgtable_types.h>
+#include <asm/page_types.h>
 #include <asm/boot.h>
 #include <asm/msr.h>
 #include <asm/processor-flags.h>
@@ -40,7 +42,6 @@
 	.hidden _ebss
 	.hidden _got
 	.hidden _egot
-	.hidden _end
 
 	__HEAD
 	.code32
@@ -105,7 +106,7 @@ ENTRY(startup_32)
 	notl	%eax
 	andl	%eax, %ebx
 	cmpl	$LOAD_PHYSICAL_ADDR, %ebx
-	jae	1f
+	jge	1f
 #endif
 	movl	$LOAD_PHYSICAL_ADDR, %ebx
 1:
@@ -132,6 +133,19 @@ ENTRY(startup_32)
  /*
   * Build early 4G boot pagetable
   */
+	/*
+	 * If SEV is active then set the encryption mask in the page tables.
+	 * This will insure that when the kernel is copied and decompressed
+	 * it will be done so encrypted.
+	 */
+	call	get_sev_encryption_bit
+	xorl	%edx, %edx
+	testl	%eax, %eax
+	jz	1f
+	subl	$32, %eax	/* Encryption bit is always above bit 31 */
+	bts	%eax, %edx	/* Set encryption mask for page tables */
+1:
+
 	/* Initialize Page tables to 0 */
 	leal	pgtable(%ebx), %edi
 	xorl	%eax, %eax
@@ -142,12 +156,14 @@ ENTRY(startup_32)
 	leal	pgtable + 0(%ebx), %edi
 	leal	0x1007 (%edi), %eax
 	movl	%eax, 0(%edi)
+	addl	%edx, 4(%edi)
 
 	/* Build Level 3 */
 	leal	pgtable + 0x1000(%ebx), %edi
 	leal	0x1007(%edi), %eax
 	movl	$4, %ecx
 1:	movl	%eax, 0x00(%edi)
+	addl	%edx, 0x04(%edi)
 	addl	$0x00001000, %eax
 	addl	$8, %edi
 	decl	%ecx
@@ -158,6 +174,7 @@ ENTRY(startup_32)
 	movl	$0x00000183, %eax
 	movl	$2048, %ecx
 1:	movl	%eax, 0(%edi)
+	addl	%edx, 4(%edi)
 	addl	$0x00200000, %eax
 	addl	$8, %edi
 	decl	%ecx
@@ -228,11 +245,6 @@ ENTRY(efi32_stub_entry)
 	leal	efi32_config(%ebp), %eax
 	movl	%eax, efi_config(%ebp)
 
-	/* Disable paging */
-	movl	%cr0, %eax
-	btrl	$X86_CR0_PG_BIT, %eax
-	movl	%eax, %cr0
-
 	jmp	startup_32
 ENDPROC(efi32_stub_entry)
 #endif
@@ -271,7 +283,7 @@ ENTRY(efi_pe_entry)
 	/*
 	 * Relocate efi_config->call().
 	 */
-	addq	%rbp, efi64_config+32(%rip)
+	addq	%rbp, efi64_config+88(%rip)
 
 	movq	%rax, %rdi
 	call	make_boot_params
@@ -291,7 +303,7 @@ handover_entry:
 	 * Relocate efi_config->call().
 	 */
 	movq	efi_config(%rip), %rax
-	addq	%rbp, 32(%rax)
+	addq	%rbp, 88(%rax)
 2:
 	movq	efi_config(%rip), %rdi
 	call	efi_main
@@ -340,7 +352,7 @@ preferred_addr:
 	notq	%rax
 	andq	%rax, %rbp
 	cmpq	$LOAD_PHYSICAL_ADDR, %rbp
-	jae	1f
+	jge	1f
 #endif
 	movq	$LOAD_PHYSICAL_ADDR, %rbp
 1:
@@ -463,15 +475,17 @@ efi_config:
 #ifdef CONFIG_EFI_MIXED
 	.global efi32_config
 efi32_config:
-	.fill	4,8,0
+	.fill	11,8,0
 	.quad	efi64_thunk
+	.fill	1,8,0
 	.byte	0
 #endif
 
 	.global efi64_config
 efi64_config:
-	.fill	4,8,0
+	.fill	11,8,0
 	.quad	efi_call
+	.fill	1,8,0
 	.byte	1
 #endif /* CONFIG_EFI_STUB */
 

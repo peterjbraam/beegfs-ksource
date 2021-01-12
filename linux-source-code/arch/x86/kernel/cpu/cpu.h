@@ -1,6 +1,12 @@
 #ifndef ARCH_X86_CPU_H
 #define ARCH_X86_CPU_H
 
+struct cpu_model_info {
+	int		vendor;
+	int		family;
+	const char	*model_names[16];
+};
+
 /* attempt to consolidate cpu attributes */
 struct cpu_dev {
 	const char	*c_vendor;
@@ -8,24 +14,15 @@ struct cpu_dev {
 	/* some have two possibilities for cpuid string */
 	const char	*c_ident[2];
 
+	struct		cpu_model_info c_models[4];
+
 	void            (*c_early_init)(struct cpuinfo_x86 *);
 	void		(*c_bsp_init)(struct cpuinfo_x86 *);
 	void		(*c_init)(struct cpuinfo_x86 *);
 	void		(*c_identify)(struct cpuinfo_x86 *);
 	void		(*c_detect_tlb)(struct cpuinfo_x86 *);
-	void		(*c_bsp_resume)(struct cpuinfo_x86 *);
+	unsigned int	(*c_size_cache)(struct cpuinfo_x86 *, unsigned int);
 	int		c_x86_vendor;
-#ifdef CONFIG_X86_32
-	/* Optional vendor specific routine to obtain the cache size. */
-	unsigned int	(*legacy_cache_size)(struct cpuinfo_x86 *,
-					     unsigned int);
-
-	/* Family/stepping-based lookup table for model names. */
-	struct legacy_cpu_model_info {
-		int		family;
-		const char	*model_names[16];
-	}		legacy_models[5];
-#endif
 };
 
 struct _tlb_table {
@@ -51,7 +48,7 @@ enum tsx_ctrl_states {
 	TSX_CTRL_NOT_SUPPORTED,
 };
 
-extern __ro_after_init enum tsx_ctrl_states tsx_ctrl_state;
+extern enum tsx_ctrl_states tsx_ctrl_state __read_mostly;
 
 extern void __init tsx_init(void);
 extern void tsx_enable(void);
@@ -65,9 +62,5 @@ extern void cpu_detect_cache_sizes(struct cpuinfo_x86 *c);
 extern int detect_extended_topology_early(struct cpuinfo_x86 *c);
 extern int detect_ht_early(struct cpuinfo_x86 *c);
 
-extern void x86_spec_ctrl_setup_ap(void);
-extern void update_srbds_msr(void);
-
 extern u64 x86_read_arch_cap_msr(void);
-
 #endif /* ARCH_X86_CPU_H */

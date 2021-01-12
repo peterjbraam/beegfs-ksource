@@ -14,20 +14,18 @@
 #include <linux/export.h>
 #include <linux/kernel.h>
 #include <linux/of.h>
-#include <linux/of_address.h>
 #include <linux/property.h>
 #include <linux/etherdevice.h>
 #include <linux/phy.h>
 
 struct property_set {
-	struct device *dev;
 	struct fwnode_handle fwnode;
 	struct property_entry *properties;
 };
 
 static inline bool is_pset_node(struct fwnode_handle *fwnode)
 {
-	return !IS_ERR_OR_NULL(fwnode) && fwnode->type == FWNODE_PDATA;
+	return fwnode && fwnode->type == FWNODE_PDATA;
 }
 
 static inline struct property_set *to_pset_node(struct fwnode_handle *fwnode)
@@ -183,12 +181,11 @@ static int pset_prop_read_string(struct property_set *pset,
 	return 0;
 }
 
-struct fwnode_handle *dev_fwnode(struct device *dev)
+static inline struct fwnode_handle *dev_fwnode(struct device *dev)
 {
 	return IS_ENABLED(CONFIG_OF) && dev->of_node ?
-		&dev->of_node->fwnode : dev->fwnode;
+		&dev->of_node->fwnode : dev->device_rh->fwnode;
 }
-EXPORT_SYMBOL_GPL(dev_fwnode);
 
 /**
  * device_property_present - check if a property of a device is present
@@ -658,7 +655,7 @@ int fwnode_property_match_string(struct fwnode_handle *fwnode,
 	const char *propname, const char *string)
 {
 	const char **values;
-	int nval, ret;
+	int nval, ret, i;
 
 	nval = fwnode_property_read_string_array(fwnode, propname, NULL, 0);
 	if (nval < 0)
@@ -675,9 +672,13 @@ int fwnode_property_match_string(struct fwnode_handle *fwnode,
 	if (ret < 0)
 		goto out;
 
-	ret = match_string(values, nval, string);
-	if (ret < 0)
-		ret = -ENODATA;
+	ret = -ENODATA;
+	for (i = 0; i < nval; i++) {
+		if (!strcmp(values[i], string)) {
+			ret = i;
+			break;
+		}
+	}
 out:
 	kfree(values);
 	return ret;
@@ -818,7 +819,6 @@ static struct property_set *pset_copy_set(const struct property_set *pset)
 void device_remove_properties(struct device *dev)
 {
 	struct fwnode_handle *fwnode;
-	struct property_set *pset;
 
 	fwnode = dev_fwnode(dev);
 	if (!fwnode)
@@ -828,16 +828,16 @@ void device_remove_properties(struct device *dev)
 	 * the pset. If there is no real firmware node (ACPI/DT) primary
 	 * will hold the pset.
 	 */
-	pset = to_pset_node(fwnode);
-	if (pset) {
+	if (is_pset_node(fwnode)) {
 		set_primary_fwnode(dev, NULL);
+		pset_free_set(to_pset_node(fwnode));
 	} else {
-		pset = to_pset_node(fwnode->secondary);
-		if (pset && dev == pset->dev)
+		fwnode = fwnode->secondary;
+		if (!IS_ERR(fwnode) && is_pset_node(fwnode)) {
 			set_secondary_fwnode(dev, NULL);
+			pset_free_set(to_pset_node(fwnode));
+		}
 	}
-	if (pset && dev == pset->dev)
-		pset_free_set(pset);
 }
 EXPORT_SYMBOL_GPL(device_remove_properties);
 
@@ -865,7 +865,6 @@ int device_add_properties(struct device *dev, struct property_entry *properties)
 
 	p->fwnode.type = FWNODE_PDATA;
 	set_secondary_fwnode(dev, &p->fwnode);
-	p->dev = dev;
 	return 0;
 }
 EXPORT_SYMBOL_GPL(device_add_properties);
@@ -952,30 +951,13 @@ EXPORT_SYMBOL_GPL(device_get_child_node_count);
 
 bool device_dma_supported(struct device *dev)
 {
-	/* For DT, this is always supported.
-	 * For ACPI, this depends on CCA, which
-	 * is determined by the acpi_dma_supported().
-	 */
-	if (IS_ENABLED(CONFIG_OF) && dev->of_node)
-		return true;
-
-	return acpi_dma_supported(ACPI_COMPANION(dev));
+	return false;
 }
 EXPORT_SYMBOL_GPL(device_dma_supported);
 
 enum dev_dma_attr device_get_dma_attr(struct device *dev)
 {
-	enum dev_dma_attr attr = DEV_DMA_NOT_SUPPORTED;
-
-	if (IS_ENABLED(CONFIG_OF) && dev->of_node) {
-		if (of_dma_is_coherent(dev->of_node))
-			attr = DEV_DMA_COHERENT;
-		else
-			attr = DEV_DMA_NON_COHERENT;
-	} else
-		attr = acpi_get_dma_attr(ACPI_COMPANION(dev));
-
-	return attr;
+	return DEV_DMA_NOT_SUPPORTED;
 }
 EXPORT_SYMBOL_GPL(device_get_dma_attr);
 

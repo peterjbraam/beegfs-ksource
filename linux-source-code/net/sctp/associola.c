@@ -22,12 +22,16 @@
  * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with GNU CC; see the file COPYING.  If not, see
- * <http://www.gnu.org/licenses/>.
+ * along with GNU CC; see the file COPYING.  If not, write to
+ * the Free Software Foundation, 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
  *
  * Please send any bug reports or fixes you make to the
  * email address(es):
- *    lksctp developers <linux-sctp@vger.kernel.org>
+ *    lksctp developers <lksctp-developers@lists.sourceforge.net>
+ *
+ * Or submit a bug report through the following website:
+ *    http://www.sf.net/projects/lksctp
  *
  * Written or modified by:
  *    La Monte H.P. Yarroll <piggy@acm.org>
@@ -39,6 +43,9 @@
  *    Daisy Chang	    <daisyc@us.ibm.com>
  *    Ryan Layer	    <rmlayer@us.ibm.com>
  *    Kevin Gao             <kevin.gao@intel.com>
+ *
+ * Any bugs reported given to us we will try to fix... any fixes shared will
+ * be incorporated into the next SCTP release.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -81,7 +88,6 @@ static struct sctp_association *sctp_association_init(struct sctp_association *a
 	/* Discarding const is appropriate here.  */
 	asoc->ep = (struct sctp_endpoint *)ep;
 	asoc->base.sk = (struct sock *)sk;
-	asoc->base.net = sock_net(sk);
 
 	sctp_endpoint_hold(asoc->ep);
 	sock_hold(asoc->base.sk);
@@ -129,7 +135,7 @@ static struct sctp_association *sctp_association_init(struct sctp_association *a
 	 */
 	asoc->param_flags = sp->param_flags;
 
-	/* Initialize the maximum number of new data packets that can be sent
+	/* Initialize the maximum mumber of new data packets that can be sent
 	 * in a burst.
 	 */
 	asoc->max_burst = sp->max_burst;
@@ -231,7 +237,7 @@ static struct sctp_association *sctp_association_init(struct sctp_association *a
 
 	/* Assume that the peer will tell us if he recognizes ASCONF
 	 * as part of INIT exchange.
-	 * The sctp_addip_noauth option is there for backward compatibility
+	 * The sctp_addip_noauth option is there for backward compatibilty
 	 * and will revert old behavior.
 	 */
 	if (net->sctp.addip_noauth)
@@ -394,7 +400,8 @@ void sctp_association_free(struct sctp_association *asoc)
 	sctp_asconf_queue_teardown(asoc);
 
 	/* Free pending address space being deleted */
-	kfree(asoc->asconf_addr_del_pending);
+	if (asoc->asconf_addr_del_pending != NULL)
+		kfree(asoc->asconf_addr_del_pending);
 
 	/* AUTH - Free the endpoint shared keys */
 	sctp_auth_destroy_keys(&asoc->endpoint_shared_keys);
@@ -424,7 +431,7 @@ static void sctp_association_destroy(struct sctp_association *asoc)
 
 	WARN_ON(atomic_read(&asoc->rmem_alloc));
 
-	kfree(asoc);
+	kfree_rcu(asoc, rcu);
 	SCTP_DBG_OBJCNT_DEC(assoc);
 }
 
@@ -562,7 +569,7 @@ void sctp_assoc_rm_peer(struct sctp_association *asoc,
 
 		/* Start a T3 timer here in case it wasn't running so
 		 * that these migrated packets have a chance to get
-		 * retransmitted.
+		 * retrnasmitted.
 		 */
 		if (!timer_pending(&active->T3_rtx_timer))
 			if (!mod_timer(&active->T3_rtx_timer,
@@ -629,7 +636,7 @@ struct sctp_transport *sctp_assoc_add_peer(struct sctp_association *asoc,
 	/* Set the path max_retrans.  */
 	peer->pathmaxrxt = asoc->pathmaxrxt;
 
-	/* And the partial failure retrans threshold */
+	/* And the partial failure retrnas threshold */
 	peer->pf_retrans = asoc->pf_retrans;
 
 	/* Initialize the peer's SACK delay timeout based on the
@@ -705,11 +712,15 @@ struct sctp_transport *sctp_assoc_add_peer(struct sctp_association *asoc,
 	/* Set the peer's active state. */
 	peer->state = peer_state;
 
+	/* Add this peer into the transport hashtable */
+	if (sctp_hash_transport(peer)) {
+		sctp_transport_free(peer);
+		return NULL;
+	}
+
 	/* Attach the remote transport to our asoc.  */
 	list_add_tail_rcu(&peer->transports, &asoc->peer.transport_addr_list);
 	asoc->peer.transport_count++;
-	/* Add this peer into the transport hashtable */
-	sctp_hash_transport(peer);
 
 	/* If we do not yet have a primary path, set one.  */
 	if (!asoc->peer.primary_path) {
@@ -821,8 +832,7 @@ void sctp_assoc_control_transport(struct sctp_association *asoc,
 		if (transport->state != SCTP_UNCONFIRMED)
 			transport->state = SCTP_INACTIVE;
 		else {
-			dst_release(transport->dst);
-			transport->dst = NULL;
+			sctp_transport_dst_release(transport);
 			ulp_notify = false;
 		}
 
@@ -909,13 +919,17 @@ int sctp_cmp_addr_exact(const union sctp_addr *ss1,
  */
 struct sctp_chunk *sctp_get_ecne_prepend(struct sctp_association *asoc)
 {
-	if (!asoc->need_ecne)
-		return NULL;
+	struct sctp_chunk *chunk;
 
 	/* Send ECNE if needed.
 	 * Not being able to allocate a chunk here is not deadly.
 	 */
-	return sctp_make_ecne(asoc, asoc->last_ecne_tsn);
+	if (asoc->need_ecne)
+		chunk = sctp_make_ecne(asoc, asoc->last_ecne_tsn);
+	else
+		chunk = NULL;
+
+	return chunk;
 }
 
 /*
@@ -1205,7 +1219,7 @@ void sctp_assoc_update(struct sctp_association *asoc,
 		}
 	}
 
-	/* SCTP-AUTH: Save the peer parameters from the new associations
+	/* SCTP-AUTH: Save the peer parameters from the new assocaitions
 	 * and also move the association shared keys over
 	 */
 	kfree(asoc->peer.peer_random);
@@ -1428,7 +1442,7 @@ sctp_assoc_choose_alter_transport(struct sctp_association *asoc,
 /* Update the association's pmtu and frag_point by going through all the
  * transports. This routine is called when a transport's PMTU has changed.
  */
-void sctp_assoc_sync_pmtu(struct sock *sk, struct sctp_association *asoc)
+void sctp_assoc_sync_pmtu(struct sctp_association *asoc)
 {
 	struct sctp_transport *t;
 	__u32 pmtu = 0;
@@ -1440,8 +1454,8 @@ void sctp_assoc_sync_pmtu(struct sock *sk, struct sctp_association *asoc)
 	list_for_each_entry(t, &asoc->peer.transport_addr_list,
 				transports) {
 		if (t->pmtu_pending && t->dst) {
-			sctp_transport_update_pmtu(sk, t,
-						   SCTP_TRUNC4(dst_mtu(t->dst)));
+			sctp_transport_update_pmtu(t,
+						   atomic_read(&t->mtu_info));
 			t->pmtu_pending = 0;
 		}
 		if (!pmtu || (t->pathmtu < pmtu))
@@ -1458,7 +1472,7 @@ void sctp_assoc_sync_pmtu(struct sock *sk, struct sctp_association *asoc)
 }
 
 /* Should we send a SACK to update our peer? */
-static inline bool sctp_peer_needs_update(struct sctp_association *asoc)
+static inline int sctp_peer_needs_update(struct sctp_association *asoc)
 {
 	struct net *net = sock_net(asoc->base.sk);
 	switch (asoc->state) {
@@ -1470,12 +1484,12 @@ static inline bool sctp_peer_needs_update(struct sctp_association *asoc)
 		    ((asoc->rwnd - asoc->a_rwnd) >= max_t(__u32,
 			   (asoc->base.sk->sk_rcvbuf >> net->sctp.rwnd_upd_shift),
 			   asoc->pathmtu)))
-			return true;
+			return 1;
 		break;
 	default:
 		break;
 	}
-	return false;
+	return 0;
 }
 
 /* Increase asoc's rwnd by len and send any window update SACK if needed. */
@@ -1500,7 +1514,7 @@ void sctp_assoc_rwnd_increase(struct sctp_association *asoc, unsigned int len)
 	 * threshold.  The idea is to recover slowly, but up
 	 * to the initial advertised window.
 	 */
-	if (asoc->rwnd_press && asoc->rwnd >= asoc->rwnd_press) {
+	if (asoc->rwnd_press) {
 		int change = min(asoc->pathmtu, asoc->rwnd_press);
 		asoc->rwnd += change;
 		asoc->rwnd_press -= change;
@@ -1555,7 +1569,7 @@ void sctp_assoc_rwnd_decrease(struct sctp_association *asoc, unsigned int len)
 
 	/* If we've reached or overflowed our receive buffer, announce
 	 * a 0 rwnd if rwnd would still be positive.  Store the
-	 * the potential pressure overflow so that the window can be restored
+	 * the pottential pressure overflow so that the window can be restored
 	 * back to original value.
 	 */
 	if (rx_count >= asoc->base.sk->sk_rcvbuf)
@@ -1568,7 +1582,7 @@ void sctp_assoc_rwnd_decrease(struct sctp_association *asoc, unsigned int len)
 			asoc->rwnd = 0;
 		}
 	} else {
-		asoc->rwnd_over = len - asoc->rwnd;
+		asoc->rwnd_over += len - asoc->rwnd;
 		asoc->rwnd = 0;
 	}
 
@@ -1583,15 +1597,12 @@ void sctp_assoc_rwnd_decrease(struct sctp_association *asoc, unsigned int len)
 int sctp_assoc_set_bind_addr_from_ep(struct sctp_association *asoc,
 				     sctp_scope_t scope, gfp_t gfp)
 {
-	struct sock *sk = asoc->base.sk;
 	int flags;
 
 	/* Use scoping rules to determine the subset of addresses from
 	 * the endpoint.
 	 */
-	flags = (PF_INET6 == sk->sk_family) ? SCTP_ADDR6_ALLOWED : 0;
-	if (!inet_v6_ipv6only(sk))
-		flags |= SCTP_ADDR4_ALLOWED;
+	flags = (PF_INET6 == asoc->base.sk->sk_family) ? SCTP_ADDR6_ALLOWED : 0;
 	if (asoc->peer.ipv4_address)
 		flags |= SCTP_ADDR4_PEERSUPP;
 	if (asoc->peer.ipv6_address)
@@ -1633,7 +1644,7 @@ int sctp_assoc_lookup_laddr(struct sctp_association *asoc,
 /* Set an association id for a given association */
 int sctp_assoc_set_id(struct sctp_association *asoc, gfp_t gfp)
 {
-	bool preload = gfpflags_allow_blocking(gfp);
+	bool preload = !!(gfp & __GFP_WAIT);
 	int ret;
 
 	/* If the id is already assigned, keep it. */

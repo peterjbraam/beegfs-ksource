@@ -9,52 +9,64 @@
 
 #include <linux/bug.h>
 
-#define __ctl_load(array, low, high) {					\
-	typedef struct { char _[sizeof(array)]; } addrtype;		\
-									\
-	BUILD_BUG_ON(sizeof(addrtype) != (high - low + 1) * sizeof(long));\
-	asm volatile(							\
-		"	lctlg	%1,%2,%0\n"				\
-		:							\
-		: "Q" (*(addrtype *)(&array)), "i" (low), "i" (high)	\
-		: "memory");						\
-}
+#ifdef CONFIG_64BIT
 
-#define __ctl_store(array, low, high) {					\
-	typedef struct { char _[sizeof(array)]; } addrtype;		\
-									\
-	BUILD_BUG_ON(sizeof(addrtype) != (high - low + 1) * sizeof(long));\
-	asm volatile(							\
-		"	stctg	%1,%2,%0\n"				\
-		: "=Q" (*(addrtype *)(&array))				\
-		: "i" (low), "i" (high));				\
-}
+#define __ctl_load(array, low, high) ({				\
+	typedef struct { char _[sizeof(array)]; } addrtype;	\
+	asm volatile(						\
+		"	lctlg	%1,%2,%0\n"			\
+		: : "Q" (*(addrtype *)(&array)),		\
+		    "i" (low), "i" (high));			\
+	})
 
-static inline void __ctl_set_bit(unsigned int cr, unsigned int bit)
-{
-	unsigned long reg;
+#define __ctl_store(array, low, high) ({			\
+	typedef struct { char _[sizeof(array)]; } addrtype;	\
+	asm volatile(						\
+		"	stctg	%1,%2,%0\n"			\
+		: "=Q" (*(addrtype *)(&array))			\
+		: "i" (low), "i" (high));			\
+	})
 
-	__ctl_store(reg, cr, cr);
-	reg |= 1UL << bit;
-	__ctl_load(reg, cr, cr);
-}
+#else /* CONFIG_64BIT */
 
-static inline void __ctl_clear_bit(unsigned int cr, unsigned int bit)
-{
-	unsigned long reg;
+#define __ctl_load(array, low, high) ({				\
+	typedef struct { char _[sizeof(array)]; } addrtype;	\
+	asm volatile(						\
+		"	lctl	%1,%2,%0\n"			\
+		: : "Q" (*(addrtype *)(&array)),		\
+		    "i" (low), "i" (high));			\
+})
 
-	__ctl_store(reg, cr, cr);
-	reg &= ~(1UL << bit);
-	__ctl_load(reg, cr, cr);
-}
+#define __ctl_store(array, low, high) ({			\
+	typedef struct { char _[sizeof(array)]; } addrtype;	\
+	asm volatile(						\
+		"	stctl	%1,%2,%0\n"			\
+		: "=Q" (*(addrtype *)(&array))			\
+		: "i" (low), "i" (high));			\
+	})
 
-void smp_ctl_set_bit(int cr, int bit);
-void smp_ctl_clear_bit(int cr, int bit);
+#endif /* CONFIG_64BIT */
+
+#define __ctl_set_bit(cr, bit) ({	\
+	unsigned long __dummy;		\
+	__ctl_store(__dummy, cr, cr);	\
+	__dummy |= 1UL << (bit);	\
+	__ctl_load(__dummy, cr, cr);	\
+})
+
+#define __ctl_clear_bit(cr, bit) ({	\
+	unsigned long __dummy;		\
+	__ctl_store(__dummy, cr, cr);	\
+	__dummy &= ~(1UL << (bit));	\
+	__ctl_load(__dummy, cr, cr);	\
+})
 
 union ctlreg0 {
 	unsigned long val;
 	struct {
+#ifdef CONFIG_64BIT
 		unsigned long	   : 32;
+#endif
 		unsigned long	   : 3;
 		unsigned long lap  : 1; /* Low-address-protection control */
 		unsigned long	   : 4;
@@ -67,11 +79,17 @@ union ctlreg0 {
 };
 
 #ifdef CONFIG_SMP
-# define ctl_set_bit(cr, bit) smp_ctl_set_bit(cr, bit)
-# define ctl_clear_bit(cr, bit) smp_ctl_clear_bit(cr, bit)
+
+extern void smp_ctl_set_bit(int cr, int bit);
+extern void smp_ctl_clear_bit(int cr, int bit);
+#define ctl_set_bit(cr, bit) smp_ctl_set_bit(cr, bit)
+#define ctl_clear_bit(cr, bit) smp_ctl_clear_bit(cr, bit)
+
 #else
-# define ctl_set_bit(cr, bit) __ctl_set_bit(cr, bit)
-# define ctl_clear_bit(cr, bit) __ctl_clear_bit(cr, bit)
-#endif
+
+#define ctl_set_bit(cr, bit) __ctl_set_bit(cr, bit)
+#define ctl_clear_bit(cr, bit) __ctl_clear_bit(cr, bit)
+
+#endif /* CONFIG_SMP */
 
 #endif /* __ASM_CTL_REG_H */

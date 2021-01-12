@@ -91,6 +91,7 @@ typedef struct siginfo {
 			int _trapno;	/* TRAP # which caused the signal */
 #endif
 			short _addr_lsb; /* LSB of the reported address */
+#ifndef __GENKSYMS__
 			union {
 				/* used when si_code=SEGV_BNDERR */
 				struct {
@@ -100,6 +101,7 @@ typedef struct siginfo {
 				/* used when si_code=SEGV_PKUERR */
 				__u32 _pkey;
 			};
+#endif
 		} _sigfault;
 
 		/* SIGPOLL */

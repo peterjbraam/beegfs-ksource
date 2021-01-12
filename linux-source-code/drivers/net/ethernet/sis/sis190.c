@@ -1877,7 +1877,7 @@ static int sis190_init_one(struct pci_dev *pdev,
 
 	dev->netdev_ops = &sis190_netdev_ops;
 
-	dev->ethtool_ops = &sis190_ethtool_ops;
+	SET_ETHTOOL_OPS(dev, &sis190_ethtool_ops);
 	dev->watchdog_timeo = SIS190_TX_TIMEOUT;
 
 	spin_lock_init(&tp->lock);
@@ -1921,6 +1921,7 @@ static void sis190_remove_one(struct pci_dev *pdev)
 	cancel_work_sync(&tp->phy_task);
 	unregister_netdev(dev);
 	sis190_release_board(pdev);
+	pci_set_drvdata(pdev, NULL);
 }
 
 static struct pci_driver sis190_pci_driver = {
@@ -1930,4 +1931,15 @@ static struct pci_driver sis190_pci_driver = {
 	.remove		= sis190_remove_one,
 };
 
-module_pci_driver(sis190_pci_driver);
+static int __init sis190_init_module(void)
+{
+	return pci_register_driver(&sis190_pci_driver);
+}
+
+static void __exit sis190_cleanup_module(void)
+{
+	pci_unregister_driver(&sis190_pci_driver);
+}
+
+module_init(sis190_init_module);
+module_exit(sis190_cleanup_module);

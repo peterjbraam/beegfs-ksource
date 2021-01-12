@@ -6,6 +6,12 @@
 
 #include <linux/dma-mapping.h>
 
+static inline int
+pci_dma_supported(struct pci_dev *hwdev, u64 mask)
+{
+	return dma_supported(hwdev == NULL ? NULL : &hwdev->dev, mask);
+}
+
 /* This defines the direction arg to the DMA mapping routines. */
 #define PCI_DMA_BIDIRECTIONAL	0
 #define PCI_DMA_TODEVICE	1

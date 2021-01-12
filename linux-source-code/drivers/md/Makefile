@@ -11,14 +11,18 @@ dm-snapshot-y	+= dm-snap.o dm-exception-store.o dm-snap-transient.o \
 dm-mirror-y	+= dm-raid1.o
 dm-log-userspace-y \
 		+= dm-log-userspace-base.o dm-log-userspace-transfer.o
+dm-bio-prison-y += dm-bio-prison-v1.o dm-bio-prison-v2.o
 dm-thin-pool-y	+= dm-thin.o dm-thin-metadata.o
-dm-cache-y	+= dm-cache-target.o dm-cache-metadata.o dm-cache-policy.o
+dm-cache-y	+= dm-cache-target.o dm-cache-metadata.o dm-cache-policy.o \
+		    dm-cache-background-tracker.o
 dm-cache-smq-y   += dm-cache-policy-smq.o
-dm-cache-cleaner-y += dm-cache-policy-cleaner.o
 dm-era-y	+= dm-era-target.o
 dm-verity-y	+= dm-verity-target.o
-md-mod-y	+= md.o bitmap.o
-raid456-y	+= raid5.o raid5-cache.o
+md-mod-y	+= md.o md-bitmap.o
+raid456-y	+= raid5.o raid5-cache.o raid5-ppl.o
+linear-y	+= md-linear.o
+multipath-y	+= md-multipath.o
+faulty-y	+= md-faulty.o
 
 # Note: link order is important.  All raid personalities
 # and must come before md.o, as they each initialise 
@@ -32,7 +36,6 @@ obj-$(CONFIG_MD_RAID10)		+= raid10.o
 obj-$(CONFIG_MD_RAID456)	+= raid456.o
 obj-$(CONFIG_MD_MULTIPATH)	+= multipath.o
 obj-$(CONFIG_MD_FAULTY)		+= faulty.o
-obj-$(CONFIG_MD_CLUSTER)	+= md-cluster.o
 obj-$(CONFIG_BCACHE)		+= bcache/
 obj-$(CONFIG_BLK_DEV_MD)	+= md-mod.o
 obj-$(CONFIG_BLK_DEV_DM)	+= dm-mod.o
@@ -56,14 +59,9 @@ obj-$(CONFIG_DM_THIN_PROVISIONING)	+= dm-thin-pool.o
 obj-$(CONFIG_DM_VERITY)		+= dm-verity.o
 obj-$(CONFIG_DM_CACHE)		+= dm-cache.o
 obj-$(CONFIG_DM_CACHE_SMQ)	+= dm-cache-smq.o
-obj-$(CONFIG_DM_CACHE_CLEANER)	+= dm-cache-cleaner.o
 obj-$(CONFIG_DM_ERA)		+= dm-era.o
 obj-$(CONFIG_DM_LOG_WRITES)	+= dm-log-writes.o
 
 ifeq ($(CONFIG_DM_UEVENT),y)
 dm-mod-objs			+= dm-uevent.o
-endif
-
-ifeq ($(CONFIG_DM_VERITY_FEC),y)
-dm-verity-objs			+= dm-verity-fec.o
 endif

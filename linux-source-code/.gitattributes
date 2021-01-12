@@ -1,2 +1,2 @@
-*.c   diff=cpp
-*.h   diff=cpp
+/redhat		export-ignore
+makefile	export-ignore

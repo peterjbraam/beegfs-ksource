@@ -36,6 +36,7 @@
 #include <linux/mm.h>
 #include <linux/errno.h>
 #include <asm/pgtable.h>
+#include <linux/shm.h>
 
 #include "rxe.h"
 #include "rxe_loc.h"
@@ -76,7 +77,7 @@ static void rxe_vma_close(struct vm_area_struct *vma)
 	kref_put(&ip->ref, rxe_mmap_release);
 }
 
-static struct vm_operations_struct rxe_vm_ops = {
+static const struct vm_operations_struct rxe_vm_ops = {
 	.open = rxe_vma_open,
 	.close = rxe_vma_close,
 };

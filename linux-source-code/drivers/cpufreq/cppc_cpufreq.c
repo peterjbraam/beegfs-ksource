@@ -144,26 +144,29 @@ static int cppc_cpufreq_cpu_init(struct cpufreq_policy *policy)
 
 	cppc_dmi_max_khz = cppc_get_dmi_max_khz();
 
-	policy->min = cpu->perf_caps.lowest_perf * cppc_dmi_max_khz / cpu->perf_caps.highest_perf;
+	/*
+	 * Set min to lowest nonlinear perf to avoid any efficiency penalty (see
+	 * Section 8.4.7.1.1.5 of ACPI 6.1 spec)
+	 */
+	policy->min = cpu->perf_caps.lowest_nonlinear_perf * cppc_dmi_max_khz /
+		cpu->perf_caps.highest_perf;
 	policy->max = cppc_dmi_max_khz;
-	policy->cpuinfo.min_freq = policy->min;
-	policy->cpuinfo.max_freq = policy->max;
+
+	/*
+	 * Set cpuinfo.min_freq to Lowest to make the full range of performance
+	 * available if userspace wants to use any perf between lowest & lowest
+	 * nonlinear perf
+	 */
+	policy->cpuinfo.min_freq = cpu->perf_caps.lowest_perf * cppc_dmi_max_khz /
+		cpu->perf_caps.highest_perf;
+	policy->cpuinfo.max_freq = cppc_dmi_max_khz;
+
 	policy->cpuinfo.transition_latency = cppc_get_transition_latency(cpu_num);
 	policy->shared_type = cpu->shared_type;
 
-	if (policy->shared_type == CPUFREQ_SHARED_TYPE_ANY) {
-		int i;
-
+	if (policy->shared_type == CPUFREQ_SHARED_TYPE_ANY)
 		cpumask_copy(policy->cpus, cpu->shared_cpu_map);
-
-		for_each_cpu(i, policy->cpus) {
-			if (unlikely(i == policy->cpu))
-				continue;
-
-			memcpy(&all_cpu_data[i]->perf_caps, &cpu->perf_caps,
-			       sizeof(cpu->perf_caps));
-		}
-	} else if (policy->shared_type == CPUFREQ_SHARED_TYPE_ALL) {
+	else if (policy->shared_type == CPUFREQ_SHARED_TYPE_ALL) {
 		/* Support only SW_ANY for now. */
 		pr_debug("Unsupported CPU co-ord type\n");
 		return -EFAULT;
@@ -228,13 +231,8 @@ static int __init cppc_cpufreq_init(void)
 	return ret;
 
 out:
-	for_each_possible_cpu(i) {
-		cpu = all_cpu_data[i];
-		if (!cpu)
-			break;
-		free_cpumask_var(cpu->shared_cpu_map);
-		kfree(cpu);
-	}
+	for_each_possible_cpu(i)
+		kfree(all_cpu_data[i]);
 
 	kfree(all_cpu_data);
 	return -ENODEV;
@@ -262,3 +260,10 @@ MODULE_DESCRIPTION("CPUFreq driver based on the ACPI CPPC v5.0+ spec");
 MODULE_LICENSE("GPL");
 
 late_initcall(cppc_cpufreq_init);
+
+static const struct acpi_device_id cppc_acpi_ids[] = {
+	{ACPI_PROCESSOR_DEVICE_HID, },
+	{}
+};
+
+MODULE_DEVICE_TABLE(acpi, cppc_acpi_ids);

@@ -34,6 +34,10 @@
 #include <linux/percpu.h>
 #include <asm/topology.h>
 
+#ifndef node_has_online_mem
+#define node_has_online_mem(nid) (1)
+#endif
+
 #ifndef nr_cpus_node
 #define nr_cpus_node(node) cpumask_weight(cpumask_of_node(node))
 #endif
@@ -54,7 +58,7 @@ int arch_update_cpu_topology(void);
 /*
  * If the distance between nodes in a system is larger than RECLAIM_DISTANCE
  * (in whatever arch specific measurement units returned by node_distance())
- * and node_reclaim_mode is enabled then the VM will only call node_reclaim()
+ * and zone_reclaim_mode is enabled then the VM will only call zone_reclaim()
  * on nodes within this distance.
  */
 #define RECLAIM_DISTANCE 30
@@ -70,7 +74,7 @@ DECLARE_PER_CPU(int, numa_node);
 /* Returns the number of the current Node. */
 static inline int numa_node_id(void)
 {
-	return raw_cpu_read(numa_node);
+	return __this_cpu_read(numa_node);
 }
 #endif
 
@@ -136,7 +140,7 @@ static inline int node_to_mem_node(int node)
 /* Returns the number of the nearest Node with memory */
 static inline int numa_mem_id(void)
 {
-	return raw_cpu_read(_numa_mem_);
+	return __this_cpu_read(_numa_mem_);
 }
 #endif
 
@@ -184,6 +188,9 @@ static inline int cpu_to_mem(int cpu)
 #ifndef topology_physical_package_id
 #define topology_physical_package_id(cpu)	((void)(cpu), -1)
 #endif
+#ifndef topology_die_id
+#define topology_die_id(cpu)			((void)(cpu), -1)
+#endif
 #ifndef topology_core_id
 #define topology_core_id(cpu)			((void)(cpu), 0)
 #endif
@@ -192,6 +199,9 @@ static inline int cpu_to_mem(int cpu)
 #endif
 #ifndef topology_core_cpumask
 #define topology_core_cpumask(cpu)		cpumask_of(cpu)
+#endif
+#ifndef topology_die_cpumask
+#define topology_die_cpumask(cpu)		cpumask_of(cpu)
 #endif
 
 #ifdef CONFIG_SCHED_SMT

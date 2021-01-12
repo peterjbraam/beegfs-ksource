@@ -255,6 +255,7 @@ static int sas_bsg_initialize(struct Scsi_Host *shost, struct sas_rphy *rphy)
 		q->queuedata = shost;
 
 	queue_flag_set_unlocked(QUEUE_FLAG_BIDI, q);
+	queue_flag_set_unlocked(QUEUE_FLAG_SCSI_PASSTHROUGH, q);
 	return 0;
 }
 
@@ -357,12 +358,16 @@ EXPORT_SYMBOL(sas_remove_children);
  * sas_remove_host  -  tear down a Scsi_Host's SAS data structures
  * @shost:	Scsi Host that is torn down
  *
- * Removes all SAS PHYs and remote PHYs for a given Scsi_Host.
- * Must be called just before scsi_remove_host for SAS HBAs.
+ * Removes all SAS PHYs and remote PHYs for a given Scsi_Host and remove the
+ * Scsi_Host as well.
+ *
+ * Note: Do not call scsi_remove_host() on the Scsi_Host any more, as it is
+ * already removed.
  */
 void sas_remove_host(struct Scsi_Host *shost)
 {
 	sas_remove_children(&shost->shost_gendev);
+	scsi_remove_host(shost);
 }
 EXPORT_SYMBOL(sas_remove_host);
 
@@ -1236,6 +1241,13 @@ show_sas_rphy_enclosure_identifier(struct device *dev,
 	u64 identifier;
 	int error;
 
+	/*
+	 * Only devices behind an expander are supported, because the
+	 * enclosure identifier is a SMP feature.
+	 */
+	if (scsi_is_sas_phy_local(phy))
+		return -EINVAL;
+
 	error = i->f->get_enclosure_identifier(rphy, &identifier);
 	if (error)
 		return error;
@@ -1255,6 +1267,9 @@ show_sas_rphy_bay_identifier(struct device *dev,
 	struct sas_internal *i = to_sas_internal(shost->transportt);
 	int val;
 
+	if (scsi_is_sas_phy_local(phy))
+		return -EINVAL;
+
 	val = i->f->get_bay_identifier(rphy);
 	if (val < 0)
 		return val;
@@ -1270,7 +1285,6 @@ sas_rphy_protocol_attr(identify.target_port_protocols, target_port_protocols);
 sas_rphy_simple_attr(identify.sas_address, sas_address, "0x%016llx\n",
 		unsigned long long);
 sas_rphy_simple_attr(identify.phy_identifier, phy_identifier, "%d\n", u8);
-sas_rphy_simple_attr(scsi_target_id, scsi_target_id, "%d\n", u32);
 
 /* only need 8 bytes of data plus header (4 or 8) */
 #define BUF_SIZE 64
@@ -1711,7 +1725,7 @@ EXPORT_SYMBOL(scsi_is_sas_rphy);
  */
 
 static int sas_user_scan(struct Scsi_Host *shost, uint channel,
-		uint id, u64 lun)
+		uint id, uint lun)
 {
 	struct sas_host_attrs *sas_host = to_sas_host_attrs(shost);
 	struct sas_rphy *rphy;
@@ -1872,7 +1886,6 @@ sas_attach_transport(struct sas_function_template *ft)
 	SETUP_RPORT_ATTRIBUTE(rphy_device_type);
 	SETUP_RPORT_ATTRIBUTE(rphy_sas_address);
 	SETUP_RPORT_ATTRIBUTE(rphy_phy_identifier);
-	SETUP_RPORT_ATTRIBUTE(rphy_scsi_target_id);
 	SETUP_OPTIONAL_RPORT_ATTRIBUTE(rphy_enclosure_identifier,
 				       get_enclosure_identifier);
 	SETUP_OPTIONAL_RPORT_ATTRIBUTE(rphy_bay_identifier,

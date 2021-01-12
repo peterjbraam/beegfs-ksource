@@ -21,7 +21,7 @@
 #include <linux/types.h>
 #include <linux/slab.h>
 #include <linux/bug.h>
-#include <linux/io.h>
+#include <asm/io.h>
 #include <asm/page.h>
 
 /*
@@ -120,12 +120,9 @@ io_mapping_init_wc(struct io_mapping *iomap,
 		   resource_size_t base,
 		   unsigned long size)
 {
-	iomap->iomem = ioremap_wc(base, size);
-	if (!iomap->iomem)
-		return NULL;
-
 	iomap->base = base;
 	iomap->size = size;
+	iomap->iomem = ioremap_wc(base, size);
 #if defined(pgprot_noncached_wc) /* archs can't agree on a name ... */
 	iomap->prot = pgprot_noncached_wc(PAGE_KERNEL);
 #elif defined(pgprot_writecombine)

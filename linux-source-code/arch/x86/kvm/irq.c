@@ -20,7 +20,7 @@
  *
  */
 
-#include <linux/export.h>
+#include <linux/module.h>
 #include <linux/kvm_host.h>
 
 #include "irq.h"

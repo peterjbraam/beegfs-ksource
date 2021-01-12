@@ -1,7 +1,7 @@
 #ifndef _UAPI__LINUX_NETLINK_H
 #define _UAPI__LINUX_NETLINK_H
 
-#include <linux/const.h>
+#include <linux/kernel.h>
 #include <linux/socket.h> /* for __kernel_sa_family_t */
 #include <linux/types.h>
 
@@ -54,7 +54,6 @@ struct nlmsghdr {
 #define NLM_F_ACK		4	/* Reply with ack, with zero or error code */
 #define NLM_F_ECHO		8	/* Echo this request 		*/
 #define NLM_F_DUMP_INTR		16	/* Dump was inconsistent due to sequence change */
-#define NLM_F_DUMP_FILTERED	32	/* Dump was filtered as requested */
 
 /* Modifiers to GET request */
 #define NLM_F_ROOT	0x100	/* specify tree	root	*/
@@ -102,18 +101,16 @@ struct nlmsgerr {
 	struct nlmsghdr msg;
 };
 
-#define NETLINK_ADD_MEMBERSHIP		1
-#define NETLINK_DROP_MEMBERSHIP		2
-#define NETLINK_PKTINFO			3
-#define NETLINK_BROADCAST_ERROR		4
-#define NETLINK_NO_ENOBUFS		5
+#define NETLINK_ADD_MEMBERSHIP	1
+#define NETLINK_DROP_MEMBERSHIP	2
+#define NETLINK_PKTINFO		3
+#define NETLINK_BROADCAST_ERROR	4
+#define NETLINK_NO_ENOBUFS	5
 #ifndef __KERNEL__
-#define NETLINK_RX_RING			6
-#define NETLINK_TX_RING			7
+#define NETLINK_RX_RING		6
+#define NETLINK_TX_RING		7
 #endif
-#define NETLINK_LISTEN_ALL_NSID		8
-#define NETLINK_LIST_MEMBERSHIPS	9
-#define NETLINK_CAP_ACK			10
+#define NETLINK_LISTEN_ALL_NSID	8
 
 struct nl_pktinfo {
 	__u32	group;
@@ -189,5 +186,22 @@ struct nlattr {
 #define NLA_ALIGN(len)		(((len) + NLA_ALIGNTO - 1) & ~(NLA_ALIGNTO - 1))
 #define NLA_HDRLEN		((int) NLA_ALIGN(sizeof(struct nlattr)))
 
+/* Generic 32 bitflags attribute content sent to the kernel.
+ *
+ * The value is a bitmap that defines the values being set
+ * The selector is a bitmask that defines which value is legit
+ *
+ * Examples:
+ *  value = 0x0, and selector = 0x1
+ *  implies we are selecting bit 1 and we want to set its value to 0.
+ *
+ *  value = 0x2, and selector = 0x2
+ *  implies we are selecting bit 2 and we want to set its value to 1.
+ *
+ */
+struct nla_bitfield32 {
+	__u32 value;
+	__u32 selector;
+};
 
 #endif /* _UAPI__LINUX_NETLINK_H */

@@ -110,7 +110,7 @@
 #include <sound/opl3.h>
 #include <sound/initval.h>
 
-#if defined(CONFIG_GAMEPORT) || (defined(MODULE) && defined(CONFIG_GAMEPORT_MODULE))
+#if IS_REACHABLE(CONFIG_GAMEPORT)
 #define SUPPORT_JOYSTICK 1
 #endif
 
@@ -470,10 +470,10 @@ struct snd_riptide {
 };
 
 struct sgd {			/* scatter gather desriptor */
-	u32 dwNextLink;
-	u32 dwSegPtrPhys;
-	u32 dwSegLen;
-	u32 dwStat_Ctl;
+	__le32 dwNextLink;
+	__le32 dwSegPtrPhys;
+	__le32 dwSegLen;
+	__le32 dwStat_Ctl;
 };
 
 struct pcmhw {			/* pcm descriptor */
@@ -1315,7 +1315,7 @@ static int riptide_reset(struct cmdif *cif, struct snd_riptide *chip)
 	return 0;
 }
 
-static struct snd_pcm_hardware snd_riptide_playback = {
+static const struct snd_pcm_hardware snd_riptide_playback = {
 	.info = (SNDRV_PCM_INFO_MMAP | SNDRV_PCM_INFO_INTERLEAVED |
 		 SNDRV_PCM_INFO_BLOCK_TRANSFER |
 		 SNDRV_PCM_INFO_PAUSE | SNDRV_PCM_INFO_MMAP_VALID),
@@ -1334,7 +1334,7 @@ static struct snd_pcm_hardware snd_riptide_playback = {
 	.periods_max = 64,
 	.fifo_size = 0,
 };
-static struct snd_pcm_hardware snd_riptide_capture = {
+static const struct snd_pcm_hardware snd_riptide_capture = {
 	.info = (SNDRV_PCM_INFO_MMAP | SNDRV_PCM_INFO_INTERLEAVED |
 		 SNDRV_PCM_INFO_BLOCK_TRANSFER |
 		 SNDRV_PCM_INFO_PAUSE | SNDRV_PCM_INFO_MMAP_VALID),
@@ -1974,10 +1974,8 @@ snd_riptide_proc_read(struct snd_info_entry *entry,
 
 static void snd_riptide_proc_init(struct snd_riptide *chip)
 {
-	struct snd_info_entry *entry;
-
-	if (!snd_card_proc_new(chip->card, "riptide", &entry))
-		snd_info_set_text_ops(entry, chip, snd_riptide_proc_read);
+	snd_card_ro_proc_new(chip->card, "riptide", chip,
+			     snd_riptide_proc_read);
 }
 
 static int snd_riptide_mixer(struct snd_riptide *chip)

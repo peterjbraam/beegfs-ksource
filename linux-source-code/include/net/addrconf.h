@@ -1,9 +1,8 @@
 #ifndef _ADDRCONF_H
 #define _ADDRCONF_H
 
-#define MAX_RTR_SOLICITATIONS		-1		/* unlimited */
+#define MAX_RTR_SOLICITATIONS		3
 #define RTR_SOLICITATION_INTERVAL	(4*HZ)
-#define RTR_SOLICITATION_MAX_INTERVAL	(3600*HZ)	/* 1 hour */
 
 #define MIN_VALID_LIFETIME		(2*3600)	/* 2 hours */
 
@@ -48,10 +47,14 @@ struct prefix_info {
 	struct in6_addr		prefix;
 };
 
-
 #include <linux/netdevice.h>
 #include <net/if_inet6.h>
 #include <net/ipv6.h>
+
+struct in6_validator_info {
+	struct in6_addr		i6vi_addr;
+	struct inet6_dev	*i6vi_dev;
+};
 
 #define IN6_ADDR_HSIZE_SHIFT	4
 #define IN6_ADDR_HSIZE		(1 << IN6_ADDR_HSIZE_SHIFT)
@@ -73,10 +76,6 @@ int ipv6_chk_addr_and_flags(struct net *net, const struct in6_addr *addr,
 int ipv6_chk_home_addr(struct net *net, const struct in6_addr *addr);
 #endif
 
-bool ipv6_chk_custom_prefix(const struct in6_addr *addr,
-				   const unsigned int prefix_len,
-				   struct net_device *dev);
-
 int ipv6_chk_prefix(const struct in6_addr *addr, struct net_device *dev);
 
 struct inet6_ifaddr *ipv6_get_ifaddr(struct net *net,
@@ -90,8 +89,6 @@ int __ipv6_get_lladdr(struct inet6_dev *idev, struct in6_addr *addr,
 		      u32 banned_flags);
 int ipv6_get_lladdr(struct net_device *dev, struct in6_addr *addr,
 		    u32 banned_flags);
-int ipv4_rcv_saddr_equal(const struct sock *sk, const struct sock *sk2,
-			 bool match_wildcard);
 int ipv6_rcv_saddr_equal(const struct sock *sk, const struct sock *sk2,
 			 bool match_wildcard);
 void addrconf_join_solict(struct net_device *dev, const struct in6_addr *addr);
@@ -107,12 +104,24 @@ int addrconf_prefix_rcv_add_addr(struct net *net, struct net_device *dev,
 				 u32 addr_flags, bool sllao, bool tokenized,
 				 __u32 valid_lft, u32 prefered_lft);
 
+static inline void addrconf_addr_eui48_base(u8 *eui, const char *const addr)
+{
+	memcpy(eui, addr, 3);
+	eui[3] = 0xFF;
+	eui[4] = 0xFE;
+	memcpy(eui + 5, addr + 3, 3);
+}
+
+static inline void addrconf_addr_eui48(u8 *eui, const char *const addr)
+{
+	addrconf_addr_eui48_base(eui, addr);
+	eui[0] ^= 2;
+}
+
 static inline int addrconf_ifid_eui48(u8 *eui, struct net_device *dev)
 {
 	if (dev->addr_len != ETH_ALEN)
 		return -1;
-	memcpy(eui, dev->dev_addr, 3);
-	memcpy(eui + 5, dev->dev_addr + 3, 3);
 
 	/*
 	 * The zSeries OSA network cards can be shared among various
@@ -127,14 +136,16 @@ static inline int addrconf_ifid_eui48(u8 *eui, struct net_device *dev)
 	 * case.  Hence the resulting interface identifier has local
 	 * scope according to RFC2373.
 	 */
+
+	addrconf_addr_eui48_base(eui, dev->dev_addr);
+
 	if (dev->dev_id) {
 		eui[3] = (dev->dev_id >> 8) & 0xFF;
 		eui[4] = dev->dev_id & 0xFF;
 	} else {
-		eui[3] = 0xFF;
-		eui[4] = 0xFE;
 		eui[0] ^= 2;
 	}
+
 	return 0;
 }
 
@@ -191,7 +202,7 @@ void ipv6_mc_remap(struct inet6_dev *idev);
 void ipv6_mc_init_dev(struct inet6_dev *idev);
 void ipv6_mc_destroy_dev(struct inet6_dev *idev);
 int ipv6_mc_check_mld(struct sk_buff *skb, struct sk_buff **skb_trimmed);
-void addrconf_dad_failure(struct inet6_ifaddr *ifp);
+void addrconf_dad_failure(struct sk_buff *skb, struct inet6_ifaddr *ifp);
 
 bool ipv6_chk_mcast_addr(struct net_device *dev, const struct in6_addr *group,
 			 const struct in6_addr *src_addr);
@@ -206,12 +217,11 @@ struct ipv6_stub {
 				 const struct in6_addr *addr);
 	int (*ipv6_sock_mc_drop)(struct sock *sk, int ifindex,
 				 const struct in6_addr *addr);
-	struct dst_entry *(*ipv6_dst_lookup_flow)(struct net *net,
-						  const struct sock *sk,
-						  struct flowi6 *fl6,
-						  const struct in6_addr *final_dst);
+	int (*ipv6_dst_lookup)(struct net *net, struct sock *sk,
+			       struct dst_entry **dst, struct flowi6 *fl6);
 	void (*udpv6_encap_enable)(void);
-	void (*ndisc_send_na)(struct net_device *dev, const struct in6_addr *daddr,
+	void (*ndisc_send_na)(struct net_device *dev, struct neighbour *neigh,
+			      const struct in6_addr *daddr,
 			      const struct in6_addr *solicited_addr,
 			      bool router, bool solicited, bool override, bool inc_opt);
 	struct neigh_table *nd_tbl;
@@ -253,21 +263,22 @@ int ipv6_sock_ac_join(struct sock *sk, int ifindex,
 		      const struct in6_addr *addr);
 int ipv6_sock_ac_drop(struct sock *sk, int ifindex,
 		      const struct in6_addr *addr);
-void __ipv6_sock_ac_close(struct sock *sk);
 void ipv6_sock_ac_close(struct sock *sk);
 
-int __ipv6_dev_ac_inc(struct inet6_dev *idev, const struct in6_addr *addr);
+int ipv6_dev_ac_inc(struct net_device *dev, const struct in6_addr *addr);
 int __ipv6_dev_ac_dec(struct inet6_dev *idev, const struct in6_addr *addr);
-void ipv6_ac_destroy_dev(struct inet6_dev *idev);
 bool ipv6_chk_acast_addr(struct net *net, struct net_device *dev,
-			 const struct in6_addr *addr);
-bool ipv6_chk_acast_addr_src(struct net *net, struct net_device *dev,
-			     const struct in6_addr *addr);
+				const struct in6_addr *addr);
+
 
 /* Device notifier */
 int register_inet6addr_notifier(struct notifier_block *nb);
 int unregister_inet6addr_notifier(struct notifier_block *nb);
 int inet6addr_notifier_call_chain(unsigned long val, void *v);
+
+int register_inet6addr_validator_notifier(struct notifier_block *nb);
+int unregister_inet6addr_validator_notifier(struct notifier_block *nb);
+int inet6addr_validator_notifier_call_chain(unsigned long val, void *v);
 
 void inet6_netconf_notify_devconf(struct net *net, int type, int ifindex,
 				  struct ipv6_devconf *devconf);
@@ -319,6 +330,16 @@ static inline void in6_dev_put(struct inet6_dev *idev)
 		in6_dev_finish_destroy(idev);
 }
 
+static inline void in6_dev_put_clear(struct inet6_dev **pidev)
+{
+	struct inet6_dev *idev = *pidev;
+
+	if (idev) {
+		in6_dev_put(idev);
+		*pidev = NULL;
+	}
+}
+
 static inline void __in6_dev_put(struct inet6_dev *idev)
 {
 	atomic_dec(&idev->refcnt);
@@ -361,10 +382,15 @@ static inline void addrconf_addr_solict_mult(const struct in6_addr *addr,
 		      htonl(0xFF000000) | addr->s6_addr32[3]);
 }
 
+static inline bool ipv6_addr_is_multicast(const struct in6_addr *addr)
+{
+	return (addr->s6_addr32[0] & htonl(0xFF000000)) == htonl(0xFF000000);
+}
+
 static inline bool ipv6_addr_is_ll_all_nodes(const struct in6_addr *addr)
 {
 #if defined(CONFIG_HAVE_EFFICIENT_UNALIGNED_ACCESS) && BITS_PER_LONG == 64
-	__be64 *p = (__be64 *)addr;
+	__u64 *p = (__u64 *)addr;
 	return ((p[0] ^ cpu_to_be64(0xff02000000000000UL)) | (p[1] ^ cpu_to_be64(1))) == 0UL;
 #else
 	return ((addr->s6_addr32[0] ^ htonl(0xff020000)) |
@@ -376,7 +402,7 @@ static inline bool ipv6_addr_is_ll_all_nodes(const struct in6_addr *addr)
 static inline bool ipv6_addr_is_ll_all_routers(const struct in6_addr *addr)
 {
 #if defined(CONFIG_HAVE_EFFICIENT_UNALIGNED_ACCESS) && BITS_PER_LONG == 64
-	__be64 *p = (__be64 *)addr;
+	__u64 *p = (__u64 *)addr;
 	return ((p[0] ^ cpu_to_be64(0xff02000000000000UL)) | (p[1] ^ cpu_to_be64(2))) == 0UL;
 #else
 	return ((addr->s6_addr32[0] ^ htonl(0xff020000)) |
@@ -393,7 +419,7 @@ static inline bool ipv6_addr_is_isatap(const struct in6_addr *addr)
 static inline bool ipv6_addr_is_solict_mult(const struct in6_addr *addr)
 {
 #if defined(CONFIG_HAVE_EFFICIENT_UNALIGNED_ACCESS) && BITS_PER_LONG == 64
-	__be64 *p = (__be64 *)addr;
+	__u64 *p = (__u64 *)addr;
 	return ((p[0] ^ cpu_to_be64(0xff02000000000000UL)) |
 		((p[1] ^ cpu_to_be64(0x00000001ff000000UL)) &
 		 cpu_to_be64(0xffffffffff000000UL))) == 0UL;

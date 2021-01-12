@@ -439,7 +439,7 @@ to the caller.  The attribute adjustment excludes read and write operations.
 
 
 =====================
-PAGE ALLOC/READ/WRITE
+PAGE READ/ALLOC/WRITE
 =====================
 
 And the sixth step is to store and retrieve pages in the cache.  There are

@@ -5,6 +5,7 @@
 #include <linux/configfs.h>
 #include <net/sock.h>
 #include <net/tcp.h>
+#include <scsi/scsi_cmnd.h>
 #include <scsi/iscsi_proto.h>
 #include <target/target_core_base.h>
 
@@ -21,6 +22,7 @@
 #define ISCSIT_TCP_BACKLOG		256
 #define ISCSI_RX_THREAD_NAME		"iscsi_trx"
 #define ISCSI_TX_THREAD_NAME		"iscsi_ttx"
+#define ISCSI_IQN_LEN			224
 
 /* struct iscsi_node_attrib sanity values */
 #define NA_DATAOUT_TIMEOUT		3
@@ -61,7 +63,7 @@
 #define TA_CACHE_CORE_NPS		0
 /* T10 protection information disabled by default */
 #define TA_DEFAULT_T10_PI		0
-#define TA_DEFAULT_FABRIC_PROT_TYPE	0
+#define TA_DEFAULT_FABRIC_PROT_TYPE     0
 /* TPG status needs to be enabled to return sendtargets discovery endpoint info */
 #define TA_DEFAULT_TPG_ENABLED_SENDTARGETS 1
 /*
@@ -82,7 +84,7 @@ enum iscsit_transport_type {
 	ISCSI_IWARP_TCP				= 3,
 	ISCSI_IWARP_SCTP			= 4,
 	ISCSI_INFINIBAND			= 5,
-	ISCSI_CXGBIT				= 6,
+	ISCSI_CXGBIT			= 6,
 };
 
 /* RFC-3720 7.1.4  Standard Connection State Diagram for a Target */
@@ -266,9 +268,9 @@ struct iscsi_conn_ops {
 };
 
 struct iscsi_sess_ops {
-	char	InitiatorName[224];
+	char	InitiatorName[ISCSI_IQN_LEN];
 	char	InitiatorAlias[256];
-	char	TargetName[224];
+	char	TargetName[ISCSI_IQN_LEN];
 	char	TargetAlias[256];
 	char	TargetAddress[256];
 	u16	TargetPortalGroupTag;		/* [0..65535] */
@@ -558,7 +560,7 @@ struct iscsi_conn {
 	struct completion	rx_half_close_comp;
 	/* socket used by this connection */
 	struct socket		*sock;
-	void			(*orig_data_ready)(struct sock *);
+	void			(*orig_data_ready)(struct sock *, int);
 	void			(*orig_state_change)(struct sock *);
 #define LOGIN_FLAGS_READ_ACTIVE		1
 #define LOGIN_FLAGS_CLOSED		2
@@ -566,7 +568,6 @@ struct iscsi_conn {
 #define LOGIN_FLAGS_INITIAL_PDU		8
 	unsigned long		login_flags;
 	struct delayed_work	login_work;
-	struct delayed_work	login_cleanup_work;
 	struct iscsi_login	*login;
 	struct timer_list	nopin_timer;
 	struct timer_list	nopin_response_timer;
@@ -671,7 +672,7 @@ struct iscsi_session {
 	atomic_t		session_logout;
 	atomic_t		session_reinstatement;
 	atomic_t		session_stop_active;
-	atomic_t		session_close;
+	atomic_t		sleep_on_sess_wait_comp;
 	/* connection list */
 	struct list_head	sess_conn_list;
 	struct list_head	cr_active_list;
@@ -773,7 +774,7 @@ struct iscsi_tpg_attrib {
 	u32			demo_mode_discovery;
 	u32			default_erl;
 	u8			t10_pi;
-	u32			fabric_prot_type;
+	u32                     fabric_prot_type;
 	u32			tpg_enabled_sendtargets;
 	u32			login_keys_workaround;
 	struct iscsi_portal_group *tpg;
@@ -852,7 +853,6 @@ struct iscsi_wwn_stat_grps {
 };
 
 struct iscsi_tiqn {
-#define ISCSI_IQN_LEN				224
 	unsigned char		tiqn[ISCSI_IQN_LEN];
 	enum tiqn_state_table	tiqn_state;
 	int			tiqn_access_count;

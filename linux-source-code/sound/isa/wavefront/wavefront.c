@@ -380,11 +380,11 @@ snd_wavefront_probe (struct snd_card *card, int dev)
 		return err;
 	}
 
-	err = snd_wss_pcm(chip, 0);
+	err = snd_wss_pcm(chip, 0, NULL);
 	if (err < 0)
 		return err;
 
-	err = snd_wss_timer(chip, 0);
+	err = snd_wss_timer(chip, 0, NULL);
 	if (err < 0)
 		return err;
 
@@ -581,6 +581,7 @@ static int snd_wavefront_isa_remove(struct device *devptr,
 				    unsigned int dev)
 {
 	snd_card_free(dev_get_drvdata(devptr));
+	dev_set_drvdata(devptr, NULL);
 	return 0;
 }
 

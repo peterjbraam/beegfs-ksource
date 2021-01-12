@@ -12,8 +12,8 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; if not, you can access it online at
- * http://www.gnu.org/licenses/gpl-2.0.html.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  *
  * Copyright (C) IBM Corporation, 2006
  * Copyright (C) Fujitsu, 2012
@@ -45,7 +45,7 @@ struct rcu_batch {
 #define RCU_BATCH_INIT(name) { NULL, &(name.head) }
 
 struct srcu_struct {
-	unsigned long completed;
+	unsigned completed;
 	struct srcu_struct_array __percpu *per_cpu_ref;
 	spinlock_t queue_lock; /* protect ->batch_queue, ->running */
 	bool running;
@@ -99,29 +99,16 @@ void process_srcu(struct work_struct *work);
 	}
 
 /*
- * Define and initialize a srcu struct at build time.
- * Do -not- call init_srcu_struct() nor cleanup_srcu_struct() on it.
- *
- * Note that although DEFINE_STATIC_SRCU() hides the name from other
- * files, the per-CPU variable rules nevertheless require that the
- * chosen name be globally unique.  These rules also prohibit use of
- * DEFINE_STATIC_SRCU() within a function.  If these rules are too
- * restrictive, declare the srcu_struct manually.  For example, in
- * each file:
- *
- *	static struct srcu_struct my_srcu;
- *
- * Then, before the first use of each my_srcu, manually initialize it:
- *
- *	init_srcu_struct(&my_srcu);
- *
- * See include/linux/percpu-defs.h for the rules on per-CPU variables.
+ * define and init a srcu struct at build time.
+ * dont't call init_srcu_struct() nor cleanup_srcu_struct() on it.
  */
-#define __DEFINE_SRCU(name, is_static)					\
+#define DEFINE_SRCU(name)						\
 	static DEFINE_PER_CPU(struct srcu_struct_array, name##_srcu_array);\
-	is_static struct srcu_struct name = __SRCU_STRUCT_INIT(name)
-#define DEFINE_SRCU(name)		__DEFINE_SRCU(name, /* not static */)
-#define DEFINE_STATIC_SRCU(name)	__DEFINE_SRCU(name, static)
+	struct srcu_struct name = __SRCU_STRUCT_INIT(name);
+
+#define DEFINE_STATIC_SRCU(name)					\
+	static DEFINE_PER_CPU(struct srcu_struct_array, name##_srcu_array);\
+	static struct srcu_struct name = __SRCU_STRUCT_INIT(name);
 
 /**
  * call_srcu() - Queue a callback for invocation after an SRCU grace period
@@ -148,7 +135,7 @@ int __srcu_read_lock(struct srcu_struct *sp) __acquires(sp);
 void __srcu_read_unlock(struct srcu_struct *sp, int idx) __releases(sp);
 void synchronize_srcu(struct srcu_struct *sp);
 void synchronize_srcu_expedited(struct srcu_struct *sp);
-unsigned long srcu_batches_completed(struct srcu_struct *sp);
+long srcu_batches_completed(struct srcu_struct *sp);
 void srcu_barrier(struct srcu_struct *sp);
 
 #ifdef CONFIG_DEBUG_LOCK_ALLOC
@@ -230,11 +217,8 @@ static inline int srcu_read_lock_held(struct srcu_struct *sp)
  */
 static inline int srcu_read_lock(struct srcu_struct *sp) __acquires(sp)
 {
-	int retval;
+	int retval = __srcu_read_lock(sp);
 
-	preempt_disable();
-	retval = __srcu_read_lock(sp);
-	preempt_enable();
 	rcu_lock_acquire(&(sp)->dep_map);
 	return retval;
 }
@@ -251,6 +235,49 @@ static inline void srcu_read_unlock(struct srcu_struct *sp, int idx)
 {
 	rcu_lock_release(&(sp)->dep_map);
 	__srcu_read_unlock(sp, idx);
+}
+
+/**
+ * srcu_read_lock_raw - register a new reader for an SRCU-protected structure.
+ * @sp: srcu_struct in which to register the new reader.
+ *
+ * Enter an SRCU read-side critical section.  Similar to srcu_read_lock(),
+ * but avoids the RCU-lockdep checking.  This means that it is legal to
+ * use srcu_read_lock_raw() in one context, for example, in an exception
+ * handler, and then have the matching srcu_read_unlock_raw() in another
+ * context, for example in the task that took the exception.
+ *
+ * However, the entire SRCU read-side critical section must reside within a
+ * single task.  For example, beware of using srcu_read_lock_raw() in
+ * a device interrupt handler and srcu_read_unlock() in the interrupted
+ * task:  This will not work if interrupts are threaded.
+ */
+static inline int srcu_read_lock_raw(struct srcu_struct *sp)
+{
+	unsigned long flags;
+	int ret;
+
+	local_irq_save(flags);
+	ret =  __srcu_read_lock(sp);
+	local_irq_restore(flags);
+	return ret;
+}
+
+/**
+ * srcu_read_unlock_raw - unregister reader from an SRCU-protected structure.
+ * @sp: srcu_struct in which to unregister the old reader.
+ * @idx: return value from corresponding srcu_read_lock_raw().
+ *
+ * Exit an SRCU read-side critical section without lockdep-RCU checking.
+ * See srcu_read_lock_raw() for more details.
+ */
+static inline void srcu_read_unlock_raw(struct srcu_struct *sp, int idx)
+{
+	unsigned long flags;
+
+	local_irq_save(flags);
+	__srcu_read_unlock(sp, idx);
+	local_irq_restore(flags);
 }
 
 /**

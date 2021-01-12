@@ -87,18 +87,12 @@ static int drff_init(struct hid_device *hid)
 {
 	struct drff_device *drff;
 	struct hid_report *report;
-	struct hid_input *hidinput;
+	struct hid_input *hidinput = list_first_entry(&hid->inputs,
+						struct hid_input, list);
 	struct list_head *report_list =
 			&hid->report_enum[HID_OUTPUT_REPORT].report_list;
-	struct input_dev *dev;
+	struct input_dev *dev = hidinput->input;
 	int error;
-
-	if (list_empty(&hid->inputs)) {
-		hid_err(hid, "no inputs found\n");
-		return -ENODEV;
-	}
-	hidinput = list_first_entry(&hid->inputs, struct hid_input, list);
-	dev = hidinput->input;
 
 	if (list_empty(report_list)) {
 		hid_err(hid, "no output reports found\n");
@@ -157,7 +151,7 @@ static inline int drff_init(struct hid_device *hid)
  * descriptor. In any case, it's a wonder it works on Windows.
  *
  *  Usage Page (Desktop),             ; Generic desktop controls (01h)
- *  Usage (Joystick),                 ; Joystick (04h, application collection)
+ *  Usage (Joystik),                  ; Joystik (04h, application collection)
  *  Collection (Application),
  *    Collection (Logical),
  *      Report Size (8),
@@ -213,7 +207,7 @@ static inline int drff_init(struct hid_device *hid)
 /* Fixed report descriptor for PID 0x011 joystick */
 static __u8 pid0011_rdesc_fixed[] = {
 	0x05, 0x01,         /*  Usage Page (Desktop),           */
-	0x09, 0x04,         /*  Usage (Joystick),               */
+	0x09, 0x04,         /*  Usage (Joystik),                */
 	0xA1, 0x01,         /*  Collection (Application),       */
 	0xA1, 0x02,         /*      Collection (Logical),       */
 	0x14,               /*          Logical Minimum (0),    */

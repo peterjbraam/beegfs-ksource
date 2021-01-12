@@ -18,6 +18,7 @@
  */
 
 #include <linux/types.h>
+#include <linux/sizes.h>
 #include <linux/string.h>
 #include <linux/kvm.h>
 #include <linux/kvm_host.h>
@@ -31,7 +32,7 @@
 #include <asm/tlbflush.h>
 #include <asm/kvm_ppc.h>
 #include <asm/kvm_book3s.h>
-#include <asm/book3s/64/mmu-hash.h>
+#include <asm/mmu-hash64.h>
 #include <asm/hvcall.h>
 #include <asm/synch.h>
 #include <asm/ppc-opcode.h>
@@ -40,9 +41,10 @@
 #include <asm/iommu.h>
 #include <asm/tce.h>
 
-static unsigned long kvmppc_tce_pages(unsigned long iommu_pages)
+static unsigned long kvmppc_tce_pages(unsigned long window_size)
 {
-	return ALIGN(iommu_pages * sizeof(u64), PAGE_SIZE) / PAGE_SIZE;
+	return ALIGN((window_size >> IOMMU_PAGE_SHIFT_4K)
+		     * sizeof(u64), PAGE_SIZE) / PAGE_SIZE;
 }
 
 static unsigned long kvmppc_stt_pages(unsigned long tce_pages)
@@ -94,7 +96,8 @@ static void release_spapr_tce_table(struct rcu_head *head)
 {
 	struct kvmppc_spapr_tce_table *stt = container_of(head,
 			struct kvmppc_spapr_tce_table, rcu);
-	unsigned long i, npages = kvmppc_tce_pages(stt->size);
+	int i;
+	unsigned long npages = kvmppc_tce_pages(stt->window_size);
 
 	for (i = 0; i < npages; i++)
 		__free_page(stt->pages[i]);
@@ -107,7 +110,7 @@ static int kvm_spapr_tce_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 	struct kvmppc_spapr_tce_table *stt = vma->vm_file->private_data;
 	struct page *page;
 
-	if (vmf->pgoff >= kvmppc_tce_pages(stt->size))
+	if (vmf->pgoff >= kvmppc_tce_pages(stt->window_size))
 		return VM_FAULT_SIGBUS;
 
 	page = stt->pages[vmf->pgoff];
@@ -129,16 +132,13 @@ static int kvm_spapr_tce_mmap(struct file *file, struct vm_area_struct *vma)
 static int kvm_spapr_tce_release(struct inode *inode, struct file *filp)
 {
 	struct kvmppc_spapr_tce_table *stt = filp->private_data;
-	struct kvm *kvm = stt->kvm;
 
-	mutex_lock(&kvm->lock);
 	list_del_rcu(&stt->list);
-	mutex_unlock(&kvm->lock);
 
 	kvm_put_kvm(stt->kvm);
 
 	kvmppc_account_memlimit(
-		kvmppc_stt_pages(kvmppc_tce_pages(stt->size)), false);
+		kvmppc_stt_pages(kvmppc_tce_pages(stt->window_size)), false);
 	call_rcu(&stt->rcu, release_spapr_tce_table);
 
 	return 0;
@@ -150,32 +150,33 @@ static const struct file_operations kvm_spapr_tce_fops = {
 };
 
 long kvm_vm_ioctl_create_spapr_tce(struct kvm *kvm,
-				   struct kvm_create_spapr_tce_64 *args)
+				   struct kvm_create_spapr_tce *args)
 {
 	struct kvmppc_spapr_tce_table *stt = NULL;
-	struct kvmppc_spapr_tce_table *siter;
-	unsigned long npages, size;
+	unsigned long npages;
 	int ret = -ENOMEM;
 	int i;
 
-	if (!args->size)
-		return -EINVAL;
+	/* Check this LIOBN hasn't been previously allocated */
+	list_for_each_entry(stt, &kvm->arch.spapr_tce_tables, list) {
+		if (stt->liobn == args->liobn)
+			return -EBUSY;
+	}
 
-	size = args->size;
-	npages = kvmppc_tce_pages(size);
+	npages = kvmppc_tce_pages(args->window_size);
 	ret = kvmppc_account_memlimit(kvmppc_stt_pages(npages), true);
-	if (ret)
-		return ret;
+	if (ret) {
+		stt = NULL;
+		goto fail;
+	}
 
 	stt = kzalloc(sizeof(*stt) + npages * sizeof(struct page *),
 		      GFP_KERNEL);
 	if (!stt)
-		goto fail_acct;
+		goto fail;
 
 	stt->liobn = args->liobn;
-	stt->page_shift = args->page_shift;
-	stt->offset = args->offset;
-	stt->size = size;
+	stt->window_size = args->window_size;
 	stt->kvm = kvm;
 
 	for (i = 0; i < npages; i++) {
@@ -184,67 +185,26 @@ long kvm_vm_ioctl_create_spapr_tce(struct kvm *kvm,
 			goto fail;
 	}
 
+	kvm_get_kvm(kvm);
+
 	mutex_lock(&kvm->lock);
-
-	/* Check this LIOBN hasn't been previously allocated */
-	ret = 0;
-	list_for_each_entry(siter, &kvm->arch.spapr_tce_tables, list) {
-		if (siter->liobn == args->liobn) {
-			ret = -EBUSY;
-			break;
-		}
-	}
-
-	if (!ret)
-		ret = anon_inode_getfd("kvm-spapr-tce", &kvm_spapr_tce_fops,
-				       stt, O_RDWR | O_CLOEXEC);
-
-	if (ret >= 0) {
-		list_add_rcu(&stt->list, &kvm->arch.spapr_tce_tables);
-		kvm_get_kvm(kvm);
-	}
+	list_add_rcu(&stt->list, &kvm->arch.spapr_tce_tables);
 
 	mutex_unlock(&kvm->lock);
 
-	if (ret >= 0)
-		return ret;
+	return anon_inode_getfd("kvm-spapr-tce", &kvm_spapr_tce_fops,
+				stt, O_RDWR | O_CLOEXEC);
 
- fail:
-	for (i = 0; i < npages; i++)
-		if (stt->pages[i])
-			__free_page(stt->pages[i]);
+fail:
+	if (stt) {
+		for (i = 0; i < npages; i++)
+			if (stt->pages[i])
+				__free_page(stt->pages[i]);
 
-	kfree(stt);
- fail_acct:
-	kvmppc_account_memlimit(kvmppc_stt_pages(npages), false);
+		kfree(stt);
+	}
 	return ret;
 }
-
-long kvmppc_h_put_tce(struct kvm_vcpu *vcpu, unsigned long liobn,
-		      unsigned long ioba, unsigned long tce)
-{
-	struct kvmppc_spapr_tce_table *stt = kvmppc_find_table(vcpu, liobn);
-	long ret;
-
-	/* udbg_printf("H_PUT_TCE(): liobn=0x%lx ioba=0x%lx, tce=0x%lx\n", */
-	/* 	    liobn, ioba, tce); */
-
-	if (!stt)
-		return H_TOO_HARD;
-
-	ret = kvmppc_ioba_validate(stt, ioba, 1);
-	if (ret != H_SUCCESS)
-		return ret;
-
-	ret = kvmppc_tce_validate(stt, tce);
-	if (ret != H_SUCCESS)
-		return ret;
-
-	kvmppc_tce_put(stt, ioba >> stt->page_shift, tce);
-
-	return H_SUCCESS;
-}
-EXPORT_SYMBOL_GPL(kvmppc_h_put_tce);
 
 long kvmppc_h_put_tce_indirect(struct kvm_vcpu *vcpu,
 		unsigned long liobn, unsigned long ioba,
@@ -253,14 +213,13 @@ long kvmppc_h_put_tce_indirect(struct kvm_vcpu *vcpu,
 	struct kvmppc_spapr_tce_table *stt;
 	long i, ret = H_SUCCESS, idx;
 	unsigned long entry, ua = 0;
-	u64 __user *tces;
-	u64 tce;
+	u64 __user *tces, tce;
 
 	stt = kvmppc_find_table(vcpu, liobn);
 	if (!stt)
 		return H_TOO_HARD;
 
-	entry = ioba >> stt->page_shift;
+	entry = ioba >> IOMMU_PAGE_SHIFT_4K;
 	/*
 	 * SPAPR spec says that the maximum size of the list is 512 TCEs
 	 * so the whole table fits in 4K page
@@ -302,29 +261,3 @@ unlock_exit:
 	return ret;
 }
 EXPORT_SYMBOL_GPL(kvmppc_h_put_tce_indirect);
-
-long kvmppc_h_stuff_tce(struct kvm_vcpu *vcpu,
-		unsigned long liobn, unsigned long ioba,
-		unsigned long tce_value, unsigned long npages)
-{
-	struct kvmppc_spapr_tce_table *stt;
-	long i, ret;
-
-	stt = kvmppc_find_table(vcpu, liobn);
-	if (!stt)
-		return H_TOO_HARD;
-
-	ret = kvmppc_ioba_validate(stt, ioba, npages);
-	if (ret != H_SUCCESS)
-		return ret;
-
-	/* Check permission bits only to allow userspace poison TCE for debug */
-	if (tce_value & (TCE_PCI_WRITE | TCE_PCI_READ))
-		return H_PARAMETER;
-
-	for (i = 0; i < npages; ++i, ioba += (1ULL << stt->page_shift))
-		kvmppc_tce_put(stt, ioba >> stt->page_shift, tce_value);
-
-	return H_SUCCESS;
-}
-EXPORT_SYMBOL_GPL(kvmppc_h_stuff_tce);

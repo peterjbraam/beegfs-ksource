@@ -523,7 +523,7 @@ static int nvme_trans_standard_inquiry_page(struct nvme_ns *ns,
 	u8 resp_data_format = 0x02;
 	u8 protect;
 	u8 cmdque = 0x01 << 1;
-	u8 fw_offset = sizeof(ctrl->firmware_rev);
+	u8 fw_offset = sizeof(ctrl->subsys->firmware_rev);
 
 	/* nvme ns identify - use DPS value for PROTECT field */
 	nvme_sc = nvme_identify_ns(ctrl, ns->ns_id, &id_ns);
@@ -544,12 +544,13 @@ static int nvme_trans_standard_inquiry_page(struct nvme_ns *ns,
 	inq_response[5] = protect;	/* sccs=0 | acc=0 | tpgs=0 | pc3=0 */
 	inq_response[7] = cmdque;	/* wbus16=0 | sync=0 | vs=0 */
 	strncpy(&inq_response[8], "NVMe    ", 8);
-	strncpy(&inq_response[16], ctrl->model, 16);
+	strncpy(&inq_response[16], ctrl->subsys->model, 16);
 
-	while (ctrl->firmware_rev[fw_offset - 1] == ' ' && fw_offset > 4)
+	while (ctrl->subsys->firmware_rev[fw_offset - 1]
+			== ' ' && fw_offset > 4)
 		fw_offset--;
 	fw_offset -= 4;
-	strncpy(&inq_response[32], ctrl->firmware_rev + fw_offset, 4);
+	strncpy(&inq_response[32], ctrl->subsys->firmware_rev + fw_offset, 4);
 
 	xfer_len = min(alloc_len, STANDARD_INQUIRY_LENGTH);
 	return nvme_trans_copy_to_user(hdr, inq_response, xfer_len);
@@ -584,7 +585,8 @@ static int nvme_trans_unit_serial_page(struct nvme_ns *ns,
 	memset(inq_response, 0, STANDARD_INQUIRY_LENGTH);
 	inq_response[1] = INQ_UNIT_SERIAL_NUMBER_PAGE; /* Page Code */
 	inq_response[3] = INQ_SERIAL_NUMBER_LENGTH;    /* Page Length */
-	strncpy(&inq_response[4], ns->ctrl->serial, INQ_SERIAL_NUMBER_LENGTH);
+	strncpy(&inq_response[4], ns->ctrl->subsys->serial,
+					INQ_SERIAL_NUMBER_LENGTH);
 
 	xfer_len = min(alloc_len, STANDARD_INQUIRY_LENGTH);
 	return nvme_trans_copy_to_user(hdr, inq_response, xfer_len);
@@ -665,9 +667,11 @@ static int nvme_fill_device_id_scsi_string(struct nvme_ns *ns,
 	inq_response[7] = 0x44;	/* Designator Length */
 
 	sprintf(&inq_response[8], "%04x", le16_to_cpu(id_ctrl->vid));
-	memcpy(&inq_response[12], ctrl->model, sizeof(ctrl->model));
+	memcpy(&inq_response[12], ctrl->subsys->model,
+			sizeof(ctrl->subsys->model));
 	sprintf(&inq_response[52], "%04x", cpu_to_be32(ns->ns_id));
-	memcpy(&inq_response[56], ctrl->serial, sizeof(ctrl->serial));
+	memcpy(&inq_response[56], ctrl->subsys->serial,
+			sizeof(ctrl->subsys->serial));
 
 	res = nvme_trans_copy_to_user(hdr, inq_response, alloc_len);
 	kfree(id_ctrl);
@@ -1230,7 +1234,7 @@ static int nvme_trans_send_activate_fw_cmd(struct nvme_ns *ns, struct sg_io_hdr 
 	c.common.opcode = nvme_admin_activate_fw;
 	c.common.cdw10[0] = cpu_to_le32(buffer_id | NVME_FWACT_REPL_ACTV);
 
-	nvme_sc = nvme_submit_sync_cmd(ns->queue, &c, NULL, 0);
+	nvme_sc = nvme_submit_sync_cmd(ns->ctrl->admin_q, &c, NULL, 0);
 	return nvme_trans_status_code(hdr, nvme_sc);
 }
 
@@ -1280,10 +1284,6 @@ static inline void nvme_trans_modesel_get_bd_len(u8 *parm_list, u8 cdb10,
 static void nvme_trans_modesel_save_bd(struct nvme_ns *ns, u8 *parm_list,
 					u16 idx, u16 bd_len, u8 llbaa)
 {
-	u16 bd_num;
-
-	bd_num = bd_len / ((llbaa == 0) ?
-			SHORT_DESC_BLOCK : LONG_DESC_BLOCK);
 	/* Store block descriptor info if a FORMAT UNIT comes later */
 	/* TODO Saving 1st BD info; what to do if multiple BD received? */
 	if (llbaa == 0) {
@@ -1528,7 +1528,7 @@ static int nvme_trans_fmt_send_cmd(struct nvme_ns *ns, struct sg_io_hdr *hdr,
 	int nvme_sc;
 	struct nvme_id_ns *id_ns;
 	u8 i;
-	u8 flbas, nlbaf;
+	u8 nlbaf;
 	u8 selected_lbaf = 0xFF;
 	u32 cdw10 = 0;
 	struct nvme_command c;
@@ -1539,7 +1539,6 @@ static int nvme_trans_fmt_send_cmd(struct nvme_ns *ns, struct sg_io_hdr *hdr,
 	if (res)
 		return res;
 
-	flbas = (id_ns->flbas) & 0x0F;
 	nlbaf = id_ns->nlbaf;
 
 	for (i = 0; i < nlbaf; i++) {
@@ -1613,7 +1612,7 @@ static int nvme_trans_do_nvme_io(struct nvme_ns *ns, struct sg_io_hdr *hdr,
 	struct nvme_command c;
 	u8 opcode = (is_write ? nvme_cmd_write : nvme_cmd_read);
 	u16 control;
-	u32 max_blocks = queue_max_hw_sectors(ns->queue);
+	u32 max_blocks = queue_max_hw_sectors(ns->queue) >> (ns->lba_shift - 9);
 
 	num_cmds = nvme_trans_io_get_num_cmds(hdr, cdb_info, max_blocks);
 
@@ -2142,15 +2141,6 @@ static int nvme_trans_request_sense(struct nvme_ns *ns, struct sg_io_hdr *hdr,
 	return res;
 }
 
-static int nvme_trans_security_protocol(struct nvme_ns *ns,
-					struct sg_io_hdr *hdr,
-					u8 *cmd)
-{
-	return nvme_trans_completion(hdr, SAM_STAT_CHECK_CONDITION,
-				ILLEGAL_REQUEST, SCSI_ASC_ILLEGAL_COMMAND,
-				SCSI_ASCQ_CAUSE_NOT_REPORTABLE);
-}
-
 static int nvme_trans_synchronize_cache(struct nvme_ns *ns,
 					struct sg_io_hdr *hdr)
 {
@@ -2163,32 +2153,6 @@ static int nvme_trans_synchronize_cache(struct nvme_ns *ns,
 
 	nvme_sc = nvme_submit_sync_cmd(ns->queue, &c, NULL, 0);
 	return nvme_trans_status_code(hdr, nvme_sc);
-}
-
-static int nvme_trans_start_stop(struct nvme_ns *ns, struct sg_io_hdr *hdr,
-							u8 *cmd)
-{
-	u8 immed, pcmod, no_flush, start;
-
-	immed = cmd[1] & 0x01;
-	pcmod = cmd[3] & 0x0f;
-	no_flush = cmd[4] & 0x04;
-	start = cmd[4] & 0x01;
-
-	if (immed != 0) {
-		return nvme_trans_completion(hdr, SAM_STAT_CHECK_CONDITION,
-					ILLEGAL_REQUEST, SCSI_ASC_INVALID_CDB,
-					SCSI_ASCQ_CAUSE_NOT_REPORTABLE);
-	} else {
-		if (no_flush == 0) {
-			/* Issue NVME FLUSH command prior to START STOP UNIT */
-			int res = nvme_trans_synchronize_cache(ns, hdr);
-			if (res)
-				return res;
-		}
-
-		return 0;
-	}
 }
 
 static int nvme_trans_format_unit(struct nvme_ns *ns, struct sg_io_hdr *hdr,
@@ -2247,7 +2211,7 @@ static int nvme_trans_test_unit_ready(struct nvme_ns *ns,
 					struct sg_io_hdr *hdr,
 					u8 *cmd)
 {
-	if (nvme_ctrl_ready(ns->ctrl))
+	if (!nvme_ctrl_ready(ns->ctrl))
 		return nvme_trans_completion(hdr, SAM_STAT_CHECK_CONDITION,
 					    NOT_READY, SCSI_ASC_LUN_NOT_READY,
 					    SCSI_ASCQ_CAUSE_NOT_REPORTABLE);
@@ -2378,12 +2342,14 @@ static int nvme_trans_unmap(struct nvme_ns *ns, struct sg_io_hdr *hdr,
 
 static int nvme_scsi_translate(struct nvme_ns *ns, struct sg_io_hdr *hdr)
 {
-	u8 cmd[BLK_MAX_CDB];
+	u8 cmd[16];
 	int retcode;
 	unsigned int opcode;
 
 	if (hdr->cmdp == NULL)
 		return -EMSGSIZE;
+	if (hdr->cmd_len > sizeof(cmd))
+		return -EINVAL;
 	if (copy_from_user(cmd, hdr->cmdp, hdr->cmd_len))
 		return -EFAULT;
 
@@ -2442,13 +2408,6 @@ static int nvme_scsi_translate(struct nvme_ns *ns, struct sg_io_hdr *hdr)
 	case REQUEST_SENSE:
 		retcode = nvme_trans_request_sense(ns, hdr, cmd);
 		break;
-	case SECURITY_PROTOCOL_IN:
-	case SECURITY_PROTOCOL_OUT:
-		retcode = nvme_trans_security_protocol(ns, hdr, cmd);
-		break;
-	case START_STOP:
-		retcode = nvme_trans_start_stop(ns, hdr, cmd);
-		break;
 	case SYNCHRONIZE_CACHE:
 		retcode = nvme_trans_synchronize_cache(ns, hdr);
 		break;
@@ -2484,8 +2443,6 @@ int nvme_sg_io(struct nvme_ns *ns, struct sg_io_hdr __user *u_hdr)
 	if (copy_from_user(&hdr, u_hdr, sizeof(hdr)))
 		return -EFAULT;
 	if (hdr.interface_id != 'S')
-		return -EINVAL;
-	if (hdr.cmd_len > BLK_MAX_CDB)
 		return -EINVAL;
 
 	/*

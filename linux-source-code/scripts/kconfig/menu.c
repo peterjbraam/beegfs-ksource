@@ -119,13 +119,12 @@ void menu_set_type(int type)
 		sym->type = type;
 		return;
 	}
-	menu_warn(current_entry,
-		"ignoring type redefinition of '%s' from '%s' to '%s'",
-		sym->name ? sym->name : "<choice>",
-		sym_type_name(sym->type), sym_type_name(type));
+	menu_warn(current_entry, "type of '%s' redefined from '%s' to '%s'",
+	    sym->name ? sym->name : "<choice>",
+	    sym_type_name(sym->type), sym_type_name(type));
 }
 
-static struct property *menu_add_prop(enum prop_type type, char *prompt, struct expr *expr, struct expr *dep)
+struct property *menu_add_prop(enum prop_type type, char *prompt, struct expr *expr, struct expr *dep)
 {
 	struct property *prop = prop_alloc(type, current_entry->sym);
 
@@ -200,12 +199,6 @@ void menu_add_option(int token, char *arg)
 {
 	switch (token) {
 	case T_OPT_MODULES:
-		if (modules_sym)
-			zconf_error("symbol '%s' redefines option 'modules'"
-				    " already defined by symbol '%s'",
-				    current_entry->sym->name,
-				    modules_sym->name
-				    );
 		modules_sym = current_entry->sym;
 		break;
 	case T_OPT_DEFCONFIG_LIST:
@@ -233,6 +226,8 @@ static void sym_check_prop(struct symbol *sym)
 {
 	struct property *prop;
 	struct symbol *sym2;
+	char *use;
+
 	for (prop = sym->prop; prop; prop = prop->next) {
 		switch (prop->type) {
 		case P_DEFAULT:
@@ -252,18 +247,20 @@ static void sym_check_prop(struct symbol *sym)
 			}
 			break;
 		case P_SELECT:
+		case P_IMPLY:
+			use = prop->type == P_SELECT ? "select" : "imply";
 			sym2 = prop_get_symbol(prop);
 			if (sym->type != S_BOOLEAN && sym->type != S_TRISTATE)
 				prop_warn(prop,
-				    "config symbol '%s' uses select, but is "
-				    "not boolean or tristate", sym->name);
+				    "config symbol '%s' uses %s, but is "
+				    "not boolean or tristate", sym->name, use);
 			else if (sym2->type != S_UNKNOWN &&
 				 sym2->type != S_BOOLEAN &&
 				 sym2->type != S_TRISTATE)
 				prop_warn(prop,
-				    "'%s' has wrong type. 'select' only "
+				    "'%s' has wrong type. '%s' only "
 				    "accept arguments of boolean and "
-				    "tristate type", sym2->name);
+				    "tristate type", sym2->name, use);
 			break;
 		case P_RANGE:
 			if (sym->type != S_INT && sym->type != S_HEX)
@@ -333,6 +330,10 @@ void menu_finalize(struct menu *parent)
 					struct symbol *es = prop_get_symbol(prop);
 					es->rev_dep.expr = expr_alloc_or(es->rev_dep.expr,
 							expr_alloc_and(expr_alloc_symbol(menu->sym), expr_copy(dep)));
+				} else if (prop->type == P_IMPLY) {
+					struct symbol *es = prop_get_symbol(prop);
+					es->implied.expr = expr_alloc_or(es->implied.expr,
+							expr_alloc_and(expr_alloc_symbol(menu->sym), expr_copy(dep)));
 				}
 			}
 		}
@@ -364,7 +365,6 @@ void menu_finalize(struct menu *parent)
 			menu->parent = parent;
 			last_menu = menu;
 		}
-		expr_free(basedep);
 		if (last_menu) {
 			parent->list = parent->next;
 			parent->next = last_menu->next;
@@ -451,22 +451,6 @@ bool menu_has_prompt(struct menu *menu)
 	return true;
 }
 
-/*
- * Determine if a menu is empty.
- * A menu is considered empty if it contains no or only
- * invisible entries.
- */
-bool menu_is_empty(struct menu *menu)
-{
-	struct menu *child;
-
-	for (child = menu->list; child; child = child->next) {
-		if (menu_is_visible(child))
-			return(false);
-	}
-	return(true);
-}
-
 bool menu_is_visible(struct menu *menu)
 {
 	struct menu *child;
@@ -478,7 +462,7 @@ bool menu_is_visible(struct menu *menu)
 
 	if (menu->visibility) {
 		if (expr_calc_value(menu->visibility) == no)
-			return false;
+			return no;
 	}
 
 	sym = menu->sym;
@@ -588,7 +572,7 @@ static void get_prompt_str(struct gstr *r, struct property *prop,
 		for (j = 4; --i >= 0; j += 2) {
 			menu = submenu[i];
 			if (jump && menu == location)
-				jump->offset = strlen(r->s);
+				jump->offset = r->len - 1;
 			str_printf(r, "%*c-> %s", j, ' ',
 				   _(menu_get_prompt(menu)));
 			if (menu->sym) {
@@ -602,7 +586,7 @@ static void get_prompt_str(struct gstr *r, struct property *prop,
 }
 
 /*
- * get property of type P_SYMBOL
+ * get peoperty of type P_SYMBOL
  */
 static struct property *get_symbol_prop(struct symbol *sym)
 {
@@ -613,13 +597,30 @@ static struct property *get_symbol_prop(struct symbol *sym)
 	return prop;
 }
 
+static void get_symbol_props_str(struct gstr *r, struct symbol *sym,
+				 enum prop_type tok, const char *prefix)
+{
+	bool hit = false;
+	struct property *prop;
+
+	for_all_properties(sym, prop, tok) {
+		if (!hit) {
+			str_append(r, prefix);
+			hit = true;
+		} else
+			str_printf(r, " && ");
+		expr_gstr_print(prop->expr, r);
+	}
+	if (hit)
+		str_append(r, "\n");
+}
+
 /*
  * head is optional and may be NULL
  */
-static void get_symbol_str(struct gstr *r, struct symbol *sym,
+void get_symbol_str(struct gstr *r, struct symbol *sym,
 		    struct list_head *head)
 {
-	bool hit;
 	struct property *prop;
 
 	if (sym && sym->name) {
@@ -649,22 +650,20 @@ static void get_symbol_str(struct gstr *r, struct symbol *sym,
 		}
 	}
 
-	hit = false;
-	for_all_properties(sym, prop, P_SELECT) {
-		if (!hit) {
-			str_append(r, "  Selects: ");
-			hit = true;
-		} else
-			str_printf(r, " && ");
-		expr_gstr_print(prop->expr, r);
-	}
-	if (hit)
-		str_append(r, "\n");
+	get_symbol_props_str(r, sym, P_SELECT, _("  Selects: "));
 	if (sym->rev_dep.expr) {
 		str_append(r, _("  Selected by: "));
 		expr_gstr_print(sym->rev_dep.expr, r);
 		str_append(r, "\n");
 	}
+
+	get_symbol_props_str(r, sym, P_IMPLY, _("  Implies: "));
+	if (sym->implied.expr) {
+		str_append(r, _("  Implied by: "));
+		expr_gstr_print(sym->implied.expr, r);
+		str_append(r, "\n");
+	}
+
 	str_append(r, "\n\n");
 }
 

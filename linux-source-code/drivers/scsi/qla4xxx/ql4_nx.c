@@ -12,7 +12,7 @@
 #include "ql4_glbl.h"
 #include "ql4_inline.h"
 
-#include <linux/io-64-nonatomic-lo-hi.h>
+#include <asm-generic/io-64-nonatomic-lo-hi.h>
 
 #define TIMEOUT_100_MS	100
 #define MASK(n)		DMA_BIT_MASK(n)
@@ -1843,7 +1843,7 @@ static uint32_t ql4_84xx_poll_wait_for_ready(struct scsi_qla_host *ha,
 	return rval;
 }
 
-static uint32_t ql4_84xx_ipmdio_rd_reg(struct scsi_qla_host *ha, uint32_t addr1,
+uint32_t ql4_84xx_ipmdio_rd_reg(struct scsi_qla_host *ha, uint32_t addr1,
 				uint32_t addr3, uint32_t mask, uint32_t addr,
 				uint32_t *data_ptr)
 {
@@ -4221,7 +4221,7 @@ qla4_8xxx_enable_msix(struct scsi_qla_host *ha)
 	for (i = 0; i < QLA_MSIX_ENTRIES; i++)
 		entries[i].entry = qla4_8xxx_msix_entries[i].entry;
 
-	ret = pci_enable_msix_exact(ha->pdev, entries, ARRAY_SIZE(entries));
+	ret = pci_enable_msix(ha->pdev, entries, ARRAY_SIZE(entries));
 	if (ret) {
 		ql4_printk(KERN_WARNING, ha,
 		    "MSI-X: Failed to enable support -- %d/%d\n",

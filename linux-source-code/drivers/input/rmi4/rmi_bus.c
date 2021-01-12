@@ -9,6 +9,7 @@
 
 #include <linux/kernel.h>
 #include <linux/device.h>
+#include <linux/kconfig.h>
 #include <linux/list.h>
 #include <linux/pm.h>
 #include <linux/rmi.h>
@@ -55,7 +56,7 @@ static void rmi_release_device(struct device *dev)
 	kfree(rmi_dev);
 }
 
-static struct device_type rmi_device_type = {
+static const struct device_type rmi_device_type = {
 	.name		= "rmi4_sensor",
 	.release	= rmi_release_device,
 };
@@ -134,7 +135,7 @@ static void rmi_release_function(struct device *dev)
 	kfree(fn);
 }
 
-static struct device_type rmi_function_type = {
+static const struct device_type rmi_function_type = {
 	.name		= "rmi4_function",
 	.release	= rmi_release_function,
 };
@@ -152,29 +153,12 @@ static int rmi_function_match(struct device *dev, struct device_driver *drv)
 	return fn->fd.function_number == handler->func;
 }
 
-#ifdef CONFIG_OF
-static void rmi_function_of_probe(struct rmi_function *fn)
-{
-	char of_name[9];
-	struct device_node *node = fn->rmi_dev->xport->dev->of_node;
-
-	snprintf(of_name, sizeof(of_name), "rmi4-f%02x",
-		fn->fd.function_number);
-	fn->dev.of_node = of_get_child_by_name(node, of_name);
-}
-#else
-static inline void rmi_function_of_probe(struct rmi_function *fn)
-{}
-#endif
-
 static int rmi_function_probe(struct device *dev)
 {
 	struct rmi_function *fn = to_rmi_function(dev);
 	struct rmi_function_handler *handler =
 					to_rmi_function_handler(dev->driver);
 	int error;
-
-	rmi_function_of_probe(fn);
 
 	if (handler->probe) {
 		error = handler->probe(fn);
@@ -230,6 +214,9 @@ err_put_device:
 
 void rmi_unregister_function(struct rmi_function *fn)
 {
+	rmi_dbg(RMI_DEBUG_CORE, &fn->dev, "Unregistering F%02X.\n",
+			fn->fd.function_number);
+
 	device_del(&fn->dev);
 	of_node_put(fn->dev.of_node);
 	put_device(&fn->dev);
@@ -258,10 +245,10 @@ int __rmi_register_function_handler(struct rmi_function_handler *handler,
 	driver->probe = rmi_function_probe;
 	driver->remove = rmi_function_remove;
 
-	error = driver_register(&handler->driver);
+	error = driver_register(driver);
 	if (error) {
 		pr_err("driver_register() failed for %s, error: %d\n",
-			handler->driver.name, error);
+			driver->name, error);
 		return error;
 	}
 
@@ -302,6 +289,9 @@ struct bus_type rmi_bus_type = {
 
 static struct rmi_function_handler *fn_handlers[] = {
 	&rmi_f01_handler,
+#ifdef CONFIG_RMI4_F03
+	&rmi_f03_handler,
+#endif
 #ifdef CONFIG_RMI4_F11
 	&rmi_f11_handler,
 #endif
@@ -310,9 +300,6 @@ static struct rmi_function_handler *fn_handlers[] = {
 #endif
 #ifdef CONFIG_RMI4_F30
 	&rmi_f30_handler,
-#endif
-#ifdef CONFIG_RMI4_F54
-	&rmi_f54_handler,
 #endif
 };
 
@@ -349,24 +336,6 @@ err_unregister_function_handlers:
 	__rmi_unregister_function_handlers(i - 1);
 	return ret;
 }
-
-int rmi_of_property_read_u32(struct device *dev, u32 *result,
-				const char *prop, bool optional)
-{
-	int retval;
-	u32 val = 0;
-
-	retval = of_property_read_u32(dev->of_node, prop, &val);
-	if (retval && (!optional && retval == -EINVAL)) {
-		dev_err(dev, "Failed to get %s value: %d\n",
-			prop, retval);
-		return retval;
-	}
-	*result = val;
-
-	return 0;
-}
-EXPORT_SYMBOL_GPL(rmi_of_property_read_u32);
 
 static int __init rmi_bus_init(void)
 {
@@ -415,4 +384,3 @@ MODULE_AUTHOR("Christopher Heiny <cheiny@synaptics.com");
 MODULE_AUTHOR("Andrew Duggan <aduggan@synaptics.com");
 MODULE_DESCRIPTION("RMI bus");
 MODULE_LICENSE("GPL");
-MODULE_VERSION(RMI_DRIVER_VERSION);

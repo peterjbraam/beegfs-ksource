@@ -179,7 +179,7 @@ handler:							;\
  *	 occured. in fact they never do. if you need them use
  *	 values saved on stack (for SPR_EPC, SPR_ESR) or content
  *       of r4 (for SPR_EEAR). for details look at EXCEPTION_HANDLE()
- *       in 'arch/openrisc/kernel/head.S'
+ *       in 'arch/or32/kernel/head.S'
  */
 
 /* =====================================================[ exceptions] === */
@@ -853,44 +853,37 @@ UNHANDLED_EXCEPTION(_vector_0x1f00,0x1f00)
 
 /* ========================================================[ return ] === */
 
+_work_pending:
+	/*
+	 * if (current_thread_info->flags & _TIF_NEED_RESCHED)
+	 *     schedule();
+	 */
+	l.lwz   r5,TI_FLAGS(r10)
+	l.andi	r3,r5,_TIF_NEED_RESCHED
+	l.sfnei r3,0
+	l.bnf   _work_notifysig
+	 l.nop
+	l.jal   schedule
+	 l.nop
+	l.j	_resume_userspace
+	 l.nop
+
+/* Handle pending signals and notify-resume requests.
+ * do_notify_resume must be passed the latest pushed pt_regs, not
+ * necessarily the "userspace" ones.  Also, pt_regs->syscallno
+ * must be set so that the syscall restart functionality works.
+ */
+_work_notifysig:
+	l.jal	do_notify_resume
+	 l.ori	r3,r1,0		  /* pt_regs */
+
 _resume_userspace:
 	DISABLE_INTERRUPTS(r3,r4)
-	l.lwz	r4,TI_FLAGS(r10)
-	l.andi	r13,r4,_TIF_WORK_MASK
-	l.sfeqi	r13,0
-	l.bf	_restore_all
+	l.lwz	r3,TI_FLAGS(r10)
+	l.andi	r3,r3,_TIF_WORK_MASK
+	l.sfnei	r3,0
+	l.bf	_work_pending
 	 l.nop
-
-_work_pending:
-	l.lwz	r5,PT_ORIG_GPR11(r1)
-	l.sfltsi r5,0
-	l.bnf	1f
-	 l.nop
-	l.andi	r5,r5,0
-1:
-	l.jal	do_work_pending
-	 l.ori	r3,r1,0			/* pt_regs */
-
-	l.sfeqi	r11,0
-	l.bf	_restore_all
-	 l.nop
-	l.sfltsi r11,0
-	l.bnf	1f
-	 l.nop
-	l.and	r11,r11,r0
-	l.ori	r11,r11,__NR_restart_syscall
-	l.j	_syscall_check_trace_enter
-	 l.nop
-1:
-	l.lwz	r11,PT_ORIG_GPR11(r1)
-	/* Restore arg registers */
-	l.lwz	r3,PT_GPR3(r1)
-	l.lwz	r4,PT_GPR4(r1)
-	l.lwz	r5,PT_GPR5(r1)
-	l.lwz	r6,PT_GPR6(r1)
-	l.lwz	r7,PT_GPR7(r1)
-	l.j	_syscall_check_trace_enter
-	 l.lwz	r8,PT_GPR8(r1)
 
 _restore_all:
 	RESTORE_ALL
@@ -1092,13 +1085,13 @@ ENTRY(__sys_clone)
 	l.movhi	r29,hi(sys_clone)
 	l.ori	r29,r29,lo(sys_clone)
 	l.j	_fork_save_extra_regs_and_call
-	 l.nop
+	 l.addi	r7,r1,0
 
 ENTRY(__sys_fork)
 	l.movhi	r29,hi(sys_fork)
 	l.ori	r29,r29,lo(sys_fork)
 	l.j	_fork_save_extra_regs_and_call
-	 l.nop
+	 l.addi	r3,r1,0
 
 ENTRY(sys_rt_sigreturn)
 	l.j	_sys_rt_sigreturn

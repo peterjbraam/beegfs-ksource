@@ -146,7 +146,7 @@ static __be32 *encode_fsid(__be32 *p, struct svc_fh *fhp)
 	default:
 	case FSIDSOURCE_DEV:
 		p = xdr_encode_hyper(p, (u64)huge_encode_dev
-				     (fhp->fh_dentry->d_sb->s_dev));
+				     (fhp->fh_dentry->d_inode->i_sb->s_dev));
 		break;
 	case FSIDSOURCE_FSID:
 		p = xdr_encode_hyper(p, (u64) fhp->fh_export->ex_fsid);
@@ -203,14 +203,14 @@ static __be32 *
 encode_post_op_attr(struct svc_rqst *rqstp, __be32 *p, struct svc_fh *fhp)
 {
 	struct dentry *dentry = fhp->fh_dentry;
-	if (dentry && d_really_is_positive(dentry)) {
+	if (dentry && dentry->d_inode) {
 	        __be32 err;
 		struct kstat stat;
 
 		err = fh_getattr(fhp, &stat);
 		if (!err) {
 			*p++ = xdr_one;		/* attributes follow */
-			lease_get_mtime(d_inode(dentry), &stat.mtime);
+			lease_get_mtime(dentry->d_inode, &stat.mtime);
 			return encode_fattr3(rqstp, p, fhp, &stat);
 		}
 	}
@@ -233,7 +233,7 @@ encode_wcc_data(struct svc_rqst *rqstp, __be32 *p, struct svc_fh *fhp)
 {
 	struct dentry	*dentry = fhp->fh_dentry;
 
-	if (dentry && d_really_is_positive(dentry) && fhp->fh_post_saved) {
+	if (dentry && dentry->d_inode && fhp->fh_post_saved) {
 		if (fhp->fh_pre_saved) {
 			*p++ = xdr_one;
 			p = xdr_encode_hyper(p, (u64) fhp->fh_pre_size);
@@ -250,6 +250,34 @@ encode_wcc_data(struct svc_rqst *rqstp, __be32 *p, struct svc_fh *fhp)
 }
 
 /*
+ * Fill in the pre_op attr for the wcc data
+ */
+void fill_pre_wcc(struct svc_fh *fhp)
+{
+	struct inode    *inode;
+	struct kstat	stat;
+	__be32 err;
+
+	if (fhp->fh_pre_saved)
+		return;
+
+	inode = d_inode(fhp->fh_dentry);
+	err = fh_getattr(fhp, &stat);
+	if (err) {
+		/* Grab the times from inode anyway */
+		stat.mtime = inode->i_mtime;
+		stat.ctime = inode->i_ctime;
+		stat.size  = inode->i_size;
+	}
+
+	fhp->fh_pre_mtime = stat.mtime;
+	fhp->fh_pre_ctime = stat.ctime;
+	fhp->fh_pre_size  = stat.size;
+	fhp->fh_pre_change = inode->i_version;
+	fhp->fh_pre_saved = true;
+}
+
+/*
  * Fill in the post_op attr for the wcc data
  */
 void fill_post_wcc(struct svc_fh *fhp)
@@ -260,11 +288,11 @@ void fill_post_wcc(struct svc_fh *fhp)
 		printk("nfsd: inode locked twice during operation.\n");
 
 	err = fh_getattr(fhp, &fhp->fh_post_attr);
-	fhp->fh_post_change = d_inode(fhp->fh_dentry)->i_version;
+	fhp->fh_post_change = fhp->fh_dentry->d_inode->i_version;
 	if (err) {
 		fhp->fh_post_saved = false;
 		/* Grab the ctime anyway - set_change_info might use it */
-		fhp->fh_post_attr.ctime = d_inode(fhp->fh_dentry)->i_ctime;
+		fhp->fh_post_attr.ctime = fhp->fh_dentry->d_inode->i_ctime;
 	} else
 		fhp->fh_post_saved = true;
 }
@@ -356,7 +384,7 @@ int
 nfs3svc_decode_writeargs(struct svc_rqst *rqstp, __be32 *p,
 					struct nfsd3_writeargs *args)
 {
-	unsigned int len, v, hdr, dlen;
+	unsigned int len, hdr, dlen;
 	u32 max_blocksize = svc_max_payload(rqstp);
 	struct kvec *head = rqstp->rq_arg.head;
 	struct kvec *tail = rqstp->rq_arg.tail;
@@ -398,17 +426,9 @@ nfs3svc_decode_writeargs(struct svc_rqst *rqstp, __be32 *p,
 		args->count = max_blocksize;
 		len = args->len = max_blocksize;
 	}
-	rqstp->rq_vec[0].iov_base = (void*)p;
-	rqstp->rq_vec[0].iov_len = head->iov_len - hdr;
-	v = 0;
-	while (len > rqstp->rq_vec[v].iov_len) {
-		len -= rqstp->rq_vec[v].iov_len;
-		v++;
-		rqstp->rq_vec[v].iov_base = page_address(rqstp->rq_pages[v]);
-		rqstp->rq_vec[v].iov_len = PAGE_SIZE;
-	}
-	rqstp->rq_vec[v].iov_len = len;
-	args->vlen = v + 1;
+
+	args->first.iov_base = (void *)p;
+	args->first.iov_len = head->iov_len - hdr;
 	return 1;
 }
 
@@ -633,7 +653,7 @@ nfs3svc_encode_attrstat(struct svc_rqst *rqstp, __be32 *p,
 					struct nfsd3_attrstat *resp)
 {
 	if (resp->status == 0) {
-		lease_get_mtime(d_inode(resp->fh.fh_dentry),
+		lease_get_mtime(resp->fh.fh_dentry->d_inode,
 				&resp->stat.mtime);
 		p = encode_fattr3(rqstp, p, &resp->fh, &resp->stat);
 	}
@@ -729,8 +749,9 @@ nfs3svc_encode_writeres(struct svc_rqst *rqstp, __be32 *p,
 	if (resp->status == 0) {
 		*p++ = htonl(resp->count);
 		*p++ = htonl(resp->committed);
-		*p++ = htonl(nn->nfssvc_boot.tv_sec);
-		*p++ = htonl(nn->nfssvc_boot.tv_usec);
+		/* unique identifier, y2038 overflow can be ignored */
+		*p++ = htonl((u32)nn->nfssvc_boot.tv_sec);
+		*p++ = htonl(nn->nfssvc_boot.tv_nsec);
 	}
 	return xdr_ressize_check(rqstp, p);
 }
@@ -833,7 +854,7 @@ compose_entry_fh(struct nfsd3_readdirres *cd, struct svc_fh *fhp,
 		return rv;
 	if (d_mountpoint(dchild))
 		goto out;
-	if (d_really_is_negative(dchild))
+	if (!dchild->d_inode)
 		goto out;
 	if (dchild->d_inode->i_ino != ino)
 		goto out;
@@ -899,7 +920,6 @@ encode_entry(struct readdir_cd *ccd, const char *name, int namlen,
 		} else {
 			xdr_encode_hyper(cd->offset, offset64);
 		}
-		cd->offset = NULL;
 	}
 
 	/*
@@ -1095,8 +1115,9 @@ nfs3svc_encode_commitres(struct svc_rqst *rqstp, __be32 *p,
 	p = encode_wcc_data(rqstp, p, &resp->fh);
 	/* Write verifier */
 	if (resp->status == 0) {
-		*p++ = htonl(nn->nfssvc_boot.tv_sec);
-		*p++ = htonl(nn->nfssvc_boot.tv_usec);
+		/* unique identifier, y2038 overflow can be ignored */
+		*p++ = htonl((u32)nn->nfssvc_boot.tv_sec);
+		*p++ = htonl(nn->nfssvc_boot.tv_nsec);
 	}
 	return xdr_ressize_check(rqstp, p);
 }

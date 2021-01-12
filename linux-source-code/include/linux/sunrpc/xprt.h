@@ -83,7 +83,6 @@ struct rpc_rqst {
 	void (*rq_release_snd_buf)(struct rpc_rqst *); /* release rq_enc_pages */
 	struct list_head	rq_list;
 
-	void			*rq_xprtdata;	/* Per-xprt private data */
 	void			*rq_buffer;	/* Call XDR encode buffer */
 	size_t			rq_callsize;
 	void			*rq_rbuffer;	/* Reply XDR decode buffer */
@@ -126,6 +125,8 @@ struct rpc_xprt_ops {
 	int		(*reserve_xprt)(struct rpc_xprt *xprt, struct rpc_task *task);
 	void		(*release_xprt)(struct rpc_xprt *xprt, struct rpc_task *task);
 	void		(*alloc_slot)(struct rpc_xprt *xprt, struct rpc_task *task);
+	void		(*free_slot)(struct rpc_xprt *xprt,
+				     struct rpc_rqst *req);
 	void		(*rpcbind)(struct rpc_task *task);
 	void		(*set_port)(struct rpc_xprt *xprt, unsigned short port);
 	void		(*connect)(struct rpc_xprt *xprt, struct rpc_task *task);
@@ -193,7 +194,7 @@ struct rpc_xprt {
 	struct list_head	free;		/* free slots */
 	unsigned int		max_reqs;	/* max number of slots */
 	unsigned int		min_reqs;	/* min number of slots */
-	atomic_t		num_reqs;	/* total slots */
+	unsigned int		num_reqs;	/* total slots */
 	unsigned long		state;		/* transport state */
 	unsigned char		resvport   : 1; /* use a reserved port */
 	atomic_t		swapper;	/* we're swapping over this
@@ -228,6 +229,7 @@ struct rpc_xprt {
 	 */
 	spinlock_t		transport_lock;	/* lock transport info */
 	spinlock_t		reserve_lock;	/* lock slot table */
+	spinlock_t		recv_lock;	/* lock receive list */
 	u32			xid;		/* Next XID value to use */
 	struct rpc_task *	snd_task;	/* Task blocked in send */
 	struct svc_xprt		*bc_xprt;	/* NFSv4.1 backchannel */
@@ -310,7 +312,6 @@ struct xprt_class {
 	struct rpc_xprt *	(*setup)(struct xprt_create *);
 	struct module		*owner;
 	char			name[32];
-	const char *		netid[];
 };
 
 /*
@@ -323,6 +324,8 @@ void			xprt_retry_reserve(struct rpc_task *task);
 int			xprt_reserve_xprt(struct rpc_xprt *xprt, struct rpc_task *task);
 int			xprt_reserve_xprt_cong(struct rpc_xprt *xprt, struct rpc_task *task);
 void			xprt_alloc_slot(struct rpc_xprt *xprt, struct rpc_task *task);
+void			xprt_free_slot(struct rpc_xprt *xprt,
+				       struct rpc_rqst *req);
 void			xprt_lock_and_alloc_slot(struct rpc_xprt *xprt, struct rpc_task *task);
 bool			xprt_prepare_transmit(struct rpc_task *task);
 void			xprt_transmit(struct rpc_task *task);
@@ -369,6 +372,8 @@ void			xprt_write_space(struct rpc_xprt *xprt);
 void			xprt_adjust_cwnd(struct rpc_xprt *xprt, struct rpc_task *task, int result);
 struct rpc_rqst *	xprt_lookup_rqst(struct rpc_xprt *xprt, __be32 xid);
 void			xprt_complete_rqst(struct rpc_task *task, int copied);
+void			xprt_pin_rqst(struct rpc_rqst *req);
+void			xprt_unpin_rqst(struct rpc_rqst *req);
 void			xprt_release_rqst_cong(struct rpc_task *task);
 void			xprt_disconnect_done(struct rpc_xprt *xprt);
 void			xprt_force_disconnect(struct rpc_xprt *xprt);
@@ -416,9 +421,9 @@ static inline int xprt_test_and_clear_connected(struct rpc_xprt *xprt)
 
 static inline void xprt_clear_connecting(struct rpc_xprt *xprt)
 {
-	smp_mb__before_atomic();
+	smp_mb__before_clear_bit();
 	clear_bit(XPRT_CONNECTING, &xprt->state);
-	smp_mb__after_atomic();
+	smp_mb__after_clear_bit();
 }
 
 static inline int xprt_connecting(struct rpc_xprt *xprt)
@@ -448,9 +453,9 @@ static inline void xprt_clear_bound(struct rpc_xprt *xprt)
 
 static inline void xprt_clear_binding(struct rpc_xprt *xprt)
 {
-	smp_mb__before_atomic();
+	smp_mb__before_clear_bit();
 	clear_bit(XPRT_BINDING, &xprt->state);
-	smp_mb__after_atomic();
+	smp_mb__after_clear_bit();
 }
 
 static inline int xprt_test_and_set_binding(struct rpc_xprt *xprt)

@@ -18,6 +18,7 @@
 #include <linux/selinux.h>
 #include <linux/atomic.h>
 #include <linux/uidgid.h>
+#include <linux/rh_kabi.h>
 
 struct user_struct;
 struct cred;
@@ -26,10 +27,15 @@ struct inode;
 /*
  * COW Supplementary groups list
  */
+#define NGROUPS_SMALL		32
+#define NGROUPS_PER_BLOCK	((unsigned int)(PAGE_SIZE / sizeof(kgid_t)))
+
 struct group_info {
 	atomic_t	usage;
 	int		ngroups;
-	kgid_t		gid[0];
+	int		nblocks;
+	kgid_t		small_block[NGROUPS_SMALL];
+	kgid_t		*blocks[0];
 };
 
 /**
@@ -57,32 +63,21 @@ do {							\
 		groups_free(group_info);		\
 } while (0)
 
-extern struct group_info init_groups;
-#ifdef CONFIG_MULTIUSER
 extern struct group_info *groups_alloc(int);
+extern struct group_info init_groups;
 extern void groups_free(struct group_info *);
-
-extern int in_group_p(kgid_t);
-extern int in_egroup_p(kgid_t);
-#else
-static inline void groups_free(struct group_info *group_info)
-{
-}
-
-static inline int in_group_p(kgid_t grp)
-{
-        return 1;
-}
-static inline int in_egroup_p(kgid_t grp)
-{
-        return 1;
-}
-#endif
 extern int set_current_groups(struct group_info *);
-extern void set_groups(struct cred *, struct group_info *);
+extern int set_groups(struct cred *, struct group_info *);
 extern int groups_search(const struct group_info *, kgid_t);
 extern bool may_setgroups(void);
 extern void groups_sort(struct group_info *);
+
+/* access the groups "array" with this macro */
+#define GROUP_AT(gi, i) \
+	((gi)->blocks[(i) / NGROUPS_PER_BLOCK][(i) % NGROUPS_PER_BLOCK])
+
+extern int in_group_p(kgid_t);
+extern int in_egroup_p(kgid_t);
 
 /*
  * The security context of a task
@@ -129,7 +124,6 @@ struct cred {
 	kernel_cap_t	cap_permitted;	/* caps we're permitted */
 	kernel_cap_t	cap_effective;	/* caps we can actually use */
 	kernel_cap_t	cap_bset;	/* capability bounding set */
-	kernel_cap_t	cap_ambient;	/* Ambient capability set */
 #ifdef CONFIG_KEYS
 	unsigned char	jit_keyring;	/* default keyring to attach requested
 					 * keys to */
@@ -144,11 +138,9 @@ struct cred {
 	struct user_struct *user;	/* real user ID subscription */
 	struct user_namespace *user_ns; /* user_ns the caps and keyrings are relative to. */
 	struct group_info *group_info;	/* supplementary groups for euid/fsgid */
-	/* RCU deletion */
-	union {
-		int non_rcu;			/* Can we skip RCU deletion? */
-		struct rcu_head	rcu;		/* RCU deletion hook */
-	};
+	struct rcu_head	rcu;		/* RCU deletion hook */
+
+	RH_KABI_EXTEND(kernel_cap_t cap_ambient)  /* Ambient capability set */
 };
 
 extern void __put_cred(struct cred *);
@@ -246,7 +238,6 @@ static inline const struct cred *get_cred(const struct cred *cred)
 {
 	struct cred *nonconst_cred = (struct cred *) cred;
 	validate_creds(cred);
-	nonconst_cred->non_rcu = 0;
 	return get_new_cred(nonconst_cred);
 }
 
@@ -374,10 +365,7 @@ extern struct user_namespace init_user_ns;
 #ifdef CONFIG_USER_NS
 #define current_user_ns()	(current_cred_xxx(user_ns))
 #else
-static inline struct user_namespace *current_user_ns(void)
-{
-	return &init_user_ns;
-}
+#define current_user_ns()	(&init_user_ns)
 #endif
 
 

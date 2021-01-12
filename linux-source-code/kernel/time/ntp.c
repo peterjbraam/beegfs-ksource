@@ -16,11 +16,9 @@
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/rtc.h>
-#include <linux/math64.h>
 
+#include "tick-internal.h"
 #include "ntp_internal.h"
-#include "timekeeping_internal.h"
-
 
 /*
  * NTP timekeeping variables:
@@ -42,7 +40,6 @@ static u64			tick_length_base;
 #define MAX_TICKADJ		500LL		/* usecs */
 #define MAX_TICKADJ_SCALED \
 	(((MAX_TICKADJ * NSEC_PER_USEC) << NTP_SCALE_SHIFT) / NTP_INTERVAL_FREQ)
-#define MAX_TAI_OFFSET		100000
 
 /*
  * phase-lock loop variables
@@ -74,7 +71,7 @@ static long			time_esterror = NTP_PHASE_LIMIT;
 static s64			time_freq;
 
 /* time at last adjustment (secs):					*/
-static time64_t		time_reftime;
+static long			time_reftime;
 
 static long			time_adjust;
 
@@ -103,7 +100,7 @@ static time64_t			ntp_next_leap_sec = TIME64_MAX;
 static int pps_valid;		/* signal watchdog counter */
 static long pps_tf[3];		/* phase median filter */
 static long pps_jitter;		/* current jitter (ns) */
-static struct timespec64 pps_fbase; /* beginning of the last freq interval */
+static struct timespec pps_fbase; /* beginning of the last freq interval */
 static int pps_shift;		/* current interval duration (s) (shift) */
 static int pps_intcnt;		/* interval counter */
 static s64 pps_freq;		/* frequency offset (scaled ns/s) */
@@ -172,21 +169,21 @@ static inline void pps_set_freq(s64 freq)
 
 static inline int is_error_status(int status)
 {
-	return (status & (STA_UNSYNC|STA_CLOCKERR))
+	return (time_status & (STA_UNSYNC|STA_CLOCKERR))
 		/* PPS signal lost when either PPS time or
 		 * PPS frequency synchronization requested
 		 */
-		|| ((status & (STA_PPSFREQ|STA_PPSTIME))
-			&& !(status & STA_PPSSIGNAL))
+		|| ((time_status & (STA_PPSFREQ|STA_PPSTIME))
+			&& !(time_status & STA_PPSSIGNAL))
 		/* PPS jitter exceeded when
 		 * PPS time synchronization requested */
-		|| ((status & (STA_PPSTIME|STA_PPSJITTER))
+		|| ((time_status & (STA_PPSTIME|STA_PPSJITTER))
 			== (STA_PPSTIME|STA_PPSJITTER))
 		/* PPS wander exceeded or calibration error when
 		 * PPS frequency synchronization requested
 		 */
-		|| ((status & STA_PPSFREQ)
-			&& (status & (STA_PPSWANDER|STA_PPSERROR)));
+		|| ((time_status & STA_PPSFREQ)
+			&& (time_status & (STA_PPSWANDER|STA_PPSERROR)));
 }
 
 static inline void pps_fill_timex(struct timex *txc)
@@ -301,27 +298,25 @@ static void ntp_update_offset(long offset)
 	if (!(time_status & STA_PLL))
 		return;
 
-	if (!(time_status & STA_NANO)) {
-		/* Make sure the multiplication below won't overflow */
-		offset = clamp(offset, -USEC_PER_SEC, USEC_PER_SEC);
+	if (!(time_status & STA_NANO))
 		offset *= NSEC_PER_USEC;
-	}
 
 	/*
 	 * Scale the phase adjustment and
 	 * clamp to the operating range.
 	 */
-	offset = clamp(offset, -MAXPHASE, MAXPHASE);
+	offset = min(offset, MAXPHASE);
+	offset = max(offset, -MAXPHASE);
 
 	/*
 	 * Select how the frequency is to be controlled
 	 * and in which mode (PLL or FLL).
 	 */
-	secs = (long)(__ktime_get_real_seconds() - time_reftime);
+	secs = get_seconds() - time_reftime;
 	if (unlikely(time_status & STA_FREQHOLD))
 		secs = 0;
 
-	time_reftime = __ktime_get_real_seconds();
+	time_reftime = get_seconds();
 
 	offset64    = offset;
 	freq_adj    = ntp_update_offset_fll(offset64, secs);
@@ -396,11 +391,10 @@ ktime_t ntp_get_next_leap(void)
  *
  * Also handles leap second processing, and returns leap offset
  */
-int second_overflow(time64_t secs)
+int second_overflow(unsigned long secs)
 {
 	s64 delta;
 	int leap = 0;
-	s32 rem;
 
 	/*
 	 * Leap second processing. If in leap-insert state at the end of the
@@ -411,19 +405,19 @@ int second_overflow(time64_t secs)
 	case TIME_OK:
 		if (time_status & STA_INS) {
 			time_state = TIME_INS;
-			div_s64_rem(secs, SECS_PER_DAY, &rem);
-			ntp_next_leap_sec = secs + SECS_PER_DAY - rem;
+			ntp_next_leap_sec = secs + SECS_PER_DAY -
+						(secs % SECS_PER_DAY);
 		} else if (time_status & STA_DEL) {
 			time_state = TIME_DEL;
-			div_s64_rem(secs + 1, SECS_PER_DAY, &rem);
-			ntp_next_leap_sec = secs + SECS_PER_DAY - rem;
+			ntp_next_leap_sec = secs + SECS_PER_DAY -
+						 ((secs+1) % SECS_PER_DAY);
 		}
 		break;
 	case TIME_INS:
 		if (!(time_status & STA_INS)) {
 			ntp_next_leap_sec = TIME64_MAX;
 			time_state = TIME_OK;
-		} else if (secs == ntp_next_leap_sec) {
+		} else if (secs % SECS_PER_DAY == 0) {
 			leap = -1;
 			time_state = TIME_OOP;
 			printk(KERN_NOTICE
@@ -434,7 +428,7 @@ int second_overflow(time64_t secs)
 		if (!(time_status & STA_DEL)) {
 			ntp_next_leap_sec = TIME64_MAX;
 			time_state = TIME_OK;
-		} else if (secs == ntp_next_leap_sec) {
+		} else if ((secs + 1) % SECS_PER_DAY == 0) {
 			leap = 1;
 			ntp_next_leap_sec = TIME64_MAX;
 			time_state = TIME_WAIT;
@@ -493,21 +487,6 @@ out:
 	return leap;
 }
 
-#ifdef CONFIG_GENERIC_CMOS_UPDATE
-int __weak update_persistent_clock(struct timespec now)
-{
-	return -ENODEV;
-}
-
-int __weak update_persistent_clock64(struct timespec64 now64)
-{
-	struct timespec now;
-
-	now = timespec64_to_timespec(now64);
-	return update_persistent_clock(now);
-}
-#endif
-
 #if defined(CONFIG_GENERIC_CMOS_UPDATE) || defined(CONFIG_RTC_SYSTOHC)
 static void sync_cmos_clock(struct work_struct *work);
 
@@ -516,7 +495,7 @@ static DECLARE_DELAYED_WORK(sync_cmos_work, sync_cmos_clock);
 static void sync_cmos_clock(struct work_struct *work)
 {
 	struct timespec64 now;
-	struct timespec64 next;
+	struct timespec next;
 	int fail = 1;
 
 	/*
@@ -537,15 +516,14 @@ static void sync_cmos_clock(struct work_struct *work)
 
 	getnstimeofday64(&now);
 	if (abs(now.tv_nsec - (NSEC_PER_SEC / 2)) <= tick_nsec * 5) {
-		struct timespec64 adjust = now;
+		struct timespec adjust = timespec64_to_timespec(now);
 
 		fail = -ENODEV;
 		if (persistent_clock_is_local)
 			adjust.tv_sec -= (sys_tz.tz_minuteswest * 60);
 #ifdef CONFIG_GENERIC_CMOS_UPDATE
-		fail = update_persistent_clock64(adjust);
+		fail = update_persistent_clock(adjust);
 #endif
-
 #ifdef CONFIG_RTC_SYSTOHC
 		if (fail == -ENODEV)
 			fail = rtc_set_ntp_time(adjust);
@@ -565,13 +543,12 @@ static void sync_cmos_clock(struct work_struct *work)
 		next.tv_sec++;
 		next.tv_nsec -= NSEC_PER_SEC;
 	}
-	queue_delayed_work(system_power_efficient_wq,
-			   &sync_cmos_work, timespec64_to_jiffies(&next));
+	schedule_delayed_work(&sync_cmos_work, timespec_to_jiffies(&next));
 }
 
 void ntp_notify_cmos_timer(void)
 {
-	queue_delayed_work(system_power_efficient_wq, &sync_cmos_work, 0);
+	schedule_delayed_work(&sync_cmos_work, 0);
 }
 
 #else
@@ -597,7 +574,7 @@ static inline void process_adj_status(struct timex *txc, struct timespec64 *ts)
 	 * reference time to current time.
 	 */
 	if (!(time_status & STA_PLL) && (txc->status & STA_PLL))
-		time_reftime = __ktime_get_real_seconds();
+		time_reftime = get_seconds();
 
 	/* only set allowed bits */
 	time_status &= STA_RONLY;
@@ -640,8 +617,7 @@ static inline void process_adjtimex_modes(struct timex *txc,
 		time_constant = max(time_constant, 0l);
 	}
 
-	if (txc->modes & ADJ_TAI &&
-			txc->constant >= 0 && txc->constant <= MAX_TAI_OFFSET)
+	if (txc->modes & ADJ_TAI && txc->constant > 0)
 		*time_tai = txc->constant;
 
 	if (txc->modes & ADJ_OFFSET)
@@ -682,35 +658,8 @@ int ntp_validate_timex(struct timex *txc)
 			return -EINVAL;
 	}
 
-	if (txc->modes & ADJ_SETOFFSET) {
-		/* In order to inject time, you gotta be super-user! */
-		if (!capable(CAP_SYS_TIME))
-			return -EPERM;
-
-		if (txc->modes & ADJ_NANO) {
-			struct timespec ts;
-
-			ts.tv_sec = txc->time.tv_sec;
-			ts.tv_nsec = txc->time.tv_usec;
-			if (!timespec_inject_offset_valid(&ts))
-				return -EINVAL;
-
-		} else {
-			if (!timeval_inject_offset_valid(&txc->time))
-				return -EINVAL;
-		}
-	}
-
-	/*
-	 * Check for potential multiplication overflows that can
-	 * only happen on 64-bit systems:
-	 */
-	if ((txc->modes & ADJ_FREQUENCY) && (BITS_PER_LONG == 64)) {
-		if (LLONG_MIN / PPM_SCALE > txc->freq)
-			return -EINVAL;
-		if (LLONG_MAX / PPM_SCALE < txc->freq)
-			return -EINVAL;
-	}
+	if ((txc->modes & ADJ_SETOFFSET) && (!capable(CAP_SYS_TIME)))
+		return -EPERM;
 
 	return 0;
 }
@@ -797,13 +746,13 @@ int __do_adjtimex(struct timex *txc, struct timespec64 *ts, s32 *time_tai)
  * pps_normtime.nsec has a range of ( -NSEC_PER_SEC / 2, NSEC_PER_SEC / 2 ]
  * while timespec.tv_nsec has a range of [0, NSEC_PER_SEC) */
 struct pps_normtime {
-	s64		sec;	/* seconds */
+	__kernel_time_t	sec;	/* seconds */
 	long		nsec;	/* nanoseconds */
 };
 
 /* normalize the timestamp so that nsec is in the
    ( -NSEC_PER_SEC / 2, NSEC_PER_SEC / 2 ] interval */
-static inline struct pps_normtime pps_normalize_ts(struct timespec64 ts)
+static inline struct pps_normtime pps_normalize_ts(struct timespec ts)
 {
 	struct pps_normtime norm = {
 		.sec = ts.tv_sec,
@@ -885,7 +834,7 @@ static long hardpps_update_freq(struct pps_normtime freq_norm)
 		pps_errcnt++;
 		pps_dec_freq_interval();
 		printk_deferred(KERN_ERR
-			"hardpps: PPSERROR: interval too long - %lld s\n",
+			"hardpps: PPSERROR: interval too long - %ld s\n",
 			freq_norm.sec);
 		return 0;
 	}
@@ -972,7 +921,7 @@ static void hardpps_update_phase(long error)
  * This code is based on David Mills's reference nanokernel
  * implementation. It was mostly rewritten but keeps the same idea.
  */
-void __hardpps(const struct timespec64 *phase_ts, const struct timespec64 *raw_ts)
+void __hardpps(const struct timespec *phase_ts, const struct timespec *raw_ts)
 {
 	struct pps_normtime pts_norm, freq_norm;
 
@@ -993,7 +942,7 @@ void __hardpps(const struct timespec64 *phase_ts, const struct timespec64 *raw_t
 	}
 
 	/* ok, now we have a base for frequency calculation */
-	freq_norm = pps_normalize_ts(timespec64_sub(*raw_ts, pps_fbase));
+	freq_norm = pps_normalize_ts(timespec_sub(*raw_ts, pps_fbase));
 
 	/* check that the signal is in the range
 	 * [1s - MAXFREQ us, 1s + MAXFREQ us], otherwise reject it */
@@ -1024,10 +973,7 @@ void __hardpps(const struct timespec64 *phase_ts, const struct timespec64 *raw_t
 
 static int __init ntp_tick_adj_setup(char *str)
 {
-	int rc = kstrtol(str, 0, (long *)&ntp_tick_adj);
-
-	if (rc)
-		return rc;
+	ntp_tick_adj = simple_strtol(str, NULL, 0);
 	ntp_tick_adj <<= NTP_SCALE_SHIFT;
 
 	return 1;

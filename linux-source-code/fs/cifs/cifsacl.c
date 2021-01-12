@@ -87,15 +87,16 @@ cifs_idmap_key_instantiate(struct key *key, struct key_preparsed_payload *prep)
 	 * dereference payload.data!
 	 */
 	if (prep->datalen <= sizeof(key->payload)) {
-		key->payload.data[0] = NULL;
-		memcpy(&key->payload, prep->data, prep->datalen);
-	} else {
-		payload = kmemdup(prep->data, prep->datalen, GFP_KERNEL);
-		if (!payload)
-			return -ENOMEM;
-		key->payload.data[0] = payload;
+		key->payload.value = 0;
+		memcpy(&key->payload.value, prep->data, prep->datalen);
+		key->datalen = prep->datalen;
+		return 0;
 	}
+	payload = kmemdup(prep->data, prep->datalen, GFP_KERNEL);
+	if (!payload)
+		return -ENOMEM;
 
+	key->payload.data = payload;
 	key->datalen = prep->datalen;
 	return 0;
 }
@@ -104,7 +105,7 @@ static inline void
 cifs_idmap_key_destroy(struct key *key)
 {
 	if (key->datalen > sizeof(key->payload))
-		kfree(key->payload.data[0]);
+		kfree(key->payload.data);
 }
 
 static struct key_type cifs_idmap_key_type = {
@@ -112,6 +113,7 @@ static struct key_type cifs_idmap_key_type = {
 	.instantiate = cifs_idmap_key_instantiate,
 	.destroy     = cifs_idmap_key_destroy,
 	.describe    = user_describe,
+	.match       = user_match,
 };
 
 static char *
@@ -317,8 +319,8 @@ id_to_sid(unsigned int cid, uint sidtype, struct cifs_sid *ssid)
 	 * it could be.
 	 */
 	ksid = sidkey->datalen <= sizeof(sidkey->payload) ?
-		(struct cifs_sid *)&sidkey->payload :
-		(struct cifs_sid *)sidkey->payload.data[0];
+		(struct cifs_sid *)&sidkey->payload.value :
+		(struct cifs_sid *)sidkey->payload.data;
 
 	ksid_size = CIFS_SID_BASE_SIZE + (ksid->num_subauth * sizeof(__le32));
 	if (ksid_size > sidkey->datalen) {
@@ -428,14 +430,14 @@ try_upcall_to_get_id:
 	if (sidtype == SIDOWNER) {
 		kuid_t uid;
 		uid_t id;
-		memcpy(&id, &sidkey->payload.data[0], sizeof(uid_t));
+		memcpy(&id, &sidkey->payload.value, sizeof(uid_t));
 		uid = make_kuid(&init_user_ns, id);
 		if (uid_valid(uid))
 			fuid = uid;
 	} else {
 		kgid_t gid;
 		gid_t id;
-		memcpy(&id, &sidkey->payload.data[0], sizeof(gid_t));
+		memcpy(&id, &sidkey->payload.value, sizeof(gid_t));
 		gid = make_kgid(&init_user_ns, id);
 		if (gid_valid(gid))
 			fgid = gid;
@@ -483,7 +485,7 @@ init_cifs_idmap(void)
 				GLOBAL_ROOT_UID, GLOBAL_ROOT_GID, cred,
 				(KEY_POS_ALL & ~KEY_POS_SETATTR) |
 				KEY_USR_VIEW | KEY_USR_READ,
-				KEY_ALLOC_NOT_IN_QUOTA, NULL, NULL);
+				KEY_ALLOC_NOT_IN_QUOTA, NULL);
 	if (IS_ERR(keyring)) {
 		ret = PTR_ERR(keyring);
 		goto failed_put_cred;
@@ -603,7 +605,7 @@ static void access_flags_to_mode(__le32 ace_flags, int type, umode_t *pmode,
 			((flags & FILE_EXEC_RIGHTS) == FILE_EXEC_RIGHTS))
 		*pmode |= (S_IXUGO & (*pbits_to_set));
 
-	cifs_dbg(NOISY, "access flags 0x%x mode now %04o\n", flags, *pmode);
+	cifs_dbg(NOISY, "access flags 0x%x mode now 0x%x\n", flags, *pmode);
 	return;
 }
 
@@ -632,7 +634,7 @@ static void mode_to_access_flags(umode_t mode, umode_t bits_to_use,
 	if (mode & S_IXUGO)
 		*pace_flags |= SET_FILE_EXEC_RIGHTS;
 
-	cifs_dbg(NOISY, "mode: %04o, access flags now 0x%x\n",
+	cifs_dbg(NOISY, "mode: 0x%x, access flags now 0x%x\n",
 		 mode, *pace_flags);
 	return;
 }
@@ -1135,20 +1137,19 @@ cifs_acl_to_fattr(struct cifs_sb_info *cifs_sb, struct cifs_fattr *fattr,
 	u32 acllen = 0;
 	int rc = 0;
 	struct tcon_link *tlink = cifs_sb_tlink(cifs_sb);
-	struct cifs_tcon *tcon;
+	struct smb_version_operations *ops;
 
 	cifs_dbg(NOISY, "converting ACL to mode for %s\n", path);
 
 	if (IS_ERR(tlink))
 		return PTR_ERR(tlink);
-	tcon = tlink_tcon(tlink);
 
-	if (pfid && (tcon->ses->server->ops->get_acl_by_fid))
-		pntsd = tcon->ses->server->ops->get_acl_by_fid(cifs_sb, pfid,
-							  &acllen);
-	else if (tcon->ses->server->ops->get_acl)
-		pntsd = tcon->ses->server->ops->get_acl(cifs_sb, inode, path,
-							&acllen);
+	ops = tlink_tcon(tlink)->ses->server->ops;
+
+	if (pfid && (ops->get_acl_by_fid))
+		pntsd = ops->get_acl_by_fid(cifs_sb, pfid, &acllen);
+	else if (ops->get_acl)
+		pntsd = ops->get_acl(cifs_sb, inode, path, &acllen);
 	else {
 		cifs_put_tlink(tlink);
 		return -EOPNOTSUPP;
@@ -1181,23 +1182,23 @@ id_mode_to_cifs_acl(struct inode *inode, const char *path, __u64 nmode,
 	struct cifs_ntsd *pnntsd = NULL; /* modified acl to be sent to server */
 	struct cifs_sb_info *cifs_sb = CIFS_SB(inode->i_sb);
 	struct tcon_link *tlink = cifs_sb_tlink(cifs_sb);
-	struct cifs_tcon *tcon;
+	struct smb_version_operations *ops;
 
 	if (IS_ERR(tlink))
 		return PTR_ERR(tlink);
-	tcon = tlink_tcon(tlink);
+
+	ops = tlink_tcon(tlink)->ses->server->ops;
 
 	cifs_dbg(NOISY, "set ACL from mode for %s\n", path);
 
 	/* Get the security descriptor */
 
-	if (tcon->ses->server->ops->get_acl == NULL) {
+	if (ops->get_acl == NULL) {
 		cifs_put_tlink(tlink);
 		return -EOPNOTSUPP;
 	}
 
-	pntsd = tcon->ses->server->ops->get_acl(cifs_sb, inode, path,
-						&secdesclen);
+	pntsd = ops->get_acl(cifs_sb, inode, path, &secdesclen);
 	if (IS_ERR(pntsd)) {
 		rc = PTR_ERR(pntsd);
 		cifs_dbg(VFS, "%s: error %d getting sec desc\n", __func__, rc);
@@ -1224,13 +1225,12 @@ id_mode_to_cifs_acl(struct inode *inode, const char *path, __u64 nmode,
 
 	cifs_dbg(NOISY, "build_sec_desc rc: %d\n", rc);
 
-	if (tcon->ses->server->ops->set_acl == NULL)
+	if (ops->set_acl == NULL)
 		rc = -EOPNOTSUPP;
 
 	if (!rc) {
 		/* Set the security descriptor */
-		rc = tcon->ses->server->ops->set_acl(pnntsd, secdesclen, inode,
-						     path, aclflag);
+		rc = ops->set_acl(pnntsd, secdesclen, inode, path, aclflag);
 		cifs_dbg(NOISY, "set_cifs_acl rc: %d\n", rc);
 	}
 	cifs_put_tlink(tlink);

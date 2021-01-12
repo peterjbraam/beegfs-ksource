@@ -65,7 +65,7 @@ static struct fsnotify_group *audit_watch_group;
 
 /* fsnotify events we care about. */
 #define AUDIT_FS_WATCH (FS_MOVE | FS_CREATE | FS_DELETE | FS_DELETE_SELF |\
-			FS_MOVE_SELF | FS_EVENT_ON_CHILD)
+			FS_MOVE_SELF | FS_EVENT_ON_CHILD | FS_UNMOUNT)
 
 static void audit_free_parent(struct audit_parent *parent)
 {
@@ -102,7 +102,7 @@ static inline struct audit_parent *audit_find_parent(struct inode *inode)
 	struct audit_parent *parent = NULL;
 	struct fsnotify_mark *entry;
 
-	entry = fsnotify_find_inode_mark(audit_watch_group, inode);
+	entry = fsnotify_find_mark(&inode->i_fsnotify_marks, audit_watch_group);
 	if (entry)
 		parent = container_of(entry, struct audit_parent, mark);
 
@@ -147,7 +147,7 @@ int audit_watch_compare(struct audit_watch *watch, unsigned long ino, dev_t dev)
 /* Initialize a parent watch entry. */
 static struct audit_parent *audit_init_parent(struct path *path)
 {
-	struct inode *inode = d_backing_inode(path->dentry);
+	struct inode *inode = path->dentry->d_inode;
 	struct audit_parent *parent;
 	int ret;
 
@@ -157,9 +157,9 @@ static struct audit_parent *audit_init_parent(struct path *path)
 
 	INIT_LIST_HEAD(&parent->watches);
 
-	fsnotify_init_mark(&parent->mark, audit_watch_free_mark);
+	fsnotify_init_mark(&parent->mark, audit_watch_group);
 	parent->mark.mask = AUDIT_FS_WATCH;
-	ret = fsnotify_add_mark(&parent->mark, audit_watch_group, inode, NULL, 0);
+	ret = fsnotify_add_inode_mark(&parent->mark, inode, 0);
 	if (ret < 0) {
 		audit_free_parent(parent);
 		return ERR_PTR(ret);
@@ -186,7 +186,7 @@ static struct audit_watch *audit_init_watch(char *path)
 	return watch;
 }
 
-/* Translate a watch string to kernel representation. */
+/* Translate a watch string to kernel respresentation. */
 int audit_to_watch(struct audit_krule *krule, char *path, int len, u32 op)
 {
 	struct audit_watch *watch;
@@ -242,10 +242,9 @@ static void audit_watch_log_rule_change(struct audit_krule *r, struct audit_watc
 		ab = audit_log_start(NULL, GFP_NOFS, AUDIT_CONFIG_CHANGE);
 		if (unlikely(!ab))
 			return;
-		audit_log_format(ab, "auid=%u ses=%u op=",
+		audit_log_format(ab, "auid=%u ses=%u op=%s",
 				 from_kuid(&init_user_ns, audit_get_loginuid(current)),
-				 audit_get_sessionid(current));
-		audit_log_string(ab, op);
+				 audit_get_sessionid(current), op);
 		audit_log_format(ab, " path=");
 		audit_log_untrustedstring(ab, w->path);
 		audit_log_key(ab, r->filterkey);
@@ -316,6 +315,8 @@ static void audit_update_watch(struct audit_parent *parent,
 			if (oentry->rule.exe)
 				audit_remove_mark(oentry->rule.exe);
 
+			audit_watch_log_rule_change(r, owatch, "updated_rules");
+
 			call_rcu(&oentry->rcu, audit_free_rule_rcu);
 		}
 
@@ -363,12 +364,12 @@ static int audit_get_nd(struct audit_watch *watch, struct path *parent)
 	struct dentry *d = kern_path_locked(watch->path, parent);
 	if (IS_ERR(d))
 		return PTR_ERR(d);
-	if (d_is_positive(d)) {
+	mutex_unlock(&parent->dentry->d_inode->i_mutex);
+	if (d->d_inode) {
 		/* update watch filter fields */
-		watch->dev = d->d_sb->s_dev;
-		watch->ino = d_backing_inode(d)->i_ino;
+		watch->dev = d->d_inode->i_sb->s_dev;
+		watch->ino = d->d_inode->i_ino;
 	}
-	inode_unlock(d_backing_inode(parent->dentry));
 	dput(d);
 	return 0;
 }
@@ -417,13 +418,6 @@ int audit_add_watch(struct audit_krule *krule, struct list_head **list)
 	struct path parent_path;
 	int h, ret = 0;
 
-	/*
-	 * When we will be calling audit_add_to_parent, krule->watch might have
-	 * been updated and watch might have been freed.
-	 * So we need to keep a reference of watch.
-	 */
-	audit_get_watch(watch);
-
 	mutex_unlock(&audit_filter_mutex);
 
 	/* Avoid calling path_lookup under audit_filter_mutex. */
@@ -432,13 +426,11 @@ int audit_add_watch(struct audit_krule *krule, struct list_head **list)
 	/* caller expects mutex locked */
 	mutex_lock(&audit_filter_mutex);
 
-	if (ret) {
-		audit_put_watch(watch);
+	if (ret)
 		return ret;
-	}
 
 	/* either find an old parent or attach a new one */
-	parent = audit_find_parent(d_backing_inode(parent_path.dentry));
+	parent = audit_find_parent(parent_path.dentry->d_inode);
 	if (!parent) {
 		parent = audit_init_parent(&parent_path);
 		if (IS_ERR(parent)) {
@@ -453,7 +445,6 @@ int audit_add_watch(struct audit_krule *krule, struct list_head **list)
 	*list = &audit_inode_hash[h];
 error:
 	path_put(&parent_path);
-	audit_put_watch(watch);
 	return ret;
 }
 
@@ -480,12 +471,12 @@ void audit_remove_watch_rule(struct audit_krule *krule)
 /* Update watch data in audit rules based on fsnotify events. */
 static int audit_watch_handle_event(struct fsnotify_group *group,
 				    struct inode *to_tell,
-				    struct fsnotify_mark *inode_mark,
-				    struct fsnotify_mark *vfsmount_mark,
-				    u32 mask, void *data, int data_type,
-				    const unsigned char *dname, u32 cookie)
+				    u32 mask, const void *data, int data_type,
+				    const unsigned char *dname, u32 cookie,
+				    struct fsnotify_iter_info *iter_info)
 {
-	struct inode *inode;
+	struct fsnotify_mark *inode_mark = fsnotify_iter_inode_mark(iter_info);
+	const struct inode *inode;
 	struct audit_parent *parent;
 
 	parent = container_of(inode_mark, struct audit_parent, mark);
@@ -494,10 +485,10 @@ static int audit_watch_handle_event(struct fsnotify_group *group,
 
 	switch (data_type) {
 	case (FSNOTIFY_EVENT_PATH):
-		inode = d_backing_inode(((struct path *)data)->dentry);
+		inode = ((const struct path *)data)->dentry->d_inode;
 		break;
 	case (FSNOTIFY_EVENT_INODE):
-		inode = (struct inode *)data;
+		inode = (const struct inode *)data;
 		break;
 	default:
 		BUG();
@@ -517,6 +508,7 @@ static int audit_watch_handle_event(struct fsnotify_group *group,
 
 static const struct fsnotify_ops audit_watch_fsnotify_ops = {
 	.handle_event = 	audit_watch_handle_event,
+	.free_mark =		audit_watch_free_mark,
 };
 
 static int __init audit_watch_init(void)

@@ -28,12 +28,16 @@
  * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with GNU CC; see the file COPYING.  If not, see
- * <http://www.gnu.org/licenses/>.
+ * along with GNU CC; see the file COPYING.  If not, write to
+ * the Free Software Foundation, 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
  *
  * Please send any bug reports or fixes you make to the
  * email address(es):
- *    lksctp developers <linux-sctp@vger.kernel.org>
+ *    lksctp developers <lksctp-developers@lists.sourceforge.net>
+ *
+ * Or submit a bug report through the following website:
+ *    http://www.sf.net/projects/lksctp
  *
  * Written or modified by:
  *    La Monte H.P. Yarroll <piggy@acm.org>
@@ -48,11 +52,13 @@
  *    Ryan Layer	    <rmlayer@us.ibm.com>
  *    Anup Pemmaiah         <pemmaiah@cc.usu.edu>
  *    Kevin Gao             <kevin.gao@intel.com>
+ *
+ * Any bugs reported given to us we will try to fix... any fixes shared will
+ * be incorporated into the next SCTP release.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
-#include <crypto/hash.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/wait.h>
@@ -62,6 +68,7 @@
 #include <linux/fcntl.h>
 #include <linux/poll.h>
 #include <linux/init.h>
+#include <linux/crypto.h>
 #include <linux/slab.h>
 #include <linux/file.h>
 #include <linux/compat.h>
@@ -71,7 +78,6 @@
 #include <net/route.h>
 #include <net/ipv6.h>
 #include <net/inet_common.h>
-#include <net/busy_poll.h>
 
 #include <linux/socket.h> /* for sa_family_t */
 #include <linux/export.h>
@@ -99,8 +105,14 @@ static int sctp_send_asconf(struct sctp_association *asoc,
 			    struct sctp_chunk *chunk);
 static int sctp_do_bind(struct sock *, union sctp_addr *, int);
 static int sctp_autobind(struct sock *sk);
-static void sctp_sock_migrate(struct sock *, struct sock *,
-			      struct sctp_association *, sctp_socket_type_t);
+static int sctp_sock_migrate(struct sock *oldsk, struct sock *newsk,
+			     struct sctp_association *assoc,
+			     sctp_socket_type_t type);
+
+extern struct kmem_cache *sctp_bucket_cachep;
+extern long sysctl_sctp_mem[3];
+extern int sysctl_sctp_rmem[3];
+extern int sysctl_sctp_wmem[3];
 
 static int sctp_memory_pressure;
 static atomic_long_t sctp_memory_allocated;
@@ -173,44 +185,29 @@ static void sctp_clear_owner_w(struct sctp_chunk *chunk)
 	skb_orphan(chunk->skb);
 }
 
-#define traverse_and_process()	\
-do {				\
-	msg = chunk->msg;	\
-	if (msg == prev_msg)	\
-		continue;	\
-	list_for_each_entry(c, &msg->chunks, frag_list) {	\
-		if ((clear && asoc->base.sk == c->skb->sk) ||	\
-		    (!clear && asoc->base.sk != c->skb->sk))	\
-			cb(c);	\
-	}			\
-	prev_msg = msg;		\
-} while (0)
-
 static void sctp_for_each_tx_datachunk(struct sctp_association *asoc,
-				       bool clear,
 				       void (*cb)(struct sctp_chunk *))
 
 {
-	struct sctp_datamsg *msg, *prev_msg = NULL;
 	struct sctp_outq *q = &asoc->outqueue;
-	struct sctp_chunk *chunk, *c;
 	struct sctp_transport *t;
+	struct sctp_chunk *chunk;
 
 	list_for_each_entry(t, &asoc->peer.transport_addr_list, transports)
 		list_for_each_entry(chunk, &t->transmitted, transmitted_list)
-			traverse_and_process();
+			cb(chunk);
 
 	list_for_each_entry(chunk, &q->retransmit, transmitted_list)
-		traverse_and_process();
+		cb(chunk);
 
 	list_for_each_entry(chunk, &q->sacked, transmitted_list)
-		traverse_and_process();
+		cb(chunk);
 
 	list_for_each_entry(chunk, &q->abandoned, transmitted_list)
-		traverse_and_process();
+		cb(chunk);
 
 	list_for_each_entry(chunk, &q->out_chunk_list, list)
-		traverse_and_process();
+		cb(chunk);
 }
 
 /* Verify that this is a valid address. */
@@ -637,7 +634,7 @@ static int sctp_send_asconf_add_ip(struct sock		*sk,
 			list_for_each_entry(trans,
 			    &asoc->peer.transport_addr_list, transports) {
 				/* Clear the source and route cache */
-				dst_release(trans->dst);
+				sctp_transport_dst_release(trans);
 				trans->cwnd = min(4*asoc->pathmtu, max_t(__u32,
 				    2*asoc->pathmtu, 4380));
 				trans->ssthresh = asoc->peer.i.a_rwnd;
@@ -888,7 +885,7 @@ skip_mkasconf:
 		 */
 		list_for_each_entry(transport, &asoc->peer.transport_addr_list,
 					transports) {
-			dst_release(transport->dst);
+			sctp_transport_dst_release(transport);
 			sctp_transport_route(transport, NULL,
 					     sctp_sk(asoc->base.sk));
 		}
@@ -1089,7 +1086,7 @@ out:
  */
 static int __sctp_connect(struct sock *sk,
 			  struct sockaddr *kaddrs,
-			  int addrs_size, int flags,
+			  int addrs_size,
 			  sctp_assoc_t *assoc_id)
 {
 	struct net *net = sock_net(sk);
@@ -1107,6 +1104,7 @@ static int __sctp_connect(struct sock *sk,
 	union sctp_addr *sa_addr = NULL;
 	void *addr_buf;
 	unsigned short port;
+	unsigned int f_flags = 0;
 
 	sp = sctp_sk(sk);
 	ep = sp->ep;
@@ -1254,7 +1252,13 @@ static int __sctp_connect(struct sock *sk,
 	sp->pf->to_sk_daddr(sa_addr, sk);
 	sk->sk_err = 0;
 
-	timeo = sock_sndtimeo(sk, flags & O_NONBLOCK);
+	/* in-kernel sockets don't generally have a file allocated to them
+	 * if all they do is call sock_create_kern().
+	 */
+	if (sk->sk_socket->file)
+		f_flags = sk->sk_socket->file->f_flags;
+
+	timeo = sock_sndtimeo(sk, f_flags & O_NONBLOCK);
 
 	if (assoc_id)
 		*assoc_id = asoc->assoc_id;
@@ -1349,7 +1353,7 @@ static int __sctp_setsockopt_connectx(struct sock *sk,
 {
 	struct sockaddr *kaddrs;
 	gfp_t gfp = GFP_KERNEL;
-	int err = 0, flags = 0;
+	int err = 0;
 
 	pr_debug("%s: sk:%p addrs:%p addrs_size:%d\n",
 		 __func__, sk, addrs, addrs_size);
@@ -1369,17 +1373,10 @@ static int __sctp_setsockopt_connectx(struct sock *sk,
 		return -ENOMEM;
 
 	if (__copy_from_user(kaddrs, addrs, addrs_size)) {
-		kfree(kaddrs);
-		return -EFAULT;
+		err = -EFAULT;
+	} else {
+		err = __sctp_connect(sk, kaddrs, addrs_size, assoc_id);
 	}
-
-	/* in-kernel sockets don't generally have a file allocated to them
-	 * if all they do is call sock_create_kern().
-	 */
-	if (sk->sk_socket->file)
-		flags = sk->sk_socket->file->f_flags;
-
-	err = __sctp_connect(sk, kaddrs, addrs_size, flags, assoc_id);
 
 	kfree(kaddrs);
 
@@ -1637,7 +1634,8 @@ static int sctp_error(struct sock *sk, int flags, int err)
 
 static int sctp_msghdr_parse(const struct msghdr *, sctp_cmsgs_t *);
 
-static int sctp_sendmsg(struct sock *sk, struct msghdr *msg, size_t msg_len)
+static int sctp_sendmsg(struct kiocb *iocb, struct sock *sk,
+			struct msghdr *msg, size_t msg_len)
 {
 	struct net *net = sock_net(sk);
 	struct sctp_sock *sp;
@@ -1830,7 +1828,7 @@ static int sctp_sendmsg(struct sock *sk, struct msghdr *msg, size_t msg_len)
 		 * either the default or the user specified stream counts.
 		 */
 		if (sinfo) {
-			if (!sinit || !sinit->sinit_num_ostreams) {
+			if (!sinit || (sinit && !sinit->sinit_num_ostreams)) {
 				/* Check against the defaults. */
 				if (sinfo->sinfo_stream >=
 				    sp->initmsg.sinit_num_ostreams) {
@@ -1949,7 +1947,7 @@ static int sctp_sendmsg(struct sock *sk, struct msghdr *msg, size_t msg_len)
 	}
 
 	if (asoc->pmtu_pending)
-		sctp_assoc_pending_pmtu(sk, asoc);
+		sctp_assoc_pending_pmtu(asoc);
 
 	/* If fragmentation is disabled and the message length exceeds the
 	 * association fragmentation point, return EMSGSIZE.  The I-D
@@ -2003,17 +2001,17 @@ static int sctp_sendmsg(struct sock *sk, struct msghdr *msg, size_t msg_len)
 		err = sctp_primitive_ASSOCIATE(net, asoc, NULL);
 		if (err < 0)
 			goto out_free;
-
 		wait_connect = true;
 		pr_debug("%s: we associated primitively\n", __func__);
 	}
 
 	/* Break the message into multiple chunks of maximum size. */
-	datamsg = sctp_datamsg_from_user(asoc, sinfo, &msg->msg_iter);
+	datamsg = sctp_datamsg_from_user(asoc, sinfo, msg, msg_len);
 	if (IS_ERR(datamsg)) {
 		err = PTR_ERR(datamsg);
 		goto out_free;
 	}
+	asoc->force_delay = !!(msg->msg_flags & MSG_MORE);
 
 	/* Now send the (possibly) fragmented message. */
 	list_for_each_entry(chunk, &datamsg->chunks, frag_list) {
@@ -2125,8 +2123,9 @@ static int sctp_skb_pull(struct sk_buff *skb, int len)
  *  flags   - flags sent or received with the user message, see Section
  *            5 for complete description of the flags.
  */
-static int sctp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len,
-			int noblock, int flags, int *addr_len)
+static int sctp_recvmsg(struct kiocb *iocb, struct sock *sk,
+			struct msghdr *msg, size_t len, int noblock,
+			int flags, int *addr_len)
 {
 	struct sctp_ulpevent *event = NULL;
 	struct sctp_sock *sp = sctp_sk(sk);
@@ -2188,6 +2187,12 @@ static int sctp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len,
 	/* Check if we allow SCTP_SNDRCVINFO. */
 	if (sp->subscribe.sctp_data_io_event)
 		sctp_ulpevent_read_sndrcvinfo(event, msg);
+
+#if 0
+	/* FIXME: we should be calling IP/IPv6 layers.  */
+	if (sk->sk_protinfo.af_inet.cmsg_flags)
+		ip_cmsg_recv(msg, skb);
+#endif
 
 	err = copied;
 
@@ -2268,7 +2273,8 @@ static int sctp_setsockopt_events(struct sock *sk, char __user *optval,
 	if (copy_from_user(&sctp_sk(sk)->subscribe, optval, optlen))
 		return -EFAULT;
 
-	/* At the time when a user app subscribes to SCTP_SENDER_DRY_EVENT,
+	/*
+	 * At the time when a user app subscribes to SCTP_SENDER_DRY_EVENT,
 	 * if there is no data to be sent or retransmit, the stack will
 	 * immediately send up this notification.
 	 */
@@ -2278,7 +2284,7 @@ static int sctp_setsockopt_events(struct sock *sk, char __user *optval,
 
 		if (asoc && sctp_outq_is_empty(&asoc->outqueue)) {
 			event = sctp_ulpevent_make_sender_dry_event(asoc,
-					GFP_ATOMIC);
+					GFP_USER | __GFP_NOWARN);
 			if (!event)
 				return -ENOMEM;
 
@@ -2481,14 +2487,16 @@ static int sctp_apply_peer_addr_params(struct sctp_paddrparams *params,
 	 * effect).
 	 */
 	if ((params->spp_flags & SPP_PMTUD_DISABLE) && params->spp_pathmtu) {
+		__u32 pmtu = min_t(__u32, params->spp_pathmtu, INT_MAX);
+
 		if (trans) {
-			trans->pathmtu = params->spp_pathmtu;
-			sctp_assoc_sync_pmtu(sctp_opt2sk(sp), asoc);
+			trans->pathmtu = pmtu;
+			sctp_assoc_sync_pmtu(asoc);
 		} else if (asoc) {
-			asoc->pathmtu = params->spp_pathmtu;
-			sctp_frag_point(asoc, params->spp_pathmtu);
+			asoc->pathmtu = pmtu;
+			sctp_frag_point(asoc, pmtu);
 		} else {
-			sp->pathmtu = params->spp_pathmtu;
+			sp->pathmtu = pmtu;
 		}
 	}
 
@@ -2500,7 +2508,7 @@ static int sctp_apply_peer_addr_params(struct sctp_paddrparams *params,
 				(trans->param_flags & ~SPP_PMTUD) | pmtud_change;
 			if (update) {
 				sctp_transport_pmtu(trans, sctp_opt2sk(sp));
-				sctp_assoc_sync_pmtu(sctp_opt2sk(sp), asoc);
+				sctp_assoc_sync_pmtu(asoc);
 			}
 		} else if (asoc) {
 			asoc->param_flags =
@@ -2636,16 +2644,6 @@ static int sctp_setsockopt_peer_addr_params(struct sock *sk,
 	return 0;
 }
 
-static inline __u32 sctp_spp_sackdelay_enable(__u32 param_flags)
-{
-	return (param_flags & ~SPP_SACKDELAY) | SPP_SACKDELAY_ENABLE;
-}
-
-static inline __u32 sctp_spp_sackdelay_disable(__u32 param_flags)
-{
-	return (param_flags & ~SPP_SACKDELAY) | SPP_SACKDELAY_DISABLE;
-}
-
 /*
  * 7.1.23.  Get or set delayed ack timer (SCTP_DELAYED_SACK)
  *
@@ -2697,9 +2695,8 @@ static int sctp_setsockopt_delayed_ack(struct sock *sk,
 		if (params.sack_delay == 0 && params.sack_freq == 0)
 			return 0;
 	} else if (optlen == sizeof(struct sctp_assoc_value)) {
-		pr_warn_ratelimited(DEPRECATED
-				    "%s (pid %d) "
-				    "Use of struct sctp_assoc_value in delayed_ack socket option.\n"
+		pr_warn_ratelimited("%s (pid %d) "
+				    "Use of struct sctp_assoc_value in delayed_ack socket option deprecated\n"
 				    "Use struct sctp_sack_info instead\n",
 				    current->comm, task_pid_nr(current));
 		if (copy_from_user(&params, optval, optlen))
@@ -2729,31 +2726,37 @@ static int sctp_setsockopt_delayed_ack(struct sock *sk,
 			asoc->sackdelay =
 				msecs_to_jiffies(params.sack_delay);
 			asoc->param_flags =
-				sctp_spp_sackdelay_enable(asoc->param_flags);
+				(asoc->param_flags & ~SPP_SACKDELAY) |
+				SPP_SACKDELAY_ENABLE;
 		} else {
 			sp->sackdelay = params.sack_delay;
 			sp->param_flags =
-				sctp_spp_sackdelay_enable(sp->param_flags);
+				(sp->param_flags & ~SPP_SACKDELAY) |
+				SPP_SACKDELAY_ENABLE;
 		}
 	}
 
 	if (params.sack_freq == 1) {
 		if (asoc) {
 			asoc->param_flags =
-				sctp_spp_sackdelay_disable(asoc->param_flags);
+				(asoc->param_flags & ~SPP_SACKDELAY) |
+				SPP_SACKDELAY_DISABLE;
 		} else {
 			sp->param_flags =
-				sctp_spp_sackdelay_disable(sp->param_flags);
+				(sp->param_flags & ~SPP_SACKDELAY) |
+				SPP_SACKDELAY_DISABLE;
 		}
 	} else if (params.sack_freq > 1) {
 		if (asoc) {
 			asoc->sackfreq = params.sack_freq;
 			asoc->param_flags =
-				sctp_spp_sackdelay_enable(asoc->param_flags);
+				(asoc->param_flags & ~SPP_SACKDELAY) |
+				SPP_SACKDELAY_ENABLE;
 		} else {
 			sp->sackfreq = params.sack_freq;
 			sp->param_flags =
-				sctp_spp_sackdelay_enable(sp->param_flags);
+				(sp->param_flags & ~SPP_SACKDELAY) |
+				SPP_SACKDELAY_ENABLE;
 		}
 	}
 
@@ -2765,15 +2768,18 @@ static int sctp_setsockopt_delayed_ack(struct sock *sk,
 				trans->sackdelay =
 					msecs_to_jiffies(params.sack_delay);
 				trans->param_flags =
-					sctp_spp_sackdelay_enable(trans->param_flags);
+					(trans->param_flags & ~SPP_SACKDELAY) |
+					SPP_SACKDELAY_ENABLE;
 			}
 			if (params.sack_freq == 1) {
 				trans->param_flags =
-					sctp_spp_sackdelay_disable(trans->param_flags);
+					(trans->param_flags & ~SPP_SACKDELAY) |
+					SPP_SACKDELAY_DISABLE;
 			} else if (params.sack_freq > 1) {
 				trans->sackfreq = params.sack_freq;
 				trans->param_flags =
-					sctp_spp_sackdelay_enable(trans->param_flags);
+					(trans->param_flags & ~SPP_SACKDELAY) |
+					SPP_SACKDELAY_ENABLE;
 			}
 		}
 	}
@@ -3148,9 +3154,8 @@ static int sctp_setsockopt_maxseg(struct sock *sk, char __user *optval, unsigned
 	int val;
 
 	if (optlen == sizeof(int)) {
-		pr_warn_ratelimited(DEPRECATED
-				    "%s (pid %d) "
-				    "Use of int in maxseg socket option.\n"
+		pr_warn_ratelimited("%s (pid %d) "
+				    "Use of int in maxseg socket option deprecated\n"
 				    "Use struct sctp_assoc_value instead\n",
 				    current->comm, task_pid_nr(current));
 		if (copy_from_user(&val, optval, optlen))
@@ -3418,9 +3423,8 @@ static int sctp_setsockopt_maxburst(struct sock *sk,
 	int assoc_id = 0;
 
 	if (optlen == sizeof(int)) {
-		pr_warn_ratelimited(DEPRECATED
-				    "%s (pid %d) "
-				    "Use of int in max_burst socket option deprecated.\n"
+		pr_warn_ratelimited("%s (pid %d) "
+				    "Use of int in max_burst socket option deprecated\n"
 				    "Use struct sctp_assoc_value instead\n",
 				    current->comm, task_pid_nr(current));
 		if (copy_from_user(&val, optval, optlen))
@@ -3500,6 +3504,8 @@ static int sctp_setsockopt_hmac_ident(struct sock *sk,
 
 	if (optlen < sizeof(struct sctp_hmacalgo))
 		return -EINVAL;
+	optlen = min_t(unsigned int, optlen, sizeof(struct sctp_hmacalgo) +
+					     SCTP_AUTH_NUM_HMACS * sizeof(u16));
 
 	hmacs = memdup_user(optval, optlen);
 	if (IS_ERR(hmacs))
@@ -3538,6 +3544,11 @@ static int sctp_setsockopt_auth_key(struct sock *sk,
 
 	if (optlen <= sizeof(struct sctp_authkey))
 		return -EINVAL;
+	/* authkey->sca_keylength is u16, so optlen can't be bigger than
+	 * this.
+	 */
+	optlen = min_t(unsigned int, optlen, USHRT_MAX +
+					     sizeof(struct sctp_authkey));
 
 	authkey = memdup_user(optval, optlen);
 	if (IS_ERR(authkey))
@@ -3994,34 +4005,30 @@ out_nounlock:
  * len: the size of the address.
  */
 static int sctp_connect(struct sock *sk, struct sockaddr *addr,
-			int addr_len, int flags)
+			int addr_len)
 {
+	int err = 0;
 	struct sctp_af *af;
-	int err = -EINVAL;
 
 	lock_sock(sk);
+
 	pr_debug("%s: sk:%p, sockaddr:%p, addr_len:%d\n", __func__, sk,
 		 addr, addr_len);
 
 	/* Validate addr_len before calling common connect/connectx routine. */
-	af = sctp_get_af_specific(addr->sa_family);
-	if (af && addr_len >= af->sockaddr_len)
-		err = __sctp_connect(sk, addr, af->sockaddr_len, flags, NULL);
+	af = addr_len < offsetofend(struct sockaddr, sa_family) ? NULL :
+		sctp_get_af_specific(addr->sa_family);
+	if (!af || addr_len < af->sockaddr_len) {
+		err = -EINVAL;
+	} else {
+		/* Pass correct addr len to common routine (so it knows there
+		 * is only one address being passed.
+		 */
+		err = __sctp_connect(sk, addr, af->sockaddr_len, NULL);
+	}
 
 	release_sock(sk);
 	return err;
-}
-
-int sctp_inet_connect(struct socket *sock, struct sockaddr *uaddr,
-		      int addr_len, int flags)
-{
-	if (addr_len < sizeof(uaddr->sa_family))
-		return -EINVAL;
-
-	if (uaddr->sa_family == AF_UNSPEC)
-		return -EOPNOTSUPP;
-
-	return sctp_connect(sock->sk, uaddr, addr_len, flags);
 }
 
 /* FIXME: Write comments. */
@@ -4081,7 +4088,11 @@ static struct sock *sctp_accept(struct sock *sk, int flags, int *err)
 	/* Populate the fields of the newsk from the oldsk and migrate the
 	 * asoc to the newsk.
 	 */
-	sctp_sock_migrate(sk, newsk, asoc, SCTP_SOCKET_TCP);
+	error = sctp_sock_migrate(sk, newsk, asoc, SCTP_SOCKET_TCP);
+	if (error) {
+		sk_common_release(newsk);
+		newsk = NULL;
+	}
 
 out:
 	release_sock(sk);
@@ -4135,6 +4146,7 @@ out:
 static int sctp_init_sock(struct sock *sk)
 {
 	struct net *net = sock_net(sk);
+	struct sctp_endpoint *ep;
 	struct sctp_sock *sp;
 
 	pr_debug("%s: sk:%p\n", __func__, sk);
@@ -4204,7 +4216,7 @@ static int sctp_init_sock(struct sock *sk)
 	 */
 	sp->hbinterval  = net->sctp.hb_interval;
 	sp->pathmaxrxt  = net->sctp.max_retrans_path;
-	sp->pathmtu     = 0; /* allow default discovery */
+	sp->pathmtu     = 0; // allow default discovery
 	sp->sackdelay   = net->sctp.sack_timeout;
 	sp->sackfreq	= 2;
 	sp->param_flags = SPP_HB_ENABLE |
@@ -4248,10 +4260,11 @@ static int sctp_init_sock(struct sock *sk)
 	 * change the data structure relationships, this may still
 	 * be useful for storing pre-connect address information.
 	 */
-	sp->ep = sctp_endpoint_new(sk, GFP_KERNEL);
-	if (!sp->ep)
+	ep = sctp_endpoint_new(sk, GFP_KERNEL);
+	if (!ep)
 		return -ENOMEM;
 
+	sp->ep = ep;
 	sp->hmac = NULL;
 
 	sk->sk_destruct = sctp_destruct_sock;
@@ -4314,7 +4327,7 @@ static void sctp_destruct_sock(struct sock *sk)
 	struct sctp_sock *sp = sctp_sk(sk);
 
 	/* Free up the HMAC transform. */
-	crypto_free_shash(sp->hmac);
+	crypto_free_hash(sp->hmac);
 
 	inet_sock_destruct(sk);
 }
@@ -4445,10 +4458,7 @@ int sctp_transport_walk_start(struct rhashtable_iter *iter)
 {
 	int err;
 
-	err = rhashtable_walk_init(&sctp_transport_hashtable, iter,
-				   GFP_KERNEL);
-	if (err)
-		return err;
+	rhltable_walk_enter(&sctp_transport_hashtable, iter);
 
 	err = rhashtable_walk_start(iter);
 	if (err && err != -EAGAIN) {
@@ -4538,45 +4548,53 @@ int sctp_transport_lookup_process(int (*cb)(struct sctp_transport *, void *),
 				  const union sctp_addr *paddr, void *p)
 {
 	struct sctp_transport *transport;
-	int err = -ENOENT;
+	int err;
 
 	rcu_read_lock();
 	transport = sctp_addrs_lookup_transport(net, laddr, paddr);
-	if (!transport || !sctp_transport_hold(transport)) {
-		rcu_read_unlock();
-		goto out;
-	}
 	rcu_read_unlock();
+	if (!transport)
+		return -ENOENT;
+
 	err = cb(transport, p);
 	sctp_transport_put(transport);
 
-out:
 	return err;
 }
 EXPORT_SYMBOL_GPL(sctp_transport_lookup_process);
 
 int sctp_for_each_transport(int (*cb)(struct sctp_transport *, void *),
-			    struct net *net, int pos, void *p) {
+			    int (*cb_done)(struct sctp_transport *, void *),
+			    struct net *net, int *pos, void *p) {
 	struct rhashtable_iter hti;
-	void *obj;
-	int err;
+	struct sctp_transport *tsp;
+	int ret;
 
-	err = sctp_transport_walk_start(&hti);
-	if (err)
-		return err;
+again:
+	ret = sctp_transport_walk_start(&hti);
+	if (ret)
+		return ret;
 
-	obj = sctp_transport_get_idx(net, &hti, pos + 1);
-	for (; !IS_ERR_OR_NULL(obj); obj = sctp_transport_get_next(net, &hti)) {
-		struct sctp_transport *transport = obj;
-
-		err = cb(transport, p);
-		sctp_transport_put(transport);
-		if (err)
+	tsp = sctp_transport_get_idx(net, &hti, *pos + 1);
+	for (; !IS_ERR_OR_NULL(tsp); tsp = sctp_transport_get_next(net, &hti)) {
+		ret = cb(tsp, p);
+		if (ret)
 			break;
+		(*pos)++;
+		sctp_transport_put(tsp);
 	}
 	sctp_transport_walk_stop(&hti);
 
-	return err;
+	if (ret) {
+		if (cb_done && !cb_done(tsp, p)) {
+			(*pos)++;
+			sctp_transport_put(tsp);
+			goto again;
+		}
+		sctp_transport_put(tsp);
+	}
+
+	return ret;
 }
 EXPORT_SYMBOL_GPL(sctp_for_each_transport);
 
@@ -4820,7 +4838,12 @@ int sctp_do_peeloff(struct sock *sk, sctp_assoc_t id, struct socket **sockp)
 	/* Populate the fields of the newsk from the oldsk and migrate the
 	 * asoc to the newsk.
 	 */
-	sctp_sock_migrate(sk, sock->sk, asoc, SCTP_SOCKET_UDP_HIGH_BANDWIDTH);
+	err = sctp_sock_migrate(sk, sock->sk, asoc,
+				SCTP_SOCKET_UDP_HIGH_BANDWIDTH);
+	if (err) {
+		sock_release(sock);
+		sock = NULL;
+	}
 
 	*sockp = sock;
 
@@ -4828,11 +4851,47 @@ int sctp_do_peeloff(struct sock *sk, sctp_assoc_t id, struct socket **sockp)
 }
 EXPORT_SYMBOL(sctp_do_peeloff);
 
+static int sctp_getsockopt_peeloff_common(struct sock *sk, sctp_peeloff_arg_t *peeloff,
+					  struct file **newfile, unsigned flags)
+{
+	struct socket *newsock;
+	int retval;
+
+	retval = sctp_do_peeloff(sk, peeloff->associd, &newsock);
+	if (retval < 0)
+		goto out;
+
+	/* Map the socket to an unused fd that can be returned to the user.  */
+	retval = get_unused_fd_flags(flags & SOCK_CLOEXEC);
+	if (retval < 0) {
+		sock_release(newsock);
+		goto out;
+	}
+
+	*newfile = sock_alloc_file(newsock, 0, NULL);
+	if (IS_ERR(*newfile)) {
+		put_unused_fd(retval);
+		sock_release(newsock);
+		retval = PTR_ERR(*newfile);
+		*newfile = NULL;
+		return retval;
+	}
+
+	pr_debug("%s: sk:%p, newsk:%p, sd:%d\n", __func__, sk, newsock->sk,
+		 retval);
+
+	peeloff->sd = retval;
+
+	if (flags & SOCK_NONBLOCK)
+		(*newfile)->f_flags |= O_NONBLOCK;
+out:
+	return retval;
+}
+
 static int sctp_getsockopt_peeloff(struct sock *sk, int len, char __user *optval, int __user *optlen)
 {
 	sctp_peeloff_arg_t peeloff;
-	struct socket *newsock;
-	struct file *newfile;
+	struct file *newfile = NULL;
 	int retval = 0;
 
 	if (len < sizeof(sctp_peeloff_arg_t))
@@ -4841,26 +4900,9 @@ static int sctp_getsockopt_peeloff(struct sock *sk, int len, char __user *optval
 	if (copy_from_user(&peeloff, optval, len))
 		return -EFAULT;
 
-	retval = sctp_do_peeloff(sk, peeloff.associd, &newsock);
+	retval = sctp_getsockopt_peeloff_common(sk, &peeloff, &newfile, 0);
 	if (retval < 0)
 		goto out;
-
-	/* Map the socket to an unused fd that can be returned to the user.  */
-	retval = get_unused_fd_flags(0);
-	if (retval < 0) {
-		sock_release(newsock);
-		goto out;
-	}
-
-	newfile = sock_alloc_file(newsock, 0, NULL);
-	if (IS_ERR(newfile)) {
-		put_unused_fd(retval);
-		sock_release(newsock);
-		return PTR_ERR(newfile);
-	}
-
-	pr_debug("%s: sk:%p, newsk:%p, sd:%d\n", __func__, sk, newsock->sk,
-		 retval);
 
 	/* Return the fd mapped to the new socket.  */
 	if (put_user(len, optlen)) {
@@ -4868,7 +4910,42 @@ static int sctp_getsockopt_peeloff(struct sock *sk, int len, char __user *optval
 		put_unused_fd(retval);
 		return -EFAULT;
 	}
-	peeloff.sd = retval;
+
+	if (copy_to_user(optval, &peeloff, len)) {
+		fput(newfile);
+		put_unused_fd(retval);
+		return -EFAULT;
+	}
+	fd_install(retval, newfile);
+out:
+	return retval;
+}
+
+static int sctp_getsockopt_peeloff_flags(struct sock *sk, int len,
+					 char __user *optval, int __user *optlen)
+{
+	sctp_peeloff_flags_arg_t peeloff;
+	struct file *newfile = NULL;
+	int retval = 0;
+
+	if (len < sizeof(sctp_peeloff_flags_arg_t))
+		return -EINVAL;
+	len = sizeof(sctp_peeloff_flags_arg_t);
+	if (copy_from_user(&peeloff, optval, len))
+		return -EFAULT;
+
+	retval = sctp_getsockopt_peeloff_common(sk, &peeloff.p_arg,
+						&newfile, peeloff.flags);
+	if (retval < 0)
+		goto out;
+
+	/* Return the fd mapped to the new socket.  */
+	if (put_user(len, optlen)) {
+		fput(newfile);
+		put_unused_fd(retval);
+		return -EFAULT;
+	}
+
 	if (copy_to_user(optval, &peeloff, len)) {
 		fput(newfile);
 		put_unused_fd(retval);
@@ -5095,9 +5172,8 @@ static int sctp_getsockopt_delayed_ack(struct sock *sk, int len,
 		if (copy_from_user(&params, optval, len))
 			return -EFAULT;
 	} else if (len == sizeof(struct sctp_assoc_value)) {
-		pr_warn_ratelimited(DEPRECATED
-				    "%s (pid %d) "
-				    "Use of struct sctp_assoc_value in delayed_ack socket option.\n"
+		pr_warn_ratelimited("%s (pid %d) "
+				    "Use of struct sctp_assoc_value in delayed_ack socket option deprecated\n"
 				    "Use struct sctp_sack_info instead\n",
 				    current->comm, task_pid_nr(current));
 		if (copy_from_user(&params, optval, len))
@@ -5787,9 +5863,8 @@ static int sctp_getsockopt_maxseg(struct sock *sk, int len,
 	struct sctp_association *asoc;
 
 	if (len == sizeof(int)) {
-		pr_warn_ratelimited(DEPRECATED
-				    "%s (pid %d) "
-				    "Use of int in maxseg socket option.\n"
+		pr_warn_ratelimited("%s (pid %d) "
+				    "Use of int in maxseg socket option deprecated\n"
 				    "Use struct sctp_assoc_value instead\n",
 				    current->comm, task_pid_nr(current));
 		params.assoc_id = 0;
@@ -5882,9 +5957,8 @@ static int sctp_getsockopt_maxburst(struct sock *sk, int len,
 	struct sctp_association *asoc;
 
 	if (len == sizeof(int)) {
-		pr_warn_ratelimited(DEPRECATED
-				    "%s (pid %d) "
-				    "Use of int in max_burst socket option.\n"
+		pr_warn_ratelimited("%s (pid %d) "
+				    "Use of int in max_burst socket option deprecated\n"
 				    "Use struct sctp_assoc_value instead\n",
 				    current->comm, task_pid_nr(current));
 		params.assoc_id = 0;
@@ -6435,14 +6509,15 @@ static int sctp_getsockopt_pr_assocstatus(struct sock *sk, int len,
 	}
 
 	policy = params.sprstat_policy;
-	if (policy & ~SCTP_PR_SCTP_MASK)
+	if (!policy || (policy & ~(SCTP_PR_SCTP_MASK | SCTP_PR_SCTP_ALL)) ||
+	    ((policy & SCTP_PR_SCTP_ALL) && (policy & SCTP_PR_SCTP_MASK)))
 		goto out;
 
 	asoc = sctp_id2assoc(sk, params.sprstat_assoc_id);
 	if (!asoc)
 		goto out;
 
-	if (policy == SCTP_PR_SCTP_NONE) {
+	if (policy == SCTP_PR_SCTP_ALL) {
 		params.sprstat_abandoned_unsent = 0;
 		params.sprstat_abandoned_sent = 0;
 		for (policy = 0; policy <= SCTP_PR_INDEX(MAX); policy++) {
@@ -6519,6 +6594,9 @@ static int sctp_getsockopt(struct sock *sk, int level, int optname,
 		break;
 	case SCTP_SOCKOPT_PEELOFF:
 		retval = sctp_getsockopt_peeloff(sk, len, optval, optlen);
+		break;
+	case SCTP_SOCKOPT_PEELOFF_FLAGS:
+		retval = sctp_getsockopt_peeloff_flags(sk, len, optval, optlen);
 		break;
 	case SCTP_PEER_ADDR_PARAMS:
 		retval = sctp_getsockopt_peer_addr_params(sk, len, optval,
@@ -6650,10 +6728,9 @@ static int sctp_getsockopt(struct sock *sk, int level, int optname,
 	return retval;
 }
 
-static int sctp_hash(struct sock *sk)
+static void sctp_hash(struct sock *sk)
 {
 	/* STUB */
-	return 0;
 }
 
 static void sctp_unhash(struct sock *sk)
@@ -6687,13 +6764,14 @@ static long sctp_get_port_local(struct sock *sk, union sctp_addr *addr)
 
 	pr_debug("%s: begins, snum:%d\n", __func__, snum);
 
+	local_bh_disable();
+
 	if (snum == 0) {
 		/* Search for an available port. */
 		int low, high, remaining, index;
 		unsigned int rover;
-		struct net *net = sock_net(sk);
 
-		inet_get_local_port_range(net, &low, &high);
+		inet_get_local_port_range(sock_net(sk), &low, &high);
 		remaining = (high - low) + 1;
 		rover = prandom_u32() % remaining + low;
 
@@ -6701,25 +6779,24 @@ static long sctp_get_port_local(struct sock *sk, union sctp_addr *addr)
 			rover++;
 			if ((rover < low) || (rover > high))
 				rover = low;
-			if (inet_is_local_reserved_port(net, rover))
+			if (inet_is_reserved_local_port(rover))
 				continue;
 			index = sctp_phashfn(sock_net(sk), rover);
 			head = &sctp_port_hashtable[index];
-			spin_lock_bh(&head->lock);
+			spin_lock(&head->lock);
 			sctp_for_each_hentry(pp, &head->chain)
 				if ((pp->port == rover) &&
 				    net_eq(sock_net(sk), pp->net))
 					goto next;
 			break;
 		next:
-			spin_unlock_bh(&head->lock);
-			cond_resched();
+			spin_unlock(&head->lock);
 		} while (--remaining > 0);
 
 		/* Exhausted local port range during search? */
 		ret = 1;
 		if (remaining <= 0)
-			return ret;
+			goto fail;
 
 		/* OK, here is the one we will use.  HEAD (the port
 		 * hash table list entry) is non-NULL and we hold it's
@@ -6734,7 +6811,7 @@ static long sctp_get_port_local(struct sock *sk, union sctp_addr *addr)
 		 * port iterator, pp being NULL.
 		 */
 		head = &sctp_port_hashtable[sctp_phashfn(sock_net(sk), snum)];
-		spin_lock_bh(&head->lock);
+		spin_lock(&head->lock);
 		sctp_for_each_hentry(pp, &head->chain) {
 			if ((pp->port == snum) && net_eq(pp->net, sock_net(sk)))
 				goto pp_found;
@@ -6818,7 +6895,10 @@ success:
 	ret = 0;
 
 fail_unlock:
-	spin_unlock_bh(&head->lock);
+	spin_unlock(&head->lock);
+
+fail:
+	local_bh_enable();
 	return ret;
 }
 
@@ -6827,6 +6907,7 @@ fail_unlock:
  */
 static int sctp_get_port(struct sock *sk, unsigned short snum)
 {
+	long ret;
 	union sctp_addr addr;
 	struct sctp_af *af = sctp_sk(sk)->pf->af;
 
@@ -6835,7 +6916,9 @@ static int sctp_get_port(struct sock *sk, unsigned short snum)
 	addr.v4.sin_port = htons(snum);
 
 	/* Note: sk->sk_num gets filled in if ephemeral port request. */
-	return !!sctp_get_port_local(sk, &addr);
+	ret = sctp_get_port_local(sk, &addr);
+
+	return ret ? 1 : 0;
 }
 
 /*
@@ -6845,13 +6928,13 @@ static int sctp_listen_start(struct sock *sk, int backlog)
 {
 	struct sctp_sock *sp = sctp_sk(sk);
 	struct sctp_endpoint *ep = sp->ep;
-	struct crypto_shash *tfm = NULL;
+	struct crypto_hash *tfm = NULL;
 	char alg[32];
 
 	/* Allocate HMAC for generating cookie. */
 	if (!sp->hmac && sp->sctp_hmac_alg) {
 		sprintf(alg, "hmac(%s)", sp->sctp_hmac_alg);
-		tfm = crypto_alloc_shash(alg, 0, 0);
+		tfm = crypto_alloc_hash(alg, 0, CRYPTO_ALG_ASYNC);
 		if (IS_ERR(tfm)) {
 			net_info_ratelimited("failed to load transform for %s: %ld\n",
 					     sp->sctp_hmac_alg, PTR_ERR(tfm));
@@ -7003,7 +7086,7 @@ unsigned int sctp_poll(struct file *file, struct socket *sock, poll_table *wait)
 	if (sctp_writeable(sk)) {
 		mask |= POLLOUT | POLLWRNORM;
 	} else {
-		sk_set_bit(SOCKWQ_ASYNC_NOSPACE, sk);
+		set_bit(SOCK_ASYNC_NOSPACE, &sk->sk_socket->flags);
 		/*
 		 * Since the socket is not locked, the buffer
 		 * might be made available after the writeable check and
@@ -7138,7 +7221,8 @@ static int sctp_msghdr_parse(const struct msghdr *msg, sctp_cmsgs_t *cmsgs)
 	struct cmsghdr *cmsg;
 	struct msghdr *my_msg = (struct msghdr *)msg;
 
-	for_each_cmsghdr(cmsg, my_msg) {
+	for (cmsg = CMSG_FIRSTHDR(msg); cmsg != NULL;
+	     cmsg = CMSG_NXTHDR(my_msg, cmsg)) {
 		if (!CMSG_OK(my_msg, cmsg))
 			return -EINVAL;
 
@@ -7325,10 +7409,6 @@ struct sk_buff *sctp_skb_recv_datagram(struct sock *sk, int flags,
 		if (sk->sk_shutdown & RCV_SHUTDOWN)
 			break;
 
-		if (sk_can_busy_loop(sk) &&
-		    sk_busy_loop(sk, noblock))
-			continue;
-
 		/* User doesn't want to wait.  */
 		error = -EAGAIN;
 		if (!timeo)
@@ -7346,30 +7426,26 @@ no_packet:
 static void __sctp_write_space(struct sctp_association *asoc)
 {
 	struct sock *sk = asoc->base.sk;
+	struct socket *sock = sk->sk_socket;
 
-	if (sctp_wspace(asoc) <= 0)
-		return;
+	if ((sctp_wspace(asoc) > 0) && sock) {
+		if (waitqueue_active(&asoc->wait))
+			wake_up_interruptible(&asoc->wait);
 
-	if (waitqueue_active(&asoc->wait))
-		wake_up_interruptible(&asoc->wait);
+		if (sctp_writeable(sk)) {
+			wait_queue_head_t *wq = sk_sleep(sk);
 
-	if (sctp_writeable(sk)) {
-		struct socket_wq *wq;
-
-		rcu_read_lock();
-		wq = rcu_dereference(sk->sk_wq);
-		if (wq) {
-			if (waitqueue_active(&wq->wait))
-				wake_up_interruptible(&wq->wait);
+			if (wq && waitqueue_active(wq))
+				wake_up_interruptible(wq);
 
 			/* Note that we try to include the Async I/O support
 			 * here by modeling from the current TCP/UDP code.
 			 * We have not tested with it yet.
 			 */
 			if (!(sk->sk_shutdown & SEND_SHUTDOWN))
-				sock_wake_async(wq, SOCK_WAKE_SPACE, POLL_OUT);
+				sock_wake_async(sock,
+						SOCK_WAKE_SPACE, POLL_OUT);
 		}
-		rcu_read_unlock();
 	}
 }
 
@@ -7527,13 +7603,13 @@ do_nonblock:
 	goto out;
 }
 
-void sctp_data_ready(struct sock *sk)
+void sctp_data_ready(struct sock *sk, int len)
 {
 	struct socket_wq *wq;
 
 	rcu_read_lock();
 	wq = rcu_dereference(sk->sk_wq);
-	if (skwq_has_sleeper(wq))
+	if (wq_has_sleeper(wq))
 		wake_up_interruptible_sync_poll(&wq->wait, POLLIN |
 						POLLRDNORM | POLLRDBAND);
 	sk_wake_async(sk, SOCK_WAKE_WAITD, POLL_IN);
@@ -7745,7 +7821,7 @@ void sctp_copy_sock(struct sock *newsk, struct sock *sk,
 	newinet->inet_rcv_saddr = inet->inet_rcv_saddr;
 	newinet->inet_dport = htons(asoc->peer.port);
 	newinet->pmtudisc = inet->pmtudisc;
-	newinet->inet_id = prandom_u32();
+	newinet->inet_id = asoc->next_tsn ^ jiffies;
 
 	newinet->uc_ttl = inet->uc_ttl;
 	newinet->mc_loop = 1;
@@ -7764,7 +7840,7 @@ static inline void sctp_copy_descendant(struct sock *sk_to,
 {
 	int ancestor_size = sizeof(struct inet_sock) +
 			    sizeof(struct sctp_sock) -
-			    offsetof(struct sctp_sock, auto_asconf_list);
+			    offsetof(struct sctp_sock, pd_lobby);
 
 	if (sk_from->sk_family == PF_INET6)
 		ancestor_size += sizeof(struct ipv6_pinfo);
@@ -7775,9 +7851,9 @@ static inline void sctp_copy_descendant(struct sock *sk_to,
 /* Populate the fields of the newsk from the oldsk and migrate the assoc
  * and its messages to the newsk.
  */
-static void sctp_sock_migrate(struct sock *oldsk, struct sock *newsk,
-			      struct sctp_association *assoc,
-			      sctp_socket_type_t type)
+static int sctp_sock_migrate(struct sock *oldsk, struct sock *newsk,
+			     struct sctp_association *assoc,
+			     sctp_socket_type_t type)
 {
 	struct sctp_sock *oldsp = sctp_sk(oldsk);
 	struct sctp_sock *newsp = sctp_sk(newsk);
@@ -7786,6 +7862,7 @@ static void sctp_sock_migrate(struct sock *oldsk, struct sock *newsk,
 	struct sk_buff *skb, *tmp;
 	struct sctp_ulpevent *event;
 	struct sctp_bind_hashbucket *head;
+	int err;
 
 	/* Migrate socket buffer sizes and all the socket level options to the
 	 * new socket.
@@ -7814,8 +7891,20 @@ static void sctp_sock_migrate(struct sock *oldsk, struct sock *newsk,
 	/* Copy the bind_addr list from the original endpoint to the new
 	 * endpoint so that we can handle restarts properly
 	 */
-	sctp_bind_addr_dup(&newsp->ep->base.bind_addr,
-				&oldsp->ep->base.bind_addr, GFP_KERNEL);
+	err = sctp_bind_addr_dup(&newsp->ep->base.bind_addr,
+				 &oldsp->ep->base.bind_addr, GFP_KERNEL);
+	if (err)
+		return err;
+
+	/* New ep's auth_hmacs should be set if old ep's is set, in case
+	 * that net->sctp.auth_enable has been changed to 0 by users and
+	 * new ep's auth_hmacs couldn't be set in sctp_endpoint_init().
+	 */
+	if (oldsp->ep->auth_hmacs) {
+		err = sctp_auth_init_hmacs(newsp->ep, GFP_KERNEL);
+		if (err)
+			return err;
+	}
 
 	/* Move any messages in the old socket's receive queue that are for the
 	 * peeled off association to the new socket's receive queue.
@@ -7835,7 +7924,6 @@ static void sctp_sock_migrate(struct sock *oldsk, struct sock *newsk,
 	 * 2) Peeling off partial delivery; keep pd_lobby in new pd_lobby.
 	 * 3) Peeling off non-partial delivery; move pd_lobby to receive_queue.
 	 */
-	skb_queue_head_init(&newsp->pd_lobby);
 	atomic_set(&sctp_sk(newsk)->pd_mode, assoc->ulpq.pd_mode);
 
 	if (atomic_read(&sctp_sk(oldsk)->pd_mode)) {
@@ -7889,9 +7977,9 @@ static void sctp_sock_migrate(struct sock *oldsk, struct sock *newsk,
 	 * paths won't try to lock it and then oldsk.
 	 */
 	lock_sock_nested(newsk, SINGLE_DEPTH_NESTING);
-	sctp_for_each_tx_datachunk(assoc, true, sctp_clear_owner_w);
+	sctp_for_each_tx_datachunk(assoc, sctp_clear_owner_w);
 	sctp_assoc_migrate(assoc, newsk);
-	sctp_for_each_tx_datachunk(assoc, false, sctp_set_owner_w);
+	sctp_for_each_tx_datachunk(assoc, sctp_set_owner_w);
 
 	/* If the association on the newsk is already closed before accept()
 	 * is called, set RCV_SHUTDOWN flag.
@@ -7904,6 +7992,8 @@ static void sctp_sock_migrate(struct sock *oldsk, struct sock *newsk,
 	}
 
 	release_sock(newsk);
+
+	return 0;
 }
 
 
@@ -7912,6 +8002,7 @@ struct proto sctp_prot = {
 	.name        =	"SCTP",
 	.owner       =	THIS_MODULE,
 	.close       =	sctp_close,
+	.connect     =	sctp_connect,
 	.disconnect  =	sctp_disconnect,
 	.accept      =	sctp_accept,
 	.ioctl       =	sctp_ioctl,
@@ -7926,7 +8017,7 @@ struct proto sctp_prot = {
 	.backlog_rcv =	sctp_backlog_rcv,
 	.hash        =	sctp_hash,
 	.unhash      =	sctp_unhash,
-	.no_autobind =	true,
+	.get_port    =	sctp_get_port,
 	.obj_size    =  sizeof(struct sctp_sock),
 	.sysctl_mem  =  sysctl_sctp_mem,
 	.sysctl_rmem =  sysctl_sctp_rmem,
@@ -7950,6 +8041,7 @@ struct proto sctpv6_prot = {
 	.name		= "SCTPv6",
 	.owner		= THIS_MODULE,
 	.close		= sctp_close,
+	.connect	= sctp_connect,
 	.disconnect	= sctp_disconnect,
 	.accept		= sctp_accept,
 	.ioctl		= sctp_ioctl,
@@ -7964,7 +8056,7 @@ struct proto sctpv6_prot = {
 	.backlog_rcv	= sctp_backlog_rcv,
 	.hash		= sctp_hash,
 	.unhash		= sctp_unhash,
-	.no_autobind	= true,
+	.get_port	= sctp_get_port,
 	.obj_size	= sizeof(struct sctp6_sock),
 	.sysctl_mem	= sysctl_sctp_mem,
 	.sysctl_rmem	= sysctl_sctp_rmem,

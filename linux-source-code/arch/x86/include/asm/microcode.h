@@ -28,7 +28,13 @@ struct cpu_signature {
 
 struct device;
 
-enum ucode_state { UCODE_ERROR, UCODE_OK, UCODE_NFOUND };
+enum ucode_state {
+	UCODE_OK	= 0,
+	UCODE_NEW,
+	UCODE_UPDATED,
+	UCODE_NFOUND,
+	UCODE_ERROR,
+};
 
 struct microcode_ops {
 	enum ucode_state (*request_microcode_user) (int cpu,
@@ -45,7 +51,7 @@ struct microcode_ops {
 	 * are being called.
 	 * See also the "Synchronization" section in microcode_core.c.
 	 */
-	int (*apply_microcode) (int cpu);
+	enum ucode_state (*apply_microcode) (int cpu);
 	int (*collect_cpu_info) (int cpu, struct cpu_signature *csig);
 };
 
@@ -133,11 +139,13 @@ static inline unsigned int x86_cpuid_family(void)
 #ifdef CONFIG_MICROCODE
 extern void __init load_ucode_bsp(void);
 extern void load_ucode_ap(void);
+extern int __init save_microcode_in_initrd(void);
 void reload_early_microcode(void);
 extern bool get_builtin_firmware(struct cpio_data *cd, const char *name);
 #else
 static inline void __init load_ucode_bsp(void)			{ }
 static inline void load_ucode_ap(void)				{ }
+static inline int __init save_microcode_in_initrd(void)		{ return 0; }
 static inline void reload_early_microcode(void)			{ }
 static inline bool
 get_builtin_firmware(struct cpio_data *cd, const char *name)	{ return false; }

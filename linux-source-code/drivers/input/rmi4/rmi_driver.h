@@ -16,8 +16,6 @@
 #include <linux/input.h>
 #include "rmi_bus.h"
 
-#define RMI_DRIVER_VERSION "2.0"
-
 #define SYNAPTICS_INPUT_DEVICE_NAME "Synaptics RMI4 Touch Sensor"
 #define SYNAPTICS_VENDOR_ID 0x06cb
 
@@ -50,9 +48,6 @@ struct pdt_entry {
 	u8 function_version;
 	u8 function_number;
 };
-
-int rmi_read_pdt_entry(struct rmi_device *rmi_dev, struct pdt_entry *entry,
-			u16 pdt_address);
 
 #define RMI_REG_DESC_PRESENSE_BITS	(32 * BITS_PER_BYTE)
 #define RMI_REG_DESC_SUBPACKET_BITS	(37 * BITS_PER_BYTE)
@@ -95,12 +90,28 @@ bool rmi_register_desc_has_subpacket(const struct rmi_register_desc_item *item,
 bool rmi_is_physical_driver(struct device_driver *);
 int rmi_register_physical_driver(void);
 void rmi_unregister_physical_driver(void);
+struct rmi_function *rmi_find_function(struct rmi_device *rmi_dev, u8 number);
+void rmi_enable_irq(struct rmi_device *rmi_dev, bool clear_wake);
+void rmi_disable_irq(struct rmi_device *rmi_dev, bool enable_wake);
 
-char *rmi_f01_get_product_ID(struct rmi_function *fn);
+const char *rmi_f01_get_product_ID(struct rmi_function *fn);
+
+#ifdef CONFIG_RMI4_F03
+int rmi_f03_overwrite_button(struct rmi_function *fn, unsigned int button,
+			     int value);
+void rmi_f03_commit_buttons(struct rmi_function *fn);
+#else
+static inline int rmi_f03_overwrite_button(struct rmi_function *fn,
+					   unsigned int button, int value)
+{
+	return 0;
+}
+static inline void rmi_f03_commit_buttons(struct rmi_function *fn) {}
+#endif
 
 extern struct rmi_function_handler rmi_f01_handler;
+extern struct rmi_function_handler rmi_f03_handler;
 extern struct rmi_function_handler rmi_f11_handler;
 extern struct rmi_function_handler rmi_f12_handler;
 extern struct rmi_function_handler rmi_f30_handler;
-extern struct rmi_function_handler rmi_f54_handler;
 #endif

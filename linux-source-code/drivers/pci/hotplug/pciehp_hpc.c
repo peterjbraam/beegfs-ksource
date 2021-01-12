@@ -562,6 +562,8 @@ static irqreturn_t pciehp_isr(int irq, void *dev_id)
 {
 	struct controller *ctrl = (struct controller *)dev_id;
 	struct pci_dev *pdev = ctrl_dev(ctrl);
+	struct pci_bus *subordinate = pdev->subordinate;
+	struct pci_dev *dev;
 	struct slot *slot = ctrl->slot;
 	u16 status, events;
 	u8 present;
@@ -584,14 +586,6 @@ static irqreturn_t pciehp_isr(int irq, void *dev_id)
 	events = status & (PCI_EXP_SLTSTA_ABP | PCI_EXP_SLTSTA_PFD |
 			   PCI_EXP_SLTSTA_PDC | PCI_EXP_SLTSTA_CC |
 			   PCI_EXP_SLTSTA_DLLSC);
-
-	/*
-	 * If we've already reported a power fault, don't report it again
-	 * until we've done something to handle it.
-	 */
-	if (ctrl->power_fault_detected)
-		events &= ~PCI_EXP_SLTSTA_PFD;
-
 	if (!events)
 		return IRQ_NONE;
 
@@ -609,9 +603,14 @@ static irqreturn_t pciehp_isr(int irq, void *dev_id)
 		wake_up(&ctrl->queue);
 	}
 
-	if (pdev->ignore_hotplug) {
-		ctrl_dbg(ctrl, "ignoring hotplug event %#06x\n", events);
-		return IRQ_HANDLED;
+	if (subordinate) {
+		list_for_each_entry(dev, &subordinate->devices, bus_list) {
+			if (dev->ignore_hotplug) {
+				ctrl_dbg(ctrl, "ignoring hotplug event %#06x (%s requested no hotplug)\n",
+					 events, pci_name(dev));
+				return IRQ_HANDLED;
+			}
+		}
 	}
 
 	/* Check Attention Button Pressed */
@@ -621,8 +620,18 @@ static irqreturn_t pciehp_isr(int irq, void *dev_id)
 		pciehp_queue_interrupt_event(slot, INT_BUTTON_PRESS);
 	}
 
-	/* Check Presence Detect Changed */
-	if (events & PCI_EXP_SLTSTA_PDC) {
+	/*
+	 * Check Link Status Changed at higher precedence than Presence
+	 * Detect Changed.  The PDS value may be set to "card present" from
+	 * out-of-band detection, which may be in conflict with a Link Down
+	 * and cause the wrong event to queue.
+	 */
+	if (events & PCI_EXP_SLTSTA_DLLSC) {
+		ctrl_info(ctrl, "Slot(%s): Link %s\n", slot_name(slot),
+			  link ? "Up" : "Down");
+		pciehp_queue_interrupt_event(slot, link ? INT_LINK_UP :
+					     INT_LINK_DOWN);
+	} else if (events & PCI_EXP_SLTSTA_PDC) {
 		present = !!(status & PCI_EXP_SLTSTA_PDS);
 		ctrl_info(ctrl, "Slot(%s): Card %spresent\n", slot_name(slot),
 			  present ? "" : "not ");
@@ -635,13 +644,6 @@ static irqreturn_t pciehp_isr(int irq, void *dev_id)
 		ctrl->power_fault_detected = 1;
 		ctrl_err(ctrl, "Slot(%s): Power fault\n", slot_name(slot));
 		pciehp_queue_interrupt_event(slot, INT_POWER_FAULT);
-	}
-
-	if (events & PCI_EXP_SLTSTA_DLLSC) {
-		ctrl_info(ctrl, "Slot(%s): Link %s\n", slot_name(slot),
-			  link ? "Up" : "Down");
-		pciehp_queue_interrupt_event(slot, link ? INT_LINK_UP :
-					     INT_LINK_DOWN);
 	}
 
 	return IRQ_HANDLED;
@@ -779,7 +781,7 @@ int pcie_init_notification(struct controller *ctrl)
 	return 0;
 }
 
-void pcie_shutdown_notification(struct controller *ctrl)
+static void pcie_shutdown_notification(struct controller *ctrl)
 {
 	if (ctrl->notification_enabled) {
 		pcie_disable_notification(ctrl);
@@ -796,7 +798,7 @@ static int pcie_init_slot(struct controller *ctrl)
 	if (!slot)
 		return -ENOMEM;
 
-	slot->wq = alloc_workqueue("pciehp-%u", 0, 0, PSN(ctrl));
+	slot->wq = alloc_ordered_workqueue("pciehp-%u", 0, PSN(ctrl));
 	if (!slot->wq)
 		goto abort;
 
@@ -814,7 +816,7 @@ abort:
 static void pcie_cleanup_slot(struct controller *ctrl)
 {
 	struct slot *slot = ctrl->slot;
-
+	cancel_delayed_work(&slot->work);
 	destroy_workqueue(slot->wq);
 	kfree(slot);
 }
@@ -863,11 +865,11 @@ struct controller *pcie_init(struct pcie_device *dev)
 	if (link_cap & PCI_EXP_LNKCAP_DLLLARC)
 		ctrl->link_active_reporting = 1;
 
-	/* Clear all remaining event bits in Slot Status register */
+	/* Clear all remaining event bits in Slot Status register. */
 	pcie_capability_write_word(pdev, PCI_EXP_SLTSTA,
 		PCI_EXP_SLTSTA_ABP | PCI_EXP_SLTSTA_PFD |
-		PCI_EXP_SLTSTA_MRLSC | PCI_EXP_SLTSTA_PDC |
-		PCI_EXP_SLTSTA_CC | PCI_EXP_SLTSTA_DLLSC);
+		PCI_EXP_SLTSTA_MRLSC | PCI_EXP_SLTSTA_CC |
+		PCI_EXP_SLTSTA_DLLSC | PCI_EXP_SLTSTA_PDC);
 
 	ctrl_info(ctrl, "Slot #%d AttnBtn%c PwrCtrl%c MRL%c AttnInd%c PwrInd%c HotPlug%c Surprise%c Interlock%c NoCompl%c LLActRep%c\n",
 		(slot_cap & PCI_EXP_SLTCAP_PSN) >> 19,
@@ -895,6 +897,7 @@ abort:
 
 void pciehp_release_ctrl(struct controller *ctrl)
 {
+	pcie_shutdown_notification(ctrl);
 	pcie_cleanup_slot(ctrl);
 	kfree(ctrl);
 }

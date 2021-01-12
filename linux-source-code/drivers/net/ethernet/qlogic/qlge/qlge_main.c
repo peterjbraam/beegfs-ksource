@@ -2360,14 +2360,14 @@ static int qlge_update_hw_vlan_features(struct net_device *ndev,
 					netdev_features_t features)
 {
 	struct ql_adapter *qdev = netdev_priv(ndev);
-	int status = 0;
 	bool need_restart = netif_running(ndev);
+	int status = 0;
 
 	if (need_restart) {
 		status = ql_adapter_down(qdev);
 		if (status) {
 			netif_err(qdev, link, qdev->ndev,
-				  "Failed to bring down the adapter\n");
+			   	  "Failed to bring down the adapter\n");
 			return status;
 		}
 	}
@@ -2379,28 +2379,33 @@ static int qlge_update_hw_vlan_features(struct net_device *ndev,
 		status = ql_adapter_up(qdev);
 		if (status) {
 			netif_err(qdev, link, qdev->ndev,
-				  "Failed to bring up the adapter\n");
+			  	  "Failed to bring up the adapter\n");
 			return status;
 		}
 	}
-
 	return status;
+}
+
+static netdev_features_t qlge_fix_features(struct net_device *ndev,
+	netdev_features_t features)
+{
+	int err;
+
+	/* Update the behavior of vlan accel in the adapter */
+	err = qlge_update_hw_vlan_features(ndev, features);
+	if (err)
+		return err;
+
+	return features;
 }
 
 static int qlge_set_features(struct net_device *ndev,
 	netdev_features_t features)
 {
 	netdev_features_t changed = ndev->features ^ features;
-	int err;
 
-	if (changed & NETIF_F_HW_VLAN_CTAG_RX) {
-		/* Update the behavior of vlan accel in the adapter */
-		err = qlge_update_hw_vlan_features(ndev, features);
-		if (err)
-			return err;
-
+	if (changed & NETIF_F_HW_VLAN_CTAG_RX)
 		qlge_vlan_mode(ndev, features);
-	}
 
 	return 0;
 }
@@ -4144,6 +4149,7 @@ static int ql_configure_rings(struct ql_adapter *qdev)
 		rx_ring->cq_id = i;
 		rx_ring->cpu = i % cpu_cnt;	/* CPU to run handler on. */
 		if (i < qdev->rss_ring_count) {
+			gmb();
 			/*
 			 * Inbound (RSS) queues.
 			 */
@@ -4160,6 +4166,7 @@ static int ql_configure_rings(struct ql_adapter *qdev)
 			rx_ring->sbq_buf_size = SMALL_BUF_MAP_SIZE;
 			rx_ring->type = RX_Q;
 		} else {
+			gmb();
 			/*
 			 * Outbound queue handles outbound completions only.
 			 */
@@ -4707,12 +4714,13 @@ static const struct net_device_ops qlge_netdev_ops = {
 	.ndo_open		= qlge_open,
 	.ndo_stop		= qlge_close,
 	.ndo_start_xmit		= qlge_send,
-	.ndo_change_mtu		= qlge_change_mtu,
+	.ndo_change_mtu_rh74	= qlge_change_mtu,
 	.ndo_get_stats		= qlge_get_stats,
 	.ndo_set_rx_mode	= qlge_set_multicast_list,
 	.ndo_set_mac_address	= qlge_set_mac_address,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_tx_timeout		= qlge_tx_timeout,
+	.ndo_fix_features	= qlge_fix_features,
 	.ndo_set_features	= qlge_set_features,
 	.ndo_vlan_rx_add_vid	= qlge_vlan_rx_add_vid,
 	.ndo_vlan_rx_kill_vid	= qlge_vlan_rx_kill_vid,
@@ -5016,4 +5024,15 @@ static struct pci_driver qlge_driver = {
 	.err_handler = &qlge_err_handler
 };
 
-module_pci_driver(qlge_driver);
+static int __init qlge_init_module(void)
+{
+	return pci_register_driver(&qlge_driver);
+}
+
+static void __exit qlge_exit(void)
+{
+	pci_unregister_driver(&qlge_driver);
+}
+
+module_init(qlge_init_module);
+module_exit(qlge_exit);

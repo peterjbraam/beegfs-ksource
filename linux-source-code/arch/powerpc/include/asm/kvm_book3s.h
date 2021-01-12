@@ -97,6 +97,7 @@ struct kvmppc_vcore {
 	struct kvm_vcpu *runner;
 	struct kvm *kvm;
 	u64 tb_offset;		/* guest timebase - host timebase */
+	u64 tb_offset_applied;	/* timebase offset currently in force */
 	ulong lpcr;
 	u32 arch_compat;
 	ulong pcr;
@@ -229,7 +230,6 @@ extern void kvmppc_copy_to_svcpu(struct kvmppc_book3s_shadow_vcpu *svcpu,
 				 struct kvm_vcpu *vcpu);
 extern void kvmppc_copy_from_svcpu(struct kvm_vcpu *vcpu,
 				   struct kvmppc_book3s_shadow_vcpu *svcpu);
-extern int kvm_irq_bypass;
 
 static inline struct kvmppc_vcpu_book3s *to_book3s(struct kvm_vcpu *vcpu)
 {

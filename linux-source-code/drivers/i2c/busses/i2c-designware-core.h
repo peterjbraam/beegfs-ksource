@@ -38,6 +38,7 @@
  * @dev: driver model device node
  * @base: IO registers pointer
  * @cmd_complete: tx completion indicator
+ * @lock: protect this struct and IO registers
  * @clk: input reference clock
  * @cmd_err: run time hadware error code
  * @msgs: points to an array of messages currently being transfered
@@ -79,6 +80,7 @@ struct dw_i2c_dev {
 	struct device		*dev;
 	void __iomem		*base;
 	struct completion	cmd_complete;
+	struct mutex		lock;
 	struct clk		*clk;
 	u32			(*get_clk_rate_khz) (struct dw_i2c_dev *dev);
 	struct dw_pci_controller *controller;
@@ -123,8 +125,13 @@ struct dw_i2c_dev {
 #define ACCESS_16BIT		0x00000002
 #define ACCESS_INTR_MASK	0x00000004
 
+extern u32 dw_readl(struct dw_i2c_dev *dev, int offset);
+extern void dw_writel(struct dw_i2c_dev *dev, u32 b, int offset);
 extern int i2c_dw_init(struct dw_i2c_dev *dev);
+extern void i2c_dw_enable(struct dw_i2c_dev *dev);
+extern u32 i2c_dw_is_enabled(struct dw_i2c_dev *dev);
 extern void i2c_dw_disable(struct dw_i2c_dev *dev);
+extern void i2c_dw_clear_int(struct dw_i2c_dev *dev);
 extern void i2c_dw_disable_int(struct dw_i2c_dev *dev);
 extern u32 i2c_dw_read_comp_param(struct dw_i2c_dev *dev);
 extern int i2c_dw_probe(struct dw_i2c_dev *dev);

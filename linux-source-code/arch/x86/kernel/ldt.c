@@ -10,18 +10,37 @@
 #include <linux/gfp.h>
 #include <linux/sched.h>
 #include <linux/string.h>
+#include <linux/kaiser.h>
 #include <linux/mm.h>
 #include <linux/smp.h>
 #include <linux/syscalls.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/uaccess.h>
-#include <linux/kaiser.h>
 
 #include <asm/ldt.h>
 #include <asm/desc.h>
 #include <asm/mmu_context.h>
 #include <asm/syscalls.h>
+
+static void refresh_ldt_segments(void)
+{
+#ifdef CONFIG_X86_64
+	unsigned short sel;
+
+	/*
+	 * Make sure that the cached DS and ES descriptors match the updated
+	 * LDT.
+	 */
+	savesegment(ds, sel);
+	if ((sel & SEGMENT_TI_MASK) == SEGMENT_LDT)
+		loadsegment(ds, sel);
+
+	savesegment(es, sel);
+	if ((sel & SEGMENT_TI_MASK) == SEGMENT_LDT)
+		loadsegment(es, sel);
+#endif
+}
 
 /* context.lock is held for us, so we don't need any locking. */
 static void flush_ldt(void *current_mm)
@@ -33,22 +52,23 @@ static void flush_ldt(void *current_mm)
 
 	pc = &current->active_mm->context;
 	set_ldt(pc->ldt->entries, pc->ldt->size);
+
+	refresh_ldt_segments();
 }
 
-static void __free_ldt_struct(struct ldt_struct *ldt)
+static void free_ldt(struct ldt_struct *ldt, int size)
 {
-	if (ldt->size * LDT_ENTRY_SIZE > PAGE_SIZE)
-		vfree(ldt->entries);
+	if (size * LDT_ENTRY_SIZE > PAGE_SIZE)
+		vfree(ldt);
 	else
-		free_page((unsigned long)ldt->entries);
-	kfree(ldt);
+		put_page(virt_to_page(ldt));
 }
 
 /* The caller must call finalize_ldt_struct on the result. LDT starts zeroed. */
-static struct ldt_struct *alloc_ldt_struct(int size)
+static struct ldt_struct *alloc_ldt_struct(unsigned int size)
 {
 	struct ldt_struct *new_ldt;
-	int alloc_size;
+	unsigned int alloc_size;
 	int ret;
 
 	if (size > LDT_ENTRIES)
@@ -72,18 +92,20 @@ static struct ldt_struct *alloc_ldt_struct(int size)
 	else
 		new_ldt->entries = (void *)get_zeroed_page(GFP_KERNEL);
 
+	ret = kaiser_add_mapping((unsigned long)new_ldt->entries,
+				alloc_size,
+				__PAGE_KERNEL | _PAGE_GLOBAL);
+	if (ret) {
+		free_ldt(new_ldt, size);
+		return NULL;
+	}
+
 	if (!new_ldt->entries) {
 		kfree(new_ldt);
 		return NULL;
 	}
 
-	ret = kaiser_add_mapping((unsigned long)new_ldt->entries, alloc_size,
-				 __PAGE_KERNEL);
 	new_ldt->size = size;
-	if (ret) {
-		__free_ldt_struct(new_ldt);
-		return NULL;
-	}
 	return new_ldt;
 }
 
@@ -110,9 +132,14 @@ static void free_ldt_struct(struct ldt_struct *ldt)
 		return;
 
 	kaiser_remove_mapping((unsigned long)ldt->entries,
-			      ldt->size * LDT_ENTRY_SIZE);
+					ldt->size * LDT_ENTRY_SIZE);
+
 	paravirt_free_ldt(ldt->entries, ldt->size);
-	__free_ldt_struct(ldt);
+	if (ldt->size * LDT_ENTRY_SIZE > PAGE_SIZE)
+		vfree(ldt->entries);
+	else
+		free_page((unsigned long)ldt->entries);
+	kfree(ldt);
 }
 
 /*
@@ -223,11 +250,11 @@ static int read_default_ldt(void __user *ptr, unsigned long bytecount)
 static int write_ldt(void __user *ptr, unsigned long bytecount, int oldmode)
 {
 	struct mm_struct *mm = current->mm;
+	struct ldt_struct *new_ldt, *old_ldt;
+	unsigned int oldsize, newsize;
+	struct user_desc ldt_info;
 	struct desc_struct ldt;
 	int error;
-	struct user_desc ldt_info;
-	int oldsize, newsize;
-	struct ldt_struct *new_ldt, *old_ldt;
 
 	error = -EINVAL;
 	if (bytecount != sizeof(ldt_info))
@@ -265,7 +292,7 @@ static int write_ldt(void __user *ptr, unsigned long bytecount, int oldmode)
 
 	old_ldt = mm->context.ldt;
 	oldsize = old_ldt ? old_ldt->size : 0;
-	newsize = max((int)(ldt_info.entry_number + 1), oldsize);
+	newsize = max(ldt_info.entry_number + 1, oldsize);
 
 	error = -ENOMEM;
 	new_ldt = alloc_ldt_struct(newsize);

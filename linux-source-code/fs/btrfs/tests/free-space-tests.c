@@ -22,10 +22,10 @@
 #include "../disk-io.h"
 #include "../free-space-cache.h"
 
-#define BITS_PER_BITMAP		(PAGE_SIZE * 8UL)
+#define BITS_PER_BITMAP		(PAGE_CACHE_SIZE * 8UL)
 
 /*
- * This test just does basic sanity checking, making sure we can add an extent
+ * This test just does basic sanity checking, making sure we can add an exten
  * entry and remove space from either end and the middle, and make sure we can
  * remove space that covers adjacent extent entries.
  */
@@ -398,9 +398,8 @@ static int check_cache_empty(struct btrfs_block_group_cache *cache)
  * wasn't optimal as they could be spread all over the block group while under
  * concurrency (extra overhead and fragmentation).
  *
- * This stealing approach is beneficial, since we always prefer to allocate
- * from extent entries, both for clustered and non-clustered allocation
- * requests.
+ * This stealing approach is benefical, since we always prefer to allocate from
+ * extent entries, both for clustered and non-clustered allocation requests.
  */
 static int
 test_steal_space_from_bitmap_to_extent(struct btrfs_block_group_cache *cache,
@@ -883,8 +882,8 @@ int btrfs_test_free_space_cache(u32 sectorsize, u32 nodesize)
 
 	ret = test_steal_space_from_bitmap_to_extent(cache, sectorsize);
 out:
-	btrfs_free_dummy_block_group(cache);
 	btrfs_free_dummy_root(root);
+	btrfs_free_dummy_block_group(cache);
 	btrfs_free_dummy_fs_info(fs_info);
 	test_msg("Free space cache tests finished\n");
 	return ret;

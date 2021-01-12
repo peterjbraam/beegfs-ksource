@@ -22,6 +22,7 @@
  */
 
 #include <linux/irq.h>
+#include <linux/bootmem.h>
 #include <linux/pci.h>
 #include <linux/msi.h>
 #include <linux/of_platform.h>
@@ -93,7 +94,7 @@ static int ppc4xx_setup_msi_irqs(struct pci_dev *dev, int nvec, int type)
 	if (!msi_data->msi_virqs)
 		return -ENOMEM;
 
-	for_each_pci_msi_entry(entry, dev) {
+	list_for_each_entry(entry, &dev->msi_list, list) {
 		int_no = msi_bitmap_alloc_hwirqs(&msi_data->bitmap, 1);
 		if (int_no >= 0)
 			break;
@@ -102,7 +103,7 @@ static int ppc4xx_setup_msi_irqs(struct pci_dev *dev, int nvec, int type)
 					__func__);
 		}
 		virq = irq_of_parse_and_map(msi_data->msi_dev, int_no);
-		if (!virq) {
+		if (virq == NO_IRQ) {
 			dev_err(&dev->dev, "%s: fail mapping irq\n", __func__);
 			msi_bitmap_free_hwirqs(&msi_data->bitmap, int_no, 1);
 			return -ENOSPC;
@@ -115,7 +116,7 @@ static int ppc4xx_setup_msi_irqs(struct pci_dev *dev, int nvec, int type)
 
 		irq_set_msi_desc(virq, entry);
 		msg.data = int_no;
-		pci_write_msi_msg(virq, &msg);
+		write_msi_msg(virq, &msg);
 	}
 	return 0;
 }
@@ -128,8 +129,8 @@ void ppc4xx_teardown_msi_irqs(struct pci_dev *dev)
 
 	dev_dbg(&dev->dev, "PCIE-MSI: tearing down msi irqs\n");
 
-	for_each_pci_msi_entry(entry, dev) {
-		if (!entry->irq)
+	list_for_each_entry(entry, &dev->msi_list, list) {
+		if (entry->irq == NO_IRQ)
 			continue;
 		hwirq = virq_to_hw(entry->irq);
 		irq_set_msi_desc(entry->irq, NULL);
@@ -201,7 +202,7 @@ static int ppc4xx_of_msi_remove(struct platform_device *dev)
 
 	for (i = 0; i < msi_irqs; i++) {
 		virq = msi->msi_virqs[i];
-		if (virq)
+		if (virq != NO_IRQ)
 			irq_dispose_mapping(virq);
 	}
 
@@ -273,6 +274,7 @@ static struct platform_driver ppc4xx_msi_driver = {
 	.remove = ppc4xx_of_msi_remove,
 	.driver = {
 		   .name = "ppc4xx-msi",
+		   .owner = THIS_MODULE,
 		   .of_match_table = ppc4xx_msi_ids,
 		   },
 

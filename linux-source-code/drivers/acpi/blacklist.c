@@ -20,12 +20,17 @@
  *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  *  General Public License for more details.
  *
+ *  You should have received a copy of the GNU General Public License along
+ *  with this program; if not, write to the Free Software Foundation, Inc.,
+ *  59 Temple Place, Suite 330, Boston, MA 02111-1307 USA.
+ *
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  */
 
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/acpi.h>
+#include <acpi/acpi_bus.h>
 #include <linux/dmi.h>
 
 #include "internal.h"
@@ -47,7 +52,7 @@ struct acpi_blacklist_item {
 	u32 is_critical_error;
 };
 
-static struct dmi_system_id acpi_rev_dmi_table[] __initdata;
+static const struct dmi_system_id acpi_rev_dmi_table[] __initdata;
 
 /*
  * POLICY: If *anything* doesn't work, put it on the blacklist.
@@ -133,63 +138,10 @@ int __init acpi_blacklisted(void)
 
 	return blacklisted;
 }
-#ifdef CONFIG_DMI
-#ifdef CONFIG_ACPI_REV_OVERRIDE_POSSIBLE
-static int __init dmi_enable_rev_override(const struct dmi_system_id *d)
-{
-	printk(KERN_NOTICE PREFIX "DMI detected: %s (force ACPI _REV to 5)\n",
-	       d->ident);
-	acpi_rev_override_setup(NULL);
-	return 0;
-}
-#endif
 
-static struct dmi_system_id acpi_rev_dmi_table[] __initdata = {
+static const struct dmi_system_id acpi_rev_dmi_table[] __initconst = {
 #ifdef CONFIG_ACPI_REV_OVERRIDE_POSSIBLE
-	/*
-	 * DELL XPS 13 (2015) switches sound between HDA and I2S
-	 * depending on the ACPI _REV callback. If userspace supports
-	 * I2S sufficiently (or if you do not care about sound), you
-	 * can safely disable this quirk.
-	 */
-	{
-	 .callback = dmi_enable_rev_override,
-	 .ident = "DELL XPS 13 (2015)",
-	 .matches = {
-		      DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
-		      DMI_MATCH(DMI_PRODUCT_NAME, "XPS 13 9343"),
-		},
-	},
-	{
-	 .callback = dmi_enable_rev_override,
-	 .ident = "DELL Precision 5520",
-	 .matches = {
-		      DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
-		      DMI_MATCH(DMI_PRODUCT_NAME, "Precision 5520"),
-		},
-	},
-	{
-	 .callback = dmi_enable_rev_override,
-	 .ident = "DELL Precision 3520",
-	 .matches = {
-		      DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
-		      DMI_MATCH(DMI_PRODUCT_NAME, "Precision 3520"),
-		},
-	},
-	/*
-	 * Resolves a quirk with the Dell Latitude 3350 that
-	 * causes the ethernet adapter to not function.
-	 */
-	{
-	 .callback = dmi_enable_rev_override,
-	 .ident = "DELL Latitude 3350",
-	 .matches = {
-		      DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
-		      DMI_MATCH(DMI_PRODUCT_NAME, "Latitude 3350"),
-		},
-	},
 #endif
-	{}
+        {}
+
 };
-
-#endif /* CONFIG_DMI */

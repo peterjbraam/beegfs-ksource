@@ -33,8 +33,8 @@
 
 #include "lapic.h"
 
-#include "hyperv.h"
 #include "x86.h"
+#include "hyperv.h"
 
 static int kvm_set_pic_irq(struct kvm_kernel_irq_routing_entry *e,
 			   struct kvm *kvm, int irq_source_id, int level,
@@ -169,16 +169,6 @@ int kvm_set_msi(struct kvm_kernel_irq_routing_entry *e,
 }
 
 
-static int kvm_hv_set_sint(struct kvm_kernel_irq_routing_entry *e,
-		    struct kvm *kvm, int irq_source_id, int level,
-		    bool line_status)
-{
-	if (!level)
-		return -1;
-
-	return kvm_hv_synic_set_irq(kvm, e->hv_sint.vcpu, e->hv_sint.sint);
-}
-
 int kvm_arch_set_irq_inatomic(struct kvm_kernel_irq_routing_entry *e,
 			      struct kvm *kvm, int irq_source_id, int level,
 			      bool line_status)
@@ -186,26 +176,18 @@ int kvm_arch_set_irq_inatomic(struct kvm_kernel_irq_routing_entry *e,
 	struct kvm_lapic_irq irq;
 	int r;
 
-	switch (e->type) {
-	case KVM_IRQ_ROUTING_HV_SINT:
-		return kvm_hv_set_sint(e, kvm, irq_source_id, level,
-				       line_status);
+	if (unlikely(e->type != KVM_IRQ_ROUTING_MSI))
+		return -EWOULDBLOCK;
 
-	case KVM_IRQ_ROUTING_MSI:
-		if (kvm_msi_route_invalid(kvm, e))
-			return -EINVAL;
+	if (kvm_msi_route_invalid(kvm, e))
+		return -EINVAL;
 
-		kvm_set_msi_irq(kvm, e, &irq);
+	kvm_set_msi_irq(kvm, e, &irq);
 
-		if (kvm_irq_delivery_to_apic_fast(kvm, NULL, &irq, &r, NULL))
-			return r;
-		break;
-
-	default:
-		break;
-	}
-
-	return -EWOULDBLOCK;
+	if (kvm_irq_delivery_to_apic_fast(kvm, NULL, &irq, &r, NULL))
+		return r;
+	else
+		return -EWOULDBLOCK;
 }
 
 int kvm_request_irq_source_id(struct kvm *kvm)
@@ -283,6 +265,16 @@ void kvm_fire_mask_notifiers(struct kvm *kvm, unsigned irqchip, unsigned pin,
 			if (kimn->irq == gsi)
 				kimn->func(kimn, mask);
 	srcu_read_unlock(&kvm->irq_srcu, idx);
+}
+
+static int kvm_hv_set_sint(struct kvm_kernel_irq_routing_entry *e,
+		    struct kvm *kvm, int irq_source_id, int level,
+		    bool line_status)
+{
+	if (!level)
+		return -1;
+
+	return kvm_hv_synic_set_irq(kvm, e->hv_sint.vcpu, e->hv_sint.sint);
 }
 
 int kvm_set_routing_entry(struct kvm *kvm,
@@ -436,12 +428,25 @@ void kvm_scan_ioapic_routes(struct kvm_vcpu *vcpu,
 
 			kvm_set_msi_irq(vcpu->kvm, entry, &irq);
 
-			if (irq.trig_mode && kvm_apic_match_dest(vcpu, NULL, 0,
+			if (irq.level && kvm_apic_match_dest(vcpu, NULL, 0,
 						irq.dest_id, irq.dest_mode))
-				__set_bit(irq.vector, ioapic_handled_vectors);
+				__set_bit(irq.vector,
+					  ioapic_handled_vectors);
 		}
 	}
 	srcu_read_unlock(&kvm->irq_srcu, idx);
+}
+
+int kvm_arch_set_irq(struct kvm_kernel_irq_routing_entry *irq, struct kvm *kvm,
+		     int irq_source_id, int level, bool line_status)
+{
+	switch (irq->type) {
+	case KVM_IRQ_ROUTING_HV_SINT:
+		return kvm_hv_set_sint(irq, kvm, irq_source_id, level,
+				       line_status);
+	default:
+		return -EWOULDBLOCK;
+	}
 }
 
 void kvm_arch_irq_routing_update(struct kvm *kvm)

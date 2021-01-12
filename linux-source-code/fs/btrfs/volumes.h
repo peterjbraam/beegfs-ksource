@@ -24,8 +24,6 @@
 #include <linux/btrfs.h>
 #include "async-thread.h"
 
-#define BTRFS_MAX_DATA_CHUNK_SIZE	(10ULL * SZ_1G)
-
 extern struct mutex uuid_mutex;
 
 #define BTRFS_STRIPE_LEN	SZ_64K
@@ -62,11 +60,6 @@ struct btrfs_device {
 
 	spinlock_t io_lock ____cacheline_aligned;
 	int running_pending;
-	/* When true means this device has pending chunk alloc in
-	 * current transaction. Protected by chunk_mutex.
-	 */
-	bool has_pending_chunks;
-
 	/* regular prio bios */
 	struct btrfs_pending_bios pending_bios;
 	/* WRITE_SYNC bios */
@@ -312,6 +305,7 @@ struct btrfs_bio {
 	u64 map_type; /* get from map_lookup->type */
 	bio_end_io_t *end_io;
 	struct bio *orig_bio;
+	unsigned long flags;
 	void *private;
 	atomic_t error;
 	int max_errors;
@@ -381,14 +375,14 @@ int btrfs_account_dev_extents_size(struct btrfs_device *device, u64 start,
 				   u64 end, u64 *length);
 void btrfs_get_bbio(struct btrfs_bio *bbio);
 void btrfs_put_bbio(struct btrfs_bio *bbio);
-int btrfs_map_block(struct btrfs_fs_info *fs_info, int op,
+int btrfs_map_block(struct btrfs_fs_info *fs_info, int rw,
 		    u64 logical, u64 *length,
 		    struct btrfs_bio **bbio_ret, int mirror_num);
-int btrfs_map_sblock(struct btrfs_fs_info *fs_info, int op,
+int btrfs_map_sblock(struct btrfs_fs_info *fs_info, int rw,
 		     u64 logical, u64 *length,
 		     struct btrfs_bio **bbio_ret, int mirror_num,
 		     int need_raid_map);
-int btrfs_rmap_block(struct btrfs_fs_info *fs_info,
+int btrfs_rmap_block(struct btrfs_mapping_tree *map_tree,
 		     u64 chunk_start, u64 physical, u64 devid,
 		     u64 **logical, int *naddrs, int *stripe_len);
 int btrfs_read_sys_array(struct btrfs_root *root);
@@ -397,7 +391,7 @@ int btrfs_alloc_chunk(struct btrfs_trans_handle *trans,
 		      struct btrfs_root *extent_root, u64 type);
 void btrfs_mapping_init(struct btrfs_mapping_tree *tree);
 void btrfs_mapping_tree_free(struct btrfs_mapping_tree *tree);
-int btrfs_map_bio(struct btrfs_root *root, struct bio *bio,
+int btrfs_map_bio(struct btrfs_root *root, int rw, struct bio *bio,
 		  int mirror_num, int async_submit);
 int btrfs_open_devices(struct btrfs_fs_devices *fs_devices,
 		       fmode_t flags, void *holder);

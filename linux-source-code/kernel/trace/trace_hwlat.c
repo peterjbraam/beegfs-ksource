@@ -40,7 +40,7 @@
  * warranty of any kind, whether express or implied.
  */
 #include <linux/kthread.h>
-#include <linux/tracefs.h>
+#include <linux/debugfs.h>
 #include <linux/uaccess.h>
 #include <linux/cpumask.h>
 #include <linux/delay.h>
@@ -104,7 +104,7 @@ static struct hwlat_data {
 static void trace_hwlat_sample(struct hwlat_sample *sample)
 {
 	struct trace_array *tr = hwlat_trace;
-	struct trace_event_call *call = &event_hwlat;
+	struct ftrace_event_call *call = &event_hwlat;
 	struct ring_buffer *buffer = tr->trace_buffer.buffer;
 	struct ring_buffer_event *event;
 	struct hwlat_entry *entry;
@@ -126,7 +126,7 @@ static void trace_hwlat_sample(struct hwlat_sample *sample)
 	entry->nmi_total_ts		= sample->nmi_total_ts;
 	entry->nmi_count		= sample->nmi_count;
 
-	if (!call_filter_check_discard(call, entry, buffer, event))
+	if (!filter_check_discard(call, entry, buffer, event))
 		__buffer_unlock_commit(buffer, event);
 }
 
@@ -151,7 +151,7 @@ void trace_hwlat_callback(bool enter)
 		if (enter)
 			nmi_ts_start = time_get();
 		else
-			nmi_total_ts += time_get() - nmi_ts_start;
+			nmi_total_ts = time_get() - nmi_ts_start;
 	}
 
 	if (enter)
@@ -257,8 +257,6 @@ static int get_sample(void)
 		/* Keep a running maximum ever recorded hardware latency */
 		if (sample > tr->max_latency)
 			tr->max_latency = sample;
-		if (outer_sample > tr->max_latency)
-			tr->max_latency = outer_sample;
 	}
 
 out:
@@ -268,14 +266,24 @@ out:
 static struct cpumask save_cpumask;
 static bool disable_migrate;
 
-static void move_to_next_cpu(void)
+static void move_to_next_cpu(bool initmask)
 {
-	struct cpumask *current_mask = &save_cpumask;
-	struct trace_array *tr = hwlat_trace;
+	static struct cpumask *current_mask;
 	int next_cpu;
 
 	if (disable_migrate)
 		return;
+
+	/* Just pick the first CPU on first iteration */
+	if (initmask) {
+		current_mask = &save_cpumask;
+		get_online_cpus();
+		cpumask_and(current_mask, cpu_online_mask, tracing_buffer_mask);
+		put_online_cpus();
+		next_cpu = cpumask_first(current_mask);
+		goto set_affinity;
+	}
+
 	/*
 	 * If for some reason the user modifies the CPU affinity
 	 * of this thread, than stop migrating for the duration
@@ -285,13 +293,14 @@ static void move_to_next_cpu(void)
 		goto disable;
 
 	get_online_cpus();
-	cpumask_and(current_mask, cpu_online_mask, tr->tracing_cpumask);
+	cpumask_and(current_mask, cpu_online_mask, tracing_buffer_mask);
 	next_cpu = cpumask_next(smp_processor_id(), current_mask);
 	put_online_cpus();
 
 	if (next_cpu >= nr_cpu_ids)
 		next_cpu = cpumask_first(current_mask);
 
+ set_affinity:
 	if (next_cpu >= nr_cpu_ids) /* Shouldn't happen! */
 		goto disable;
 
@@ -321,10 +330,12 @@ static void move_to_next_cpu(void)
 static int kthread_fn(void *data)
 {
 	u64 interval;
+	bool initmask = true;
 
 	while (!kthread_should_stop()) {
 
-		move_to_next_cpu();
+		move_to_next_cpu(initmask);
+		initmask = false;
 
 		local_irq_disable();
 		get_sample();
@@ -355,27 +366,16 @@ static int kthread_fn(void *data)
  */
 static int start_kthread(struct trace_array *tr)
 {
-	struct cpumask *current_mask = &save_cpumask;
 	struct task_struct *kthread;
-	int next_cpu;
 
-	/* Just pick the first CPU on first iteration */
-	current_mask = &save_cpumask;
-	get_online_cpus();
-	cpumask_and(current_mask, cpu_online_mask, tr->tracing_cpumask);
-	put_online_cpus();
-	next_cpu = cpumask_first(current_mask);
+	if (WARN_ON(hwlat_kthread))
+		return 0;
 
 	kthread = kthread_create(kthread_fn, NULL, "hwlatd");
 	if (IS_ERR(kthread)) {
 		pr_err(BANNER "could not start sampling thread\n");
 		return -ENOMEM;
 	}
-
-	cpumask_clear(current_mask);
-	cpumask_set_cpu(next_cpu, current_mask);
-	sched_setaffinity(kthread->pid, current_mask);
-
 	hwlat_kthread = kthread;
 	wake_up_process(kthread);
 
@@ -518,14 +518,14 @@ static const struct file_operations window_fops = {
 };
 
 /**
- * init_tracefs - A function to initialize the tracefs interface files
+ * init_debugfs - A function to initialize the debugfs interface files
  *
- * This function creates entries in tracefs for "hwlat_detector".
+ * This function creates entries in debugfs for "hwlat_detector".
  * It creates the hwlat_detector directory in the tracing directory,
  * and within that directory is the count, width and window files to
  * change and view those values.
  */
-static int init_tracefs(void)
+static int init_debugfs(void)
 {
 	struct dentry *d_tracer;
 	struct dentry *top_dir;
@@ -534,18 +534,18 @@ static int init_tracefs(void)
 	if (IS_ERR(d_tracer))
 		return -ENOMEM;
 
-	top_dir = tracefs_create_dir("hwlat_detector", d_tracer);
+	top_dir = debugfs_create_dir("hwlat_detector", d_tracer);
 	if (!top_dir)
 		return -ENOMEM;
 
-	hwlat_sample_window = tracefs_create_file("window", 0640,
+	hwlat_sample_window = trace_create_file("window", 0640,
 						  top_dir,
 						  &hwlat_data.sample_window,
 						  &window_fops);
 	if (!hwlat_sample_window)
 		goto err;
 
-	hwlat_sample_width = tracefs_create_file("width", 0644,
+	hwlat_sample_width = trace_create_file("width", 0644,
 						 top_dir,
 						 &hwlat_data.sample_width,
 						 &width_fops);
@@ -555,7 +555,7 @@ static int init_tracefs(void)
 	return 0;
 
  err:
-	tracefs_remove_recursive(top_dir);
+	debugfs_remove_recursive(top_dir);
 	return -ENOMEM;
 }
 
@@ -631,7 +631,7 @@ __init static int init_hwlat_tracer(void)
 	if (ret)
 		return ret;
 
-	init_tracefs();
+	init_debugfs();
 
 	return 0;
 }

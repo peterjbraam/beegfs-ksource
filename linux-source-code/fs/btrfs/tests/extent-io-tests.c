@@ -18,8 +18,8 @@
 
 #include <linux/pagemap.h>
 #include <linux/sched.h>
-#include <linux/slab.h>
 #include <linux/sizes.h>
+#include <linux/slab.h>
 #include "btrfs-tests.h"
 #include "../ctree.h"
 #include "../extent_io.h"
@@ -33,8 +33,8 @@ static noinline int process_page_range(struct inode *inode, u64 start, u64 end,
 {
 	int ret;
 	struct page *pages[16];
-	unsigned long index = start >> PAGE_SHIFT;
-	unsigned long end_index = end >> PAGE_SHIFT;
+	unsigned long index = start >> PAGE_CACHE_SHIFT;
+	unsigned long end_index = end >> PAGE_CACHE_SHIFT;
 	unsigned long nr_pages = end_index - index + 1;
 	int i;
 	int count = 0;
@@ -50,9 +50,9 @@ static noinline int process_page_range(struct inode *inode, u64 start, u64 end,
 				count++;
 			if (flags & PROCESS_UNLOCK && PageLocked(pages[i]))
 				unlock_page(pages[i]);
-			put_page(pages[i]);
+			page_cache_release(pages[i]);
 			if (flags & PROCESS_RELEASE)
-				put_page(pages[i]);
+				page_cache_release(pages[i]);
 		}
 		nr_pages -= ret;
 		index += ret;
@@ -94,7 +94,7 @@ static int test_find_delalloc(u32 sectorsize)
 	 * everything to make sure our pages don't get evicted and screw up our
 	 * test.
 	 */
-	for (index = 0; index < (total_dirty >> PAGE_SHIFT); index++) {
+	for (index = 0; index < (total_dirty >> PAGE_CACHE_SHIFT); index++) {
 		page = find_or_create_page(inode->i_mapping, index, GFP_KERNEL);
 		if (!page) {
 			test_msg("Failed to allocate test page\n");
@@ -105,7 +105,7 @@ static int test_find_delalloc(u32 sectorsize)
 		if (index) {
 			unlock_page(page);
 		} else {
-			get_page(page);
+			page_cache_get(page);
 			locked_page = page;
 		}
 	}
@@ -130,7 +130,7 @@ static int test_find_delalloc(u32 sectorsize)
 	}
 	unlock_extent(&tmp, start, end);
 	unlock_page(locked_page);
-	put_page(locked_page);
+	page_cache_release(locked_page);
 
 	/*
 	 * Test this scenario
@@ -140,7 +140,7 @@ static int test_find_delalloc(u32 sectorsize)
 	 */
 	test_start = SZ_64M;
 	locked_page = find_lock_page(inode->i_mapping,
-				     test_start >> PAGE_SHIFT);
+				     test_start >> PAGE_CACHE_SHIFT);
 	if (!locked_page) {
 		test_msg("Couldn't find the locked page\n");
 		goto out_bits;
@@ -166,7 +166,7 @@ static int test_find_delalloc(u32 sectorsize)
 	}
 	unlock_extent(&tmp, start, end);
 	/* locked_page was unlocked above */
-	put_page(locked_page);
+	page_cache_release(locked_page);
 
 	/*
 	 * Test this scenario
@@ -175,9 +175,9 @@ static int test_find_delalloc(u32 sectorsize)
 	 */
 	test_start = max_bytes + sectorsize;
 	locked_page = find_lock_page(inode->i_mapping, test_start >>
-				     PAGE_SHIFT);
+				     PAGE_CACHE_SHIFT);
 	if (!locked_page) {
-		test_msg("Couldn't find the locked page\n");
+		test_msg("Could'nt find the locked page\n");
 		goto out_bits;
 	}
 	start = test_start;
@@ -226,13 +226,13 @@ static int test_find_delalloc(u32 sectorsize)
 	 * range we want to find.
 	 */
 	page = find_get_page(inode->i_mapping,
-			     (max_bytes + SZ_1M) >> PAGE_SHIFT);
+			     (max_bytes + SZ_1M) >> PAGE_CACHE_SHIFT);
 	if (!page) {
 		test_msg("Couldn't find our page\n");
 		goto out_bits;
 	}
 	ClearPageDirty(page);
-	put_page(page);
+	page_cache_release(page);
 
 	/* We unlocked it in the previous test */
 	lock_page(locked_page);
@@ -240,7 +240,7 @@ static int test_find_delalloc(u32 sectorsize)
 	end = 0;
 	/*
 	 * Currently if we fail to find dirty pages in the delalloc range we
-	 * will adjust max_bytes down to PAGE_SIZE and then re-search.  If
+	 * will adjust max_bytes down to PAGE_CACHE_SIZE and then re-search.  If
 	 * this changes at any point in the future we will need to fix this
 	 * tests expected behavior.
 	 */
@@ -250,9 +250,9 @@ static int test_find_delalloc(u32 sectorsize)
 		test_msg("Didn't find our range\n");
 		goto out_bits;
 	}
-	if (start != test_start && end != test_start + PAGE_SIZE - 1) {
+	if (start != test_start && end != test_start + PAGE_CACHE_SIZE - 1) {
 		test_msg("Expected start %Lu end %Lu, got start %Lu end %Lu\n",
-			 test_start, test_start + PAGE_SIZE - 1, start,
+			 test_start, test_start + PAGE_CACHE_SIZE - 1, start,
 			 end);
 		goto out_bits;
 	}
@@ -266,7 +266,7 @@ out_bits:
 	clear_extent_bits(&tmp, 0, total_dirty - 1, (unsigned)-1);
 out:
 	if (locked_page)
-		put_page(locked_page);
+		page_cache_release(locked_page);
 	process_page_range(inode, 0, total_dirty - 1,
 			   PROCESS_UNLOCK | PROCESS_RELEASE);
 	iput(inode);

@@ -58,6 +58,19 @@ EXPORT_SYMBOL(x86_dma_fallback_dev);
 /* Number of entries preallocated for DMA-API debugging */
 #define PREALLOC_DMA_DEBUG_ENTRIES       65536
 
+int dma_set_mask(struct device *dev, u64 mask)
+{
+	if (!dev->dma_mask || !dma_supported(dev, mask))
+		return -EIO;
+
+	dma_check_mask(dev, mask);
+
+	*dev->dma_mask = mask;
+
+	return 0;
+}
+EXPORT_SYMBOL(dma_set_mask);
+
 void __init pci_iommu_alloc(void)
 {
 	struct iommu_table_entry *p;
@@ -77,7 +90,7 @@ void __init pci_iommu_alloc(void)
 }
 void *dma_generic_alloc_coherent(struct device *dev, size_t size,
 				 dma_addr_t *dma_addr, gfp_t flag,
-				 unsigned long attrs)
+				 struct dma_attrs *attrs)
 {
 	unsigned long dma_mask;
 	struct page *page;
@@ -86,15 +99,18 @@ void *dma_generic_alloc_coherent(struct device *dev, size_t size,
 
 	dma_mask = dma_alloc_coherent_mask(dev, flag);
 
-	flag &= ~__GFP_ZERO;
+	flag |= __GFP_ZERO;
 again:
 	page = NULL;
 	/* CMA can be used only in the context which permits sleeping */
-	if (gfpflags_allow_blocking(flag)) {
+	if (flag & __GFP_WAIT) {
 		page = dma_alloc_from_contiguous(dev, count, get_order(size));
-		if (page && page_to_phys(page) + size > dma_mask) {
-			dma_release_from_contiguous(dev, page, count);
-			page = NULL;
+		if (page) {
+			addr = phys_to_dma(dev, page_to_phys(page));
+			if (addr + size > dma_mask) {
+				dma_release_from_contiguous(dev, page, count);
+				page = NULL;
+			}
 		}
 	}
 	/* fallback */
@@ -103,7 +119,7 @@ again:
 	if (!page)
 		return NULL;
 
-	addr = page_to_phys(page);
+	addr = phys_to_dma(dev, page_to_phys(page));
 	if (addr + size > dma_mask) {
 		__free_pages(page, get_order(size));
 
@@ -114,13 +130,13 @@ again:
 
 		return NULL;
 	}
-	memset(page_address(page), 0, size);
+
 	*dma_addr = addr;
 	return page_address(page);
 }
 
 void dma_generic_free_coherent(struct device *dev, size_t size, void *vaddr,
-			       dma_addr_t dma_addr, unsigned long attrs)
+			       dma_addr_t dma_addr, struct dma_attrs *attrs)
 {
 	unsigned int count = PAGE_ALIGN(size) >> PAGE_SHIFT;
 	struct page *page = virt_to_page(vaddr);

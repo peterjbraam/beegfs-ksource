@@ -254,7 +254,6 @@ static struct dm_block_validator sb_validator = {
  * Low level metadata handling
  *--------------------------------------------------------------*/
 #define DM_ERA_METADATA_BLOCK_SIZE 4096
-#define DM_ERA_METADATA_CACHE_SIZE 64
 #define ERA_MAX_CONCURRENT_LOCKS 5
 
 struct era_metadata {
@@ -615,7 +614,6 @@ static int create_persistent_data_objects(struct era_metadata *md,
 	int r;
 
 	md->bm = dm_block_manager_create(md->bdev, DM_ERA_METADATA_BLOCK_SIZE,
-					 DM_ERA_METADATA_CACHE_SIZE,
 					 ERA_MAX_CONCURRENT_LOCKS);
 	if (IS_ERR(md->bm)) {
 		DMERR("could not create block manager");
@@ -1182,7 +1180,7 @@ static bool block_size_is_power_of_two(struct era *era)
 
 static dm_block_t get_block(struct era *era, struct bio *bio)
 {
-	sector_t block_nr = bio->bi_iter.bi_sector;
+	sector_t block_nr = bio->bi_sector;
 
 	if (!block_size_is_power_of_two(era))
 		(void) sector_div(block_nr, era->sectors_per_block);
@@ -1427,6 +1425,7 @@ static int era_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	char dummy;
 	struct era *era;
 	struct era_metadata *md;
+	static bool seen = false;
 
 	if (argc != 3) {
 		ti->error = "Invalid argument count";
@@ -1515,9 +1514,13 @@ static int era_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	ti->flush_supported = true;
 
 	ti->num_discard_bios = 1;
-	ti->discards_supported = true;
 	era->callbacks.congested_fn = era_is_congested;
 	dm_table_add_target_callbacks(ti->table, &era->callbacks);
+
+	if (!seen) {
+		mark_tech_preview("DM era", THIS_MODULE);
+		seen = true;
+	}
 
 	return 0;
 }
@@ -1540,9 +1543,9 @@ static int era_map(struct dm_target *ti, struct bio *bio)
 	remap_to_origin(era, bio);
 
 	/*
-	 * REQ_PREFLUSH bios carry no data, so we're not interested in them.
+	 * REQ_FLUSH bios carry no data, so we're not interested in them.
 	 */
-	if (!(bio->bi_opf & REQ_PREFLUSH) &&
+	if (!(bio->bi_rw & REQ_FLUSH) &&
 	    (bio_data_dir(bio) == WRITE) &&
 	    !metadata_current_marked(era->md, block)) {
 		defer_bio(era, bio);
@@ -1672,6 +1675,20 @@ static int era_iterate_devices(struct dm_target *ti,
 	return fn(ti, era->origin_dev, 0, get_dev_size(era->origin_dev), data);
 }
 
+static int era_merge(struct dm_target *ti, struct bvec_merge_data *bvm,
+		     struct bio_vec *biovec, int max_size)
+{
+	struct era *era = ti->private;
+	struct request_queue *q = bdev_get_queue(era->origin_dev->bdev);
+
+	if (!q->merge_bvec_fn)
+		return max_size;
+
+	bvm->bi_bdev = era->origin_dev->bdev;
+
+	return min(max_size, q->merge_bvec_fn(q, bvm, biovec));
+}
+
 static void era_io_hints(struct dm_target *ti, struct queue_limits *limits)
 {
 	struct era *era = ti->private;
@@ -1683,6 +1700,7 @@ static void era_io_hints(struct dm_target *ti, struct queue_limits *limits)
 	 */
 	if (io_opt_sectors < era->sectors_per_block ||
 	    do_div(io_opt_sectors, era->sectors_per_block)) {
+		gmb();
 		blk_limits_io_min(limits, 0);
 		blk_limits_io_opt(limits, era->sectors_per_block << SECTOR_SHIFT);
 	}
@@ -1702,6 +1720,7 @@ static struct target_type era_target = {
 	.status = era_status,
 	.message = era_message,
 	.iterate_devices = era_iterate_devices,
+	.merge = era_merge,
 	.io_hints = era_io_hints
 };
 

@@ -9,6 +9,7 @@
 #include <linux/init.h>
 #include <linux/blkdev.h>
 #include <linux/bio.h>
+#include <linux/dax.h>
 #include <linux/slab.h>
 #include <linux/device-mapper.h>
 
@@ -88,8 +89,7 @@ static void linear_map_bio(struct dm_target *ti, struct bio *bio)
 
 	bio->bi_bdev = lc->dev->bdev;
 	if (bio_sectors(bio))
-		bio->bi_iter.bi_sector =
-			linear_map_sector(ti, bio->bi_iter.bi_sector);
+		bio->bi_sector = linear_map_sector(ti, bio->bi_sector);
 }
 
 static int linear_map(struct dm_target *ti, struct bio *bio)
@@ -116,8 +116,7 @@ static void linear_status(struct dm_target *ti, status_type_t type,
 	}
 }
 
-static int linear_prepare_ioctl(struct dm_target *ti,
-		struct block_device **bdev, fmode_t *mode)
+static int linear_prepare_ioctl(struct dm_target *ti, struct block_device **bdev)
 {
 	struct linear_c *lc = (struct linear_c *) ti->private;
 	struct dm_dev *dev = lc->dev;
@@ -133,6 +132,21 @@ static int linear_prepare_ioctl(struct dm_target *ti,
 	return 0;
 }
 
+static int linear_merge(struct dm_target *ti, struct bvec_merge_data *bvm,
+			struct bio_vec *biovec, int max_size)
+{
+	struct linear_c *lc = ti->private;
+	struct request_queue *q = bdev_get_queue(lc->dev->bdev);
+
+	if (!q->merge_bvec_fn)
+		return max_size;
+
+	bvm->bi_bdev = lc->dev->bdev;
+	bvm->bi_sector = linear_map_sector(ti, bvm->bi_sector);
+
+	return min(max_size, q->merge_bvec_fn(q, bvm, biovec));
+}
+
 static int linear_iterate_devices(struct dm_target *ti,
 				  iterate_devices_callout_fn fn, void *data)
 {
@@ -141,23 +155,57 @@ static int linear_iterate_devices(struct dm_target *ti,
 	return fn(ti, lc->dev, lc->start, ti->len, data);
 }
 
-static long linear_direct_access(struct dm_target *ti, sector_t sector,
-				 void **kaddr, pfn_t *pfn, long size)
+#if IS_ENABLED(CONFIG_DAX_DRIVER)
+static long linear_dax_direct_access(struct dm_target *ti, pgoff_t pgoff,
+		long nr_pages, void **kaddr, pfn_t *pfn)
+{
+	long ret;
+	struct linear_c *lc = ti->private;
+	struct block_device *bdev = lc->dev->bdev;
+	struct dax_device *dax_dev = lc->dev->dax_dev;
+	sector_t dev_sector, sector = pgoff * PAGE_SECTORS;
+
+	dev_sector = linear_map_sector(ti, sector);
+	ret = bdev_dax_pgoff(bdev, dev_sector, nr_pages * PAGE_SIZE, &pgoff);
+	if (ret)
+		return ret;
+	return dax_direct_access(dax_dev, pgoff, nr_pages, kaddr, pfn);
+}
+
+static int linear_dax_memcpy_fromiovecend(struct dm_target *ti, pgoff_t pgoff,
+					  void *addr, const struct iovec *iov,
+					  int offset, int len)
 {
 	struct linear_c *lc = ti->private;
 	struct block_device *bdev = lc->dev->bdev;
-	struct blk_dax_ctl dax = {
-		.sector = linear_map_sector(ti, sector),
-		.size = size,
-	};
-	long ret;
+	struct dax_device *dax_dev = lc->dev->dax_dev;
+	sector_t dev_sector, sector = pgoff * PAGE_SECTORS;
 
-	ret = bdev_direct_access(bdev, &dax);
-	*kaddr = dax.addr;
-	*pfn = dax.pfn;
-
-	return ret;
+	dev_sector = linear_map_sector(ti, sector);
+	if (bdev_dax_pgoff(bdev, dev_sector, ALIGN(len, PAGE_SIZE), &pgoff))
+		return 0;
+	return dax_memcpy_fromiovecend(dax_dev, pgoff, addr, iov, offset, len);
 }
+
+static int linear_dax_memcpy_toiovecend(struct dm_target *ti, pgoff_t pgoff,
+		const struct iovec *iov, void *addr, int offset, int len)
+{
+	struct linear_c *lc = ti->private;
+	struct block_device *bdev = lc->dev->bdev;
+	struct dax_device *dax_dev = lc->dev->dax_dev;
+	sector_t dev_sector, sector = pgoff * PAGE_SECTORS;
+
+	dev_sector = linear_map_sector(ti, sector);
+	if (bdev_dax_pgoff(bdev, dev_sector, ALIGN(len, PAGE_SIZE), &pgoff))
+		return 0;
+	return dax_memcpy_toiovecend(dax_dev, pgoff, iov, addr, offset, len);
+}
+
+#else
+#define linear_dax_direct_access NULL
+#define linear_dax_memcpy_fromiovecend NULL
+#define linear_dax_memcpy_toiovecend NULL
+#endif
 
 static struct target_type linear_target = {
 	.name   = "linear",
@@ -168,8 +216,11 @@ static struct target_type linear_target = {
 	.map    = linear_map,
 	.status = linear_status,
 	.prepare_ioctl = linear_prepare_ioctl,
+	.merge  = linear_merge,
 	.iterate_devices = linear_iterate_devices,
-	.direct_access = linear_direct_access,
+	.direct_access = linear_dax_direct_access,
+	.dax_memcpy_fromiovecend = linear_dax_memcpy_fromiovecend,
+	.dax_memcpy_toiovecend = linear_dax_memcpy_toiovecend,
 };
 
 int __init dm_linear_init(void)

@@ -22,17 +22,26 @@ int xfrm4_extract_input(struct xfrm_state *x, struct sk_buff *skb)
 	return xfrm4_extract_header(skb);
 }
 
-static inline int xfrm4_rcv_encap_finish(struct net *net, struct sock *sk,
-					 struct sk_buff *skb)
+static int xfrm4_rcv_encap_finish2(struct sock *sk,
+				   struct sk_buff *skb)
 {
-	if (!skb_dst(skb)) {
+	return dst_input(skb);
+}
+
+static inline int xfrm4_rcv_encap_finish(struct sock *sk, struct sk_buff *skb)
+{
+	if (skb_dst(skb) == NULL) {
 		const struct iphdr *iph = ip_hdr(skb);
 
 		if (ip_route_input_noref(skb, iph->daddr, iph->saddr,
 					 iph->tos, skb->dev))
 			goto drop;
 	}
-	return dst_input(skb);
+
+	if (xfrm_trans_queue(skb, xfrm4_rcv_encap_finish2))
+		goto drop;
+
+	return 0;
 drop:
 	kfree_skb(skb);
 	return NET_RX_DROP;
@@ -53,8 +62,8 @@ int xfrm4_transport_finish(struct sk_buff *skb, int async)
 	iph->tot_len = htons(skb->len);
 	ip_send_check(iph);
 
-	NF_HOOK(NFPROTO_IPV4, NF_INET_PRE_ROUTING,
-		dev_net(skb->dev), NULL, skb, skb->dev, NULL,
+	NF_HOOK(NFPROTO_IPV4, NF_INET_PRE_ROUTING, NULL, skb,
+		skb->dev, NULL,
 		xfrm4_rcv_encap_finish);
 	return 0;
 }

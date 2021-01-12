@@ -23,12 +23,16 @@
  * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with GNU CC; see the file COPYING.  If not, see
- * <http://www.gnu.org/licenses/>.
+ * along with GNU CC; see the file COPYING.  If not, write to
+ * the Free Software Foundation, 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
  *
  * Please send any bug reports or fixes you make to the
  * email address(es):
- *    lksctp developers <linux-sctp@vger.kernel.org>
+ *    lksctp developers <lksctp-developers@lists.sourceforge.net>
+ *
+ * Or submit a bug report through the following website:
+ *    http://www.sf.net/projects/lksctp
  *
  * Written or modified by:
  *    La Monte H.P. Yarroll <piggy@acm.org>
@@ -36,12 +40,16 @@
  *    Jon Grimm <jgrimm@austin.ibm.com>
  *    Daisy Chang <daisyc@us.ibm.com>
  *    Dajiang Zhang <dajiang.zhang@nokia.com>
+ *
+ * Any bugs reported given to us we will try to fix... any fixes shared will
+ * be incorporated into the next SCTP release.
  */
 
 #include <linux/types.h>
 #include <linux/slab.h>
 #include <linux/in.h>
 #include <linux/random.h>	/* get_random_bytes() */
+#include <linux/crypto.h>
 #include <net/sock.h>
 #include <net/ipv6.h>
 #include <net/sctp/sctp.h>
@@ -106,6 +114,13 @@ static struct sctp_endpoint *sctp_endpoint_init(struct sctp_endpoint *ep,
 			auth_chunks->param_hdr.length =
 					htons(sizeof(sctp_paramhdr_t) + 2);
 		}
+
+		/* Allocate and initialize transorms arrays for supported
+		 * HMACs.
+		 */
+		err = sctp_auth_init_hmacs(ep, gfp);
+		if (err)
+			goto nomem;
 	}
 
 	/* Initialize the base structure. */
@@ -145,14 +160,9 @@ static struct sctp_endpoint *sctp_endpoint_init(struct sctp_endpoint *ep,
 	INIT_LIST_HEAD(&ep->endpoint_shared_keys);
 	null_key = sctp_auth_shkey_create(0, gfp);
 	if (!null_key)
-		goto nomem;
+		goto nomem_shkey;
 
 	list_add(&null_key->key_list, &ep->endpoint_shared_keys);
-
-	/* Allocate and initialize transorms arrays for supported HMACs. */
-	err = sctp_auth_init_hmacs(ep, gfp);
-	if (err)
-		goto nomem_hmacs;
 
 	/* Add the null key to the endpoint shared keys list and
 	 * set the hmcas and chunks pointers.
@@ -163,13 +173,12 @@ static struct sctp_endpoint *sctp_endpoint_init(struct sctp_endpoint *ep,
 
 	/* Remember who we are attached to.  */
 	ep->base.sk = sk;
-	ep->base.net = sock_net(sk);
 	sock_hold(ep->base.sk);
 
 	return ep;
 
-nomem_hmacs:
-	sctp_auth_destroy_keys(&ep->endpoint_shared_keys);
+nomem_shkey:
+	sctp_auth_destroy_hmacs(ep->auth_hmacs);
 nomem:
 	/* Free all allocations */
 	kfree(auth_hmacs);
@@ -275,6 +284,7 @@ static void sctp_endpoint_destroy(struct sctp_endpoint *ep)
 		if (sctp_sk(sk)->bind_hash)
 			sctp_put_port(sk);
 
+		sctp_sk(sk)->ep = NULL;
 		sock_put(sk);
 	}
 
@@ -332,7 +342,9 @@ struct sctp_association *sctp_endpoint_lookup_assoc(
 	 * on this endpoint.
 	 */
 	if (!ep->base.bind_addr.port)
-		goto out;
+		return NULL;
+
+	rcu_read_lock();
 	t = sctp_epaddr_lookup_transport(ep, paddr);
 	if (!t)
 		goto out;
@@ -340,6 +352,7 @@ struct sctp_association *sctp_endpoint_lookup_assoc(
 	*transport = t;
 	asoc = t->asoc;
 out:
+	rcu_read_unlock();
 	return asoc;
 }
 

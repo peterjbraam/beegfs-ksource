@@ -8,7 +8,6 @@
 
 #include <linux/uaccess.h>
 #include <linux/ptrace.h>
-#include <asm/switch_to.h>
 
 enum stack_type {
 	STACK_TYPE_UNKNOWN,
@@ -43,8 +42,6 @@ static inline bool on_stack(struct stack_info *info, void *addr, size_t len)
 		addr + len > begin && addr + len <= end);
 }
 
-extern int kstack_depth_to_print;
-
 #ifdef CONFIG_X86_32
 #define STACKSLOTS_PER_LINE 8
 #else
@@ -55,16 +52,14 @@ extern int kstack_depth_to_print;
 static inline unsigned long *
 get_frame_pointer(struct task_struct *task, struct pt_regs *regs)
 {
-	struct inactive_task_frame *frame;
-
 	if (regs)
 		return (unsigned long *)regs->bp;
 
 	if (task == current)
 		return __builtin_frame_address(0);
 
-	frame = (struct inactive_task_frame *)task->thread.sp;
-	return (unsigned long *)READ_ONCE_NOCHECK(frame->bp);
+	/* bp is the last reg pushed by switch_to */
+	return (unsigned long *)*(unsigned long *)task->thread.sp;
 }
 #else
 static inline unsigned long *
@@ -88,9 +83,6 @@ get_stack_pointer(struct task_struct *task, struct pt_regs *regs)
 
 void show_trace_log_lvl(struct task_struct *task, struct pt_regs *regs,
 			unsigned long *stack, char *log_lvl);
-
-void show_stack_log_lvl(struct task_struct *task, struct pt_regs *regs,
-			unsigned long *sp, char *log_lvl);
 
 extern unsigned int code_bytes;
 

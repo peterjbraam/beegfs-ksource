@@ -5,11 +5,16 @@
 
 #include <linux/slab.h>
 #include <asm/ebcdic.h>
-#include "qeth_core.h"
 #include "qeth_l2.h"
 
 #define QETH_DEVICE_ATTR(_id, _name, _mode, _show, _store) \
 struct device_attribute dev_attr_##_id = __ATTR(_name, _mode, _show, _store)
+
+static int qeth_card_hw_is_reachable(struct qeth_card *card)
+{
+	return (card->state == CARD_STATE_SOFTSETUP) ||
+		(card->state == CARD_STATE_UP);
+}
 
 static ssize_t qeth_bridge_port_role_state_show(struct device *dev,
 				struct device_attribute *attr, char *buf,
@@ -22,6 +27,8 @@ static ssize_t qeth_bridge_port_role_state_show(struct device *dev,
 
 	if (!card)
 		return -EINVAL;
+
+	mutex_lock(&card->conf_mutex);
 
 	if (qeth_card_hw_is_reachable(card) &&
 					card->options.sbp.supported_funcs)
@@ -56,6 +63,8 @@ static ssize_t qeth_bridge_port_role_state_show(struct device *dev,
 		else
 			rc = sprintf(buf, "%s\n", word);
 	}
+
+	mutex_unlock(&card->conf_mutex);
 
 	return rc;
 }
@@ -109,7 +118,7 @@ static ssize_t qeth_bridge_port_state_show(struct device *dev,
 	return qeth_bridge_port_role_state_show(dev, attr, buf, 1);
 }
 
-static DEVICE_ATTR(bridge_state, 0444, qeth_bridge_port_state_show,
+static DEVICE_ATTR(bridge_state, 0644, qeth_bridge_port_state_show,
 		   NULL);
 
 static ssize_t qeth_bridgeport_hostnotification_show(struct device *dev,
@@ -121,7 +130,11 @@ static ssize_t qeth_bridgeport_hostnotification_show(struct device *dev,
 	if (!card)
 		return -EINVAL;
 
+	mutex_lock(&card->conf_mutex);
+
 	enabled = card->options.sbp.hostnotification;
+
+	mutex_unlock(&card->conf_mutex);
 
 	return sprintf(buf, "%d\n", enabled);
 }

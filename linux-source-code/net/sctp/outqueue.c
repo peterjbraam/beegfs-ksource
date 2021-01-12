@@ -22,12 +22,16 @@
  * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with GNU CC; see the file COPYING.  If not, see
- * <http://www.gnu.org/licenses/>.
+ * along with GNU CC; see the file COPYING.  If not, write to
+ * the Free Software Foundation, 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
  *
  * Please send any bug reports or fixes you make to the
  * email address(es):
- *    lksctp developers <linux-sctp@vger.kernel.org>
+ *    lksctp developers <lksctp-developers@lists.sourceforge.net>
+ *
+ * Or submit a bug report through the following website:
+ *    http://www.sf.net/projects/lksctp
  *
  * Written or modified by:
  *    La Monte H.P. Yarroll <piggy@acm.org>
@@ -37,6 +41,9 @@
  *    Hui Huang 	    <hui.huang@nokia.com>
  *    Sridhar Samudrala     <sri@us.ibm.com>
  *    Jon Grimm             <jgrimm@us.ibm.com>
+ *
+ * Any bugs reported given to us we will try to fix... any fixes shared will
+ * be incorporated into the next SCTP release.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -353,10 +360,12 @@ static int sctp_prsctp_prune_sent(struct sctp_association *asoc,
 	struct sctp_chunk *chk, *temp;
 
 	list_for_each_entry_safe(chk, temp, queue, transmitted_list) {
-		if (!SCTP_PR_PRIO_ENABLED(chk->sinfo.sinfo_flags) ||
-		    chk->sinfo.sinfo_timetolive <= sinfo->sinfo_timetolive)
+		if (!chk->msg->abandoned &&
+		    (!SCTP_PR_PRIO_ENABLED(chk->sinfo.sinfo_flags) ||
+		     chk->sinfo.sinfo_timetolive <= sinfo->sinfo_timetolive))
 			continue;
 
+		chk->msg->abandoned = 1;
 		list_del_init(&chk->transmitted_list);
 		sctp_insert_list(&asoc->outqueue.abandoned,
 				 &chk->transmitted_list);
@@ -389,10 +398,13 @@ static int sctp_prsctp_prune_unsent(struct sctp_association *asoc,
 	struct sctp_chunk *chk, *temp;
 
 	list_for_each_entry_safe(chk, temp, &q->out_chunk_list, list) {
-		if (!SCTP_PR_PRIO_ENABLED(chk->sinfo.sinfo_flags) ||
-		    chk->sinfo.sinfo_timetolive <= sinfo->sinfo_timetolive)
+		if (!chk->msg->abandoned &&
+		    (!(chk->chunk_hdr->flags & SCTP_DATA_FIRST_FRAG) ||
+		     !SCTP_PR_PRIO_ENABLED(chk->sinfo.sinfo_flags) ||
+		     chk->sinfo.sinfo_timetolive <= sinfo->sinfo_timetolive))
 			continue;
 
+		chk->msg->abandoned = 1;
 		list_del_init(&chk->list);
 		q->out_qlen -= chk->skb->len;
 		asoc->sent_cnt_removable--;
@@ -690,7 +702,7 @@ redo:
 			done = 1;
 			break;
 
-		case SCTP_XMIT_DELAY:
+		case SCTP_XMIT_NAGLE_DELAY:
 			/* Send this packet. */
 			error = sctp_packet_transmit(pkt, GFP_ATOMIC);
 
@@ -1091,7 +1103,7 @@ static void sctp_outq_flush(struct sctp_outq *q, int rtx_timeout, gfp_t gfp)
 			switch (status) {
 			case SCTP_XMIT_PMTU_FULL:
 			case SCTP_XMIT_RWND_FULL:
-			case SCTP_XMIT_DELAY:
+			case SCTP_XMIT_NAGLE_DELAY:
 				/* We could not append this chunk, so put
 				 * the chunk back on the output queue.
 				 */
@@ -1101,6 +1113,7 @@ static void sctp_outq_flush(struct sctp_outq *q, int rtx_timeout, gfp_t gfp)
 
 				sctp_outq_head_data(q, chunk);
 				goto sctp_flush_out;
+				break;
 
 			case SCTP_XMIT_OK:
 				/* The sender is in the SHUTDOWN-PENDING state,
@@ -1427,7 +1440,7 @@ static void sctp_check_transmitted(struct sctp_outq *q,
 			 * the outstanding bytes for this chunk, so only
 			 * count bytes associated with a transport.
 			 */
-			if (transport) {
+			if (transport && !tchunk->tsn_gap_acked) {
 				/* If this chunk is being used for RTT
 				 * measurement, calculate the RTT and update
 				 * the RTO using this value.
@@ -1439,13 +1452,33 @@ static void sctp_check_transmitted(struct sctp_outq *q,
 				 * first instance of the packet or a later
 				 * instance).
 				 */
-				if (!tchunk->tsn_gap_acked &&
-				    !tchunk->resent &&
+				if (!tchunk->resent &&
 				    tchunk->rtt_in_progress) {
 					tchunk->rtt_in_progress = 0;
 					rtt = jiffies - tchunk->sent_at;
 					sctp_transport_update_rto(transport,
 								  rtt);
+				}
+
+				if (TSN_lte(tsn, sack_ctsn)) {
+					/*
+					 * SFR-CACC algorithm:
+					 * 2) If the SACK contains gap acks
+					 * and the flag CHANGEOVER_ACTIVE is
+					 * set the receiver of the SACK MUST
+					 * take the following action:
+					 *
+					 * B) For each TSN t being acked that
+					 * has not been acked in any SACK so
+					 * far, set cacc_saw_newack to 1 for
+					 * the destination that the TSN was
+					 * sent to.
+					 */
+					if (sack->num_gap_ack_blocks &&
+					    q->asoc->peer.primary_path->cacc.
+					    changeover_active)
+						transport->cacc.cacc_saw_newack
+							= 1;
 				}
 			}
 
@@ -1477,28 +1510,6 @@ static void sctp_check_transmitted(struct sctp_outq *q,
 				 */
 				restart_timer = 1;
 				forward_progress = true;
-
-				if (!tchunk->tsn_gap_acked) {
-					/*
-					 * SFR-CACC algorithm:
-					 * 2) If the SACK contains gap acks
-					 * and the flag CHANGEOVER_ACTIVE is
-					 * set the receiver of the SACK MUST
-					 * take the following action:
-					 *
-					 * B) For each TSN t being acked that
-					 * has not been acked in any SACK so
-					 * far, set cacc_saw_newack to 1 for
-					 * the destination that the TSN was
-					 * sent to.
-					 */
-					if (transport &&
-					    sack->num_gap_ack_blocks &&
-					    q->asoc->peer.primary_path->cacc.
-					    changeover_active)
-						transport->cacc.cacc_saw_newack
-							= 1;
-				}
 
 				list_add_tail(&tchunk->transmitted_list,
 					      &q->sacked);
@@ -1644,7 +1655,7 @@ static void sctp_check_transmitted(struct sctp_outq *q,
 
 		if (forward_progress) {
 			if (transport->dst)
-				dst_confirm(transport->dst);
+				sctp_transport_dst_confirm(transport);
 		}
 	}
 

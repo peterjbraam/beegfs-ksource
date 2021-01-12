@@ -48,8 +48,6 @@ struct virtio_vsock_pkt {
 	struct virtio_vsock_hdr	hdr;
 	struct work_struct work;
 	struct list_head list;
-	/* socket refcnt not held, only use for cancellation */
-	struct vsock_sock *vsk;
 	void *buf;
 	u32 len;
 	u32 off;
@@ -58,7 +56,6 @@ struct virtio_vsock_pkt {
 
 struct virtio_vsock_pkt_info {
 	u32 remote_cid, remote_port;
-	struct vsock_sock *vsk;
 	struct msghdr *msg;
 	u32 pkt_len;
 	u16 type;
@@ -81,7 +78,8 @@ virtio_transport_stream_dequeue(struct vsock_sock *vsk,
 				size_t len,
 				int type);
 int
-virtio_transport_dgram_dequeue(struct vsock_sock *vsk,
+virtio_transport_dgram_dequeue(struct kiocb *kiocb,
+			       struct vsock_sock *vsk,
 			       struct msghdr *msg,
 			       size_t len, int flags);
 
@@ -153,5 +151,6 @@ void virtio_transport_free_pkt(struct virtio_vsock_pkt *pkt);
 void virtio_transport_inc_tx_pkt(struct virtio_vsock_sock *vvs, struct virtio_vsock_pkt *pkt);
 u32 virtio_transport_get_credit(struct virtio_vsock_sock *vvs, u32 wanted);
 void virtio_transport_put_credit(struct virtio_vsock_sock *vvs, u32 credit);
+void virtio_transport_deliver_tap_pkt(struct virtio_vsock_pkt *pkt);
 
 #endif /* _LINUX_VIRTIO_VSOCK_H */

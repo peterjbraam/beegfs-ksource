@@ -295,7 +295,7 @@ struct nv_swncq_port_priv {
 #define NV_ADMA_CHECK_INTR(GCTL, PORT) ((GCTL) & (1 << (19 + (12 * (PORT)))))
 
 static int nv_init_one(struct pci_dev *pdev, const struct pci_device_id *ent);
-#ifdef CONFIG_PM_SLEEP
+#ifdef CONFIG_PM
 static int nv_pci_device_resume(struct pci_dev *pdev);
 #endif
 static void nv_ck804_host_stop(struct ata_host *host);
@@ -313,7 +313,7 @@ static void nv_ck804_freeze(struct ata_port *ap);
 static void nv_ck804_thaw(struct ata_port *ap);
 static int nv_adma_slave_config(struct scsi_device *sdev);
 static int nv_adma_check_atapi_dma(struct ata_queued_cmd *qc);
-static enum ata_completion_errors nv_adma_qc_prep(struct ata_queued_cmd *qc);
+static void nv_adma_qc_prep(struct ata_queued_cmd *qc);
 static unsigned int nv_adma_qc_issue(struct ata_queued_cmd *qc);
 static irqreturn_t nv_adma_interrupt(int irq, void *dev_instance);
 static void nv_adma_irq_clear(struct ata_port *ap);
@@ -335,7 +335,7 @@ static void nv_mcp55_freeze(struct ata_port *ap);
 static void nv_swncq_error_handler(struct ata_port *ap);
 static int nv_swncq_slave_config(struct scsi_device *sdev);
 static int nv_swncq_port_start(struct ata_port *ap);
-static enum ata_completion_errors nv_swncq_qc_prep(struct ata_queued_cmd *qc);
+static void nv_swncq_qc_prep(struct ata_queued_cmd *qc);
 static void nv_swncq_fill_sg(struct ata_queued_cmd *qc);
 static unsigned int nv_swncq_qc_issue(struct ata_queued_cmd *qc);
 static void nv_swncq_irq_clear(struct ata_port *ap, u16 fis);
@@ -379,7 +379,7 @@ static struct pci_driver nv_pci_driver = {
 	.name			= DRV_NAME,
 	.id_table		= nv_pci_tbl,
 	.probe			= nv_init_one,
-#ifdef CONFIG_PM_SLEEP
+#ifdef CONFIG_PM
 	.suspend		= ata_pci_device_suspend,
 	.resume			= nv_pci_device_resume,
 #endif
@@ -756,10 +756,10 @@ static int nv_adma_slave_config(struct scsi_device *sdev)
 			blk_queue_bounce_limit(sdev1->request_queue,
 					       ATA_DMA_MASK);
 
-		dma_set_mask(&pdev->dev, ATA_DMA_MASK);
+		pci_set_dma_mask(pdev, ATA_DMA_MASK);
 	} else {
 		/** This shouldn't fail as it was set to this value before */
-		dma_set_mask(&pdev->dev, pp->adma_dma_mask);
+		pci_set_dma_mask(pdev, pp->adma_dma_mask);
 		if (sdev0)
 			blk_queue_bounce_limit(sdev0->request_queue,
 					       pp->adma_dma_mask);
@@ -1133,10 +1133,10 @@ static int nv_adma_port_start(struct ata_port *ap)
 
 	/* Ensure DMA mask is set to 32-bit before allocating legacy PRD and
 	   pad buffers */
-	rc = dma_set_mask(&pdev->dev, DMA_BIT_MASK(32));
+	rc = pci_set_dma_mask(pdev, DMA_BIT_MASK(32));
 	if (rc)
 		return rc;
-	rc = dma_set_coherent_mask(&pdev->dev, DMA_BIT_MASK(32));
+	rc = pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(32));
 	if (rc)
 		return rc;
 
@@ -1161,8 +1161,8 @@ static int nv_adma_port_start(struct ata_port *ap)
 	   These are allowed to fail since we store the value that ends up
 	   being used to set as the bounce limit in slave_config later if
 	   needed. */
-	dma_set_mask(&pdev->dev, DMA_BIT_MASK(64));
-	dma_set_coherent_mask(&pdev->dev, DMA_BIT_MASK(64));
+	pci_set_dma_mask(pdev, DMA_BIT_MASK(64));
+	pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(64));
 	pp->adma_dma_mask = *dev->dma_mask;
 
 	mem = dmam_alloc_coherent(dev, NV_ADMA_PORT_PRIV_DMA_SZ,
@@ -1382,7 +1382,7 @@ static int nv_adma_use_reg_mode(struct ata_queued_cmd *qc)
 	return 1;
 }
 
-static enum ata_completion_errors nv_adma_qc_prep(struct ata_queued_cmd *qc)
+static void nv_adma_qc_prep(struct ata_queued_cmd *qc)
 {
 	struct nv_adma_port_priv *pp = qc->ap->private_data;
 	struct nv_adma_cpb *cpb = &pp->cpb[qc->tag];
@@ -1394,7 +1394,7 @@ static enum ata_completion_errors nv_adma_qc_prep(struct ata_queued_cmd *qc)
 			(qc->flags & ATA_QCFLAG_DMAMAP));
 		nv_adma_register_mode(qc->ap);
 		ata_bmdma_qc_prep(qc);
-		return AC_ERR_OK;
+		return;
 	}
 
 	cpb->resp_flags = NV_CPB_RESP_DONE;
@@ -1426,8 +1426,6 @@ static enum ata_completion_errors nv_adma_qc_prep(struct ata_queued_cmd *qc)
 	cpb->ctl_flags = ctl_flags;
 	wmb();
 	cpb->resp_flags = 0;
-
-	return AC_ERR_OK;
 }
 
 static unsigned int nv_adma_qc_issue(struct ata_queued_cmd *qc)
@@ -1953,7 +1951,7 @@ static int nv_swncq_slave_config(struct scsi_device *sdev)
 	ata_id_c_string(dev->id, model_num, ATA_ID_PROD, sizeof(model_num));
 
 	if (strncmp(model_num, "Maxtor", 6) == 0) {
-		ata_scsi_change_queue_depth(sdev, 1);
+		ata_scsi_change_queue_depth(sdev, 1, SCSI_QDEPTH_DEFAULT);
 		ata_dev_notice(dev, "Disabling SWNCQ mode (depth %x)\n",
 			       sdev->queue_depth);
 	}
@@ -1991,19 +1989,17 @@ static int nv_swncq_port_start(struct ata_port *ap)
 	return 0;
 }
 
-static enum ata_completion_errors nv_swncq_qc_prep(struct ata_queued_cmd *qc)
+static void nv_swncq_qc_prep(struct ata_queued_cmd *qc)
 {
 	if (qc->tf.protocol != ATA_PROT_NCQ) {
 		ata_bmdma_qc_prep(qc);
-		return AC_ERR_OK;
+		return;
 	}
 
 	if (!(qc->flags & ATA_QCFLAG_DMAMAP))
-		return AC_ERR_OK;
+		return;
 
 	nv_swncq_fill_sg(qc);
-
-	return AC_ERR_OK;
 }
 
 static void nv_swncq_fill_sg(struct ata_queued_cmd *qc)
@@ -2435,10 +2431,10 @@ static int nv_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	return ata_pci_sff_activate_host(host, ipriv->irq_handler, ipriv->sht);
 }
 
-#ifdef CONFIG_PM_SLEEP
+#ifdef CONFIG_PM
 static int nv_pci_device_resume(struct pci_dev *pdev)
 {
-	struct ata_host *host = pci_get_drvdata(pdev);
+	struct ata_host *host = dev_get_drvdata(&pdev->dev);
 	struct nv_host_priv *hpriv = host->private_data;
 	int rc;
 

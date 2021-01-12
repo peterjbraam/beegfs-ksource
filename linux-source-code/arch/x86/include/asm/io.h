@@ -35,13 +35,10 @@
   */
 
 #define ARCH_HAS_IOREMAP_WC
-#define ARCH_HAS_IOREMAP_WT
 
 #include <linux/string.h>
 #include <linux/compiler.h>
 #include <asm/page.h>
-#include <asm/early_ioremap.h>
-#include <asm/pgtable_types.h>
 
 #define build_mmio_read(name, size, type, reg, barrier) \
 static inline type name(const volatile void __iomem *addr) \
@@ -179,12 +176,10 @@ static inline unsigned int isa_virt_to_bus(volatile void *address)
  * look at pci_iomap().
  */
 extern void __iomem *ioremap_nocache(resource_size_t offset, unsigned long size);
-extern void __iomem *ioremap_uc(resource_size_t offset, unsigned long size);
-#define ioremap_uc ioremap_uc
-
 extern void __iomem *ioremap_cache(resource_size_t offset, unsigned long size);
 extern void __iomem *ioremap_prot(resource_size_t offset, unsigned long size,
 				unsigned long prot_val);
+extern void __iomem *ioremap_encrypted(resource_size_t phys_addr, unsigned long size);
 
 /*
  * The default ioremap() behavior is non-cached:
@@ -201,6 +196,8 @@ extern void set_iounmap_nonlazy(void);
 #ifdef __KERNEL__
 
 #include <asm-generic/iomap.h>
+
+#include <linux/vmalloc.h>
 
 /*
  * Convert a virtual cached pointer to an uncached pointer
@@ -273,6 +270,22 @@ static inline void slow_down_io(void)
 
 #endif
 
+#ifdef CONFIG_AMD_MEM_ENCRYPT
+#include <linux/jump_label.h>
+
+extern struct static_key sev_enable_key;
+
+static inline bool sev_key_active(void)
+{
+	return static_key_false(&sev_enable_key);
+}
+
+#else /* !CONFIG_AMD_MEM_ENCRYPT */
+
+static inline bool sev_key_active(void) { return false; }
+
+#endif /* CONFIG_AMD_MEM_ENCRYPT */
+
 #define BUILDIO(bwl, bw, type)						\
 static inline void out##bwl(unsigned type value, int port)		\
 {									\
@@ -303,14 +316,34 @@ static inline unsigned type in##bwl##_p(int port)			\
 									\
 static inline void outs##bwl(int port, const void *addr, unsigned long count) \
 {									\
-	asm volatile("rep; outs" #bwl					\
-		     : "+S"(addr), "+c"(count) : "d"(port) : "memory");	\
+	if (sev_key_active()) {						\
+		unsigned type *value = (unsigned type *)addr;		\
+		while (count) {						\
+			out##bwl(*value, port);				\
+			value++;					\
+			count--;					\
+		}							\
+	} else {							\
+		asm volatile("rep; outs" #bwl				\
+			     : "+S"(addr), "+c"(count)			\
+			     : "d"(port) : "memory");			\
+	}								\
 }									\
 									\
 static inline void ins##bwl(int port, void *addr, unsigned long count)	\
 {									\
-	asm volatile("rep; ins" #bwl					\
-		     : "+D"(addr), "+c"(count) : "d"(port) : "memory");	\
+	if (sev_key_active()) {						\
+		unsigned type *value = (unsigned type *)addr;		\
+		while (count) {						\
+			*value = in##bwl(port);				\
+			value++;					\
+			count--;					\
+		}							\
+	} else {							\
+		asm volatile("rep; ins" #bwl				\
+			     : "+D"(addr), "+c"(count)			\
+			     : "d"(port) : "memory");			\
+	}								\
 }
 
 BUILDIO(b, b, char)
@@ -323,8 +356,21 @@ extern void unxlate_dev_mem_ptr(phys_addr_t phys, void *addr);
 extern int ioremap_change_attr(unsigned long vaddr, unsigned long size,
 				enum page_cache_mode pcm);
 extern void __iomem *ioremap_wc(resource_size_t offset, unsigned long size);
-extern void __iomem *ioremap_wt(resource_size_t offset, unsigned long size);
 
+/*
+ * early_ioremap() and early_iounmap() are for temporary early boot-time
+ * mappings, before the real ioremap() is functional.
+ * A boot-time mapping is currently limited to at most 16 pages.
+ */
+extern void early_ioremap_init(void);
+extern void early_ioremap_reset(void);
+extern void __iomem *early_ioremap(resource_size_t phys_addr,
+				   unsigned long size);
+extern void *early_memremap(resource_size_t phys_addr,
+				    unsigned long size);
+extern void early_iounmap(void __iomem *addr, unsigned long size);
+extern void early_memunmap(void *addr, unsigned long size);
+extern void fixup_early_ioremap(void);
 extern bool is_early_ioremap_ptep(pte_t *ptep);
 
 #ifdef CONFIG_XEN
@@ -342,14 +388,19 @@ extern bool xen_biovec_phys_mergeable(const struct bio_vec *vec1,
 #define IO_SPACE_LIMIT 0xffff
 
 #ifdef CONFIG_MTRR
-extern int __must_check arch_phys_wc_index(int handle);
-#define arch_phys_wc_index arch_phys_wc_index
-
 extern int __must_check arch_phys_wc_add(unsigned long base,
 					 unsigned long size);
 extern void arch_phys_wc_del(int handle);
 #define arch_phys_wc_add arch_phys_wc_add
 #endif
+
+extern bool arch_memremap_can_ram_remap(resource_size_t offset,
+					unsigned long size,
+					unsigned long flags);
+#define arch_memremap_can_ram_remap arch_memremap_can_ram_remap
+
+extern bool phys_mem_access_encrypted(unsigned long phys_addr,
+				      unsigned long size);
 
 #ifdef CONFIG_X86_PAT
 extern int arch_io_reserve_memtype_wc(resource_size_t start, resource_size_t size);

@@ -32,7 +32,7 @@ static int __init fail_io_timeout_debugfs(void)
 	struct dentry *dir = fault_create_debugfs_attr("fail_io_timeout",
 						NULL, &fail_io_timeout);
 
-	return PTR_ERR_OR_ZERO(dir);
+	return IS_ERR(dir) ? PTR_ERR(dir) : 0;
 }
 
 late_initcall(fail_io_timeout_debugfs);
@@ -83,10 +83,9 @@ void blk_delete_timer(struct request *req)
 static void blk_rq_timed_out(struct request *req)
 {
 	struct request_queue *q = req->q;
-	enum blk_eh_timer_return ret = BLK_EH_RESET_TIMER;
+	enum blk_eh_timer_return ret;
 
-	if (q->rq_timed_out_fn)
-		ret = q->rq_timed_out_fn(req);
+	ret = q->rq_timed_out_fn(req);
 	switch (ret) {
 	case BLK_EH_HANDLED:
 		/* Can we use req->errors here? */

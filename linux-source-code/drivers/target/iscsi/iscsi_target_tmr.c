@@ -17,7 +17,7 @@
  ******************************************************************************/
 
 #include <asm/unaligned.h>
-#include <scsi/scsi_proto.h>
+#include <scsi/scsi_device.h>
 #include <scsi/iscsi_proto.h>
 #include <target/target_core_base.h>
 #include <target/target_core_fabric.h>
@@ -440,14 +440,14 @@ static int iscsit_task_reassign_complete(
 		break;
 	default:
 		 pr_err("Illegal iSCSI Opcode 0x%02x during"
-			" command realligence\n", cmd->iscsi_opcode);
+			" command reallegiance\n", cmd->iscsi_opcode);
 		return -1;
 	}
 
 	if (ret != 0)
 		return ret;
 
-	pr_debug("Completed connection realligence for Opcode: 0x%02x,"
+	pr_debug("Completed connection reallegiance for Opcode: 0x%02x,"
 		" ITT: 0x%08x to CID: %hu.\n", cmd->iscsi_opcode,
 			cmd->init_task_tag, conn->cid);
 

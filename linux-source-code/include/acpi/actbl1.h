@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2016, Intel Corp.
+ * Copyright (C) 2000 - 2013, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -236,8 +236,7 @@ enum acpi_einj_actions {
 	ACPI_EINJ_CHECK_BUSY_STATUS = 6,
 	ACPI_EINJ_GET_COMMAND_STATUS = 7,
 	ACPI_EINJ_SET_ERROR_TYPE_WITH_ADDRESS = 8,
-	ACPI_EINJ_GET_EXECUTE_TIMINGS = 9,
-	ACPI_EINJ_ACTION_RESERVED = 10,	/* 10 and greater are reserved */
+	ACPI_EINJ_ACTION_RESERVED = 9,	/* 9 and greater are reserved */
 	ACPI_EINJ_TRIGGER_ERROR = 0xFF	/* Except for this value */
 };
 
@@ -349,8 +348,7 @@ enum acpi_erst_actions {
 	ACPI_ERST_GET_ERROR_RANGE = 13,
 	ACPI_ERST_GET_ERROR_LENGTH = 14,
 	ACPI_ERST_GET_ERROR_ATTRIBUTES = 15,
-	ACPI_ERST_EXECUTE_TIMINGS = 16,
-	ACPI_ERST_ACTION_RESERVED = 17	/* 17 and greater are reserved */
+	ACPI_ERST_ACTION_RESERVED = 16	/* 16 and greater are reserved */
 };
 
 /* Values for Instruction field above */
@@ -429,8 +427,7 @@ enum acpi_hest_types {
 	ACPI_HEST_TYPE_AER_ENDPOINT = 7,
 	ACPI_HEST_TYPE_AER_BRIDGE = 8,
 	ACPI_HEST_TYPE_GENERIC_ERROR = 9,
-	ACPI_HEST_TYPE_GENERIC_ERROR_V2 = 10,
-	ACPI_HEST_TYPE_RESERVED = 11	/* 11 and greater are reserved */
+	ACPI_HEST_TYPE_RESERVED = 10	/* 10 and greater are reserved */
 };
 
 /*
@@ -509,11 +506,7 @@ enum acpi_hest_notify_types {
 	ACPI_HEST_NOTIFY_NMI = 4,
 	ACPI_HEST_NOTIFY_CMCI = 5,	/* ACPI 5.0 */
 	ACPI_HEST_NOTIFY_MCE = 6,	/* ACPI 5.0 */
-	ACPI_HEST_NOTIFY_GPIO = 7,	/* ACPI 6.0 */
-	ACPI_HEST_NOTIFY_SEA = 8,	/* ACPI 6.1 */
-	ACPI_HEST_NOTIFY_SEI = 9,	/* ACPI 6.1 */
-	ACPI_HEST_NOTIFY_GSIV = 10,	/* ACPI 6.1 */
-	ACPI_HEST_NOTIFY_RESERVED = 11	/* 11 and greater are reserved */
+	ACPI_HEST_NOTIFY_RESERVED = 7	/* 7 and greater are reserved */
 };
 
 /* Values for config_write_enable bitfield above */
@@ -610,27 +603,9 @@ struct acpi_hest_generic {
 	u32 error_block_length;
 };
 
-/* 10: Generic Hardware Error Source, version 2 */
-
-struct acpi_hest_generic_v2 {
-	struct acpi_hest_header header;
-	u16 related_source_id;
-	u8 reserved;
-	u8 enabled;
-	u32 records_to_preallocate;
-	u32 max_sections_per_record;
-	u32 max_raw_data_length;
-	struct acpi_generic_address error_status_address;
-	struct acpi_hest_notify notify;
-	u32 error_block_length;
-	struct acpi_generic_address read_ack_register;
-	u64 read_ack_preserve;
-	u64 read_ack_write;
-};
-
 /* Generic Error Status block */
 
-struct acpi_hest_generic_status {
+struct acpi_generic_status {
 	u32 block_status;
 	u32 raw_data_offset;
 	u32 raw_data_length;
@@ -640,15 +615,15 @@ struct acpi_hest_generic_status {
 
 /* Values for block_status flags above */
 
-#define ACPI_HEST_UNCORRECTABLE             (1)
-#define ACPI_HEST_CORRECTABLE               (1<<1)
-#define ACPI_HEST_MULTIPLE_UNCORRECTABLE    (1<<2)
-#define ACPI_HEST_MULTIPLE_CORRECTABLE      (1<<3)
-#define ACPI_HEST_ERROR_ENTRY_COUNT         (0xFF<<4)	/* 8 bits, error count */
+#define ACPI_GEN_ERR_UC			BIT(0)
+#define ACPI_GEN_ERR_CE			BIT(1)
+#define ACPI_GEN_ERR_MULTI_UC		BIT(2)
+#define ACPI_GEN_ERR_MULTI_CE		BIT(3)
+#define ACPI_GEN_ERR_COUNT_SHIFT	(0xFF<<4) /* 8 bits, error count */
 
 /* Generic Error Data entry */
 
-struct acpi_hest_generic_data {
+struct acpi_generic_data {
 	u8 section_type[16];
 	u32 error_severity;
 	u16 revision;
@@ -658,33 +633,6 @@ struct acpi_hest_generic_data {
 	u8 fru_id[16];
 	u8 fru_text[20];
 };
-
-/* Extension for revision 0x0300 */
-
-struct acpi_hest_generic_data_v300 {
-	u8 section_type[16];
-	u32 error_severity;
-	u16 revision;
-	u8 validation_bits;
-	u8 flags;
-	u32 error_data_length;
-	u8 fru_id[16];
-	u8 fru_text[20];
-	u64 time_stamp;
-};
-
-/* Values for error_severity above */
-
-#define ACPI_HEST_GEN_ERROR_RECOVERABLE     0
-#define ACPI_HEST_GEN_ERROR_FATAL           1
-#define ACPI_HEST_GEN_ERROR_CORRECTED       2
-#define ACPI_HEST_GEN_ERROR_NONE            3
-
-/* Flags for validation_bits above */
-
-#define ACPI_HEST_GEN_VALID_FRU_ID          (1)
-#define ACPI_HEST_GEN_VALID_FRU_STRING      (1<<1)
-#define ACPI_HEST_GEN_VALID_TIMESTAMP       (1<<2)
 
 /*******************************************************************************
  *
@@ -724,14 +672,11 @@ enum acpi_madt_type {
 	ACPI_MADT_TYPE_LOCAL_X2APIC_NMI = 10,
 	ACPI_MADT_TYPE_GENERIC_INTERRUPT = 11,
 	ACPI_MADT_TYPE_GENERIC_DISTRIBUTOR = 12,
-	ACPI_MADT_TYPE_GENERIC_MSI_FRAME = 13,
-	ACPI_MADT_TYPE_GENERIC_REDISTRIBUTOR = 14,
-	ACPI_MADT_TYPE_GENERIC_TRANSLATOR = 15,
-	ACPI_MADT_TYPE_RESERVED = 16	/* 16 and greater are reserved */
+	ACPI_MADT_TYPE_RESERVED = 13	/* 13 and greater are reserved */
 };
 
 /*
- * MADT Subtables, correspond to Type in struct acpi_subtable_header
+ * MADT Sub-tables, correspond to Type in struct acpi_subtable_header
  */
 
 /* 0: Processor Local APIC */
@@ -848,34 +793,21 @@ struct acpi_madt_local_x2apic_nmi {
 	u8 reserved[3];		/* reserved - must be zero */
 };
 
-/* 11: Generic Interrupt (ACPI 5.0 + ACPI 6.0 changes) */
+/* 11: Generic Interrupt (ACPI 5.0) */
 
 struct acpi_madt_generic_interrupt {
 	struct acpi_subtable_header header;
 	u16 reserved;		/* reserved - must be zero */
-	u32 cpu_interface_number;
+	u32 gic_id;
 	u32 uid;
 	u32 flags;
 	u32 parking_version;
 	u32 performance_interrupt;
 	u64 parked_address;
 	u64 base_address;
-	u64 gicv_base_address;
-	u64 gich_base_address;
-	u32 vgic_interrupt;
-	u64 gicr_base_address;
-	u64 arm_mpidr;
-	u8 efficiency_class;
-	u8 reserved2[3];
 };
 
-/* Masks for Flags field above */
-
-/* ACPI_MADT_ENABLED                    (1)      Processor is usable if set */
-#define ACPI_MADT_PERFORMANCE_IRQ_MODE  (1<<1)	/* 01: Performance Interrupt Mode */
-#define ACPI_MADT_VGIC_IRQ_MODE         (1<<2)	/* 02: VGIC Maintenance Interrupt mode */
-
-/* 12: Generic Distributor (ACPI 5.0 + ACPI 6.0 changes) */
+/* 12: Generic Distributor (ACPI 5.0) */
 
 struct acpi_madt_generic_distributor {
 	struct acpi_subtable_header header;
@@ -883,61 +815,14 @@ struct acpi_madt_generic_distributor {
 	u32 gic_id;
 	u64 base_address;
 	u32 global_irq_base;
-	u8 version;
-	u8 reserved2[3];	/* reserved - must be zero */
-};
-
-/* Values for Version field above */
-
-enum acpi_madt_gic_version {
-	ACPI_MADT_GIC_VERSION_NONE = 0,
-	ACPI_MADT_GIC_VERSION_V1 = 1,
-	ACPI_MADT_GIC_VERSION_V2 = 2,
-	ACPI_MADT_GIC_VERSION_V3 = 3,
-	ACPI_MADT_GIC_VERSION_V4 = 4,
-	ACPI_MADT_GIC_VERSION_RESERVED = 5	/* 5 and greater are reserved */
-};
-
-/* 13: Generic MSI Frame (ACPI 5.1) */
-
-struct acpi_madt_generic_msi_frame {
-	struct acpi_subtable_header header;
-	u16 reserved;		/* reserved - must be zero */
-	u32 msi_frame_id;
-	u64 base_address;
-	u32 flags;
-	u16 spi_count;
-	u16 spi_base;
-};
-
-/* Masks for Flags field above */
-
-#define ACPI_MADT_OVERRIDE_SPI_VALUES   (1)
-
-/* 14: Generic Redistributor (ACPI 5.1) */
-
-struct acpi_madt_generic_redistributor {
-	struct acpi_subtable_header header;
-	u16 reserved;		/* reserved - must be zero */
-	u64 base_address;
-	u32 length;
-};
-
-/* 15: Generic Translator (ACPI 6.0) */
-
-struct acpi_madt_generic_translator {
-	struct acpi_subtable_header header;
-	u16 reserved;		/* reserved - must be zero */
-	u32 translation_id;
-	u64 base_address;
-	u32 reserved2;
+	u32 reserved2;		/* reserved - must be zero */
 };
 
 /*
  * Common flags fields for MADT subtables
  */
 
-/* MADT Local APIC flags */
+/* MADT Local APIC flags (lapic_flags) and GIC flags */
 
 #define ACPI_MADT_ENABLED           (1)	/* 00: Processor is usable if set */
 
@@ -1013,7 +898,8 @@ enum acpi_nfit_type {
 	ACPI_NFIT_TYPE_CONTROL_REGION = 4,
 	ACPI_NFIT_TYPE_DATA_REGION = 5,
 	ACPI_NFIT_TYPE_FLUSH_ADDRESS = 6,
-	ACPI_NFIT_TYPE_RESERVED = 7	/* 7 and greater are reserved */
+	ACPI_NFIT_TYPE_CAPABILITIES = 7,
+	ACPI_NFIT_TYPE_RESERVED = 8	/* 8 and greater are reserved */
 };
 
 /*
@@ -1145,6 +1031,69 @@ struct acpi_nfit_flush_address {
 	u64 hint_address[1];	/* Variable length */
 };
 
+/* 7: Platform Capabilities Structure */
+
+struct acpi_nfit_capabilities {
+	struct acpi_nfit_header header;
+	u8 highest_capability;
+	u8 reserved[3];		/* Reserved, must be zero */
+	u32 capabilities;
+	u32 reserved2;
+};
+
+/* Capabilities Flags */
+
+#define ACPI_NFIT_CAPABILITY_CACHE_FLUSH       (1)	/* 00: Cache Flush to NVDIMM capable */
+#define ACPI_NFIT_CAPABILITY_MEM_FLUSH         (1<<1)	/* 01: Memory Flush to NVDIMM capable */
+#define ACPI_NFIT_CAPABILITY_MEM_MIRRORING     (1<<2)	/* 02: Memory Mirroring capable */
+
+/*
+ * NFIT/DVDIMM device handle support - used as the _ADR for each NVDIMM
+ */
+struct nfit_device_handle {
+	u32 handle;
+};
+
+/* Device handle construction and extraction macros */
+
+#define ACPI_NFIT_DIMM_NUMBER_MASK              0x0000000F
+#define ACPI_NFIT_CHANNEL_NUMBER_MASK           0x000000F0
+#define ACPI_NFIT_MEMORY_ID_MASK                0x00000F00
+#define ACPI_NFIT_SOCKET_ID_MASK                0x0000F000
+#define ACPI_NFIT_NODE_ID_MASK                  0x0FFF0000
+
+#define ACPI_NFIT_DIMM_NUMBER_OFFSET            0
+#define ACPI_NFIT_CHANNEL_NUMBER_OFFSET         4
+#define ACPI_NFIT_MEMORY_ID_OFFSET              8
+#define ACPI_NFIT_SOCKET_ID_OFFSET              12
+#define ACPI_NFIT_NODE_ID_OFFSET                16
+
+/* Macro to construct a NFIT/NVDIMM device handle */
+
+#define ACPI_NFIT_BUILD_DEVICE_HANDLE(dimm, channel, memory, socket, node) \
+	((dimm)                                         | \
+	((channel) << ACPI_NFIT_CHANNEL_NUMBER_OFFSET)  | \
+	((memory)  << ACPI_NFIT_MEMORY_ID_OFFSET)       | \
+	((socket)  << ACPI_NFIT_SOCKET_ID_OFFSET)       | \
+	((node)    << ACPI_NFIT_NODE_ID_OFFSET))
+
+/* Macros to extract individual fields from a NFIT/NVDIMM device handle */
+
+#define ACPI_NFIT_GET_DIMM_NUMBER(handle) \
+	((handle) & ACPI_NFIT_DIMM_NUMBER_MASK)
+
+#define ACPI_NFIT_GET_CHANNEL_NUMBER(handle) \
+	(((handle) & ACPI_NFIT_CHANNEL_NUMBER_MASK) >> ACPI_NFIT_CHANNEL_NUMBER_OFFSET)
+
+#define ACPI_NFIT_GET_MEMORY_ID(handle) \
+	(((handle) & ACPI_NFIT_MEMORY_ID_MASK)      >> ACPI_NFIT_MEMORY_ID_OFFSET)
+
+#define ACPI_NFIT_GET_SOCKET_ID(handle) \
+	(((handle) & ACPI_NFIT_SOCKET_ID_MASK)      >> ACPI_NFIT_SOCKET_ID_OFFSET)
+
+#define ACPI_NFIT_GET_NODE_ID(handle) \
+	(((handle) & ACPI_NFIT_NODE_ID_MASK)        >> ACPI_NFIT_NODE_ID_OFFSET)
+
 /*******************************************************************************
  *
  * SBST - Smart Battery Specification Table
@@ -1191,12 +1140,11 @@ enum acpi_srat_type {
 	ACPI_SRAT_TYPE_CPU_AFFINITY = 0,
 	ACPI_SRAT_TYPE_MEMORY_AFFINITY = 1,
 	ACPI_SRAT_TYPE_X2APIC_CPU_AFFINITY = 2,
-	ACPI_SRAT_TYPE_GICC_AFFINITY = 3,
-	ACPI_SRAT_TYPE_RESERVED = 4	/* 4 and greater are reserved */
+	ACPI_SRAT_TYPE_RESERVED = 3	/* 3 and greater are reserved */
 };
 
 /*
- * SRAT Subtables, correspond to Type in struct acpi_subtable_header
+ * SRAT Sub-tables, correspond to Type in struct acpi_subtable_header
  */
 
 /* 0: Processor Local APIC/SAPIC Affinity */
@@ -1208,7 +1156,7 @@ struct acpi_srat_cpu_affinity {
 	u32 flags;
 	u8 local_sapic_eid;
 	u8 proximity_domain_hi[3];
-	u32 clock_domain;
+	u32 reserved;		/* Reserved, must be zero */
 };
 
 /* Flags */
@@ -1249,20 +1197,6 @@ struct acpi_srat_x2apic_cpu_affinity {
 /* Flags for struct acpi_srat_cpu_affinity and struct acpi_srat_x2apic_cpu_affinity */
 
 #define ACPI_SRAT_CPU_ENABLED       (1)	/* 00: Use affinity structure */
-
-/* 3: GICC Affinity (ACPI 5.1) */
-
-struct acpi_srat_gicc_affinity {
-	struct acpi_subtable_header header;
-	u32 proximity_domain;
-	u32 acpi_processor_uid;
-	u32 flags;
-	u32 clock_domain;
-};
-
-/* Flags for struct acpi_srat_gicc_affinity */
-
-#define ACPI_SRAT_GICC_ENABLED     (1)	/* 00: Use affinity structure */
 
 /* Reset to default packing */
 

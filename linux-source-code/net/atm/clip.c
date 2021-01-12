@@ -60,7 +60,7 @@ static int to_atmarpd(enum atmarp_ctrl_type type, int itf, __be32 ip)
 	skb = alloc_skb(sizeof(struct atmarp_ctrl), GFP_ATOMIC);
 	if (!skb)
 		return -ENOMEM;
-	ctrl = (struct atmarp_ctrl *)skb_put(skb, sizeof(struct atmarp_ctrl));
+	ctrl = skb_put(skb, sizeof(struct atmarp_ctrl));
 	ctrl->type = type;
 	ctrl->itf_num = itf;
 	ctrl->ip = ip;
@@ -68,7 +68,7 @@ static int to_atmarpd(enum atmarp_ctrl_type type, int itf, __be32 ip)
 
 	sk = sk_atm(atmarpd);
 	skb_queue_tail(&sk->sk_receive_queue, skb);
-	sk->sk_data_ready(sk);
+	sk->sk_data_ready(sk, skb->len);
 	return 0;
 }
 
@@ -106,7 +106,7 @@ static void unlink_clip_vcc(struct clip_vcc *clip_vcc)
 			entry->expires = jiffies - 1;
 			/* force resolution or expiration */
 			error = neigh_update(entry->neigh, NULL, NUD_NONE,
-					     NEIGH_UPDATE_F_ADMIN);
+					     NEIGH_UPDATE_F_ADMIN, 0);
 			if (error)
 				pr_crit("neigh_update failed with %d\n", error);
 			goto out;
@@ -317,9 +317,6 @@ static int clip_constructor(struct net_device *dev, struct neighbour *neigh)
 
 static int clip_encap(struct atm_vcc *vcc, int mode)
 {
-	if (!CLIP_VCC(vcc))
-		return -EBADFD;
-
 	CLIP_VCC(vcc)->encap = mode;
 	return 0;
 }
@@ -387,7 +384,7 @@ static netdev_tx_t clip_start_xmit(struct sk_buff *skb,
 	pr_debug("atm_skb(%p)->vcc(%p)->dev(%p)\n", skb, vcc, vcc->dev);
 	old = xchg(&entry->vccs->xoff, 1);	/* assume XOFF ... */
 	if (old) {
-		pr_warn("XOFF->XOFF transition\n");
+		pr_warning("XOFF->XOFF transition\n");
 		goto out_release_neigh;
 	}
 	dev->stats.tx_packets++;
@@ -450,7 +447,7 @@ static int clip_setentry(struct atm_vcc *vcc, __be32 ip)
 	struct rtable *rt;
 
 	if (vcc->push != clip_push) {
-		pr_warn("non-CLIP VCC\n");
+		pr_warning("non-CLIP VCC\n");
 		return -EBADF;
 	}
 	clip_vcc = CLIP_VCC(vcc);
@@ -481,14 +478,15 @@ static int clip_setentry(struct atm_vcc *vcc, __be32 ip)
 		link_vcc(clip_vcc, entry);
 	}
 	error = neigh_update(neigh, llc_oui, NUD_PERMANENT,
-			     NEIGH_UPDATE_F_OVERRIDE | NEIGH_UPDATE_F_ADMIN);
+			     NEIGH_UPDATE_F_OVERRIDE | NEIGH_UPDATE_F_ADMIN, 0);
 	neigh_release(neigh);
 	return error;
 }
 
 static const struct net_device_ops clip_netdev_ops = {
+	.ndo_size		= sizeof(struct net_device_ops),
 	.ndo_start_xmit		= clip_start_xmit,
-	.ndo_neigh_construct	= clip_constructor,
+	.extended.ndo_neigh_construct	= clip_constructor,
 };
 
 static void clip_setup(struct net_device *dev)
@@ -523,8 +521,7 @@ static int clip_create(int number)
 			if (PRIV(dev)->number >= number)
 				number = PRIV(dev)->number + 1;
 	}
-	dev = alloc_netdev(sizeof(struct clip_priv), "", NET_NAME_UNKNOWN,
-			   clip_setup);
+	dev = alloc_netdev(sizeof(struct clip_priv), "", clip_setup);
 	if (!dev)
 		return -ENOMEM;
 	clip_priv = PRIV(dev);
@@ -884,7 +881,7 @@ static void atm_clip_exit_noproc(void);
 static int __init atm_clip_init(void)
 {
 	register_atm_ioctl(&clip_ioctl_ops);
-	register_netdevice_notifier(&clip_dev_notifier);
+	register_netdevice_notifier_rh(&clip_dev_notifier);
 	register_inetaddr_notifier(&clip_inet_notifier);
 
 	setup_timer(&idle_timer, idle_timer_check, 0);
@@ -910,7 +907,7 @@ static void atm_clip_exit_noproc(void)
 	struct net_device *dev, *next;
 
 	unregister_inetaddr_notifier(&clip_inet_notifier);
-	unregister_netdevice_notifier(&clip_dev_notifier);
+	unregister_netdevice_notifier_rh(&clip_dev_notifier);
 
 	deregister_atm_ioctl(&clip_ioctl_ops);
 

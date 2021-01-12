@@ -28,7 +28,6 @@
 
 #include <linux/kvm_host.h>
 #include <linux/highmem.h>
-#include <linux/nospec.h>
 #include <asm/apicdef.h>
 #include <trace/events/kvm.h>
 
@@ -73,22 +72,11 @@ static bool synic_has_vector_auto_eoi(struct kvm_vcpu_hv_synic *synic,
 	return false;
 }
 
-static int synic_set_sint(struct kvm_vcpu_hv_synic *synic, int sint,
-			  u64 data, bool host)
+static void synic_update_vector(struct kvm_vcpu_hv_synic *synic,
+				int vector)
 {
-	int vector;
-
-	vector = data & HV_SYNIC_SINT_VECTOR_MASK;
-	if (vector < 16 && !host)
-		return 1;
-	/*
-	 * Guest may configure multiple SINTs to use the same vector, so
-	 * we maintain a bitmap of vectors handled by synic, and a
-	 * bitmap of vectors with auto-eoi behavior.  The bitmaps are
-	 * updated here, and atomically queried on fast paths.
-	 */
-
-	atomic64_set(&synic->sint[sint], data);
+	if (vector < HV_SYNIC_FIRST_VALID_VECTOR)
+		return;
 
 	if (synic_has_vector_connected(synic, vector))
 		__set_bit(vector, synic->vec_bitmap);
@@ -99,20 +87,64 @@ static int synic_set_sint(struct kvm_vcpu_hv_synic *synic, int sint,
 		__set_bit(vector, synic->auto_eoi_bitmap);
 	else
 		__clear_bit(vector, synic->auto_eoi_bitmap);
+}
+
+static int synic_set_sint(struct kvm_vcpu_hv_synic *synic, int sint,
+			  u64 data, bool host)
+{
+	int vector, old_vector;
+	bool masked;
+
+	vector = data & HV_SYNIC_SINT_VECTOR_MASK;
+	masked = data & HV_SYNIC_SINT_MASKED;
+
+	/*
+	 * Valid vectors are 16-255, however, nested Hyper-V attempts to write
+	 * default '0x10000' value on boot and this should not #GP. We need to
+	 * allow zero-initing the register from host as well.
+	 */
+	if (vector < HV_SYNIC_FIRST_VALID_VECTOR && !host && !masked)
+		return 1;
+	/*
+	 * Guest may configure multiple SINTs to use the same vector, so
+	 * we maintain a bitmap of vectors handled by synic, and a
+	 * bitmap of vectors with auto-eoi behavior.  The bitmaps are
+	 * updated here, and atomically queried on fast paths.
+	 */
+	old_vector = synic_read_sint(synic, sint) & HV_SYNIC_SINT_VECTOR_MASK;
+
+	atomic64_set(&synic->sint[sint], data);
+
+	synic_update_vector(synic, old_vector);
+
+	synic_update_vector(synic, vector);
 
 	/* Load SynIC vectors into EOI exit bitmap */
 	kvm_make_request(KVM_REQ_SCAN_IOAPIC, synic_to_vcpu(synic));
 	return 0;
 }
 
-static struct kvm_vcpu_hv_synic *synic_get(struct kvm *kvm, u32 vcpu_id)
+static struct kvm_vcpu *get_vcpu_by_vpidx(struct kvm *kvm, u32 vpidx)
+{
+	struct kvm_vcpu *vcpu = NULL;
+	int i;
+
+	if (vpidx < KVM_MAX_VCPUS)
+		vcpu = kvm_get_vcpu(kvm, vpidx);
+	if (vcpu && vcpu_to_hv_vcpu(vcpu)->vp_index == vpidx)
+		return vcpu;
+	kvm_for_each_vcpu(i, vcpu, kvm)
+		if (vcpu_to_hv_vcpu(vcpu)->vp_index == vpidx)
+			return vcpu;
+	return NULL;
+}
+
+static struct kvm_vcpu_hv_synic *synic_get(struct kvm *kvm, u32 vpidx)
 {
 	struct kvm_vcpu *vcpu;
 	struct kvm_vcpu_hv_synic *synic;
 
-	if (vcpu_id >= atomic_read(&kvm->online_vcpus))
-		return NULL;
-	vcpu = kvm_get_vcpu(kvm, vcpu_id);
+	vcpu = get_vcpu_by_vpidx(kvm, vpidx);
 	if (!vcpu)
 		return NULL;
 	synic = vcpu_to_synic(vcpu);
@@ -200,7 +232,7 @@ static int synic_set_msr(struct kvm_vcpu_hv_synic *synic,
 	struct kvm_vcpu *vcpu = synic_to_vcpu(synic);
 	int ret;
 
-	if (!synic->active)
+	if (!synic->active && !host)
 		return 1;
 
 	trace_kvm_hv_synic_set_msr(vcpu->vcpu_id, msr, data, host);
@@ -220,7 +252,8 @@ static int synic_set_msr(struct kvm_vcpu_hv_synic *synic,
 		synic->version = data;
 		break;
 	case HV_X64_MSR_SIEFP:
-		if (data & HV_SYNIC_SIEFP_ENABLE)
+		if ((data & HV_SYNIC_SIEFP_ENABLE) && !host &&
+		    !synic->dont_zero_synic_pages)
 			if (kvm_clear_guest(vcpu->kvm,
 					    data & PAGE_MASK, PAGE_SIZE)) {
 				ret = 1;
@@ -231,7 +264,8 @@ static int synic_set_msr(struct kvm_vcpu_hv_synic *synic,
 			synic_exit(synic, msr);
 		break;
 	case HV_X64_MSR_SIMP:
-		if (data & HV_SYNIC_SIMP_ENABLE)
+		if ((data & HV_SYNIC_SIMP_ENABLE) && !host &&
+		    !synic->dont_zero_synic_pages)
 			if (kvm_clear_guest(vcpu->kvm,
 					    data & PAGE_MASK, PAGE_SIZE)) {
 				ret = 1;
@@ -258,11 +292,12 @@ static int synic_set_msr(struct kvm_vcpu_hv_synic *synic,
 	return ret;
 }
 
-static int synic_get_msr(struct kvm_vcpu_hv_synic *synic, u32 msr, u64 *pdata)
+static int synic_get_msr(struct kvm_vcpu_hv_synic *synic, u32 msr, u64 *pdata,
+			 bool host)
 {
 	int ret;
 
-	if (!synic->active)
+	if (!synic->active && !host)
 		return 1;
 
 	ret = 0;
@@ -292,7 +327,7 @@ static int synic_get_msr(struct kvm_vcpu_hv_synic *synic, u32 msr, u64 *pdata)
 	return ret;
 }
 
-int synic_set_irq(struct kvm_vcpu_hv_synic *synic, u32 sint)
+static int synic_set_irq(struct kvm_vcpu_hv_synic *synic, u32 sint)
 {
 	struct kvm_vcpu *vcpu = synic_to_vcpu(synic);
 	struct kvm_lapic_irq irq;
@@ -306,22 +341,22 @@ int synic_set_irq(struct kvm_vcpu_hv_synic *synic, u32 sint)
 		return -ENOENT;
 
 	memset(&irq, 0, sizeof(irq));
-	irq.dest_id = kvm_apic_id(vcpu->arch.apic);
+	irq.shorthand = APIC_DEST_SELF;
 	irq.dest_mode = APIC_DEST_PHYSICAL;
 	irq.delivery_mode = APIC_DM_FIXED;
 	irq.vector = vector;
 	irq.level = 1;
 
-	ret = kvm_irq_delivery_to_apic(vcpu->kvm, NULL, &irq, NULL);
+	ret = kvm_irq_delivery_to_apic(vcpu->kvm, vcpu->arch.apic, &irq, NULL);
 	trace_kvm_hv_synic_set_irq(vcpu->vcpu_id, sint, irq.vector, ret);
 	return ret;
 }
 
-int kvm_hv_synic_set_irq(struct kvm *kvm, u32 vcpu_id, u32 sint)
+int kvm_hv_synic_set_irq(struct kvm *kvm, u32 vpidx, u32 sint)
 {
 	struct kvm_vcpu_hv_synic *synic;
 
-	synic = synic_get(kvm, vcpu_id);
+	synic = synic_get(kvm, vpidx);
 	if (!synic)
 		return -EINVAL;
 
@@ -340,11 +375,11 @@ void kvm_hv_synic_send_eoi(struct kvm_vcpu *vcpu, int vector)
 			kvm_hv_notify_acked_sint(vcpu, i);
 }
 
-static int kvm_hv_set_sint_gsi(struct kvm *kvm, u32 vcpu_id, u32 sint, int gsi)
+static int kvm_hv_set_sint_gsi(struct kvm *kvm, u32 vpidx, u32 sint, int gsi)
 {
 	struct kvm_vcpu_hv_synic *synic;
 
-	synic = synic_get(kvm, vcpu_id);
+	synic = synic_get(kvm, vpidx);
 	if (!synic)
 		return -EINVAL;
 
@@ -511,7 +546,10 @@ static int stimer_set_config(struct kvm_vcpu_hv_stimer *stimer, u64 config,
 	if ((stimer->config & HV_STIMER_ENABLE) && HV_STIMER_SINT(config) == 0)
 		config &= ~HV_STIMER_ENABLE;
 	stimer->config = config;
-	stimer_mark_pending(stimer, false);
+
+	if (stimer->config & HV_STIMER_ENABLE)
+		stimer_mark_pending(stimer, false);
+
 	return 0;
 }
 
@@ -527,7 +565,10 @@ static int stimer_set_count(struct kvm_vcpu_hv_stimer *stimer, u64 count,
 		stimer->config &= ~HV_STIMER_ENABLE;
 	else if (stimer->config & HV_STIMER_AUTOENABLE)
 		stimer->config |= HV_STIMER_ENABLE;
-	stimer_mark_pending(stimer, false);
+
+        if (stimer->config & HV_STIMER_ENABLE)
+		stimer_mark_pending(stimer, false);
+
 	return 0;
 }
 
@@ -633,9 +674,10 @@ void kvm_hv_process_stimers(struct kvm_vcpu *vcpu)
 				}
 
 				if ((stimer->config & HV_STIMER_ENABLE) &&
-				    stimer->count)
-					stimer_start(stimer);
-				else
+				    stimer->count) {
+					if (!stimer->msg_pending)
+						stimer_start(stimer);
+				} else
 					stimer_cleanup(stimer);
 			}
 		}
@@ -686,14 +728,24 @@ void kvm_hv_vcpu_init(struct kvm_vcpu *vcpu)
 		stimer_init(&hv_vcpu->stimer[i], i);
 }
 
-int kvm_hv_activate_synic(struct kvm_vcpu *vcpu)
+void kvm_hv_vcpu_postcreate(struct kvm_vcpu *vcpu)
 {
+	struct kvm_vcpu_hv *hv_vcpu = vcpu_to_hv_vcpu(vcpu);
+
+	hv_vcpu->vp_index = kvm_vcpu_get_idx(vcpu);
+}
+
+int kvm_hv_activate_synic(struct kvm_vcpu *vcpu, bool dont_zero_synic_pages)
+{
+	struct kvm_vcpu_hv_synic *synic = vcpu_to_synic(vcpu);
+
 	/*
 	 * Hyper-V SynIC auto EOI SINT's are
 	 * not compatible with APICV, so deactivate APICV
 	 */
 	kvm_vcpu_deactivate_apicv(vcpu);
-	vcpu_to_synic(vcpu)->active = true;
+	synic->active = true;
+	synic->dont_zero_synic_pages = dont_zero_synic_pages;
 	return 0;
 }
 
@@ -720,12 +772,11 @@ static int kvm_hv_msr_get_crash_data(struct kvm_vcpu *vcpu,
 				     u32 index, u64 *pdata)
 {
 	struct kvm_hv *hv = &vcpu->kvm->arch.hyperv;
-	size_t size = ARRAY_SIZE(hv->hv_crash_param);
 
-	if (WARN_ON_ONCE(index >= size))
+	if (WARN_ON_ONCE(index >= ARRAY_SIZE(hv->hv_crash_param)))
 		return -EINVAL;
 
-	*pdata = hv->hv_crash_param[array_index_nospec(index, size)];
+	*pdata = hv->hv_crash_param[index];
 	return 0;
 }
 
@@ -764,12 +815,11 @@ static int kvm_hv_msr_set_crash_data(struct kvm_vcpu *vcpu,
 				     u32 index, u64 data)
 {
 	struct kvm_hv *hv = &vcpu->kvm->arch.hyperv;
-	size_t size = ARRAY_SIZE(hv->hv_crash_param);
 
-	if (WARN_ON_ONCE(index >= size))
+	if (WARN_ON_ONCE(index >= ARRAY_SIZE(hv->hv_crash_param)))
 		return -EINVAL;
 
-	hv->hv_crash_param[array_index_nospec(index, size)] = data;
+	hv->hv_crash_param[index] = data;
 	return 0;
 }
 
@@ -855,6 +905,10 @@ void kvm_hv_setup_tsc_page(struct kvm *kvm,
 	if (!(hv->hv_tsc_page & HV_X64_MSR_TSC_REFERENCE_ENABLE))
 		return;
 
+	mutex_lock(&kvm->arch.hyperv.hv_lock);
+	if (!(hv->hv_tsc_page & HV_X64_MSR_TSC_REFERENCE_ENABLE))
+		goto out_unlock;
+
 	gfn = hv->hv_tsc_page >> HV_X64_MSR_TSC_REFERENCE_ADDRESS_SHIFT;
 	/*
 	 * Because the TSC parameters only vary when there is a
@@ -862,7 +916,7 @@ void kvm_hv_setup_tsc_page(struct kvm *kvm,
 	 */
 	if (unlikely(kvm_read_guest(kvm, gfn_to_gpa(gfn),
 				    &tsc_seq, sizeof(tsc_seq))))
-		return;
+		goto out_unlock;
 
 	/*
 	 * While we're computing and writing the parameters, force the
@@ -871,15 +925,15 @@ void kvm_hv_setup_tsc_page(struct kvm *kvm,
 	hv->tsc_ref.tsc_sequence = 0;
 	if (kvm_write_guest(kvm, gfn_to_gpa(gfn),
 			    &hv->tsc_ref, sizeof(hv->tsc_ref.tsc_sequence)))
-		return;
+		goto out_unlock;
 
 	if (!compute_tsc_page_parameters(hv_clock, &hv->tsc_ref))
-		return;
+		goto out_unlock;
 
 	/* Ensure sequence is zero before writing the rest of the struct.  */
 	smp_wmb();
 	if (kvm_write_guest(kvm, gfn_to_gpa(gfn), &hv->tsc_ref, sizeof(hv->tsc_ref)))
-		return;
+		goto out_unlock;
 
 	/*
 	 * Now switch to the TSC page mechanism by writing the sequence.
@@ -894,6 +948,8 @@ void kvm_hv_setup_tsc_page(struct kvm *kvm,
 	hv->tsc_ref.tsc_sequence = tsc_seq;
 	kvm_write_guest(kvm, gfn_to_gpa(gfn),
 			&hv->tsc_ref, sizeof(hv->tsc_ref.tsc_sequence));
+out_unlock:
+	mutex_unlock(&kvm->arch.hyperv.hv_lock);
 }
 
 static int kvm_hv_set_msr_pw(struct kvm_vcpu *vcpu, u32 msr, u64 data,
@@ -950,6 +1006,11 @@ static int kvm_hv_set_msr_pw(struct kvm_vcpu *vcpu, u32 msr, u64 data,
 			kvm_make_request(KVM_REQ_HV_RESET, vcpu);
 		}
 		break;
+	case HV_X64_MSR_TIME_REF_COUNT:
+		/* read-only, but still ignore it if host-initiated */
+		if (!host)
+			return 1;
+		break;
 	default:
 		vcpu_unimpl(vcpu, "Hyper-V uhandled wrmsr: 0x%x data 0x%llx\n",
 			    msr, data);
@@ -972,6 +1033,11 @@ static int kvm_hv_set_msr(struct kvm_vcpu *vcpu, u32 msr, u64 data, bool host)
 	struct kvm_vcpu_hv *hv = &vcpu->arch.hyperv;
 
 	switch (msr) {
+	case HV_X64_MSR_VP_INDEX:
+		if (!host)
+			return 1;
+		hv->vp_index = (u32)data;
+		break;
 	case HV_X64_MSR_APIC_ASSIST_PAGE: {
 		u64 gfn;
 		unsigned long addr;
@@ -1031,6 +1097,12 @@ static int kvm_hv_set_msr(struct kvm_vcpu *vcpu, u32 msr, u64 data, bool host)
 		return stimer_set_count(vcpu_to_stimer(vcpu, timer_index),
 					data, host);
 	}
+	case HV_X64_MSR_TSC_FREQUENCY:
+	case HV_X64_MSR_APIC_FREQUENCY:
+		/* read-only, but still ignore it if host-initiated */
+		if (!host)
+			return 1;
+		break;
 	default:
 		vcpu_unimpl(vcpu, "Hyper-V uhandled wrmsr: 0x%x data 0x%llx\n",
 			    msr, data);
@@ -1077,24 +1149,16 @@ static int kvm_hv_get_msr_pw(struct kvm_vcpu *vcpu, u32 msr, u64 *pdata)
 	return 0;
 }
 
-static int kvm_hv_get_msr(struct kvm_vcpu *vcpu, u32 msr, u64 *pdata)
+static int kvm_hv_get_msr(struct kvm_vcpu *vcpu, u32 msr, u64 *pdata,
+			  bool host)
 {
 	u64 data = 0;
 	struct kvm_vcpu_hv *hv = &vcpu->arch.hyperv;
 
 	switch (msr) {
-	case HV_X64_MSR_VP_INDEX: {
-		int r;
-		struct kvm_vcpu *v;
-
-		kvm_for_each_vcpu(r, v, vcpu->kvm) {
-			if (v == vcpu) {
-				data = r;
-				break;
-			}
-		}
+	case HV_X64_MSR_VP_INDEX:
+		data = hv->vp_index;
 		break;
-	}
 	case HV_X64_MSR_EOI:
 		return kvm_hv_vapic_msr_read(vcpu, APIC_EOI, pdata);
 	case HV_X64_MSR_ICR:
@@ -1107,13 +1171,19 @@ static int kvm_hv_get_msr(struct kvm_vcpu *vcpu, u32 msr, u64 *pdata)
 	case HV_X64_MSR_VP_RUNTIME:
 		data = current_task_runtime_100ns() + hv->runtime_offset;
 		break;
+	case HV_X64_MSR_TSC_FREQUENCY:
+		data = (u64)vcpu->arch.virtual_tsc_khz * 1000;
+		break;
+	case HV_X64_MSR_APIC_FREQUENCY:
+		data = APIC_BUS_FREQUENCY;
+		break;
 	case HV_X64_MSR_SCONTROL:
 	case HV_X64_MSR_SVERSION:
 	case HV_X64_MSR_SIEFP:
 	case HV_X64_MSR_SIMP:
 	case HV_X64_MSR_EOM:
 	case HV_X64_MSR_SINT0 ... HV_X64_MSR_SINT15:
-		return synic_get_msr(vcpu_to_synic(vcpu), msr, pdata);
+		return synic_get_msr(vcpu_to_synic(vcpu), msr, pdata, host);
 	case HV_X64_MSR_STIMER0_CONFIG:
 	case HV_X64_MSR_STIMER1_CONFIG:
 	case HV_X64_MSR_STIMER2_CONFIG:
@@ -1145,30 +1215,30 @@ int kvm_hv_set_msr_common(struct kvm_vcpu *vcpu, u32 msr, u64 data, bool host)
 	if (kvm_hv_msr_partition_wide(msr)) {
 		int r;
 
-		mutex_lock(&vcpu->kvm->lock);
+		mutex_lock(&vcpu->kvm->arch.hyperv.hv_lock);
 		r = kvm_hv_set_msr_pw(vcpu, msr, data, host);
-		mutex_unlock(&vcpu->kvm->lock);
+		mutex_unlock(&vcpu->kvm->arch.hyperv.hv_lock);
 		return r;
 	} else
 		return kvm_hv_set_msr(vcpu, msr, data, host);
 }
 
-int kvm_hv_get_msr_common(struct kvm_vcpu *vcpu, u32 msr, u64 *pdata)
+int kvm_hv_get_msr_common(struct kvm_vcpu *vcpu, u32 msr, u64 *pdata, bool host)
 {
 	if (kvm_hv_msr_partition_wide(msr)) {
 		int r;
 
-		mutex_lock(&vcpu->kvm->lock);
+		mutex_lock(&vcpu->kvm->arch.hyperv.hv_lock);
 		r = kvm_hv_get_msr_pw(vcpu, msr, pdata);
-		mutex_unlock(&vcpu->kvm->lock);
+		mutex_unlock(&vcpu->kvm->arch.hyperv.hv_lock);
 		return r;
 	} else
-		return kvm_hv_get_msr(vcpu, msr, pdata);
+		return kvm_hv_get_msr(vcpu, msr, pdata, host);
 }
 
 bool kvm_hv_hypercall_enabled(struct kvm *kvm)
 {
-	return kvm->arch.hyperv.hv_hypercall & HV_X64_MSR_HYPERCALL_ENABLE;
+	return READ_ONCE(kvm->arch.hyperv.hv_hypercall) & HV_X64_MSR_HYPERCALL_ENABLE;
 }
 
 static void kvm_hv_hypercall_set_result(struct kvm_vcpu *vcpu, u64 result)
@@ -1204,7 +1274,7 @@ int kvm_hv_hypercall(struct kvm_vcpu *vcpu)
 	 */
 	if (kvm_x86_ops->get_cpl(vcpu) != 0 || !is_protmode(vcpu)) {
 		kvm_queue_exception(vcpu, UD_VECTOR);
-		return 1;
+		return 0;
 	}
 
 	longmode = is_64_bit_mode(vcpu);

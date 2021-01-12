@@ -253,12 +253,12 @@ static int cmm_skip_blanks(char *cp, char **endp)
 
 static struct ctl_table cmm_table[];
 
-static int cmm_pages_handler(struct ctl_table *ctl, int write,
-			     void __user *buffer, size_t *lenp, loff_t *ppos)
+static int cmm_pages_handler(ctl_table *ctl, int write, void __user *buffer,
+			     size_t *lenp, loff_t *ppos)
 {
 	char buf[16], *p;
-	unsigned int len;
 	long nr;
+	int len;
 
 	if (!*lenp || (*ppos && !write)) {
 		*lenp = 0;
@@ -293,12 +293,12 @@ static int cmm_pages_handler(struct ctl_table *ctl, int write,
 	return 0;
 }
 
-static int cmm_timeout_handler(struct ctl_table *ctl, int write,
-			       void __user *buffer, size_t *lenp, loff_t *ppos)
+static int cmm_timeout_handler(ctl_table *ctl, int write,  void __user *buffer,
+			       size_t *lenp, loff_t *ppos)
 {
 	char buf[64], *p;
 	long nr, seconds;
-	unsigned int len;
+	int len;
 
 	if (!*lenp || (*ppos && !write)) {
 		*lenp = 0;
@@ -306,16 +306,16 @@ static int cmm_timeout_handler(struct ctl_table *ctl, int write,
 	}
 
 	if (write) {
-		len = min(*lenp, sizeof(buf));
-		if (copy_from_user(buf, buffer, len))
+		len = *lenp;
+		if (copy_from_user(buf, buffer,
+				   len > sizeof(buf) ? sizeof(buf) : len))
 			return -EFAULT;
-		buf[len - 1] = '\0';
+		buf[sizeof(buf) - 1] = '\0';
 		cmm_skip_blanks(buf, &p);
 		nr = simple_strtoul(p, &p, 0);
 		cmm_skip_blanks(p, &p);
 		seconds = simple_strtoul(p, &p, 0);
 		cmm_set_timeout(nr, seconds);
-		*ppos += *lenp;
 	} else {
 		len = sprintf(buf, "%ld %ld\n",
 			      cmm_timeout_pages, cmm_timeout_seconds);
@@ -323,9 +323,9 @@ static int cmm_timeout_handler(struct ctl_table *ctl, int write,
 			len = *lenp;
 		if (copy_to_user(buffer, buf, len))
 			return -EFAULT;
-		*lenp = len;
-		*ppos += len;
 	}
+	*lenp = len;
+	*ppos += len;
 	return 0;
 }
 

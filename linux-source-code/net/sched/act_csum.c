@@ -30,13 +30,12 @@
 #include <net/tcp.h>
 #include <net/udp.h>
 #include <net/ip6_checksum.h>
+#include <net/sctp/checksum.h>
 
 #include <net/act_api.h>
 
 #include <linux/tc_act/tc_csum.h>
 #include <net/tc_act/tc_csum.h>
-
-#define CSUM_TAB_MASK 15
 
 static const struct nla_policy csum_policy[TCA_CSUM_MAX + 1] = {
 	[TCA_CSUM_PARMS] = { .len = sizeof(struct tc_csum), },
@@ -66,18 +65,19 @@ static int tcf_csum_init(struct net *net, struct nlattr *nla,
 		return -EINVAL;
 	parm = nla_data(tb[TCA_CSUM_PARMS]);
 
-	if (!tcf_hash_check(tn, parm->index, a, bind)) {
-		ret = tcf_hash_create(tn, parm->index, est, a,
-				      &act_csum_ops, bind, false);
+	if (!tcf_idr_check(tn, parm->index, a, bind)) {
+		ret = tcf_idr_create(tn, parm->index, est, a,
+				     &act_csum_ops, bind, false);
 		if (ret)
 			return ret;
 		ret = ACT_P_CREATED;
 	} else {
 		if (bind)/* dont override defaults */
 			return 0;
-		tcf_hash_release(*a, bind);
-		if (!ovr)
+		if (!ovr) {
+			tcf_idr_release(*a, bind);
 			return -EEXIST;
+		}
 	}
 
 	p = to_tcf_csum(*a);
@@ -87,7 +87,7 @@ static int tcf_csum_init(struct net *net, struct nlattr *nla,
 	spin_unlock_bh(&p->tcf_lock);
 
 	if (ret == ACT_P_CREATED)
-		tcf_hash_insert(tn, *a);
+		tcf_idr_insert(tn, *a);
 
 	return ret;
 }
@@ -334,6 +334,25 @@ ignore_obscure_skb:
 	return 1;
 }
 
+static int tcf_csum_sctp(struct sk_buff *skb, unsigned int ihl,
+			 unsigned int ipl)
+{
+	struct sctphdr *sctph;
+
+	if (skb_is_gso(skb) && skb_shinfo(skb)->gso_type & SKB_GSO_SCTP)
+		return 1;
+
+	sctph = tcf_csum_skb_nextlayer(skb, ihl, ipl, sizeof(*sctph));
+	if (!sctph)
+		return 0;
+
+	sctph->checksum = sctp_compute_cksum(skb,
+					     skb_network_offset(skb) + ihl);
+	skb->ip_summed = CHECKSUM_NONE;
+
+	return 1;
+}
+
 static int tcf_csum_ipv4(struct sk_buff *skb, u32 update_flags)
 {
 	const struct iphdr *iph;
@@ -376,6 +395,11 @@ static int tcf_csum_ipv4(struct sk_buff *skb, u32 update_flags)
 			if (!tcf_csum_ipv4_udp(skb, iph->ihl * 4,
 					       ntohs(iph->tot_len), 1))
 				goto fail;
+		break;
+	case IPPROTO_SCTP:
+		if ((update_flags & TCA_CSUM_UPDATE_FLAG_SCTP) &&
+		    !tcf_csum_sctp(skb, iph->ihl * 4, ntohs(iph->tot_len)))
+			goto fail;
 		break;
 	}
 
@@ -493,6 +517,11 @@ static int tcf_csum_ipv6(struct sk_buff *skb, u32 update_flags)
 						       pl + sizeof(*ip6h), 1))
 					goto fail;
 			goto done;
+		case IPPROTO_SCTP:
+			if ((update_flags & TCA_CSUM_UPDATE_FLAG_SCTP) &&
+			    !tcf_csum_sctp(skb, hl, pl + sizeof(*ip6h)))
+				goto fail;
+			goto done;
 		default:
 			goto ignore_skb;
 		}
@@ -510,6 +539,9 @@ static int tcf_csum(struct sk_buff *skb, const struct tc_action *a,
 		    struct tcf_result *res)
 {
 	struct tcf_csum *p = to_tcf_csum(a);
+	bool orig_vlan_tag_present = false;
+	unsigned int vlan_hdr_count = 0;
+	__be16 protocol;
 	int action;
 	u32 update_flags;
 
@@ -523,7 +555,9 @@ static int tcf_csum(struct sk_buff *skb, const struct tc_action *a,
 	if (unlikely(action == TC_ACT_SHOT))
 		goto drop;
 
-	switch (tc_skb_protocol(skb)) {
+	protocol = tc_skb_protocol(skb);
+again:
+	switch (protocol) {
 	case cpu_to_be16(ETH_P_IP):
 		if (!tcf_csum_ipv4(skb, update_flags))
 			goto drop;
@@ -532,6 +566,27 @@ static int tcf_csum(struct sk_buff *skb, const struct tc_action *a,
 		if (!tcf_csum_ipv6(skb, update_flags))
 			goto drop;
 		break;
+	case cpu_to_be16(ETH_P_8021AD): /* fall through */
+	case cpu_to_be16(ETH_P_8021Q):
+		if (skb_vlan_tag_present(skb) && !orig_vlan_tag_present) {
+			protocol = skb->protocol;
+			orig_vlan_tag_present = true;
+		} else {
+			struct vlan_hdr *vlan = (struct vlan_hdr *)skb->data;
+
+			protocol = vlan->h_vlan_encapsulated_proto;
+			skb_pull(skb, VLAN_HLEN);
+			skb_reset_network_header(skb);
+			vlan_hdr_count++;
+		}
+		goto again;
+	}
+
+out:
+	/* Restore the skb for the pulled VLAN tags */
+	while (vlan_hdr_count--) {
+		skb_push(skb, VLAN_HLEN);
+		skb_reset_network_header(skb);
 	}
 
 	return action;
@@ -540,7 +595,8 @@ drop:
 	spin_lock(&p->tcf_lock);
 	p->tcf_qstats.drops++;
 	spin_unlock(&p->tcf_lock);
-	return TC_ACT_SHOT;
+	action = TC_ACT_SHOT;
+	goto out;
 }
 
 static int tcf_csum_dump(struct sk_buff *skb, struct tc_action *a, int bind,
@@ -584,7 +640,7 @@ static int tcf_csum_search(struct net *net, struct tc_action **a, u32 index)
 {
 	struct tc_action_net *tn = net_generic(net, csum_net_id);
 
-	return tcf_hash_search(tn, a, index);
+	return tcf_idr_search(tn, a, index);
 }
 
 static struct tc_action_ops act_csum_ops = {
@@ -603,7 +659,7 @@ static __net_init int csum_init_net(struct net *net)
 {
 	struct tc_action_net *tn = net_generic(net, csum_net_id);
 
-	return tc_action_net_init(tn, &act_csum_ops, CSUM_TAB_MASK);
+	return tc_action_net_init(tn, &act_csum_ops);
 }
 
 static void __net_exit csum_exit_net(struct net *net)

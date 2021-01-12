@@ -102,7 +102,7 @@ static LIST_HEAD(free_entries);
 static DEFINE_SPINLOCK(free_entries_lock);
 
 /* Global disable flag - will be set in case of an error */
-static bool global_disable __read_mostly;
+static u32 global_disable __read_mostly;
 
 /* Early initialization disable flag, set at the end of dma_debug_init */
 static bool dma_debug_initialized __read_mostly;
@@ -435,7 +435,6 @@ void debug_dma_dump_mappings(struct device *dev)
 		}
 
 		spin_unlock_irqrestore(&bucket->lock, flags);
-		cond_resched();
 	}
 }
 EXPORT_SYMBOL(debug_dma_dump_mappings);
@@ -941,20 +940,16 @@ static int device_dma_allocations(struct device *dev, struct dma_debug_entry **o
 	unsigned long flags;
 	int count = 0, i;
 
-	local_irq_save(flags);
-
 	for (i = 0; i < HASH_SIZE; ++i) {
-		spin_lock(&dma_entry_hash[i].lock);
+		spin_lock_irqsave(&dma_entry_hash[i].lock, flags);
 		list_for_each_entry(entry, &dma_entry_hash[i].list, list) {
 			if (entry->dev == dev) {
 				count += 1;
 				*out_entry = entry;
 			}
 		}
-		spin_unlock(&dma_entry_hash[i].lock);
+		spin_unlock_irqrestore(&dma_entry_hash[i].lock, flags);
 	}
-
-	local_irq_restore(flags);
 
 	return count;
 }
@@ -1156,6 +1151,11 @@ static void check_unmap(struct dma_debug_entry *ref)
 			   dir2name[ref->direction]);
 	}
 
+	/*
+	 * Drivers should use dma_mapping_error() to check the returned
+	 * addresses of dma_map_single() and dma_map_page().
+	 * If not, print this warning message. See Documentation/DMA-API.txt.
+	 */
 	if (entry->map_err_type == MAP_ERR_NOT_CHECKED) {
 		err_printk(ref->dev, entry,
 			   "DMA-API: device driver failed to check map error"
@@ -1489,17 +1489,25 @@ void debug_dma_alloc_coherent(struct device *dev, size_t size,
 	if (unlikely(virt == NULL))
 		return;
 
+	/* handle vmalloc and linear addresses */
+	if (!is_vmalloc_addr(virt) && !virt_addr_valid(virt))
+		return;
+
 	entry = dma_entry_alloc();
 	if (!entry)
 		return;
 
 	entry->type      = dma_debug_coherent;
 	entry->dev       = dev;
-	entry->pfn	 = page_to_pfn(virt_to_page(virt));
-	entry->offset	 = (size_t) virt & ~PAGE_MASK;
+	entry->offset	 = offset_in_page(virt);
 	entry->size      = size;
 	entry->dev_addr  = dma_addr;
 	entry->direction = DMA_BIDIRECTIONAL;
+
+	if (is_vmalloc_addr(virt))
+		entry->pfn = vmalloc_to_pfn(virt);
+	else
+		entry->pfn = page_to_pfn(virt_to_page(virt));
 
 	add_dma_entry(entry);
 }
@@ -1511,12 +1519,20 @@ void debug_dma_free_coherent(struct device *dev, size_t size,
 	struct dma_debug_entry ref = {
 		.type           = dma_debug_coherent,
 		.dev            = dev,
-		.pfn		= page_to_pfn(virt_to_page(virt)),
-		.offset		= (size_t) virt & ~PAGE_MASK,
+		.offset		= offset_in_page(virt),
 		.dev_addr       = addr,
 		.size           = size,
 		.direction      = DMA_BIDIRECTIONAL,
 	};
+
+	/* handle vmalloc and linear addresses */
+	if (!is_vmalloc_addr(virt) && !virt_addr_valid(virt))
+		return;
+
+	if (is_vmalloc_addr(virt))
+		ref.pfn = vmalloc_to_pfn(virt);
+	else
+		ref.pfn = page_to_pfn(virt_to_page(virt));
 
 	if (unlikely(dma_debug_disabled()))
 		return;
@@ -1539,7 +1555,7 @@ void debug_dma_map_resource(struct device *dev, phys_addr_t addr, size_t size,
 
 	entry->type		= dma_debug_resource;
 	entry->dev		= dev;
-	entry->pfn		= PHYS_PFN(addr);
+	entry->pfn		= __phys_to_pfn(addr);
 	entry->offset		= offset_in_page(addr);
 	entry->size		= size;
 	entry->dev_addr		= dma_addr;

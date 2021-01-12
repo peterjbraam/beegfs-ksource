@@ -77,7 +77,7 @@ static int can_modify_feature(struct btrfs_feature_attr *fa)
 		clear = BTRFS_FEATURE_INCOMPAT_SAFE_CLEAR;
 		break;
 	default:
-		pr_warn("btrfs: sysfs: unknown feature set %d\n",
+		printk(KERN_WARNING "btrfs: sysfs: unknown feature set %d\n",
 				fa->feature_set);
 		return 0;
 	}
@@ -751,12 +751,7 @@ int btrfs_sysfs_add_fsid(struct btrfs_fs_devices *fs_devs,
 	fs_devs->fsid_kobj.kset = btrfs_kset;
 	error = kobject_init_and_add(&fs_devs->fsid_kobj,
 				&btrfs_ktype, parent, "%pU", fs_devs->fsid);
-	if (error) {
-		kobject_put(&fs_devs->fsid_kobj);
-		return error;
-	}
-
-	return 0;
+	return error;
 }
 
 int btrfs_sysfs_add_mounted(struct btrfs_fs_info *fs_info)

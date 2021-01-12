@@ -46,7 +46,7 @@
  * 
  */
 struct cache_head {
-	struct hlist_node	cache_list;
+	struct cache_head * next;
 	time_t		expiry_time;	/* After time time, don't use the data */
 	time_t		last_refresh;   /* If CACHE_PENDING, this is when upcall was
 					 * sent, else this is when update was
@@ -75,8 +75,10 @@ struct cache_detail_pipefs {
 struct cache_detail {
 	struct module *		owner;
 	int			hash_size;
-	struct hlist_head *	hash_table;
+	struct cache_head **	hash_table;
 	rwlock_t		hash_lock;
+
+	atomic_t		inuse; /* active user-space update or lookup */
 
 	char			*name;
 	void			(*cache_put)(struct kref *);
@@ -118,9 +120,9 @@ struct cache_detail {
 	/* fields for communication over channel */
 	struct list_head	queue;
 
-	atomic_t		readers;		/* how many time is /chennel open */
-	time_t			last_close;		/* if no readers, when did last close */
-	time_t			last_warn;		/* when we last warned about no readers */
+	atomic_t		writers;		/* how many time is /channel open */
+	time_t			last_close;		/* if no writers, when did last close */
+	time_t			last_warn;		/* when we last warned about no writers */
 
 	union {
 		struct cache_detail_procfs procfs;
@@ -198,7 +200,7 @@ static inline struct cache_head  *cache_get(struct cache_head *h)
 
 static inline void cache_put(struct cache_head *h, struct cache_detail *cd)
 {
-	if (atomic_read(&h->ref.refcount) <= 2 &&
+	if (kref_read(&h->ref) <= 2 &&
 	    h->expiry_time < cd->nextcheck)
 		cd->nextcheck = h->expiry_time;
 	kref_put(&h->ref, cd->cache_put);

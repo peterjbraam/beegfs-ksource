@@ -15,20 +15,9 @@
 static inline int init_new_context(struct task_struct *tsk,
 				   struct mm_struct *mm)
 {
-	spin_lock_init(&mm->context.lock);
-	spin_lock_init(&mm->context.pgtable_lock);
-	INIT_LIST_HEAD(&mm->context.pgtable_list);
-	spin_lock_init(&mm->context.gmap_lock);
-	INIT_LIST_HEAD(&mm->context.gmap_list);
-	cpumask_clear(&mm->context.cpu_attach_mask);
-	atomic_set(&mm->context.flush_count, 0);
-	mm->context.gmap_asce = 0;
+	atomic_set(&mm->context.attach_count, 0);
 	mm->context.flush_mm = 0;
-#ifdef CONFIG_PGSTE
-	mm->context.alloc_pgste = page_table_allocate_pgste;
 	mm->context.has_pgste = 0;
-	mm->context.use_skey = 0;
-#endif
 	switch (mm->context.asce_limit) {
 	case 1UL << 42:
 		/*
@@ -37,9 +26,12 @@ static inline int init_new_context(struct task_struct *tsk,
 		 */
 	case 0:
 		/* context created by exec, set asce limit to 4TB */
-		mm->context.asce_limit = STACK_TOP_MAX;
 		mm->context.asce = __pa(mm->pgd) | _ASCE_TABLE_LENGTH |
-				   _ASCE_USER_BITS | _ASCE_TYPE_REGION3;
+				   _ASCE_USER_BITS;
+#ifdef CONFIG_64BIT
+		mm->context.asce |= _ASCE_TYPE_REGION3;
+#endif
+		mm->context.asce_limit = STACK_TOP_MAX;
 		break;
 	case 1UL << 53:
 		/* forked 4-level task, set new asce with new mm->pgd */
@@ -50,8 +42,6 @@ static inline int init_new_context(struct task_struct *tsk,
 		/* forked 2-level compat task, set new asce with new mm->pgd */
 		mm->context.asce = __pa(mm->pgd) | _ASCE_TABLE_LENGTH |
 				   _ASCE_USER_BITS | _ASCE_TYPE_SEGMENT;
-		/* pgd_alloc() did not increase mm->nr_pmds */
-		mm_inc_nr_pmds(mm);
 	}
 	crst_table_init((unsigned long *) mm->pgd, pgd_entry_type(mm));
 	return 0;
@@ -59,63 +49,33 @@ static inline int init_new_context(struct task_struct *tsk,
 
 #define destroy_context(mm)             do { } while (0)
 
-static inline void set_user_asce(struct mm_struct *mm)
-{
-	S390_lowcore.user_asce = mm->context.asce;
-	if (current->thread.mm_segment.ar4)
-		__ctl_load(S390_lowcore.user_asce, 7, 7);
-	set_cpu_flag(CIF_ASCE);
-}
-
-static inline void clear_user_asce(void)
-{
-	S390_lowcore.user_asce = S390_lowcore.kernel_asce;
-
-	__ctl_load(S390_lowcore.user_asce, 1, 1);
-	__ctl_load(S390_lowcore.user_asce, 7, 7);
-}
-
-static inline void load_kernel_asce(void)
+static inline void update_primary_asce(struct task_struct *tsk)
 {
 	unsigned long asce;
 
 	__ctl_store(asce, 1, 1);
 	if (asce != S390_lowcore.kernel_asce)
 		__ctl_load(S390_lowcore.kernel_asce, 1, 1);
-	set_cpu_flag(CIF_ASCE);
+	set_tsk_thread_flag(tsk, TIF_ASCE);
+}
+
+static inline void update_mm(struct mm_struct *mm, struct task_struct *tsk)
+{
+	S390_lowcore.user_asce = mm->context.asce;
+	set_fs(current->thread.mm_segment);
+	update_primary_asce(tsk);
 }
 
 static inline void switch_mm(struct mm_struct *prev, struct mm_struct *next,
 			     struct task_struct *tsk)
 {
-	int cpu = smp_processor_id();
-
-	S390_lowcore.user_asce = next->context.asce;
-	if (prev == next)
-		return;
-	cpumask_set_cpu(cpu, &next->context.cpu_attach_mask);
-	/* Clear old ASCE by loading the kernel ASCE. */
-	__ctl_load(S390_lowcore.kernel_asce, 1, 1);
-	__ctl_load(S390_lowcore.kernel_asce, 7, 7);
-	cpumask_clear_cpu(cpu, &prev->context.cpu_attach_mask);
-}
-
-#define finish_arch_post_lock_switch finish_arch_post_lock_switch
-static inline void finish_arch_post_lock_switch(void)
-{
-	struct task_struct *tsk = current;
-	struct mm_struct *mm = tsk->mm;
-
-	load_kernel_asce();
-	if (mm) {
-		preempt_disable();
-		while (atomic_read(&mm->context.flush_count))
-			cpu_relax();
-		cpumask_set_cpu(smp_processor_id(), mm_cpumask(mm));
-		__tlb_flush_mm_lazy(mm);
-		preempt_enable();
-	}
-	set_fs(current->thread.mm_segment);
+	cpumask_set_cpu(smp_processor_id(), mm_cpumask(next));
+	update_mm(next, tsk);
+	atomic_dec(&prev->context.attach_count);
+	WARN_ON(atomic_read(&prev->context.attach_count) < 0);
+	atomic_inc(&next->context.attach_count);
+	/* Check for TLBs not flushed yet */
+	__tlb_flush_mm_lazy(next);
 }
 
 #define enter_lazy_tlb(mm,tsk)	do { } while (0)
@@ -124,9 +84,7 @@ static inline void finish_arch_post_lock_switch(void)
 static inline void activate_mm(struct mm_struct *prev,
                                struct mm_struct *next)
 {
-	switch_mm(prev, next, current);
-	cpumask_set_cpu(smp_processor_id(), mm_cpumask(next));
-	set_user_asce(next);
+        switch_mm(prev, next, current);
 }
 
 static inline void arch_dup_mmap(struct mm_struct *oldmm,

@@ -161,6 +161,7 @@ the driver can specify that only MSI or MSI-X is acceptable:
 The following old APIs to enable and disable MSI or MSI-X interrupts should
 not be used in new code:
 
+
   pci_enable_msi()		/* deprecated */
   pci_enable_msi_range()	/* deprecated */
   pci_enable_msi_exact()	/* deprecated */
@@ -186,9 +187,18 @@ necessary to disable interrupts (Linux guarantees the same interrupt will
 not be re-entered).  If a device uses multiple interrupts, the driver
 must disable interrupts while the lock is held.  If the device sends
 a different interrupt, the driver will deadlock trying to recursively
-acquire the spinlock.  Such deadlocks can be avoided by using
-spin_lock_irqsave() or spin_lock_irq() which disable local interrupts
-and acquire the lock (see Documentation/DocBook/kernel-locking).
+acquire the spinlock.
+
+There are two solutions.  The first is to take the lock with
+spin_lock_irqsave() or spin_lock_irq() (see
+Documentation/DocBook/kernel-locking).  The second is to specify
+IRQF_DISABLED to request_irq() so that the kernel runs the entire
+interrupt routine with interrupts disabled.
+
+If your MSI interrupt routine does not hold the lock for the whole time
+it is running, the first solution may be best.  The second solution is
+normally preferred as it avoids making two transitions from interrupt
+disabled to enabled and back again.
 
 4.5 How to tell whether MSI/MSI-X is enabled on a device
 
@@ -252,7 +262,7 @@ Some devices are known to have faulty MSI implementations.  Usually this
 is handled in the individual device driver, but occasionally it's necessary
 to handle this with a quirk.  Some drivers have an option to disable use
 of MSI.  While this is a convenient workaround for the driver author,
-it is not good practice, and should not be emulated.
+it is not good practise, and should not be emulated.
 
 5.4. Finding why MSIs are disabled on a device
 

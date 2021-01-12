@@ -15,7 +15,6 @@
 #include <linux/bug.h>
 #include <linux/nmi.h>
 #include <linux/sysfs.h>
-#include <linux/kasan.h>
 
 #include <asm/stacktrace.h>
 #include <asm/unwind.h>
@@ -23,7 +22,6 @@
 int panic_on_unrecovered_nmi;
 int panic_on_io_nmi;
 unsigned int code_bytes = 64;
-int kstack_depth_to_print = 3 * STACKSLOTS_PER_LINE;
 static int die_counter;
 
 bool in_task_stack(unsigned long *stack, struct task_struct *task,
@@ -68,6 +66,7 @@ void show_trace_log_lvl(struct task_struct *task, struct pt_regs *regs,
 	printk("%sCall Trace:\n", log_lvl);
 
 	unwind_start(&state, task, regs, stack);
+	stack = stack ? : get_stack_pointer(task, regs);
 
 	/*
 	 * Iterate through the stacks, starting with the current stack pointer.
@@ -113,7 +112,7 @@ void show_trace_log_lvl(struct task_struct *task, struct pt_regs *regs,
 		for (; stack < stack_info.end; stack++) {
 			unsigned long real_addr;
 			int reliable = 0;
-			unsigned long addr = READ_ONCE_NOCHECK(*stack);
+			unsigned long addr = *stack;
 			unsigned long *ret_addr_p =
 				unwind_get_return_address_ptr(&state);
 
@@ -165,19 +164,14 @@ void show_stack(struct task_struct *task, unsigned long *sp)
 	if (!sp && task == current)
 		sp = get_stack_pointer(current, NULL);
 
-	show_stack_log_lvl(task, NULL, sp, "");
-}
-
-void show_stack_regs(struct pt_regs *regs)
-{
-	show_stack_log_lvl(current, regs, NULL, "");
+	show_trace_log_lvl(task, NULL, sp, "");
 }
 
 static arch_spinlock_t die_lock = __ARCH_SPIN_LOCK_UNLOCKED;
 static int die_owner = -1;
 static unsigned int die_nest_count;
 
-unsigned long oops_begin(void)
+unsigned __kprobes long oops_begin(void)
 {
 	int cpu;
 	unsigned long flags;
@@ -200,11 +194,8 @@ unsigned long oops_begin(void)
 	return flags;
 }
 EXPORT_SYMBOL_GPL(oops_begin);
-NOKPROBE_SYMBOL(oops_begin);
 
-void __noreturn rewind_stack_do_exit(int signr);
-
-void oops_end(unsigned long flags, struct pt_regs *regs, int signr)
+void __kprobes oops_end(unsigned long flags, struct pt_regs *regs, int signr)
 {
 	if (regs && kexec_should_crash(current))
 		crash_kexec(regs);
@@ -225,32 +216,26 @@ void oops_end(unsigned long flags, struct pt_regs *regs, int signr)
 		panic("Fatal exception in interrupt");
 	if (panic_on_oops)
 		panic("Fatal exception");
-
-	/*
-	 * We're not going to return, but we might be on an IST stack or
-	 * have very little stack space left.  Rewind the stack and kill
-	 * the task.
-	 * Before we rewind the stack, we have to tell KASAN that we're going to
-	 * reuse the task stack and that existing poisons are invalid.
-	 */
-	kasan_unpoison_task_stack(current);
-	rewind_stack_do_exit(signr);
+	do_exit(signr);
 }
-NOKPROBE_SYMBOL(oops_end);
 
-int __die(const char *str, struct pt_regs *regs, long err)
+int __kprobes __die(const char *str, struct pt_regs *regs, long err)
 {
 #ifdef CONFIG_X86_32
 	unsigned short ss;
 	unsigned long sp;
 #endif
 	printk(KERN_DEFAULT
-	       "%s: %04lx [#%d]%s%s%s%s\n", str, err & 0xffff, ++die_counter,
-	       IS_ENABLED(CONFIG_PREEMPT) ? " PREEMPT"         : "",
-	       IS_ENABLED(CONFIG_SMP)     ? " SMP"             : "",
-	       debug_pagealloc_enabled()  ? " DEBUG_PAGEALLOC" : "",
-	       IS_ENABLED(CONFIG_KASAN)   ? " KASAN"           : "");
-
+	       "%s: %04lx [#%d] ", str, err & 0xffff, ++die_counter);
+#ifdef CONFIG_PREEMPT
+	printk("PREEMPT ");
+#endif
+#ifdef CONFIG_SMP
+	printk("SMP ");
+#endif
+	if (debug_pagealloc_enabled())
+		printk("DEBUG_PAGEALLOC");
+	printk("\n");
 	if (notify_die(DIE_OOPS, str, regs, err,
 			current->thread.trap_nr, SIGSEGV) == NOTIFY_STOP)
 		return 1;
@@ -258,7 +243,7 @@ int __die(const char *str, struct pt_regs *regs, long err)
 	print_modules();
 	show_regs(regs);
 #ifdef CONFIG_X86_32
-	if (user_mode(regs)) {
+	if (user_mode_vm(regs)) {
 		sp = regs->sp;
 		ss = regs->ss & 0xffff;
 	} else {
@@ -276,7 +261,6 @@ int __die(const char *str, struct pt_regs *regs, long err)
 #endif
 	return 0;
 }
-NOKPROBE_SYMBOL(__die);
 
 /*
  * This is gone through when something in the kernel has done something bad
@@ -287,29 +271,13 @@ void die(const char *str, struct pt_regs *regs, long err)
 	unsigned long flags = oops_begin();
 	int sig = SIGSEGV;
 
-	if (!user_mode(regs))
+	if (!user_mode_vm(regs))
 		report_bug(regs->ip, regs);
 
 	if (__die(str, regs, err))
 		sig = 0;
 	oops_end(flags, regs, sig);
 }
-
-static int __init kstack_setup(char *s)
-{
-	ssize_t ret;
-	unsigned long val;
-
-	if (!s)
-		return -EINVAL;
-
-	ret = kstrtoul(s, 0, &val);
-	if (ret)
-		return ret;
-	kstack_depth_to_print = val;
-	return 0;
-}
-early_param("kstack", kstack_setup);
 
 static int __init code_bytes_setup(char *s)
 {

@@ -11,6 +11,7 @@
 #include <linux/log2.h>
 #include <linux/typecheck.h>
 #include <linux/printk.h>
+#include <linux/dynamic_debug.h>
 #include <asm/byteorder.h>
 #include <uapi/linux/kernel.h>
 
@@ -45,6 +46,7 @@
 
 #define REPEAT_BYTE(x)	((~0ul / 0xff) * (x))
 
+/* @a is a power of 2 value */
 #define ALIGN(x, a)		__ALIGN_KERNEL((x), (a))
 #define ALIGN_DOWN(x, a)	__ALIGN_KERNEL((x) - ((a) - 1), (a))
 #define __ALIGN_MASK(x, mask)	__ALIGN_KERNEL_MASK((x), (mask))
@@ -55,8 +57,8 @@
 
 #define u64_to_user_ptr(x) (		\
 {					\
-	typecheck(u64, (x));		\
-	(void __user *)(uintptr_t)(x);	\
+	typecheck(u64, x);		\
+	(void __user *)(uintptr_t)x;	\
 }					\
 )
 
@@ -72,8 +74,11 @@
 
 #define FIELD_SIZEOF(t, f) (sizeof(((t*)0)->f))
 #define DIV_ROUND_UP __KERNEL_DIV_ROUND_UP
-#define DIV_ROUND_UP_ULL(ll,d) \
-	({ unsigned long long _tmp = (ll)+(d)-1; do_div(_tmp, d); _tmp; })
+
+#define DIV_ROUND_DOWN_ULL(ll, d) \
+	({ unsigned long long _tmp = (ll); do_div(_tmp, d); _tmp; })
+
+#define DIV_ROUND_UP_ULL(ll, d)		DIV_ROUND_DOWN_ULL((ll) + (d) - 1, (d))
 
 #if BITS_PER_LONG == 32
 # define DIV_ROUND_UP_SECTOR_T(ll,d) DIV_ROUND_UP_ULL(ll, d)
@@ -181,7 +186,6 @@ extern int _cond_resched(void);
 #endif
 
 #ifdef CONFIG_DEBUG_ATOMIC_SLEEP
-  void ___might_sleep(const char *file, int line, int preempt_offset);
   void __might_sleep(const char *file, int line, int preempt_offset);
 /**
  * might_sleep - annotation for functions that can sleep
@@ -195,40 +199,39 @@ extern int _cond_resched(void);
  */
 # define might_sleep() \
 	do { __might_sleep(__FILE__, __LINE__, 0); might_resched(); } while (0)
-# define sched_annotate_sleep()	(current->task_state_change = 0)
 #else
-  static inline void ___might_sleep(const char *file, int line,
-				   int preempt_offset) { }
   static inline void __might_sleep(const char *file, int line,
 				   int preempt_offset) { }
 # define might_sleep() do { might_resched(); } while (0)
-# define sched_annotate_sleep() do { } while (0)
 #endif
 
 #define might_sleep_if(cond) do { if (cond) might_sleep(); } while (0)
 
 /**
  * abs - return absolute value of an argument
- * @x: the value.  If it is unsigned type, it is converted to signed type first.
- *     char is treated as if it was signed (regardless of whether it really is)
- *     but the macro's return type is preserved as char.
+ * @x: the value.  If it is unsigned type, it is converted to signed type first
+ *   (s64, long or int depending on its size).
  *
- * Return: an absolute value of x.
+ * Return: an absolute value of x.  If x is 64-bit, macro's return type is s64,
+ *   otherwise it is signed long.
  */
-#define abs(x)	__abs_choose_expr(x, long long,				\
-		__abs_choose_expr(x, long,				\
-		__abs_choose_expr(x, int,				\
-		__abs_choose_expr(x, short,				\
-		__abs_choose_expr(x, char,				\
-		__builtin_choose_expr(					\
-			__builtin_types_compatible_p(typeof(x), char),	\
-			(char)({ signed char __x = (x); __x<0?-__x:__x; }), \
-			((void)0)))))))
+#define abs(x) __builtin_choose_expr(sizeof(x) == sizeof(s64), ({	\
+		s64 __x = (x);						\
+		(__x < 0) ? -__x : __x;					\
+	}), ({								\
+		long ret;						\
+		if (sizeof(x) == sizeof(long)) {			\
+			long __x = (x);					\
+			ret = (__x < 0) ? -__x : __x;			\
+		} else {						\
+			int __x = (x);					\
+			ret = (__x < 0) ? -__x : __x;			\
+		}							\
+		ret;							\
+	}))
 
-#define __abs_choose_expr(x, type, other) __builtin_choose_expr(	\
-	__builtin_types_compatible_p(typeof(x),   signed type) ||	\
-	__builtin_types_compatible_p(typeof(x), unsigned type),		\
-	({ signed type __x = (x); __x < 0 ? -__x : __x; }), other)
+/* Deprecated, use abs instead. */
+#define abs64(x) abs((s64)(x))
 
 /**
  * reciprocal_scale - "scale" a value into range [0, ep_ro)
@@ -249,8 +252,7 @@ static inline u32 reciprocal_scale(u32 val, u32 ep_ro)
 	return (u32)(((u64) val * ep_ro) >> 32);
 }
 
-#if defined(CONFIG_MMU) && \
-	(defined(CONFIG_PROVE_LOCKING) || defined(CONFIG_DEBUG_ATOMIC_SLEEP))
+#if defined(CONFIG_PROVE_LOCKING) || defined(CONFIG_DEBUG_ATOMIC_SLEEP)
 #define might_fault() __might_fault(__FILE__, __LINE__)
 void __might_fault(const char *file, int line);
 #else
@@ -260,14 +262,17 @@ static inline void might_fault(void) { }
 extern struct atomic_notifier_head panic_notifier_list;
 extern long (*panic_blink)(int state);
 __printf(1, 2)
-void panic(const char *fmt, ...) __noreturn __cold;
+void panic(const char *fmt, ...)
+	__noreturn __cold;
 void nmi_panic(struct pt_regs *regs, const char *msg);
 extern void oops_enter(void);
 extern void oops_exit(void);
 void print_oops_end_marker(void);
 extern int oops_may_print(void);
-void do_exit(long error_code) __noreturn;
-void complete_and_exit(struct completion *, long) __noreturn;
+void do_exit(long error_code)
+	__noreturn;
+void complete_and_exit(struct completion *, long)
+	__noreturn;
 
 /* Internal, do not use. */
 int __must_check _kstrtoul(const char *s, unsigned int base, unsigned long *res);
@@ -401,6 +406,10 @@ extern unsigned long simple_strtoul(const char *,char **,unsigned int);
 extern long simple_strtol(const char *,char **,unsigned int);
 extern unsigned long long simple_strtoull(const char *,char **,unsigned int);
 extern long long simple_strtoll(const char *,char **,unsigned int);
+#define strict_strtoul	kstrtoul
+#define strict_strtol	kstrtol
+#define strict_strtoull	kstrtoull
+#define strict_strtoll	kstrtoll
 
 extern int num_to_str(char *buf, int size, unsigned long long num);
 
@@ -416,10 +425,9 @@ extern __printf(3, 4)
 int scnprintf(char *buf, size_t size, const char *fmt, ...);
 extern __printf(3, 0)
 int vscnprintf(char *buf, size_t size, const char *fmt, va_list args);
-extern __printf(2, 3) __malloc
+extern __printf(2, 3)
 char *kasprintf(gfp_t gfp, const char *fmt, ...);
-extern __printf(2, 0) __malloc
-char *kvasprintf(gfp_t gfp, const char *fmt, va_list args);
+extern char *kvasprintf(gfp_t gfp, const char *fmt, va_list args);
 extern __printf(2, 0)
 const char *kvasprintf_const(gfp_t gfp, const char *fmt, va_list args);
 
@@ -432,12 +440,16 @@ extern int get_option(char **str, int *pint);
 extern char *get_options(const char *str, int nints, int *ints);
 extern unsigned long long memparse(const char *ptr, char **retptr);
 extern bool parse_option_str(const char *str, const char *option);
+extern char *next_arg(char *args, char **param, char **val);
 
 extern int core_kernel_text(unsigned long addr);
 extern int core_kernel_data(unsigned long addr);
 extern int __kernel_text_address(unsigned long addr);
 extern int kernel_text_address(unsigned long addr);
 extern int func_ptr_is_kernel_text(void *ptr);
+
+struct pid;
+extern struct pid *session_of_pgrp(struct pid *pgrp);
 
 unsigned long int_sqrt(unsigned long);
 
@@ -493,7 +505,7 @@ extern enum system_states {
 
 #define TAINT_PROPRIETARY_MODULE	0
 #define TAINT_FORCED_MODULE		1
-#define TAINT_CPU_OUT_OF_SPEC		2
+#define TAINT_UNSAFE_SMP		2
 #define TAINT_FORCED_RMMOD		3
 #define TAINT_MACHINE_CHECK		4
 #define TAINT_BAD_PAGE			5
@@ -507,6 +519,33 @@ extern enum system_states {
 #define TAINT_UNSIGNED_MODULE		13
 #define TAINT_SOFTLOCKUP		14
 #define TAINT_LIVEPATCH			15
+#define TAINT_16			16
+#define TAINT_17			17
+#define TAINT_18			18
+#define TAINT_19			19
+#define TAINT_20			20
+#define TAINT_21			21
+#define TAINT_22			22
+#define TAINT_23			23
+#define TAINT_24			24
+#define TAINT_25			25
+#define TAINT_26			26
+#define TAINT_27			27
+/* Reserving bits for vendor specific uses */
+#define TAINT_HARDWARE_UNSUPPORTED	28
+#define TAINT_TECH_PREVIEW		29
+/* Bits 30 - 31 are reserved for Red Hat use only */
+#define TAINT_RESERVED30		30
+#define TAINT_RESERVED31		31
+#define TAINT_FLAGS_COUNT		32
+
+struct taint_flag {
+	char c_true;	/* character printed when tainted */
+	char c_false;	/* character printed when not tainted */
+	bool module;	/* also show as a per-module taint flag */
+};
+
+extern const struct taint_flag taint_flags[TAINT_FLAGS_COUNT];
 
 extern const char hex_asc[];
 #define hex_asc_lo(x)	hex_asc[((x) & 0x0f)]
@@ -530,11 +569,14 @@ static inline char *hex_byte_pack_upper(char *buf, u8 byte)
 	return buf;
 }
 
+static inline char * __deprecated pack_hex_byte(char *buf, u8 byte)
+{
+	return hex_byte_pack(buf, byte);
+}
+
 extern int hex_to_bin(char ch);
 extern int __must_check hex2bin(u8 *dst, const char *src, size_t count);
 extern char *bin2hex(char *dst, const void *src, size_t count);
-
-bool mac_pton(const char *s, u8 *mac);
 
 /*
  * General tracing related utility functions - trace_printk(),
@@ -555,6 +597,12 @@ bool mac_pton(const char *s, u8 *mac);
  *
  * Most likely, you want to use tracing_on/tracing_off.
  */
+#ifdef CONFIG_RING_BUFFER
+/* trace_off_permanent stops recording with no way to bring it back */
+void tracing_off_permanent(void);
+#else
+static inline void tracing_off_permanent(void) { }
+#endif
 
 enum ftrace_dump_mode {
 	DUMP_NONE,
@@ -623,7 +671,7 @@ do {							\
 
 #define do_trace_printk(fmt, args...)					\
 do {									\
-	static const char *trace_printk_fmt __used			\
+	static const char *trace_printk_fmt				\
 		__attribute__((section("__trace_printk_fmt"))) =	\
 		__builtin_constant_p(fmt) ? fmt : NULL;			\
 									\
@@ -640,6 +688,9 @@ int __trace_bprintk(unsigned long ip, const char *fmt, ...);
 
 extern __printf(2, 3)
 int __trace_printk(unsigned long ip, const char *fmt, ...);
+
+extern int __trace_bputs(unsigned long ip, const char *str);
+extern int __trace_puts(unsigned long ip, const char *str, int size);
 
 /**
  * trace_puts - write a string into the ftrace buffer
@@ -667,7 +718,7 @@ int __trace_printk(unsigned long ip, const char *fmt, ...);
  */
 
 #define trace_puts(str) ({						\
-	static const char *trace_printk_fmt __used			\
+	static const char *trace_printk_fmt				\
 		__attribute__((section("__trace_printk_fmt"))) =	\
 		__builtin_constant_p(str) ? str : NULL;			\
 									\
@@ -676,8 +727,6 @@ int __trace_printk(unsigned long ip, const char *fmt, ...);
 	else								\
 		__trace_puts(_THIS_IP_, str, strlen(str));		\
 })
-extern int __trace_bputs(unsigned long ip, const char *str);
-extern int __trace_puts(unsigned long ip, const char *str, int size);
 
 extern void trace_dump_stack(int skip);
 
@@ -689,7 +738,7 @@ extern void trace_dump_stack(int skip);
 #define ftrace_vprintk(fmt, vargs)					\
 do {									\
 	if (__builtin_constant_p(fmt)) {				\
-		static const char *trace_printk_fmt __used		\
+		static const char *trace_printk_fmt			\
 		  __attribute__((section("__trace_printk_fmt"))) =	\
 			__builtin_constant_p(fmt) ? fmt : NULL;		\
 									\
@@ -698,17 +747,17 @@ do {									\
 		__ftrace_vprintk(_THIS_IP_, fmt, vargs);		\
 } while (0)
 
-extern __printf(2, 0) int
+extern int
 __ftrace_vbprintk(unsigned long ip, const char *fmt, va_list ap);
 
-extern __printf(2, 0) int
+extern int
 __ftrace_vprintk(unsigned long ip, const char *fmt, va_list ap);
 
 extern void ftrace_dump(enum ftrace_dump_mode oops_dump_mode);
 #else
 static inline void tracing_start(void) { }
 static inline void tracing_stop(void) { }
-static inline void trace_dump_stack(int skip) { }
+static inline void trace_dump_stack(void) { }
 
 static inline void tracing_on(void) { }
 static inline void tracing_off(void) { }
@@ -721,7 +770,7 @@ int trace_printk(const char *fmt, ...)
 {
 	return 0;
 }
-static __printf(1, 0) inline int
+static inline int
 ftrace_vprintk(const char *fmt, va_list ap)
 {
 	return 0;
@@ -734,28 +783,35 @@ static inline void ftrace_dump(enum ftrace_dump_mode oops_dump_mode) { }
  * strict type-checking.. See the
  * "unnecessary" pointer comparison.
  */
-#define __min(t1, t2, min1, min2, x, y) ({		\
-	t1 min1 = (x);					\
-	t2 min2 = (y);					\
-	(void) (&min1 == &min2);			\
-	min1 < min2 ? min1 : min2; })
-#define min(x, y)					\
-	__min(typeof(x), typeof(y),			\
-	      __UNIQUE_ID(min1_), __UNIQUE_ID(min2_),	\
-	      x, y)
+#define min(x, y) ({				\
+	typeof(x) _min1 = (x);			\
+	typeof(y) _min2 = (y);			\
+	(void) (&_min1 == &_min2);		\
+	_min1 < _min2 ? _min1 : _min2; })
 
-#define __max(t1, t2, max1, max2, x, y) ({		\
-	t1 max1 = (x);					\
-	t2 max2 = (y);					\
-	(void) (&max1 == &max2);			\
-	max1 > max2 ? max1 : max2; })
-#define max(x, y)					\
-	__max(typeof(x), typeof(y),			\
-	      __UNIQUE_ID(max1_), __UNIQUE_ID(max2_),	\
-	      x, y)
+#define max(x, y) ({				\
+	typeof(x) _max1 = (x);			\
+	typeof(y) _max2 = (y);			\
+	(void) (&_max1 == &_max2);		\
+	_max1 > _max2 ? _max1 : _max2; })
 
-#define min3(x, y, z) min((typeof(x))min(x, y), z)
-#define max3(x, y, z) max((typeof(x))max(x, y), z)
+#define min3(x, y, z) ({			\
+	typeof(x) _min1 = (x);			\
+	typeof(y) _min2 = (y);			\
+	typeof(z) _min3 = (z);			\
+	(void) (&_min1 == &_min2);		\
+	(void) (&_min1 == &_min3);		\
+	_min1 < _min2 ? (_min1 < _min3 ? _min1 : _min3) : \
+		(_min2 < _min3 ? _min2 : _min3); })
+
+#define max3(x, y, z) ({			\
+	typeof(x) _max1 = (x);			\
+	typeof(y) _max2 = (y);			\
+	typeof(z) _max3 = (z);			\
+	(void) (&_max1 == &_max2);		\
+	(void) (&_max1 == &_max3);		\
+	_max1 > _max2 ? (_max1 > _max3 ? _max1 : _max3) : \
+		(_max2 > _max3 ? _max2 : _max3); })
 
 /**
  * min_not_zero - return the minimum that is _not_ zero, unless both are zero
@@ -770,13 +826,20 @@ static inline void ftrace_dump(enum ftrace_dump_mode oops_dump_mode) { }
 /**
  * clamp - return a value clamped to a given range with strict typechecking
  * @val: current value
- * @lo: lowest allowable value
- * @hi: highest allowable value
+ * @min: minimum allowable value
+ * @max: maximum allowable value
  *
- * This macro does strict typechecking of lo/hi to make sure they are of the
+ * This macro does strict typechecking of min/max to make sure they are of the
  * same type as val.  See the unnecessary pointer comparisons.
  */
-#define clamp(val, lo, hi) min((typeof(val))max(val, lo), hi)
+#define clamp(val, min, max) ({			\
+	typeof(val) __val = (val);		\
+	typeof(min) __min = (min);		\
+	typeof(max) __max = (max);		\
+	(void) (&__val == &__min);		\
+	(void) (&__val == &__max);		\
+	__val = __val < __min ? __min: __val;	\
+	__val > __max ? __max: __val; })
 
 /*
  * ..and if you can't take the strict
@@ -784,40 +847,50 @@ static inline void ftrace_dump(enum ftrace_dump_mode oops_dump_mode) { }
  *
  * Or not use min/max/clamp at all, of course.
  */
-#define min_t(type, x, y)				\
-	__min(type, type,				\
-	      __UNIQUE_ID(min1_), __UNIQUE_ID(min2_),	\
-	      x, y)
+#define min_t(type, x, y) ({			\
+	type __min1 = (x);			\
+	type __min2 = (y);			\
+	__min1 < __min2 ? __min1: __min2; })
 
-#define max_t(type, x, y)				\
-	__max(type, type,				\
-	      __UNIQUE_ID(min1_), __UNIQUE_ID(min2_),	\
-	      x, y)
+#define max_t(type, x, y) ({			\
+	type __max1 = (x);			\
+	type __max2 = (y);			\
+	__max1 > __max2 ? __max1: __max2; })
 
 /**
  * clamp_t - return a value clamped to a given range using a given type
  * @type: the type of variable to use
  * @val: current value
- * @lo: minimum allowable value
- * @hi: maximum allowable value
+ * @min: minimum allowable value
+ * @max: maximum allowable value
  *
  * This macro does no typechecking and uses temporary variables of type
  * 'type' to make all the comparisons.
  */
-#define clamp_t(type, val, lo, hi) min_t(type, max_t(type, val, lo), hi)
+#define clamp_t(type, val, min, max) ({		\
+	type __val = (val);			\
+	type __min = (min);			\
+	type __max = (max);			\
+	__val = __val < __min ? __min: __val;	\
+	__val > __max ? __max: __val; })
 
 /**
  * clamp_val - return a value clamped to a given range using val's type
  * @val: current value
- * @lo: minimum allowable value
- * @hi: maximum allowable value
+ * @min: minimum allowable value
+ * @max: maximum allowable value
  *
  * This macro does no typechecking and uses temporary variables of whatever
  * type the input argument 'val' is.  This is useful when val is an unsigned
  * type and min and max are literals that will otherwise be assigned a signed
  * integer type.
  */
-#define clamp_val(val, lo, hi) clamp_t(typeof(val), val, lo, hi)
+#define clamp_val(val, min, max) ({		\
+	typeof(val) __val = (val);		\
+	typeof(val) __min = (min);		\
+	typeof(val) __max = (max);		\
+	__val = __val < __min ? __min: __val;	\
+	__val > __max ? __max: __val; })
 
 
 /*
@@ -837,21 +910,22 @@ static inline void ftrace_dump(enum ftrace_dump_mode oops_dump_mode) { }
 	const typeof( ((type *)0)->member ) *__mptr = (ptr);	\
 	(type *)( (char *)__mptr - offsetof(type,member) );})
 
+/* Trap pasters of __FUNCTION__ at compile-time */
+#define __FUNCTION__ (__func__)
+
 /* Rebuild everything on CONFIG_FTRACE_MCOUNT_RECORD */
 #ifdef CONFIG_FTRACE_MCOUNT_RECORD
 # define REBUILD_DUE_TO_FTRACE_MCOUNT_RECORD
 #endif
 
-/* Permissions on a sysfs file: you didn't miss the 0 prefix did you? */
-#define VERIFY_OCTAL_PERMISSIONS(perms)						\
-	(BUILD_BUG_ON_ZERO((perms) < 0) +					\
-	 BUILD_BUG_ON_ZERO((perms) > 0777) +					\
-	 /* USER_READABLE >= GROUP_READABLE >= OTHER_READABLE */		\
-	 BUILD_BUG_ON_ZERO((((perms) >> 6) & 4) < (((perms) >> 3) & 4)) +	\
-	 BUILD_BUG_ON_ZERO((((perms) >> 3) & 4) < ((perms) & 4)) +		\
-	 /* USER_WRITABLE >= GROUP_WRITABLE */					\
-	 BUILD_BUG_ON_ZERO((((perms) >> 6) & 2) < (((perms) >> 3) & 2)) +	\
-	 /* OTHER_WRITABLE?  Generally considered a bad idea. */		\
-	 BUILD_BUG_ON_ZERO((perms) & 2) +					\
-	 (perms))
+struct module;
+
+void mark_hardware_unsupported(const char *msg);
+void mark_hardware_deprecated(const char *msg);
+void mark_tech_preview(const char *msg, struct module *mod);
+
+#else
+#ifndef pr_fmt
+#define pr_fmt(fmt) fmt
+#endif
 #endif

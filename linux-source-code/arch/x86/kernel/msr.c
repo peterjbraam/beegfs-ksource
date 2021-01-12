@@ -22,8 +22,6 @@
  * an SMP box will direct the access to CPU %d.
  */
 
-#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
-
 #include <linux/module.h>
 
 #include <linux/types.h>
@@ -39,6 +37,7 @@
 #include <linux/notifier.h>
 #include <linux/uaccess.h>
 #include <linux/gfp.h>
+#include <linux/security.h>
 
 #include <asm/cpufeature.h>
 #include <asm/msr.h>
@@ -82,6 +81,9 @@ static ssize_t msr_write(struct file *file, const char __user *buf,
 	int cpu = iminor(file_inode(file));
 	int err = 0;
 	ssize_t bytes = 0;
+
+	if (get_securelevel() > 0)
+		return -EPERM;
 
 	if (count % 8)
 		return -EINVAL;	/* Invalid chunk size */
@@ -128,6 +130,10 @@ static long msr_ioctl(struct file *file, unsigned int ioc, unsigned long arg)
 	case X86_IOC_WRMSR_REGS:
 		if (!(file->f_mode & FMODE_WRITE)) {
 			err = -EBADF;
+			break;
+		}
+		if (get_securelevel() > 0) {
+			err = -EPERM;
 			break;
 		}
 		if (copy_from_user(&regs, uregs, sizeof regs)) {
@@ -186,7 +192,7 @@ static int msr_device_create(int cpu)
 
 	dev = device_create(msr_class, NULL, MKDEV(MSR_MAJOR, cpu), NULL,
 			    "msr%d", cpu);
-	return PTR_ERR_OR_ZERO(dev);
+	return IS_ERR(dev) ? PTR_ERR(dev) : 0;
 }
 
 static void msr_device_destroy(int cpu)
@@ -228,7 +234,8 @@ static int __init msr_init(void)
 	i = 0;
 
 	if (__register_chrdev(MSR_MAJOR, 0, NR_CPUS, "cpu/msr", &msr_fops)) {
-		pr_err("unable to get major %d for msr\n", MSR_MAJOR);
+		printk(KERN_ERR "msr: unable to get major %d for msr\n",
+		       MSR_MAJOR);
 		err = -EBUSY;
 		goto out;
 	}

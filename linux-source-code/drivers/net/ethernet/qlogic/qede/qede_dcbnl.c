@@ -105,7 +105,7 @@ static u8 qede_dcbnl_getpfcstate(struct net_device *netdev)
 	return edev->ops->dcb->getpfcstate(edev->cdev);
 }
 
-static int qede_dcbnl_getapp(struct net_device *netdev, u8 idtype, u16 id)
+static u8 qede_dcbnl_getapp(struct net_device *netdev, u8 idtype, u16 id)
 {
 	struct qede_dev *edev = netdev_priv(netdev);
 
@@ -174,8 +174,8 @@ static void qede_dcbnl_setpfcstate(struct net_device *netdev, u8 state)
 	return edev->ops->dcb->setpfcstate(edev->cdev, state);
 }
 
-static int qede_dcbnl_setapp(struct net_device *netdev, u8 idtype, u16 idval,
-			     u8 up)
+static u8 qede_dcbnl_setapp(struct net_device *netdev, u8 idtype, u16 idval,
+			    u8 up)
 {
 	struct qede_dev *edev = netdev_priv(netdev);
 
@@ -281,6 +281,11 @@ static int qede_dcbnl_ieee_setapp(struct net_device *netdev,
 				  struct dcb_app *app)
 {
 	struct qede_dev *edev = netdev_priv(netdev);
+	int err;
+
+	err = dcb_ieee_setapp(netdev, app);
+	if (err)
+		return err;
 
 	return edev->ops->dcb->ieee_setapp(edev->cdev, app);
 }
@@ -308,7 +313,6 @@ static const struct dcbnl_rtnl_ops qede_dcbnl_ops = {
 	.ieee_setets = qede_dcbnl_ieee_setets,
 	.ieee_getapp = qede_dcbnl_ieee_getapp,
 	.ieee_setapp = qede_dcbnl_ieee_setapp,
-	.getdcbx = qede_dcbnl_getdcbx,
 	.ieee_peer_getpfc = qede_dcbnl_ieee_peer_getpfc,
 	.ieee_peer_getets = qede_dcbnl_ieee_peer_getets,
 	.getstate = qede_dcbnl_getstate,

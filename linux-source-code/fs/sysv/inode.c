@@ -60,7 +60,6 @@ static int sysv_remount(struct super_block *sb, int *flags, char *data)
 {
 	struct sysv_sb_info *sbi = SYSV_SB(sb);
 
-	sync_filesystem(sb);
 	if (sbi->s_forced_ro)
 		*flags |= MS_RDONLY;
 	return 0;
@@ -146,7 +145,8 @@ static inline void write3byte(struct sysv_sb_info *sbi,
 
 static const struct inode_operations sysv_symlink_inode_operations = {
 	.readlink	= generic_readlink,
-	.get_link	= page_get_link,
+	.follow_link	= page_follow_link_light,
+	.put_link	= page_put_link,
 	.getattr	= sysv_getattr,
 };
 
@@ -161,9 +161,14 @@ void sysv_set_inode(struct inode *inode, dev_t rdev)
 		inode->i_fop = &sysv_dir_operations;
 		inode->i_mapping->a_ops = &sysv_aops;
 	} else if (S_ISLNK(inode->i_mode)) {
-		inode->i_op = &sysv_symlink_inode_operations;
-		inode_nohighmem(inode);
-		inode->i_mapping->a_ops = &sysv_aops;
+		if (inode->i_blocks) {
+			inode->i_op = &sysv_symlink_inode_operations;
+			inode->i_mapping->a_ops = &sysv_aops;
+		} else {
+			inode->i_op = &sysv_fast_symlink_inode_operations;
+			nd_terminate_link(SYSV_I(inode)->i_data, inode->i_size,
+				sizeof(SYSV_I(inode)->i_data) - 1);
+		}
 	} else
 		init_special_inode(inode, inode->i_mode, rdev);
 }
@@ -275,7 +280,7 @@ static int __sysv_write_inode(struct inode *inode, int wait)
                 }
         }
 	brelse(bh);
-	return err;
+	return 0;
 }
 
 int sysv_write_inode(struct inode *inode, struct writeback_control *wbc)

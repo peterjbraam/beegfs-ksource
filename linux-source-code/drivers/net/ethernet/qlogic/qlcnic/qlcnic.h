@@ -37,8 +37,8 @@
 
 #define _QLCNIC_LINUX_MAJOR 5
 #define _QLCNIC_LINUX_MINOR 3
-#define _QLCNIC_LINUX_SUBVERSION 65
-#define QLCNIC_LINUX_VERSIONID  "5.3.65"
+#define _QLCNIC_LINUX_SUBVERSION 66
+#define QLCNIC_LINUX_VERSIONID  "5.3.66"
 #define QLCNIC_DRV_IDC_VER  0x01
 #define QLCNIC_DRIVER_VERSION  ((_QLCNIC_LINUX_MAJOR << 16) |\
 		 (_QLCNIC_LINUX_MINOR << 8) | (_QLCNIC_LINUX_SUBVERSION))
@@ -1026,8 +1026,10 @@ struct qlcnic_ipaddr {
 #define QLCNIC_HAS_PHYS_PORT_ID		0x40000
 #define QLCNIC_TSS_RSS			0x80000
 
+#ifdef CONFIG_QLCNIC_VXLAN
 #define QLCNIC_ADD_VXLAN_PORT		0x100000
 #define QLCNIC_DEL_VXLAN_PORT		0x200000
+#endif
 
 #define QLCNIC_VLAN_FILTERING		0x800000
 
@@ -1850,17 +1852,17 @@ static inline bool qlcnic_82xx_encap_tx_offload(struct qlcnic_adapter *adapter)
 
 static inline bool qlcnic_82xx_encap_rx_offload(struct qlcnic_adapter *adapter)
 {
-        return false;
+	return false;
 }
 
 static inline bool qlcnic_encap_rx_offload(struct qlcnic_adapter *adapter)
 {
-        return adapter->ahw->hw_ops->encap_rx_offload(adapter);
+	return adapter->ahw->hw_ops->encap_rx_offload(adapter);
 }
 
 static inline bool qlcnic_encap_tx_offload(struct qlcnic_adapter *adapter)
 {
-        return adapter->ahw->hw_ops->encap_tx_offload(adapter);
+	return adapter->ahw->hw_ops->encap_tx_offload(adapter);
 }
 
 static inline int qlcnic_start_firmware(struct qlcnic_adapter *adapter)
@@ -2087,11 +2089,6 @@ static inline void qlcnic_set_mac_filter_count(struct qlcnic_adapter *adapter)
 		adapter->ahw->hw_ops->set_mac_filter_count(adapter);
 }
 
-static inline void qlcnic_get_beacon_state(struct qlcnic_adapter *adapter)
-{
-	adapter->ahw->hw_ops->get_beacon_state(adapter);
-}
-
 static inline void qlcnic_read_phys_port_id(struct qlcnic_adapter *adapter)
 {
 	if (adapter->ahw->hw_ops->read_phys_port_id)
@@ -2132,6 +2129,11 @@ static inline void qlcnic_store_cap_mask(struct qlcnic_adapter *adapter,
 					 void *tmpl_hdr, u32 mask)
 {
 	adapter->ahw->hw_ops->store_cap_mask(tmpl_hdr, mask);
+}
+
+static inline void qlcnic_get_beacon_state(struct qlcnic_adapter *adapter)
+{
+	adapter->ahw->hw_ops->get_beacon_state(adapter);
 }
 
 static inline void qlcnic_dev_request_reset(struct qlcnic_adapter *adapter,

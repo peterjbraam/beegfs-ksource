@@ -124,10 +124,10 @@ static unsigned int icp_native_get_irq(void)
 	unsigned int irq;
 
 	if (vec == XICS_IRQ_SPURIOUS)
-		return 0;
+		return NO_IRQ;
 
 	irq = irq_find_mapping(xics_host, vec);
-	if (likely(irq)) {
+	if (likely(irq != NO_IRQ)) {
 		xics_push_cppr(vec);
 		return irq;
 	}
@@ -138,7 +138,7 @@ static unsigned int icp_native_get_irq(void)
 	/* We might learn about it later, so EOI it */
 	icp_native_set_xirr(xirr);
 
-	return 0;
+	return NO_IRQ;
 }
 
 #ifdef CONFIG_SMP
@@ -147,16 +147,12 @@ static void icp_native_cause_ipi(int cpu, unsigned long data)
 {
 	kvmppc_set_host_ipi(cpu, 1);
 #ifdef CONFIG_PPC_DOORBELL
-	if (cpu_has_feature(CPU_FTR_DBELL)) {
-		if (cpumask_test_cpu(cpu, cpu_sibling_mask(get_cpu()))) {
-			doorbell_cause_ipi(cpu, data);
-			put_cpu();
-			return;
-		}
-		put_cpu();
-	}
+	if (cpu_has_feature(CPU_FTR_DBELL) &&
+	    (cpumask_test_cpu(cpu, cpu_sibling_mask(smp_processor_id()))))
+		doorbell_cause_ipi(cpu, data);
+	else
 #endif
-	icp_native_set_qirr(cpu, IPI_PRIORITY);
+		icp_native_set_qirr(cpu, IPI_PRIORITY);
 }
 
 #ifdef CONFIG_KVM_BOOK3S_HV_POSSIBLE

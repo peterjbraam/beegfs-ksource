@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2016, Intel Corp.
+ * Copyright (C) 2000 - 2013, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -115,7 +115,7 @@ acpi_status acpi_ex_opcode_0A_0T_1R(struct acpi_walk_state *walk_state)
 		break;
 	}
 
-cleanup:
+      cleanup:
 
 	/* Delete return object on error */
 
@@ -234,7 +234,7 @@ acpi_status acpi_ex_opcode_1A_1T_0R(struct acpi_walk_state *walk_state)
 		goto cleanup;
 	}
 
-cleanup:
+      cleanup:
 
 	return_ACPI_STATUS(status);
 }
@@ -484,26 +484,22 @@ acpi_status acpi_ex_opcode_1A_1T_1R(struct acpi_walk_state *walk_state)
 
 	case AML_TO_DECSTRING_OP:	/* to_decimal_string (Data, Result) */
 
-		status =
-		    acpi_ex_convert_to_string(operand[0], &return_desc,
-					      ACPI_EXPLICIT_CONVERT_DECIMAL);
+		status = acpi_ex_convert_to_string(operand[0], &return_desc,
+						   ACPI_EXPLICIT_CONVERT_DECIMAL);
 		if (return_desc == operand[0]) {
 
 			/* No conversion performed, add ref to handle return value */
-
 			acpi_ut_add_reference(return_desc);
 		}
 		break;
 
 	case AML_TO_HEXSTRING_OP:	/* to_hex_string (Data, Result) */
 
-		status =
-		    acpi_ex_convert_to_string(operand[0], &return_desc,
-					      ACPI_EXPLICIT_CONVERT_HEX);
+		status = acpi_ex_convert_to_string(operand[0], &return_desc,
+						   ACPI_EXPLICIT_CONVERT_HEX);
 		if (return_desc == operand[0]) {
 
 			/* No conversion performed, add ref to handle return value */
-
 			acpi_ut_add_reference(return_desc);
 		}
 		break;
@@ -514,7 +510,6 @@ acpi_status acpi_ex_opcode_1A_1T_1R(struct acpi_walk_state *walk_state)
 		if (return_desc == operand[0]) {
 
 			/* No conversion performed, add ref to handle return value */
-
 			acpi_ut_add_reference(return_desc);
 		}
 		break;
@@ -528,7 +523,6 @@ acpi_status acpi_ex_opcode_1A_1T_1R(struct acpi_walk_state *walk_state)
 		if (return_desc == operand[0]) {
 
 			/* No conversion performed, add ref to handle return value */
-
 			acpi_ut_add_reference(return_desc);
 		}
 		break;
@@ -559,7 +553,7 @@ acpi_status acpi_ex_opcode_1A_1T_1R(struct acpi_walk_state *walk_state)
 		status = acpi_ex_store(return_desc, operand[1], walk_state);
 	}
 
-cleanup:
+      cleanup:
 
 	/* Delete return object on error */
 
@@ -687,7 +681,7 @@ acpi_status acpi_ex_opcode_1A_0T_1R(struct acpi_walk_state *walk_state)
 		status = acpi_ex_store(return_desc, operand[0], walk_state);
 		break;
 
-	case AML_OBJECT_TYPE_OP:	/* object_type (source_object) */
+	case AML_TYPE_OP:	/* object_type (source_object) */
 		/*
 		 * Note: The operand is not resolved at this point because we want to
 		 * get the associated object, not its value. For example, we don't
@@ -721,9 +715,9 @@ acpi_status acpi_ex_opcode_1A_0T_1R(struct acpi_walk_state *walk_state)
 
 		/* Get the base object */
 
-		status =
-		    acpi_ex_resolve_multiple(walk_state, operand[0], &type,
-					     &temp_desc);
+		status = acpi_ex_resolve_multiple(walk_state,
+						  operand[0], &type,
+						  &temp_desc);
 		if (ACPI_FAILURE(status)) {
 			goto cleanup;
 		}
@@ -767,10 +761,8 @@ acpi_status acpi_ex_opcode_1A_0T_1R(struct acpi_walk_state *walk_state)
 		default:
 
 			ACPI_ERROR((AE_INFO,
-				    "Operand must be Buffer/Integer/String/Package"
-				    " - found type %s",
+				    "Operand must be Buffer/Integer/String/Package - found type %s",
 				    acpi_ut_get_type_name(type)));
-
 			status = AE_AML_OPERAND_TYPE;
 			goto cleanup;
 		}
@@ -891,16 +883,14 @@ acpi_status acpi_ex_opcode_1A_0T_1R(struct acpi_walk_state *walk_state)
 				 *    Field, so we need to resolve the node to a value.
 				 */
 				status =
-				    acpi_ns_get_node_unlocked(walk_state->
-							      scope_info->scope.
-							      node,
-							      operand[0]->
-							      string.pointer,
-							      ACPI_NS_SEARCH_PARENT,
-							      ACPI_CAST_INDIRECT_PTR
-							      (struct
-							       acpi_namespace_node,
-							       &return_desc));
+				    acpi_ns_get_node(walk_state->scope_info->
+						     scope.node,
+						     operand[0]->string.pointer,
+						     ACPI_NS_SEARCH_PARENT,
+						     ACPI_CAST_INDIRECT_PTR
+						     (struct
+						      acpi_namespace_node,
+						      &return_desc));
 				if (ACPI_FAILURE(status)) {
 					goto cleanup;
 				}
@@ -974,17 +964,10 @@ acpi_status acpi_ex_opcode_1A_0T_1R(struct acpi_walk_state *walk_state)
 					 */
 					return_desc =
 					    *(operand[0]->reference.where);
-					if (!return_desc) {
-						/*
-						 * Element is NULL, do not allow the dereference.
-						 * This provides compatibility with other ACPI
-						 * implementations.
-						 */
-						return_ACPI_STATUS
-						    (AE_AML_UNINITIALIZED_ELEMENT);
+					if (return_desc) {
+						acpi_ut_add_reference
+						    (return_desc);
 					}
-
-					acpi_ut_add_reference(return_desc);
 					break;
 
 				default:
@@ -993,7 +976,6 @@ acpi_status acpi_ex_opcode_1A_0T_1R(struct acpi_walk_state *walk_state)
 						    "Unknown Index TargetType 0x%X in reference object %p",
 						    operand[0]->reference.
 						    target_type, operand[0]));
-
 					status = AE_AML_OPERAND_TYPE;
 					goto cleanup;
 				}
@@ -1010,40 +992,11 @@ acpi_status acpi_ex_opcode_1A_0T_1R(struct acpi_walk_state *walk_state)
 									 acpi_namespace_node
 									 *)
 									return_desc);
-					if (!return_desc) {
-						break;
-					}
-
-					/*
-					 * June 2013:
-					 * buffer_fields/field_units require additional resolution
-					 */
-					switch (return_desc->common.type) {
-					case ACPI_TYPE_BUFFER_FIELD:
-					case ACPI_TYPE_LOCAL_REGION_FIELD:
-					case ACPI_TYPE_LOCAL_BANK_FIELD:
-					case ACPI_TYPE_LOCAL_INDEX_FIELD:
-
-						status =
-						    acpi_ex_read_data_from_field
-						    (walk_state, return_desc,
-						     &temp_desc);
-						if (ACPI_FAILURE(status)) {
-							goto cleanup;
-						}
-
-						return_desc = temp_desc;
-						break;
-
-					default:
-
-						/* Add another reference to the object */
-
-						acpi_ut_add_reference
-						    (return_desc);
-						break;
-					}
 				}
+
+				/* Add another reference to the object! */
+
+				acpi_ut_add_reference(return_desc);
 				break;
 
 			default:
@@ -1063,12 +1016,11 @@ acpi_status acpi_ex_opcode_1A_0T_1R(struct acpi_walk_state *walk_state)
 
 		ACPI_ERROR((AE_INFO, "Unknown AML opcode 0x%X",
 			    walk_state->opcode));
-
 		status = AE_AML_BAD_OPCODE;
 		goto cleanup;
 	}
 
-cleanup:
+      cleanup:
 
 	/* Delete return object on error */
 

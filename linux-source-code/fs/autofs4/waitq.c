@@ -26,14 +26,14 @@ void autofs4_catatonic_mode(struct autofs_sb_info *sbi)
 	struct autofs_wait_queue *wq, *nwq;
 
 	mutex_lock(&sbi->wq_mutex);
-	if (sbi->catatonic) {
+	if (sbi->flags & AUTOFS_SBI_CATATONIC) {
 		mutex_unlock(&sbi->wq_mutex);
 		return;
 	}
 
 	pr_debug("entering catatonic mode\n");
 
-	sbi->catatonic = 1;
+	sbi->flags |= AUTOFS_SBI_CATATONIC;
 	wq = sbi->queues;
 	sbi->queues = NULL;	/* Erase all wait queues */
 	while (wq) {
@@ -67,7 +67,7 @@ static int autofs4_write(struct autofs_sb_info *sbi,
 
 	mutex_lock(&sbi->pipe_mutex);
 	while (bytes) {
-		wr = __vfs_write(file, data, bytes, &file->f_pos);
+		wr = file->f_op->write(file, data, bytes, &file->f_pos);
 		if (wr <= 0)
 			break;
 		data += wr;
@@ -78,7 +78,7 @@ static int autofs4_write(struct autofs_sb_info *sbi,
 	set_fs(fs);
 
 	/* Keep the currently executing process from receiving a
-	 * SIGPIPE unless it was already supposed to get one
+	   SIGPIPE unless it was already supposed to get one
 	 */
 	if (wr == -EPIPE && !sigpipe) {
 		spin_lock_irqsave(&current->sighand->siglock, flags);
@@ -87,8 +87,7 @@ static int autofs4_write(struct autofs_sb_info *sbi,
 		spin_unlock_irqrestore(&current->sighand->siglock, flags);
 	}
 
-	/* if 'wr' returned 0 (impossible) we assume -EIO (safe) */
-	return bytes == 0 ? 0 : wr < 0 ? wr : -EIO;
+	return (bytes > 0);
 }
 
 static void autofs4_notify_daemon(struct autofs_sb_info *sbi,
@@ -102,7 +101,6 @@ static void autofs4_notify_daemon(struct autofs_sb_info *sbi,
 	} pkt;
 	struct file *pipe = NULL;
 	size_t pktsz;
-	int ret;
 
 	pr_debug("wait id = 0x%08lx, name = %.*s, type=%d\n",
 		 (unsigned long) wq->wait_queue_token,
@@ -176,18 +174,8 @@ static void autofs4_notify_daemon(struct autofs_sb_info *sbi,
 
 	mutex_unlock(&sbi->wq_mutex);
 
-	switch (ret = autofs4_write(sbi, pipe, &pkt, pktsz)) {
-	case 0:
-		break;
-	case -ENOMEM:
-	case -ERESTARTSYS:
-		/* Just fail this one */
-		autofs4_wait_release(sbi, wq->wait_queue_token, ret);
-		break;
-	default:
+	if (autofs4_write(sbi, pipe, &pkt, pktsz))
 		autofs4_catatonic_mode(sbi);
-		break;
-	}
 	fput(pipe);
 }
 
@@ -262,12 +250,13 @@ autofs4_find_wait(struct autofs_sb_info *sbi, const struct qstr *qstr)
 static int validate_request(struct autofs_wait_queue **wait,
 			    struct autofs_sb_info *sbi,
 			    const struct qstr *qstr,
-			    struct dentry *dentry, enum autofs_notify notify)
+			    const struct path *path, enum autofs_notify notify)
 {
+	struct dentry *dentry = path->dentry;
 	struct autofs_wait_queue *wq;
 	struct autofs_info *ino;
 
-	if (sbi->catatonic)
+	if (sbi->flags & AUTOFS_SBI_CATATONIC)
 		return -ENOENT;
 
 	/* Wait in progress, continue; */
@@ -302,7 +291,7 @@ static int validate_request(struct autofs_wait_queue **wait,
 			if (mutex_lock_interruptible(&sbi->wq_mutex))
 				return -EINTR;
 
-			if (sbi->catatonic)
+			if (sbi->flags & AUTOFS_SBI_CATATONIC)
 				return -ENOENT;
 
 			wq = autofs4_find_wait(sbi, qstr);
@@ -326,6 +315,7 @@ static int validate_request(struct autofs_wait_queue **wait,
 	 */
 	if (notify == NFY_MOUNT) {
 		struct dentry *new = NULL;
+		struct path this;
 		int valid = 1;
 
 		/*
@@ -345,7 +335,9 @@ static int validate_request(struct autofs_wait_queue **wait,
 					dentry = new;
 			}
 		}
-		if (have_submounts(dentry))
+		this.mnt = path->mnt;
+		this.dentry = dentry;
+		if (path_has_submounts(&this))
 			valid = 0;
 
 		if (new)
@@ -357,8 +349,9 @@ static int validate_request(struct autofs_wait_queue **wait,
 }
 
 int autofs4_wait(struct autofs_sb_info *sbi,
-		 struct dentry *dentry, enum autofs_notify notify)
+		 const struct path *path, enum autofs_notify notify)
 {
+	struct dentry *dentry = path->dentry;
 	struct autofs_wait_queue *wq;
 	struct qstr qstr;
 	char *name;
@@ -367,7 +360,7 @@ int autofs4_wait(struct autofs_sb_info *sbi,
 	pid_t tgid;
 
 	/* In catatonic mode, we don't wait for nobody */
-	if (sbi->catatonic)
+	if (sbi->flags & AUTOFS_SBI_CATATONIC)
 		return -ENOENT;
 
 	/*
@@ -410,14 +403,14 @@ int autofs4_wait(struct autofs_sb_info *sbi,
 		}
 	}
 	qstr.name = name;
-	qstr.hash = full_name_hash(dentry, name, qstr.len);
+	qstr.hash = full_name_hash(name, qstr.len);
 
 	if (mutex_lock_interruptible(&sbi->wq_mutex)) {
 		kfree(qstr.name);
 		return -EINTR;
 	}
 
-	ret = validate_request(&wq, sbi, &qstr, dentry, notify);
+	ret = validate_request(&wq, sbi, &qstr, path, notify);
 	if (ret <= 0) {
 		if (ret != -EINTR)
 			mutex_unlock(&sbi->wq_mutex);
@@ -443,8 +436,8 @@ int autofs4_wait(struct autofs_sb_info *sbi,
 		memcpy(&wq->name, &qstr, sizeof(struct qstr));
 		wq->dev = autofs4_get_dev(sbi);
 		wq->ino = autofs4_get_ino(sbi);
-		wq->uid = current_cred()->uid;
-		wq->gid = current_cred()->gid;
+		wq->uid = current_uid();
+		wq->gid = current_gid();
 		wq->pid = pid;
 		wq->tgid = tgid;
 		wq->status = -EINTR; /* Status return if interrupted */

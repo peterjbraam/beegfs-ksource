@@ -23,12 +23,11 @@
 #include <asm/desc.h>
 #include <asm/pgtable.h>
 #include <asm/cpu.h>
+#include <asm/mmu_context.h>
 
 #include <xen/interface/xen.h>
 #include <xen/interface/vcpu.h>
-#include <xen/interface/xenpmu.h>
 
-#include <asm/spec-ctrl.h>
 #include <asm/xen/interface.h>
 #include <asm/xen/hypercall.h>
 
@@ -39,8 +38,6 @@
 #include <xen/hvc-console.h>
 #include "xen-ops.h"
 #include "mmu.h"
-#include "smp.h"
-#include "pmu.h"
 
 cpumask_var_t xen_cpu_initialized_map;
 
@@ -53,7 +50,6 @@ static DEFINE_PER_CPU(struct xen_common_irq, xen_callfunc_irq) = { .irq = -1 };
 static DEFINE_PER_CPU(struct xen_common_irq, xen_callfuncsingle_irq) = { .irq = -1 };
 static DEFINE_PER_CPU(struct xen_common_irq, xen_irq_work) = { .irq = -1 };
 static DEFINE_PER_CPU(struct xen_common_irq, xen_debug_irq) = { .irq = -1 };
-static DEFINE_PER_CPU(struct xen_common_irq, xen_pmu_irq) = { .irq = -1 };
 
 static irqreturn_t xen_call_function_interrupt(int irq, void *dev_id);
 static irqreturn_t xen_call_function_single_interrupt(int irq, void *dev_id);
@@ -78,17 +74,13 @@ static void cpu_bringup(void)
 	touch_softlockup_watchdog();
 	preempt_disable();
 
-	/* PVH runs in ring 0 and allows us to do native syscalls. Yay! */
-	if (!xen_feature(XENFEAT_supervisor_mode_kernel)) {
-		xen_enable_sysenter();
-		xen_enable_syscall();
-	}
+	xen_enable_sysenter();
+	xen_enable_syscall();
+
 	cpu = smp_processor_id();
 	smp_store_cpu_info(cpu);
 	cpu_data(cpu).x86_max_cores = 1;
 	set_cpu_sibling_map(cpu);
-
-	speculative_store_bypass_ht_init();
 
 	xen_setup_cpu_clockevents();
 
@@ -96,30 +88,23 @@ static void cpu_bringup(void)
 
 	set_cpu_online(cpu, true);
 
-	cpu_set_state_online(cpu);  /* Implies full memory barrier. */
+	this_cpu_write(cpu_state, CPU_ONLINE);
+
+	wmb();
 
 	/* We can take interrupts now: we're officially "up". */
 	local_irq_enable();
+
+	wmb();			/* make sure everything is out */
 }
 
-/*
- * Note: cpu parameter is only relevant for PVH. The reason for passing it
- * is we can't do smp_processor_id until the percpu segments are loaded, for
- * which we need the cpu number! So we pass it in rdi as first parameter.
- */
-asmlinkage __visible void cpu_bringup_and_idle(int cpu)
+static void cpu_bringup_and_idle(void)
 {
-#ifdef CONFIG_XEN_PVH
-	if (xen_feature(XENFEAT_auto_translated_physmap) &&
-	    xen_feature(XENFEAT_supervisor_mode_kernel))
-		xen_pvh_secondary_vcpu_init(cpu);
-#endif
 	cpu_bringup();
-	cpu_startup_entry(CPUHP_AP_ONLINE_IDLE);
-	prevent_tail_call_optimization();
+	cpu_startup_entry(CPUHP_ONLINE);
 }
 
-void xen_smp_intr_free(unsigned int cpu)
+static void xen_smp_intr_free(unsigned int cpu)
 {
 	if (per_cpu(xen_resched_irq, cpu).irq >= 0) {
 		unbind_from_irqhandler(per_cpu(xen_resched_irq, cpu).irq, NULL);
@@ -155,18 +140,11 @@ void xen_smp_intr_free(unsigned int cpu)
 		kfree(per_cpu(xen_irq_work, cpu).name);
 		per_cpu(xen_irq_work, cpu).name = NULL;
 	}
-
-	if (per_cpu(xen_pmu_irq, cpu).irq >= 0) {
-		unbind_from_irqhandler(per_cpu(xen_pmu_irq, cpu).irq, NULL);
-		per_cpu(xen_pmu_irq, cpu).irq = -1;
-		kfree(per_cpu(xen_pmu_irq, cpu).name);
-		per_cpu(xen_pmu_irq, cpu).name = NULL;
-	}
 };
-int xen_smp_intr_init(unsigned int cpu)
+static int xen_smp_intr_init(unsigned int cpu)
 {
 	int rc;
-	char *resched_name, *callfunc_name, *debug_name, *pmu_name;
+	char *resched_name, *callfunc_name, *debug_name;
 
 	resched_name = kasprintf(GFP_KERNEL, "resched%d", cpu);
 	rc = bind_ipi_to_irqhandler(XEN_RESCHEDULE_VECTOR,
@@ -232,18 +210,6 @@ int xen_smp_intr_init(unsigned int cpu)
 	per_cpu(xen_irq_work, cpu).irq = rc;
 	per_cpu(xen_irq_work, cpu).name = callfunc_name;
 
-	if (is_xen_pmu(cpu)) {
-		pmu_name = kasprintf(GFP_KERNEL, "pmu%d", cpu);
-		rc = bind_virq_to_irqhandler(VIRQ_XENPMU, cpu,
-					     xen_pmu_irq_handler,
-					     IRQF_PERCPU|IRQF_NOBALANCING,
-					     pmu_name, NULL);
-		if (rc < 0)
-			goto fail;
-		per_cpu(xen_pmu_irq, cpu).irq = rc;
-		per_cpu(xen_pmu_irq, cpu).name = pmu_name;
-	}
-
 	return 0;
 
  fail:
@@ -303,46 +269,25 @@ static void __init xen_filter_cpu_maps(void)
 
 }
 
-static void __init xen_pv_smp_prepare_boot_cpu(void)
+static void __init xen_smp_prepare_boot_cpu(void)
 {
 	BUG_ON(smp_processor_id() != 0);
 	native_smp_prepare_boot_cpu();
 
-	if (!xen_feature(XENFEAT_writable_page_tables))
-		/* We've switched to the "real" per-cpu gdt, so make
-		 * sure the old memory can be recycled. */
+	if (xen_pv_domain()) {
+		/* We've switched to the "real" per-cpu gdt, so make sure the
+		   old memory can be recycled */
 		make_lowmem_page_readwrite(xen_initial_gdt);
 
-#ifdef CONFIG_X86_32
-	/*
-	 * Xen starts us with XEN_FLAT_RING1_DS, but linux code
-	 * expects __USER_DS
-	 */
-	loadsegment(ds, __USER_DS);
-	loadsegment(es, __USER_DS);
-#endif
-
-	xen_filter_cpu_maps();
-	xen_setup_vcpu_info_placement();
-
-	/*
-	 * The alternative logic (which patches the unlock/lock) runs before
-	 * the smp bootup up code is activated. Hence we need to set this up
-	 * the core kernel is being patched. Otherwise we will have only
-	 * modules patched but not core code.
-	 */
-	xen_init_spinlocks();
-}
-
-static void __init xen_hvm_smp_prepare_boot_cpu(void)
-{
-	BUG_ON(smp_processor_id() != 0);
-	native_smp_prepare_boot_cpu();
+		xen_filter_cpu_maps();
+		xen_setup_vcpu_info_placement();
+	}
 
 	/*
 	 * Setup vcpu_info for boot CPU.
 	 */
-	xen_vcpu_setup(0);
+	if (xen_hvm_domain())
+		xen_vcpu_setup(0);
 
 	/*
 	 * The alternative logic (which patches the unlock/lock) runs before
@@ -375,13 +320,10 @@ static void __init xen_smp_prepare_cpus(unsigned int max_cpus)
 	for_each_possible_cpu(i) {
 		zalloc_cpumask_var(&per_cpu(cpu_sibling_map, i), GFP_KERNEL);
 		zalloc_cpumask_var(&per_cpu(cpu_core_map, i), GFP_KERNEL);
+		zalloc_cpumask_var(&per_cpu(cpu_die_map, i), GFP_KERNEL);
 		zalloc_cpumask_var(&per_cpu(cpu_llc_shared_map, i), GFP_KERNEL);
 	}
 	set_cpu_sibling_map(0);
-
-	speculative_store_bypass_ht_init();
-
-	xen_pmu_init(0);
 
 	if (xen_smp_intr_init(0))
 		BUG();
@@ -420,20 +362,22 @@ cpu_initialize_context(unsigned int cpu, struct task_struct *idle)
 
 	gdt = get_cpu_gdt_table(cpu);
 
+	ctxt->flags = VGCF_IN_KERNEL;
+	ctxt->user_regs.ss = __KERNEL_DS;
 #ifdef CONFIG_X86_32
-	/* Note: PVH is not yet supported on x86_32. */
 	ctxt->user_regs.fs = __KERNEL_PERCPU;
 	ctxt->user_regs.gs = __KERNEL_STACK_CANARY;
+#else
+	ctxt->gs_base_kernel = per_cpu_offset(cpu);
 #endif
+	ctxt->user_regs.eip = (unsigned long)cpu_bringup_and_idle;
+
 	memset(&ctxt->fpu_ctxt, 0, sizeof(ctxt->fpu_ctxt));
 
-	if (!xen_feature(XENFEAT_auto_translated_physmap)) {
-		ctxt->user_regs.eip = (unsigned long)cpu_bringup_and_idle;
-		ctxt->flags = VGCF_IN_KERNEL;
+	{
 		ctxt->user_regs.eflags = 0x1000; /* IOPL_RING1 */
 		ctxt->user_regs.ds = __USER_DS;
 		ctxt->user_regs.es = __USER_DS;
-		ctxt->user_regs.ss = __KERNEL_DS;
 
 		xen_copy_trap_info(ctxt->trap_ctxt);
 
@@ -454,30 +398,18 @@ cpu_initialize_context(unsigned int cpu, struct task_struct *idle)
 #ifdef CONFIG_X86_32
 		ctxt->event_callback_cs     = __KERNEL_CS;
 		ctxt->failsafe_callback_cs  = __KERNEL_CS;
-#else
-		ctxt->gs_base_kernel = per_cpu_offset(cpu);
 #endif
 		ctxt->event_callback_eip    =
 					(unsigned long)xen_hypervisor_callback;
 		ctxt->failsafe_callback_eip =
 					(unsigned long)xen_failsafe_callback;
-		ctxt->user_regs.cs = __KERNEL_CS;
-		per_cpu(xen_cr3, cpu) = __pa(swapper_pg_dir);
 	}
-#ifdef CONFIG_XEN_PVH
-	else {
-		/*
-		 * The vcpu comes on kernel page tables which have the NX pte
-		 * bit set. This means before DS/SS is touched, NX in
-		 * EFER must be set. Hence the following assembly glue code.
-		 */
-		ctxt->user_regs.eip = (unsigned long)xen_pvh_early_cpu_init;
-		ctxt->user_regs.rdi = cpu;
-		ctxt->user_regs.rsi = true;  /* entry == true */
-	}
-#endif
+	ctxt->user_regs.cs = __KERNEL_CS;
 	ctxt->user_regs.esp = idle->thread.sp0 - sizeof(struct pt_regs);
-	ctxt->ctrlreg[3] = xen_pfn_to_cr3(virt_to_gfn(swapper_pg_dir));
+
+	per_cpu(xen_cr3, cpu) = __pa(swapper_pg_dir);
+	ctxt->ctrlreg[3] = xen_pfn_to_cr3(virt_to_mfn(swapper_pg_dir));
+
 	if (HYPERVISOR_vcpu_op(VCPUOP_initialise, xen_vcpu_nr(cpu), ctxt))
 		BUG();
 
@@ -489,17 +421,26 @@ static int xen_cpu_up(unsigned int cpu, struct task_struct *idle)
 {
 	int rc;
 
-	common_cpu_up(cpu, idle);
+	if (per_cpu(xen_vcpu, cpu) == NULL)
+		return -ENODEV;
 
+	per_cpu(current_task, cpu) = idle;
+#ifdef CONFIG_X86_32
+	irq_ctx_init(cpu);
+#else
+	clear_tsk_thread_flag(idle, TIF_FORK);
+	per_cpu(kernel_stack, cpu) =
+		(unsigned long)task_stack_page(idle) -
+		KERNEL_STACK_OFFSET + THREAD_SIZE;
+	per_cpu(__kernel_stack_70__, cpu) =
+		(unsigned long)task_stack_page(idle) -
+		KERNEL_STACK_OFFSET + THREAD_SIZE - 8192;
+#endif
 	xen_setup_runstate_info(cpu);
+	xen_setup_timer(cpu);
+	xen_init_lock_cpu(cpu);
 
-	/*
-	 * PV VCPUs are always successfully taken down (see 'while' loop
-	 * in xen_cpu_die()), so -EBUSY is an error.
-	 */
-	rc = cpu_check_up_prepare(cpu);
-	if (rc)
-		return rc;
+	per_cpu(cpu_state, cpu) = CPU_UP_PREPARE;
 
 	/* make sure interrupts start blocked */
 	per_cpu(xen_vcpu, cpu)->evtchn_upcall_mask = 1;
@@ -508,19 +449,23 @@ static int xen_cpu_up(unsigned int cpu, struct task_struct *idle)
 	if (rc)
 		return rc;
 
-	xen_pmu_init(cpu);
+	if (num_online_cpus() == 1)
+		/* Just in case we booted with a single CPU. */
+		alternatives_enable_smp();
+
+	rc = xen_smp_intr_init(cpu);
+	if (rc)
+		return rc;
 
 	rc = HYPERVISOR_vcpu_op(VCPUOP_up, xen_vcpu_nr(cpu), NULL);
 	BUG_ON(rc);
 
-	while (cpu_report_state(cpu) != CPU_ONLINE)
+	while(per_cpu(cpu_state, cpu) != CPU_ONLINE) {
 		HYPERVISOR_sched_op(SCHEDOP_yield, NULL);
+		barrier();
+	}
 
 	return 0;
-}
-
-static void xen_smp_cpus_done(unsigned int max_cpus)
-{
 }
 
 #ifdef CONFIG_HOTPLUG_CPU
@@ -540,16 +485,12 @@ static void xen_cpu_die(unsigned int cpu)
 {
 	while (xen_pv_domain() && HYPERVISOR_vcpu_op(VCPUOP_is_up,
 						     xen_vcpu_nr(cpu), NULL)) {
-		__set_current_state(TASK_UNINTERRUPTIBLE);
+		current->state = TASK_UNINTERRUPTIBLE;
 		schedule_timeout(HZ/10);
 	}
-
-	if (common_cpu_die(cpu) == 0) {
-		xen_smp_intr_free(cpu);
-		xen_uninit_lock_cpu(cpu);
-		xen_teardown_timer(cpu);
-		xen_pmu_finish(cpu);
-	}
+	xen_smp_intr_free(cpu);
+	xen_uninit_lock_cpu(cpu);
+	xen_teardown_timer(cpu);
 }
 
 static void xen_play_dead(void) /* used only with HOTPLUG_CPU */
@@ -564,8 +505,6 @@ static void xen_play_dead(void) /* used only with HOTPLUG_CPU */
 	 * data back is to call:
 	 */
 	tick_nohz_idle_enter();
-
-	cpu_startup_entry(CPUHP_AP_ONLINE_IDLE);
 }
 
 #else /* !CONFIG_HOTPLUG_CPU */
@@ -602,6 +541,36 @@ static void stop_self(void *v)
 static void xen_stop_other_cpus(int wait)
 {
 	smp_call_function(stop_self, NULL, wait);
+}
+
+static void __init xen_smp_cpus_done(unsigned int max_cpus)
+{
+	int cpu, rc, count = 0;
+
+	if (xen_hvm_domain())
+		native_smp_cpus_done(max_cpus);
+
+	if (xen_have_vcpu_info_placement)
+		return;
+
+	for_each_online_cpu(cpu) {
+		if (xen_vcpu_nr(cpu) < MAX_VIRT_CPUS)
+			continue;
+
+		rc = cpu_down(cpu);
+
+		if (rc == 0) {
+			/*
+			 * Reset vcpu_info so this cpu cannot be onlined again.
+			 */
+			xen_vcpu_info_reset(cpu);
+			count++;
+		} else {
+			pr_warn("%s: failed to bring CPU %d down, error %d\n",
+				__func__, cpu, rc);
+		}
+	}
+	WARN(count, "%s: brought %d CPUs offline\n", __func__, count);
 }
 
 static void xen_smp_send_reschedule(int cpu)
@@ -656,12 +625,6 @@ static inline int xen_map_vector(int vector)
 	case IRQ_WORK_VECTOR:
 		xen_vector = XEN_IRQ_WORK_VECTOR;
 		break;
-#ifdef CONFIG_X86_64
-	case NMI_VECTOR:
-	case APIC_DM_NMI: /* Some use that instead of NMI_VECTOR */
-		xen_vector = XEN_NMI_VECTOR;
-		break;
-#endif
 	default:
 		xen_vector = -1;
 		printk(KERN_ERR "xen: vector 0x%x is not implemented\n",
@@ -750,7 +713,7 @@ static irqreturn_t xen_irq_work_interrupt(int irq, void *dev_id)
 }
 
 static const struct smp_ops xen_smp_ops __initconst = {
-	.smp_prepare_boot_cpu = xen_pv_smp_prepare_boot_cpu,
+	.smp_prepare_boot_cpu = xen_smp_prepare_boot_cpu,
 	.smp_prepare_cpus = xen_smp_prepare_cpus,
 	.smp_cpus_done = xen_smp_cpus_done,
 
@@ -774,10 +737,50 @@ void __init xen_smp_init(void)
 
 static void __init xen_hvm_smp_prepare_cpus(unsigned int max_cpus)
 {
+	int cpu;
+
 	native_smp_prepare_cpus(max_cpus);
 	WARN_ON(xen_smp_intr_init(0));
 
 	xen_init_lock_cpu(0);
+
+	for_each_possible_cpu(cpu) {
+		if (cpu == 0)
+			continue;
+
+		/* Set default vcpu_id to make sure that we don't use cpu-0's */
+		per_cpu(xen_vcpu_id, cpu) = XEN_VCPU_ID_INVALID;
+	}
+}
+
+static int xen_hvm_cpu_up(unsigned int cpu, struct task_struct *tidle)
+{
+	int rc;
+	/*
+	 * xen_smp_intr_init() needs to run before native_cpu_up()
+	 * so that IPI vectors are set up on the booting CPU before
+	 * it is marked online in native_cpu_up().
+	*/
+	rc = xen_smp_intr_init(cpu);
+	WARN_ON(rc);
+	if (!rc)
+		rc =  native_cpu_up(cpu, tidle);
+
+	/*
+	 * We must initialize the slowpath CPU kicker _after_ the native
+	 * path has executed. If we initialized it before none of the
+	 * unlocker IPI kicks would reach the booting CPU as the booting
+	 * CPU had not set itself 'online' in cpu_online_mask. That mask
+	 * is checked when IPIs are sent (on HVM at least).
+	 */
+	xen_init_lock_cpu(cpu);
+	return rc;
+}
+
+static void xen_hvm_cpu_die(unsigned int cpu)
+{
+	xen_cpu_die(cpu);
+	native_cpu_die(cpu);
 }
 
 void __init xen_hvm_smp_init(void)
@@ -786,8 +789,10 @@ void __init xen_hvm_smp_init(void)
 		return;
 	smp_ops.smp_prepare_cpus = xen_hvm_smp_prepare_cpus;
 	smp_ops.smp_send_reschedule = xen_smp_send_reschedule;
-	smp_ops.cpu_die = xen_cpu_die;
+	smp_ops.cpu_up = xen_hvm_cpu_up;
+	smp_ops.cpu_die = xen_hvm_cpu_die;
 	smp_ops.send_call_func_ipi = xen_smp_send_call_function_ipi;
 	smp_ops.send_call_func_single_ipi = xen_smp_send_call_function_single_ipi;
-	smp_ops.smp_prepare_boot_cpu = xen_hvm_smp_prepare_boot_cpu;
+	smp_ops.smp_prepare_boot_cpu = xen_smp_prepare_boot_cpu;
+	smp_ops.smp_cpus_done = xen_smp_cpus_done;
 }

@@ -211,7 +211,7 @@ static void isight_packet(struct fw_iso_context *context, u32 cycle,
 
 static int isight_connect(struct isight *isight)
 {
-	int ch, err;
+	int ch, err, rcode, errors = 0;
 	__be32 value;
 
 retry_after_bus_reset:
@@ -224,18 +224,26 @@ retry_after_bus_reset:
 	}
 
 	value = cpu_to_be32(ch | (isight->device->max_speed << SPEED_SHIFT));
-	err = snd_fw_transaction(isight->unit, TCODE_WRITE_QUADLET_REQUEST,
-				 isight->audio_base + REG_ISO_TX_CONFIG,
-				 &value, 4, FW_FIXED_GENERATION |
-				 isight->resources.generation);
-	if (err == -EAGAIN) {
-		fw_iso_resources_free(&isight->resources);
-		goto retry_after_bus_reset;
-	} else if (err < 0) {
-		goto err_resources;
+	for (;;) {
+		rcode = fw_run_transaction(
+				isight->device->card,
+				TCODE_WRITE_QUADLET_REQUEST,
+				isight->device->node_id,
+				isight->resources.generation,
+				isight->device->max_speed,
+				isight->audio_base + REG_ISO_TX_CONFIG,
+				&value, 4);
+		if (rcode == RCODE_COMPLETE) {
+			return 0;
+		} else if (rcode == RCODE_GENERATION) {
+			fw_iso_resources_free(&isight->resources);
+			goto retry_after_bus_reset;
+		} else if (rcode_is_permanent_error(rcode) || ++errors >= 3) {
+			err = -EIO;
+			goto err_resources;
+		}
+		msleep(5);
 	}
-
-	return 0;
 
 err_resources:
 	fw_iso_resources_free(&isight->resources);
@@ -301,19 +309,17 @@ static int isight_hw_params(struct snd_pcm_substream *substream,
 static int reg_read(struct isight *isight, int offset, __be32 *value)
 {
 	return snd_fw_transaction(isight->unit, TCODE_READ_QUADLET_REQUEST,
-				  isight->audio_base + offset, value, 4, 0);
+				  isight->audio_base + offset, value, 4);
 }
 
 static int reg_write(struct isight *isight, int offset, __be32 value)
 {
 	return snd_fw_transaction(isight->unit, TCODE_WRITE_QUADLET_REQUEST,
-				  isight->audio_base + offset, &value, 4, 0);
+				  isight->audio_base + offset, &value, 4);
 }
 
 static void isight_stop_streaming(struct isight *isight)
 {
-	__be32 value;
-
 	if (!isight->context)
 		return;
 
@@ -321,10 +327,7 @@ static void isight_stop_streaming(struct isight *isight)
 	fw_iso_context_destroy(isight->context);
 	isight->context = NULL;
 	fw_iso_resources_free(&isight->resources);
-	value = 0;
-	snd_fw_transaction(isight->unit, TCODE_WRITE_QUADLET_REQUEST,
-			   isight->audio_base + REG_AUDIO_ENABLE,
-			   &value, 4, FW_QUIET);
+	reg_write(isight, REG_AUDIO_ENABLE, 0);
 }
 
 static int isight_hw_free(struct snd_pcm_substream *substream)
@@ -454,7 +457,6 @@ static int isight_create_pcm(struct isight *isight)
 		.trigger   = isight_trigger,
 		.pointer   = isight_pointer,
 		.page      = snd_pcm_lib_get_vmalloc_page,
-		.mmap      = snd_pcm_lib_mmap_vmalloc,
 	};
 	struct snd_pcm *pcm;
 	int err;
@@ -617,9 +619,9 @@ static u64 get_unit_base(struct fw_unit *unit)
 	return 0;
 }
 
-static int isight_probe(struct fw_unit *unit,
-			const struct ieee1394_device_id *id)
+static int isight_probe(struct device *unit_dev)
 {
+	struct fw_unit *unit = fw_unit(unit_dev);
 	struct fw_device *fw_dev = fw_parent_device(unit);
 	struct snd_card *card;
 	struct isight *isight;
@@ -639,7 +641,7 @@ static int isight_probe(struct fw_unit *unit,
 	if (!isight->audio_base) {
 		dev_err(&unit->device, "audio unit base not found\n");
 		err = -ENXIO;
-		goto error;
+		goto err_unit;
 	}
 	fw_iso_resources_init(&isight->resources, unit);
 
@@ -665,16 +667,33 @@ static int isight_probe(struct fw_unit *unit,
 	if (err < 0)
 		goto error;
 
-	dev_set_drvdata(&unit->device, isight);
+	dev_set_drvdata(unit_dev, isight);
 
 	return 0;
+
+err_unit:
+	fw_unit_put(isight->unit);
+	mutex_destroy(&isight->mutex);
 error:
 	snd_card_free(card);
-
-	mutex_destroy(&isight->mutex);
-	fw_unit_put(isight->unit);
-
 	return err;
+}
+
+static int isight_remove(struct device *dev)
+{
+	struct isight *isight = dev_get_drvdata(dev);
+
+	isight_pcm_abort(isight);
+
+	snd_card_disconnect(isight->card);
+
+	mutex_lock(&isight->mutex);
+	isight_stop_streaming(isight);
+	mutex_unlock(&isight->mutex);
+
+	snd_card_free_when_closed(isight->card);
+
+	return 0;
 }
 
 static void isight_bus_reset(struct fw_unit *unit)
@@ -688,21 +707,6 @@ static void isight_bus_reset(struct fw_unit *unit)
 		isight_stop_streaming(isight);
 		mutex_unlock(&isight->mutex);
 	}
-}
-
-static void isight_remove(struct fw_unit *unit)
-{
-	struct isight *isight = dev_get_drvdata(&unit->device);
-
-	isight_pcm_abort(isight);
-
-	snd_card_disconnect(isight->card);
-
-	mutex_lock(&isight->mutex);
-	isight_stop_streaming(isight);
-	mutex_unlock(&isight->mutex);
-
-	snd_card_free_when_closed(isight->card);
 }
 
 static const struct ieee1394_device_id isight_id_table[] = {
@@ -721,10 +725,10 @@ static struct fw_driver isight_driver = {
 		.owner	= THIS_MODULE,
 		.name	= KBUILD_MODNAME,
 		.bus	= &fw_bus_type,
+		.probe	= isight_probe,
+		.remove	= isight_remove,
 	},
-	.probe    = isight_probe,
 	.update   = isight_bus_reset,
-	.remove   = isight_remove,
 	.id_table = isight_id_table,
 };
 

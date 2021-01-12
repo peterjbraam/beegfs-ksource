@@ -7,18 +7,26 @@
  * Copyright (C) 2009, 2010 Arnaldo Carvalho de Melo <acme@redhat.com>
  */
 #include "util.h"
+#include <dirent.h>
+#include <errno.h>
 #include <stdio.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include "build-id.h"
 #include "event.h"
 #include "symbol.h"
+#include "thread.h"
 #include <linux/kernel.h>
 #include "debug.h"
 #include "session.h"
 #include "tool.h"
 #include "header.h"
 #include "vdso.h"
+#include "path.h"
 #include "probe-file.h"
+#include "strlist.h"
 
+#include "sane_ctype.h"
 
 static bool no_buildid_cache;
 
@@ -38,9 +46,7 @@ int build_id__mark_dso_hit(struct perf_tool *tool __maybe_unused,
 		return -1;
 	}
 
-	thread__find_addr_map(thread, sample->cpumode, MAP__FUNCTION, sample->ip, &al);
-
-	if (al.map != NULL)
+	if (thread__find_map(thread, sample->cpumode, sample->ip, &al))
 		al.map->dso->hit = 1;
 
 	thread__put(thread);
@@ -176,7 +182,6 @@ char *build_id_cache__linkname(const char *sbuild_id, char *bf, size_t size)
 	return bf;
 }
 
-/* The caller is responsible to free the returned buffer. */
 char *build_id_cache__origname(const char *sbuild_id)
 {
 	char *linkname;
@@ -271,51 +276,6 @@ char *dso__build_id_filename(const struct dso *dso, char *bf, size_t size)
 	return bf;
 }
 
-bool dso__build_id_is_kmod(const struct dso *dso, char *bf, size_t size)
-{
-	char *id_name = NULL, *ch;
-	struct stat sb;
-	char sbuild_id[SBUILD_ID_SIZE];
-
-	if (!dso->has_build_id)
-		goto err;
-
-	build_id__sprintf(dso->build_id, sizeof(dso->build_id), sbuild_id);
-	id_name = build_id_cache__linkname(sbuild_id, NULL, 0);
-	if (!id_name)
-		goto err;
-	if (access(id_name, F_OK))
-		goto err;
-	if (lstat(id_name, &sb) == -1)
-		goto err;
-	if ((size_t)sb.st_size > size - 1)
-		goto err;
-	if (readlink(id_name, bf, size - 1) < 0)
-		goto err;
-
-	bf[sb.st_size] = '\0';
-
-	/*
-	 * link should be:
-	 * ../../lib/modules/4.4.0-rc4/kernel/net/ipv4/netfilter/nf_nat_ipv4.ko/a09fe3eb3147dafa4e3b31dbd6257e4d696bdc92
-	 */
-	ch = strrchr(bf, '/');
-	if (!ch)
-		goto err;
-	if (ch - 3 < bf)
-		goto err;
-
-	free(id_name);
-	return strncmp(".ko", ch - 3, 3) == 0;
-err:
-	pr_err("Invalid build id: %s\n", id_name ? :
-					 dso->long_name ? :
-					 dso->short_name ? :
-					 "[unknown]");
-	free(id_name);
-	return false;
-}
-
 #define dsos__for_each_with_build_id(pos, head)	\
 	list_for_each_entry(pos, head, node)	\
 		if (!pos->has_build_id)		\
@@ -323,7 +283,7 @@ err:
 		else
 
 static int write_buildid(const char *name, size_t name_len, u8 *build_id,
-			 pid_t pid, u16 misc, int fd)
+			 pid_t pid, u16 misc, struct feat_fd *fd)
 {
 	int err;
 	struct build_id_event b;
@@ -338,17 +298,17 @@ static int write_buildid(const char *name, size_t name_len, u8 *build_id,
 	b.header.misc = misc;
 	b.header.size = sizeof(b) + len;
 
-	err = writen(fd, &b, sizeof(b));
+	err = do_write(fd, &b, sizeof(b));
 	if (err < 0)
 		return err;
 
 	return write_padded(fd, name, name_len + 1, len);
 }
 
-static int machine__write_buildid_table(struct machine *machine, int fd)
+static int machine__write_buildid_table(struct machine *machine,
+					struct feat_fd *fd)
 {
 	int err = 0;
-	char nm[PATH_MAX];
 	struct dso *pos;
 	u16 kmisc = PERF_RECORD_MISC_KERNEL,
 	    umisc = PERF_RECORD_MISC_USER;
@@ -370,9 +330,8 @@ static int machine__write_buildid_table(struct machine *machine, int fd)
 			name = pos->short_name;
 			name_len = pos->short_name_len;
 		} else if (dso__is_kcore(pos)) {
-			machine__mmap_name(machine, nm, sizeof(nm));
-			name = nm;
-			name_len = strlen(nm);
+			name = machine->mmap_name;
+			name_len = strlen(name);
 		} else {
 			name = pos->long_name;
 			name_len = pos->long_name_len;
@@ -390,7 +349,8 @@ static int machine__write_buildid_table(struct machine *machine, int fd)
 	return err;
 }
 
-int perf_session__write_buildid_table(struct perf_session *session, int fd)
+int perf_session__write_buildid_table(struct perf_session *session,
+				      struct feat_fd *fd)
 {
 	struct rb_node *nd;
 	int err = machine__write_buildid_table(&session->machines.host, fd);
@@ -448,14 +408,14 @@ void disable_buildid_cache(void)
 }
 
 static bool lsdir_bid_head_filter(const char *name __maybe_unused,
-				  struct dirent *d __maybe_unused)
+				  struct dirent *d)
 {
 	return (strlen(d->d_name) == 2) &&
 		isxdigit(d->d_name[0]) && isxdigit(d->d_name[1]);
 }
 
 static bool lsdir_bid_tail_filter(const char *name __maybe_unused,
-				  struct dirent *d __maybe_unused)
+				  struct dirent *d)
 {
 	int i = 0;
 	while (isxdigit(d->d_name[i]) && i < SBUILD_ID_SIZE - 3)
@@ -695,7 +655,7 @@ int build_id_cache__add_s(const char *sbuild_id, const char *name,
 		err = 0;
 
 	/* Update SDT cache : error is just warned */
-	if (build_id_cache__add_sdt_cache(sbuild_id, realname) < 0)
+	if (realname && build_id_cache__add_sdt_cache(sbuild_id, realname) < 0)
 		pr_debug4("Failed to update/scan SDT cache for %s\n", realname);
 
 out_free:
@@ -773,12 +733,10 @@ static int dso__cache_build_id(struct dso *dso, struct machine *machine)
 	bool is_kallsyms = dso__is_kallsyms(dso);
 	bool is_vdso = dso__is_vdso(dso);
 	const char *name = dso->long_name;
-	char nm[PATH_MAX];
 
 	if (dso__is_kcore(dso)) {
 		is_kallsyms = true;
-		machine__mmap_name(machine, nm, sizeof(nm));
-		name = nm;
+		name = machine->mmap_name;
 	}
 	return build_id_cache__add_b(dso->build_id, sizeof(dso->build_id), name,
 				     is_kallsyms, is_vdso);

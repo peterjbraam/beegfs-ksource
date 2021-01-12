@@ -24,16 +24,23 @@
  * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with GNU CC; see the file COPYING.  If not, see
- * <http://www.gnu.org/licenses/>.
+ * along with GNU CC; see the file COPYING.  If not, write to
+ * the Free Software Foundation, 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
  *
  * Please send any bug reports or fixes you make to the
  * email address(es):
- *    lksctp developers <linux-sctp@vger.kernel.org>
+ *    lksctp developers <lksctp-developers@lists.sourceforge.net>
+ *
+ * Or submit a bug report through the following website:
+ *    http://www.sf.net/projects/lksctp
  *
  * Written or modified by:
  *    La Monte H.P. Yarroll <piggy@acm.org>
  *    Karl Knutson <karl@athena.chicago.il.us>
+ *
+ * Any bugs reported given to us we will try to fix... any fixes shared will
+ * be incorporated into the next SCTP release.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -182,7 +189,7 @@ next_chunk:
 				chunk->skb = skb_shinfo(chunk->skb)->frag_list;
 
 			if (WARN_ON(!chunk->skb)) {
-				__SCTP_INC_STATS(dev_net(chunk->skb->dev), SCTP_MIB_IN_PKT_DISCARDS);
+				SCTP_INC_STATS_BH(dev_net(chunk->skb->dev), SCTP_MIB_IN_PKT_DISCARDS);
 				sctp_chunk_free(chunk);
 				goto next_chunk;
 			}
@@ -208,7 +215,6 @@ new_skb:
 				*head_cb = SCTP_INPUT_CB(chunk->head_skb);
 
 			cb->chunk = head_cb->chunk;
-			cb->af = head_cb->af;
 		}
 	}
 

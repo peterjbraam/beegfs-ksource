@@ -875,13 +875,10 @@ static void snd_miro_write(struct snd_miro *chip, unsigned char reg,
 	spin_unlock_irqrestore(&chip->lock, flags);
 }
 
-static inline void snd_miro_write_mask(struct snd_miro *chip,
-		unsigned char reg, unsigned char value, unsigned char mask)
-{
-	unsigned char oldval = snd_miro_read(chip, reg);
 
-	snd_miro_write(chip, reg, (oldval & ~mask) | (value & mask));
-}
+#define snd_miro_write_mask(chip, reg, value, mask)	\
+	snd_miro_write(chip, reg,			\
+		(snd_miro_read(chip, reg) & ~(mask)) | ((value) & (mask)))
 
 /*
  *  Proc Interface
@@ -1273,6 +1270,8 @@ static int snd_miro_probe(struct snd_card *card)
 	int error;
 	struct snd_miro *miro = card->private_data;
 	struct snd_wss *codec;
+	struct snd_timer *timer;
+	struct snd_pcm *pcm;
 	struct snd_rawmidi *rmidi;
 
 	if (!miro->res_mc_base) {
@@ -1311,7 +1310,7 @@ static int snd_miro_probe(struct snd_card *card)
 	if (error < 0)
 		return error;
 
-	error = snd_wss_pcm(codec, 0);
+	error = snd_wss_pcm(codec, 0, &pcm);
 	if (error < 0)
 		return error;
 
@@ -1319,11 +1318,11 @@ static int snd_miro_probe(struct snd_card *card)
 	if (error < 0)
 		return error;
 
-	error = snd_wss_timer(codec, 0);
+	error = snd_wss_timer(codec, 0, &timer);
 	if (error < 0)
 		return error;
 
-	miro->pcm = codec->pcm;
+	miro->pcm = pcm;
 
 	error = snd_miro_mixer(card, miro);
 	if (error < 0)
@@ -1357,8 +1356,8 @@ static int snd_miro_probe(struct snd_card *card)
 
 	strcpy(card->driver, "miro");
 	sprintf(card->longname, "%s: OPTi%s, %s at 0x%lx, irq %d, dma %d&%d",
-		card->shortname, miro->name, codec->pcm->name,
-		miro->wss_base + 4, miro->irq, miro->dma1, miro->dma2);
+		card->shortname, miro->name, pcm->name, miro->wss_base + 4,
+		miro->irq, miro->dma1, miro->dma2);
 
 	if (mpu_port <= 0 || mpu_port == SNDRV_AUTO_PORT)
 		rmidi = NULL;
@@ -1494,6 +1493,7 @@ static int snd_miro_isa_remove(struct device *devptr,
 			       unsigned int dev)
 {
 	snd_card_free(dev_get_drvdata(devptr));
+	dev_set_drvdata(devptr, NULL);
 	return 0;
 }
 

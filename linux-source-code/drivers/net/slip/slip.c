@@ -164,7 +164,7 @@ static int sl_alloc_bufs(struct slip *sl, int mtu)
 	if (cbuff == NULL)
 		goto err_exit;
 	slcomp = slhc_init(16, 16);
-	if (IS_ERR(slcomp))
+	if (slcomp == NULL)
 		goto err_exit;
 #endif
 	spin_lock_bh(&sl->lock);
@@ -452,16 +452,9 @@ static void slip_transmit(struct work_struct *work)
  */
 static void slip_write_wakeup(struct tty_struct *tty)
 {
-	struct slip *sl;
-
-	rcu_read_lock();
-	sl = rcu_dereference(tty->disc_data);
-	if (!sl)
-		goto out;
+	struct slip *sl = tty->disc_data;
 
 	schedule_work(&sl->tx_work);
-out:
-	rcu_read_unlock();
 }
 
 static void sl_tx_timeout(struct net_device *dev)
@@ -578,7 +571,7 @@ static int sl_change_mtu(struct net_device *dev, int new_mtu)
 
 /* Netdevice get statistics request */
 
-static struct rtnl_link_stats64 *
+static void
 sl_get_stats64(struct net_device *dev, struct rtnl_link_stats64 *stats)
 {
 	struct net_device_stats *devstats = &dev->stats;
@@ -609,7 +602,6 @@ sl_get_stats64(struct net_device *dev, struct rtnl_link_stats64 *stats)
 		stats->collisions     += comp->sls_o_misses;
 	}
 #endif
-	return stats;
 }
 
 /* Netdevice register callback */
@@ -642,7 +634,7 @@ static void sl_uninit(struct net_device *dev)
 static void sl_free_netdev(struct net_device *dev)
 {
 	int i = dev->base_addr;
-	free_netdev(dev);
+
 	slip_devs[i] = NULL;
 }
 
@@ -653,7 +645,7 @@ static const struct net_device_ops sl_netdev_ops = {
 	.ndo_stop		= sl_close,
 	.ndo_start_xmit		= sl_xmit,
 	.ndo_get_stats64        = sl_get_stats64,
-	.ndo_change_mtu		= sl_change_mtu,
+	.ndo_change_mtu_rh74	= sl_change_mtu,
 	.ndo_tx_timeout		= sl_tx_timeout,
 #ifdef CONFIG_SLIP_SMART
 	.ndo_do_ioctl		= sl_ioctl,
@@ -664,7 +656,8 @@ static const struct net_device_ops sl_netdev_ops = {
 static void sl_setup(struct net_device *dev)
 {
 	dev->netdev_ops		= &sl_netdev_ops;
-	dev->destructor		= sl_free_netdev;
+	dev->extended->needs_free_netdev	= true;
+	dev->extended->priv_destructor	= sl_free_netdev;
 
 	dev->hard_header_len	= 0;
 	dev->addr_len		= 0;
@@ -756,7 +749,7 @@ static struct slip *sl_alloc(dev_t line)
 		return NULL;
 
 	sprintf(name, "sl%d", i);
-	dev = alloc_netdev(sizeof(*sl), name, NET_NAME_UNKNOWN, sl_setup);
+	dev = alloc_netdev(sizeof(*sl), name, sl_setup);
 	if (!dev)
 		return NULL;
 
@@ -867,10 +860,6 @@ err_free_chan:
 	sl->tty = NULL;
 	tty->disc_data = NULL;
 	clear_bit(SLF_INUSE, &sl->flags);
-	/* do not call free_netdev before rtnl_unlock */
-	rtnl_unlock();
-	sl_free_netdev(sl->dev);
-	return err;
 
 err_exit:
 	rtnl_unlock();
@@ -896,11 +885,10 @@ static void slip_close(struct tty_struct *tty)
 		return;
 
 	spin_lock_bh(&sl->lock);
-	rcu_assign_pointer(tty->disc_data, NULL);
+	tty->disc_data = NULL;
 	sl->tty = NULL;
 	spin_unlock_bh(&sl->lock);
 
-	synchronize_rcu();
 	flush_work(&sl->tx_work);
 
 	/* VSV = very important to remove timers */
@@ -1383,8 +1371,6 @@ static void __exit slip_exit(void)
 		if (sl->tty) {
 			printk(KERN_ERR "%s: tty discipline still running\n",
 			       dev->name);
-			/* Intentionally leak the control block. */
-			dev->destructor = NULL;
 		}
 
 		unregister_netdev(dev);

@@ -47,17 +47,43 @@ struct fib4_rule {
 #endif
 };
 
-int __fib_lookup(struct net *net, struct flowi4 *flp,
-		 struct fib_result *res, unsigned int flags)
+static bool fib4_rule_matchall(const struct fib_rule *rule)
+{
+	struct fib4_rule *r = container_of(rule, struct fib4_rule, common);
+
+	if (r->dst_len || r->src_len || r->tos)
+		return false;
+	return fib_rule_matchall(rule);
+}
+
+bool fib4_rule_default(const struct fib_rule *rule)
+{
+	if (!fib4_rule_matchall(rule) || rule->action != FR_ACT_TO_TBL)
+		return false;
+	if (rule->table != RT_TABLE_LOCAL && rule->table != RT_TABLE_MAIN &&
+	    rule->table != RT_TABLE_DEFAULT)
+		return false;
+	return true;
+}
+EXPORT_SYMBOL_GPL(fib4_rule_default);
+
+int fib4_rules_dump(struct net *net, struct notifier_block *nb)
+{
+	return fib_rules_dump(net, nb, AF_INET);
+}
+
+unsigned int fib4_rules_seq_read(struct net *net)
+{
+	return fib_rules_seq_read(net, AF_INET);
+}
+
+int __fib_lookup(struct net *net, struct flowi4 *flp, struct fib_result *res)
 {
 	struct fib_lookup_arg arg = {
 		.result = res,
-		.flags = flags,
+		.flags = FIB_LOOKUP_NOREF,
 	};
 	int err;
-
-	/* update flow if oif or iif point to device enslaved to l3mdev */
-	l3mdev_update_flow(net, flowi4_to_flowi(flp));
 
 	err = fib_rules_lookup(net->ipv4.rules_ops, flowi4_to_flowi(flp), 0, &arg);
 #ifdef CONFIG_IP_ROUTE_CLASSID
@@ -79,7 +105,6 @@ static int fib4_rule_action(struct fib_rule *rule, struct flowi *flp,
 {
 	int err = -EAGAIN;
 	struct fib_table *tbl;
-	u32 tb_id;
 
 	switch (rule->action) {
 	case FR_ACT_TO_TBL:
@@ -98,8 +123,7 @@ static int fib4_rule_action(struct fib_rule *rule, struct flowi *flp,
 
 	rcu_read_lock();
 
-	tb_id = fib_rule_get_table(rule, arg);
-	tbl = fib_get_table(rule->fr_net, tb_id);
+	tbl = fib_get_table(rule->fr_net, rule->table);
 	if (tbl)
 		err = fib_table_lookup(tbl, &flp->u.ip4,
 				       (struct fib_result *)arg->result,
@@ -111,30 +135,16 @@ static int fib4_rule_action(struct fib_rule *rule, struct flowi *flp,
 
 static bool fib4_rule_suppress(struct fib_rule *rule, struct fib_lookup_arg *arg)
 {
-	struct fib_result *result = (struct fib_result *) arg->result;
-	struct net_device *dev = NULL;
-
-	if (result->fi)
-		dev = result->fi->fib_dev;
-
 	/* do not accept result if the route does
 	 * not meet the required prefix length
 	 */
-	if (result->prefixlen <= rule->suppress_prefixlen)
-		goto suppress_route;
-
-	/* do not accept result if the route uses a device
-	 * belonging to a forbidden interface group
-	 */
-	if (rule->suppress_ifgroup != -1 && dev && dev->group == rule->suppress_ifgroup)
-		goto suppress_route;
-
+	struct fib_result *result = (struct fib_result *) arg->result;
+	if (result->prefixlen <= rule->suppress_prefixlen) {
+		if (!(arg->flags & FIB_LOOKUP_NOREF))
+			fib_info_put(result->fi);
+		return true;
+	}
 	return false;
-
-suppress_route:
-	if (!(arg->flags & FIB_LOOKUP_NOREF))
-		fib_info_put(result->fi);
-	return true;
 }
 
 static int fib4_rule_match(struct fib_rule *rule, struct flowi *fl, int flags)
@@ -159,17 +169,9 @@ static struct fib_table *fib_empty_table(struct net *net)
 	u32 id;
 
 	for (id = 1; id <= RT_TABLE_MAX; id++)
-		if (!fib_get_table(net, id))
+		if (fib_get_table(net, id) == NULL)
 			return fib_new_table(net, id);
 	return NULL;
-}
-
-static int call_fib_rule_notifiers(struct net *net,
-				   enum fib_event_type event_type)
-{
-	struct fib_notifier_info info;
-
-	return call_fib_notifiers(net, event_type, &info);
 }
 
 static const struct nla_policy fib4_rule_policy[FRA_MAX+1] = {
@@ -193,12 +195,12 @@ static int fib4_rule_configure(struct fib_rule *rule, struct sk_buff *skb,
 	if (err)
 		goto errout;
 
-	if (rule->table == RT_TABLE_UNSPEC && !rule->l3mdev) {
+	if (rule->table == RT_TABLE_UNSPEC) {
 		if (rule->action == FR_ACT_TO_TBL) {
 			struct fib_table *table;
 
 			table = fib_empty_table(net);
-			if (!table) {
+			if (table == NULL) {
 				err = -ENOBUFS;
 				goto errout;
 			}
@@ -228,7 +230,6 @@ static int fib4_rule_configure(struct fib_rule *rule, struct sk_buff *skb,
 	rule4->tos = frh->tos;
 
 	net->ipv4.fib_has_custom_rules = true;
-	call_fib_rule_notifiers(net, FIB_EVENT_RULE_ADD);
 
 	err = 0;
 errout:
@@ -250,7 +251,6 @@ static int fib4_rule_delete(struct fib_rule *rule)
 		net->ipv4.fib_num_tclassid_users--;
 #endif
 	net->ipv4.fib_has_custom_rules = true;
-	call_fib_rule_notifiers(net, FIB_EVENT_RULE_DEL);
 errout:
 	return err;
 }

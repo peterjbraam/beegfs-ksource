@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2016, Intel Corp.
+ * Copyright (C) 2000 - 2013, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -73,7 +73,7 @@ void *acpi_os_allocate_zeroed(acpi_size size)
 
 		/* Clear the memory block */
 
-		memset(allocation, 0, size);
+		ACPI_MEMSET(allocation, 0, size);
 	}
 
 	return (allocation);
@@ -209,10 +209,10 @@ acpi_status acpi_ut_delete_caches(void)
 
 	/* Free memory lists */
 
-	acpi_os_free(acpi_gbl_global_list);
+	ACPI_FREE(acpi_gbl_global_list);
 	acpi_gbl_global_list = NULL;
 
-	acpi_os_free(acpi_gbl_ns_node_list);
+	ACPI_FREE(acpi_gbl_ns_node_list);
 	acpi_gbl_ns_node_list = NULL;
 #endif
 
@@ -231,7 +231,7 @@ acpi_status acpi_ut_delete_caches(void)
  *
  ******************************************************************************/
 
-acpi_status acpi_ut_validate_buffer(struct acpi_buffer *buffer)
+acpi_status acpi_ut_validate_buffer(struct acpi_buffer * buffer)
 {
 
 	/* Obviously, the structure pointer must be valid */
@@ -272,7 +272,8 @@ acpi_status acpi_ut_validate_buffer(struct acpi_buffer *buffer)
  ******************************************************************************/
 
 acpi_status
-acpi_ut_initialize_buffer(struct acpi_buffer *buffer, acpi_size required_length)
+acpi_ut_initialize_buffer(struct acpi_buffer * buffer,
+			  acpi_size required_length)
 {
 	acpi_size input_buffer_length;
 
@@ -301,13 +302,9 @@ acpi_ut_initialize_buffer(struct acpi_buffer *buffer, acpi_size required_length)
 		return (AE_BUFFER_OVERFLOW);
 
 	case ACPI_ALLOCATE_BUFFER:
-		/*
-		 * Allocate a new buffer. We directectly call acpi_os_allocate here to
-		 * purposefully bypass the (optionally enabled) internal allocation
-		 * tracking mechanism since we only want to track internal
-		 * allocations. Note: The caller should use acpi_os_free to free this
-		 * buffer created via ACPI_ALLOCATE_BUFFER.
-		 */
+
+		/* Allocate a new buffer */
+
 		buffer->pointer = acpi_os_allocate(required_length);
 		break;
 

@@ -21,7 +21,6 @@ struct pt_regs;
 #define BUILD_BUG_ON_MSG(cond, msg) (0)
 #define BUILD_BUG_ON(condition) (0)
 #define BUILD_BUG() (0)
-#define MAYBE_BUILD_BUG_ON(cond) (0)
 #else /* __CHECKER__ */
 
 /* Force a compilation error if a constant expression is not a power of 2 */
@@ -87,14 +86,6 @@ struct pt_regs;
  */
 #define BUILD_BUG() BUILD_BUG_ON_MSG(1, "BUILD_BUG failed")
 
-#define MAYBE_BUILD_BUG_ON(cond)			\
-	do {						\
-		if (__builtin_constant_p((cond)))       \
-			BUILD_BUG_ON(cond);             \
-		else                                    \
-			BUG_ON(cond);                   \
-	} while (0)
-
 #endif	/* __CHECKER__ */
 
 #ifdef CONFIG_GENERIC_BUG
@@ -113,11 +104,6 @@ enum bug_trap_type report_bug(unsigned long bug_addr, struct pt_regs *regs);
 int is_valid_bugaddr(unsigned long addr);
 
 #else	/* !CONFIG_GENERIC_BUG */
-
-static inline void *find_bug(unsigned long bugaddr)
-{
-	return NULL;
-}
 
 static inline enum bug_trap_type report_bug(unsigned long bug_addr,
 					    struct pt_regs *regs)

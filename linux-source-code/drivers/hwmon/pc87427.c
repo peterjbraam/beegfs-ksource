@@ -1,7 +1,7 @@
 /*
  *  pc87427.c - hardware monitoring driver for the
  *              National Semiconductor PC87427 Super-I/O chip
- *  Copyright (C) 2006, 2008, 2010  Jean Delvare <jdelvare@suse.de>
+ *  Copyright (C) 2006, 2008, 2010  Jean Delvare <khali@linux-fr.org>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License version 2 as
@@ -106,13 +106,6 @@ static const char *logdev_str[2] = { DRVNAME " FMC", DRVNAME " HMC" };
 #define LD_IN		1
 #define LD_TEMP		1
 
-static inline int superio_enter(int sioaddr)
-{
-	if (!request_muxed_region(sioaddr, 2, DRVNAME))
-		return -EBUSY;
-	return 0;
-}
-
 static inline void superio_outb(int sioaddr, int reg, int val)
 {
 	outb(reg, sioaddr);
@@ -129,7 +122,6 @@ static inline void superio_exit(int sioaddr)
 {
 	outb(0x02, sioaddr);
 	outb(0x02, sioaddr + 1);
-	release_region(sioaddr, 2);
 }
 
 /*
@@ -991,7 +983,7 @@ static int pc87427_request_regions(struct platform_device *pdev,
 
 static void pc87427_init_device(struct device *dev)
 {
-	struct pc87427_sio_data *sio_data = dev_get_platdata(dev);
+	struct pc87427_sio_data *sio_data = dev->platform_data;
 	struct pc87427_data *data = dev_get_drvdata(dev);
 	int i;
 	u8 reg;
@@ -1083,14 +1075,16 @@ static void pc87427_remove_files(struct device *dev)
 
 static int pc87427_probe(struct platform_device *pdev)
 {
-	struct pc87427_sio_data *sio_data = dev_get_platdata(&pdev->dev);
+	struct pc87427_sio_data *sio_data = pdev->dev.platform_data;
 	struct pc87427_data *data;
 	int i, err, res_count;
 
 	data = devm_kzalloc(&pdev->dev, sizeof(struct pc87427_data),
 			    GFP_KERNEL);
-	if (!data)
+	if (!data) {
+		pr_err("Out of memory\n");
 		return -ENOMEM;
+	}
 
 	data->address[0] = sio_data->address[0];
 	data->address[1] = sio_data->address[1];
@@ -1161,6 +1155,7 @@ static int pc87427_remove(struct platform_device *pdev)
 
 static struct platform_driver pc87427_driver = {
 	.driver = {
+		.owner	= THIS_MODULE,
 		.name	= DRVNAME,
 	},
 	.probe		= pc87427_probe,
@@ -1228,11 +1223,7 @@ static int __init pc87427_find(int sioaddr, struct pc87427_sio_data *sio_data)
 {
 	u16 val;
 	u8 cfg, cfg_b;
-	int i, err;
-
-	err = superio_enter(sioaddr);
-	if (err)
-		return err;
+	int i, err = 0;
 
 	/* Identify device */
 	val = force_id ? force_id : superio_inb(sioaddr, SIOREG_DEVID);
@@ -1356,7 +1347,7 @@ static void __exit pc87427_exit(void)
 	platform_driver_unregister(&pc87427_driver);
 }
 
-MODULE_AUTHOR("Jean Delvare <jdelvare@suse.de>");
+MODULE_AUTHOR("Jean Delvare <khali@linux-fr.org>");
 MODULE_DESCRIPTION("PC87427 hardware monitoring driver");
 MODULE_LICENSE("GPL");
 

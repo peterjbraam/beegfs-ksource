@@ -80,8 +80,6 @@ Userspace can detect that a driver can report more total contacts than slots
 by noting that the largest supported BTN_TOOL_*TAP event is larger than the
 total number of type B slots reported in the absinfo for the ABS_MT_SLOT axis.
 
-The minimum value of the ABS_MT_SLOT axis must be 0.
-
 Protocol Example A
 ------------------
 
@@ -361,7 +359,7 @@ For win8 devices with both T and C coordinates, the position mapping is
    ABS_MT_POSITION_X := T_X
    ABS_MT_POSITION_Y := T_Y
    ABS_MT_TOOL_X := C_X
-   ABS_MT_TOOL_Y := C_Y
+   ABS_MT_TOOL_X := C_Y
 
 Unfortunately, there is not enough information to specify both the touching
 ellipse and the tool ellipse, so one has to resort to approximations.  One
@@ -375,7 +373,7 @@ simple scheme, which is compatible with earlier usage, is:
 
 Rationale: We have no information about the orientation of the touching
 ellipse, so approximate it with an inscribed circle instead. The tool
-ellipse should align with the vector (T - C), so the diameter must
+ellipse should align with the the vector (T - C), so the diameter must
 increase with distance(T, C). Finally, assume that the touch diameter is
 equal to the tool thickness, and we arrive at the formulas above.
 

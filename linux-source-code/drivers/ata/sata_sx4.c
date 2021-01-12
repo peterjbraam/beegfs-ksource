@@ -218,7 +218,7 @@ static void pdc_error_handler(struct ata_port *ap);
 static void pdc_freeze(struct ata_port *ap);
 static void pdc_thaw(struct ata_port *ap);
 static int pdc_port_start(struct ata_port *ap);
-static enum ata_completion_errors pdc20621_qc_prep(struct ata_queued_cmd *qc);
+static void pdc20621_qc_prep(struct ata_queued_cmd *qc);
 static void pdc_tf_load_mmio(struct ata_port *ap, const struct ata_taskfile *tf);
 static void pdc_exec_command_mmio(struct ata_port *ap, const struct ata_taskfile *tf);
 static unsigned int pdc20621_dimm_init(struct ata_host *host);
@@ -546,7 +546,7 @@ static void pdc20621_nodata_prep(struct ata_queued_cmd *qc)
 	VPRINTK("ata pkt buf ofs %u, mmio copied\n", i);
 }
 
-static enum ata_completion_errors pdc20621_qc_prep(struct ata_queued_cmd *qc)
+static void pdc20621_qc_prep(struct ata_queued_cmd *qc)
 {
 	switch (qc->tf.protocol) {
 	case ATA_PROT_DMA:
@@ -558,8 +558,6 @@ static enum ata_completion_errors pdc20621_qc_prep(struct ata_queued_cmd *qc)
 	default:
 		break;
 	}
-
-	return AC_ERR_OK;
 }
 
 static void __pdc20621_push_hdma(struct ata_queued_cmd *qc,
@@ -1022,7 +1020,8 @@ static void pdc20621_get_from_dimm(struct ata_host *host, void *psource,
 	idx++;
 	dist = ((long) (window_size - (offset + size))) >= 0 ? size :
 		(long) (window_size - offset);
-	memcpy_fromio(psource, dimm_mmio + offset / 4, dist);
+	memcpy_fromio((char *) psource, (char *) (dimm_mmio + offset / 4),
+		      dist);
 
 	psource += dist;
 	size -= dist;
@@ -1031,7 +1030,8 @@ static void pdc20621_get_from_dimm(struct ata_host *host, void *psource,
 		readl(mmio + PDC_GENERAL_CTLR);
 		writel(((idx) << page_mask), mmio + PDC_DIMM_WINDOW_CTLR);
 		readl(mmio + PDC_DIMM_WINDOW_CTLR);
-		memcpy_fromio(psource, dimm_mmio, window_size / 4);
+		memcpy_fromio((char *) psource, (char *) (dimm_mmio),
+			      window_size / 4);
 		psource += window_size;
 		size -= window_size;
 		idx++;
@@ -1042,7 +1042,8 @@ static void pdc20621_get_from_dimm(struct ata_host *host, void *psource,
 		readl(mmio + PDC_GENERAL_CTLR);
 		writel(((idx) << page_mask), mmio + PDC_DIMM_WINDOW_CTLR);
 		readl(mmio + PDC_DIMM_WINDOW_CTLR);
-		memcpy_fromio(psource, dimm_mmio, size / 4);
+		memcpy_fromio((char *) psource, (char *) (dimm_mmio),
+			      size / 4);
 	}
 }
 #endif
@@ -1488,10 +1489,10 @@ static int pdc_sata_init_one(struct pci_dev *pdev,
 	}
 
 	/* configure and activate */
-	rc = dma_set_mask(&pdev->dev, ATA_DMA_MASK);
+	rc = pci_set_dma_mask(pdev, ATA_DMA_MASK);
 	if (rc)
 		return rc;
-	rc = dma_set_coherent_mask(&pdev->dev, ATA_DMA_MASK);
+	rc = pci_set_consistent_dma_mask(pdev, ATA_DMA_MASK);
 	if (rc)
 		return rc;
 

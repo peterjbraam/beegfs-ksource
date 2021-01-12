@@ -6,16 +6,14 @@
 #include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/pci.h>
-#include <linux/of_device.h>
-#include <linux/of_pci.h>
+#ifndef __GENKSYMS__
 #include <linux/pci_hotplug.h>
+#endif
 #include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/cpumask.h>
 #include <linux/pci-aspm.h>
 #include <linux/aer.h>
-#include <linux/acpi.h>
-#include <linux/irqdomain.h>
 #include <linux/pm_runtime.h>
 #include "pci.h"
 
@@ -95,6 +93,7 @@ static void release_pcibus_dev(struct device *dev)
 	put_device(pci_bus->bridge);
 	pci_bus_remove_resources(pci_bus);
 	pci_release_bus_of_node(pci_bus);
+	kfree(pci_bus->pci_bus_rh);
 	kfree(pci_bus);
 }
 
@@ -127,6 +126,62 @@ static u64 pci_size(u64 base, u64 maxbase, u64 mask)
 
 	return size;
 }
+
+int pci_read_config_byte(const struct pci_dev *dev, int where, u8 *val)
+{
+	if (pci_dev_is_disconnected(dev)) {
+		*val = ~0;
+		return PCIBIOS_DEVICE_NOT_FOUND;
+	}
+	return pci_bus_read_config_byte(dev->bus, dev->devfn, where, val);
+}
+EXPORT_SYMBOL(pci_read_config_byte);
+
+int pci_read_config_word(const struct pci_dev *dev, int where, u16 *val)
+{
+	if (pci_dev_is_disconnected(dev)) {
+		*val = ~0;
+		return PCIBIOS_DEVICE_NOT_FOUND;
+	}
+	return pci_bus_read_config_word(dev->bus, dev->devfn, where, val);
+}
+EXPORT_SYMBOL(pci_read_config_word);
+
+int pci_read_config_dword(const struct pci_dev *dev, int where,
+					u32 *val)
+{
+	if (pci_dev_is_disconnected(dev)) {
+		*val = ~0;
+		return PCIBIOS_DEVICE_NOT_FOUND;
+	}
+	return pci_bus_read_config_dword(dev->bus, dev->devfn, where, val);
+}
+EXPORT_SYMBOL(pci_read_config_dword);
+
+int pci_write_config_byte(const struct pci_dev *dev, int where, u8 val)
+{
+	if (pci_dev_is_disconnected(dev))
+		return PCIBIOS_DEVICE_NOT_FOUND;
+	return pci_bus_write_config_byte(dev->bus, dev->devfn, where, val);
+}
+EXPORT_SYMBOL(pci_write_config_byte);
+
+int pci_write_config_word(const struct pci_dev *dev, int where, u16 val)
+{
+	if (pci_dev_is_disconnected(dev))
+		return PCIBIOS_DEVICE_NOT_FOUND;
+	return pci_bus_write_config_word(dev->bus, dev->devfn, where, val);
+}
+EXPORT_SYMBOL(pci_write_config_word);
+
+int pci_write_config_dword(const struct pci_dev *dev, int where,
+					 u32 val)
+{
+	if (pci_dev_is_disconnected(dev))
+		return PCIBIOS_DEVICE_NOT_FOUND;
+	return pci_bus_write_config_dword(dev->bus, dev->devfn, where, val);
+}
+EXPORT_SYMBOL(pci_write_config_dword);
 
 static inline unsigned long decode_bar(struct pci_dev *dev, u32 bar)
 {
@@ -175,7 +230,7 @@ static inline unsigned long decode_bar(struct pci_dev *dev, u32 bar)
 int __pci_read_base(struct pci_dev *dev, enum pci_bar_type type,
 		    struct resource *res, unsigned int pos)
 {
-	u32 l, sz, mask;
+	u32 l = 0, sz = 0, mask;
 	u64 l64, sz64, mask64;
 	u16 orig_cmd;
 	struct pci_bus_region region, inverted_region;
@@ -227,11 +282,10 @@ int __pci_read_base(struct pci_dev *dev, enum pci_bar_type type,
 			mask64 = (u32)PCI_BASE_ADDRESS_MEM_MASK;
 		}
 	} else {
-		if (l & PCI_ROM_ADDRESS_ENABLE)
-			res->flags |= IORESOURCE_ROM_ENABLE;
+		res->flags |= (l & IORESOURCE_ROM_ENABLE);
 		l64 = l & PCI_ROM_ADDRESS_MASK;
 		sz64 = sz & PCI_ROM_ADDRESS_MASK;
-		mask64 = PCI_ROM_ADDRESS_MASK;
+		mask64 = (u32)PCI_ROM_ADDRESS_MASK;
 	}
 
 	if (res->flags & IORESOURCE_MEM_64) {
@@ -334,8 +388,60 @@ static void pci_read_bases(struct pci_dev *dev, unsigned int howmany, int rom)
 		struct resource *res = &dev->resource[PCI_ROM_RESOURCE];
 		dev->rom_base_reg = rom;
 		res->flags = IORESOURCE_MEM | IORESOURCE_PREFETCH |
-				IORESOURCE_READONLY | IORESOURCE_SIZEALIGN;
+				IORESOURCE_READONLY | IORESOURCE_CACHEABLE |
+				IORESOURCE_SIZEALIGN;
 		__pci_read_base(dev, pci_bar_mem32, res, rom);
+	}
+}
+
+static void pci_read_bridge_windows(struct pci_dev *bridge)
+{
+	u16 io;
+	u32 pmem, tmp;
+
+	pci_read_config_word(bridge, PCI_IO_BASE, &io);
+	if (!io) {
+		pci_write_config_word(bridge, PCI_IO_BASE, 0xe0f0);
+		pci_read_config_word(bridge, PCI_IO_BASE, &io);
+		pci_write_config_word(bridge, PCI_IO_BASE, 0x0);
+	}
+	if (io)
+		bridge->io_window = 1;
+
+	/*
+	 * DECchip 21050 pass 2 errata: the bridge may miss an address
+	 * disconnect boundary by one PCI data phase.  Workaround: do not
+	 * use prefetching on this device.
+	 */
+	if (bridge->vendor == PCI_VENDOR_ID_DEC && bridge->device == 0x0001)
+		return;
+
+	pci_read_config_dword(bridge, PCI_PREF_MEMORY_BASE, &pmem);
+	if (!pmem) {
+		pci_write_config_dword(bridge, PCI_PREF_MEMORY_BASE,
+					       0xffe0fff0);
+		pci_read_config_dword(bridge, PCI_PREF_MEMORY_BASE, &pmem);
+		pci_write_config_dword(bridge, PCI_PREF_MEMORY_BASE, 0x0);
+	}
+	if (!pmem)
+		return;
+
+	bridge->pref_window = 1;
+
+	if ((pmem & PCI_PREF_RANGE_TYPE_MASK) == PCI_PREF_RANGE_TYPE_64) {
+
+		/*
+		 * Bridge claims to have a 64-bit prefetchable memory
+		 * window; verify that the upper bits are actually
+		 * writable.
+		 */
+		pci_read_config_dword(bridge, PCI_PREF_BASE_UPPER32, &pmem);
+		pci_write_config_dword(bridge, PCI_PREF_BASE_UPPER32,
+				       0xffffffff);
+		pci_read_config_dword(bridge, PCI_PREF_BASE_UPPER32, &tmp);
+		pci_write_config_dword(bridge, PCI_PREF_BASE_UPPER32, pmem);
+		if (tmp)
+			bridge->pref_64_window = 1;
 	}
 }
 
@@ -496,6 +602,12 @@ static struct pci_bus *pci_alloc_bus(struct pci_bus *parent)
 	if (!b)
 		return NULL;
 
+	b->pci_bus_rh = kzalloc(sizeof(struct pci_bus_rh), GFP_KERNEL);
+	if (!b->pci_bus_rh) {
+		kfree(b);
+		return NULL;
+	}
+
 	INIT_LIST_HEAD(&b->node);
 	INIT_LIST_HEAD(&b->children);
 	INIT_LIST_HEAD(&b->devices);
@@ -529,9 +641,22 @@ static struct pci_host_bridge *pci_alloc_host_bridge(struct pci_bus *b)
 	bridge = kzalloc(sizeof(*bridge), GFP_KERNEL);
 	if (!bridge)
 		return NULL;
+	device_rh_alloc(&bridge->dev);
 
 	INIT_LIST_HEAD(&bridge->windows);
 	bridge->bus = b;
+
+	/*
+	 * We assume we can manage these PCIe features.  Some systems may
+	 * reserve these for use by the platform itself, e.g., an ACPI BIOS
+	 * may implement its own AER handling and use _OSC to prevent the
+	 * OS from interfering.
+	 */
+	bridge->native_aer = 1;
+	bridge->native_pcie_hotplug = 1;
+	bridge->native_shpc_hotplug = 1;
+	bridge->native_pme = 1;
+
 	return bridge;
 }
 
@@ -559,7 +684,7 @@ const unsigned char pcie_link_speed[] = {
 	PCIE_SPEED_2_5GT,		/* 1 */
 	PCIE_SPEED_5_0GT,		/* 2 */
 	PCIE_SPEED_8_0GT,		/* 3 */
-	PCI_SPEED_UNKNOWN,		/* 4 */
+	PCIE_SPEED_16_0GT,		/* 4 */
 	PCI_SPEED_UNKNOWN,		/* 5 */
 	PCI_SPEED_UNKNOWN,		/* 6 */
 	PCI_SPEED_UNKNOWN,		/* 7 */
@@ -668,56 +793,6 @@ static void pci_set_bus_speed(struct pci_bus *bus)
 	}
 }
 
-static struct irq_domain *pci_host_bridge_msi_domain(struct pci_bus *bus)
-{
-	struct irq_domain *d;
-
-	/*
-	 * Any firmware interface that can resolve the msi_domain
-	 * should be called from here.
-	 */
-	d = pci_host_bridge_of_msi_domain(bus);
-	if (!d)
-		d = pci_host_bridge_acpi_msi_domain(bus);
-
-#ifdef CONFIG_PCI_MSI_IRQ_DOMAIN
-	/*
-	 * If no IRQ domain was found via the OF tree, try looking it up
-	 * directly through the fwnode_handle.
-	 */
-	if (!d) {
-		struct fwnode_handle *fwnode = pci_root_bus_fwnode(bus);
-
-		if (fwnode)
-			d = irq_find_matching_fwnode(fwnode,
-						     DOMAIN_BUS_PCI_MSI);
-	}
-#endif
-
-	return d;
-}
-
-static void pci_set_bus_msi_domain(struct pci_bus *bus)
-{
-	struct irq_domain *d;
-	struct pci_bus *b;
-
-	/*
-	 * The bus can be a root bus, a subordinate bus, or a virtual bus
-	 * created by an SR-IOV device.  Walk up to the first bridge device
-	 * found or derive the domain from the host bridge.
-	 */
-	for (b = bus, d = NULL; !d && !pci_is_root_bus(b); b = b->parent) {
-		if (b->self)
-			d = dev_get_msi_domain(&b->self->dev);
-	}
-
-	if (!d)
-		d = pci_host_bridge_msi_domain(b);
-
-	dev_set_msi_domain(&bus->dev, d);
-}
-
 static struct pci_bus *pci_alloc_child_bus(struct pci_bus *parent,
 					   struct pci_dev *bridge, int busnr)
 {
@@ -771,17 +846,10 @@ static struct pci_bus *pci_alloc_child_bus(struct pci_bus *parent,
 	bridge->subordinate = child;
 
 add_dev:
-	pci_set_bus_msi_domain(child);
 	ret = device_register(&child->dev);
 	WARN_ON(ret < 0);
 
 	pcibios_add_bus(child);
-
-	if (child->ops->add_bus) {
-		ret = child->ops->add_bus(child);
-		if (WARN_ON(ret < 0))
-			dev_err(&child->dev, "failed to add bus: %d\n", ret);
-	}
 
 	/* Create legacy_io and legacy_mem files for this bus */
 	pci_create_legacy_files(child);
@@ -815,7 +883,21 @@ static void pci_enable_crs(struct pci_dev *pdev)
 					 PCI_EXP_RTCTL_CRSSVE);
 }
 
+static unsigned int pci_scan_child_bus_extend(struct pci_bus *bus,
+					      unsigned int available_buses);
+
 /*
+ * pci_scan_bridge_extend() - Scan buses behind a bridge
+ * @bus: Parent bus the bridge is on
+ * @dev: Bridge itself
+ * @max: Starting subordinate number of buses behind this bridge
+ * @available_buses: Total number of buses available for this bridge and
+ *		     the devices below. After the minimal bus space has
+ *		     been allocated the remaining buses will be
+ *		     distributed equally between hotplug-capable bridges.
+ * @pass: Either %0 (scan already configured bridges) or %1 (scan bridges
+ *        that need to be reconfigured.
+ *
  * If it's a bridge, configure it and scan the bus behind it.
  * For CardBus bridges, we don't scan behind as the devices will
  * be handled by the bridge driver itself.
@@ -824,8 +906,12 @@ static void pci_enable_crs(struct pci_dev *pdev)
  * already configured by the BIOS and after we are done with all of
  * them, we proceed to assigning numbers to the remaining buses in
  * order to avoid overlaps between old and new bus numbers.
+ *
+ * Return: New subordinate number covering all buses behind this bridge.
  */
-int pci_scan_bridge(struct pci_bus *bus, struct pci_dev *dev, int max, int pass)
+static int pci_scan_bridge_extend(struct pci_bus *bus, struct pci_dev *dev,
+				  int max, unsigned int available_buses,
+				  int pass)
 {
 	struct pci_bus *child;
 	int is_cardbus = (dev->hdr_type == PCI_HEADER_TYPE_CARDBUS);
@@ -936,6 +1022,9 @@ int pci_scan_bridge(struct pci_bus *bus, struct pci_dev *dev, int max, int pass)
 						bus->busn_res.end);
 		}
 		max++;
+		if (available_buses)
+			available_buses--;
+
 		buses = (buses & 0xff000000)
 		      | ((unsigned int)(child->primary)     <<  0)
 		      | ((unsigned int)(child->busn_res.start)   <<  8)
@@ -957,7 +1046,7 @@ int pci_scan_bridge(struct pci_bus *bus, struct pci_dev *dev, int max, int pass)
 
 		if (!is_cardbus) {
 			child->bridge_ctl = bctl;
-			max = pci_scan_child_bus(child);
+			max = pci_scan_child_bus_extend(child, available_buses);
 		} else {
 			/*
 			 * For CardBus bridges, we leave 4 bus numbers
@@ -1000,20 +1089,15 @@ int pci_scan_bridge(struct pci_bus *bus, struct pci_dev *dev, int max, int pass)
 		(is_cardbus ? "PCI CardBus %04x:%02x" : "PCI Bus %04x:%02x"),
 		pci_domain_nr(bus), child->number);
 
-	/* Has only triggered on CardBus, fixup is in yenta_socket */
+	/* Check that all devices are accessible */
 	while (bus->parent) {
 		if ((child->busn_res.end > bus->busn_res.end) ||
 		    (child->number > bus->busn_res.end) ||
 		    (child->number < bus->number) ||
 		    (child->busn_res.end < bus->number)) {
-			dev_info(&child->dev, "%pR %s hidden behind%s bridge %s %pR\n",
-				&child->busn_res,
-				(bus->number > child->busn_res.end &&
-				 bus->busn_res.end < child->number) ?
-					"wholly" : "partially",
-				bus->self->transparent ? " transparent" : "",
-				dev_name(&bus->dev),
-				&bus->busn_res);
+			dev_info(&dev->dev, "devices behind bridge are unusable because %pR cannot be assigned for them\n",
+				 &child->busn_res);
+			break;
 		}
 		bus = bus->parent;
 	}
@@ -1024,6 +1108,30 @@ out:
 	pm_runtime_put(&dev->dev);
 
 	return max;
+}
+
+/*
+ * pci_scan_bridge() - Scan buses behind a bridge
+ * @bus: Parent bus the bridge is on
+ * @dev: Bridge itself
+ * @max: Starting subordinate number of buses behind this bridge
+ * @pass: Either %0 (scan already configured bridges) or %1 (scan bridges
+ *        that need to be reconfigured.
+ *
+ * If it's a bridge, configure it and scan the bus behind it.
+ * For CardBus bridges, we don't scan behind as the devices will
+ * be handled by the bridge driver itself.
+ *
+ * We need to process bridges in two passes -- first we scan those
+ * already configured by the BIOS and after we are done with all of
+ * them, we proceed to assigning numbers to the remaining buses in
+ * order to avoid overlaps between old and new bus numbers.
+ *
+ * Return: New subordinate number covering all buses behind this bridge.
+ */
+int pci_scan_bridge(struct pci_bus *bus, struct pci_dev *dev, int max, int pass)
+{
+	return pci_scan_bridge_extend(bus, dev, max, 0, pass);
 }
 EXPORT_SYMBOL(pci_scan_bridge);
 
@@ -1089,6 +1197,24 @@ void set_pcie_hotplug_bridge(struct pci_dev *pdev)
 	pcie_capability_read_dword(pdev, PCI_EXP_SLTCAP, &reg32);
 	if (reg32 & PCI_EXP_SLTCAP_HPC)
 		pdev->is_hotplug_bridge = 1;
+}
+
+static void set_pcie_thunderbolt(struct pci_dev *dev)
+{
+	int vsec = 0;
+	u32 header;
+
+	while ((vsec = pci_find_next_ext_capability(dev, vsec,
+						    PCI_EXT_CAP_ID_VNDR))) {
+		pci_read_config_dword(dev, vsec + PCI_VNDR_HEADER, &header);
+
+		/* Is the device part of a Thunderbolt controller? */
+		if (dev->vendor == PCI_VENDOR_ID_INTEL &&
+		    PCI_VNDR_HEADER_ID(header) == PCI_VSEC_ID_INTEL_TBT) {
+			dev->is_thunderbolt = 1;
+			return;
+		}
+	}
 }
 
 /**
@@ -1243,6 +1369,9 @@ int pci_setup_device(struct pci_dev *dev)
 	/* need to have dev->class ready */
 	dev->cfg_size = pci_cfg_space_size(dev);
 
+	/* need to have dev->cfg_size ready */
+	set_pcie_thunderbolt(dev);
+
 	/* "Unknown power state" */
 	dev->current_state = PCI_UNKNOWN;
 
@@ -1251,7 +1380,7 @@ int pci_setup_device(struct pci_dev *dev)
 	/* device class may be changed after fixup */
 	class = dev->class >> 8;
 
-	if (dev->non_compliant_bars && !dev->mmio_always_on) {
+	if (dev->non_compliant_bars) {
 		pci_read_config_word(dev, PCI_COMMAND, &cmd);
 		if (cmd & (PCI_COMMAND_IO | PCI_COMMAND_MEMORY)) {
 			dev_info(&dev->dev, "device has non-compliant BARs; disabling IO/MEM decoding\n");
@@ -1323,6 +1452,7 @@ int pci_setup_device(struct pci_dev *dev)
 		pci_read_irq(dev);
 		dev->transparent = ((dev->class & 0xff) == 1);
 		pci_read_bases(dev, 2, PCI_ROM_ADDRESS1);
+		pci_read_bridge_windows(dev);
 		set_pcie_hotplug_bridge(dev);
 		pos = pci_find_capability(dev, PCI_CAP_ID_SSVID);
 		if (pos) {
@@ -1358,33 +1488,13 @@ int pci_setup_device(struct pci_dev *dev)
 static void pci_configure_mps(struct pci_dev *dev)
 {
 	struct pci_dev *bridge = pci_upstream_bridge(dev);
-	int mps, p_mps, rc;
+	int mps, mpss, p_mps, rc;
 
-	if (!pci_is_pcie(dev))
+	if (!pci_is_pcie(dev) || !bridge || !pci_is_pcie(bridge))
 		return;
 
 	/* MPS and MRRS fields are of type 'RsvdP' for VFs, short-circuit out */
 	if (dev->is_virtfn)
-		return;
-
-	/*
-	 * For Root Complex Integrated Endpoints, program the maximum
-	 * supported value unless limited by the PCIE_BUS_PEER2PEER case.
-	 */
-	if (pci_pcie_type(dev) == PCI_EXP_TYPE_RC_END) {
-		if (pcie_bus_config == PCIE_BUS_PEER2PEER)
-			mps = 128;
-		else
-			mps = 128 << dev->pcie_mpss;
-		rc = pcie_set_mps(dev, mps);
-		if (rc) {
-			pci_warn(dev, "can't set Max Payload Size to %d; if necessary, use \"pci=pcie_bus_safe\" and report a bug\n",
-				 mps);
-		}
-		return;
-	}
-
-	if (!bridge || !pci_is_pcie(bridge))
 		return;
 
 	mps = pcie_get_mps(dev);
@@ -1406,6 +1516,14 @@ static void pci_configure_mps(struct pci_dev *dev)
 	if (pcie_bus_config != PCIE_BUS_DEFAULT)
 		return;
 
+	mpss = 128 << dev->pcie_mpss;
+	if (mpss < p_mps && pci_pcie_type(bridge) == PCI_EXP_TYPE_ROOT_PORT) {
+		pcie_set_mps(bridge, mpss);
+		pci_info(dev, "Upstream bridge's Max Payload Size set to %d (was %d, max %d)\n",
+			 mpss, p_mps, 128 << bridge->pcie_mpss);
+		p_mps = pcie_get_mps(bridge);
+	}
+
 	rc = pcie_set_mps(dev, p_mps);
 	if (rc) {
 		dev_warn(&dev->dev, "can't set Max Payload Size to %d; if necessary, use \"pci=pcie_bus_safe\" and report a bug\n",
@@ -1414,7 +1532,7 @@ static void pci_configure_mps(struct pci_dev *dev)
 	}
 
 	dev_info(&dev->dev, "Max Payload Size set to %d (was %d, max %d)\n",
-		 p_mps, mps, 128 << dev->pcie_mpss);
+		 p_mps, mps, mpss);
 }
 
 static struct hpp_type0 pci_default_type0 = {
@@ -1463,16 +1581,8 @@ static void program_hpp_type0(struct pci_dev *dev, struct hpp_type0 *hpp)
 
 static void program_hpp_type1(struct pci_dev *dev, struct hpp_type1 *hpp)
 {
-	int pos;
-
-	if (!hpp)
-		return;
-
-	pos = pci_find_capability(dev, PCI_CAP_ID_PCIX);
-	if (!pos)
-		return;
-
-	dev_warn(&dev->dev, "PCI-X settings not supported\n");
+	if (hpp)
+		dev_warn(&dev->dev, "PCI-X settings not supported\n");
 }
 
 static bool pcie_root_rcb_set(struct pci_dev *dev)
@@ -1496,9 +1606,6 @@ static void program_hpp_type2(struct pci_dev *dev, struct hpp_type2 *hpp)
 	u32 reg32;
 
 	if (!hpp)
-		return;
-
-	if (!pci_is_pcie(dev))
 		return;
 
 	if (hpp->revision > 1) {
@@ -1570,12 +1677,55 @@ static void program_hpp_type2(struct pci_dev *dev, struct hpp_type2 *hpp)
 	 */
 }
 
+/**
+ * pcie_relaxed_ordering_enabled - Probe for PCIe relaxed ordering enable
+ * @dev: PCI device to query
+ *
+ * Returns true if the device has enabled relaxed ordering attribute.
+ */
+bool pcie_relaxed_ordering_enabled(struct pci_dev *dev)
+{
+	u16 v;
+
+	pcie_capability_read_word(dev, PCI_EXP_DEVCTL, &v);
+
+	return !!(v & PCI_EXP_DEVCTL_RELAX_EN);
+}
+EXPORT_SYMBOL(pcie_relaxed_ordering_enabled);
+
+static void pci_configure_relaxed_ordering(struct pci_dev *dev)
+{
+	struct pci_dev *root;
+
+	/* PCI_EXP_DEVICE_RELAX_EN is RsvdP in VFs */
+	if (dev->is_virtfn)
+		return;
+
+	if (!pcie_relaxed_ordering_enabled(dev))
+		return;
+
+	/*
+	 * For now, we only deal with Relaxed Ordering issues with Root
+	 * Ports. Peer-to-Peer DMA is another can of worms.
+	 */
+	root = pci_find_pcie_root_port(dev);
+	if (!root)
+		return;
+
+	if (root->dev_flags & PCI_DEV_FLAGS_NO_RELAXED_ORDERING) {
+		pcie_capability_clear_word(dev, PCI_EXP_DEVCTL,
+					   PCI_EXP_DEVCTL_RELAX_EN);
+		dev_info(&dev->dev, "Disable Relaxed Ordering because the Root Port didn't support it\n");
+	}
+}
+
 static void pci_configure_device(struct pci_dev *dev)
 {
 	struct hotplug_params hpp;
 	int ret;
 
 	pci_configure_mps(dev);
+        pci_configure_relaxed_ordering(dev);
 
 	memset(&hpp, 0, sizeof(hpp));
 	ret = pci_get_hp_params(dev, &hpp);
@@ -1610,8 +1760,9 @@ static void pci_release_dev(struct device *dev)
 	pci_release_of_node(pci_dev);
 	pcibios_release_device(pci_dev);
 	pci_bus_put(pci_dev->bus);
-	kfree(pci_dev->driver_override);
-	kfree(pci_dev->dma_alias_mask);
+	kfree(pci_dev->pci_dev_rh->driver_override);
+	kfree(pci_dev->pci_dev_rh->dma_alias_mask);
+	kfree(pci_dev->pci_dev_rh);
 	kfree(pci_dev);
 }
 
@@ -1622,6 +1773,12 @@ struct pci_dev *pci_alloc_dev(struct pci_bus *bus)
 	dev = kzalloc(sizeof(struct pci_dev), GFP_KERNEL);
 	if (!dev)
 		return NULL;
+
+	dev->pci_dev_rh = kzalloc(sizeof(struct pci_dev_rh), GFP_KERNEL);
+	if (!dev->pci_dev_rh) {
+		kfree(dev);
+		return NULL;
+	}
 
 	INIT_LIST_HEAD(&dev->bus_list);
 	dev->dev.type = &pci_dev_type;
@@ -1695,6 +1852,7 @@ static struct pci_dev *pci_scan_device(struct pci_bus *bus, int devfn)
 
 	if (pci_setup_device(dev)) {
 		pci_bus_put(dev->bus);
+		kfree(dev->pci_dev_rh);
 		kfree(dev);
 		return NULL;
 	}
@@ -1702,10 +1860,32 @@ static struct pci_dev *pci_scan_device(struct pci_bus *bus, int devfn)
 	return dev;
 }
 
+static void pcie_report_downtraining(struct pci_dev *dev)
+{
+	if (!pci_is_pcie(dev))
+		return;
+
+	/* Look from the device up to avoid downstream ports with no devices */
+	if ((pci_pcie_type(dev) != PCI_EXP_TYPE_ENDPOINT) &&
+	    (pci_pcie_type(dev) != PCI_EXP_TYPE_LEG_END) &&
+	    (pci_pcie_type(dev) != PCI_EXP_TYPE_UPSTREAM))
+		return;
+
+	/* Multi-function PCIe devices share the same link/status */
+	if (PCI_FUNC(dev->devfn) != 0 || dev->is_virtfn)
+		return;
+
+	/* Print link status only if the device is constrained by the fabric */
+	__pcie_print_link_status(dev, false);
+}
+
 static void pci_init_capabilities(struct pci_dev *dev)
 {
 	/* Enhanced Allocation */
 	pci_ea_init(dev);
+
+	/* MSI/MSI-X list */
+	pci_msi_init_pci_dev(dev);
 
 	/* Setup MSI caps & disable MSI/MSI-X interrupts */
 	pci_msi_setup_pci_dev(dev);
@@ -1731,83 +1911,12 @@ static void pci_init_capabilities(struct pci_dev *dev)
 	/* Enable ACS P2P upstream forwarding */
 	pci_enable_acs(dev);
 
-	/* Precision Time Measurement */
-	pci_ptm_init(dev);
+	pci_cleanup_aer_error_status_regs(dev);
 
-	/* Advanced Error Reporting */
-	pci_aer_init(dev);
-}
+	if (pci_probe_reset_function(dev) == 0)
+		dev->reset_fn = 1;
 
-/*
- * This is the equivalent of pci_host_bridge_msi_domain that acts on
- * devices. Firmware interfaces that can select the MSI domain on a
- * per-device basis should be called from here.
- */
-static struct irq_domain *pci_dev_msi_domain(struct pci_dev *dev)
-{
-	struct irq_domain *d;
-
-	/*
-	 * If a domain has been set through the pcibios_add_device
-	 * callback, then this is the one (platform code knows best).
-	 */
-	d = dev_get_msi_domain(&dev->dev);
-	if (d)
-		return d;
-
-	/*
-	 * Let's see if we have a firmware interface able to provide
-	 * the domain.
-	 */
-	d = pci_msi_get_device_domain(dev);
-	if (d)
-		return d;
-
-	return NULL;
-}
-
-static void pci_set_msi_domain(struct pci_dev *dev)
-{
-	struct irq_domain *d;
-
-	/*
-	 * If the platform or firmware interfaces cannot supply a
-	 * device-specific MSI domain, then inherit the default domain
-	 * from the host bridge itself.
-	 */
-	d = pci_dev_msi_domain(dev);
-	if (!d)
-		d = dev_get_msi_domain(&dev->bus->dev);
-
-	dev_set_msi_domain(&dev->dev, d);
-}
-
-/**
- * pci_dma_configure - Setup DMA configuration
- * @dev: ptr to pci_dev struct of the PCI device
- *
- * Function to update PCI devices's DMA configuration using the same
- * info from the OF node or ACPI node of host bridge's parent (if any).
- */
-static void pci_dma_configure(struct pci_dev *dev)
-{
-	struct device *bridge = pci_get_host_bridge_device(dev);
-
-	if (IS_ENABLED(CONFIG_OF) &&
-		bridge->parent && bridge->parent->of_node) {
-			of_dma_configure(&dev->dev, bridge->parent->of_node);
-	} else if (has_acpi_companion(bridge)) {
-		struct acpi_device *adev = to_acpi_device_node(bridge->fwnode);
-		enum dev_dma_attr attr = acpi_get_dma_attr(adev);
-
-		if (attr == DEV_DMA_NOT_SUPPORTED)
-			dev_warn(&dev->dev, "DMA not supported.\n");
-		else
-			arch_setup_dma_ops(&dev->dev, 0, 0, NULL,
-					   attr == DEV_DMA_COHERENT);
-	}
-
-	pci_put_host_bridge_device(bridge);
+	pcie_report_downtraining(dev);
 }
 
 void pci_device_add(struct pci_dev *dev, struct pci_bus *bus)
@@ -1823,7 +1932,6 @@ void pci_device_add(struct pci_dev *dev, struct pci_bus *bus)
 	dev->dev.dma_mask = &dev->dma_mask;
 	dev->dev.dma_parms = &dev->dma_parms;
 	dev->dev.coherent_dma_mask = 0xffffffffull;
-	pci_dma_configure(dev);
 
 	pci_set_dma_max_seg_size(dev, 65536);
 	pci_set_dma_seg_boundary(dev, 0xffffffff);
@@ -1850,9 +1958,6 @@ void pci_device_add(struct pci_dev *dev, struct pci_bus *bus)
 
 	ret = pcibios_add_device(dev);
 	WARN_ON(ret < 0);
-
-	/* Setup MSI irq domain */
-	pci_set_msi_domain(dev);
 
 	/* Notifier could use PCI capabilities */
 	dev->match_driver = false;
@@ -2124,9 +2229,24 @@ void pcie_bus_configure_settings(struct pci_bus *bus)
 }
 EXPORT_SYMBOL_GPL(pcie_bus_configure_settings);
 
-unsigned int pci_scan_child_bus(struct pci_bus *bus)
+/**
+ * pci_scan_child_bus_extend() - Scan devices below a bus
+ * @bus: Bus to scan for devices
+ * @available_buses: Total number of buses available (%0 does not try to
+ *		     extend beyond the minimal)
+ *
+ * Scans devices below @bus including subordinate buses. Returns new
+ * subordinate number including all the found devices. Passing
+ * @available_buses causes the remaining bus space to be distributed
+ * equally between hotplug-capable bridges to allow future extension of the
+ * hierarchy.
+ */
+static unsigned int pci_scan_child_bus_extend(struct pci_bus *bus,
+					      unsigned int available_buses)
 {
-	unsigned int devfn, pass, max = bus->busn_res.start;
+	unsigned int used_buses, normal_bridges = 0, hotplug_bridges = 0;
+	unsigned int start = bus->busn_res.start;
+	unsigned int devfn, cmax, max = start;
 	struct pci_dev *dev;
 
 	dev_dbg(&bus->dev, "scanning bus\n");
@@ -2136,7 +2256,8 @@ unsigned int pci_scan_child_bus(struct pci_bus *bus)
 		pci_scan_slot(bus, devfn);
 
 	/* Reserve buses for SR-IOV capability. */
-	max += pci_iov_bus_range(bus);
+	used_buses = pci_iov_bus_range(bus);
+	max += used_buses;
 
 	/*
 	 * After performing arch-dependent fixup of the bus, look behind
@@ -2148,23 +2269,82 @@ unsigned int pci_scan_child_bus(struct pci_bus *bus)
 		bus->is_added = 1;
 	}
 
-	for (pass = 0; pass < 2; pass++)
-		list_for_each_entry(dev, &bus->devices, bus_list) {
-			if (pci_is_bridge(dev))
-				max = pci_scan_bridge(bus, dev, max, pass);
+	/*
+	 * Calculate how many hotplug bridges and normal bridges there
+	 * are on this bus. We will distribute the additional available
+	 * buses between hotplug bridges.
+	 */
+	for_each_pci_bridge(dev, bus) {
+		if (dev->is_hotplug_bridge)
+			hotplug_bridges++;
+		else
+			normal_bridges++;
+	}
+
+	/*
+	 * Scan bridges that are already configured. We don't touch them
+	 * unless they are misconfigured (which will be done in the second
+	 * scan below).
+	 */
+	for_each_pci_bridge(dev, bus) {
+		cmax = max;
+		max = pci_scan_bridge_extend(bus, dev, max, 0, 0);
+
+		/*
+		 * Reserve one bus for each bridge now to avoid extending
+		 * hotplug bridges too much during the second scan below.
+		 */
+		used_buses++;
+		if (cmax - max > 1)
+			used_buses += cmax - max - 1;
+	}
+
+	/* Scan bridges that need to be reconfigured */
+	for_each_pci_bridge(dev, bus) {
+		unsigned int buses = 0;
+
+		if (!hotplug_bridges && normal_bridges == 1) {
+			/*
+			 * There is only one bridge on the bus (upstream
+			 * port) so it gets all available buses which it
+			 * can then distribute to the possible hotplug
+			 * bridges below.
+			 */
+			buses = available_buses;
+		} else if (dev->is_hotplug_bridge) {
+			/*
+			 * Distribute the extra buses between hotplug
+			 * bridges if any.
+			 */
+			buses = available_buses / hotplug_bridges;
+			buses = min(buses, available_buses - used_buses + 1);
 		}
+
+		cmax = max;
+		max = pci_scan_bridge_extend(bus, dev, cmax, buses, 1);
+		/* One bus is already accounted so don't add it again */
+		if (max - cmax > 1)
+			used_buses += max - cmax - 1;
+	}
 
 	/*
 	 * Make sure a hotplug bridge has at least the minimum requested
-	 * number of buses.
+	 * number of buses but allow it to grow up to the maximum available
+	 * bus number of there is room.
 	 */
-	if (bus->self && bus->self->is_hotplug_bridge && pci_hotplug_bus_size) {
-		if (max - bus->busn_res.start < pci_hotplug_bus_size - 1)
-			max = bus->busn_res.start + pci_hotplug_bus_size - 1;
+	if (bus->self && bus->self->is_hotplug_bridge) {
+		used_buses = max_t(unsigned int, available_buses,
+				   pci_hotplug_bus_size - 1);
+		if (max - start < used_buses) {
+			max = start + used_buses;
 
-		/* Do not allocate more buses than we have room left */
-		if (max > bus->busn_res.end)
-			max = bus->busn_res.end;
+			/* Do not allocate more buses than we have room left */
+			if (max > bus->busn_res.end)
+				max = bus->busn_res.end;
+
+			dev_dbg(&bus->dev, "%pR extended by %#02x\n",
+				&bus->busn_res, max - start);
+		}
 	}
 
 	/*
@@ -2176,6 +2356,18 @@ unsigned int pci_scan_child_bus(struct pci_bus *bus)
 	 */
 	dev_dbg(&bus->dev, "bus scan returning with max=%02x\n", max);
 	return max;
+}
+
+/**
+ * pci_scan_child_bus() - Scan devices below a bus
+ * @bus: Bus to scan for devices
+ *
+ * Scans devices below @bus including subordinate buses. Returns new
+ * subordinate number including all the found devices.
+ */
+unsigned int pci_scan_child_bus(struct pci_bus *bus)
+{
+	return pci_scan_child_bus_extend(bus, 0);
 }
 EXPORT_SYMBOL_GPL(pci_scan_child_bus);
 
@@ -2218,9 +2410,7 @@ struct pci_bus *pci_create_root_bus(struct device *parent, int bus,
 	b->sysdata = sysdata;
 	b->ops = ops;
 	b->number = b->busn_res.start = bus;
-#ifdef CONFIG_PCI_DOMAINS_GENERIC
-	b->domain_nr = pci_bus_find_domain_nr(b, parent);
-#endif
+	pci_bus_assign_domain_nr(b, parent);
 	b2 = pci_find_bus(pci_domain_nr(b), bus);
 	if (b2) {
 		/* If we already got to this bus through a different bridge, ignore it */
@@ -2249,7 +2439,6 @@ struct pci_bus *pci_create_root_bus(struct device *parent, int bus,
 	b->bridge = get_device(&bridge->dev);
 	device_enable_async_suspend(b->bridge);
 	pci_set_bus_of_node(b);
-	pci_set_bus_msi_domain(b);
 
 	if (!parent)
 		set_dev_node(b->bridge, pcibus_to_node(b));
@@ -2520,3 +2709,38 @@ void __init pci_sort_breadthfirst(void)
 {
 	bus_sort_breadthfirst(&pci_bus_type, &pci_sort_bf_cmp);
 }
+
+int pci_hp_add_bridge(struct pci_dev *dev)
+{
+	struct pci_bus *parent = dev->bus;
+	int busnr, start = parent->busn_res.start;
+	unsigned int available_buses = 0;
+	int end = parent->busn_res.end;
+
+	for (busnr = start; busnr <= end; busnr++) {
+		if (!pci_find_bus(pci_domain_nr(parent), busnr))
+			break;
+	}
+	if (busnr-- > end) {
+		dev_err(&dev->dev, "No bus number available for hot-added bridge\n");
+		return -1;
+	}
+
+	/* Scan bridges that are already configured */
+	busnr = pci_scan_bridge(parent, dev, busnr, 0);
+
+	/*
+	 * Distribute the available bus numbers between hotplug-capable
+	 * bridges to make extending the chain later possible.
+	 */
+	available_buses = end - busnr;
+
+	/* Scan bridges that need to be reconfigured */
+	pci_scan_bridge_extend(parent, dev, busnr, available_buses, 1);
+
+	if (!dev->subordinate)
+		return -1;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(pci_hp_add_bridge);

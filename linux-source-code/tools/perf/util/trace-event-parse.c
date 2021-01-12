@@ -21,12 +21,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <ctype.h>
 #include <errno.h>
 
 #include "../perf.h"
-#include "util.h"
+#include "debug.h"
 #include "trace-event.h"
+
+#include "sane_ctype.h"
 
 static int get_common_field(struct scripting_context *context,
 			    int *offset, int *size, const char *type)
@@ -149,7 +150,7 @@ void parse_ftrace_printk(struct pevent *pevent,
 	while (line) {
 		addr_str = strtok_r(line, ":", &fmt);
 		if (!addr_str) {
-			warning("printk format with empty entry");
+			pr_warning("printk format with empty entry");
 			break;
 		}
 		addr = strtoull(addr_str, NULL, 16);
@@ -157,6 +158,23 @@ void parse_ftrace_printk(struct pevent *pevent,
 		printk = strdup(fmt+1);
 		line = strtok_r(NULL, "\n", &next);
 		pevent_register_print_string(pevent, printk, addr);
+		free(printk);
+	}
+}
+
+void parse_saved_cmdline(struct pevent *pevent,
+			 char *file, unsigned int size __maybe_unused)
+{
+	char comm[17]; /* Max comm length in the kernel is 16. */
+	char *line;
+	char *next = NULL;
+	int pid;
+
+	line = strtok_r(file, "\n", &next);
+	while (line) {
+		if (sscanf(line, "%d %16s", &pid, comm) == 2)
+			pevent_register_comm(pevent, comm, pid);
+		line = strtok_r(NULL, "\n", &next);
 	}
 }
 

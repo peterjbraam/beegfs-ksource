@@ -8,6 +8,7 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/kernel.h>
+#include <linux/init.h>
 #include <linux/types.h>
 #include <linux/module.h>
 #include <linux/list.h>
@@ -146,7 +147,10 @@ static int ql_wait_for_drvr_lock(struct ql3_adapter *qdev)
 {
 	int i = 0;
 
-	do {
+	while (i < 10) {
+		if (i)
+			ssleep(1);
+
 		if (ql_sem_lock(qdev,
 				QL_DRVR_SEM_MASK,
 				(QL_RESOURCE_BITS_BASE_CODE | (qdev->mac_index)
@@ -155,8 +159,7 @@ static int ql_wait_for_drvr_lock(struct ql3_adapter *qdev)
 				      "driver lock acquired\n");
 			return 1;
 		}
-		ssleep(1);
-	} while (++i < 10);
+	}
 
 	netdev_err(qdev->ndev, "Timed out waiting for driver lock...\n");
 	return 0;
@@ -380,6 +383,8 @@ static void fm93c56a_select(struct ql3_adapter *qdev)
 
 	qdev->eeprom_cmd_data = AUBURN_EEPROM_CS_1;
 	ql_write_nvram_reg(qdev, spir, ISP_NVRAM_MASK | qdev->eeprom_cmd_data);
+	ql_write_nvram_reg(qdev, spir,
+			   ((ISP_NVRAM_MASK << 16) | qdev->eeprom_cmd_data));
 }
 
 /*
@@ -2752,9 +2757,6 @@ static int ql_alloc_large_buffers(struct ql3_adapter *qdev)
 	int err;
 
 	for (i = 0; i < qdev->num_large_buffers; i++) {
-		lrg_buf_cb = &qdev->lrg_buf[i];
-		memset(lrg_buf_cb, 0, sizeof(struct ql_rcv_buf_cb));
-
 		skb = netdev_alloc_skb(qdev->ndev,
 				       qdev->lrg_buffer_len);
 		if (unlikely(!skb)) {
@@ -2765,7 +2767,11 @@ static int ql_alloc_large_buffers(struct ql3_adapter *qdev)
 			ql_free_large_buffers(qdev);
 			return -ENOMEM;
 		} else {
+
+			lrg_buf_cb = &qdev->lrg_buf[i];
+			memset(lrg_buf_cb, 0, sizeof(struct ql_rcv_buf_cb));
 			lrg_buf_cb->index = i;
+			lrg_buf_cb->skb = skb;
 			/*
 			 * We save some space to copy the ethhdr from first
 			 * buffer
@@ -2782,12 +2788,10 @@ static int ql_alloc_large_buffers(struct ql3_adapter *qdev)
 				netdev_err(qdev->ndev,
 					   "PCI mapping failed with error: %d\n",
 					   err);
-				dev_kfree_skb_irq(skb);
 				ql_free_large_buffers(qdev);
 				return -ENOMEM;
 			}
 
-			lrg_buf_cb->skb = skb;
 			dma_unmap_addr_set(lrg_buf_cb, mapaddr, map);
 			dma_unmap_len_set(lrg_buf_cb, maplen,
 					  qdev->lrg_buffer_len -
@@ -3754,7 +3758,7 @@ static const struct net_device_ops ql3xxx_netdev_ops = {
 	.ndo_open		= ql3xxx_open,
 	.ndo_start_xmit		= ql3xxx_send,
 	.ndo_stop		= ql3xxx_close,
-	.ndo_change_mtu		= eth_change_mtu,
+	.ndo_change_mtu_rh74	= eth_change_mtu,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_set_mac_address	= ql3xxx_set_mac_address,
 	.ndo_tx_timeout		= ql3xxx_tx_timeout,
@@ -3833,7 +3837,7 @@ static int ql3xxx_probe(struct pci_dev *pdev,
 
 	/* Set driver entry points */
 	ndev->netdev_ops = &ql3xxx_netdev_ops;
-	ndev->ethtool_ops = &ql3xxx_ethtool_ops;
+	SET_ETHTOOL_OPS(ndev, &ql3xxx_ethtool_ops);
 	ndev->watchdog_timeo = 5 * HZ;
 
 	netif_napi_add(ndev, &qdev->napi, ql_poll, 64);
@@ -3910,6 +3914,7 @@ err_out_free_regions:
 	pci_release_regions(pdev);
 err_out_disable_pdev:
 	pci_disable_device(pdev);
+	pci_set_drvdata(pdev, NULL);
 err_out:
 	return err;
 }
@@ -3932,6 +3937,7 @@ static void ql3xxx_remove(struct pci_dev *pdev)
 
 	iounmap(qdev->mem_map_registers);
 	pci_release_regions(pdev);
+	pci_set_drvdata(pdev, NULL);
 	free_netdev(ndev);
 }
 

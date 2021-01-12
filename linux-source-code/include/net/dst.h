@@ -17,6 +17,8 @@
 #include <net/neighbour.h>
 #include <asm/processor.h>
 
+#include <linux/rh_kabi.h>
+
 #define DST_GC_MIN	(HZ/10)
 #define DST_GC_INC	(HZ/2)
 #define DST_GC_MAX	(120*HZ)
@@ -45,7 +47,8 @@ struct dst_entry {
 	void			*__pad1;
 #endif
 	int			(*input)(struct sk_buff *);
-	int			(*output)(struct net *net, struct sock *sk, struct sk_buff *skb);
+	RH_KABI_REPLACE(int			(*output)(struct sk_buff *),
+			int			(*output)(struct sock *sk, struct sk_buff *skb))
 
 	unsigned short		flags;
 #define DST_HOST		0x0001
@@ -59,8 +62,7 @@ struct dst_entry {
 #define DST_XFRM_QUEUE		0x0100
 #define DST_METADATA		0x0200
 
-	unsigned short		pending_confirm;
-
+	RH_KABI_DEPRECATE(unsigned short, pending_confirm)
 	short			error;
 
 	/* A non-zero value of dst->obsolete forces by-hand validation
@@ -84,11 +86,11 @@ struct dst_entry {
 	__u32			__pad2;
 #endif
 
-#ifdef CONFIG_64BIT
 	/*
 	 * Align __refcnt to a 64 bytes alignment
 	 * (L1_CACHE_SIZE would be too much)
 	 */
+#ifdef CONFIG_64BIT
 	long			__pad_to_align_refcnt[2];
 #endif
 	/*
@@ -98,22 +100,37 @@ struct dst_entry {
 	atomic_t		__refcnt;	/* client references	*/
 	int			__use;
 	unsigned long		lastuse;
-	struct lwtunnel_state   *lwtstate;
 	union {
 		struct dst_entry	*next;
 		struct rtable __rcu	*rt_next;
 		struct rt6_info		*rt6_next;
 		struct dn_route __rcu	*dn_next;
 	};
+
+	/* RHEL SPECIFIC
+	 *
+	 * The following padding has been inserted before ABI freeze to
+	 * allow extending the structure while preserve ABI. Feel free
+	 * to replace reserved slots with required structure field
+	 * additions of your backport.
+	 */
+#ifdef __GENKSYMS__
+	u32			rh_reserved1;
+	u32			rh_reserved2;
+#else
+	struct lwtunnel_state   *lwtstate;
+#endif
+	u32			rh_reserved3;
+	u32			rh_reserved4;
 };
 
 struct dst_metrics {
 	u32		metrics[RTAX_MAX];
 	atomic_t	refcnt;
-} __aligned(4);		/* Low pointer bits contain DST_METRICS_FLAGS */
+};
 extern const struct dst_metrics dst_default_metrics;
 
-u32 *dst_cow_metrics_generic(struct dst_entry *dst, unsigned long old);
+extern u32 *dst_cow_metrics_generic(struct dst_entry *dst, unsigned long old);
 
 #define DST_METRICS_READ_ONLY		0x1UL
 #define DST_METRICS_REFCOUNTED		0x2UL
@@ -276,7 +293,7 @@ static inline struct dst_entry *dst_clone(struct dst_entry *dst)
 	return dst;
 }
 
-void dst_release(struct dst_entry *dst);
+extern void dst_release(struct dst_entry *dst);
 
 static inline void refdst_drop(unsigned long refdst)
 {
@@ -401,30 +418,31 @@ static inline void skb_tunnel_rx(struct sk_buff *skb, struct net_device *dev,
 	__skb_tunnel_rx(skb, dev, net);
 }
 
-static inline u32 dst_tclassid(const struct sk_buff *skb)
-{
-#ifdef CONFIG_IP_ROUTE_CLASSID
-	const struct dst_entry *dst;
+/* Children define the path of the packet through the
+ * Linux networking.  Thus, destinations are stackable.
+ */
 
-	dst = skb_dst(skb);
-	if (dst)
-		return dst->tclassid;
-#endif
-	return 0;
+static inline struct dst_entry *skb_dst_pop(struct sk_buff *skb)
+{
+	struct dst_entry *child = dst_clone(skb_dst(skb)->child);
+
+	skb_dst_drop(skb);
+	return child;
 }
 
-int dst_discard_out(struct net *net, struct sock *sk, struct sk_buff *skb);
+int dst_discard_sk(struct sock *sk, struct sk_buff *skb);
 static inline int dst_discard(struct sk_buff *skb)
 {
-	return dst_discard_out(&init_net, skb->sk, skb);
+	return dst_discard_sk(skb->sk, skb);
 }
-void *dst_alloc(struct dst_ops *ops, struct net_device *dev, int initial_ref,
-		int initial_obsolete, unsigned short flags);
+extern void *dst_alloc(struct dst_ops *ops, struct net_device *dev,
+		       int initial_ref, int initial_obsolete,
+		       unsigned short flags);
 void dst_init(struct dst_entry *dst, struct dst_ops *ops,
 	      struct net_device *dev, int initial_ref, int initial_obsolete,
 	      unsigned short flags);
-void __dst_free(struct dst_entry *dst);
-struct dst_entry *dst_destroy(struct dst_entry *dst);
+extern void __dst_free(struct dst_entry *dst);
+extern struct dst_entry *dst_destroy(struct dst_entry *dst);
 
 static inline void dst_free(struct dst_entry *dst)
 {
@@ -446,22 +464,12 @@ static inline void dst_rcu_free(struct rcu_head *head)
 
 static inline void dst_confirm(struct dst_entry *dst)
 {
-	dst->pending_confirm = 1;
 }
 
 static inline int dst_neigh_output(struct dst_entry *dst, struct neighbour *n,
 				   struct sk_buff *skb)
 {
 	const struct hh_cache *hh;
-
-	if (dst->pending_confirm) {
-		unsigned long now = jiffies;
-
-		dst->pending_confirm = 0;
-		/* avoid dirtying neighbour */
-		if (n->confirmed != now)
-			n->confirmed = now;
-	}
 
 	hh = &n->hh;
 	if ((n->nud_state & NUD_CONNECTED) && hh->hh_len)
@@ -479,16 +487,15 @@ static inline struct neighbour *dst_neigh_lookup(const struct dst_entry *dst, co
 static inline struct neighbour *dst_neigh_lookup_skb(const struct dst_entry *dst,
 						     struct sk_buff *skb)
 {
-	struct neighbour *n = NULL;
-
-	/* The packets from tunnel devices (eg bareudp) may have only
-	 * metadata in the dst pointer of skb. Hence a pointer check of
-	 * neigh_lookup is needed.
-	 */
-	if (dst->ops->neigh_lookup)
-		n = dst->ops->neigh_lookup(dst, skb, NULL);
-
+	struct neighbour *n =  dst->ops->neigh_lookup(dst, skb, NULL);
 	return IS_ERR(n) ? NULL : n;
+}
+
+static inline void dst_confirm_neigh(const struct dst_entry *dst,
+				     const void *daddr)
+{
+	if (dst->ops->confirm_neigh)
+		dst->ops->confirm_neigh(dst, daddr);
 }
 
 static inline void dst_link_failure(struct sk_buff *skb)
@@ -510,9 +517,13 @@ static inline void dst_set_expires(struct dst_entry *dst, int timeout)
 }
 
 /* Output packet to network from transport.  */
-static inline int dst_output(struct net *net, struct sock *sk, struct sk_buff *skb)
+static inline int dst_output_sk(struct sock *sk, struct sk_buff *skb)
 {
-	return skb_dst(skb)->output(net, sk, skb);
+	return skb_dst(skb)->output(sk, skb);
+}
+static inline int dst_output(struct sk_buff *skb)
+{
+	return dst_output_sk(skb->sk, skb);
 }
 
 /* Input packet from network to transport.  */
@@ -563,9 +574,9 @@ static inline struct xfrm_state *dst_xfrm(const struct dst_entry *dst)
 }
 
 #else
-struct dst_entry *xfrm_lookup(struct net *net, struct dst_entry *dst_orig,
-			      const struct flowi *fl, const struct sock *sk,
-			      int flags);
+extern struct dst_entry *xfrm_lookup(struct net *net, struct dst_entry *dst_orig,
+				     const struct flowi *fl, const struct sock *sk,
+				     int flags);
 
 struct dst_entry *xfrm_lookup_route(struct net *net, struct dst_entry *dst_orig,
 				    const struct flowi *fl, const struct sock *sk,
@@ -577,5 +588,23 @@ static inline struct xfrm_state *dst_xfrm(const struct dst_entry *dst)
 	return dst->xfrm;
 }
 #endif
+
+static inline void skb_dst_update_pmtu(struct sk_buff *skb, u32 mtu)
+{
+	struct dst_entry *dst = skb_dst(skb);
+
+	if (dst && dst->ops->update_pmtu)
+		dst->ops->update_pmtu(dst, NULL, skb, mtu);
+}
+
+static inline void skb_tunnel_check_pmtu(struct sk_buff *skb,
+					 struct dst_entry *encap_dst,
+					 int headroom)
+{
+	u32 encap_mtu = dst_mtu(encap_dst);
+
+	if (skb->len > encap_mtu - headroom)
+		skb_dst_update_pmtu(skb, encap_mtu - headroom);
+}
 
 #endif /* _NET_DST_H */

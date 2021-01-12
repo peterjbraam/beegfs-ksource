@@ -122,7 +122,7 @@ __BUILD_MEMORY_STRING(__raw_, l, u32)
 
 __BUILD_MEMORY_STRING(__raw_, q, u64)
 
-#ifdef CONFIG_HAS_IOPORT_MAP
+#ifdef CONFIG_HAS_IOPORT
 
 /*
  * Slowdown I/O port space accesses for antique hardware.
@@ -218,7 +218,7 @@ __BUILD_IOPORT_STRING(w, u16)
 __BUILD_IOPORT_STRING(l, u32)
 __BUILD_IOPORT_STRING(q, u64)
 
-#else /* !CONFIG_HAS_IOPORT_MAP */
+#else /* !CONFIG_HAS_IOPORT */
 
 #include <asm/io_noioport.h>
 
@@ -369,12 +369,7 @@ static inline int iounmap_fixed(void __iomem *addr) { return -EINVAL; }
 #endif
 
 #define ioremap_nocache	ioremap
-#define ioremap_uc	ioremap
-
-static inline void iounmap(void __iomem *addr)
-{
-	__iounmap(addr);
-}
+#define iounmap		__iounmap
 
 /*
  * Convert a physical pointer to a virtual kernel pointer for /dev/mem

@@ -336,7 +336,7 @@ static void sil24_dev_config(struct ata_device *dev);
 static int sil24_scr_read(struct ata_link *link, unsigned sc_reg, u32 *val);
 static int sil24_scr_write(struct ata_link *link, unsigned sc_reg, u32 val);
 static int sil24_qc_defer(struct ata_queued_cmd *qc);
-static enum ata_completion_errors sil24_qc_prep(struct ata_queued_cmd *qc);
+static void sil24_qc_prep(struct ata_queued_cmd *qc);
 static unsigned int sil24_qc_issue(struct ata_queued_cmd *qc);
 static bool sil24_qc_fill_rtf(struct ata_queued_cmd *qc);
 static void sil24_pmp_attach(struct ata_port *ap);
@@ -353,10 +353,8 @@ static void sil24_error_handler(struct ata_port *ap);
 static void sil24_post_internal_cmd(struct ata_queued_cmd *qc);
 static int sil24_port_start(struct ata_port *ap);
 static int sil24_init_one(struct pci_dev *pdev, const struct pci_device_id *ent);
-#ifdef CONFIG_PM_SLEEP
-static int sil24_pci_device_resume(struct pci_dev *pdev);
-#endif
 #ifdef CONFIG_PM
+static int sil24_pci_device_resume(struct pci_dev *pdev);
 static int sil24_port_resume(struct ata_port *ap);
 #endif
 
@@ -377,7 +375,7 @@ static struct pci_driver sil24_pci_driver = {
 	.id_table		= sil24_pci_tbl,
 	.probe			= sil24_init_one,
 	.remove			= ata_pci_remove_one,
-#ifdef CONFIG_PM_SLEEP
+#ifdef CONFIG_PM
 	.suspend		= ata_pci_device_suspend,
 	.resume			= sil24_pci_device_resume,
 #endif
@@ -840,7 +838,7 @@ static int sil24_qc_defer(struct ata_queued_cmd *qc)
 	return ata_std_qc_defer(qc);
 }
 
-static enum ata_completion_errors sil24_qc_prep(struct ata_queued_cmd *qc)
+static void sil24_qc_prep(struct ata_queued_cmd *qc)
 {
 	struct ata_port *ap = qc->ap;
 	struct sil24_port_priv *pp = ap->private_data;
@@ -884,8 +882,6 @@ static enum ata_completion_errors sil24_qc_prep(struct ata_queued_cmd *qc)
 
 	if (qc->flags & ATA_QCFLAG_DMAMAP)
 		sil24_fill_sg(qc, sge);
-
-	return AC_ERR_OK;
 }
 
 static unsigned int sil24_qc_issue(struct ata_queued_cmd *qc)
@@ -1046,6 +1042,7 @@ static void sil24_error_intr(struct ata_port *ap)
 			pmp = (context >> 5) & 0xf;
 
 			if (pmp < ap->nr_pmp_links) {
+				gmb();
 				link = &ap->pmp_link[pmp];
 				ehi = &link->eh_info;
 				qc = ata_qc_from_tag(ap, link->active_tag);
@@ -1314,10 +1311,10 @@ static int sil24_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	host->iomap = iomap;
 
 	/* configure and activate the device */
-	if (!dma_set_mask(&pdev->dev, DMA_BIT_MASK(64))) {
-		rc = dma_set_coherent_mask(&pdev->dev, DMA_BIT_MASK(64));
+	if (!pci_set_dma_mask(pdev, DMA_BIT_MASK(64))) {
+		rc = pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(64));
 		if (rc) {
-			rc = dma_set_coherent_mask(&pdev->dev, DMA_BIT_MASK(32));
+			rc = pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(32));
 			if (rc) {
 				dev_err(&pdev->dev,
 					"64-bit DMA enable failed\n");
@@ -1325,12 +1322,12 @@ static int sil24_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 			}
 		}
 	} else {
-		rc = dma_set_mask(&pdev->dev, DMA_BIT_MASK(32));
+		rc = pci_set_dma_mask(pdev, DMA_BIT_MASK(32));
 		if (rc) {
 			dev_err(&pdev->dev, "32-bit DMA enable failed\n");
 			return rc;
 		}
-		rc = dma_set_coherent_mask(&pdev->dev, DMA_BIT_MASK(32));
+		rc = pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(32));
 		if (rc) {
 			dev_err(&pdev->dev,
 				"32-bit consistent DMA enable failed\n");
@@ -1355,10 +1352,10 @@ static int sil24_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 				 &sil24_sht);
 }
 
-#ifdef CONFIG_PM_SLEEP
+#ifdef CONFIG_PM
 static int sil24_pci_device_resume(struct pci_dev *pdev)
 {
-	struct ata_host *host = pci_get_drvdata(pdev);
+	struct ata_host *host = dev_get_drvdata(&pdev->dev);
 	void __iomem *host_base = host->iomap[SIL24_HOST_BAR];
 	int rc;
 
@@ -1375,9 +1372,7 @@ static int sil24_pci_device_resume(struct pci_dev *pdev)
 
 	return 0;
 }
-#endif
 
-#ifdef CONFIG_PM
 static int sil24_port_resume(struct ata_port *ap)
 {
 	sil24_config_pmp(ap, ap->nr_pmp_links);

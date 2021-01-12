@@ -3,7 +3,7 @@
 
 /*
  * User space memory access functions, these should work
- * on any machine that has kernel and user data in the same
+ * on a ny machine that has kernel and user data in the same
  * address space, e.g. all NOMMU machines.
  */
 #include <linux/sched.h>
@@ -69,6 +69,9 @@ struct exception_table_entry
 	unsigned long insn, fixup;
 };
 
+/* Returns 0 if exception not found and fixup otherwise.  */
+extern unsigned long search_exception_table(unsigned long);
+
 /*
  * architectures with an MMU should override these two
  */
@@ -76,6 +79,7 @@ struct exception_table_entry
 static inline __must_check long __copy_from_user(void *to,
 		const void __user * from, unsigned long n)
 {
+	check_object_size(to, n, false);
 	if (__builtin_constant_p(n)) {
 		switch(n) {
 		case 1:
@@ -106,6 +110,7 @@ static inline __must_check long __copy_from_user(void *to,
 static inline __must_check long __copy_to_user(void __user *to,
 		const void *from, unsigned long n)
 {
+	check_object_size(from, n, true);
 	if (__builtin_constant_p(n)) {
 		switch(n) {
 		case 1:
@@ -160,10 +165,9 @@ static inline __must_check long __copy_to_user(void __user *to,
 
 #define put_user(x, ptr)					\
 ({								\
-	void *__p = (ptr);					\
 	might_fault();						\
-	access_ok(VERIFY_WRITE, __p, sizeof(*ptr)) ?		\
-		__put_user((x), ((__typeof__(*(ptr)) *)__p)) :	\
+	access_ok(VERIFY_WRITE, ptr, sizeof(*ptr)) ?		\
+		__put_user(x, ptr) :				\
 		-EFAULT;					\
 })
 
@@ -223,22 +227,17 @@ extern int __put_user_bad(void) __attribute__((noreturn));
 
 #define get_user(x, ptr)					\
 ({								\
-	const void *__p = (ptr);				\
 	might_fault();						\
-	access_ok(VERIFY_READ, __p, sizeof(*ptr)) ?		\
-		__get_user((x), (__typeof__(*(ptr)) *)__p) :	\
-		((x) = (__typeof__(*(ptr)))0,-EFAULT);		\
+	access_ok(VERIFY_READ, ptr, sizeof(*ptr)) ?		\
+		__get_user(x, ptr) :				\
+		-EFAULT;					\
 })
 
 #ifndef __get_user_fn
 static inline int __get_user_fn(size_t size, const void __user *ptr, void *x)
 {
-	size_t n = __copy_from_user(x, ptr, size);
-	if (unlikely(n)) {
-		memset(x + (size - n), 0, n);
-		return -EFAULT;
-	}
-	return 0;
+	size = __copy_from_user(x, ptr, size);
+	return size ? -EFAULT : size;
 }
 
 #define __get_user_fn(sz, u, k)	__get_user_fn(sz, u, k)
@@ -258,13 +257,11 @@ extern int __get_user_bad(void) __attribute__((noreturn));
 static inline long copy_from_user(void *to,
 		const void __user * from, unsigned long n)
 {
-	unsigned long res = n;
 	might_fault();
-	if (likely(access_ok(VERIFY_READ, from, n)))
-		res = __copy_from_user(to, from, n);
-	if (unlikely(res))
-		memset(to + (n - res), 0, res);
-	return res;
+	if (access_ok(VERIFY_READ, from, n))
+		return __copy_from_user(to, from, n);
+	else
+		return n;
 }
 
 static inline long copy_to_user(void __user *to,

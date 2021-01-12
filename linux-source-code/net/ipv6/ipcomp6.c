@@ -16,7 +16,8 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; if not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 /*
  * [Memo]
@@ -181,7 +182,8 @@ static int ipcomp6_rcv_cb(struct sk_buff *skb, int err)
 	return 0;
 }
 
-static const struct xfrm_type ipcomp6_type = {
+static const struct xfrm_type ipcomp6_type =
+{
 	.description	= "IPCOMP6",
 	.owner		= THIS_MODULE,
 	.proto		= IPPROTO_COMP,
@@ -192,7 +194,8 @@ static const struct xfrm_type ipcomp6_type = {
 	.hdr_offset	= xfrm6_find_1stfragopt,
 };
 
-static struct xfrm6_protocol ipcomp6_protocol = {
+static struct xfrm6_protocol ipcomp6_protocol =
+{
 	.handler	= xfrm6_rcv,
 	.cb_handler	= ipcomp6_rcv_cb,
 	.err_handler	= ipcomp6_err,

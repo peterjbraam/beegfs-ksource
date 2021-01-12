@@ -6,21 +6,28 @@
  */
 
 #include <linux/kernel_stat.h>
+#include <linux/notifier.h>
+#include <linux/kprobes.h>
 #include <linux/export.h>
 #include <linux/kernel.h>
 #include <linux/timex.h>
 #include <linux/types.h>
 #include <linux/time.h>
+#include <linux/cpu.h>
+#include <linux/smp.h>
 
+#include <asm/irq_regs.h>
 #include <asm/cputime.h>
 #include <asm/vtimer.h>
 #include <asm/vtime.h>
+#include <asm/irq.h>
 #include <asm/cpu_mf.h>
 #include <asm/smp.h>
-
 #include "entry.h"
 
 static void virt_timer_expire(void);
+
+DEFINE_PER_CPU(struct s390_idle_data, s390_idle);
 
 static LIST_HEAD(virt_timer_list);
 static DEFINE_SPINLOCK(virt_timer_lock);
@@ -69,7 +76,7 @@ static void update_mt_scaling(void)
 	int i;
 
 	stcctm5(smp_cpu_mtid + 1, cycles_new);
-	cycles_old = this_cpu_ptr(mt_cycles);
+	cycles_old = __get_cpu_var(mt_cycles);
 	fac = 1;
 	mult = div = 0;
 	for (i = 0; i <= smp_cpu_mtid; i++) {
@@ -131,8 +138,8 @@ static int do_account_vtime(struct task_struct *tsk, int hardirq_offset)
 	system_scaled = system;
 	/* Do MT utilization scaling */
 	if (smp_cpu_mtid) {
-		u64 mult = __this_cpu_read(mt_scaling_mult);
-		u64 div = __this_cpu_read(mt_scaling_div);
+		u64 mult = __get_cpu_var(mt_scaling_mult);
+		u64 div = __get_cpu_var(mt_scaling_div);
 
 		user_scaled = (user_scaled * mult) / div;
 		system_scaled = (system_scaled * mult) / div;
@@ -182,6 +189,8 @@ void vtime_account_irq_enter(struct task_struct *tsk)
 	struct thread_info *ti = task_thread_info(tsk);
 	u64 timer, system, system_scaled;
 
+	WARN_ON_ONCE(!irqs_disabled());
+
 	timer = S390_lowcore.last_update_timer;
 	S390_lowcore.last_update_timer = get_vtimer();
 	S390_lowcore.system_timer += timer - S390_lowcore.last_update_timer;
@@ -197,8 +206,8 @@ void vtime_account_irq_enter(struct task_struct *tsk)
 	system_scaled = system;
 	/* Do MT utilization scaling */
 	if (smp_cpu_mtid) {
-		u64 mult = __this_cpu_read(mt_scaling_mult);
-		u64 div = __this_cpu_read(mt_scaling_div);
+		u64 mult = __get_cpu_var(mt_scaling_mult);
+		u64 div = __get_cpu_var(mt_scaling_div);
 
 		system_scaled = (system_scaled * mult) / div;
 	}
@@ -211,6 +220,49 @@ EXPORT_SYMBOL_GPL(vtime_account_irq_enter);
 void vtime_account_system(struct task_struct *tsk)
 __attribute__((alias("vtime_account_irq_enter")));
 EXPORT_SYMBOL_GPL(vtime_account_system);
+
+void __kprobes vtime_stop_cpu(void)
+{
+	struct s390_idle_data *idle = &__get_cpu_var(s390_idle);
+	unsigned long long idle_time;
+	unsigned long psw_mask;
+
+	trace_hardirqs_on();
+
+	/* Wait for external, I/O or machine check interrupt. */
+	psw_mask = PSW_KERNEL_BITS | PSW_MASK_WAIT | PSW_MASK_DAT |
+		PSW_MASK_IO | PSW_MASK_EXT | PSW_MASK_MCHECK;
+	idle->nohz_delay = 0;
+
+	/* Call the assembler magic in entry.S */
+	psw_idle(idle, psw_mask);
+
+	/* Account time spent with enabled wait psw loaded as idle time. */
+	idle->sequence++;
+	smp_wmb();
+	idle_time = idle->clock_idle_exit - idle->clock_idle_enter;
+	idle->clock_idle_enter = idle->clock_idle_exit = 0ULL;
+	idle->idle_time += idle_time;
+	idle->idle_count++;
+	account_idle_time(idle_time);
+	smp_wmb();
+	idle->sequence++;
+}
+
+cputime64_t s390_get_idle_time(int cpu)
+{
+	struct s390_idle_data *idle = &per_cpu(s390_idle, cpu);
+	unsigned long long now, idle_enter, idle_exit;
+	unsigned int sequence;
+
+	do {
+		now = get_tod_clock();
+		sequence = ACCESS_ONCE(idle->sequence);
+		idle_enter = ACCESS_ONCE(idle->clock_idle_enter);
+		idle_exit = ACCESS_ONCE(idle->clock_idle_exit);
+	} while ((sequence & 1) || (ACCESS_ONCE(idle->sequence) != sequence));
+	return idle_enter ? ((idle_exit ?: now) - idle_enter) : 0;
+}
 
 /*
  * Sorted add to a list. List is linear searched until first bigger
@@ -389,7 +441,7 @@ EXPORT_SYMBOL(del_virt_timer);
 /*
  * Start the virtual CPU timer on the current CPU.
  */
-void vtime_init(void)
+void init_cpu_vtimer(void)
 {
 	/* set initial cpu timer */
 	set_vtimer(VTIMER_MAX_SLICE);
@@ -398,6 +450,29 @@ void vtime_init(void)
 		__this_cpu_write(mt_scaling_jiffies, jiffies);
 		__this_cpu_write(mt_scaling_mult, 1);
 		__this_cpu_write(mt_scaling_div, 1);
-		stcctm5(smp_cpu_mtid + 1, this_cpu_ptr(mt_cycles));
+		stcctm5(smp_cpu_mtid + 1, __get_cpu_var(mt_cycles));
 	}
+}
+
+static int s390_nohz_notify(struct notifier_block *self, unsigned long action,
+			    void *hcpu)
+{
+	struct s390_idle_data *idle;
+	long cpu = (long) hcpu;
+
+	idle = &per_cpu(s390_idle, cpu);
+	switch (action & ~CPU_TASKS_FROZEN) {
+	case CPU_DYING:
+		idle->nohz_delay = 0;
+	default:
+		break;
+	}
+	return NOTIFY_OK;
+}
+
+void __init vtime_init(void)
+{
+	/* Enable cpu timer interrupts on the boot cpu. */
+	init_cpu_vtimer();
+	cpu_notifier(s390_nohz_notify, 0);
 }

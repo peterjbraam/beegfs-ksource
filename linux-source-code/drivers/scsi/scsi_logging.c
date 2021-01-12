@@ -16,15 +16,57 @@
 #include <scsi/scsi_eh.h>
 #include <scsi/scsi_dbg.h>
 
+#define SCSI_LOG_SPOOLSIZE 4096
+
+#if (SCSI_LOG_SPOOLSIZE / SCSI_LOG_BUFSIZE) > BITS_PER_LONG
+#warning SCSI logging bitmask too large
+#endif
+
+struct scsi_log_buf {
+	char buffer[SCSI_LOG_SPOOLSIZE];
+	unsigned long map;
+};
+
+static DEFINE_PER_CPU(struct scsi_log_buf, scsi_format_log);
+
 static char *scsi_log_reserve_buffer(size_t *len)
 {
-	*len = 128;
-	return kmalloc(*len, GFP_ATOMIC);
+	struct scsi_log_buf *buf;
+	unsigned long map_bits = sizeof(buf->buffer) / SCSI_LOG_BUFSIZE;
+	unsigned long idx = 0;
+
+	preempt_disable();
+	buf = this_cpu_ptr(&scsi_format_log);
+	idx = find_first_zero_bit(&buf->map, map_bits);
+	if (likely(idx < map_bits)) {
+		while (test_and_set_bit(idx, &buf->map)) {
+			idx = find_next_zero_bit(&buf->map, map_bits, idx);
+			if (idx >= map_bits)
+				break;
+		}
+	}
+	if (WARN_ON(idx >= map_bits)) {
+		preempt_enable();
+		return NULL;
+	}
+	*len = SCSI_LOG_BUFSIZE;
+	return buf->buffer + idx * SCSI_LOG_BUFSIZE;
 }
 
 static void scsi_log_release_buffer(char *bufptr)
 {
-	kfree(bufptr);
+	struct scsi_log_buf *buf;
+	unsigned long idx;
+	int ret;
+
+	buf = this_cpu_ptr(&scsi_format_log);
+	if (bufptr >= buf->buffer &&
+	    bufptr < buf->buffer + SCSI_LOG_SPOOLSIZE) {
+		idx = (bufptr - buf->buffer) / SCSI_LOG_BUFSIZE;
+		ret = test_and_clear_bit(idx, &buf->map);
+		WARN_ON(!ret);
+	}
+	preempt_enable();
 }
 
 static inline const char *scmd_name(const struct scsi_cmnd *scmd)
@@ -51,19 +93,20 @@ static size_t sdev_format_header(char *logbuf, size_t logbuf_len,
 	return off;
 }
 
-void sdev_prefix_printk(const char *level, const struct scsi_device *sdev,
-			const char *name, const char *fmt, ...)
+int sdev_prefix_printk(const char *level, const struct scsi_device *sdev,
+		       const char *name, const char *fmt, ...)
 {
 	va_list args;
 	char *logbuf;
 	size_t off = 0, logbuf_len;
+	int ret;
 
 	if (!sdev)
-		return;
+		return 0;
 
 	logbuf = scsi_log_reserve_buffer(&logbuf_len);
 	if (!logbuf)
-		return;
+		return 0;
 
 	if (name)
 		off += scnprintf(logbuf + off, logbuf_len - off,
@@ -73,24 +116,26 @@ void sdev_prefix_printk(const char *level, const struct scsi_device *sdev,
 		off += vscnprintf(logbuf + off, logbuf_len - off, fmt, args);
 		va_end(args);
 	}
-	dev_printk(level, &sdev->sdev_gendev, "%s", logbuf);
+	ret = dev_printk(level, &sdev->sdev_gendev, "%s", logbuf);
 	scsi_log_release_buffer(logbuf);
+	return ret;
 }
 EXPORT_SYMBOL(sdev_prefix_printk);
 
-void scmd_printk(const char *level, const struct scsi_cmnd *scmd,
+int scmd_printk(const char *level, const struct scsi_cmnd *scmd,
 		const char *fmt, ...)
 {
 	va_list args;
 	char *logbuf;
 	size_t off = 0, logbuf_len;
+	int ret;
 
 	if (!scmd || !scmd->cmnd)
-		return;
+		return 0;
 
 	logbuf = scsi_log_reserve_buffer(&logbuf_len);
 	if (!logbuf)
-		return;
+		return 0;
 	off = sdev_format_header(logbuf, logbuf_len, scmd_name(scmd),
 				 scmd->request->tag);
 	if (off < logbuf_len) {
@@ -98,8 +143,9 @@ void scmd_printk(const char *level, const struct scsi_cmnd *scmd,
 		off += vscnprintf(logbuf + off, logbuf_len - off, fmt, args);
 		va_end(args);
 	}
-	dev_printk(level, &scmd->device->sdev_gendev, "%s", logbuf);
+	ret = dev_printk(level, &scmd->device->sdev_gendev, "%s", logbuf);
 	scsi_log_release_buffer(logbuf);
+	return ret;
 }
 EXPORT_SYMBOL(scmd_printk);
 
@@ -391,6 +437,7 @@ void scsi_print_result(const struct scsi_cmnd *cmd, const char *msg,
 	const char *mlret_string = scsi_mlreturn_string(disposition);
 	const char *hb_string = scsi_hostbyte_string(cmd->result);
 	const char *db_string = scsi_driverbyte_string(cmd->result);
+	unsigned long cmd_age = (jiffies - cmd->jiffies_at_alloc) / HZ;
 
 	logbuf = scsi_log_reserve_buffer(&logbuf_len);
 	if (!logbuf)
@@ -432,10 +479,15 @@ void scsi_print_result(const struct scsi_cmnd *cmd, const char *msg,
 
 	if (db_string)
 		off += scnprintf(logbuf + off, logbuf_len - off,
-				 "driverbyte=%s", db_string);
+				 "driverbyte=%s ", db_string);
 	else
 		off += scnprintf(logbuf + off, logbuf_len - off,
-				 "driverbyte=0x%02x", driver_byte(cmd->result));
+				 "driverbyte=0x%02x ",
+				 driver_byte(cmd->result));
+
+	off += scnprintf(logbuf + off, logbuf_len - off,
+			 "cmd_age=%lus", cmd_age);
+
 out_printk:
 	dev_printk(KERN_INFO, &cmd->device->sdev_gendev, "%s", logbuf);
 	scsi_log_release_buffer(logbuf);

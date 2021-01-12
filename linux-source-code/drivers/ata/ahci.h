@@ -35,11 +35,8 @@
 #ifndef _AHCI_H
 #define _AHCI_H
 
-#include <linux/pci.h>
 #include <linux/clk.h>
 #include <linux/libata.h>
-#include <linux/phy/phy.h>
-#include <linux/regulator/consumer.h>
 
 /* Enclosure Management Control */
 #define EM_CTRL_MSG_TYPE              0x000f0000
@@ -54,7 +51,6 @@
 
 enum {
 	AHCI_MAX_PORTS		= 32,
-	AHCI_MAX_CLKS		= 5,
 	AHCI_MAX_SG		= 168, /* hardware max is 64K */
 	AHCI_DMA_BOUNDARY	= 0xffffffff,
 	AHCI_MAX_CMDS		= 32,
@@ -238,16 +234,9 @@ enum {
 	AHCI_HFLAG_DELAY_ENGINE		= (1 << 15), /* do not start engine on
 						        port start (wait until
 						        error-handling stage) */
-	AHCI_HFLAG_NO_DEVSLP		= (1 << 17), /* no device sleep */
-	AHCI_HFLAG_NO_FBS		= (1 << 18), /* no FBS */
-
-#ifdef CONFIG_PCI_MSI
-	AHCI_HFLAG_MULTI_MSI		= (1 << 20), /* per-port MSI(-X) */
-#else
-	/* compile out MSI infrastructure */
-	AHCI_HFLAG_MULTI_MSI		= 0,
-#endif
-	AHCI_HFLAG_WAKE_BEFORE_STOP	= (1 << 22), /* wake before DMA stop */
+	AHCI_HFLAG_MULTI_MSI		= (1 << 16), /* multiple PCI MSIs */
+	AHCI_HFLAG_NO_FBS		= (1 << 17), /* no FBS */
+	AHCI_HFLAG_MULTI_MSIX		= (1 << 18), /* per-port MSI-X */
 
 	/* ap->flags bits */
 
@@ -325,12 +314,8 @@ struct ahci_port_priv {
 };
 
 struct ahci_host_priv {
-	/* Input fields */
-	unsigned int		flags;		/* AHCI_HFLAG_* */
-	u32			force_port_map;	/* force port map */
-	u32			mask_port_map;	/* mask out particular bits */
-
 	void __iomem *		mmio;		/* bus-independent mem map */
+	unsigned int		flags;		/* AHCI_HFLAG_* */
 	u32			cap;		/* cap to use */
 	u32			cap2;		/* cap2 to use */
 	u32			version;	/* cached version */
@@ -341,28 +326,9 @@ struct ahci_host_priv {
 	u32 			em_loc; /* enclosure management location */
 	u32			em_buf_sz;	/* EM buffer size in byte */
 	u32			em_msg_type;	/* EM message type */
-	bool			got_runtime_pm; /* Did we do pm_runtime_get? */
-	struct clk		*clks[AHCI_MAX_CLKS]; /* Optional */
-	struct regulator	**target_pwrs;	/* Optional */
-	/*
-	 * If platform uses PHYs. There is a 1:1 relation between the port number and
-	 * the PHY position in this array.
-	 */
-	struct phy		**phys;
-	unsigned		nports;		/* Number of ports */
-	void			*plat_data;	/* Other platform data */
+	struct clk		*clk;		/* Only for platforms supporting clk */
+	struct msix_entry	*msix;		/* Optional MSI-X support */
 	unsigned int		irq;		/* interrupt line */
-	/*
-	 * Optional ahci_start_engine override, if not set this gets set to the
-	 * default ahci_start_engine during ahci_save_initial_config, this can
-	 * be overridden anytime before the host is activated.
-	 */
-	void			(*start_engine)(struct ata_port *ap);
-	irqreturn_t 		(*irq_handler)(int irq, void *dev_instance);
-
-	/* only required for per-port MSI(-X) support */
-	int			(*get_irq_vector)(struct ata_host *host,
-						  int port);
 };
 
 extern int ahci_ignore_sss;
@@ -370,10 +336,6 @@ extern int ahci_ignore_sss;
 extern struct device_attribute *ahci_shost_attrs[];
 extern struct device_attribute *ahci_sdev_attrs[];
 
-/*
- * This must be instantiated by the edge drivers.  Read the comments
- * for ATA_BASE_SHT
- */
 #define AHCI_SHT(drv_name)						\
 	ATA_NCQ_SHT(drv_name),						\
 	.can_queue		= AHCI_MAX_CMDS - 1,			\
@@ -383,14 +345,15 @@ extern struct device_attribute *ahci_sdev_attrs[];
 	.sdev_attrs		= ahci_sdev_attrs
 
 extern struct ata_port_operations ahci_ops;
-extern struct ata_port_operations ahci_platform_ops;
 extern struct ata_port_operations ahci_pmp_retry_srst_ops;
 
 unsigned int ahci_dev_classify(struct ata_port *ap);
 void ahci_fill_cmd_slot(struct ahci_port_priv *pp, unsigned int tag,
 			u32 opts);
 void ahci_save_initial_config(struct device *dev,
-			      struct ahci_host_priv *hpriv);
+			      struct ahci_host_priv *hpriv,
+			      unsigned int force_port_map,
+			      unsigned int mask_port_map);
 void ahci_init_controller(struct ata_host *host);
 int ahci_reset_controller(struct ata_host *host);
 
@@ -410,8 +373,6 @@ void ahci_set_em_messages(struct ahci_host_priv *hpriv,
 int ahci_reset_em(struct ata_host *host);
 void ahci_print_info(struct ata_host *host, const char *scc_s);
 int ahci_host_activate(struct ata_host *host, struct scsi_host_template *sht);
-void ahci_error_handler(struct ata_port *ap);
-u32 ahci_handle_port_intr(struct ata_host *host, u32 irq_masked);
 
 static inline void __iomem *__ahci_port_base(struct ata_host *host,
 					     unsigned int port_no)

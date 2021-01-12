@@ -99,6 +99,7 @@ out:	snd_card_free(card);
 static int snd_adlib_remove(struct device *dev, unsigned int n)
 {
 	snd_card_free(dev_get_drvdata(dev));
+	dev_set_drvdata(dev, NULL);
 	return 0;
 }
 
@@ -112,4 +113,15 @@ static struct isa_driver snd_adlib_driver = {
 	}
 };
 
-module_isa_driver(snd_adlib_driver, SNDRV_CARDS);
+static int __init alsa_card_adlib_init(void)
+{
+	return isa_register_driver(&snd_adlib_driver, SNDRV_CARDS);
+}
+
+static void __exit alsa_card_adlib_exit(void)
+{
+	isa_unregister_driver(&snd_adlib_driver);
+}
+
+module_init(alsa_card_adlib_init);
+module_exit(alsa_card_adlib_exit);

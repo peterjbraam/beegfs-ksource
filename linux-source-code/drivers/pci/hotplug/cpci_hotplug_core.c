@@ -719,3 +719,13 @@ cpci_hotplug_init(int debug)
 	cpci_debug = debug;
 	return 0;
 }
+
+void __exit
+cpci_hotplug_exit(void)
+{
+	/*
+	 * Clean everything up.
+	 */
+	cpci_hp_stop();
+	cpci_hp_unregister_controller(controller);
+}

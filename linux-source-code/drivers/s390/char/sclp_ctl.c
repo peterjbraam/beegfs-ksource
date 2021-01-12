@@ -13,6 +13,7 @@
 #include <linux/module.h>
 #include <linux/ioctl.h>
 #include <linux/fs.h>
+#include <linux/compat.h>
 #include <asm/compat.h>
 #include <asm/sclp_ctl.h>
 #include <asm/sclp.h>
@@ -56,7 +57,6 @@ static int sclp_ctl_ioctl_sccb(void __user *user_area)
 {
 	struct sclp_ctl_sccb ctl_sccb;
 	struct sccb_header *sccb;
-	unsigned long copied;
 	int rc;
 
 	if (copy_from_user(&ctl_sccb, user_area, sizeof(ctl_sccb)))
@@ -66,15 +66,14 @@ static int sclp_ctl_ioctl_sccb(void __user *user_area)
 	sccb = (void *) get_zeroed_page(GFP_KERNEL | GFP_DMA);
 	if (!sccb)
 		return -ENOMEM;
-	copied = PAGE_SIZE -
-		copy_from_user(sccb, u64_to_uptr(ctl_sccb.sccb), PAGE_SIZE);
-	if (offsetof(struct sccb_header, length) +
-	    sizeof(sccb->length) > copied || sccb->length > copied) {
+	if (copy_from_user(sccb, u64_to_uptr(ctl_sccb.sccb), sizeof(*sccb))) {
 		rc = -EFAULT;
 		goto out_free;
 	}
-	if (sccb->length < 8) {
-		rc = -EINVAL;
+	if (sccb->length > PAGE_SIZE || sccb->length < 8)
+		return -EINVAL;
+	if (copy_from_user(sccb, u64_to_uptr(ctl_sccb.sccb), sccb->length)) {
+		rc = -EFAULT;
 		goto out_free;
 	}
 	rc = sclp_sync_request(ctl_sccb.cmdw, sccb);

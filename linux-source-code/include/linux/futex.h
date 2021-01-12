@@ -34,35 +34,28 @@ handle_futex_death(u32 __user *uaddr, struct task_struct *curr, int pi);
 
 union futex_key {
 	struct {
-		u64 i_seq;
 		unsigned long pgoff;
-		unsigned int offset;
+		struct inode *inode;
+		int offset;
 	} shared;
 	struct {
-		union {
-			struct mm_struct *mm;
-			u64 __tmp;
-		};
 		unsigned long address;
-		unsigned int offset;
+		struct mm_struct *mm;
+		int offset;
 	} private;
 	struct {
-		u64 ptr;
 		unsigned long word;
-		unsigned int offset;
+		void *ptr;
+		int offset;
 	} both;
 };
 
-#define FUTEX_KEY_INIT (union futex_key) { .both = { .ptr = 0ULL } }
+#define FUTEX_KEY_INIT (union futex_key) { .both = { .ptr = NULL } }
 
 #ifdef CONFIG_FUTEX
 extern void exit_robust_list(struct task_struct *curr);
 extern void exit_pi_state_list(struct task_struct *curr);
-#ifdef CONFIG_HAVE_FUTEX_CMPXCHG
-#define futex_cmpxchg_enabled 1
-#else
 extern int futex_cmpxchg_enabled;
-#endif
 #else
 static inline void exit_robust_list(struct task_struct *curr)
 {

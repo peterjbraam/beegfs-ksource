@@ -55,22 +55,18 @@ struct nfs_access_entry {
 	struct rcu_head		rcu_head;
 };
 
-struct nfs_lockowner {
-	fl_owner_t l_owner;
-	pid_t l_pid;
-};
-
 struct nfs_lock_context {
 	atomic_t count;
 	struct list_head list;
 	struct nfs_open_context *open_context;
-	struct nfs_lockowner lockowner;
+	fl_owner_t lockowner;
 	atomic_t io_count;
 };
 
 struct nfs4_state;
 struct nfs_open_context {
 	struct nfs_lock_context lock_context;
+	fl_owner_t flock_owner;
 	struct dentry *dentry;
 	struct rpc_cred *cred;
 	struct nfs4_state *state;
@@ -80,6 +76,7 @@ struct nfs_open_context {
 #define NFS_CONTEXT_ERROR_WRITE		(0)
 #define NFS_CONTEXT_RESEND_WRITES	(1)
 #define NFS_CONTEXT_BAD			(2)
+#define NFS_CONTEXT_UNLOCK	(3)
 	int error;
 
 	struct list_head list;
@@ -150,6 +147,10 @@ struct nfs_inode {
 	struct rb_root		access_cache;
 	struct list_head	access_cache_entry_lru;
 	struct list_head	access_cache_inode_lru;
+#ifdef CONFIG_NFS_V3_ACL
+	struct posix_acl	*acl_access;
+	struct posix_acl	*acl_default;
+#endif
 
 	/*
 	 * This is the cookie verifier used for NFSv3 readdir
@@ -163,9 +164,11 @@ struct nfs_inode {
 	/* Open contexts for shared mmap writes */
 	struct list_head	open_files;
 
-	/* Readers: in-flight sillydelete RPC calls */
-	/* Writers: rmdir */
-	struct rw_semaphore	rmdir_sem;
+	/* Number of in-flight sillydelete RPC calls */
+	atomic_t		silly_count;
+	/* List of deferred sillydelete requests */
+	struct hlist_head	silly_list;
+	wait_queue_head_t	waitqueue;
 
 #if IS_ENABLED(CONFIG_NFS_V4)
 	struct nfs4_cached_acl	*nfs4_acl;
@@ -205,12 +208,12 @@ struct nfs_inode {
 #define NFS_INO_STALE		(1)		/* possible stale inode */
 #define NFS_INO_ACL_LRU_SET	(2)		/* Inode is on the LRU list */
 #define NFS_INO_INVALIDATING	(3)		/* inode is being invalidated */
+#define NFS_INO_FLUSHING	(4)		/* inode is flushing out data */
 #define NFS_INO_FSCACHE		(5)		/* inode can be cached by FS-Cache */
 #define NFS_INO_FSCACHE_LOCK	(6)		/* FS-Cache cookie management lock */
 #define NFS_INO_LAYOUTCOMMIT	(9)		/* layoutcommit required */
 #define NFS_INO_LAYOUTCOMMITTING (10)		/* layoutcommit inflight */
 #define NFS_INO_LAYOUTSTATS	(11)		/* layoutstats inflight */
-#define NFS_INO_ODIRECT		(12)		/* I/O setting is O_DIRECT */
 
 static inline struct nfs_inode *NFS_I(const struct inode *inode)
 {
@@ -350,7 +353,7 @@ extern int nfs_revalidate_inode(struct nfs_server *server, struct inode *inode);
 extern int nfs_revalidate_inode_rcu(struct nfs_server *server, struct inode *inode);
 extern int __nfs_revalidate_inode(struct nfs_server *, struct inode *);
 extern int nfs_revalidate_mapping(struct inode *inode, struct address_space *mapping);
-extern int nfs_revalidate_mapping_rcu(struct inode *inode);
+extern int nfs_revalidate_mapping_protected(struct inode *inode, struct address_space *mapping);
 extern int nfs_setattr(struct dentry *, struct iattr *);
 extern void nfs_setattr_update_inode(struct inode *inode, struct iattr *attr, struct nfs_fattr *);
 extern void nfs_setsecurity(struct inode *inode, struct nfs_fattr *fattr,
@@ -358,7 +361,7 @@ extern void nfs_setsecurity(struct inode *inode, struct nfs_fattr *fattr,
 extern struct nfs_open_context *get_nfs_open_context(struct nfs_open_context *ctx);
 extern void put_nfs_open_context(struct nfs_open_context *ctx);
 extern struct nfs_open_context *nfs_find_open_context(struct inode *inode, struct rpc_cred *cred, fmode_t mode);
-extern struct nfs_open_context *alloc_nfs_open_context(struct dentry *dentry, fmode_t f_mode);
+extern struct nfs_open_context *alloc_nfs_open_context(struct dentry *dentry, fmode_t f_mode, struct file *filp);
 extern void nfs_inode_attach_open_context(struct nfs_open_context *ctx);
 extern void nfs_file_set_open_context(struct file *filp, struct nfs_open_context *ctx);
 extern void nfs_file_clear_open_context(struct file *flip);
@@ -418,7 +421,7 @@ extern __be32 root_nfs_parse_addr(char *name); /*__init*/
  */
 extern const struct file_operations nfs_file_operations;
 #if IS_ENABLED(CONFIG_NFS_V4)
-extern const struct file_operations nfs4_file_operations;
+extern const struct file_operations_extend nfs4_file_operations;
 #endif /* CONFIG_NFS_V4 */
 extern const struct address_space_operations nfs_file_aops;
 extern const struct address_space_operations nfs_dir_aops;
@@ -442,11 +445,14 @@ static inline struct rpc_cred *nfs_file_cred(struct file *file)
 /*
  * linux/fs/nfs/direct.c
  */
-extern ssize_t nfs_direct_IO(struct kiocb *, struct iov_iter *);
+extern ssize_t nfs_direct_IO(int, struct kiocb *, const struct iovec *, loff_t,
+			unsigned long);
 extern ssize_t nfs_file_direct_read(struct kiocb *iocb,
-			struct iov_iter *iter);
+			const struct iovec *iov, unsigned long nr_segs,
+			loff_t pos, bool uio);
 extern ssize_t nfs_file_direct_write(struct kiocb *iocb,
-			struct iov_iter *iter);
+			const struct iovec *iov, unsigned long nr_segs,
+			loff_t pos, bool uio);
 
 /*
  * linux/fs/nfs/dir.c
@@ -488,6 +494,9 @@ extern void nfs_release_automount_timer(void);
  * linux/fs/nfs/unlink.c
  */
 extern void nfs_complete_unlink(struct dentry *dentry, struct inode *);
+extern void nfs_wait_on_sillyrename(struct dentry *dentry);
+extern void nfs_block_sillyrename(struct dentry *dentry);
+extern void nfs_unblock_sillyrename(struct dentry *dentry);
 
 /*
  * linux/fs/nfs/write.c
@@ -536,7 +545,6 @@ extern int  nfs_readpages(struct file *, struct address_space *,
 		struct list_head *, unsigned);
 extern int  nfs_readpage_async(struct nfs_open_context *, struct inode *,
 			       struct page *);
-
 /*
  * inline functions
  */

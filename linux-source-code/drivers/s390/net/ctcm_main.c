@@ -567,7 +567,7 @@ static int ctcm_transmit_skb(struct channel *ch, struct sk_buff *skb)
 	fsm_newstate(ch->fsm, CTC_STATE_TX);
 	fsm_addtimer(&ch->timer, CTCM_TIME_5_SEC, CTC_EVENT_TIMER, ch);
 	spin_lock_irqsave(get_ccwdev_lock(ch->cdev), saveflags);
-	ch->prof.send_stamp = jiffies;
+	ch->prof.send_stamp = current_kernel_time(); /* xtime */
 	rc = ccw_device_start(ch->cdev, &ch->ccw[ccw_idx],
 					(unsigned long)ch, 0xff, 0);
 	spin_unlock_irqrestore(get_ccwdev_lock(ch->cdev), saveflags);
@@ -831,7 +831,7 @@ static int ctcmpc_transmit_skb(struct channel *ch, struct sk_buff *skb)
 					sizeof(struct ccw1) * 3);
 
 	spin_lock_irqsave(get_ccwdev_lock(ch->cdev), saveflags);
-	ch->prof.send_stamp = jiffies;
+	ch->prof.send_stamp = current_kernel_time(); /* xtime */
 	rc = ccw_device_start(ch->cdev, &ch->ccw[ccw_idx],
 					(unsigned long)ch, 0xff, 0);
 	spin_unlock_irqrestore(get_ccwdev_lock(ch->cdev), saveflags);
@@ -1106,7 +1106,7 @@ static const struct net_device_ops ctcm_netdev_ops = {
 	.ndo_open		= ctcm_open,
 	.ndo_stop		= ctcm_close,
 	.ndo_get_stats		= ctcm_stats,
-	.ndo_change_mtu	   	= ctcm_change_mtu,
+	.ndo_change_mtu_rh74	= ctcm_change_mtu,
 	.ndo_start_xmit		= ctcm_tx,
 };
 
@@ -1114,7 +1114,7 @@ static const struct net_device_ops ctcm_mpc_netdev_ops = {
 	.ndo_open		= ctcm_open,
 	.ndo_stop		= ctcm_close,
 	.ndo_get_stats		= ctcm_stats,
-	.ndo_change_mtu	   	= ctcm_change_mtu,
+	.ndo_change_mtu_rh74	= ctcm_change_mtu,
 	.ndo_start_xmit		= ctcmpc_tx,
 };
 
@@ -1137,11 +1137,9 @@ static struct net_device *ctcm_init_netdevice(struct ctcm_priv *priv)
 		return NULL;
 
 	if (IS_MPC(priv))
-		dev = alloc_netdev(0, MPC_DEVICE_GENE, NET_NAME_UNKNOWN,
-				   ctcm_dev_setup);
+		dev = alloc_netdev(0, MPC_DEVICE_GENE, ctcm_dev_setup);
 	else
-		dev = alloc_netdev(0, CTC_DEVICE_GENE, NET_NAME_UNKNOWN,
-				   ctcm_dev_setup);
+		dev = alloc_netdev(0, CTC_DEVICE_GENE, ctcm_dev_setup);
 
 	if (!dev) {
 		CTCM_DBF_TEXT_(ERROR, CTC_DBF_CRIT,
@@ -1595,7 +1593,6 @@ static int ctcm_new_device(struct ccwgroup_device *cgdev)
 		if (priv->channel[direction] == NULL) {
 			if (direction == CTCM_WRITE)
 				channel_free(priv->channel[CTCM_READ]);
-			result = -ENODEV;
 			goto out_dev;
 		}
 		priv->channel[direction]->netdev = dev;
@@ -1678,8 +1675,11 @@ static int ctcm_shutdown_device(struct ccwgroup_device *cgdev)
 
 	ccw_device_set_offline(cgdev->cdev[1]);
 	ccw_device_set_offline(cgdev->cdev[0]);
-	channel_remove(priv->channel[CTCM_READ]);
-	channel_remove(priv->channel[CTCM_WRITE]);
+
+	if (priv->channel[CTCM_READ])
+		channel_remove(priv->channel[CTCM_READ]);
+	if (priv->channel[CTCM_WRITE])
+		channel_remove(priv->channel[CTCM_WRITE]);
 	priv->channel[CTCM_READ] = priv->channel[CTCM_WRITE] = NULL;
 
 	return 0;
@@ -1837,7 +1837,7 @@ static int __init ctcm_init(void)
 	if (ret)
 		goto out_err;
 	ctcm_root_dev = root_device_register("ctcm");
-	ret = PTR_ERR_OR_ZERO(ctcm_root_dev);
+	ret = IS_ERR(ctcm_root_dev) ? PTR_ERR(ctcm_root_dev) : 0;
 	if (ret)
 		goto register_err;
 	ret = ccw_driver_register(&ctcm_ccw_driver);

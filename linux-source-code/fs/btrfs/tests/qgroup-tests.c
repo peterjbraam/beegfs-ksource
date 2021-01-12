@@ -63,7 +63,7 @@ static int insert_normal_tree_ref(struct btrfs_root *root, u64 bytenr,
 	btrfs_set_extent_generation(leaf, item, 1);
 	btrfs_set_extent_flags(leaf, item, BTRFS_EXTENT_FLAG_TREE_BLOCK);
 	block_info = (struct btrfs_tree_block_info *)(item + 1);
-	btrfs_set_tree_block_level(leaf, block_info, 0);
+	btrfs_set_tree_block_level(leaf, block_info, 1);
 	iref = (struct btrfs_extent_inline_ref *)(block_info + 1);
 	if (parent > 0) {
 		btrfs_set_extent_inline_ref_type(leaf, iref,
@@ -236,7 +236,7 @@ static int test_no_shared_qgroup(struct btrfs_root *root,
 	}
 
 	/*
-	 * Since the test trans doesn't have the complicated delayed refs,
+	 * Since the test trans doesn't havee the complicated delayed refs,
 	 * we can only call btrfs_qgroup_account_extent() directly to test
 	 * quota.
 	 */
@@ -488,9 +488,9 @@ int btrfs_test_qgroups(u32 sectorsize, u32 nodesize)
 	 */
 	root->node = alloc_test_extent_buffer(root->fs_info, nodesize,
 					nodesize);
-	if (IS_ERR(root->node)) {
+	if (!root->node) {
 		test_msg("Couldn't allocate dummy buffer\n");
-		ret = PTR_ERR(root->node);
+		ret = -ENOMEM;
 		goto out;
 	}
 	btrfs_set_header_level(root->node, 0);

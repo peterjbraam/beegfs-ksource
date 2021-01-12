@@ -11,6 +11,7 @@
 
 #define pcibios_assign_all_busses(void) 1
 
+extern unsigned long pci_mem_start;
 #define PCIBIOS_MIN_IO		0x1000
 #define PCIBIOS_MIN_MEM		0x10000000
 
@@ -29,7 +30,7 @@ int pcibios_set_irq_routing(struct pci_dev *dev, int pin, int irq);
 
 #include <linux/types.h>
 #include <linux/slab.h>
-#include <linux/scatterlist.h>
+#include <asm/scatterlist.h>
 #include <linux/string.h>
 #include <asm/io.h>
 

@@ -11,14 +11,8 @@
 #include <linux/in6.h>
 #include <linux/atomic.h>
 #include <net/flow_dissector.h>
-
-/*
- * ifindex generation is per-net namespace, and loopback is
- * always the 1st device in ns (see net_dev_init), thus any
- * loopback device should get ifindex 1
- */
-
-#define LOOPBACK_IFINDEX	1
+#include <linux/rh_kabi.h>
+#include <net/flow_dissector.h>
 
 struct flowi_tunnel {
 	__be64			tun_id;
@@ -33,10 +27,11 @@ struct flowi_common {
 	__u8	flowic_proto;
 	__u8	flowic_flags;
 #define FLOWI_FLAG_ANYSRC		0x01
-#define FLOWI_FLAG_KNOWN_NH		0x02
-#define FLOWI_FLAG_SKIP_NH_OIF		0x04
+/* This has changed to 0x02 upstream. Preserved here to remain ABI compatible. */
+#define FLOWI_FLAG_KNOWN_NH		0x04
+#define FLOWI_FLAG_EXTENDED4		0x40
+#define FLOWI_FLAG_EXTENDED6		0x80
 	__u32	flowic_secid;
-	struct flowi_tunnel flowic_tun_key;
 };
 
 union flowi_uli {
@@ -63,6 +58,13 @@ union flowi_uli {
 	} mht;
 };
 
+
+struct flowi_extended {
+	struct flowi_tunnel flowic_tun_key;
+	/* kABI: use these reserved fields to add new items.  */
+	u32 rh_reserved[4];
+};
+
 struct flowi4 {
 	struct flowi_common	__fl_common;
 #define flowi4_oif		__fl_common.flowic_oif
@@ -73,7 +75,6 @@ struct flowi4 {
 #define flowi4_proto		__fl_common.flowic_proto
 #define flowi4_flags		__fl_common.flowic_flags
 #define flowi4_secid		__fl_common.flowic_secid
-#define flowi4_tun_key		__fl_common.flowic_tun_key
 
 	/* (saddr,daddr) must be grouped, same order as in IP header */
 	__be32			saddr;
@@ -87,7 +88,16 @@ struct flowi4 {
 #define fl4_ipsec_spi		uli.spi
 #define fl4_mh_type		uli.mht.type
 #define fl4_gre_key		uli.gre_key
+	/* kABI: use these reserved fields to add new items. */
+	RH_KABI_EXTEND(u32 rh_reserved[4])
+	RH_KABI_EXTEND(struct flowi_extended __fl_extended)
 } __attribute__((__aligned__(BITS_PER_LONG/8)));
+
+static inline void flowi4_tun_id_set(struct flowi4 *fl, __be64 tun_id)
+{
+	fl->flowi4_flags |= FLOWI_FLAG_EXTENDED4;
+	fl->__fl_extended.flowic_tun_key.tun_id = tun_id;
+}
 
 static inline void flowi4_init_output(struct flowi4 *fl4, int oif,
 				      __u32 mark, __u8 tos, __u8 scope,
@@ -96,14 +106,14 @@ static inline void flowi4_init_output(struct flowi4 *fl4, int oif,
 				      __be16 dport, __be16 sport)
 {
 	fl4->flowi4_oif = oif;
-	fl4->flowi4_iif = LOOPBACK_IFINDEX;
+	fl4->flowi4_iif = 0;
 	fl4->flowi4_mark = mark;
 	fl4->flowi4_tos = tos;
 	fl4->flowi4_scope = scope;
 	fl4->flowi4_proto = proto;
 	fl4->flowi4_flags = flags;
 	fl4->flowi4_secid = 0;
-	fl4->flowi4_tun_key.tun_id = 0;
+	flowi4_tun_id_set(fl4, 0);
 	fl4->daddr = daddr;
 	fl4->saddr = saddr;
 	fl4->fl4_dport = dport;
@@ -126,14 +136,13 @@ struct flowi6 {
 #define flowi6_oif		__fl_common.flowic_oif
 #define flowi6_iif		__fl_common.flowic_iif
 #define flowi6_mark		__fl_common.flowic_mark
+#define flowi6_tos		__fl_common.flowic_tos
 #define flowi6_scope		__fl_common.flowic_scope
 #define flowi6_proto		__fl_common.flowic_proto
 #define flowi6_flags		__fl_common.flowic_flags
 #define flowi6_secid		__fl_common.flowic_secid
-#define flowi6_tun_key		__fl_common.flowic_tun_key
 	struct in6_addr		daddr;
 	struct in6_addr		saddr;
-	/* Note: flowi6_tos is encoded in flowlabel, too. */
 	__be32			flowlabel;
 	union flowi_uli		uli;
 #define fl6_sport		uli.ports.sport
@@ -143,7 +152,16 @@ struct flowi6 {
 #define fl6_ipsec_spi		uli.spi
 #define fl6_mh_type		uli.mht.type
 #define fl6_gre_key		uli.gre_key
+	/* kABI: use these reserved fields to add new items. */
+	RH_KABI_EXTEND(u32 rh_reserved[4])
+	RH_KABI_EXTEND(struct flowi_extended __fl_extended)
 } __attribute__((__aligned__(BITS_PER_LONG/8)));
+
+static inline void flowi6_tun_id_set(struct flowi6 *fl, __be64 tun_id)
+{
+	fl->flowi6_flags |= FLOWI_FLAG_EXTENDED6;
+	fl->__fl_extended.flowic_tun_key.tun_id = tun_id;
+}
 
 struct flowidn {
 	struct flowi_common	__fl_common;
@@ -175,8 +193,17 @@ struct flowi {
 #define flowi_proto	u.__fl_common.flowic_proto
 #define flowi_flags	u.__fl_common.flowic_flags
 #define flowi_secid	u.__fl_common.flowic_secid
-#define flowi_tun_key	u.__fl_common.flowic_tun_key
 } __attribute__((__aligned__(BITS_PER_LONG/8)));
+
+static inline __be64 flowi_tun_id_get(struct flowi *fl)
+{
+	if (fl->flowi_flags & FLOWI_FLAG_EXTENDED4)
+		return fl->u.ip4.__fl_extended.flowic_tun_key.tun_id;
+	else if (fl->flowi_flags & FLOWI_FLAG_EXTENDED6)
+		return fl->u.ip6.__fl_extended.flowic_tun_key.tun_id;
+	else
+		return 0;
+}
 
 static inline struct flowi *flowi4_to_flowi(struct flowi4 *fl4)
 {

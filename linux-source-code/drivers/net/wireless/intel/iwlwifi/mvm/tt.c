@@ -18,11 +18,6 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110,
- * USA
- *
  * The full GNU General Public License is included in this distribution
  * in the file called COPYING.
  *
@@ -71,7 +66,7 @@
 
 #define IWL_MVM_TEMP_NOTIF_WAIT_TIMEOUT	HZ
 
-static void iwl_mvm_enter_ctkill(struct iwl_mvm *mvm)
+void iwl_mvm_enter_ctkill(struct iwl_mvm *mvm)
 {
 	struct iwl_mvm_tt_mgmt *tt = &mvm->thermal_throttle;
 	u32 duration = tt->params.ct_kill_duration;
@@ -356,7 +351,7 @@ static void iwl_mvm_tt_tx_protection(struct iwl_mvm *mvm, bool enable)
 	struct iwl_mvm_sta *mvmsta;
 	int i, err;
 
-	for (i = 0; i < IWL_MVM_STATION_COUNT; i++) {
+	for (i = 0; i < ARRAY_SIZE(mvm->fw_id_to_mac_id); i++) {
 		mvmsta = iwl_mvm_sta_from_staid_protected(mvm, i);
 		if (!mvmsta)
 			continue;
@@ -529,6 +524,7 @@ int iwl_mvm_ctdp_command(struct iwl_mvm *mvm, u32 op, u32 state)
 
 	lockdep_assert_held(&mvm->mutex);
 
+	status = 0;
 	ret = iwl_mvm_send_cmd_pdu_status(mvm, WIDE_ID(PHY_OPS_GROUP,
 						       CTDP_CONFIG_CMD),
 					  sizeof(cmd), &cmd, &status);
@@ -620,7 +616,11 @@ send:
 }
 
 static int iwl_mvm_tzone_get_temp(struct thermal_zone_device *device,
+#if 0 /* Not in RHEL */
 				  int *temperature)
+#else
+				  unsigned long *temperature)
+#endif
 {
 	struct iwl_mvm *mvm = (struct iwl_mvm *)device->devdata;
 	int ret;
@@ -628,8 +628,9 @@ static int iwl_mvm_tzone_get_temp(struct thermal_zone_device *device,
 
 	mutex_lock(&mvm->mutex);
 
-	if (!mvm->ucode_loaded || !(mvm->cur_ucode == IWL_UCODE_REGULAR)) {
-		ret = -EIO;
+	if (!iwl_mvm_firmware_running(mvm) ||
+	    mvm->fwrt.cur_fw_img != IWL_UCODE_REGULAR) {
+		ret = -ENODATA;
 		goto out;
 	}
 
@@ -645,7 +646,11 @@ out:
 }
 
 static int iwl_mvm_tzone_get_trip_temp(struct thermal_zone_device *device,
+#if 0 /* Not in RHEL */
 				       int trip, int *temp)
+#else
+				       int trip, unsigned long *temp)
+#endif
 {
 	struct iwl_mvm *mvm = (struct iwl_mvm *)device->devdata;
 
@@ -669,7 +674,11 @@ static int iwl_mvm_tzone_get_trip_type(struct thermal_zone_device *device,
 }
 
 static int iwl_mvm_tzone_set_trip_temp(struct thermal_zone_device *device,
+#if 0 /* Not in RHEL */
 				       int trip, int temp)
+#else
+				       int trip, unsigned long temp)
+#endif
 {
 	struct iwl_mvm *mvm = (struct iwl_mvm *)device->devdata;
 	struct iwl_mvm_thermal_device *tzone;
@@ -678,7 +687,8 @@ static int iwl_mvm_tzone_set_trip_temp(struct thermal_zone_device *device,
 
 	mutex_lock(&mvm->mutex);
 
-	if (!mvm->ucode_loaded || !(mvm->cur_ucode == IWL_UCODE_REGULAR)) {
+	if (!iwl_mvm_firmware_running(mvm) ||
+	    mvm->fwrt.cur_fw_img != IWL_UCODE_REGULAR) {
 		ret = -EIO;
 		goto out;
 	}
@@ -736,8 +746,7 @@ static  struct thermal_zone_device_ops tzone_ops = {
 static void iwl_mvm_thermal_zone_register(struct iwl_mvm *mvm)
 {
 	int i;
-	char name[16];
-	static atomic_t counter = ATOMIC_INIT(0);
+	char name[] = "iwlwifi";
 
 	if (!iwl_mvm_is_tt_in_fw(mvm)) {
 		mvm->tz_device.tzone = NULL;
@@ -747,7 +756,6 @@ static void iwl_mvm_thermal_zone_register(struct iwl_mvm *mvm)
 
 	BUILD_BUG_ON(ARRAY_SIZE(name) >= THERMAL_NAME_LENGTH);
 
-	sprintf(name, "iwlwifi_%u", atomic_inc_return(&counter) & 0xFF);
 	mvm->tz_device.tzone = thermal_zone_device_register(name,
 							IWL_MAX_DTS_TRIPS,
 							IWL_WRITABLE_TRIPS_MSK,
@@ -794,7 +802,8 @@ static int iwl_mvm_tcool_set_cur_state(struct thermal_cooling_device *cdev,
 
 	mutex_lock(&mvm->mutex);
 
-	if (!mvm->ucode_loaded || !(mvm->cur_ucode == IWL_UCODE_REGULAR)) {
+	if (!iwl_mvm_firmware_running(mvm) ||
+	    mvm->fwrt.cur_fw_img != IWL_UCODE_REGULAR) {
 		ret = -EIO;
 		goto unlock;
 	}
@@ -812,7 +821,7 @@ unlock:
 	return ret;
 }
 
-static struct thermal_cooling_device_ops tcooling_ops = {
+static const struct thermal_cooling_device_ops tcooling_ops = {
 	.get_max_state = iwl_mvm_tcool_get_max_state,
 	.get_cur_state = iwl_mvm_tcool_get_cur_state,
 	.set_cur_state = iwl_mvm_tcool_set_cur_state,
@@ -886,10 +895,14 @@ void iwl_mvm_thermal_initialize(struct iwl_mvm *mvm, u32 min_backoff)
 	iwl_mvm_cooling_device_register(mvm);
 	iwl_mvm_thermal_zone_register(mvm);
 #endif
+	mvm->init_status |= IWL_MVM_INIT_STATUS_THERMAL_INIT_COMPLETE;
 }
 
 void iwl_mvm_thermal_exit(struct iwl_mvm *mvm)
 {
+	if (!(mvm->init_status & IWL_MVM_INIT_STATUS_THERMAL_INIT_COMPLETE))
+		return;
+
 	cancel_delayed_work_sync(&mvm->thermal_throttle.ct_kill_exit);
 	IWL_DEBUG_TEMP(mvm, "Exit Thermal Throttling\n");
 
@@ -897,4 +910,5 @@ void iwl_mvm_thermal_exit(struct iwl_mvm *mvm)
 	iwl_mvm_cooling_device_unregister(mvm);
 	iwl_mvm_thermal_zone_unregister(mvm);
 #endif
+	mvm->init_status &= ~IWL_MVM_INIT_STATUS_THERMAL_INIT_COMPLETE;
 }

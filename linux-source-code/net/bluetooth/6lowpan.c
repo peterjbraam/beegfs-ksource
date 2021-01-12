@@ -57,7 +57,6 @@ static bool enable_6lowpan;
 /* We are listening incoming connections via this channel
  */
 static struct l2cap_chan *listen_chan;
-static DEFINE_MUTEX(set_lock);
 
 struct lowpan_peer {
 	struct list_head list;
@@ -168,10 +167,10 @@ static inline struct lowpan_peer *peer_lookup_dst(struct lowpan_btle_dev *dev,
 						  struct in6_addr *daddr,
 						  struct sk_buff *skb)
 {
-	struct lowpan_peer *peer;
-	struct in6_addr *nexthop;
 	struct rt6_info *rt = (struct rt6_info *)skb_dst(skb);
 	int count = atomic_read(&dev->peer_count);
+	const struct in6_addr *nexthop;
+	struct lowpan_peer *peer;
 
 	BT_DBG("peers %d addr %pI6c rt %p", count, daddr, rt);
 
@@ -188,18 +187,12 @@ static inline struct lowpan_peer *peer_lookup_dst(struct lowpan_btle_dev *dev,
 	}
 
 	if (!rt) {
-		if (ipv6_addr_any(&lowpan_cb(skb)->gw)) {
-			/* There is neither route nor gateway,
-			 * probably the destination is a direct peer.
-			 */
-			nexthop = daddr;
-		} else {
-			/* There is a known gateway
-			 */
-			nexthop = &lowpan_cb(skb)->gw;
-		}
+		nexthop = &lowpan_cb(skb)->gw;
+
+		if (ipv6_addr_any(nexthop))
+			return NULL;
 	} else {
-		nexthop = rt6_nexthop(rt, daddr);
+		nexthop = rt6_nexthop(rt);
 
 		/* We need to remember the address because it is needed
 		 * by bt_xmit() when sending the packet. In bt_xmit(), the
@@ -521,11 +514,11 @@ static int send_pkt(struct l2cap_chan *chan, struct sk_buff *skb,
 	 */
 	chan->data = skb;
 
+	memset(&msg, 0, sizeof(msg));
+	msg.msg_iov = (struct iovec *) &iv;
+	msg.msg_iovlen = 1;
 	iv.iov_base = skb->data;
 	iv.iov_len = skb->len;
-
-	memset(&msg, 0, sizeof(msg));
-	iov_iter_kvec(&msg.msg_iter, WRITE | ITER_KVEC, &iv, 1, skb->len);
 
 	err = l2cap_chan_send(chan, &msg, skb->len);
 	if (err > 0) {
@@ -762,8 +755,7 @@ static void set_ip_addr_bits(u8 addr_type, u8 *addr)
 }
 
 static struct l2cap_chan *add_peer_chan(struct l2cap_chan *chan,
-					struct lowpan_btle_dev *dev,
-					bool new_netdev)
+					struct lowpan_btle_dev *dev)
 {
 	struct lowpan_peer *peer;
 
@@ -794,8 +786,7 @@ static struct l2cap_chan *add_peer_chan(struct l2cap_chan *chan,
 	spin_unlock(&devices_lock);
 
 	/* Notifying peers about us needs to be done without locks held */
-	if (new_netdev)
-		INIT_DELAYED_WORK(&dev->notify_peers, do_notify_peers);
+	INIT_DELAYED_WORK(&dev->notify_peers, do_notify_peers);
 	schedule_delayed_work(&dev->notify_peers, msecs_to_jiffies(100));
 
 	return peer->chan;
@@ -807,8 +798,7 @@ static int setup_netdev(struct l2cap_chan *chan, struct lowpan_btle_dev **dev)
 	int err = 0;
 
 	netdev = alloc_netdev(LOWPAN_PRIV_SIZE(sizeof(struct lowpan_btle_dev)),
-			      IFACE_NAME_TEMPLATE, NET_NAME_UNKNOWN,
-			      netdev_setup);
+			      IFACE_NAME_TEMPLATE, netdev_setup);
 	if (!netdev)
 		return -ENOMEM;
 
@@ -852,7 +842,6 @@ out:
 static inline void chan_ready_cb(struct l2cap_chan *chan)
 {
 	struct lowpan_btle_dev *dev;
-	bool new_netdev = false;
 
 	dev = lookup_dev(chan->conn);
 
@@ -863,13 +852,12 @@ static inline void chan_ready_cb(struct l2cap_chan *chan)
 			l2cap_chan_del(chan, -ENOENT);
 			return;
 		}
-		new_netdev = true;
 	}
 
 	if (!try_module_get(THIS_MODULE))
 		return;
 
-	add_peer_chan(chan, dev, new_netdev);
+	add_peer_chan(chan, dev);
 	ifup(dev->netdev);
 }
 
@@ -931,7 +919,7 @@ static void chan_close_cb(struct l2cap_chan *chan)
 			BT_DBG("dev %p removing %speer %p", dev,
 			       last ? "last " : "1 ", peer);
 			BT_DBG("chan %p orig refcnt %d", chan,
-			       atomic_read(&chan->kref.refcount));
+			       kref_read(&chan->kref));
 
 			l2cap_chan_put(chan);
 			break;
@@ -1013,6 +1001,7 @@ static const struct l2cap_ops bt_6lowpan_chan_ops = {
 	.suspend		= chan_suspend_cb,
 	.get_sndtimeo		= chan_get_sndtimeo_cb,
 	.alloc_skb		= chan_alloc_skb_cb,
+	.memcpy_fromiovec	= l2cap_chan_no_memcpy_fromiovec,
 
 	.teardown		= l2cap_chan_no_teardown,
 	.defer			= l2cap_chan_no_defer,
@@ -1188,14 +1177,12 @@ static void do_enable_set(struct work_struct *work)
 
 	enable_6lowpan = set_enable->flag;
 
-	mutex_lock(&set_lock);
 	if (listen_chan) {
 		l2cap_chan_close(listen_chan, 0);
 		l2cap_chan_put(listen_chan);
 	}
 
 	listen_chan = bt_6lowpan_listen();
-	mutex_unlock(&set_lock);
 
 	kfree(set_enable);
 }
@@ -1247,13 +1234,11 @@ static ssize_t lowpan_control_write(struct file *fp,
 		if (ret == -EINVAL)
 			return ret;
 
-		mutex_lock(&set_lock);
 		if (listen_chan) {
 			l2cap_chan_close(listen_chan, 0);
 			l2cap_chan_put(listen_chan);
 			listen_chan = NULL;
 		}
-		mutex_unlock(&set_lock);
 
 		if (conn) {
 			struct lowpan_peer *peer;
@@ -1401,7 +1386,7 @@ static int __init bt_6lowpan_init(void)
 						     bt_debugfs, NULL,
 						     &lowpan_control_fops);
 
-	return register_netdevice_notifier(&bt_6lowpan_dev_notifier);
+	return register_netdevice_notifier_rh(&bt_6lowpan_dev_notifier);
 }
 
 static void __exit bt_6lowpan_exit(void)
@@ -1416,7 +1401,7 @@ static void __exit bt_6lowpan_exit(void)
 
 	disconnect_devices();
 
-	unregister_netdevice_notifier(&bt_6lowpan_dev_notifier);
+	unregister_netdevice_notifier_rh(&bt_6lowpan_dev_notifier);
 }
 
 module_init(bt_6lowpan_init);

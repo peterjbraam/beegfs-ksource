@@ -16,7 +16,6 @@
  * Boston, MA 021110-1307, USA.
  */
 
-#include <linux/err.h>
 #include <linux/uuid.h>
 #include "ctree.h"
 #include "transaction.h"
@@ -66,9 +65,9 @@ static void btrfs_read_root_item(struct extent_buffer *eb, int slot,
  * search_key: the key to search
  * path: the path we search
  * root_item: the root item of the tree we look for
- * root_key: the root key of the tree we look for
+ * root_key: the reak key of the tree we look for
  *
- * If ->offset of 'search_key' is -1ULL, it means we are not sure the offset
+ * If ->offset of 'seach_key' is -1ULL, it means we are not sure the offset
  * of the search key, just lookup the root with the highest offset for a
  * given objectid.
  *
@@ -144,8 +143,10 @@ int btrfs_update_root(struct btrfs_trans_handle *trans, struct btrfs_root
 		return -ENOMEM;
 
 	ret = btrfs_search_slot(trans, root, key, path, 0, 1);
-	if (ret < 0)
+	if (ret < 0) {
+		btrfs_abort_transaction(trans, root, ret);
 		goto out;
+	}
 
 	if (ret != 0) {
 		btrfs_print_leaf(root, path->nodes[0]);
@@ -170,20 +171,20 @@ int btrfs_update_root(struct btrfs_trans_handle *trans, struct btrfs_root
 		ret = btrfs_search_slot(trans, root, key, path,
 				-1, 1);
 		if (ret < 0) {
-			btrfs_abort_transaction(trans, ret);
+			btrfs_abort_transaction(trans, root, ret);
 			goto out;
 		}
 
 		ret = btrfs_del_item(trans, root, path);
 		if (ret < 0) {
-			btrfs_abort_transaction(trans, ret);
+			btrfs_abort_transaction(trans, root, ret);
 			goto out;
 		}
 		btrfs_release_path(path);
 		ret = btrfs_insert_empty_item(trans, root, path,
 				key, sizeof(*item));
 		if (ret < 0) {
-			btrfs_abort_transaction(trans, ret);
+			btrfs_abort_transaction(trans, root, ret);
 			goto out;
 		}
 		l = path->nodes[0];
@@ -284,7 +285,7 @@ int btrfs_find_orphan_roots(struct btrfs_root *tree_root)
 		}
 
 		root = btrfs_read_fs_root(tree_root, &root_key);
-		err = PTR_ERR_OR_ZERO(root);
+		err = PTR_RET(root);
 		if (err && err != -ENOENT) {
 			break;
 		} else if (err == -ENOENT) {
@@ -449,7 +450,7 @@ again:
 	ret = btrfs_insert_empty_item(trans, tree_root, path, &key,
 				      sizeof(*ref) + name_len);
 	if (ret) {
-		btrfs_abort_transaction(trans, ret);
+		btrfs_abort_transaction(trans, tree_root, ret);
 		btrfs_free_path(path);
 		return ret;
 	}

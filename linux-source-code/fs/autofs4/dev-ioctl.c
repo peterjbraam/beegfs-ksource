@@ -38,8 +38,6 @@
  * which have been left busy at at service shutdown.
  */
 
-#define AUTOFS_DEV_IOCTL_SIZE	sizeof(struct autofs_dev_ioctl)
-
 typedef int (*ioctl_fn)(struct file *, struct autofs_sb_info *,
 			struct autofs_dev_ioctl *);
 
@@ -149,27 +147,20 @@ static int validate_dev_ioctl(int cmd, struct autofs_dev_ioctl *param)
 				cmd);
 			goto out;
 		}
+	} else {
+		unsigned int inr = _IOC_NR(cmd);
+
+		if (inr == AUTOFS_DEV_IOCTL_OPENMOUNT_CMD ||
+		    inr == AUTOFS_DEV_IOCTL_REQUESTER_CMD ||
+		    inr == AUTOFS_DEV_IOCTL_ISMOUNTPOINT_CMD) {
+			err = -EINVAL;
+			goto out;
+		}
 	}
 
 	err = 0;
 out:
 	return err;
-}
-
-/*
- * Get the autofs super block info struct from the file opened on
- * the autofs mount point.
- */
-static struct autofs_sb_info *autofs_dev_ioctl_sbi(struct file *f)
-{
-	struct autofs_sb_info *sbi = NULL;
-	struct inode *inode;
-
-	if (f) {
-		inode = file_inode(f);
-		sbi = autofs4_sbi(inode->i_sb);
-	}
-	return sbi;
 }
 
 /* Return autofs dev ioctl version */
@@ -204,7 +195,7 @@ static int autofs_dev_ioctl_protosubver(struct file *fp,
 /* Find the topmost mount satisfying test() */
 static int find_autofs_mount(const char *pathname,
 			     struct path *res,
-			     int test(struct path *path, void *data),
+			     int test(const struct path *path, void *data),
 			     void *data)
 {
 	struct path path;
@@ -230,12 +221,12 @@ static int find_autofs_mount(const char *pathname,
 	return err;
 }
 
-static int test_by_dev(struct path *path, void *p)
+static int test_by_dev(const struct path *path, void *p)
 {
 	return path->dentry->d_sb->s_dev == *(dev_t *)p;
 }
 
-static int test_by_type(struct path *path, void *p)
+static int test_by_type(const struct path *path, void *p)
 {
 	struct autofs_info *ino = autofs4_dentry_ino(path->dentry);
 
@@ -290,7 +281,8 @@ static int autofs_dev_ioctl_openmount(struct file *fp,
 	dev_t devid;
 	int err, fd;
 
-	/* param->path has already been checked */
+	/* param->path has been checked in validate_dev_ioctl() */
+
 	if (!param->openmount.devid)
 		return -EINVAL;
 
@@ -345,7 +337,7 @@ static int autofs_dev_ioctl_fail(struct file *fp,
 	int status;
 
 	token = (autofs_wqt_t) param->fail.token;
-	status = param->fail.status < 0 ? param->fail.status : -ENOENT;
+	status = param->fail.status ? param->fail.status : -ENOENT;
 	return autofs4_wait_release(sbi, token, status);
 }
 
@@ -375,7 +367,7 @@ static int autofs_dev_ioctl_setpipefd(struct file *fp,
 	pipefd = param->setpipefd.pipefd;
 
 	mutex_lock(&sbi->wq_mutex);
-	if (!sbi->catatonic) {
+	if (!(sbi->flags & AUTOFS_SBI_CATATONIC)) {
 		mutex_unlock(&sbi->wq_mutex);
 		return -EBUSY;
 	} else {
@@ -402,7 +394,7 @@ static int autofs_dev_ioctl_setpipefd(struct file *fp,
 		swap(sbi->oz_pgrp, new_pid);
 		sbi->pipefd = pipefd;
 		sbi->pipe = pipe;
-		sbi->catatonic = 0;
+		sbi->flags &= ~AUTOFS_SBI_CATATONIC;
 	}
 out:
 	put_pid(new_pid);
@@ -452,10 +444,7 @@ static int autofs_dev_ioctl_requester(struct file *fp,
 	dev_t devid;
 	int err = -ENOENT;
 
-	if (param->size <= sizeof(*param)) {
-		err = -EINVAL;
-		goto out;
-	}
+	/* param->path has been checked in validate_dev_ioctl() */
 
 	devid = sbi->sb->s_dev;
 
@@ -468,7 +457,7 @@ static int autofs_dev_ioctl_requester(struct file *fp,
 	ino = autofs4_dentry_ino(path.dentry);
 	if (ino) {
 		err = 0;
-		autofs4_expire_wait(path.dentry, 0);
+		autofs4_expire_wait(&path, 0);
 		spin_lock(&sbi->fs_lock);
 		param->requester.uid =
 			from_kuid_munged(current_user_ns(), ino->uid);
@@ -540,10 +529,7 @@ static int autofs_dev_ioctl_ismountpoint(struct file *fp,
 	unsigned int devid, magic;
 	int err = -ENOENT;
 
-	if (param->size <= sizeof(*param)) {
-		err = -EINVAL;
-		goto out;
-	}
+	/* param->path has been checked in validate_dev_ioctl() */
 
 	name = param->path;
 	type = param->ismountpoint.in.type;
@@ -575,7 +561,7 @@ static int autofs_dev_ioctl_ismountpoint(struct file *fp,
 
 		devid = new_encode_dev(dev);
 
-		err = have_submounts(path.dentry);
+		err = path_has_submounts(&path);
 
 		if (follow_down_one(&path))
 			magic = path.dentry->d_sb->s_magic;
@@ -669,6 +655,8 @@ static int _autofs_dev_ioctl(unsigned int command,
 	if (cmd != AUTOFS_DEV_IOCTL_VERSION_CMD &&
 	    cmd != AUTOFS_DEV_IOCTL_OPENMOUNT_CMD &&
 	    cmd != AUTOFS_DEV_IOCTL_CLOSEMOUNT_CMD) {
+		struct super_block *sb;
+
 		fp = fget(param->ioctlfd);
 		if (!fp) {
 			if (cmd == AUTOFS_DEV_IOCTL_ISMOUNTPOINT_CMD)
@@ -677,12 +665,19 @@ static int _autofs_dev_ioctl(unsigned int command,
 			goto out;
 		}
 
-		sbi = autofs_dev_ioctl_sbi(fp);
-		if (!sbi || sbi->magic != AUTOFS_SBI_MAGIC) {
+		if (!fp->f_op) {
+			err = -ENOTTY;
+			fput(fp);
+			goto out;
+		}
+
+		sb = file_inode(fp)->i_sb;
+		if (sb->s_type != &autofs_fs_type) {
 			err = -EINVAL;
 			fput(fp);
 			goto out;
 		}
+		sbi = autofs4_sbi(sb);
 
 		/*
 		 * Admin needs to be able to set the mount catatonic in

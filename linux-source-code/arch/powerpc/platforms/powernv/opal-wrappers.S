@@ -9,71 +9,34 @@
  * 2 of the License, or (at your option) any later version.
  */
 
-#include <linux/jump_label.h>
 #include <asm/ppc_asm.h>
 #include <asm/hvcall.h>
 #include <asm/asm-offsets.h>
 #include <asm/opal.h>
-
-	.section	".text"
-
-#ifdef CONFIG_TRACEPOINTS
-#ifdef HAVE_JUMP_LABEL
-#define OPAL_BRANCH(LABEL)					\
-	ARCH_STATIC_BRANCH(LABEL, opal_tracepoint_key)
-#else
-
-	.section	".toc","aw"
-
-	.globl opal_tracepoint_refcount
-opal_tracepoint_refcount:
-	.llong	0
-
-	.section	".text"
-
-/*
- * We branch around this in early init by using an unconditional cpu
- * feature.
- */
-#define OPAL_BRANCH(LABEL)					\
-BEGIN_FTR_SECTION;						\
-	b	1f;						\
-END_FTR_SECTION(0, 1);						\
-	ld	r12,opal_tracepoint_refcount@toc(r2);		\
-	cmpdi	r12,0;						\
-	bne-	LABEL;						\
-1:
-
-#endif
-
-#else
-#define OPAL_BRANCH(LABEL)
-#endif
 
 /* TODO:
  *
  * - Trace irqs in/off (needs saving/restoring all args, argh...)
  * - Get r11 feed up by Dave so I can have better register usage
  */
-
 #define OPAL_CALL(name, token)		\
  _GLOBAL_TOC(name);			\
 	mflr	r0;			\
-	std	r0,PPC_LR_STKOFF(r1);	\
-	li	r0,token;		\
-	OPAL_BRANCH(opal_tracepoint_entry) \
 	mfcr	r12;			\
+	std	r0,PPC_LR_STKOFF(r1);	\
 	stw	r12,8(r1);		\
-	li	r11,0;			\
+	std	r1,PACAR1(r13);		\
+	li	r0,0;			\
 	mfmsr	r12;			\
-	ori	r11,r11,MSR_EE;		\
+	ori	r0,r0,MSR_EE;		\
 	std	r12,PACASAVEDMSR(r13);	\
-	andc	r12,r12,r11;		\
+	andc	r12,r12,r0;		\
 	mtmsrd	r12,1;			\
-	LOAD_REG_ADDR(r11,opal_return);	\
-	mtlr	r11;			\
-	li	r11,MSR_DR|MSR_IR|MSR_LE;\
-	andc	r12,r12,r11;		\
+	LOAD_REG_ADDR(r0,opal_return);	\
+	mtlr	r0;			\
+	li	r0,MSR_DR|MSR_IR|MSR_LE;\
+	andc	r12,r12,r0;		\
+	li	r0,token;		\
 	mtspr	SPRN_HSRR1,r12;		\
 	LOAD_REG_ADDR(r11,opal);	\
 	ld	r12,8(r11);		\
@@ -97,63 +60,6 @@ opal_return:
 	mtspr	SPRN_SRR1,r6;
 	mtcr	r4;
 	rfid
-
-#ifdef CONFIG_TRACEPOINTS
-opal_tracepoint_entry:
-	stdu	r1,-STACKFRAMESIZE(r1)
-	std	r0,STK_REG(R23)(r1)
-	std	r3,STK_REG(R24)(r1)
-	std	r4,STK_REG(R25)(r1)
-	std	r5,STK_REG(R26)(r1)
-	std	r6,STK_REG(R27)(r1)
-	std	r7,STK_REG(R28)(r1)
-	std	r8,STK_REG(R29)(r1)
-	std	r9,STK_REG(R30)(r1)
-	std	r10,STK_REG(R31)(r1)
-	mr	r3,r0
-	addi	r4,r1,STK_REG(R24)
-	bl	__trace_opal_entry
-	ld	r0,STK_REG(R23)(r1)
-	ld	r3,STK_REG(R24)(r1)
-	ld	r4,STK_REG(R25)(r1)
-	ld	r5,STK_REG(R26)(r1)
-	ld	r6,STK_REG(R27)(r1)
-	ld	r7,STK_REG(R28)(r1)
-	ld	r8,STK_REG(R29)(r1)
-	ld	r9,STK_REG(R30)(r1)
-	ld	r10,STK_REG(R31)(r1)
-	LOAD_REG_ADDR(r11,opal_tracepoint_return)
-	mfcr	r12
-	std	r11,16(r1)
-	stw	r12,8(r1)
-	li	r11,0
-	mfmsr	r12
-	ori	r11,r11,MSR_EE
-	std	r12,PACASAVEDMSR(r13)
-	andc	r12,r12,r11
-	mtmsrd	r12,1
-	LOAD_REG_ADDR(r11,opal_return)
-	mtlr	r11
-	li	r11,MSR_DR|MSR_IR|MSR_LE
-	andc	r12,r12,r11
-	mtspr	SPRN_HSRR1,r12
-	LOAD_REG_ADDR(r11,opal)
-	ld	r12,8(r11)
-	ld	r2,0(r11)
-	mtspr	SPRN_HSRR0,r12
-	hrfid
-
-opal_tracepoint_return:
-	std	r3,STK_REG(R31)(r1)
-	mr	r4,r3
-	ld	r3,STK_REG(R23)(r1)
-	bl	__trace_opal_exit
-	ld	r3,STK_REG(R31)(r1)
-	addi	r1,r1,STACKFRAMESIZE
-	ld	r0,16(r1)
-	mtlr	r0
-	blr
-#endif
 
 #define OPAL_CALL_REAL(name, token)			\
  _GLOBAL_TOC(name);					\
@@ -272,7 +178,6 @@ OPAL_CALL(opal_dump_info2,			OPAL_DUMP_INFO2);
 OPAL_CALL(opal_dump_read,			OPAL_DUMP_READ);
 OPAL_CALL(opal_dump_ack,			OPAL_DUMP_ACK);
 OPAL_CALL(opal_get_msg,				OPAL_GET_MSG);
-OPAL_CALL(opal_write_oppanel_async,		OPAL_WRITE_OPPANEL_ASYNC);
 OPAL_CALL(opal_check_completion,		OPAL_CHECK_ASYNC_COMPLETION);
 OPAL_CALL(opal_dump_resend_notification,	OPAL_DUMP_RESEND);
 OPAL_CALL(opal_sync_host_reboot,		OPAL_SYNC_HOST_REBOOT);
@@ -281,12 +186,11 @@ OPAL_CALL(opal_get_param,			OPAL_GET_PARAM);
 OPAL_CALL(opal_set_param,			OPAL_SET_PARAM);
 OPAL_CALL(opal_handle_hmi,			OPAL_HANDLE_HMI);
 OPAL_CALL_REAL(opal_rm_handle_hmi,		OPAL_HANDLE_HMI);
-OPAL_CALL(opal_config_cpu_idle_state,		OPAL_CONFIG_CPU_IDLE_STATE);
 OPAL_CALL_REAL(opal_rm_config_cpu_idle_state,	OPAL_CONFIG_CPU_IDLE_STATE);
 OPAL_CALL(opal_slw_set_reg,			OPAL_SLW_SET_REG);
 OPAL_CALL(opal_register_dump_region,		OPAL_REGISTER_DUMP_REGION);
 OPAL_CALL(opal_unregister_dump_region,		OPAL_UNREGISTER_DUMP_REGION);
-OPAL_CALL(opal_pci_set_phb_cxl_mode,		OPAL_PCI_SET_PHB_CAPI_MODE);
+OPAL_CALL(opal_pci_set_phb_cxl_mode,		OPAL_PCI_SET_PHB_CXL_MODE);
 OPAL_CALL(opal_tpo_write,			OPAL_WRITE_TPO);
 OPAL_CALL(opal_tpo_read,			OPAL_READ_TPO);
 OPAL_CALL(opal_ipmi_send,			OPAL_IPMI_SEND);
@@ -299,13 +203,5 @@ OPAL_CALL(opal_prd_msg,				OPAL_PRD_MSG);
 OPAL_CALL(opal_leds_get_ind,			OPAL_LEDS_GET_INDICATOR);
 OPAL_CALL(opal_leds_set_ind,			OPAL_LEDS_SET_INDICATOR);
 OPAL_CALL(opal_console_flush,			OPAL_CONSOLE_FLUSH);
-OPAL_CALL(opal_get_device_tree,			OPAL_GET_DEVICE_TREE);
-OPAL_CALL(opal_pci_get_presence_state,		OPAL_PCI_GET_PRESENCE_STATE);
-OPAL_CALL(opal_pci_get_power_state,		OPAL_PCI_GET_POWER_STATE);
-OPAL_CALL(opal_pci_set_power_state,		OPAL_PCI_SET_POWER_STATE);
-OPAL_CALL(opal_int_get_xirr,			OPAL_INT_GET_XIRR);
-OPAL_CALL(opal_int_set_cppr,			OPAL_INT_SET_CPPR);
-OPAL_CALL(opal_int_eoi,				OPAL_INT_EOI);
-OPAL_CALL(opal_int_set_mfrr,			OPAL_INT_SET_MFRR);
 OPAL_CALL(opal_pci_tce_kill,			OPAL_PCI_TCE_KILL);
 OPAL_CALL_REAL(opal_rm_pci_tce_kill,		OPAL_PCI_TCE_KILL);

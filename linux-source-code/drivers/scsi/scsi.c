@@ -89,14 +89,49 @@ EXPORT_SYMBOL(scsi_logging_level);
 ASYNC_DOMAIN(scsi_sd_probe_domain);
 EXPORT_SYMBOL(scsi_sd_probe_domain);
 
-/*
- * Separate domain (from scsi_sd_probe_domain) to maximize the benefit of
- * asynchronous system resume operations.  It is marked 'exclusive' to avoid
- * being included in the async_synchronize_full() that is invoked by
- * dpm_resume()
+/* NB: These are exposed through /proc/scsi/scsi and form part of the ABI.
+ * You may not alter any existing entry (although adding new ones is
+ * encouraged once assigned by ANSI/INCITS T10
  */
-ASYNC_DOMAIN_EXCLUSIVE(scsi_sd_pm_domain);
-EXPORT_SYMBOL(scsi_sd_pm_domain);
+static const char *const scsi_device_types[] = {
+	"Direct-Access    ",
+	"Sequential-Access",
+	"Printer          ",
+	"Processor        ",
+	"WORM             ",
+	"CD-ROM           ",
+	"Scanner          ",
+	"Optical Device   ",
+	"Medium Changer   ",
+	"Communications   ",
+	"ASC IT8          ",
+	"ASC IT8          ",
+	"RAID             ",
+	"Enclosure        ",
+	"Direct-Access-RBC",
+	"Optical card     ",
+	"Bridge controller",
+	"Object storage   ",
+	"Automation/Drive ",
+};
+
+/**
+ * scsi_device_type - Return 17 char string indicating device type.
+ * @type: type number to look up
+ */
+
+const char * scsi_device_type(unsigned type)
+{
+	if (type == 0x1e)
+		return "Well-known LUN   ";
+	if (type == 0x1f)
+		return "No Device        ";
+	if (type >= ARRAY_SIZE(scsi_device_types))
+		return "Unknown          ";
+	return scsi_device_types[type];
+}
+
+EXPORT_SYMBOL(scsi_device_type);
 
 struct scsi_host_cmd_pool {
 	struct kmem_cache	*cmd_slab;
@@ -189,8 +224,7 @@ fail:
  * Description: allocate a struct scsi_cmd from host's slab, recycling from the
  *              host's free_list if necessary.
  */
-static struct scsi_cmnd *
-__scsi_get_command(struct Scsi_Host *shost, gfp_t gfp_mask)
+struct scsi_cmnd *__scsi_get_command(struct Scsi_Host *shost, gfp_t gfp_mask)
 {
 	struct scsi_cmnd *cmd = scsi_host_alloc_command(shost, gfp_mask);
 
@@ -220,6 +254,7 @@ __scsi_get_command(struct Scsi_Host *shost, gfp_t gfp_mask)
 
 	return cmd;
 }
+EXPORT_SYMBOL_GPL(__scsi_get_command);
 
 /**
  * scsi_get_command - Allocate and setup a scsi command block
@@ -245,13 +280,14 @@ struct scsi_cmnd *scsi_get_command(struct scsi_device *dev, gfp_t gfp_mask)
 	cmd->jiffies_at_alloc = jiffies;
 	return cmd;
 }
+EXPORT_SYMBOL(scsi_get_command);
 
 /**
  * __scsi_put_command - Free a struct scsi_cmnd
  * @shost: dev->host
  * @cmd: Command to free
  */
-static void __scsi_put_command(struct Scsi_Host *shost, struct scsi_cmnd *cmd)
+void __scsi_put_command(struct Scsi_Host *shost, struct scsi_cmnd *cmd)
 {
 	unsigned long flags;
 
@@ -267,6 +303,7 @@ static void __scsi_put_command(struct Scsi_Host *shost, struct scsi_cmnd *cmd)
 	if (likely(cmd != NULL))
 		scsi_host_free_command(shost, cmd);
 }
+EXPORT_SYMBOL(__scsi_put_command);
 
 /**
  * scsi_put_command - Free a scsi command block
@@ -286,10 +323,11 @@ void scsi_put_command(struct scsi_cmnd *cmd)
 	list_del_init(&cmd->list);
 	spin_unlock_irqrestore(&cmd->device->list_lock, flags);
 
-	BUG_ON(delayed_work_pending(&cmd->abort_work));
+	cancel_delayed_work(&cmd->abort_work);
 
 	__scsi_put_command(cmd->device->host, cmd);
 }
+EXPORT_SYMBOL(scsi_put_command);
 
 static struct scsi_host_cmd_pool *
 scsi_find_host_cmd_pool(struct Scsi_Host *shost)
@@ -521,7 +559,7 @@ void scsi_log_completion(struct scsi_cmnd *cmd, int disposition)
 		    (level > 1)) {
 			scsi_print_result(cmd, "Done", disposition);
 			scsi_print_command(cmd);
-			if (status_byte(cmd->result) & CHECK_CONDITION)
+			if (status_byte(cmd->result) == CHECK_CONDITION)
 				scsi_print_sense(cmd);
 			if (level > 3)
 				scmd_printk(KERN_INFO, cmd,
@@ -548,6 +586,87 @@ void scsi_cmd_get_serial(struct Scsi_Host *host, struct scsi_cmnd *cmd)
 		cmd->serial_number = host->cmd_serial_number++;
 }
 EXPORT_SYMBOL(scsi_cmd_get_serial);
+
+/**
+ * scsi_dispatch_command - Dispatch a command to the low-level driver.
+ * @cmd: command block we are dispatching.
+ *
+ * Return: nonzero return request was rejected and device's queue needs to be
+ * plugged.
+ */
+int scsi_dispatch_cmd(struct scsi_cmnd *cmd)
+{
+	struct Scsi_Host *host = cmd->device->host;
+	int rtn = 0;
+
+	atomic_inc(&cmd->device->iorequest_cnt);
+
+	/* check if the device is still usable */
+	if (unlikely(cmd->device->sdev_state == SDEV_DEL)) {
+		/* in SDEV_DEL we error all commands. DID_NO_CONNECT
+		 * returns an immediate error upwards, and signals
+		 * that the device is no longer present */
+		cmd->result = DID_NO_CONNECT << 16;
+		goto done;
+	}
+
+	/* Check to see if the scsi lld made this device blocked. */
+	if (unlikely(scsi_device_blocked(cmd->device))) {
+		/*
+		 * in blocked state, the command is just put back on
+		 * the device queue.  The suspend state has already
+		 * blocked the queue so future requests should not
+		 * occur until the device transitions out of the
+		 * suspend state.
+		 */
+		SCSI_LOG_MLQUEUE(3, scmd_printk(KERN_INFO, cmd,
+			"queuecommand : device blocked\n"));
+		return SCSI_MLQUEUE_DEVICE_BUSY;
+	}
+
+	/* Store the LUN value in cmnd, if needed. */
+	if (cmd->device->lun_in_cdb)
+		cmd->cmnd[1] = (cmd->cmnd[1] & 0x1f) |
+			       (cmd->device->lun << 5 & 0xe0);
+
+	scsi_log_send(cmd);
+
+	/*
+	 * Before we queue this command, check if the command
+	 * length exceeds what the host adapter can handle.
+	 */
+	if (cmd->cmd_len > cmd->device->host->max_cmd_len) {
+		SCSI_LOG_MLQUEUE(3, scmd_printk(KERN_INFO, cmd,
+			       "queuecommand : command too long. "
+			       "cdb_size=%d host->max_cmd_len=%d\n",
+			       cmd->cmd_len, cmd->device->host->max_cmd_len));
+		cmd->result = (DID_ABORT << 16);
+		goto done;
+	}
+
+	if (unlikely(host->shost_state == SHOST_DEL)) {
+		cmd->result = (DID_NO_CONNECT << 16);
+		goto done;
+
+	}
+
+	trace_scsi_dispatch_cmd_start(cmd);
+	rtn = host->hostt->queuecommand(host, cmd);
+	if (rtn) {
+		trace_scsi_dispatch_cmd_error(cmd, rtn);
+		if (rtn != SCSI_MLQUEUE_DEVICE_BUSY &&
+		    rtn != SCSI_MLQUEUE_TARGET_BUSY)
+			rtn = SCSI_MLQUEUE_HOST_BUSY;
+
+		SCSI_LOG_MLQUEUE(3, scmd_printk(KERN_INFO, cmd,
+			"queuecommand : request rejected\n"));
+	}
+
+	return rtn;
+ done:
+	cmd->scsi_done(cmd);
+	return 0;
+}
 
 /**
  * scsi_finish_command - cleanup and pass command back to upper layer
@@ -606,24 +725,79 @@ void scsi_finish_command(struct scsi_cmnd *cmd)
 	}
 	scsi_io_completion(cmd, good_bytes);
 }
+EXPORT_SYMBOL(scsi_finish_command);
 
 /**
- * scsi_change_queue_depth - change a device's queue depth
+ * scsi_adjust_queue_depth - Let low level drivers change a device's queue depth
  * @sdev: SCSI Device in question
- * @depth: number of commands allowed to be queued to the driver
+ * @tagged: Do we use tagged queueing (non-0) or do we treat
+ *          this device as an untagged device (0)
+ * @tags: Number of tags allowed if tagged queueing enabled,
+ *        or number of commands the low level driver can
+ *        queue up in non-tagged mode (as per cmd_per_lun).
  *
- * Sets the device queue depth and returns the new value.
+ * Returns:	Nothing
+ *
+ * Lock Status:	None held on entry
+ *
+ * Notes:	Low level drivers may call this at any time and we will do
+ * 		the right thing depending on whether or not the device is
+ * 		currently active and whether or not it even has the
+ * 		command blocks built yet.
  */
-int scsi_change_queue_depth(struct scsi_device *sdev, int depth)
+void scsi_adjust_queue_depth(struct scsi_device *sdev, int tagged, int tags)
 {
-	if (depth > 0) {
-		sdev->queue_depth = depth;
-		wmb();
+	unsigned long flags;
+
+	/*
+	 * refuse to set tagged depth to an unworkable size
+	 */
+	if (tags <= 0)
+		return;
+
+	spin_lock_irqsave(sdev->request_queue->queue_lock, flags);
+
+	/*
+	 * Check to see if the queue is managed by the block layer.
+	 * If it is, and we fail to adjust the depth, exit.
+	 *
+	 * Do not resize the tag map if it is a host wide share bqt,
+	 * because the size should be the hosts's can_queue. If there
+	 * is more IO than the LLD's can_queue (so there are not enuogh
+	 * tags) request_fn's host queue ready check will handle it.
+	 */
+	if (!shost_use_blk_mq(sdev->host) && !sdev->host->bqt) {
+		if (blk_queue_tagged(sdev->request_queue) &&
+		    blk_queue_resize_tags(sdev->request_queue, tags) != 0)
+			goto out;
 	}
 
-	return sdev->queue_depth;
+	sdev->queue_depth = tags;
+	blk_set_queue_depth(sdev->request_queue, sdev->queue_depth);
+	switch (tagged) {
+		case 0:
+			sdev->ordered_tags = 0;
+			sdev->simple_tags = 0;
+			break;
+		case MSG_ORDERED_TAG:
+			sdev->ordered_tags = 1;
+			sdev->simple_tags = 1;
+			break;
+		case MSG_SIMPLE_TAG:
+			sdev->ordered_tags = 0;
+			sdev->simple_tags = 1;
+			break;
+		default:
+			sdev->ordered_tags = 0;
+			sdev->simple_tags = 0;
+			sdev_printk(KERN_WARNING, sdev,
+				    "scsi_adjust_queue_depth, bad queue type, "
+				    "disabled\n");
+	}
+ out:
+	spin_unlock_irqrestore(sdev->request_queue->queue_lock, flags);
 }
-EXPORT_SYMBOL(scsi_change_queue_depth);
+EXPORT_SYMBOL(scsi_adjust_queue_depth);
 
 /**
  * scsi_track_queue_full - track QUEUE_FULL events to adjust queue depth
@@ -665,8 +839,17 @@ int scsi_track_queue_full(struct scsi_device *sdev, int depth)
 
 	if (sdev->last_queue_full_count <= 10)
 		return 0;
-
-	return scsi_change_queue_depth(sdev, depth);
+	if (sdev->last_queue_full_depth < 8) {
+		/* Drop back to untagged */
+		scsi_adjust_queue_depth(sdev, 0, sdev->host->cmd_per_lun);
+		return -1;
+	}
+	
+	if (sdev->ordered_tags)
+		scsi_adjust_queue_depth(sdev, MSG_ORDERED_TAG, depth);
+	else
+		scsi_adjust_queue_depth(sdev, MSG_SIMPLE_TAG, depth);
+	return depth;
 }
 EXPORT_SYMBOL(scsi_track_queue_full);
 
@@ -829,11 +1012,11 @@ retry_pg80:
 			kfree(vpd_buf);
 			goto retry_pg80;
 		}
-		mutex_lock(&sdev->inquiry_mutex);
+		spin_lock(&sdev->inquiry_lock);
 		orig_vpd_buf = sdev->vpd_pg80;
 		sdev->vpd_pg80_len = result;
 		rcu_assign_pointer(sdev->vpd_pg80, vpd_buf);
-		mutex_unlock(&sdev->inquiry_mutex);
+		spin_unlock(&sdev->inquiry_lock);
 		synchronize_rcu();
 		if (orig_vpd_buf) {
 			kfree(orig_vpd_buf);
@@ -858,11 +1041,11 @@ retry_pg83:
 			kfree(vpd_buf);
 			goto retry_pg83;
 		}
-		mutex_lock(&sdev->inquiry_mutex);
+		spin_lock(&sdev->inquiry_lock);
 		orig_vpd_buf = sdev->vpd_pg83;
 		sdev->vpd_pg83_len = result;
 		rcu_assign_pointer(sdev->vpd_pg83, vpd_buf);
-		mutex_unlock(&sdev->inquiry_mutex);
+		spin_unlock(&sdev->inquiry_lock);
 		synchronize_rcu();
 		if (orig_vpd_buf)
 			kfree(orig_vpd_buf);
@@ -1049,7 +1232,7 @@ EXPORT_SYMBOL(__starget_for_each_device);
  * really want to use scsi_device_lookup_by_target instead.
  **/
 struct scsi_device *__scsi_device_lookup_by_target(struct scsi_target *starget,
-						   u64 lun)
+						   uint lun)
 {
 	struct scsi_device *sdev;
 
@@ -1074,7 +1257,7 @@ EXPORT_SYMBOL(__scsi_device_lookup_by_target);
  * needs to be released with scsi_device_put once you're done with it.
  **/
 struct scsi_device *scsi_device_lookup_by_target(struct scsi_target *starget,
-						 u64 lun)
+						 uint lun)
 {
 	struct scsi_device *sdev;
 	struct Scsi_Host *shost = dev_to_shost(starget->dev.parent);
@@ -1107,11 +1290,13 @@ EXPORT_SYMBOL(scsi_device_lookup_by_target);
  * really want to use scsi_device_lookup instead.
  **/
 struct scsi_device *__scsi_device_lookup(struct Scsi_Host *shost,
-		uint channel, uint id, u64 lun)
+		uint channel, uint id, uint lun)
 {
 	struct scsi_device *sdev;
 
 	list_for_each_entry(sdev, &shost->__devices, siblings) {
+		if (sdev->sdev_state == SDEV_DEL)
+			continue;
 		if (sdev->channel == channel && sdev->id == id &&
 				sdev->lun ==lun)
 			return sdev;
@@ -1133,7 +1318,7 @@ EXPORT_SYMBOL(__scsi_device_lookup);
  * needs to be released with scsi_device_put once you're done with it.
  **/
 struct scsi_device *scsi_device_lookup(struct Scsi_Host *shost,
-		uint channel, uint id, u64 lun)
+		uint channel, uint id, uint lun)
 {
 	struct scsi_device *sdev;
 	unsigned long flags;
@@ -1154,16 +1339,15 @@ MODULE_LICENSE("GPL");
 module_param(scsi_logging_level, int, S_IRUGO|S_IWUSR);
 MODULE_PARM_DESC(scsi_logging_level, "a bit mask of logging levels");
 
-#ifdef CONFIG_SCSI_MQ_DEFAULT
-bool scsi_use_blk_mq = true;
-#else
 bool scsi_use_blk_mq = false;
-#endif
 module_param_named(use_blk_mq, scsi_use_blk_mq, bool, S_IWUSR | S_IRUGO);
 
 static int __init init_scsi(void)
 {
 	int error;
+
+	if (scsi_use_blk_mq)
+		mark_tech_preview("scsi-mq", THIS_MODULE);
 
 	error = scsi_init_queue();
 	if (error)

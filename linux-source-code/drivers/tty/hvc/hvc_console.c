@@ -29,9 +29,8 @@
 #include <linux/kernel.h>
 #include <linux/kthread.h>
 #include <linux/list.h>
-#include <linux/init.h>
+#include <linux/module.h>
 #include <linux/major.h>
-#include <linux/atomic.h>
 #include <linux/sysrq.h>
 #include <linux/tty.h>
 #include <linux/tty_flip.h>
@@ -70,9 +69,6 @@ static struct task_struct *hvc_task;
 
 /* Picks up late kicks after list walk but before schedule() */
 static int hvc_kicked;
-
-/* hvc_init is triggered from hvc_alloc, i.e. only when actually used */
-static atomic_t hvc_needs_init __read_mostly = ATOMIC_INIT(-1);
 
 static int hvc_init(void);
 
@@ -289,6 +285,10 @@ int hvc_instantiate(uint32_t vtermno, int index, const struct hv_ops *ops)
 	vtermnos[index] = vtermno;
 	cons_ops[index] = ops;
 
+	/* reserve all indices up to and including this index */
+	if (last_hvc < index)
+		last_hvc = index;
+
 	/* check if we need to re-register the kernel console */
 	hvc_check_console(index);
 
@@ -315,8 +315,7 @@ static int hvc_install(struct tty_driver *driver, struct tty_struct *tty)
 	int rc;
 
 	/* Auto increments kref reference if found. */
-	hp = hvc_get_by_index(tty->index);
-	if (!hp)
+	if (!(hp = hvc_get_by_index(tty->index)))
 		return -ENODEV;
 
 	tty->driver_data = hp;
@@ -358,14 +357,15 @@ static int hvc_open(struct tty_struct *tty, struct file * filp)
 	 * tty fields and return the kref reference.
 	 */
 	if (rc) {
+		tty_port_tty_set(&hp->port, NULL);
+		tty->driver_data = NULL;
+		tty_port_put(&hp->port);
 		printk(KERN_ERR "hvc_open: request_irq failed with rc %d.\n", rc);
-	} else {
+	} else
 		/* We are ready... raise DTR/RTS */
 		if (C_BAUD(tty))
 			if (hp->ops->dtr_rts)
 				hp->ops->dtr_rts(hp, 1);
-		tty_port_set_initialized(&hp->port, true);
-	}
 
 	/* Force wakeup of the polling thread */
 	hvc_kick();
@@ -375,11 +375,21 @@ static int hvc_open(struct tty_struct *tty, struct file * filp)
 
 static void hvc_close(struct tty_struct *tty, struct file * filp)
 {
-	struct hvc_struct *hp = tty->driver_data;
+	struct hvc_struct *hp;
 	unsigned long flags;
 
 	if (tty_hung_up_p(filp))
 		return;
+
+	/*
+	 * No driver_data means that this close was issued after a failed
+	 * hvc_open by the tty layer's release_dev() function and we can just
+	 * exit cleanly because the kref reference wasn't made.
+	 */
+	if (!tty->driver_data)
+		return;
+
+	hp = tty->driver_data;
 
 	spin_lock_irqsave(&hp->port.lock, flags);
 
@@ -387,9 +397,6 @@ static void hvc_close(struct tty_struct *tty, struct file * filp)
 		spin_unlock_irqrestore(&hp->port.lock, flags);
 		/* We are done with the tty pointer now. */
 		tty_port_tty_set(&hp->port, NULL);
-
-		if (!tty_port_initialized(&hp->port))
-			return;
 
 		if (C_HUPCL(tty))
 			if (hp->ops->dtr_rts)
@@ -407,7 +414,6 @@ static void hvc_close(struct tty_struct *tty, struct file * filp)
 		 * waking periodically to check chars_in_buffer().
 		 */
 		tty_wait_until_sent(tty, HVC_CLOSE_WAIT);
-		tty_port_set_initialized(&hp->port, false);
 	} else {
 		if (hp->port.count < 0)
 			printk(KERN_ERR "hvc_close %X: oops, count is %d\n",
@@ -789,7 +795,7 @@ static int hvc_tiocmset(struct tty_struct *tty,
 }
 
 #ifdef CONFIG_CONSOLE_POLL
-static int hvc_poll_init(struct tty_driver *driver, int line, char *options)
+int hvc_poll_init(struct tty_driver *driver, int line, char *options)
 {
 	return 0;
 }
@@ -803,7 +809,7 @@ static int hvc_poll_get_char(struct tty_driver *driver, int line)
 
 	n = hp->ops->get_chars(hp->vtermno, &ch, 1);
 
-	if (n <= 0)
+	if (n == 0)
 		return NO_POLL_CHAR;
 
 	return ch;
@@ -852,7 +858,7 @@ struct hvc_struct *hvc_alloc(uint32_t vtermno, int data,
 	int i;
 
 	/* We wait until a driver actually comes along */
-	if (atomic_inc_not_zero(&hvc_needs_init)) {
+	if (!hvc_driver) {
 		int err = hvc_init();
 		if (err)
 			return ERR_PTR(err);
@@ -885,22 +891,13 @@ struct hvc_struct *hvc_alloc(uint32_t vtermno, int data,
 		    cons_ops[i] == hp->ops)
 			break;
 
-	if (i >= MAX_NR_HVC_CONSOLES) {
-
-		/* find 'empty' slot for console */
-		for (i = 0; i < MAX_NR_HVC_CONSOLES && vtermnos[i] != -1; i++) {
-		}
-
-		/* no matching slot, just use a counter */
-		if (i == MAX_NR_HVC_CONSOLES)
-			i = ++last_hvc + MAX_NR_HVC_CONSOLES;
-	}
+	/* no matching slot, just use a counter */
+	if (i >= MAX_NR_HVC_CONSOLES)
+		i = ++last_hvc;
 
 	hp->index = i;
-	if (i < MAX_NR_HVC_CONSOLES) {
-		cons_ops[i] = ops;
-		vtermnos[i] = vtermno;
-	}
+	cons_ops[i] = ops;
+	vtermnos[i] = vtermno;
 
 	list_add_tail(&(hp->next), &hvc_structs);
 	spin_unlock(&hvc_structs_lock);
@@ -919,17 +916,17 @@ int hvc_remove(struct hvc_struct *hp)
 
 	tty = tty_port_tty_get(&hp->port);
 
+	console_lock();
 	spin_lock_irqsave(&hp->lock, flags);
 	if (hp->index < MAX_NR_HVC_CONSOLES) {
-		console_lock();
 		vtermnos[hp->index] = -1;
 		cons_ops[hp->index] = NULL;
-		console_unlock();
 	}
 
 	/* Don't whack hp->irq because tty_hangup() will need to free the irq. */
 
 	spin_unlock_irqrestore(&hp->lock, flags);
+	console_unlock();
 
 	/*
 	 * We 'put' the instance that was grabbed when the kref instance
@@ -1003,3 +1000,19 @@ put_tty:
 out:
 	return err;
 }
+
+/* This isn't particularly necessary due to this being a console driver
+ * but it is nice to be thorough.
+ */
+static void __exit hvc_exit(void)
+{
+	if (hvc_driver) {
+		kthread_stop(hvc_task);
+
+		tty_unregister_driver(hvc_driver);
+		/* return tty_struct instances allocated in hvc_init(). */
+		put_tty_driver(hvc_driver);
+		unregister_console(&hvc_console);
+	}
+}
+module_exit(hvc_exit);

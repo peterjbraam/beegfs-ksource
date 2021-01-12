@@ -26,6 +26,7 @@
 #include <linux/fs.h>
 #include <linux/sched.h>
 #include <linux/writeback.h>
+#include <linux/jbd2.h>
 #include <linux/blkdev.h>
 
 #include "ext4.h"
@@ -43,29 +44,24 @@
  */
 static int ext4_sync_parent(struct inode *inode)
 {
-	struct dentry *dentry, *next;
+	struct dentry *dentry = NULL;
+	struct inode *next;
 	int ret = 0;
 
 	if (!ext4_test_inode_state(inode, EXT4_STATE_NEWENTRY))
 		return 0;
-	dentry = d_find_any_alias(inode);
-	if (!dentry)
-		return 0;
+	inode = igrab(inode);
 	while (ext4_test_inode_state(inode, EXT4_STATE_NEWENTRY)) {
 		ext4_clear_inode_state(inode, EXT4_STATE_NEWENTRY);
-
-		next = dget_parent(dentry);
+		dentry = d_find_any_alias(inode);
+		if (!dentry)
+			break;
+		next = igrab(dentry->d_parent->d_inode);
 		dput(dentry);
-		dentry = next;
-		inode = dentry->d_inode;
-
-		/*
-		 * The directory inode may have gone through rmdir by now. But
-		 * the inode itself and its blocks are still allocated (we hold
-		 * a reference to the inode via its dentry), so it didn't go
-		 * through ext4_evict_inode()) and so we are safe to flush
-		 * metadata blocks and the inode.
-		 */
+		if (!next)
+			break;
+		iput(inode);
+		inode = next;
 		ret = sync_mapping_buffers(inode->i_mapping);
 		if (ret)
 			break;
@@ -73,7 +69,7 @@ static int ext4_sync_parent(struct inode *inode)
 		if (ret)
 			break;
 	}
-	dput(dentry);
+	iput(inode);
 	return ret;
 }
 
@@ -111,17 +107,16 @@ int ext4_sync_file(struct file *file, loff_t start, loff_t end, int datasync)
 	}
 
 	if (!journal) {
-		ret = __generic_file_fsync(file, start, end, datasync);
-		if (!ret)
+		ret = generic_file_fsync(file, start, end, datasync);
+		if (!ret && !hlist_empty(&inode->i_dentry))
 			ret = ext4_sync_parent(inode);
-		if (test_opt(inode->i_sb, BARRIER))
-			goto issue_flush;
 		goto out;
 	}
 
 	ret = filemap_write_and_wait_range(inode->i_mapping, start, end);
 	if (ret)
 		return ret;
+
 	/*
 	 * data=writeback,ordered:
 	 *  The caller's filemap_fdatawrite()/wait will sync the data.
@@ -147,7 +142,6 @@ int ext4_sync_file(struct file *file, loff_t start, loff_t end, int datasync)
 		needs_barrier = true;
 	ret = jbd2_complete_transaction(journal, commit_tid);
 	if (needs_barrier) {
-	issue_flush:
 		err = blkdev_issue_flush(inode->i_sb->s_bdev, GFP_KERNEL, NULL);
 		if (!ret)
 			ret = err;

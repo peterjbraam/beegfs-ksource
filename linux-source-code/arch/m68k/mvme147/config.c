@@ -26,12 +26,11 @@
 #include <linux/interrupt.h>
 
 #include <asm/bootinfo.h>
-#include <asm/bootinfo-vme.h>
-#include <asm/byteorder.h>
 #include <asm/pgtable.h>
 #include <asm/setup.h>
 #include <asm/irq.h>
 #include <asm/traps.h>
+#include <asm/rtc.h>
 #include <asm/machdep.h>
 #include <asm/mvme147hw.h>
 
@@ -46,11 +45,15 @@ extern void mvme147_reset (void);
 
 static int bcd2int (unsigned char b);
 
+/* Save tick handler routine pointer, will point to xtime_update() in
+ * kernel/time/timekeeping.c, called via mvme147_process_int() */
 
-int __init mvme147_parse_bootinfo(const struct bi_record *bi)
+irq_handler_t tick_handler;
+
+
+int mvme147_parse_bootinfo(const struct bi_record *bi)
 {
-	uint16_t tag = be16_to_cpu(bi->tag);
-	if (tag == BI_VME_TYPE || tag == BI_VME_BRDINFO)
+	if (bi->tag == BI_VME_TYPE || bi->tag == BI_VME_BRDINFO)
 		return 0;
 	else
 		return 1;
@@ -101,23 +104,16 @@ void __init config_mvme147(void)
 
 static irqreturn_t mvme147_timer_int (int irq, void *dev_id)
 {
-	irq_handler_t timer_routine = dev_id;
-	unsigned long flags;
-
-	local_irq_save(flags);
 	m147_pcc->t1_int_cntrl = PCC_TIMER_INT_CLR;
 	m147_pcc->t1_int_cntrl = PCC_INT_ENAB|PCC_LEVEL_TIMER1;
-	timer_routine(0, NULL);
-	local_irq_restore(flags);
-
-	return IRQ_HANDLED;
+	return tick_handler(irq, dev_id);
 }
 
 
 void mvme147_sched_init (irq_handler_t timer_routine)
 {
-	if (request_irq(PCC_IRQ_TIMER1, mvme147_timer_int, 0, "timer 1",
-			timer_routine))
+	tick_handler = timer_routine;
+	if (request_irq(PCC_IRQ_TIMER1, mvme147_timer_int, 0, "timer 1", NULL))
 		pr_err("Couldn't register timer interrupt\n");
 
 	/* Init the clock with a value */
@@ -168,4 +164,50 @@ int mvme147_hwclk(int op, struct rtc_time *t)
 int mvme147_set_clock_mmss (unsigned long nowtime)
 {
 	return 0;
+}
+
+/*-------------------  Serial console stuff ------------------------*/
+
+static void scc_delay (void)
+{
+	int n;
+	volatile int trash;
+
+	for (n = 0; n < 20; n++)
+		trash = n;
+}
+
+static void scc_write (char ch)
+{
+	volatile char *p = (volatile char *)M147_SCC_A_ADDR;
+
+	do {
+		scc_delay();
+	}
+	while (!(*p & 4));
+	scc_delay();
+	*p = 8;
+	scc_delay();
+	*p = ch;
+}
+
+
+void m147_scc_write (struct console *co, const char *str, unsigned count)
+{
+	unsigned long flags;
+
+	local_irq_save(flags);
+
+	while (count--)
+	{
+		if (*str == '\n')
+			scc_write ('\r');
+		scc_write (*str++);
+	}
+	local_irq_restore(flags);
+}
+
+void mvme147_init_console_port (struct console *co, int cflag)
+{
+	co->write    = m147_scc_write;
 }

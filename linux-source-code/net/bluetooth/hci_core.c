@@ -548,7 +548,6 @@ static void hci_set_event_mask_page_2(struct hci_request *req)
 {
 	struct hci_dev *hdev = req->hdev;
 	u8 events[8] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-	bool changed = false;
 
 	/* If Connectionless Slave Broadcast master role is supported
 	 * enable all necessary events for it.
@@ -558,7 +557,6 @@ static void hci_set_event_mask_page_2(struct hci_request *req)
 		events[1] |= 0x80;	/* Synchronization Train Complete */
 		events[2] |= 0x10;	/* Slave Page Response Timeout */
 		events[2] |= 0x20;	/* CSB Channel Map Change */
-		changed = true;
 	}
 
 	/* If Connectionless Slave Broadcast slave role is supported
@@ -569,24 +567,13 @@ static void hci_set_event_mask_page_2(struct hci_request *req)
 		events[2] |= 0x02;	/* CSB Receive */
 		events[2] |= 0x04;	/* CSB Timeout */
 		events[2] |= 0x08;	/* Truncated Page Complete */
-		changed = true;
 	}
 
 	/* Enable Authenticated Payload Timeout Expired event if supported */
-	if (lmp_ping_capable(hdev) || hdev->le_features[0] & HCI_LE_PING) {
+	if (lmp_ping_capable(hdev) || hdev->le_features[0] & HCI_LE_PING)
 		events[2] |= 0x80;
-		changed = true;
-	}
 
-	/* Some Broadcom based controllers indicate support for Set Event
-	 * Mask Page 2 command, but then actually do not support it. Since
-	 * the default value is all bits set to zero, the command is only
-	 * required if the event mask has to be changed. In case no change
-	 * to the event mask is needed, skip this command.
-	 */
-	if (changed)
-		hci_req_add(req, HCI_OP_SET_EVENT_MASK_PAGE_2,
-			    sizeof(events), events);
+	hci_req_add(req, HCI_OP_SET_EVENT_MASK_PAGE_2, sizeof(events), events);
 }
 
 static int hci_init3_req(struct hci_request *req, unsigned long opt)
@@ -3035,7 +3022,9 @@ int hci_register_dev(struct hci_dev *hdev)
 {
 	int id, error;
 
-	if (!hdev->open || !hdev->close || !hdev->send)
+	/* RHEL-7 check for new or old 'send' function */
+	if (!hdev->open || !hdev->close ||
+	    !(hdev->send || hdev->rh_reserved_send))
 		return -EINVAL;
 
 	/* Do not allow HCI_AMP devices to register at index 0,
@@ -3353,6 +3342,22 @@ static void hci_send_frame(struct hci_dev *hdev, struct sk_buff *skb)
 
 	if (!test_bit(HCI_RUNNING, &hdev->flags)) {
 		kfree_skb(skb);
+		return;
+	}
+
+	/*
+ 	 * RHEL-7: handle kabi breaking of old function.
+ 	 * Check to see if old function was populated and if
+ 	 * so, add hdev to skb the old way before calling
+ 	 * the send function.
+ 	 */
+	if (hdev->rh_reserved_send) {
+		skb->dev = (void *) hdev;
+		err = hdev->rh_reserved_send(skb);
+		if (err < 0) {
+			BT_ERR("%s sending frame failed (%d)", hdev->name, err);
+			kfree_skb(skb);
+		}
 		return;
 	}
 
@@ -4180,14 +4185,7 @@ static void hci_rx_work(struct work_struct *work)
 			hci_send_to_sock(hdev, skb);
 		}
 
-		/* If the device has been opened in HCI_USER_CHANNEL,
-		 * the userspace has exclusive access to device.
-		 * When device is HCI_INIT, we still need to process
-		 * the data packets to the driver in order
-		 * to complete its setup().
-		 */
-		if (hci_dev_test_flag(hdev, HCI_USER_CHANNEL) &&
-		    !test_bit(HCI_INIT, &hdev->flags)) {
+		if (hci_dev_test_flag(hdev, HCI_USER_CHANNEL)) {
 			kfree_skb(skb);
 			continue;
 		}

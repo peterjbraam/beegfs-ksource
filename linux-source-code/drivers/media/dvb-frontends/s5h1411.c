@@ -37,7 +37,7 @@ struct s5h1411_state {
 
 	struct dvb_frontend frontend;
 
-	enum fe_modulation current_modulation;
+	fe_modulation_t current_modulation;
 	unsigned int first_tune:1;
 
 	u32 current_frequency;
@@ -51,7 +51,7 @@ static int debug;
 #define dprintk(arg...) do {	\
 	if (debug)		\
 		printk(arg);	\
-	} while (0)
+} while (0)
 
 /* Register values to initialise the demod, defaults to VSB */
 static struct init_tab {
@@ -410,7 +410,7 @@ static int s5h1411_set_if_freq(struct dvb_frontend *fe, int KHz)
 	default:
 		dprintk("%s(%d KHz) Invalid, defaulting to 5380\n",
 			__func__, KHz);
-		/* no break, need to continue */
+		/* fall through */
 	case 5380:
 	case 44000:
 		s5h1411_writereg(state, S5H1411_I2C_TOP_ADDR, 0x38, 0x1be4);
@@ -484,7 +484,7 @@ static int s5h1411_set_serialmode(struct dvb_frontend *fe, int serial)
 }
 
 static int s5h1411_enable_modulation(struct dvb_frontend *fe,
-				     enum fe_modulation m)
+				     fe_modulation_t m)
 {
 	struct s5h1411_state *state = fe->demodulator_priv;
 
@@ -659,7 +659,7 @@ static int s5h1411_init(struct dvb_frontend *fe)
 	return 0;
 }
 
-static int s5h1411_read_status(struct dvb_frontend *fe, enum fe_status *status)
+static int s5h1411_read_status(struct dvb_frontend *fe, fe_status_t *status)
 {
 	struct s5h1411_state *state = fe->demodulator_priv;
 	u16 reg;
@@ -840,9 +840,9 @@ static int s5h1411_read_ber(struct dvb_frontend *fe, u32 *ber)
 	return s5h1411_read_ucblocks(fe, ber);
 }
 
-static int s5h1411_get_frontend(struct dvb_frontend *fe,
-				struct dtv_frontend_properties *p)
+static int s5h1411_get_frontend(struct dvb_frontend *fe)
 {
+	struct dtv_frontend_properties *p = &fe->dtv_property_cache;
 	struct s5h1411_state *state = fe->demodulator_priv;
 
 	p->frequency = state->current_frequency;
@@ -944,3 +944,8 @@ MODULE_PARM_DESC(debug, "Enable verbose debug messages");
 MODULE_DESCRIPTION("Samsung S5H1411 QAM-B/ATSC Demodulator driver");
 MODULE_AUTHOR("Steven Toth");
 MODULE_LICENSE("GPL");
+
+/*
+ * Local variables:
+ * c-basic-offset: 8
+ */

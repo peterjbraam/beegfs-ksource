@@ -47,10 +47,7 @@ static struct inode *jffs2_alloc_inode(struct super_block *sb)
 static void jffs2_i_callback(struct rcu_head *head)
 {
 	struct inode *inode = container_of(head, struct inode, i_rcu);
-	struct jffs2_inode_info *f = JFFS2_INODE_INFO(inode);
-
-	kfree(f->target);
-	kmem_cache_free(jffs2_inode_cachep, f);
+	kmem_cache_free(jffs2_inode_cachep, JFFS2_INODE_INFO(inode));
 }
 
 static void jffs2_destroy_inode(struct inode *inode)
@@ -104,8 +101,7 @@ static int jffs2_sync_fs(struct super_block *sb, int wait)
 	struct jffs2_sb_info *c = JFFS2_SB_INFO(sb);
 
 #ifdef CONFIG_JFFS2_FS_WRITEBUFFER
-	if (jffs2_is_writebuffered(c))
-		cancel_delayed_work_sync(&c->wbuf_dwork);
+	cancel_delayed_work_sync(&c->wbuf_dwork);
 #endif
 
 	mutex_lock(&c->alloc_sem);
@@ -142,16 +138,16 @@ static struct dentry *jffs2_get_parent(struct dentry *child)
 	struct jffs2_inode_info *f;
 	uint32_t pino;
 
-	BUG_ON(!d_is_dir(child));
+	BUG_ON(!S_ISDIR(child->d_inode->i_mode));
 
-	f = JFFS2_INODE_INFO(d_inode(child));
+	f = JFFS2_INODE_INFO(child->d_inode);
 
 	pino = f->inocache->pino_nlink;
 
 	JFFS2_DEBUG("Parent of directory ino #%u is #%u\n",
 		    f->inocache->ino, pino);
 
-	return d_obtain_alias(jffs2_iget(child->d_sb, pino));
+	return d_obtain_alias(jffs2_iget(child->d_inode->i_sb, pino));
 }
 
 static const struct export_operations jffs2_export_ops = {
@@ -247,7 +243,6 @@ static int jffs2_remount_fs(struct super_block *sb, int *flags, char *data)
 	struct jffs2_sb_info *c = JFFS2_SB_INFO(sb);
 	int err;
 
-	sync_filesystem(sb);
 	err = jffs2_parse_options(c, data);
 	if (err)
 		return -EINVAL;
@@ -289,8 +284,10 @@ static int jffs2_fill_super(struct super_block *sb, void *data, int silent)
 	sb->s_fs_info = c;
 
 	ret = jffs2_parse_options(c, data);
-	if (ret)
+	if (ret) {
+		kfree(c);
 		return -EINVAL;
+	}
 
 	/* Initialize JFFS2 superblock locks, the further initialization will
 	 * be done later */
@@ -333,7 +330,10 @@ static void jffs2_put_super (struct super_block *sb)
 
 	jffs2_free_ino_caches(c);
 	jffs2_free_raw_node_refs(c);
-	kvfree(c->blocks);
+	if (jffs2_blocks_use_vmalloc(c))
+		vfree(c->blocks);
+	else
+		kfree(c->blocks);
 	jffs2_flash_cleanup(c);
 	kfree(c->inocache_list);
 	jffs2_clear_xattr_subsystem(c);
@@ -344,7 +344,7 @@ static void jffs2_put_super (struct super_block *sb)
 static void jffs2_kill_sb(struct super_block *sb)
 {
 	struct jffs2_sb_info *c = JFFS2_SB_INFO(sb);
-	if (c && !(sb->s_flags & MS_RDONLY))
+	if (!(sb->s_flags & MS_RDONLY))
 		jffs2_stop_garbage_collect_thread(c);
 	kill_mtd_super(sb);
 	kfree(c);

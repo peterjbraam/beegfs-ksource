@@ -7,7 +7,7 @@
 #include <linux/uaccess.h>
 #include <linux/hardirq.h>
 #include <linux/kdebug.h>
-#include <linux/export.h>
+#include <linux/module.h>
 #include <linux/ptrace.h>
 #include <linux/kexec.h>
 #include <linux/sysfs.h>
@@ -56,11 +56,11 @@ static bool in_exception_stack(unsigned long *stack, struct stack_info *info)
 	BUILD_BUG_ON(N_EXCEPTION_STACKS != 4);
 
 	for (k = 0; k < N_EXCEPTION_STACKS; k++) {
-		end   = (unsigned long *)raw_cpu_ptr(&orig_ist)->ist[k];
+		end   = (unsigned long *)__this_cpu_ptr(&orig_ist)->ist[k];
 		begin = end - (exception_stack_sizes[k] / sizeof(long));
 		regs  = (struct pt_regs *)end - 1;
 
-		if (stack < begin || stack >= end)
+		if (stack <= begin || stack >= end)
 			continue;
 
 		info->type	= STACK_TYPE_EXCEPTION + k;
@@ -83,7 +83,7 @@ static bool in_irq_stack(unsigned long *stack, struct stack_info *info)
 	 * This is a software stack, so 'end' can be a valid stack pointer.
 	 * It just means the stack is empty.
 	 */
-	if (stack < begin || stack > end)
+	if (stack <= begin || stack > end)
 		return false;
 
 	info->type	= STACK_TYPE_IRQ;
@@ -140,56 +140,6 @@ unknown:
 	return -EINVAL;
 }
 
-void show_stack_log_lvl(struct task_struct *task, struct pt_regs *regs,
-			unsigned long *sp, char *log_lvl)
-{
-	unsigned long *irq_stack_end;
-	unsigned long *irq_stack;
-	unsigned long *stack;
-	int i;
-
-	if (!try_get_task_stack(task))
-		return;
-
-	irq_stack_end = (unsigned long *)this_cpu_read(irq_stack_ptr);
-	irq_stack     = irq_stack_end - (IRQ_STACK_SIZE / sizeof(long));
-
-	sp = sp ? : get_stack_pointer(task, regs);
-
-	stack = sp;
-	for (i = 0; i < kstack_depth_to_print; i++) {
-		unsigned long word;
-
-		if (stack >= irq_stack && stack <= irq_stack_end) {
-			if (stack == irq_stack_end) {
-				stack = (unsigned long *) (irq_stack_end[-1]);
-				pr_cont(" <EOI> ");
-			}
-		} else {
-		if (kstack_end(stack))
-			break;
-		}
-
-		if (probe_kernel_address(stack, word))
-			break;
-
-		if ((i % STACKSLOTS_PER_LINE) == 0) {
-			if (i != 0)
-				pr_cont("\n");
-			printk("%s %016lx", log_lvl, word);
-		} else
-			pr_cont(" %016lx", word);
-
-		stack++;
-		touch_nmi_watchdog();
-	}
-
-	pr_cont("\n");
-	show_trace_log_lvl(task, regs, sp, log_lvl);
-
-	put_task_stack(task);
-}
-
 void show_regs(struct pt_regs *regs)
 {
 	int i;
@@ -207,8 +157,7 @@ void show_regs(struct pt_regs *regs)
 		unsigned char c;
 		u8 *ip;
 
-		printk(KERN_DEFAULT "Stack:\n");
-		show_stack_log_lvl(current, regs, NULL, KERN_DEFAULT);
+		show_trace_log_lvl(current, regs, NULL, KERN_DEFAULT);
 
 		printk(KERN_DEFAULT "Code: ");
 

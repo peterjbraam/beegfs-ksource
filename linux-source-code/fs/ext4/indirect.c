@@ -20,10 +20,10 @@
  *	(sct@redhat.com), 1993, 1998
  */
 
+#include <linux/aio.h>
 #include "ext4_jbd2.h"
 #include "truncate.h"
 #include <linux/dax.h>
-#include <linux/uio.h>
 
 #include <trace/events/ext4.h>
 
@@ -583,10 +583,11 @@ int ext4_ind_map_blocks(handle_t *handle, struct inode *inode,
 	/*
 	 * Okay, we need to do block allocation.
 	*/
-	if (ext4_has_feature_bigalloc(inode->i_sb)) {
+	if (EXT4_HAS_RO_COMPAT_FEATURE(inode->i_sb,
+				       EXT4_FEATURE_RO_COMPAT_BIGALLOC)) {
 		EXT4_ERROR_INODE(inode, "Can't allocate blocks for "
 				 "non-extent mapped inodes with bigalloc");
-		return -EFSCORRUPTED;
+		return -EUCLEAN;
 	}
 
 	/* Set up for the direct block allocation */
@@ -597,8 +598,6 @@ int ext4_ind_map_blocks(handle_t *handle, struct inode *inode,
 		ar.flags = EXT4_MB_HINT_DATA;
 	if (flags & EXT4_GET_BLOCKS_DELALLOC_RESERVE)
 		ar.flags |= EXT4_MB_DELALLOC_RESERVED;
-	if (flags & EXT4_GET_BLOCKS_METADATA_NOFAIL)
-		ar.flags |= EXT4_MB_USE_RESERVED;
 
 	ar.goal = ext4_find_goal(inode, map->m_lblk, partial);
 
@@ -652,6 +651,139 @@ cleanup:
 out:
 	trace_ext4_ind_map_blocks_exit(inode, flags, map, err);
 	return err;
+}
+
+/*
+ * O_DIRECT for ext3 (or indirect map) based files
+ *
+ * If the O_DIRECT write will extend the file then add this inode to the
+ * orphan list.  So recovery will truncate it back to the original size
+ * if the machine crashes during the write.
+ *
+ * If the O_DIRECT write is intantiating holes inside i_size and the machine
+ * crashes then stale disk data _may_ be exposed inside the file. But current
+ * VFS code falls back into buffered path in that case so we are safe.
+ */
+ssize_t ext4_ind_direct_IO(int rw, struct kiocb *iocb,
+			   const struct iovec *iov, loff_t offset,
+			   unsigned long nr_segs)
+{
+	struct file *file = iocb->ki_filp;
+	struct inode *inode = file->f_mapping->host;
+	struct ext4_inode_info *ei = EXT4_I(inode);
+	handle_t *handle;
+	ssize_t ret;
+	int orphan = 0;
+	size_t count = iov_length(iov, nr_segs);
+	int retries = 0;
+
+	/* DAX uses iomap path now */
+	if (WARN_ON_ONCE(IS_DAX(inode)))
+		return 0;
+
+	if (rw == WRITE) {
+		loff_t final_size = offset + count;
+
+		if (final_size > inode->i_size) {
+			/* Credits for sb + inode write */
+			handle = ext4_journal_start(inode, EXT4_HT_INODE, 2);
+			if (IS_ERR(handle)) {
+				ret = PTR_ERR(handle);
+				goto out;
+			}
+			ret = ext4_orphan_add(handle, inode);
+			if (ret) {
+				ext4_journal_stop(handle);
+				goto out;
+			}
+			orphan = 1;
+			ext4_update_i_disksize(inode, inode->i_size);
+			ext4_journal_stop(handle);
+		}
+	}
+
+retry:
+	if (rw == READ && ext4_should_dioread_nolock(inode)) {
+		/*
+		 * Nolock dioread optimization may be dynamically disabled
+		 * via ext4_inode_block_unlocked_dio(). Check inode's state
+		 * while holding extra i_dio_count ref.
+		 */
+		inode_dio_begin(inode);
+		smp_mb();
+		if (unlikely(ext4_test_inode_state(inode,
+						    EXT4_STATE_DIOREAD_LOCK))) {
+			inode_dio_end(inode);
+			goto locked;
+		}
+		ret = __blockdev_direct_IO(rw, iocb, inode,
+					inode->i_sb->s_bdev, iov,
+					offset, nr_segs,
+					ext4_get_block, NULL, NULL, 0);
+		inode_dio_end(inode);
+	} else {
+locked:
+		ret = blockdev_direct_IO(rw, iocb, inode, iov,
+					offset, nr_segs, ext4_get_block);
+
+		if (unlikely((rw & WRITE) && ret < 0)) {
+			loff_t isize = i_size_read(inode);
+			loff_t end = offset + iov_length(iov, nr_segs);
+
+			if (end > isize)
+				ext4_truncate_failed_write(inode);
+		}
+	}
+	if (ret == -ENOSPC && ext4_should_retry_alloc(inode->i_sb, &retries))
+		goto retry;
+
+	if (orphan) {
+		int err;
+
+		/* Credits for sb + inode write */
+		handle = ext4_journal_start(inode, EXT4_HT_INODE, 2);
+		if (IS_ERR(handle)) {
+			/*
+			 * We wrote the data but cannot extend
+			 * i_size. Bail out. In async io case, we do
+			 * not return error here because we have
+			 * already submmitted the corresponding
+			 * bio. Returning error here makes the caller
+			 * think that this IO is done and failed
+			 * resulting in race with bio's completion
+			 * handler.
+			 */
+			if (!ret)
+				ret = PTR_ERR(handle);
+			if (inode->i_nlink)
+				ext4_orphan_del(NULL, inode);
+
+			goto out;
+		}
+		if (inode->i_nlink)
+			ext4_orphan_del(handle, inode);
+		if (ret > 0) {
+			loff_t end = offset + ret;
+			if (end > inode->i_size || end > ei->i_disksize) {
+				ext4_update_i_disksize(inode, end);
+				if (end > inode->i_size)
+					i_size_write(inode, end);
+				/*
+				 * We're going to return a positive `ret'
+				 * here due to non-zero-length I/O, so there's
+				 * no way of reporting error returns from
+				 * ext4_mark_inode_dirty() to userspace.  So
+				 * ignore it.
+				 */
+				ext4_mark_inode_dirty(handle, inode);
+			}
+		}
+		err = ext4_journal_stop(handle);
+		if (ret == 0)
+			ret = err;
+	}
+out:
+	return ret;
 }
 
 /*

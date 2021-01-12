@@ -136,6 +136,7 @@ static bool bcma_is_core_needed_early(u16 core_id)
 	return false;
 }
 
+#if 0 /* Not in RHEL */
 static struct device_node *bcma_of_find_child_device(struct platform_device *parent,
 						     struct bcma_device *core)
 {
@@ -209,10 +210,19 @@ static void bcma_of_fill_device(struct platform_device *parent,
 		core->dev.of_node = node;
 
 	core->irq = bcma_of_get_irq(parent, core, 0);
-
-	of_dma_configure(&core->dev, node);
 }
 
+#else
+static void bcma_of_fill_device(struct platform_device *parent,
+				struct bcma_device *core)
+{
+}
+static inline unsigned int bcma_of_get_irq(struct platform_device *parent,
+					   struct bcma_device *core, int num)
+{
+	return 0;
+}
+#endif
 unsigned int bcma_core_irq(struct bcma_device *core, int num)
 {
 	struct bcma_bus *bus = core->bus;
@@ -250,12 +260,12 @@ void bcma_prepare_core(struct bcma_bus *bus, struct bcma_device *core)
 		core->irq = bus->host_pci->irq;
 		break;
 	case BCMA_HOSTTYPE_SOC:
-		if (IS_ENABLED(CONFIG_OF) && bus->host_pdev) {
+		core->dev.dma_mask = &core->dev.coherent_dma_mask;
+		if (bus->host_pdev) {
 			core->dma_dev = &bus->host_pdev->dev;
 			core->dev.parent = &bus->host_pdev->dev;
 			bcma_of_fill_device(bus->host_pdev, core);
 		} else {
-			core->dev.dma_mask = &core->dev.coherent_dma_mask;
 			core->dma_dev = &core->dev;
 		}
 		break;
@@ -405,7 +415,9 @@ int bcma_bus_register(struct bcma_bus *bus)
 {
 	int err;
 	struct bcma_device *core;
+#if 0 /* Not in RHEL */
 	struct device *dev;
+#endif
 
 	/* Scan for devices (cores) */
 	err = bcma_bus_scan(bus);
@@ -428,10 +440,12 @@ int bcma_bus_register(struct bcma_bus *bus)
 		bcma_core_pci_early_init(&bus->drv_pci[0]);
 	}
 
+#if 0 /* Not in RHEL */
 	dev = bcma_bus_get_host_dev(bus);
 	if (dev) {
 		of_platform_default_populate(dev->of_node, NULL, dev);
 	}
+#endif
 
 	/* Cores providing flash access go before SPROM init */
 	list_for_each_entry(core, &bus->cores, list) {
@@ -633,11 +647,8 @@ static int bcma_device_probe(struct device *dev)
 					       drv);
 	int err = 0;
 
-	get_device(dev);
 	if (adrv->probe)
 		err = adrv->probe(core);
-	if (err)
-		put_device(dev);
 
 	return err;
 }
@@ -650,7 +661,6 @@ static int bcma_device_remove(struct device *dev)
 
 	if (adrv->remove)
 		adrv->remove(core);
-	put_device(dev);
 
 	return 0;
 }

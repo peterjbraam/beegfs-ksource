@@ -29,7 +29,6 @@ static struct sk_buff *__skb_udp_tunnel_segment(struct sk_buff *skb,
 	u16 mac_len = skb->mac_len;
 	int udp_offset, outer_hlen;
 	__wsum partial;
-	bool need_ipsec;
 
 	if (unlikely(!pskb_may_pull(skb, tnl_hlen)))
 		goto out;
@@ -58,15 +57,12 @@ static struct sk_buff *__skb_udp_tunnel_segment(struct sk_buff *skb,
 	need_csum = !!(skb_shinfo(skb)->gso_type & SKB_GSO_UDP_TUNNEL_CSUM);
 	skb->encap_hdr_csum = need_csum;
 
-	remcsum = !!(skb_shinfo(skb)->gso_type & SKB_GSO_TUNNEL_REMCSUM);
-	skb->remcsum_offload = remcsum;
+	remcsum = skb->remcsum_offload;
 
 	ufo = !!(skb_shinfo(skb)->gso_type & SKB_GSO_UDP);
 
-	need_ipsec = skb_dst(skb) && dst_xfrm(skb_dst(skb));
 	/* Try to offload checksum if possible */
 	offload_csum = !!(need_csum &&
-			  !need_ipsec &&
 			  (skb->dev->features &
 			   (is_ipv6 ? (NETIF_F_HW_CSUM | NETIF_F_IPV6_CSUM) :
 				      (NETIF_F_HW_CSUM | NETIF_F_IP_CSUM))));
@@ -301,7 +297,13 @@ unflush:
 
 	skb_gro_pull(skb, sizeof(struct udphdr)); /* pull encapsulating udp header */
 	skb_gro_postpull_rcsum(skb, uh, sizeof(struct udphdr));
-	pp = call_gro_receive_sk(udp_sk(sk)->gro_receive, sk, head, skb);
+
+	if (gro_recursion_inc_test(skb)) {
+		flush = 1;
+		pp = NULL;
+	} else {
+		pp = udp_sk(sk)->gro_receive(sk, head, skb);
+	}
 
 out_unlock:
 	rcu_read_unlock();
@@ -359,9 +361,6 @@ int udp_gro_complete(struct sk_buff *skb, int nhoff,
 		err = udp_sk(sk)->gro_complete(sk, skb,
 				nhoff + sizeof(struct udphdr));
 	rcu_read_unlock();
-
-	if (skb->remcsum_offload)
-		skb_shinfo(skb)->gso_type |= SKB_GSO_TUNNEL_REMCSUM;
 
 	return err;
 }

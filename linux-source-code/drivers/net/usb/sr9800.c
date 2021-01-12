@@ -63,10 +63,6 @@ static int sr_rx_fixup(struct usbnet *dev, struct sk_buff *skb)
 {
 	int offset = 0;
 
-	/* This check is no longer done by usbnet */
-	if (skb->len < dev->net->hard_header_len)
-		return 0;
-
 	while (offset + sizeof(u32) < skb->len) {
 		struct sk_buff *sr_skb;
 		u16 size;
@@ -336,7 +332,7 @@ static void sr_set_multicast(struct net_device *net)
 static int sr_mdio_read(struct net_device *net, int phy_id, int loc)
 {
 	struct usbnet *dev = netdev_priv(net);
-	__le16 res = 0;
+	__le16 res;
 
 	mutex_lock(&dev->phy_mutex);
 	sr_set_sw_mii(dev);
@@ -527,9 +523,9 @@ static const struct ethtool_ops sr9800_ethtool_ops = {
 	.set_wol	= sr_set_wol,
 	.get_eeprom_len	= sr_get_eeprom_len,
 	.get_eeprom	= sr_get_eeprom,
-	.get_settings	= usbnet_get_settings,
-	.set_settings	= usbnet_set_settings,
 	.nway_reset	= usbnet_nway_reset,
+	.get_link_ksettings	= usbnet_get_link_ksettings,
+	.set_link_ksettings	= usbnet_set_link_ksettings,
 };
 
 static int sr9800_link_reset(struct usbnet *dev)

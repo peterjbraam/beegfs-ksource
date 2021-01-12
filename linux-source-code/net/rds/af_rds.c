@@ -501,7 +501,7 @@ static int rds_create(struct net *net, struct socket *sock, int protocol,
 	if (sock->type != SOCK_SEQPACKET || protocol)
 		return -ESOCKTNOSUPPORT;
 
-	sk = sk_alloc(net, AF_RDS, GFP_ATOMIC, &rds_proto, kern);
+	sk = sk_alloc(net, AF_RDS, GFP_ATOMIC, &rds_proto);
 	if (!sk)
 		return -ENOMEM;
 
@@ -605,9 +605,13 @@ static void rds_exit(void)
 }
 module_exit(rds_exit);
 
+u32 rds_gen_num;
+
 static int rds_init(void)
 {
 	int ret;
+
+	net_get_random_once(&rds_gen_num, sizeof(rds_gen_num));
 
 	ret = rds_bind_lock_init();
 	if (ret)

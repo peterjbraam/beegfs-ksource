@@ -24,7 +24,10 @@
  *
  * Please send any bug reports or fixes you make to the
  * email address(es):
- *    lksctp developers <linux-sctp@vger.kernel.org>
+ *    lksctp developers <lksctp-developers@lists.sourceforge.net>
+ *
+ * Or submit a bug report through the following website:
+ *    http://www.sf.net/projects/lksctp
  *
  * Written or modified by:
  *   La Monte H.P. Yarroll <piggy@acm.org>
@@ -35,6 +38,9 @@
  *   Xingang Guo           <xingang.guo@intel.com>
  *   Sridhar Samudrala     <samudrala@us.ibm.com>
  *   Daisy Chang           <daisyc@us.ibm.com>
+ *
+ * Any bugs reported given to us we will try to fix... any fixes shared will
+ * be incorporated into the next SCTP release.
  */
 
 #ifndef __sctp_constants_h__
@@ -311,7 +317,7 @@ typedef enum {
 	SCTP_XMIT_OK,
 	SCTP_XMIT_PMTU_FULL,
 	SCTP_XMIT_RWND_FULL,
-	SCTP_XMIT_DELAY,
+	SCTP_XMIT_NAGLE_DELAY,
 } sctp_xmit_t;
 
 /* These are the commands for manipulating transports.  */
@@ -357,13 +363,11 @@ typedef enum {
 	 ipv4_is_anycast_6to4(a))
 
 /* Flags used for the bind address copy functions.  */
-#define SCTP_ADDR4_ALLOWED	0x00000001	/* IPv4 address is allowed by
+#define SCTP_ADDR6_ALLOWED	0x00000001	/* IPv6 address is allowed by
 						   local sock family */
-#define SCTP_ADDR6_ALLOWED	0x00000002	/* IPv6 address is allowed by
-						   local sock family */
-#define SCTP_ADDR4_PEERSUPP	0x00000004	/* IPv4 address is supported by
+#define SCTP_ADDR4_PEERSUPP	0x00000002	/* IPv4 address is supported by
 						   peer */
-#define SCTP_ADDR6_PEERSUPP	0x00000008	/* IPv6 address is supported by
+#define SCTP_ADDR6_PEERSUPP	0x00000004	/* IPv6 address is supported by
 						   peer */
 
 /* Reasons to retransmit. */

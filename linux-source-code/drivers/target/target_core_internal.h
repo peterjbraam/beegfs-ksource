@@ -11,6 +11,7 @@ struct target_backend {
 
 	struct config_item_type tb_dev_cit;
 	struct config_item_type tb_dev_attrib_cit;
+	struct config_item_type tb_dev_action_cit;
 	struct config_item_type tb_dev_pr_cit;
 	struct config_item_type tb_dev_wwn_cit;
 	struct config_item_type tb_dev_alua_tg_pt_gps_cit;
@@ -51,9 +52,6 @@ struct target_fabric_configfs {
 extern struct t10_alua_lu_gp *default_lu_gp;
 
 /* target_core_device.c */
-extern struct mutex g_device_mutex;
-extern struct list_head g_device_list;
-
 int	core_alloc_rtpi(struct se_lun *lun, struct se_device *dev);
 struct se_dev_entry *core_get_se_deve_from_rtpi(struct se_node_acl *, u16);
 void	target_pr_kref_release(struct kref *);
@@ -82,8 +80,11 @@ void	core_dev_release_virtual_lun0(void);
 struct se_device *target_alloc_device(struct se_hba *hba, const char *name);
 int	target_configure_device(struct se_device *dev);
 void	target_free_device(struct se_device *);
+int	target_for_each_device(int (*fn)(struct se_device *dev, void *data),
+			       void *data);
 
 /* target_core_configfs.c */
+extern struct configfs_item_operations target_core_dev_item_ops;
 void	target_setup_backend_cits(struct target_backend *);
 
 /* target_core_fabric_configfs.c */
@@ -155,11 +156,5 @@ void	target_stat_setup_mappedlun_default_groups(struct se_lun_acl *);
 
 /* target_core_xcopy.c */
 extern struct se_portal_group xcopy_pt_tpg;
-
-/* target_core_configfs.c */
-#define DB_ROOT_LEN		4096
-#define	DB_ROOT_DEFAULT		"/var/target"
-
-extern char db_root[];
 
 #endif /* TARGET_CORE_INTERNAL_H */

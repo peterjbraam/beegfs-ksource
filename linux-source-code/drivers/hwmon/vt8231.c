@@ -145,7 +145,7 @@ static const u8 regtempmin[] = { 0x3a, 0x3e, 0x2c, 0x2e, 0x30, 0x32 };
  */
 static inline u8 FAN_TO_REG(long rpm, int div)
 {
-	if (rpm <= 0 || rpm > 1310720)
+	if (rpm == 0)
 		return 0;
 	return clamp_val(1310720 / (rpm * div), 1, 255);
 }
@@ -759,6 +759,7 @@ static const struct attribute_group vt8231_group = {
 
 static struct platform_driver vt8231_driver = {
 	.driver = {
+		.owner	= THIS_MODULE,
 		.name	= "vt8231",
 	},
 	.probe	= vt8231_probe,

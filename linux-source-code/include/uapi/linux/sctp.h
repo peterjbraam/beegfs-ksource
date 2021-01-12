@@ -22,12 +22,13 @@
  * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with GNU CC; see the file COPYING.  If not, see
- * <http://www.gnu.org/licenses/>.
+ * along with GNU CC; see the file COPYING.  If not, write to
+ * the Free Software Foundation, 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
  *
  * Please send any bug reports or fixes you make to the
  * email address(es):
- *    lksctp developers <linux-sctp@vger.kernel.org>
+ *    lksctp developers <lksctp-developers@lists.sourceforge.net>
  *
  * Or submit a bug report through the following website:
  *    http://www.sf.net/projects/lksctp
@@ -115,6 +116,7 @@ typedef __s32 sctp_assoc_t;
 #define SCTP_PR_SUPPORTED	113
 #define SCTP_DEFAULT_PRINFO	114
 #define SCTP_PR_ASSOC_STATUS	115
+#define SCTP_SOCKOPT_PEELOFF_FLAGS 122
 
 /* PR-SCTP policies */
 #define SCTP_PR_SCTP_NONE	0x0000
@@ -251,6 +253,9 @@ enum sctp_sinfo_flags {
 	SCTP_ADDR_OVER		= (1 << 1), /* Override the primary destination. */
 	SCTP_ABORT		= (1 << 2), /* Send an ABORT message to the peer. */
 	SCTP_SACK_IMMEDIATELY	= (1 << 3), /* SACK should be sent without delay. */
+	/* 2 bits here have been used by SCTP_PR_SCTP_MASK and
+	 * 1 bits for SCTP_SENDALL */
+	SCTP_PR_SCTP_ALL	= (1 << 7),
 	SCTP_NOTIFICATION	= MSG_NOTIFICATION, /* Next message is not user msg but notification. */
 	SCTP_EOF		= MSG_FIN,  /* Initiate graceful shutdown process. */
 };
@@ -916,6 +921,11 @@ typedef struct {
 	sctp_assoc_t associd;
 	int sd;
 } sctp_peeloff_arg_t;
+
+typedef struct {
+	sctp_peeloff_arg_t p_arg;
+	unsigned flags;
+} sctp_peeloff_flags_arg_t;
 
 /*
  *  Peer Address Thresholds socket option

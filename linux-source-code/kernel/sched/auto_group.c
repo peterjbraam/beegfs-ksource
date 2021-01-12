@@ -1,3 +1,5 @@
+#ifdef CONFIG_SCHED_AUTOGROUP
+
 #include "sched.h"
 
 #include <linux/proc_fs.h>
@@ -6,8 +8,9 @@
 #include <linux/utsname.h>
 #include <linux/security.h>
 #include <linux/export.h>
+#include <linux/nospec.h>
 
-unsigned int __read_mostly sysctl_sched_autogroup_enabled = 1;
+unsigned int __read_mostly sysctl_sched_autogroup_enabled = 0;
 static struct autogroup autogroup_default;
 static atomic_t autogroup_seq_nr;
 
@@ -85,7 +88,8 @@ static inline struct autogroup *autogroup_create(void)
 	 * so we don't have to move tasks around upon policy change,
 	 * or flail around trying to allocate bandwidth on the fly.
 	 * A bandwidth exception in __sched_setscheduler() allows
-	 * the policy change to proceed.
+	 * the policy change to proceed.  Thereafter, task_group()
+	 * returns &root_task_group, so zero bandwidth is required.
 	 */
 	free_rt_sched_group(tg);
 	tg->rt_se = root_task_group.rt_se;
@@ -110,6 +114,9 @@ out_fail:
 bool task_wants_autogroup(struct task_struct *p, struct task_group *tg)
 {
 	if (tg != &root_task_group)
+		return false;
+
+	if (p->sched_class != &fair_sched_class)
 		return false;
 	/*
 	 * If we race with autogroup_move_group() the caller can use the old
@@ -212,10 +219,9 @@ int proc_sched_autogroup_set_nice(struct task_struct *p, int nice)
 {
 	static unsigned long next = INITIAL_JIFFIES;
 	struct autogroup *ag;
-	unsigned long shares;
-	int err;
+	int err, idx;
 
-	if (nice < MIN_NICE || nice > MAX_NICE)
+	if (nice < -20 || nice > 19)
 		return -EINVAL;
 
 	err = security_task_setnice(current, nice);
@@ -231,10 +237,11 @@ int proc_sched_autogroup_set_nice(struct task_struct *p, int nice)
 
 	next = HZ / 10 + jiffies;
 	ag = autogroup_task_get(p);
-	shares = scale_load(sched_prio_to_weight[nice + 20]);
+
+	idx = array_index_nospec(nice + 20, 40);
 
 	down_write(&ag->lock);
-	err = sched_group_set_shares(ag->tg, shares);
+	err = sched_group_set_shares(ag->tg, prio_to_weight[idx]);
 	if (!err)
 		ag->nice = nice;
 	up_write(&ag->lock);
@@ -269,3 +276,5 @@ int autogroup_path(struct task_group *tg, char *buf, int buflen)
 	return snprintf(buf, buflen, "%s-%ld", "/autogroup", tg->autogroup->id);
 }
 #endif /* CONFIG_SCHED_DEBUG */
+
+#endif /* CONFIG_SCHED_AUTOGROUP */

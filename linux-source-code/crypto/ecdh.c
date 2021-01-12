@@ -38,7 +38,8 @@ static unsigned int ecdh_supported_curve(unsigned int curve_id)
 	}
 }
 
-static int ecdh_set_secret(struct crypto_kpp *tfm, void *buf, unsigned int len)
+static int ecdh_set_secret(struct crypto_kpp *tfm, const void *buf,
+			   unsigned int len)
 {
 	struct ecdh_ctx *ctx = ecdh_get_ctx(tfm);
 	struct ecdh params;
@@ -79,7 +80,7 @@ static int ecdh_compute_value(struct kpp_request *req)
 		if (copied != 2 * nbytes)
 			return -EINVAL;
 
-		ret = crypto_ecdh_shared_secret(ctx->curve_id, ctx->ndigits,
+		ret = ecdh_shared_secret(ctx->curve_id, ctx->ndigits,
 					 (const u8 *)ctx->private_key, nbytes,
 					 (const u8 *)ctx->public_key, 2 * nbytes,
 					 (u8 *)ctx->shared_secret, nbytes);

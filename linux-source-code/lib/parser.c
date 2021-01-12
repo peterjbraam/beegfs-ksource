@@ -113,7 +113,6 @@ int match_token(char *s, const match_table_t table, substring_t args[])
 
 	return p->token;
 }
-EXPORT_SYMBOL(match_token);
 
 /**
  * match_number: scan a number in the given base from a substring_t
@@ -152,6 +151,36 @@ static int match_number(substring_t *s, int *result, int base)
 }
 
 /**
+ * match_u64int: scan a number in the given base from a substring_t
+ * @s: substring to be scanned
+ * @result: resulting u64 on success
+ * @base: base to use when converting string
+ *
+ * Description: Given a &substring_t and a base, attempts to parse the substring
+ * as a number in that base. On success, sets @result to the integer represented
+ * by the string and returns 0. Returns -ENOMEM, -EINVAL, or -ERANGE on failure.
+ */
+static int match_u64int(substring_t *s, u64 *result, int base)
+{
+	char *buf;
+	int ret;
+	u64 val;
+	size_t len = s->to - s->from;
+
+	buf = kmalloc(len + 1, GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
+	memcpy(buf, s->from, len);
+	buf[len] = '\0';
+
+	ret = kstrtoull(buf, base, &val);
+	if (!ret)
+		*result = val;
+	kfree(buf);
+	return ret;
+}
+
+/**
  * match_int: - scan a decimal representation of an integer from a substring_t
  * @s: substring_t to be scanned
  * @result: resulting integer on success
@@ -164,7 +193,23 @@ int match_int(substring_t *s, int *result)
 {
 	return match_number(s, result, 0);
 }
-EXPORT_SYMBOL(match_int);
+
+/**
+ * match_u64: - scan a decimal representation of a u64 from
+ *                  a substring_t
+ * @s: substring_t to be scanned
+ * @result: resulting unsigned long long on success
+ *
+ * Description: Attempts to parse the &substring_t @s as a long decimal
+ * integer. On success, sets @result to the integer represented by the
+ * string and returns 0.
+ * Returns -ENOMEM, -EINVAL, or -ERANGE on failure.
+ */
+int match_u64(substring_t *s, u64 *result)
+{
+	return match_u64int(s, result, 0);
+}
+EXPORT_SYMBOL(match_u64);
 
 /**
  * match_octal: - scan an octal representation of an integer from a substring_t
@@ -179,7 +224,6 @@ int match_octal(substring_t *s, int *result)
 {
 	return match_number(s, result, 8);
 }
-EXPORT_SYMBOL(match_octal);
 
 /**
  * match_hex: - scan a hex representation of an integer from a substring_t
@@ -194,7 +238,6 @@ int match_hex(substring_t *s, int *result)
 {
 	return match_number(s, result, 16);
 }
-EXPORT_SYMBOL(match_hex);
 
 /**
  * match_wildcard: - parse if a string matches given wildcard pattern
@@ -245,7 +288,6 @@ bool match_wildcard(const char *pattern, const char *str)
 		++p;
 	return !*p;
 }
-EXPORT_SYMBOL(match_wildcard);
 
 /**
  * match_strlcpy: - Copy the characters from a substring_t to a sized buffer
@@ -268,7 +310,6 @@ size_t match_strlcpy(char *dest, const substring_t *src, size_t size)
 	}
 	return ret;
 }
-EXPORT_SYMBOL(match_strlcpy);
 
 /**
  * match_strdup: - allocate a new string with the contents of a substring_t
@@ -286,4 +327,11 @@ char *match_strdup(const substring_t *s)
 		match_strlcpy(p, s, sz);
 	return p;
 }
+
+EXPORT_SYMBOL(match_token);
+EXPORT_SYMBOL(match_int);
+EXPORT_SYMBOL(match_octal);
+EXPORT_SYMBOL(match_hex);
+EXPORT_SYMBOL(match_wildcard);
+EXPORT_SYMBOL(match_strlcpy);
 EXPORT_SYMBOL(match_strdup);

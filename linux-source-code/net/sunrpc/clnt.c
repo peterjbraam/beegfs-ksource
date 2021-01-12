@@ -184,6 +184,7 @@ static int __rpc_clnt_handle_event(struct rpc_clnt *clnt, unsigned long event,
 				   struct super_block *sb)
 {
 	struct dentry *dentry;
+	int err = 0;
 
 	switch (event) {
 	case RPC_PIPEFS_MOUNT:
@@ -200,7 +201,7 @@ static int __rpc_clnt_handle_event(struct rpc_clnt *clnt, unsigned long event,
 		printk(KERN_ERR "%s: unknown event: %ld\n", __func__, event);
 		return -ENOTSUPP;
 	}
-	return 0;
+	return err;
 }
 
 static int __rpc_pipefs_event(struct rpc_clnt *clnt, unsigned long event,
@@ -1936,14 +1937,6 @@ call_connect_status(struct rpc_task *task)
 	task->tk_status = 0;
 	switch (status) {
 	case -ECONNREFUSED:
-		/* A positive refusal suggests a rebind is needed. */
-		if (RPC_IS_SOFTCONN(task))
-			break;
-		if (clnt->cl_autobind) {
-			rpc_force_rebind(clnt);
-			task->tk_action = call_bind;
-			return;
-		}
 	case -ECONNRESET:
 	case -ECONNABORTED:
 	case -ENETUNREACH:
@@ -1951,6 +1944,8 @@ call_connect_status(struct rpc_task *task)
 	case -EADDRINUSE:
 	case -ENOBUFS:
 	case -EPIPE:
+		xprt_conditional_disconnect(task->tk_rqstp->rq_xprt,
+					    task->tk_rqstp->rq_connect_cookie);
 		if (RPC_IS_SOFTCONN(task))
 			break;
 		/* retry with existing socket, after a delay */
@@ -2592,7 +2587,7 @@ static void rpc_cb_add_xprt_release(void *calldata)
 	kfree(data);
 }
 
-static const struct rpc_call_ops rpc_cb_add_xprt_call_ops = {
+const static struct rpc_call_ops rpc_cb_add_xprt_call_ops = {
 	.rpc_call_done = rpc_cb_add_xprt_done,
 	.rpc_release = rpc_cb_add_xprt_release,
 };
@@ -2726,7 +2721,6 @@ int rpc_clnt_add_xprt(struct rpc_clnt *clnt,
 	xprt = xprt_iter_xprt(&clnt->cl_xpi);
 	if (xps == NULL || xprt == NULL) {
 		rcu_read_unlock();
-		xprt_switch_put(xps);
 		return -EAGAIN;
 	}
 	resvport = xprt->resvport;

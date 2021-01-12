@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  *	Generic watchdog defines. Derived from..
  *
@@ -13,7 +14,6 @@
 #include <linux/cdev.h>
 #include <linux/device.h>
 #include <linux/kernel.h>
-#include <linux/notifier.h>
 #include <uapi/linux/watchdog.h>
 
 struct watchdog_ops;
@@ -31,7 +31,6 @@ struct watchdog_governor;
  * @set_timeout:The routine for setting the watchdog devices timeout value (in seconds).
  * @set_pretimeout:The routine for setting the watchdog devices pretimeout.
  * @get_timeleft:The routine that gets the time left before a reset (in seconds).
- * @restart:	The routine for restarting the machine.
  * @ioctl:	The routines that handles extra ioctl calls.
  *
  * The watchdog_ops structure contains a list of low-level operations
@@ -50,7 +49,6 @@ struct watchdog_ops {
 	int (*set_timeout)(struct watchdog_device *, unsigned int);
 	int (*set_pretimeout)(struct watchdog_device *, unsigned int);
 	unsigned int (*get_timeleft)(struct watchdog_device *);
-	int (*restart)(struct watchdog_device *, unsigned long, void *);
 	long (*ioctl)(struct watchdog_device *, unsigned int, unsigned long);
 };
 
@@ -77,7 +75,6 @@ struct watchdog_ops {
  *		Hardware limit for maximum timeout, in milli-seconds.
  *		Replaces max_timeout if specified.
  * @reboot_nb:	The notifier block to stop watchdog on reboot.
- * @restart_nb:	The notifier block to register a restart function.
  * @driver_data:Pointer to the drivers private data.
  * @wd_data:	Pointer to watchdog core internal data.
  * @status:	Field that contains the devices internal status bits.
@@ -108,7 +105,6 @@ struct watchdog_device {
 	unsigned int min_hw_heartbeat_ms;
 	unsigned int max_hw_heartbeat_ms;
 	struct notifier_block reboot_nb;
-	struct notifier_block restart_nb;
 	void *driver_data;
 	struct watchdog_core_data *wd_data;
 	unsigned long status;
@@ -117,6 +113,7 @@ struct watchdog_device {
 #define WDOG_NO_WAY_OUT		1	/* Is 'nowayout' feature set ? */
 #define WDOG_STOP_ON_REBOOT	2	/* Should be stopped on reboot */
 #define WDOG_HW_RUNNING		3	/* True if HW watchdog running */
+#define WDOG_STOP_ON_UNREGISTER	4	/* Should be stopped on unregister */
 	struct list_head deferred;
 };
 
@@ -149,6 +146,12 @@ static inline void watchdog_set_nowayout(struct watchdog_device *wdd, bool noway
 static inline void watchdog_stop_on_reboot(struct watchdog_device *wdd)
 {
 	set_bit(WDOG_STOP_ON_REBOOT, &wdd->status);
+}
+
+/* Use the following function to stop the watchdog when unregistering it */
+static inline void watchdog_stop_on_unregister(struct watchdog_device *wdd)
+{
+	set_bit(WDOG_STOP_ON_UNREGISTER, &wdd->status);
 }
 
 /* Use the following function to check if a timeout value is invalid */
@@ -199,7 +202,6 @@ static inline void watchdog_notify_pretimeout(struct watchdog_device *wdd)
 #endif
 
 /* drivers/watchdog/watchdog_core.c */
-void watchdog_set_restart_priority(struct watchdog_device *wdd, int priority);
 extern int watchdog_init_timeout(struct watchdog_device *wdd,
 				  unsigned int timeout_parm, struct device *dev);
 extern int watchdog_register_device(struct watchdog_device *);

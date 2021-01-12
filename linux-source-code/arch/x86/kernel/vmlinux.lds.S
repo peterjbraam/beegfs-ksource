@@ -34,35 +34,36 @@ OUTPUT_FORMAT(CONFIG_OUTPUT_FORMAT, CONFIG_OUTPUT_FORMAT, CONFIG_OUTPUT_FORMAT)
 #ifdef CONFIG_X86_32
 OUTPUT_ARCH(i386)
 ENTRY(phys_startup_32)
+jiffies = jiffies_64;
 #else
 OUTPUT_ARCH(i386:x86-64)
 ENTRY(phys_startup_64)
+jiffies_64 = jiffies;
 #endif
 
-jiffies = jiffies_64;
-
-#if defined(CONFIG_X86_64)
+#if defined(CONFIG_X86_64) && defined(CONFIG_DEBUG_RODATA)
 /*
- * On 64-bit, align RODATA to 2MB so we retain large page mappings for
- * boundaries spanning kernel text, rodata and data sections.
+ * On 64-bit, align RODATA to 2MB so that even with CONFIG_DEBUG_RODATA
+ * we retain large page mappings for boundaries spanning kernel text, rodata
+ * and data sections.
  *
  * However, kernel identity mappings will have different RWX permissions
  * to the pages mapping to text and to the pages padding (which are freed) the
  * text section. Hence kernel identity mappings will be broken to smaller
  * pages. For 64-bit, kernel text and kernel identity mappings are different,
- * so we can enable protection checks as well as retain 2MB large page
- * mappings for kernel text.
+ * so we can enable protection checks that come with CONFIG_DEBUG_RODATA,
+ * as well as retain 2MB large page mappings for kernel text.
  */
-#define X64_ALIGN_RODATA_BEGIN	. = ALIGN(HPAGE_SIZE);
+#define X64_ALIGN_DEBUG_RODATA_BEGIN	. = ALIGN(HPAGE_SIZE);
 
-#define X64_ALIGN_RODATA_END					\
+#define X64_ALIGN_DEBUG_RODATA_END				\
 		. = ALIGN(HPAGE_SIZE);				\
 		__end_rodata_hpage_align = .;
 
 #else
 
-#define X64_ALIGN_RODATA_BEGIN
-#define X64_ALIGN_RODATA_END
+#define X64_ALIGN_DEBUG_RODATA_BEGIN
+#define X64_ALIGN_DEBUG_RODATA_END
 
 #endif
 
@@ -78,40 +79,40 @@ PHDRS {
 	note PT_NOTE FLAGS(0);          /* ___ */
 }
 
+#ifdef CONFIG_PAGE_TABLE_ISOLATION
+#define ALIGN_KAISER()	. = ALIGN(PAGE_SIZE);
+#else
+#define ALIGN_KAISER()
+#endif
+
 SECTIONS
 {
 #ifdef CONFIG_X86_32
-	. = LOAD_OFFSET + LOAD_PHYSICAL_ADDR;
-	phys_startup_32 = ABSOLUTE(startup_32 - LOAD_OFFSET);
+        . = LOAD_OFFSET + LOAD_PHYSICAL_ADDR;
+        phys_startup_32 = startup_32 - LOAD_OFFSET;
 #else
-	. = __START_KERNEL;
-	phys_startup_64 = ABSOLUTE(startup_64 - LOAD_OFFSET);
+        . = __START_KERNEL;
+        phys_startup_64 = startup_64 - LOAD_OFFSET;
 #endif
 
 	/* Text and read-only data */
 	.text :  AT(ADDR(.text) - LOAD_OFFSET) {
 		_text = .;
+		_stext = .;
 		/* bootstrapping code */
 		HEAD_TEXT
 		. = ALIGN(8);
-		_stext = .;
 		TEXT_TEXT
 		SCHED_TEXT
 		CPUIDLE_TEXT
 		LOCK_TEXT
+		ALIGN_KAISER()
 		KPROBES_TEXT
 		ENTRY_TEXT
 		IRQENTRY_TEXT
-		SOFTIRQENTRY_TEXT
+		ALIGN_KAISER()
 		*(.fixup)
 		*(.gnu.warning)
-
-#ifdef CONFIG_RETPOLINE
-		__indirect_thunk_start = .;
-		*(.text.__x86.indirect_thunk)
-		__indirect_thunk_end = .;
-#endif
-
 		/* End of text section */
 		_etext = .;
 	} :text = 0x9090
@@ -120,11 +121,15 @@ SECTIONS
 
 	EXCEPTION_TABLE(16) :text = 0x9090
 
+	MC_EXCEPTION_TABLE(16) :text = 0x9090
+
+#if defined(CONFIG_DEBUG_RODATA)
 	/* .text should occupy whole number of pages */
 	. = ALIGN(PAGE_SIZE);
-	X64_ALIGN_RODATA_BEGIN
+#endif
+	X64_ALIGN_DEBUG_RODATA_BEGIN
 	RO_DATA(PAGE_SIZE)
-	X64_ALIGN_RODATA_END
+	X64_ALIGN_DEBUG_RODATA_END
 
 	/* Data */
 	.data : AT(ADDR(.data) - LOAD_OFFSET) {
@@ -153,6 +158,7 @@ SECTIONS
 		_edata = .;
 	} :data
 
+#ifdef CONFIG_X86_64
 
 	. = ALIGN(PAGE_SIZE);
 	__vvar_page = .;
@@ -170,14 +176,11 @@ SECTIONS
 #undef __VVAR_KERNEL_LDS
 #undef EMIT_VVAR
 
-		/*
-		 * Pad the rest of the page with zeros.  Otherwise the loader
-		 * can leave garbage here.
-		 */
-		. = __vvar_beginning_hack + PAGE_SIZE;
 	} :data
 
        . = ALIGN(__vvar_page + PAGE_SIZE, PAGE_SIZE);
+
+#endif /* CONFIG_X86_64 */
 
 	/* Init code and data - will be freed after init */
 	. = ALIGN(PAGE_SIZE);
@@ -201,17 +204,6 @@ SECTIONS
 	:init
 #endif
 
-	/*
-	 * Section for code used exclusively before alternatives are run. All
-	 * references to such code must be patched out by alternatives, normally
-	 * by using X86_FEATURE_ALWAYS CPU feature bit.
-	 *
-	 * See static_cpu_has() for an example.
-	 */
-	.altinstr_aux : AT(ADDR(.altinstr_aux) - LOAD_OFFSET) {
-		*(.altinstr_aux)
-	}
-
 	INIT_DATA_SECTION(16)
 
 	.x86_cpu_dev.init : AT(ADDR(.x86_cpu_dev.init) - LOAD_OFFSET) {
@@ -219,15 +211,6 @@ SECTIONS
 		*(.x86_cpu_dev.init)
 		__x86_cpu_dev_end = .;
 	}
-
-#ifdef CONFIG_X86_INTEL_MID
-	.x86_intel_mid_dev.init : AT(ADDR(.x86_intel_mid_dev.init) - \
-								LOAD_OFFSET) {
-		__x86_intel_mid_dev_start = .;
-		*(.x86_intel_mid_dev.init)
-		__x86_intel_mid_dev_end = .;
-	}
-#endif
 
 	/*
 	 * start address and size of operations which during runtime
@@ -329,11 +312,18 @@ SECTIONS
 	.bss : AT(ADDR(.bss) - LOAD_OFFSET) {
 		__bss_start = .;
 		*(.bss..page_aligned)
-		. = ALIGN(PAGE_SIZE);
-		*(BSS_MAIN)
+		*(.bss)
 		. = ALIGN(PAGE_SIZE);
 		__bss_stop = .;
 	}
+
+	/*
+	 * The memory occupied from _text to here, __end_of_kernel_reserve, is
+	 * automatically reserved in setup_arch(). Anything after here must be
+	 * explicitly reserved using memblock_reserve() or it will be discarded
+	 * and treated as available memory.
+	 */
+	__end_of_kernel_reserve = .;
 
 	. = ALIGN(PAGE_SIZE);
 	.brk : AT(ADDR(.brk) - LOAD_OFFSET) {
@@ -346,13 +336,37 @@ SECTIONS
 	. = ALIGN(PAGE_SIZE);		/* keep VO_INIT_SIZE page aligned */
 	_end = .;
 
+#ifdef CONFIG_AMD_MEM_ENCRYPT
+	/*
+	 * SME workarea section: Lives outside of the kernel proper (_text -
+	 * _end) for performing in-place encryption of the kernel during boot.
+	 *
+	 * Resides after _end because even though the .brk section is after
+	 * __end_of_kernel_reserve, the .brk section is later reserved as a
+	 * part of the kernel. It is used in very early boot code and not
+	 * needed after that, so it is located after __end_of_kernel_reserve
+	 * so that it will be discarded and become part of the available
+	 * memory.
+	 *
+	 * Resides on a 2MB boundary to simplify the pagetable setup used for
+	 * the encryption.
+	 */
+	. = ALIGN(HPAGE_SIZE);
+	.sme : AT(ADDR(.sme) - LOAD_OFFSET) {
+		__sme_begin = .;
+		*(.sme)
+		. = ALIGN(HPAGE_SIZE);
+		__sme_end = .;
+	}
+#endif
+
         STABS_DEBUG
         DWARF_DEBUG
 
-	/* Sections to be discarded */
 	DISCARDS
 	/DISCARD/ : {
 		*(.eh_frame)
+		*(__func_stack_frame_non_standard)
 	}
 }
 
@@ -368,7 +382,7 @@ SECTIONS
  * Per-cpu symbols which need to be offset from __per_cpu_load
  * for the boot processor.
  */
-#define INIT_PER_CPU(x) init_per_cpu__##x = ABSOLUTE(x) + __per_cpu_load
+#define INIT_PER_CPU(x) init_per_cpu__##x = x + __per_cpu_load
 INIT_PER_CPU(gdt_page);
 INIT_PER_CPU(irq_stack_union);
 

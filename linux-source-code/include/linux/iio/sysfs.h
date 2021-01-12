@@ -55,9 +55,33 @@ struct iio_const_attr {
 	{ .dev_attr = __ATTR(_name, _mode, _show, _store),	\
 	  .address = _addr }
 
+#define IIO_ATTR_RO(_name, _addr)       \
+	{ .dev_attr = __ATTR_RO(_name), \
+	  .address = _addr }
+
+#define IIO_ATTR_WO(_name, _addr)       \
+	{ .dev_attr = __ATTR_WO(_name), \
+	  .address = _addr }
+
+#define IIO_ATTR_RW(_name, _addr)       \
+	{ .dev_attr = __ATTR_RW(_name), \
+	  .address = _addr }
+
 #define IIO_DEVICE_ATTR(_name, _mode, _show, _store, _addr)	\
 	struct iio_dev_attr iio_dev_attr_##_name		\
 	= IIO_ATTR(_name, _mode, _show, _store, _addr)
+
+#define IIO_DEVICE_ATTR_RO(_name, _addr)                       \
+	struct iio_dev_attr iio_dev_attr_##_name                \
+	= IIO_ATTR_RO(_name, _addr)
+
+#define IIO_DEVICE_ATTR_WO(_name, _addr)                       \
+	struct iio_dev_attr iio_dev_attr_##_name                \
+	= IIO_ATTR_WO(_name, _addr)
+
+#define IIO_DEVICE_ATTR_RW(_name, _addr)                                   \
+	struct iio_dev_attr iio_dev_attr_##_name                            \
+	= IIO_ATTR_RW(_name, _addr)
 
 #define IIO_DEVICE_ATTR_NAMED(_vname, _name, _mode, _show, _store, _addr) \
 	struct iio_dev_attr iio_dev_attr_##_vname			\
@@ -74,6 +98,11 @@ struct iio_const_attr {
 	    .dev_attr = __ATTR(_name, S_IRUGO, iio_read_const_attr, NULL)}
 
 /* Generic attributes of onetype or another */
+/**
+ * IIO_DEV_ATTR_RESET: resets the device
+ **/
+#define IIO_DEV_ATTR_RESET(_store)			\
+	IIO_DEVICE_ATTR(reset, S_IWUSR, NULL, _store, 0)
 
 /**
  * IIO_DEV_ATTR_SAMP_FREQ - sets any internal clock frequency

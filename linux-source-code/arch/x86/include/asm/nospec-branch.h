@@ -1,14 +1,15 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 
-#ifndef _ASM_X86_NOSPEC_BRANCH_H_
-#define _ASM_X86_NOSPEC_BRANCH_H_
-
-#include <linux/static_key.h>
+#ifndef __NOSPEC_BRANCH_H__
+#define __NOSPEC_BRANCH_H__
 
 #include <asm/alternative.h>
 #include <asm/alternative-asm.h>
 #include <asm/cpufeatures.h>
-#include <asm/msr-index.h>
+#include <asm/bitsperlong.h>
+#include <asm/percpu.h>
+#include <asm/nops.h>
+#include <asm/jump_label.h>
 
 /*
  * Fill the CPU return stack buffer.
@@ -56,29 +57,24 @@
 
 #ifdef __ASSEMBLY__
 
-/*
- * This should be used immediately before a retpoline alternative.  It tells
- * objtool where the retpolines are so that it can make sense of the control
- * flow by just reading the original instruction(s) and ignoring the
- * alternatives.
- */
-.macro ANNOTATE_NOSPEC_ALTERNATIVE
-	.Lannotate_\@:
-	.pushsection .discard.nospec
-	.long .Lannotate_\@ - .
+ /*
+  * A simpler FILL_RETURN_BUFFER macro. Don't make people use the CPP
+  * monstrosity above, manually.
+  */
+.macro FILL_RETURN_BUFFER_CLOBBER reg=%rax
+	661: __FILL_RETURN_BUFFER(\reg, RSB_CLEAR_LOOPS, %_ASM_SP); 662:
+	.pushsection .altinstr_replacement, "ax"
+	663: ASM_NOP8; ASM_NOP8; ASM_NOP8; ASM_NOP8; ASM_NOP8; ASM_NOP3; 664:
+	.popsection
+	.pushsection .altinstructions, "a"
+	altinstruction_entry 661b, 663b, X86_FEATURE_SMEP, 662b-661b, 664b-663b
 	.popsection
 .endm
 
-/*
- * This should be used immediately before an indirect jump/call. It tells
- * objtool the subsequent indirect jump/call is vouched safe for retpoline
- * builds.
- */
-.macro ANNOTATE_RETPOLINE_SAFE
-	.Lannotate_\@:
-	.pushsection .discard.retpoline_safe
-	_ASM_PTR .Lannotate_\@
-	.popsection
+.macro FILL_RETURN_BUFFER
+	push %rax
+	FILL_RETURN_BUFFER_CLOBBER reg=%rax
+	pop %rax
 .endm
 
 /*
@@ -109,101 +105,78 @@
 	call	.Ldo_retpoline_jmp_\@
 .endm
 
+.macro __JMP_NOSPEC reg:req
+	661: RETPOLINE_JMP \reg; 662:
+	.pushsection .altinstr_replacement, "ax"
+	663: lfence; jmp *\reg; 664:
+	.popsection
+	.pushsection .altinstructions, "a"
+	altinstruction_entry 661b, 663b, X86_FEATURE_RETPOLINE_AMD, 662b-661b, 664b-663b
+	.popsection
+.endm
+
+.macro __CALL_NOSPEC reg:req
+	661: RETPOLINE_CALL \reg; 662:
+	.pushsection .altinstr_replacement, "ax"
+	663: lfence; call *\reg; 664:
+	.popsection
+	.pushsection .altinstructions, "a"
+	altinstruction_entry 661b, 663b, X86_FEATURE_RETPOLINE_AMD, 662b-661b, 664b-663b
+	.popsection
+.endm
+
 /*
  * JMP_NOSPEC and CALL_NOSPEC macros can be used instead of a simple
  * indirect jmp/call which may be susceptible to the Spectre variant 2
  * attack.
  */
 .macro JMP_NOSPEC reg:req
-#ifdef CONFIG_RETPOLINE
-	ANNOTATE_NOSPEC_ALTERNATIVE
-	ALTERNATIVE_2 __stringify(ANNOTATE_RETPOLINE_SAFE; jmp *\reg),	\
-		__stringify(RETPOLINE_JMP \reg), X86_FEATURE_RETPOLINE,	\
-		__stringify(lfence; ANNOTATE_RETPOLINE_SAFE; jmp *\reg), X86_FEATURE_RETPOLINE_AMD
-#else
-	jmp	*\reg
-#endif
+	STATIC_JUMP .Lretp_\@, retp_enabled_key
+	jmp *\reg
+
+.Lretp_\@:
+	__JMP_NOSPEC \reg
 .endm
 
 .macro CALL_NOSPEC reg:req
-#ifdef CONFIG_RETPOLINE
-	ANNOTATE_NOSPEC_ALTERNATIVE
-	ALTERNATIVE_2 __stringify(ANNOTATE_RETPOLINE_SAFE; call *\reg),	\
-		__stringify(RETPOLINE_CALL \reg), X86_FEATURE_RETPOLINE,\
-		__stringify(lfence; ANNOTATE_RETPOLINE_SAFE; call *\reg), X86_FEATURE_RETPOLINE_AMD
-#else
-	call	*\reg
-#endif
+	STATIC_JUMP .Lretp_\@, retp_enabled_key
+	call *\reg
+	jmp	.Ldone_\@
+
+.Lretp_\@:
+	__CALL_NOSPEC \reg
+
+.Ldone_\@:
 .endm
 
- /*
-  * A simpler FILL_RETURN_BUFFER macro. Don't make people use the CPP
-  * monstrosity above, manually.
-  */
-.macro FILL_RETURN_BUFFER reg:req nr:req ftr:req
-#ifdef CONFIG_RETPOLINE
-	ANNOTATE_NOSPEC_ALTERNATIVE
-	ALTERNATIVE "jmp .Lskip_rsb_\@",				\
-		__stringify(__FILL_RETURN_BUFFER(\reg,\nr,%_ASM_SP))	\
-		\ftr
-.Lskip_rsb_\@:
-#endif
+/*
+ * MDS_USER_CLEAR_CPU_BUFFERS macro is the assembly equivalent of
+ * mds_user_clear_cpu_buffers(). Like the C version, the __KERNEL_DS
+ * is used for verw.
+ * Note: The ZF flag will be clobbered after calling this macro.
+ */
+.macro MDS_USER_CLEAR_CPU_BUFFERS
+	STATIC_JUMP .Lverw_\@, mds_user_clear
+	jmp	.Ldone_\@
+	.balign 2
+.Lds_\@:
+	.word	__KERNEL_DS
+.Lverw_\@:
+	verw	.Lds_\@(%rip)
+.Ldone_\@:
 .endm
 
 #else /* __ASSEMBLY__ */
 
-#define ANNOTATE_NOSPEC_ALTERNATIVE				\
-	"999:\n\t"						\
-	".pushsection .discard.nospec\n\t"			\
-	".long 999b - .\n\t"					\
-	".popsection\n\t"
-
-#define ANNOTATE_RETPOLINE_SAFE					\
-	"999:\n\t"						\
-	".pushsection .discard.retpoline_safe\n\t"		\
-	_ASM_PTR " 999b\n\t"					\
-	".popsection\n\t"
-
 #if defined(CONFIG_X86_64) && defined(RETPOLINE)
-
 /*
  * Since the inline asm uses the %V modifier which is only in newer GCC,
  * the 64-bit one is dependent on RETPOLINE not CONFIG_RETPOLINE.
  */
-# define CALL_NOSPEC						\
-	ANNOTATE_NOSPEC_ALTERNATIVE				\
-	ALTERNATIVE(						\
-	ANNOTATE_RETPOLINE_SAFE					\
-	"call *%[thunk_target]\n",				\
-	"call __x86_indirect_thunk_%V[thunk_target]\n",		\
-	X86_FEATURE_RETPOLINE)
-# define THUNK_TARGET(addr) [thunk_target] "r" (addr)
+#define CALL_NOSPEC						\
+	"call __x86_indirect_thunk_%V[thunk_target]\n"
+#define THUNK_TARGET(addr) [thunk_target] "r" (addr)
 
-#elif defined(CONFIG_X86_32) && defined(CONFIG_RETPOLINE)
-/*
- * For i386 we use the original ret-equivalent retpoline, because
- * otherwise we'll run out of registers. We don't care about CET
- * here, anyway.
- */
-# define CALL_NOSPEC						\
-	ALTERNATIVE(						\
-	ANNOTATE_RETPOLINE_SAFE					\
-	"call *%[thunk_target]\n",				\
-	"       jmp    904f;\n"					\
-	"       .align 16\n"					\
-	"901:	call   903f;\n"					\
-	"902:	pause;\n"					\
-	"    	lfence;\n"					\
-	"       jmp    902b;\n"					\
-	"       .align 16\n"					\
-	"903:	lea    4(%%esp), %%esp;\n"			\
-	"       pushl  %[thunk_target];\n"			\
-	"       ret;\n"						\
-	"       .align 16\n"					\
-	"904:	call   901b;\n",				\
-	X86_FEATURE_RETPOLINE)
-
-# define THUNK_TARGET(addr) [thunk_target] "rm" (addr)
 #else /* No retpoline for C / inline asm */
 # define CALL_NOSPEC "call *%[thunk_target]\n"
 # define THUNK_TARGET(addr) [thunk_target] "rm" (addr)
@@ -213,20 +186,39 @@
 enum spectre_v2_mitigation {
 	SPECTRE_V2_NONE,
 	SPECTRE_V2_RETPOLINE_MINIMAL,
-	SPECTRE_V2_RETPOLINE_MINIMAL_AMD,
-	SPECTRE_V2_RETPOLINE_GENERIC,
-	SPECTRE_V2_RETPOLINE_AMD,
+	SPECTRE_V2_RETPOLINE_NO_IBPB,
+	SPECTRE_V2_RETPOLINE_UNSAFE_MODULE,
+	SPECTRE_V2_RETPOLINE,
+	SPECTRE_V2_RETPOLINE_IBRS_USER,
+	SPECTRE_V2_IBRS,
+	SPECTRE_V2_IBRS_ALWAYS,
+	SPECTRE_V2_IBP_DISABLED,
 	SPECTRE_V2_IBRS_ENHANCED,
 };
 
-/* The indirect branch speculation control variants */
-enum spectre_v2_user_mitigation {
-	SPECTRE_V2_USER_NONE,
-	SPECTRE_V2_USER_STRICT,
-	SPECTRE_V2_USER_STRICT_PREFERRED,
-	SPECTRE_V2_USER_PRCTL,
-	SPECTRE_V2_USER_SECCOMP,
-};
+extern enum spectre_v2_mitigation spectre_v2_enabled;
+
+void __spectre_v2_select_mitigation(void);
+void spectre_v2_print_mitigation(void);
+
+static inline bool retp_compiler(void)
+{
+#ifdef RETPOLINE
+	return true;
+#else
+	return false;
+#endif
+}
+
+/*
+ * The Intel specification for the SPEC_CTRL MSR requires that we
+ * preserve any already set reserved bits at boot time (e.g. for
+ * future additions that this kernel is not currently aware of).
+ * We then set any additional mitigation bits that we want
+ * ourselves and always use this as the base for SPEC_CTRL.
+ * We also use this when handling guest entry/exit as below.
+ */
+extern u64 x86_spec_ctrl_base;
 
 /* The Speculative Store Bypass disable variants */
 enum ssb_mitigation {
@@ -236,81 +228,28 @@ enum ssb_mitigation {
 	SPEC_STORE_BYPASS_SECCOMP,
 };
 
-extern char __indirect_thunk_start[];
-extern char __indirect_thunk_end[];
+/* AMD specific Speculative Store Bypass MSR data */
+extern u64 x86_amd_ls_cfg_base;
+extern u64 x86_amd_ls_cfg_ssbd_mask;
 
 /*
  * On VMEXIT we must ensure that no RSB predictions learned in the guest
  * can be followed in the host, by overwriting the RSB completely. Both
  * retpoline and IBRS mitigations for Spectre v2 need this; only on future
- * CPUs with IBRS_ALL *might* it be avoided.
+ * CPUs with IBRS_ATT *might* it be avoided.
  */
-static inline void vmexit_fill_RSB(void)
+static inline void fill_RSB(void)
 {
-#ifdef CONFIG_RETPOLINE
 	unsigned long loops;
+	register unsigned long sp asm(_ASM_SP);
 
-	asm volatile (ANNOTATE_NOSPEC_ALTERNATIVE
-		      ALTERNATIVE("jmp 910f",
-				  __stringify(__FILL_RETURN_BUFFER(%0, RSB_CLEAR_LOOPS, %1)),
-				  X86_FEATURE_RETPOLINE)
-		      "910:"
-		      : "=r" (loops), ASM_CALL_CONSTRAINT
+	asm volatile (__stringify(__FILL_RETURN_BUFFER(%0, RSB_CLEAR_LOOPS, %1))
+		      : "=r" (loops), "+r" (sp)
 		      : : "memory" );
-#endif
 }
 
-static __always_inline
-void alternative_msr_write(unsigned int msr, u64 val, unsigned int feature)
-{
-	asm volatile(ALTERNATIVE("", "wrmsr", %c[feature])
-		: : "c" (msr),
-		    "a" ((u32)val),
-		    "d" ((u32)(val >> 32)),
-		    [feature] "i" (feature)
-		: "memory");
-}
-
-static inline void indirect_branch_prediction_barrier(void)
-{
-	u64 val = PRED_CMD_IBPB;
-
-	alternative_msr_write(MSR_IA32_PRED_CMD, val, X86_FEATURE_USE_IBPB);
-}
-
-/* The Intel SPEC CTRL MSR base value cache */
-extern u64 x86_spec_ctrl_base;
-
-/*
- * With retpoline, we must use IBRS to restrict branch prediction
- * before calling into firmware.
- *
- * (Implemented as CPP macros due to header hell.)
- */
-#define firmware_restrict_branch_speculation_start()			\
-do {									\
-	u64 val = x86_spec_ctrl_base | SPEC_CTRL_IBRS;			\
-									\
-	preempt_disable();						\
-	alternative_msr_write(MSR_IA32_SPEC_CTRL, val,			\
-			      X86_FEATURE_USE_IBRS_FW);			\
-} while (0)
-
-#define firmware_restrict_branch_speculation_end()			\
-do {									\
-	u64 val = x86_spec_ctrl_base;					\
-									\
-	alternative_msr_write(MSR_IA32_SPEC_CTRL, val,			\
-			      X86_FEATURE_USE_IBRS_FW);			\
-	preempt_enable();						\
-} while (0)
-
-DECLARE_STATIC_KEY_FALSE(switch_to_cond_stibp);
-DECLARE_STATIC_KEY_FALSE(switch_mm_cond_ibpb);
-DECLARE_STATIC_KEY_FALSE(switch_mm_always_ibpb);
-
-DECLARE_STATIC_KEY_FALSE(mds_user_clear);
-DECLARE_STATIC_KEY_FALSE(mds_idle_clear);
+extern struct static_key mds_user_clear;
+extern struct static_key mds_idle_clear;
 
 #include <asm/segment.h>
 
@@ -321,7 +260,7 @@ DECLARE_STATIC_KEY_FALSE(mds_idle_clear);
  * combination with microcode which triggers a CPU buffer flush when the
  * instruction is executed.
  */
-static __always_inline void mds_clear_cpu_buffers(void)
+static inline void mds_clear_cpu_buffers(void)
 {
 	static const u16 ds = __KERNEL_DS;
 
@@ -341,10 +280,14 @@ static __always_inline void mds_clear_cpu_buffers(void)
  * mds_user_clear_cpu_buffers - Mitigation for MDS and TAA vulnerability
  *
  * Clear CPU buffers if the corresponding static key is enabled
+ *
+ * RHEL7: This inline function from upstream isn't being used. The
+ * equivalent MDS_USER_CLEAR_CPU_BUFFERS assembly macro is used in
+ * the entry code to achieve the same effect.
  */
-static __always_inline void mds_user_clear_cpu_buffers(void)
+static inline void mds_user_clear_cpu_buffers(void)
 {
-	if (static_branch_likely(&mds_user_clear))
+	if (static_key_false(&mds_user_clear))
 		mds_clear_cpu_buffers();
 }
 
@@ -355,7 +298,7 @@ static __always_inline void mds_user_clear_cpu_buffers(void)
  */
 static inline void mds_idle_clear_cpu_buffers(void)
 {
-	if (static_branch_likely(&mds_idle_clear))
+	if (static_key_false(&mds_idle_clear))
 		mds_clear_cpu_buffers();
 }
 
@@ -397,4 +340,4 @@ static inline void mds_idle_clear_cpu_buffers(void)
 	EMIT2(0xFF, 0xE0);	 /* jmp *%rax */
 #endif
 
-#endif /* _ASM_X86_NOSPEC_BRANCH_H_ */
+#endif /* __NOSPEC_BRANCH_H__ */

@@ -6,6 +6,8 @@
 
 #define DEFAULT_SERIAL_PORT 0x3f8 /* ttyS0 */
 
+#define XMTRDY          0x20
+
 #define DLAB		0x80
 
 #define TXR             0       /*  Transmit register (WRITE) */
@@ -76,8 +78,8 @@ static void parse_earlyprintk(void)
 			static const int bases[] = { 0x3f8, 0x2f8 };
 			int idx = 0;
 
-			/* += strlen("ttyS"); */
-			pos += 4;
+			if (!strncmp(arg + pos, "ttyS", 4))
+				pos += 4;
 
 			if (arg[pos++] == '1')
 				idx = 1;

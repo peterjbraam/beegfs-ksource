@@ -158,7 +158,7 @@ static void fq_flow_set_throttled(struct fq_sched_data *q, struct fq_flow *f)
 		struct fq_flow *aux;
 
 		parent = *p;
-		aux = container_of(parent, struct fq_flow, rate_node);
+		aux = rb_entry(parent, struct fq_flow, rate_node);
 		if (f->time_next_packet >= aux->time_next_packet)
 			p = &parent->rb_right;
 		else
@@ -201,7 +201,7 @@ static void fq_gc(struct fq_sched_data *q,
 	while (*p) {
 		parent = *p;
 
-		f = container_of(parent, struct fq_flow, fq_node);
+		f = rb_entry(parent, struct fq_flow, fq_node);
 		if (f->sk == sk)
 			break;
 
@@ -239,16 +239,13 @@ static struct fq_flow *fq_classify(struct sk_buff *skb, struct fq_sched_data *q)
 	if (unlikely((skb->priority & TC_PRIO_MAX) == TC_PRIO_CONTROL))
 		return &q->internal;
 
-	/* SYNACK messages are attached to a TCP_NEW_SYN_RECV request socket
-	 * or a listener (SYNCOOKIE mode)
-	 * 1) request sockets are not full blown,
-	 *    they do not contain sk_pacing_rate
-	 * 2) They are not part of a 'flow' yet
-	 * 3) We do not want to rate limit them (eg SYNFLOOD attack),
+	/* SYNACK messages are attached to a listener socket.
+	 * 1) They are not part of a 'flow' yet
+	 * 2) We do not want to rate limit them (eg SYNFLOOD attack),
 	 *    especially if the listener set SO_MAX_PACING_RATE
-	 * 4) We pretend they are orphaned
+	 * 3) We pretend they are orphaned
 	 */
-	if (!sk || sk_listener(sk)) {
+	if (!sk || sk->sk_state == TCP_LISTEN) {
 		unsigned long hash = skb_get_hash(skb) & q->orphan_mask;
 
 		/* By forcing low order bit to 1, we make sure to not
@@ -258,7 +255,7 @@ static struct fq_flow *fq_classify(struct sk_buff *skb, struct fq_sched_data *q)
 		skb_orphan(skb);
 	}
 
-	root = &q->fq_root[hash_32((u32)(long)sk, q->fq_trees_log)];
+	root = &q->fq_root[hash_ptr(sk, q->fq_trees_log)];
 
 	if (q->flows >= (2U << q->fq_trees_log) &&
 	    q->inactive_flows > q->flows/2)
@@ -269,7 +266,7 @@ static struct fq_flow *fq_classify(struct sk_buff *skb, struct fq_sched_data *q)
 	while (*p) {
 		parent = *p;
 
-		f = container_of(parent, struct fq_flow, fq_node);
+		f = rb_entry(parent, struct fq_flow, fq_node);
 		if (f->sk == sk) {
 			/* socket might have been reallocated, so check
 			 * if its sk_hash is the same.
@@ -439,7 +436,7 @@ static void fq_check_throttled(struct fq_sched_data *q, u64 now)
 
 	q->time_next_delayed_flow = ~0ULL;
 	while ((p = rb_first(&q->delayed)) != NULL) {
-		struct fq_flow *f = container_of(p, struct fq_flow, rate_node);
+		struct fq_flow *f = rb_entry(p, struct fq_flow, rate_node);
 
 		if (f->time_next_packet > now) {
 			q->time_next_delayed_flow = f->time_next_packet;
@@ -576,7 +573,7 @@ static void fq_reset(struct Qdisc *sch)
 	for (idx = 0; idx < (1U << q->fq_trees_log); idx++) {
 		root = &q->fq_root[idx];
 		while ((p = rb_first(root)) != NULL) {
-			f = container_of(p, struct fq_flow, fq_node);
+			f = rb_entry(p, struct fq_flow, fq_node);
 			rb_erase(p, root);
 
 			fq_flow_purge(f);
@@ -606,20 +603,20 @@ static void fq_rehash(struct fq_sched_data *q,
 		oroot = &old_array[idx];
 		while ((op = rb_first(oroot)) != NULL) {
 			rb_erase(op, oroot);
-			of = container_of(op, struct fq_flow, fq_node);
+			of = rb_entry(op, struct fq_flow, fq_node);
 			if (fq_gc_candidate(of)) {
 				fcnt++;
 				kmem_cache_free(fq_flow_cachep, of);
 				continue;
 			}
-			nroot = &new_array[hash_32((u32)(long)of->sk, new_log)];
+			nroot = &new_array[hash_ptr(of->sk, new_log)];
 
 			np = &nroot->rb_node;
 			parent = NULL;
 			while (*np) {
 				parent = *np;
 
-				nf = container_of(parent, struct fq_flow, fq_node);
+				nf = rb_entry(parent, struct fq_flow, fq_node);
 				BUG_ON(nf->sk == of->sk);
 
 				if (nf->sk > of->sk)
@@ -635,16 +632,6 @@ static void fq_rehash(struct fq_sched_data *q,
 	q->flows -= fcnt;
 	q->inactive_flows -= fcnt;
 	q->stat_gc_flows += fcnt;
-}
-
-static void *fq_alloc_node(size_t sz, int node)
-{
-	void *ptr;
-
-	ptr = kmalloc_node(sz, GFP_KERNEL | __GFP_REPEAT | __GFP_NOWARN, node);
-	if (!ptr)
-		ptr = vmalloc_node(sz, node);
-	return ptr;
 }
 
 static void fq_free(void *addr)
@@ -663,7 +650,7 @@ static int fq_resize(struct Qdisc *sch, u32 log)
 		return 0;
 
 	/* If XPS was setup, we can allocate memory on right NUMA node */
-	array = fq_alloc_node(sizeof(struct rb_root) << log,
+	array = kvmalloc_node(sizeof(struct rb_root) << log, GFP_KERNEL | __GFP_REPEAT,
 			      netdev_queue_numa_node_read(sch->dev_queue));
 	if (!array)
 		return -ENOMEM;
@@ -697,7 +684,6 @@ static const struct nla_policy fq_policy[TCA_FQ_MAX + 1] = {
 	[TCA_FQ_FLOW_MAX_RATE]		= { .type = NLA_U32 },
 	[TCA_FQ_BUCKETS_LOG]		= { .type = NLA_U32 },
 	[TCA_FQ_FLOW_REFILL_DELAY]	= { .type = NLA_U32 },
-	[TCA_FQ_ORPHAN_MASK]		= { .type = NLA_U32 },
 	[TCA_FQ_LOW_RATE_THRESHOLD]	= { .type = NLA_U32 },
 };
 
@@ -737,7 +723,7 @@ static int fq_change(struct Qdisc *sch, struct nlattr *opt)
 	if (tb[TCA_FQ_QUANTUM]) {
 		u32 quantum = nla_get_u32(tb[TCA_FQ_QUANTUM]);
 
-		if (quantum > 0 && quantum <= (1 << 20))
+		if (quantum > 0)
 			q->quantum = quantum;
 		else
 			err = -EINVAL;

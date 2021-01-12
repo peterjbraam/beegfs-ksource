@@ -74,9 +74,7 @@ static void nft_payload_eval(const struct nft_expr *expr,
 	u32 *dest = &regs->data[priv->dreg];
 	int offset;
 
-	if (priv->len % NFT_REG32_SIZE)
-		dest[priv->len / NFT_REG32_SIZE] = 0;
-
+	dest[priv->len / NFT_REG32_SIZE] = 0;
 	switch (priv->base) {
 	case NFT_PAYLOAD_LL_HEADER:
 		if (!skb_mac_header_was_set(skb))
@@ -94,8 +92,6 @@ static void nft_payload_eval(const struct nft_expr *expr,
 		offset = skb_network_offset(skb);
 		break;
 	case NFT_PAYLOAD_TRANSPORT_HEADER:
-		if (!pkt->tprot_set)
-			goto err;
 		offset = pkt->xt.thoff;
 		break;
 	default:
@@ -150,7 +146,6 @@ nla_put_failure:
 	return -1;
 }
 
-static struct nft_expr_type nft_payload_type;
 static const struct nft_expr_ops nft_payload_ops = {
 	.type		= &nft_payload_type,
 	.size		= NFT_EXPR_SIZE(sizeof(struct nft_payload)),
@@ -188,8 +183,6 @@ static void nft_payload_set_eval(const struct nft_expr *expr,
 		offset = skb_network_offset(skb);
 		break;
 	case NFT_PAYLOAD_TRANSPORT_HEADER:
-		if (!pkt->tprot_set)
-			goto err;
 		offset = pkt->xt.thoff;
 		break;
 	default:
@@ -322,20 +315,10 @@ nft_payload_select_ops(const struct nft_ctx *ctx,
 		return &nft_payload_ops;
 }
 
-static struct nft_expr_type nft_payload_type __read_mostly = {
+struct nft_expr_type nft_payload_type __read_mostly = {
 	.name		= "payload",
 	.select_ops	= nft_payload_select_ops,
 	.policy		= nft_payload_policy,
 	.maxattr	= NFTA_PAYLOAD_MAX,
 	.owner		= THIS_MODULE,
 };
-
-int __init nft_payload_module_init(void)
-{
-	return nft_register_expr(&nft_payload_type);
-}
-
-void nft_payload_module_exit(void)
-{
-	nft_unregister_expr(&nft_payload_type);
-}

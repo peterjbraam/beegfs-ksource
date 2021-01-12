@@ -35,8 +35,8 @@
 #include <linux/spinlock.h>
 #include <linux/preempt.h>
 #include <linux/lockdep.h>
-#include <linux/compiler.h>
 #include <asm/processor.h>
+#include <linux/compiler.h>
 
 /*
  * Version using sequence counter only.
@@ -89,7 +89,6 @@ static inline void seqcount_lockdep_reader_access(const seqcount_t *s)
 #endif
 
 #define SEQCNT_ZERO(lockname) { .sequence = 0, SEQCOUNT_DEP_MAP_INIT(lockname)}
-
 
 /**
  * __read_seqcount_begin - begin a seq-read critical section (without barrier)
@@ -181,6 +180,7 @@ static inline unsigned read_seqcount_begin(const seqcount_t *s)
 static inline unsigned raw_seqcount_begin(const seqcount_t *s)
 {
 	unsigned ret = READ_ONCE(s->sequence);
+
 	smp_rmb();
 	return ret & ~1;
 }
@@ -221,73 +221,9 @@ static inline int read_seqcount_retry(const seqcount_t *s, unsigned start)
 }
 
 
-
-static inline void raw_write_seqcount_begin(seqcount_t *s)
-{
-	s->sequence++;
-	smp_wmb();
-}
-
-static inline void raw_write_seqcount_end(seqcount_t *s)
-{
-	smp_wmb();
-	s->sequence++;
-}
-
-/**
- * raw_write_seqcount_barrier - do a seq write barrier
- * @s: pointer to seqcount_t
- *
- * This can be used to provide an ordering guarantee instead of the
- * usual consistency guarantee. It is one wmb cheaper, because we can
- * collapse the two back-to-back wmb()s.
- *
- * Note that, writes surrounding the barrier should be declared atomic (e.g.
- * via WRITE_ONCE): a) to ensure the writes become visible to other threads
- * atomically, avoiding compiler optimizations; b) to document which writes are
- * meant to propagate to the reader critical section. This is necessary because
- * neither writes before and after the barrier are enclosed in a seq-writer
- * critical section that would ensure readers are aware of ongoing writes.
- *
- *      seqcount_t seq;
- *      bool X = true, Y = false;
- *
- *      void read(void)
- *      {
- *              bool x, y;
- *
- *              do {
- *                      int s = read_seqcount_begin(&seq);
- *
- *                      x = X; y = Y;
- *
- *              } while (read_seqcount_retry(&seq, s));
- *
- *              BUG_ON(!x && !y);
- *      }
- *
- *      void write(void)
- *      {
- *              WRITE_ONCE(Y, true);
- *
- *              raw_write_seqcount_barrier(seq);
- *
- *              WRITE_ONCE(X, false);
- *      }
- */
-static inline void raw_write_seqcount_barrier(seqcount_t *s)
-{
-	s->sequence++;
-	smp_wmb();
-	s->sequence++;
-}
-
 static inline int raw_read_seqcount_latch(seqcount_t *s)
 {
-	int seq = READ_ONCE(s->sequence);
-	/* Pairs with the first smp_wmb() in raw_write_seqcount_latch() */
-	smp_read_barrier_depends();
-	return seq;
+       return lockless_dereference(s->sequence);
 }
 
 /**
@@ -341,7 +277,8 @@ static inline int raw_read_seqcount_latch(seqcount_t *s)
  *	unsigned seq, idx;
  *
  *	do {
- *		seq = raw_read_seqcount_latch(&latch->seq);
+ *		seq = latch->seq;
+ *		smp_rmb();
  *
  *		idx = seq & 0x01;
  *		entry = data_query(latch->data[idx], ...);
@@ -372,6 +309,60 @@ static inline void raw_write_seqcount_latch(seqcount_t *s)
        smp_wmb();      /* prior stores before incrementing "sequence" */
        s->sequence++;
        smp_wmb();      /* increment "sequence" before following stores */
+}
+
+
+static inline void raw_write_seqcount_begin(seqcount_t *s)
+{
+	s->sequence++;
+	smp_wmb();
+}
+
+static inline void raw_write_seqcount_end(seqcount_t *s)
+{
+	smp_wmb();
+	s->sequence++;
+}
+
+/**
+ * raw_write_seqcount_barrier - do a seq write barrier
+ * @s: pointer to seqcount_t
+ *
+ * This can be used to provide an ordering guarantee instead of the
+ * usual consistency guarantee. It is one wmb cheaper, because we can
+ * collapse the two back-to-back wmb()s.
+ *
+ *      seqcount_t seq;
+ *      bool X = true, Y = false;
+ *
+ *      void read(void)
+ *      {
+ *              bool x, y;
+ *
+ *              do {
+ *                      int s = read_seqcount_begin(&seq);
+ *
+ *                      x = X; y = Y;
+ *
+ *              } while (read_seqcount_retry(&seq, s));
+ *
+ *              BUG_ON(!x && !y);
+ *      }
+ *
+ *      void write(void)
+ *      {
+ *              Y = true;
+ *
+ *              raw_write_seqcount_barrier(seq);
+ *
+ *              X = false;
+ *      }
+ */
+static inline void raw_write_seqcount_barrier(seqcount_t *s)
+{
+	s->sequence++;
+	smp_wmb();
+	s->sequence++;
 }
 
 /*
@@ -586,21 +577,19 @@ read_sequnlock_excl_irqrestore(seqlock_t *sl, unsigned long flags)
 	spin_unlock_irqrestore(&sl->lock, flags);
 }
 
-static inline unsigned long
-read_seqbegin_or_lock_irqsave(seqlock_t *lock, int *seq)
+static inline unsigned long read_seqbegin_or_lock_irqsave(seqlock_t *lock,
+							  int *seq)
 {
 	unsigned long flags = 0;
-
 	if (!(*seq & 1))	/* Even */
 		*seq = read_seqbegin(lock);
 	else			/* Odd */
 		read_seqlock_excl_irqsave(lock, flags);
-
 	return flags;
 }
 
-static inline void
-done_seqretry_irqrestore(seqlock_t *lock, int seq, unsigned long flags)
+static inline void done_seqretry_irqrestore(seqlock_t *lock, int seq,
+					    unsigned long flags)
 {
 	if (seq & 1)
 		read_sequnlock_excl_irqrestore(lock, flags);

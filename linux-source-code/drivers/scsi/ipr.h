@@ -39,8 +39,8 @@
 /*
  * Literals
  */
-#define IPR_DRIVER_VERSION "2.6.3"
-#define IPR_DRIVER_DATE "(October 17, 2015)"
+#define IPR_DRIVER_VERSION "2.6.4"
+#define IPR_DRIVER_DATE "(March 14, 2017)"
 
 /*
  * IPR_MAX_CMD_PER_LUN: This defines the maximum number of outstanding
@@ -1135,6 +1135,11 @@ struct ipr_hostrcb_type_30_error {
 	struct ipr_hostrcb64_fabric_desc desc[1];
 }__attribute__((packed, aligned (4)));
 
+struct ipr_hostrcb_type_41_error {
+	u8 failure_reason[64];
+	 __be32 data[200];
+}__attribute__((packed, aligned (4)));
+
 struct ipr_hostrcb_error {
 	__be32 fd_ioasc;
 	struct ipr_res_addr fd_res_addr;
@@ -1173,6 +1178,7 @@ struct ipr_hostrcb64_error {
 		struct ipr_hostrcb_type_23_error type_23_error;
 		struct ipr_hostrcb_type_24_error type_24_error;
 		struct ipr_hostrcb_type_30_error type_30_error;
+		struct ipr_hostrcb_type_41_error type_41_error;
 	} u;
 }__attribute__((packed, aligned (8)));
 
@@ -1218,6 +1224,7 @@ struct ipr_hcam {
 #define IPR_HOST_RCB_OVERLAY_ID_24				0x24
 #define IPR_HOST_RCB_OVERLAY_ID_26				0x26
 #define IPR_HOST_RCB_OVERLAY_ID_30				0x30
+#define IPR_HOST_RCB_OVERLAY_ID_41				0x41
 #define IPR_HOST_RCB_OVERLAY_ID_DEFAULT				0xFF
 
 	u8 reserved1[3];
@@ -1306,7 +1313,6 @@ struct ipr_resource_entry {
 #define IPR_ARRAY_VIRTUAL_BUS			0x1
 #define IPR_VSET_VIRTUAL_BUS			0x2
 #define IPR_IOAFP_VIRTUAL_BUS			0x3
-#define IPR_MAX_SIS64_BUSES			0x4
 
 #define IPR_GET_RES_PHYS_LOC(res) \
 	(((res)->bus << 24) | ((res)->target << 8) | (res)->lun)
@@ -1492,6 +1498,8 @@ struct ipr_ioa_cfg {
 	u8 cfg_locked:1;
 	u8 clear_isr:1;
 	u8 probe_done:1;
+	u8 scsi_unblock:1;
+	u8 scsi_blocked:1;
 
 	u8 revid;
 
@@ -1570,6 +1578,7 @@ struct ipr_ioa_cfg {
 	u8 saved_mode_page_len;
 
 	struct work_struct work_q;
+	struct work_struct scsi_add_work_q;
 	struct workqueue_struct *reset_work_q;
 
 	wait_queue_head_t reset_wait_q;
@@ -1582,7 +1591,7 @@ struct ipr_ioa_cfg {
 	struct ipr_misc_cbs *vpd_cbs;
 	dma_addr_t vpd_cbs_dma;
 
-	struct dma_pool *ipr_cmd_pool;
+	struct pci_pool *ipr_cmd_pool;
 
 	struct ipr_cmnd *reset_cmd;
 	int (*reset) (struct ipr_cmnd *);

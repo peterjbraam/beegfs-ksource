@@ -37,7 +37,6 @@
 #include <net/icmp.h>
 #include <net/protocol.h>
 #include <net/ip_tunnels.h>
-#include <net/ip6_tunnel.h>
 #include <net/arp.h>
 #include <net/checksum.h>
 #include <net/dsfield.h>
@@ -48,27 +47,18 @@
 #include <net/rtnetlink.h>
 #include <net/dst_metadata.h>
 
-const struct ip_tunnel_encap_ops __rcu *
-		iptun_encaps[MAX_IPTUN_ENCAP_OPS] __read_mostly;
-EXPORT_SYMBOL(iptun_encaps);
-
-const struct ip6_tnl_encap_ops __rcu *
-		ip6tun_encaps[MAX_IPTUN_ENCAP_OPS] __read_mostly;
-EXPORT_SYMBOL(ip6tun_encaps);
-
 void iptunnel_xmit(struct sock *sk, struct rtable *rt, struct sk_buff *skb,
 		   __be32 src, __be32 dst, __u8 proto,
 		   __u8 tos, __u8 ttl, __be16 df, bool xnet)
 {
 	int pkt_len = skb->len - skb_inner_network_offset(skb);
-	struct net *net = dev_net(rt->dst.dev);
 	struct net_device *dev = skb->dev;
 	struct iphdr *iph;
 	int err;
 
 	skb_scrub_packet(skb, xnet);
 
-	skb_clear_hash_if_not_l4(skb);
+	skb_clear_hash(skb);
 	skb_dst_set(skb, &rt->dst);
 	memset(IPCB(skb), 0, sizeof(*IPCB(skb)));
 
@@ -86,9 +76,10 @@ void iptunnel_xmit(struct sock *sk, struct rtable *rt, struct sk_buff *skb,
 	iph->daddr	=	dst;
 	iph->saddr	=	src;
 	iph->ttl	=	ttl;
-	__ip_select_ident(net, iph, skb_shinfo(skb)->gso_segs ?: 1);
+	__ip_select_ident(dev_net(rt->dst.dev), iph,
+			  skb_shinfo(skb)->gso_segs ?: 1);
 
-	err = ip_local_out(net, sk, skb);
+	err = ip_local_out_sk(sk, skb);
 	if (unlikely(net_xmit_eval(err)))
 		pkt_len = 0;
 	iptunnel_xmit_stats(dev, pkt_len);
@@ -110,7 +101,7 @@ int __iptunnel_pull_header(struct sk_buff *skb, int hdr_len,
 			return -ENOMEM;
 
 		eh = (struct ethhdr *)skb->data;
-		if (likely(eth_proto_is_802_3(eh->h_proto)))
+		if (likely(ntohs(eh->h_proto) >= ETH_P_802_3_MIN))
 			skb->protocol = eh->h_proto;
 		else
 			skb->protocol = htons(ETH_P_802_2);
@@ -134,10 +125,12 @@ struct metadata_dst *iptunnel_metadata_reply(struct metadata_dst *md,
 	struct metadata_dst *res;
 	struct ip_tunnel_info *dst, *src;
 
-	if (!md || md->u.tun_info.mode & IP_TUNNEL_INFO_TX)
+	if (!md || md->type != METADATA_IP_TUNNEL ||
+	    md->u.tun_info.mode & IP_TUNNEL_INFO_TX)
+
 		return NULL;
 
-	res = metadata_dst_alloc(0, flags);
+	res = metadata_dst_alloc(0, METADATA_IP_TUNNEL, flags);
 	if (!res)
 		return NULL;
 
@@ -188,16 +181,15 @@ int iptunnel_handle_offloads(struct sk_buff *skb,
 EXPORT_SYMBOL_GPL(iptunnel_handle_offloads);
 
 /* Often modified stats are per cpu, other are shared (netdev->stats) */
-struct rtnl_link_stats64 *ip_tunnel_get_stats64(struct net_device *dev,
-						struct rtnl_link_stats64 *tot)
+void ip_tunnel_get_stats64(struct net_device *dev,
+			   struct rtnl_link_stats64 *tot)
 {
 	int i;
 
 	netdev_stats_to_stats64(tot, &dev->stats);
 
 	for_each_possible_cpu(i) {
-		const struct pcpu_sw_netstats *tstats =
-						   per_cpu_ptr(dev->tstats, i);
+		const struct pcpu_sw_netstats *tstats = per_cpu_ptr(dev->tstats, i);
 		u64 rx_packets, rx_bytes, tx_packets, tx_bytes;
 		unsigned int start;
 
@@ -214,8 +206,6 @@ struct rtnl_link_stats64 *ip_tunnel_get_stats64(struct net_device *dev,
 		tot->rx_bytes   += rx_bytes;
 		tot->tx_bytes   += tx_bytes;
 	}
-
-	return tot;
 }
 EXPORT_SYMBOL_GPL(ip_tunnel_get_stats64);
 
@@ -313,7 +303,6 @@ static const struct lwtunnel_encap_ops ip_tun_lwt_ops = {
 	.fill_encap = ip_tun_fill_encap_info,
 	.get_encap_size = ip_tun_encap_nlsize,
 	.cmp_encap = ip_tun_cmp_encap,
-	.owner = THIS_MODULE,
 };
 
 static const struct nla_policy ip6_tun_policy[LWTUNNEL_IP6_MAX + 1] = {
@@ -404,7 +393,6 @@ static const struct lwtunnel_encap_ops ip6_tun_lwt_ops = {
 	.fill_encap = ip6_tun_fill_encap_info,
 	.get_encap_size = ip6_tun_encap_nlsize,
 	.cmp_encap = ip_tun_cmp_encap,
-	.owner = THIS_MODULE,
 };
 
 void __init ip_tunnel_core_init(void)

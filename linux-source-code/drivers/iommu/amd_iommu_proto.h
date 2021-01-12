@@ -63,15 +63,6 @@ extern u8 amd_iommu_pc_get_max_counters(u16 devid);
 extern int amd_iommu_pc_get_set_reg_val(u16 devid, u8 bank, u8 cntr, u8 fxn,
 				    u64 *value, bool is_write);
 
-#ifdef CONFIG_IRQ_REMAP
-extern int amd_iommu_create_irq_domain(struct amd_iommu *iommu);
-#else
-static inline int amd_iommu_create_irq_domain(struct amd_iommu *iommu)
-{
-	return 0;
-}
-#endif
-
 #define PPR_SUCCESS			0x0
 #define PPR_INVALID			0x1
 #define PPR_FAILURE			0xf
@@ -93,4 +84,16 @@ static inline bool iommu_feature(struct amd_iommu *iommu, u64 f)
 	return !!(iommu->features & f);
 }
 
+static inline u64 iommu_virt_to_phys(void *vaddr)
+{
+	return (u64)__sme_set(virt_to_phys(vaddr));
+}
+
+static inline void *iommu_phys_to_virt(unsigned long paddr)
+{
+	return phys_to_virt(__sme_clr(paddr));
+}
+
+extern bool translation_pre_enabled(struct amd_iommu *iommu);
+extern struct iommu_dev_data *get_dev_data(struct device *dev);
 #endif /* _ASM_X86_AMD_IOMMU_PROTO_H  */

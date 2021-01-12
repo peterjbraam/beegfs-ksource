@@ -26,7 +26,6 @@
 #include <linux/dax.h>
 #include <linux/buffer_head.h>
 #include <linux/uio.h>
-#include <linux/list_lru.h>
 
 /*
  *	Base types
@@ -47,7 +46,7 @@ typedef enum {
 #define XBF_ASYNC	 (1 << 4) /* initiator will not wait for completion */
 #define XBF_DONE	 (1 << 5) /* all pages in the buffer uptodate */
 #define XBF_STALE	 (1 << 6) /* buffer has been staled, do not find it */
-#define XBF_WRITE_FAIL	 (1 << 24)/* async writes have failed on this buffer */
+#define XBF_WRITE_FAIL	 (1 << 25)/* async writes have failed on this buffer */
 
 /* I/O hints for the BIO layer */
 #define XBF_SYNCIO	 (1 << 10)/* treat this buffer as synchronous I/O */
@@ -70,6 +69,7 @@ typedef unsigned int xfs_buf_flags_t;
 	{ XBF_READ,		"READ" }, \
 	{ XBF_WRITE,		"WRITE" }, \
 	{ XBF_READ_AHEAD,	"READ_AHEAD" }, \
+	{ XBF_NO_IOACCT,	"NO_IOACCT" }, \
 	{ XBF_ASYNC,		"ASYNC" }, \
 	{ XBF_DONE,		"DONE" }, \
 	{ XBF_STALE,		"STALE" }, \
@@ -84,12 +84,11 @@ typedef unsigned int xfs_buf_flags_t;
 	{ _XBF_DELWRI_Q,	"DELWRI_Q" }, \
 	{ _XBF_COMPOUND,	"COMPOUND" }
 
-
 /*
  * Internal state flags.
  */
-#define XFS_BSTATE_DISPOSE	 (1 << 0)	/* buffer being discarded */
-#define XFS_BSTATE_IN_FLIGHT	 (1 << 1)	/* I/O in flight */
+#define XFS_BSTATE_DISPOSE	(1 << 0)	/* buffer being discarded */
+#define XFS_BSTATE_IN_FLIGHT	(1 << 1)	/* I/O in flight */
 
 /*
  * The xfs_buftarg contains 2 notions of "sector size" -
@@ -108,6 +107,7 @@ typedef struct xfs_buftarg {
 	dev_t			bt_dev;
 	struct block_device	*bt_bdev;
 	struct backing_dev_info	*bt_bdi;
+	struct dax_device	*bt_daxdev;
 	struct xfs_mount	*bt_mount;
 	unsigned int		bt_meta_sectorsize;
 	size_t			bt_meta_sectormask;
@@ -116,7 +116,9 @@ typedef struct xfs_buftarg {
 
 	/* LRU control structures */
 	struct shrinker		bt_shrinker;
-	struct list_lru		bt_lru;
+	struct list_head	bt_lru;
+	spinlock_t		bt_lru_lock;
+	unsigned int		bt_lru_nr;
 
 	struct percpu_counter	bt_io_count;
 } xfs_buftarg_t;
@@ -139,6 +141,7 @@ struct xfs_buf_ops {
 	char *name;
 	void (*verify_read)(struct xfs_buf *);
 	void (*verify_write)(struct xfs_buf *);
+	xfs_failaddr_t (*verify_struct)(struct xfs_buf *bp);
 };
 
 typedef struct xfs_buf {
@@ -215,20 +218,9 @@ typedef struct xfs_buf {
 } xfs_buf_t;
 
 /* Finding and Reading Buffers */
-struct xfs_buf *_xfs_buf_find(struct xfs_buftarg *target,
-			      struct xfs_buf_map *map, int nmaps,
-			      xfs_buf_flags_t flags, struct xfs_buf *new_bp);
-
-static inline struct xfs_buf *
-xfs_incore(
-	struct xfs_buftarg	*target,
-	xfs_daddr_t		blkno,
-	size_t			numblks,
-	xfs_buf_flags_t		flags)
-{
-	DEFINE_SINGLE_BUF_MAP(map, blkno, numblks);
-	return _xfs_buf_find(target, &map, 1, flags, NULL);
-}
+struct xfs_buf *xfs_buf_incore(struct xfs_buftarg *target,
+			   xfs_daddr_t blkno, size_t numblks,
+			   xfs_buf_flags_t flags);
 
 struct xfs_buf *_xfs_buf_alloc(struct xfs_buftarg *target,
 			       struct xfs_buf_map *map, int nmaps,
@@ -290,7 +282,6 @@ xfs_buf_readahead(
 	return xfs_buf_readahead_map(target, &map, 1, ops);
 }
 
-struct xfs_buf *xfs_buf_get_empty(struct xfs_buftarg *target, size_t numblks);
 void xfs_buf_set_empty(struct xfs_buf *bp, size_t numblks);
 int xfs_buf_associate_memory(struct xfs_buf *bp, void *mem, size_t length);
 
@@ -315,10 +306,18 @@ extern void xfs_buf_unlock(xfs_buf_t *);
 /* Buffer Read and Write Routines */
 extern int xfs_bwrite(struct xfs_buf *bp);
 extern void xfs_buf_ioend(struct xfs_buf *bp);
-extern void xfs_buf_ioerror(xfs_buf_t *, int);
+extern void __xfs_buf_ioerror(struct xfs_buf *bp, int error,
+		xfs_failaddr_t failaddr);
+#define xfs_buf_ioerror(bp, err) __xfs_buf_ioerror((bp), (err), __this_address)
 extern void xfs_buf_ioerror_alert(struct xfs_buf *, const char *func);
-extern void xfs_buf_submit(struct xfs_buf *bp);
-extern int xfs_buf_submit_wait(struct xfs_buf *bp);
+
+extern int __xfs_buf_submit(struct xfs_buf *bp, bool);
+static inline int xfs_buf_submit(struct xfs_buf *bp)
+{
+	bool wait = bp->b_flags & XBF_ASYNC ? false : true;
+	return __xfs_buf_submit(bp, wait);
+}
+
 extern void xfs_buf_iomove(xfs_buf_t *, size_t, size_t, void *,
 				xfs_buf_rw_t);
 #define xfs_buf_zero(bp, off, len) \
@@ -352,9 +351,18 @@ extern void xfs_buf_terminate(void);
 #define XFS_BUF_ADDR(bp)		((bp)->b_maps[0].bm_bn)
 #define XFS_BUF_SET_ADDR(bp, bno)	((bp)->b_maps[0].bm_bn = (xfs_daddr_t)(bno))
 
-static inline void xfs_buf_set_ref(struct xfs_buf *bp, int lru_ref)
+void xfs_buf_set_ref(struct xfs_buf *bp, int lru_ref);
+
+/*
+ * If the buffer is already on the LRU, do nothing. Otherwise set the buffer
+ * up with a reference count of 0 so it will be tossed from the cache when
+ * released.
+ */
+static inline void xfs_buf_oneshot(struct xfs_buf *bp)
 {
-	atomic_set(&bp->b_lru_ref, lru_ref);
+	if (!list_empty(&bp->b_lru) || atomic_read(&bp->b_lru_ref) > 1)
+		return;
+	atomic_set(&bp->b_lru_ref, 0);
 }
 
 static inline int xfs_buf_ispinned(struct xfs_buf *bp)
@@ -386,7 +394,7 @@ xfs_buf_update_cksum(struct xfs_buf *bp, unsigned long cksum_offset)
  *	Handling of buftargs.
  */
 extern xfs_buftarg_t *xfs_alloc_buftarg(struct xfs_mount *,
-			struct block_device *);
+			struct block_device *, struct dax_device *);
 extern void xfs_free_buftarg(struct xfs_mount *, struct xfs_buftarg *);
 extern void xfs_wait_buftarg(xfs_buftarg_t *);
 extern int xfs_setsize_buftarg(xfs_buftarg_t *, unsigned int);

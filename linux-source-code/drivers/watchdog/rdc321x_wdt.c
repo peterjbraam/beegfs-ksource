@@ -27,6 +27,7 @@
 #include <linux/errno.h>
 #include <linux/miscdevice.h>
 #include <linux/fs.h>
+#include <linux/init.h>
 #include <linux/ioport.h>
 #include <linux/timer.h>
 #include <linux/completion.h>
@@ -230,7 +231,7 @@ static int rdc321x_wdt_probe(struct platform_device *pdev)
 	struct resource *r;
 	struct rdc321x_wdt_pdata *pdata;
 
-	pdata = dev_get_platdata(&pdev->dev);
+	pdata = pdev->dev.platform_data;
 	if (!pdata) {
 		dev_err(&pdev->dev, "no platform data supplied\n");
 		return -ENODEV;
@@ -244,8 +245,6 @@ static int rdc321x_wdt_probe(struct platform_device *pdev)
 
 	rdc321x_wdt_device.sb_pdev = pdata->sb_pdev;
 	rdc321x_wdt_device.base_reg = r->start;
-	rdc321x_wdt_device.queue = 0;
-	rdc321x_wdt_device.default_ticks = ticks;
 
 	err = misc_register(&rdc321x_wdt_misc);
 	if (err < 0) {
@@ -260,10 +259,13 @@ static int rdc321x_wdt_probe(struct platform_device *pdev)
 				rdc321x_wdt_device.base_reg, RDC_WDT_RST);
 
 	init_completion(&rdc321x_wdt_device.stop);
+	rdc321x_wdt_device.queue = 0;
 
 	clear_bit(0, &rdc321x_wdt_device.inuse);
 
 	setup_timer(&rdc321x_wdt_device.timer, rdc321x_wdt_trigger, 0);
+
+	rdc321x_wdt_device.default_ticks = ticks;
 
 	dev_info(&pdev->dev, "watchdog init success\n");
 
@@ -286,6 +288,7 @@ static struct platform_driver rdc321x_wdt_driver = {
 	.probe = rdc321x_wdt_probe,
 	.remove = rdc321x_wdt_remove,
 	.driver = {
+		.owner = THIS_MODULE,
 		.name = "rdc321x-wdt",
 	},
 };
@@ -295,3 +298,4 @@ module_platform_driver(rdc321x_wdt_driver);
 MODULE_AUTHOR("Florian Fainelli <florian@openwrt.org>");
 MODULE_DESCRIPTION("RDC321x watchdog driver");
 MODULE_LICENSE("GPL");
+MODULE_ALIAS_MISCDEV(WATCHDOG_MINOR);

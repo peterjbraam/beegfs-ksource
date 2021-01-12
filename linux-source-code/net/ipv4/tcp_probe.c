@@ -38,7 +38,7 @@ MODULE_DESCRIPTION("TCP cwnd snooper");
 MODULE_LICENSE("GPL");
 MODULE_VERSION("1.1");
 
-static int port __read_mostly;
+static int port __read_mostly = 0;
 MODULE_PARM_DESC(port, "Port to match (0=all)");
 module_param(port, int, 0);
 
@@ -46,7 +46,7 @@ static unsigned int bufsize __read_mostly = 4096;
 MODULE_PARM_DESC(bufsize, "Log buffer size in packets (4096)");
 module_param(bufsize, uint, 0);
 
-static unsigned int fwmark __read_mostly;
+static unsigned int fwmark __read_mostly = 0;
 MODULE_PARM_DESC(fwmark, "skb mark to match (0=no mark)");
 module_param(fwmark, uint, 0);
 
@@ -187,13 +187,13 @@ static int tcpprobe_sprint(char *tbuf, int n)
 {
 	const struct tcp_log *p
 		= tcp_probe.log + tcp_probe.tail;
-	struct timespec64 ts
-		= ktime_to_timespec64(ktime_sub(p->tstamp, tcp_probe.start));
+	struct timespec tv
+		= ktime_to_timespec(ktime_sub(p->tstamp, tcp_probe.start));
 
 	return scnprintf(tbuf, n,
 			"%lu.%09lu %pISpc %pISpc %d %#x %#x %u %u %u %u %u\n",
-			(unsigned long)ts.tv_sec,
-			(unsigned long)ts.tv_nsec,
+			(unsigned long)tv.tv_sec,
+			(unsigned long)tv.tv_nsec,
 			&p->src, &p->dst, p->length, p->snd_nxt, p->snd_una,
 			p->snd_cwnd, p->ssthresh, p->snd_wnd, p->srtt, p->rcv_wnd);
 }

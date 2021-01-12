@@ -20,6 +20,10 @@
  *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  *  General Public License for more details.
  *
+ *  You should have received a copy of the GNU General Public License along
+ *  with this program; if not, write to the Free Software Foundation, Inc.,
+ *  59 Temple Place, Suite 330, Boston, MA 02111-1307 USA.
+ *
  */
 
 #include <linux/kernel.h>
@@ -27,11 +31,14 @@
 #include <linux/init.h>
 #include <linux/cpufreq.h>
 #include <linux/slab.h>
-#include <linux/acpi.h>
-#include <acpi/processor.h>
+
 #ifdef CONFIG_X86
 #include <asm/cpufeature.h>
 #endif
+
+#include <acpi/acpi_bus.h>
+#include <acpi/acpi_drivers.h>
+#include <acpi/processor.h>
 
 #define PREFIX "ACPI: "
 
@@ -83,7 +90,7 @@ static int acpi_processor_ppc_notifier(struct notifier_block *nb,
 	if (ignore_ppc)
 		return 0;
 
-	if (event != CPUFREQ_ADJUST)
+	if (event != CPUFREQ_INCOMPATIBLE)
 		return 0;
 
 	mutex_lock(&performance_mutex);
@@ -161,7 +168,7 @@ int acpi_processor_ppc_has_changed(struct acpi_processor *pr, int event_flag)
 {
 	int ret;
 
-	if (ignore_ppc || !pr->performance) {
+	if (ignore_ppc) {
 		/*
 		 * Only when it is notification event, the _OST object
 		 * will be evaluated. Otherwise it is skipped.
@@ -218,6 +225,28 @@ void acpi_processor_ppc_exit(void)
 					    CPUFREQ_POLICY_NOTIFIER);
 
 	acpi_processor_ppc_status &= ~PPC_REGISTERED;
+}
+
+/*
+ * Do a quick check if the systems looks like it should use ACPI
+ * cpufreq. We look at a _PCT method being available, but don't
+ * do a whole lot of sanity checks.
+ */
+void acpi_processor_load_module(struct acpi_processor *pr)
+{
+	static int requested;
+	acpi_status status = 0;
+	struct acpi_buffer buffer = { ACPI_ALLOCATE_BUFFER, NULL };
+
+	if (!arch_has_acpi_pdc() || requested)
+		return;
+	status = acpi_evaluate_object(pr->handle, "_PCT", NULL, &buffer);
+	if (!ACPI_FAILURE(status)) {
+		printk(KERN_INFO PREFIX "Requesting acpi_cpufreq\n");
+		request_module_nowait("acpi_cpufreq");
+		requested = 1;
+	}
+	kfree(buffer.pointer);
 }
 
 static int acpi_processor_get_performance_control(struct acpi_processor *pr)
@@ -465,11 +494,33 @@ int acpi_processor_get_performance_info(struct acpi_processor *pr)
 	return result;
 }
 EXPORT_SYMBOL_GPL(acpi_processor_get_performance_info);
-int acpi_processor_notify_smm(struct module *calling_module)
+
+int acpi_processor_pstate_control(void)
 {
 	acpi_status status;
-	static int is_done = 0;
 
+	if (!acpi_gbl_FADT.smi_command || !acpi_gbl_FADT.pstate_control)
+		return 0;
+
+	ACPI_DEBUG_PRINT((ACPI_DB_INFO,
+			  "Writing pstate_control [0x%x] to smi_command [0x%x]\n",
+			  acpi_gbl_FADT.pstate_control, acpi_gbl_FADT.smi_command));
+
+	status = acpi_os_write_port(acpi_gbl_FADT.smi_command,
+				    (u32)acpi_gbl_FADT.pstate_control, 8);
+	if (ACPI_SUCCESS(status))
+		return 1;
+
+	ACPI_EXCEPTION((AE_INFO, status,
+			"Failed to write pstate_control [0x%x] to smi_command [0x%x]",
+			acpi_gbl_FADT.pstate_control, acpi_gbl_FADT.smi_command));
+	return -EIO;
+}
+
+int acpi_processor_notify_smm(struct module *calling_module)
+{
+	static int is_done = 0;
+	int result;
 
 	if (!(acpi_processor_ppc_status & PPC_REGISTERED))
 		return -EBUSY;
@@ -492,26 +543,15 @@ int acpi_processor_notify_smm(struct module *calling_module)
 
 	is_done = -EIO;
 
-	/* Can't write pstate_control to smi_command if either value is zero */
-	if ((!acpi_gbl_FADT.smi_command) || (!acpi_gbl_FADT.pstate_control)) {
+	result = acpi_processor_pstate_control();
+	if (!result) {
 		ACPI_DEBUG_PRINT((ACPI_DB_INFO, "No SMI port or pstate_control\n"));
 		module_put(calling_module);
 		return 0;
 	}
-
-	ACPI_DEBUG_PRINT((ACPI_DB_INFO,
-			  "Writing pstate_control [0x%x] to smi_command [0x%x]\n",
-			  acpi_gbl_FADT.pstate_control, acpi_gbl_FADT.smi_command));
-
-	status = acpi_os_write_port(acpi_gbl_FADT.smi_command,
-				    (u32) acpi_gbl_FADT.pstate_control, 8);
-	if (ACPI_FAILURE(status)) {
-		ACPI_EXCEPTION((AE_INFO, status,
-				"Failed to write pstate_control [0x%x] to "
-				"smi_command [0x%x]", acpi_gbl_FADT.pstate_control,
-				acpi_gbl_FADT.smi_command));
+	if (result < 0) {
 		module_put(calling_module);
-		return status;
+		return result;
 	}
 
 	/* Success. If there's no _PPC, we need to fear nothing, so
@@ -780,7 +820,9 @@ acpi_processor_register_performance(struct acpi_processor_performance
 
 EXPORT_SYMBOL(acpi_processor_register_performance);
 
-void acpi_processor_unregister_performance(unsigned int cpu)
+void
+acpi_processor_unregister_performance(struct acpi_processor_performance
+				      *performance, unsigned int cpu)
 {
 	struct acpi_processor *pr;
 

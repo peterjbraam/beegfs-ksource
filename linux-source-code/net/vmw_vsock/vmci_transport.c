@@ -273,31 +273,6 @@ vmci_transport_send_control_pkt_bh(struct sockaddr_vm *src,
 }
 
 static int
-vmci_transport_alloc_send_control_pkt(struct sockaddr_vm *src,
-				      struct sockaddr_vm *dst,
-				      enum vmci_transport_packet_type type,
-				      u64 size,
-				      u64 mode,
-				      struct vmci_transport_waiting_info *wait,
-				      u16 proto,
-				      struct vmci_handle handle)
-{
-	struct vmci_transport_packet *pkt;
-	int err;
-
-	pkt = kmalloc(sizeof(*pkt), GFP_KERNEL);
-	if (!pkt)
-		return -ENOMEM;
-
-	err = __vmci_transport_send_control_pkt(pkt, src, dst, type, size,
-						mode, wait, proto, handle,
-						true);
-	kfree(pkt);
-
-	return err;
-}
-
-static int
 vmci_transport_send_control_pkt(struct sock *sk,
 				enum vmci_transport_packet_type type,
 				u64 size,
@@ -306,7 +281,9 @@ vmci_transport_send_control_pkt(struct sock *sk,
 				u16 proto,
 				struct vmci_handle handle)
 {
+	struct vmci_transport_packet *pkt;
 	struct vsock_sock *vsk;
+	int err;
 
 	vsk = vsock_sk(sk);
 
@@ -316,10 +293,17 @@ vmci_transport_send_control_pkt(struct sock *sk,
 	if (!vsock_addr_bound(&vsk->remote_addr))
 		return -EINVAL;
 
-	return vmci_transport_alloc_send_control_pkt(&vsk->local_addr,
-						     &vsk->remote_addr,
-						     type, size, mode,
-						     wait, proto, handle);
+	pkt = kmalloc(sizeof(*pkt), GFP_KERNEL);
+	if (!pkt)
+		return -ENOMEM;
+
+	err = __vmci_transport_send_control_pkt(pkt, &vsk->local_addr,
+						&vsk->remote_addr, type, size,
+						mode, wait, proto, handle,
+						true);
+	kfree(pkt);
+
+	return err;
 }
 
 static int vmci_transport_send_reset_bh(struct sockaddr_vm *dst,
@@ -337,29 +321,12 @@ static int vmci_transport_send_reset_bh(struct sockaddr_vm *dst,
 static int vmci_transport_send_reset(struct sock *sk,
 				     struct vmci_transport_packet *pkt)
 {
-	struct sockaddr_vm *dst_ptr;
-	struct sockaddr_vm dst;
-	struct vsock_sock *vsk;
-
 	if (pkt->type == VMCI_TRANSPORT_PACKET_TYPE_RST)
 		return 0;
-
-	vsk = vsock_sk(sk);
-
-	if (!vsock_addr_bound(&vsk->local_addr))
-		return -EINVAL;
-
-	if (vsock_addr_bound(&vsk->remote_addr)) {
-		dst_ptr = &vsk->remote_addr;
-	} else {
-		vsock_addr_init(&dst, pkt->dg.src.context,
-				pkt->src_port);
-		dst_ptr = &dst;
-	}
-	return vmci_transport_alloc_send_control_pkt(&vsk->local_addr, dst_ptr,
-					     VMCI_TRANSPORT_PACKET_TYPE_RST,
-					     0, 0, NULL, VSOCK_PROTO_INVALID,
-					     VMCI_INVALID_HANDLE);
+	return vmci_transport_send_control_pkt(sk,
+					VMCI_TRANSPORT_PACKET_TYPE_RST,
+					0, 0, NULL, VSOCK_PROTO_INVALID,
+					VMCI_INVALID_HANDLE);
 }
 
 static int vmci_transport_send_negotiate(struct sock *sk, size_t size)
@@ -658,14 +625,13 @@ static int vmci_transport_recv_dgram_cb(void *data, struct vmci_datagram *dg)
 
 	/* Attach the packet to the socket's receive queue as an sk_buff. */
 	skb = alloc_skb(size, GFP_ATOMIC);
-	if (!skb)
-		return VMCI_ERROR_NO_MEM;
-
-	/* sk_receive_skb() will do a sock_put(), so hold here. */
-	sock_hold(sk);
-	skb_put(skb, size);
-	memcpy(skb->data, dg, size);
-	sk_receive_skb(sk, skb, 0);
+	if (skb) {
+		/* sk_receive_skb() will do a sock_put(), so hold here. */
+		sock_hold(sk);
+		skb_put(skb, size);
+		memcpy(skb->data, dg, size);
+		sk_receive_skb(sk, skb, 0);
+	}
 
 	return VMCI_SUCCESS;
 }
@@ -784,7 +750,7 @@ static int vmci_transport_recv_stream_cb(void *data, struct vmci_datagram *dg)
 		/* The local context ID may be out of date, update it. */
 		vsk->local_addr.svm_cid = dst.svm_cid;
 
-		if (sk->sk_state == SS_CONNECTED)
+		if (sk->sk_state == TCP_ESTABLISHED)
 			vmci_trans(vsk)->notify_ops->handle_notify_pkt(
 					sk, pkt, true, &dst, &src,
 					&bh_process_pkt);
@@ -842,7 +808,7 @@ static void vmci_transport_handle_detach(struct sock *sk)
 		 * left in our consume queue.
 		 */
 		if (vsock_stream_has_data(vsk) <= 0) {
-			if (sk->sk_state == SS_CONNECTING) {
+			if (sk->sk_state == TCP_SYN_SENT) {
 				/* The peer may detach from a queue pair while
 				 * we are still in the connecting state, i.e.,
 				 * if the peer VM is killed after attaching to
@@ -851,12 +817,12 @@ static void vmci_transport_handle_detach(struct sock *sk)
 				 * event like a reset.
 				 */
 
-				sk->sk_state = SS_UNCONNECTED;
+				sk->sk_state = TCP_CLOSE;
 				sk->sk_err = ECONNRESET;
 				sk->sk_error_report(sk);
 				return;
 			}
-			sk->sk_state = SS_UNCONNECTED;
+			sk->sk_state = TCP_CLOSE;
 		}
 		sk->sk_state_change(sk);
 	}
@@ -924,17 +890,17 @@ static void vmci_transport_recv_pkt_work(struct work_struct *work)
 	vsock_sk(sk)->local_addr.svm_cid = pkt->dg.dst.context;
 
 	switch (sk->sk_state) {
-	case VSOCK_SS_LISTEN:
+	case TCP_LISTEN:
 		vmci_transport_recv_listen(sk, pkt);
 		break;
-	case SS_CONNECTING:
+	case TCP_SYN_SENT:
 		/* Processing of pending connections for servers goes through
 		 * the listening socket, so see vmci_transport_recv_listen()
 		 * for that path.
 		 */
 		vmci_transport_recv_connecting_client(sk, pkt);
 		break;
-	case SS_CONNECTED:
+	case TCP_ESTABLISHED:
 		vmci_transport_recv_connected(sk, pkt);
 		break;
 	default:
@@ -945,9 +911,10 @@ static void vmci_transport_recv_pkt_work(struct work_struct *work)
 		 * reset to prevent that.
 		 */
 		vmci_transport_send_reset(sk, pkt);
-		break;
+		goto out;
 	}
 
+out:
 	release_sock(sk);
 	kfree(recv_pkt_info);
 	/* Release reference obtained in the stream callback when we fetched
@@ -983,7 +950,7 @@ static int vmci_transport_recv_listen(struct sock *sk,
 		vsock_sk(pending)->local_addr.svm_cid = pkt->dg.dst.context;
 
 		switch (pending->sk_state) {
-		case SS_CONNECTING:
+		case TCP_SYN_SENT:
 			err = vmci_transport_recv_connecting_server(sk,
 								    pending,
 								    pkt);
@@ -1027,7 +994,7 @@ static int vmci_transport_recv_listen(struct sock *sk,
 	}
 
 	pending = __vsock_create(sock_net(sk), NULL, sk, GFP_KERNEL,
-				 sk->sk_type, 0);
+				 sk->sk_type);
 	if (!pending) {
 		vmci_transport_send_reset(sk, pkt);
 		return -ENOMEM;
@@ -1113,7 +1080,7 @@ static int vmci_transport_recv_listen(struct sock *sk,
 	vsock_add_pending(sk, pending);
 	sk->sk_ack_backlog++;
 
-	pending->sk_state = SS_CONNECTING;
+	pending->sk_state = TCP_SYN_SENT;
 	vmci_trans(vpending)->produce_size =
 		vmci_trans(vpending)->consume_size = qp_size;
 	vmci_trans(vpending)->queue_pair_size = qp_size;
@@ -1237,11 +1204,11 @@ vmci_transport_recv_connecting_server(struct sock *listener,
 	 * the socket will be valid until it is removed from the queue.
 	 *
 	 * If we fail sending the attach below, we remove the socket from the
-	 * connected list and move the socket to SS_UNCONNECTED before
+	 * connected list and move the socket to TCP_CLOSE before
 	 * releasing the lock, so a pending slow path processing of an incoming
 	 * packet will not see the socket in the connected state in that case.
 	 */
-	pending->sk_state = SS_CONNECTED;
+	pending->sk_state = TCP_ESTABLISHED;
 
 	vsock_insert_connected(vpending);
 
@@ -1266,13 +1233,13 @@ vmci_transport_recv_connecting_server(struct sock *listener,
 	/* Callers of accept() will be be waiting on the listening socket, not
 	 * the pending socket.
 	 */
-	listener->sk_data_ready(listener);
+	listener->sk_state_change(listener);
 
 	return 0;
 
 destroy:
 	pending->sk_err = skerr;
-	pending->sk_state = SS_UNCONNECTED;
+	pending->sk_state = TCP_CLOSE;
 	/* As long as we drop our reference, all necessary cleanup will handle
 	 * when the cleanup function drops its reference and our destruct
 	 * implementation is called.  Note that since the listen handler will
@@ -1310,7 +1277,7 @@ vmci_transport_recv_connecting_client(struct sock *sk,
 		 * accounting (it can already be found since it's in the bound
 		 * table).
 		 */
-		sk->sk_state = SS_CONNECTED;
+		sk->sk_state = TCP_ESTABLISHED;
 		sk->sk_socket->state = SS_CONNECTED;
 		vsock_insert_connected(vsk);
 		sk->sk_state_change(sk);
@@ -1378,7 +1345,7 @@ vmci_transport_recv_connecting_client(struct sock *sk,
 destroy:
 	vmci_transport_send_reset(sk, pkt);
 
-	sk->sk_state = SS_UNCONNECTED;
+	sk->sk_state = TCP_CLOSE;
 	sk->sk_err = skerr;
 	sk->sk_error_report(sk);
 	return err;
@@ -1566,7 +1533,7 @@ static int vmci_transport_recv_connected(struct sock *sk,
 		sock_set_flag(sk, SOCK_DONE);
 		vsk->peer_shutdown = SHUTDOWN_MASK;
 		if (vsock_stream_has_data(vsk) <= 0)
-			sk->sk_state = SS_DISCONNECTING;
+			sk->sk_state = TCP_CLOSING;
 
 		sk->sk_state_change(sk);
 		break;
@@ -1656,10 +1623,6 @@ static void vmci_transport_cleanup(struct work_struct *work)
 
 static void vmci_transport_destruct(struct vsock_sock *vsk)
 {
-	/* transport can be NULL if we hit a failure at init() time */
-	if (!vmci_trans(vsk))
-		return;
-
 	/* Ensure that the detach callback doesn't use the sk/vsk
 	 * we are about to destruct.
 	 */
@@ -1755,7 +1718,8 @@ static int vmci_transport_dgram_enqueue(
 	return err - sizeof(*dg);
 }
 
-static int vmci_transport_dgram_dequeue(struct vsock_sock *vsk,
+static int vmci_transport_dgram_dequeue(struct kiocb *kiocb,
+					struct vsock_sock *vsk,
 					struct msghdr *msg, size_t len,
 					int flags)
 {
@@ -1799,8 +1763,10 @@ static int vmci_transport_dgram_dequeue(struct vsock_sock *vsk,
 		goto out;
 
 	if (msg->msg_name) {
+		struct sockaddr_vm *vm_addr;
+
 		/* Provide the address of the sender. */
-		DECLARE_SOCKADDR(struct sockaddr_vm *, vm_addr, msg->msg_name);
+		vm_addr = (struct sockaddr_vm *)msg->msg_name;
 		vsock_addr_init(vm_addr, dg->src.context, dg->src.resource);
 		msg->msg_namelen = sizeof(*vm_addr);
 	}
@@ -1834,7 +1800,7 @@ static int vmci_transport_connect(struct vsock_sock *vsk)
 		err = vmci_transport_send_conn_request(
 			sk, vmci_trans(vsk)->queue_pair_size);
 		if (err < 0) {
-			sk->sk_state = SS_UNCONNECTED;
+			sk->sk_state = TCP_CLOSE;
 			return err;
 		}
 	} else {
@@ -1844,7 +1810,7 @@ static int vmci_transport_connect(struct vsock_sock *vsk)
 				sk, vmci_trans(vsk)->queue_pair_size,
 				supported_proto_versions);
 		if (err < 0) {
-			sk->sk_state = SS_UNCONNECTED;
+			sk->sk_state = TCP_CLOSE;
 			return err;
 		}
 
@@ -1861,9 +1827,9 @@ static ssize_t vmci_transport_stream_dequeue(
 	int flags)
 {
 	if (flags & MSG_PEEK)
-		return vmci_qpair_peekv(vmci_trans(vsk)->qpair, msg, len, 0);
+		return vmci_qpair_peekv(vmci_trans(vsk)->qpair, msg->msg_iov, len, 0);
 	else
-		return vmci_qpair_dequev(vmci_trans(vsk)->qpair, msg, len, 0);
+		return vmci_qpair_dequev(vmci_trans(vsk)->qpair, msg->msg_iov, len, 0);
 }
 
 static ssize_t vmci_transport_stream_enqueue(
@@ -1871,7 +1837,7 @@ static ssize_t vmci_transport_stream_enqueue(
 	struct msghdr *msg,
 	size_t len)
 {
-	return vmci_qpair_enquev(vmci_trans(vsk)->qpair, msg, len, 0);
+	return vmci_qpair_enquev(vmci_trans(vsk)->qpair, msg->msg_iov, len, 0);
 }
 
 static s64 vmci_transport_stream_has_data(struct vsock_sock *vsk)
@@ -2089,7 +2055,7 @@ static u32 vmci_transport_get_local_cid(void)
 	return vmci_get_context_id();
 }
 
-static const struct vsock_transport vmci_transport = {
+static struct vsock_transport vmci_transport = {
 	.init = vmci_transport_socket_init,
 	.destruct = vmci_transport_destruct,
 	.release = vmci_transport_release,

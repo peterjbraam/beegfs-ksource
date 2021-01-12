@@ -40,24 +40,18 @@
 #define KVM_MAX_VCORES		NR_CPUS
 #define KVM_USER_MEM_SLOTS	512
 
-#include <asm/cputhreads.h>
-#define KVM_MAX_VCPU_ID                (threads_per_subcore * KVM_MAX_VCORES)
-
 #define __KVM_HAVE_ARCH_INTC_INITIALIZED
 
 #ifdef CONFIG_KVM_MMIO
 #define KVM_COALESCED_MMIO_PAGE_OFFSET 1
 #endif
-#define KVM_HALT_POLL_NS_DEFAULT 500000
+#define KVM_HALT_POLL_NS_DEFAULT 10000	/* 10 us */
 
 /* These values are internal and can be increased later */
 #define KVM_NR_IRQCHIPS          1
 #define KVM_IRQCHIP_NUM_PINS     256
 
-/* PPC-specific vcpu->requests bit members */
-#define KVM_REQ_WATCHDOG           8
-#define KVM_REQ_EPR_EXIT           9
-
+#if !defined(CONFIG_KVM_440)
 #include <linux/mmu_notifier.h>
 
 #define KVM_ARCH_WANT_MMU_NOTIFIER
@@ -65,9 +59,11 @@
 extern int kvm_unmap_hva(struct kvm *kvm, unsigned long hva);
 extern int kvm_unmap_hva_range(struct kvm *kvm,
 			       unsigned long start, unsigned long end);
-extern int kvm_age_hva(struct kvm *kvm, unsigned long start, unsigned long end);
+extern int kvm_age_hva(struct kvm *kvm, unsigned long hva);
 extern int kvm_test_age_hva(struct kvm *kvm, unsigned long hva);
 extern void kvm_set_spte_hva(struct kvm *kvm, unsigned long hva, pte_t pte);
+
+#endif
 
 static inline void kvm_arch_mmu_notifier_invalidate_page(struct kvm *kvm,
 							 unsigned long address)
@@ -103,6 +99,7 @@ struct kvm_vm_stat {
 struct kvm_vcpu_stat {
 	u64 sum_exits;
 	u64 mmio_exits;
+	u64 dcr_exits;
 	u64 signal_exits;
 	u64 light_exits;
 	/* Account for special types of light exits: */
@@ -122,7 +119,6 @@ struct kvm_vcpu_stat {
 	u64 halt_successful_poll;
 	u64 halt_attempted_poll;
 	u64 halt_successful_wait;
-	u64 halt_poll_invalid;
 	u64 halt_wakeup;
 	u64 dbell_exits;
 	u64 gdbell_exits;
@@ -144,6 +140,7 @@ struct kvm_vcpu_stat {
 
 enum kvm_exit_types {
 	MMIO_EXITS,
+	DCR_EXITS,
 	SIGNAL_EXITS,
 	ITLB_REAL_MISS_EXITS,
 	ITLB_VIRT_MISS_EXITS,
@@ -163,7 +160,6 @@ enum kvm_exit_types {
 	EMULATED_TLBWE_EXITS,
 	EMULATED_RFI_EXITS,
 	EMULATED_RFCI_EXITS,
-	EMULATED_RFDI_EXITS,
 	DEC_EXITS,
 	EXT_INTR_EXITS,
 	HALT_WAKEUP,
@@ -195,10 +191,8 @@ struct kvmppc_spapr_tce_table {
 	struct list_head list;
 	struct kvm *kvm;
 	u64 liobn;
+	u32 window_size;
 	struct rcu_head rcu;
-	u32 page_shift;
-	u64 offset;		/* in pages */
-	u64 size;		/* window size in pages */
 	struct page *pages[0];
 };
 
@@ -241,11 +235,23 @@ struct kvm_arch_memory_slot {
 #endif /* CONFIG_KVM_BOOK3S_HV_POSSIBLE */
 };
 
+struct kvm_hpt_info {
+	/* Host virtual (linear mapping) address of guest HPT */
+	unsigned long virt;
+	/* Array of reverse mapping entries for each guest HPTE */
+	struct revmap_entry *rev;
+	/* Guest HPT size is 2**(order) bytes */
+	u32 order;
+	/* 1 if HPT allocated with CMA, 0 otherwise */
+	int cma;
+};
+
+struct kvm_resize_hpt;
+
 struct kvm_arch {
 	unsigned int lpid;
 #ifdef CONFIG_KVM_BOOK3S_HV_POSSIBLE
-	unsigned long hpt_virt;
-	struct revmap_entry *revmap;
+	struct kvm_hpt_info hpt;
 	unsigned int host_lpid;
 	unsigned long host_lpcr;
 	unsigned long sdr1;
@@ -254,16 +260,13 @@ struct kvm_arch {
 	unsigned long lpcr;
 	unsigned long vrma_slb_v;
 	int hpte_setup_done;
-	u32 hpt_order;
 	atomic_t vcpus_running;
 	u32 online_vcores;
-	unsigned long hpt_npte;
-	unsigned long hpt_mask;
 	atomic_t hpte_mod_interest;
 	cpumask_t need_tlb_flush;
-	int hpt_cma_alloc;
 	struct dentry *debugfs_dir;
 	struct dentry *htab_dentry;
+	struct kvm_resize_hpt *resize_hpt; /* protected by kvm->lock */
 #endif /* CONFIG_KVM_BOOK3S_HV_POSSIBLE */
 #ifdef CONFIG_KVM_BOOK3S_PR_POSSIBLE
 	struct mutex hpt_mutex;
@@ -271,7 +274,6 @@ struct kvm_arch {
 #ifdef CONFIG_PPC_BOOK3S_64
 	struct list_head spapr_tce_tables;
 	struct list_head rtas_tokens;
-	struct mutex rtas_token_lock;
 	DECLARE_BITMAP(enabled_hcalls, MAX_HCALL_OPCODE/4 + 1);
 #endif
 #ifdef CONFIG_KVM_MPIC
@@ -404,6 +406,17 @@ struct kvmppc_passthru_irqmap {
 #define KVMPPC_EPR_NONE		0 /* EPR not supported */
 #define KVMPPC_EPR_USER		1 /* exit to userspace to fill EPR */
 #define KVMPPC_EPR_KERNEL	2 /* in-kernel irqchip */
+
+struct kvmppc_booke_debug_reg {
+	u32 dbcr0;
+	u32 dbcr1;
+	u32 dbcr2;
+#ifdef CONFIG_KVM_E500MC
+	u32 dbcr4;
+#endif
+	u64 iac[KVMPPC_BOOKE_MAX_IAC];
+	u64 dac[KVMPPC_BOOKE_MAX_DAC];
+};
 
 #define KVMPPC_IRQ_DEFAULT	0
 #define KVMPPC_IRQ_MPIC		1
@@ -547,7 +560,6 @@ struct kvm_vcpu_arch {
 	u64 tfiar;
 
 	u32 cr_tm;
-	u64 xer_tm;
 	u64 lr_tm;
 	u64 ctr_tm;
 	u64 amr_tm;
@@ -596,19 +608,17 @@ struct kvm_vcpu_arch {
 	u32 mmucfg;
 	u32 eptcfg;
 	u32 epr;
-	u64 sprg9;
-	u32 pwrmgtcr0;
 	u32 crit_save;
-	/* guest debug registers*/
-	struct debug_reg dbg_reg;
+	struct kvmppc_booke_debug_reg dbg_reg;
 #endif
 	gpa_t paddr_accessed;
 	gva_t vaddr_accessed;
-	pgd_t *pgdir;
 
 	u8 io_gpr; /* GPR used as IO source/target */
 	u8 mmio_host_swabbed;
 	u8 mmio_sign_extend;
+	u8 dcr_needed;
+	u8 dcr_is_write;
 	u8 osi_needed;
 	u8 osi_enabled;
 	u8 papr_enabled;
@@ -663,6 +673,7 @@ struct kvm_vcpu_arch {
 
 	struct task_struct *run_task;
 	struct kvm_run *kvm_run;
+	pgd_t *pgdir;
 
 	spinlock_t vpa_update_lock;
 	struct kvmppc_vpa vpa;
@@ -711,15 +722,7 @@ struct kvm_vcpu_arch {
 #define __KVM_HAVE_ARCH_WQP
 #define __KVM_HAVE_CREATE_DEVICE
 
-static inline void kvm_arch_hardware_disable(void) {}
-static inline void kvm_arch_hardware_unsetup(void) {}
-static inline void kvm_arch_sync_events(struct kvm *kvm) {}
-static inline void kvm_arch_memslots_updated(struct kvm *kvm, struct kvm_memslots *slots) {}
-static inline void kvm_arch_flush_shadow_all(struct kvm *kvm) {}
-static inline void kvm_arch_sched_in(struct kvm_vcpu *vcpu, int cpu) {}
-static inline void kvm_arch_exit(void) {}
 static inline void kvm_arch_vcpu_blocking(struct kvm_vcpu *vcpu) {}
 static inline void kvm_arch_vcpu_unblocking(struct kvm_vcpu *vcpu) {}
-static inline void kvm_arch_vcpu_block_finish(struct kvm_vcpu *vcpu) {}
 
 #endif /* __POWERPC_KVM_HOST_H__ */

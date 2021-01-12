@@ -1,12 +1,12 @@
 #include <linux/mount.h>
 #include <linux/seq_file.h>
 #include <linux/poll.h>
-#include <linux/ns_common.h>
 #include <linux/fs_pin.h>
+#include <linux/rh_kabi.h>
 
 struct mnt_namespace {
 	atomic_t		count;
-	struct ns_common	ns;
+	unsigned int		proc_inum;
 	struct mount *	root;
 	struct list_head	list;
 	struct user_namespace	*user_ns;
@@ -14,8 +14,8 @@ struct mnt_namespace {
 	u64			seq;	/* Sequence number to prevent loops */
 	wait_queue_head_t poll;
 	u64 event;
-	unsigned int		mounts; /* # of mounts in the namespace */
-	unsigned int		pending_mounts;
+	RH_KABI_EXTEND(unsigned int	mounts) /* # of mounts in the namespace */
+	RH_KABI_EXTEND(unsigned int	pending_mounts)
 };
 
 struct mnt_pcp {
@@ -58,9 +58,9 @@ struct mount {
 	struct mnt_namespace *mnt_ns;	/* containing namespace */
 	struct mountpoint *mnt_mp;	/* where is it mounted */
 	struct hlist_node mnt_mp_list;	/* list mounts with the same mountpoint */
-	struct list_head mnt_umounting; /* list entry for umount propagation */
 #ifdef CONFIG_FSNOTIFY
-	struct hlist_head mnt_fsnotify_marks;
+	RH_KABI_REPLACE(struct hlist_head mnt_fsnotify_marks,
+		     struct fsnotify_mark_connector __rcu *mnt_fsnotify_marks)
 	__u32 mnt_fsnotify_mask;
 #endif
 	int mnt_id;			/* mount identifier */
@@ -69,6 +69,7 @@ struct mount {
 	struct hlist_head mnt_pins;
 	struct fs_pin mnt_umount;
 	struct dentry *mnt_ex_mountpoint;
+	RH_KABI_EXTEND(struct list_head mnt_umounting)	/* list entry for umount propagation */
 };
 
 #define MNT_NS_INTERNAL ERR_PTR(-EINVAL) /* distinct from any mnt_namespace */
@@ -93,6 +94,14 @@ extern struct mount *__lookup_mnt(struct vfsmount *, struct dentry *);
 
 extern int __legitimize_mnt(struct vfsmount *, unsigned);
 extern bool legitimize_mnt(struct vfsmount *, unsigned);
+
+static inline bool __path_is_mountpoint(const struct path *path)
+{
+	struct mount *m = __lookup_mnt(path->mnt, path->dentry);
+	return m && likely(!(m->mnt.mnt_flags & MNT_SYNC_UMOUNT));
+}
+
+extern int may_detach_mounts;
 
 extern void __detach_mounts(struct dentry *dentry);
 
@@ -121,6 +130,7 @@ static inline void unlock_mount_hash(void)
 }
 
 struct proc_mounts {
+	struct seq_file m;
 	struct mnt_namespace *ns;
 	struct path root;
 	int (*show)(struct seq_file *, struct vfsmount *);
@@ -129,6 +139,8 @@ struct proc_mounts {
 	loff_t cached_index;
 };
 
+#define proc_mounts(p) (container_of((p), struct proc_mounts, m))
+
 extern const struct seq_operations mounts_op;
 
 extern bool __is_local_mountpoint(struct dentry *dentry);
@@ -136,6 +148,9 @@ static inline bool is_local_mountpoint(struct dentry *dentry)
 {
 	if (!d_mountpoint(dentry))
 		return false;
+
+	if (!may_detach_mounts)
+		return true;
 
 	return __is_local_mountpoint(dentry);
 }

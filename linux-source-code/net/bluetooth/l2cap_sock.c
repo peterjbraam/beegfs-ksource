@@ -43,7 +43,7 @@ static struct bt_sock_list l2cap_sk_list = {
 static const struct proto_ops l2cap_sock_ops;
 static void l2cap_sock_init(struct sock *sk, struct sock *parent);
 static struct sock *l2cap_sock_alloc(struct net *net, struct socket *sock,
-				     int proto, gfp_t prio, int kern);
+				     int proto, gfp_t prio);
 
 bool l2cap_is_socket(struct socket *sock)
 {
@@ -944,8 +944,8 @@ static int l2cap_sock_setsockopt(struct socket *sock, int level, int optname,
 	return err;
 }
 
-static int l2cap_sock_sendmsg(struct socket *sock, struct msghdr *msg,
-			      size_t len)
+static int l2cap_sock_sendmsg(struct kiocb *iocb, struct socket *sock,
+			      struct msghdr *msg, size_t len)
 {
 	struct sock *sk = sock->sk;
 	struct l2cap_chan *chan = l2cap_pi(sk)->chan;
@@ -976,8 +976,8 @@ static int l2cap_sock_sendmsg(struct socket *sock, struct msghdr *msg,
 	return err;
 }
 
-static int l2cap_sock_recvmsg(struct socket *sock, struct msghdr *msg,
-			      size_t len, int flags)
+static int l2cap_sock_recvmsg(struct kiocb *iocb, struct socket *sock,
+			      struct msghdr *msg, size_t len, int flags)
 {
 	struct sock *sk = sock->sk;
 	struct l2cap_pinfo *pi = l2cap_pi(sk);
@@ -1004,9 +1004,9 @@ static int l2cap_sock_recvmsg(struct socket *sock, struct msghdr *msg,
 	release_sock(sk);
 
 	if (sock->type == SOCK_STREAM)
-		err = bt_sock_stream_recvmsg(sock, msg, len, flags);
+		err = bt_sock_stream_recvmsg(iocb, sock, msg, len, flags);
 	else
-		err = bt_sock_recvmsg(sock, msg, len, flags);
+		err = bt_sock_recvmsg(iocb, sock, msg, len, flags);
 
 	if (pi->chan->mode != L2CAP_MODE_ERTM)
 		return err;
@@ -1038,7 +1038,7 @@ done:
 }
 
 /* Kill socket (only if zapped and orphan)
- * Must be called on unlocked socket, with l2cap channel lock.
+ * Must be called on unlocked socket.
  */
 static void l2cap_sock_kill(struct sock *sk)
 {
@@ -1189,7 +1189,6 @@ static int l2cap_sock_release(struct socket *sock)
 {
 	struct sock *sk = sock->sk;
 	int err;
-	struct l2cap_chan *chan;
 
 	BT_DBG("sock %p, sk %p", sock, sk);
 
@@ -1199,17 +1198,9 @@ static int l2cap_sock_release(struct socket *sock)
 	bt_sock_unlink(&l2cap_sk_list, sk);
 
 	err = l2cap_sock_shutdown(sock, 2);
-	chan = l2cap_pi(sk)->chan;
-
-	l2cap_chan_hold(chan);
-	l2cap_chan_lock(chan);
 
 	sock_orphan(sk);
 	l2cap_sock_kill(sk);
-
-	l2cap_chan_unlock(chan);
-	l2cap_chan_put(chan);
-
 	return err;
 }
 
@@ -1227,15 +1218,12 @@ static void l2cap_sock_cleanup_listen(struct sock *parent)
 		BT_DBG("child chan %p state %s", chan,
 		       state_to_string(chan->state));
 
-		l2cap_chan_hold(chan);
 		l2cap_chan_lock(chan);
-
 		__clear_chan_timer(chan);
 		l2cap_chan_close(chan, ECONNRESET);
-		l2cap_sock_kill(sk);
-
 		l2cap_chan_unlock(chan);
-		l2cap_chan_put(chan);
+
+		l2cap_sock_kill(sk);
 	}
 }
 
@@ -1253,7 +1241,7 @@ static struct l2cap_chan *l2cap_sock_new_connection_cb(struct l2cap_chan *chan)
 	}
 
 	sk = l2cap_sock_alloc(sock_net(parent), NULL, BTPROTO_L2CAP,
-			      GFP_ATOMIC, 0);
+			      GFP_ATOMIC);
 	if (!sk) {
 		release_sock(parent);
 		return NULL;
@@ -1340,6 +1328,8 @@ static void l2cap_sock_teardown_cb(struct l2cap_chan *chan, int err)
 
 	parent = bt_sk(sk)->parent;
 
+	sock_set_flag(sk, SOCK_ZAPPED);
+
 	switch (chan->state) {
 	case BT_OPEN:
 	case BT_BOUND:
@@ -1359,18 +1349,15 @@ static void l2cap_sock_teardown_cb(struct l2cap_chan *chan, int err)
 
 		if (parent) {
 			bt_accept_unlink(sk);
-			parent->sk_data_ready(parent);
+			parent->sk_data_ready(parent, 0);
 		} else {
 			sk->sk_state_change(sk);
 		}
 
 		break;
 	}
+
 	release_sock(sk);
-
-	/* Only zap after cleanup to avoid use after free race */
-	sock_set_flag(sk, SOCK_ZAPPED);
-
 }
 
 static void l2cap_sock_state_change_cb(struct l2cap_chan *chan, int state,
@@ -1406,6 +1393,13 @@ static struct sk_buff *l2cap_sock_alloc_skb_cb(struct l2cap_chan *chan,
 	return skb;
 }
 
+static int l2cap_sock_memcpy_fromiovec_cb(struct l2cap_chan *chan,
+					  unsigned char *kdata,
+					  struct msghdr *msg, int len)
+{
+	return memcpy_fromiovec(kdata, msg->msg_iov, len);
+}
+
 static void l2cap_sock_ready_cb(struct l2cap_chan *chan)
 {
 	struct sock *sk = chan->data;
@@ -1421,7 +1415,7 @@ static void l2cap_sock_ready_cb(struct l2cap_chan *chan)
 	sk->sk_state_change(sk);
 
 	if (parent)
-		parent->sk_data_ready(parent);
+		parent->sk_data_ready(parent, 0);
 
 	release_sock(sk);
 }
@@ -1434,7 +1428,7 @@ static void l2cap_sock_defer_cb(struct l2cap_chan *chan)
 
 	parent = bt_sk(sk)->parent;
 	if (parent)
-		parent->sk_data_ready(parent);
+		parent->sk_data_ready(parent, 0);
 
 	release_sock(sk);
 }
@@ -1476,19 +1470,6 @@ static void l2cap_sock_suspend_cb(struct l2cap_chan *chan)
 	sk->sk_state_change(sk);
 }
 
-static int l2cap_sock_filter(struct l2cap_chan *chan, struct sk_buff *skb)
-{
-	struct sock *sk = chan->data;
-
-	switch (chan->mode) {
-	case L2CAP_MODE_ERTM:
-	case L2CAP_MODE_STREAMING:
-		return sk_filter(sk, skb);
-	}
-
-	return 0;
-}
-
 static const struct l2cap_ops l2cap_chan_ops = {
 	.name			= "L2CAP Socket Interface",
 	.new_connection		= l2cap_sock_new_connection_cb,
@@ -1503,7 +1484,7 @@ static const struct l2cap_ops l2cap_chan_ops = {
 	.set_shutdown		= l2cap_sock_set_shutdown_cb,
 	.get_sndtimeo		= l2cap_sock_get_sndtimeo_cb,
 	.alloc_skb		= l2cap_sock_alloc_skb_cb,
-	.filter			= l2cap_sock_filter,
+	.memcpy_fromiovec	= l2cap_sock_memcpy_fromiovec_cb,
 };
 
 static void l2cap_sock_destruct(struct sock *sk)
@@ -1608,12 +1589,12 @@ static struct proto l2cap_proto = {
 };
 
 static struct sock *l2cap_sock_alloc(struct net *net, struct socket *sock,
-				     int proto, gfp_t prio, int kern)
+				     int proto, gfp_t prio)
 {
 	struct sock *sk;
 	struct l2cap_chan *chan;
 
-	sk = sk_alloc(net, PF_BLUETOOTH, prio, &l2cap_proto, kern);
+	sk = sk_alloc(net, PF_BLUETOOTH, prio, &l2cap_proto);
 	if (!sk)
 		return NULL;
 
@@ -1659,7 +1640,7 @@ static int l2cap_sock_create(struct net *net, struct socket *sock, int protocol,
 
 	sock->ops = &l2cap_sock_ops;
 
-	sk = l2cap_sock_alloc(net, sock, protocol, GFP_ATOMIC, kern);
+	sk = l2cap_sock_alloc(net, sock, protocol, GFP_ATOMIC);
 	if (!sk)
 		return -ENOMEM;
 

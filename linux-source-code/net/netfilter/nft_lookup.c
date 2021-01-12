@@ -35,7 +35,7 @@ static void nft_lookup_eval(const struct nft_expr *expr,
 	const struct nft_set_ext *ext;
 	bool found;
 
-	found = set->ops->lookup(pkt->net, set, &regs->data[priv->sreg], &ext) ^
+	found = set->ops->lookup(set, &regs->data[priv->sreg], &ext) ^
 		priv->invert;
 
 	if (!found) {
@@ -43,7 +43,7 @@ static void nft_lookup_eval(const struct nft_expr *expr,
 		return;
 	}
 
-	if (set->flags & NFT_SET_MAP)
+	if (found && set->flags & NFT_SET_MAP)
 		nft_data_copy(&regs->data[priv->dreg],
 			      nft_set_ext_data(ext), set->dlen);
 
@@ -62,7 +62,6 @@ static int nft_lookup_init(const struct nft_ctx *ctx,
 			   const struct nlattr * const tb[])
 {
 	struct nft_lookup *priv = nft_expr_priv(expr);
-	u8 genmask = nft_genmask_next(ctx->net);
 	struct nft_set *set;
 	u32 flags;
 	int err;
@@ -71,12 +70,11 @@ static int nft_lookup_init(const struct nft_ctx *ctx,
 	    tb[NFTA_LOOKUP_SREG] == NULL)
 		return -EINVAL;
 
-	set = nf_tables_set_lookup(ctx->table, tb[NFTA_LOOKUP_SET], genmask);
+	set = nf_tables_set_lookup(ctx->table, tb[NFTA_LOOKUP_SET]);
 	if (IS_ERR(set)) {
 		if (tb[NFTA_LOOKUP_SET_ID]) {
 			set = nf_tables_set_lookup_byid(ctx->net,
-							tb[NFTA_LOOKUP_SET_ID],
-							genmask);
+							tb[NFTA_LOOKUP_SET_ID]);
 		}
 		if (IS_ERR(set))
 			return PTR_ERR(set);
@@ -155,7 +153,6 @@ nla_put_failure:
 	return -1;
 }
 
-static struct nft_expr_type nft_lookup_type;
 static const struct nft_expr_ops nft_lookup_ops = {
 	.type		= &nft_lookup_type,
 	.size		= NFT_EXPR_SIZE(sizeof(struct nft_lookup)),
@@ -165,20 +162,10 @@ static const struct nft_expr_ops nft_lookup_ops = {
 	.dump		= nft_lookup_dump,
 };
 
-static struct nft_expr_type nft_lookup_type __read_mostly = {
+struct nft_expr_type nft_lookup_type __read_mostly = {
 	.name		= "lookup",
 	.ops		= &nft_lookup_ops,
 	.policy		= nft_lookup_policy,
 	.maxattr	= NFTA_LOOKUP_MAX,
 	.owner		= THIS_MODULE,
 };
-
-int __init nft_lookup_module_init(void)
-{
-	return nft_register_expr(&nft_lookup_type);
-}
-
-void nft_lookup_module_exit(void)
-{
-	nft_unregister_expr(&nft_lookup_type);
-}

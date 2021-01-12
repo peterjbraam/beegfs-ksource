@@ -226,21 +226,15 @@ static inline void superio_select(int sio_cip, int ldn)
 	outb(ldn, sio_cip + 1);
 }
 
-static inline int superio_enter(int sio_cip)
+static inline void superio_enter(int sio_cip)
 {
-	if (!request_muxed_region(sio_cip, 2, DRVNAME))
-		return -EBUSY;
-
 	outb(0x87, sio_cip);
 	outb(0x87, sio_cip);
-
-	return 0;
 }
 
 static inline void superio_exit(int sio_cip)
 {
 	outb(0xaa, sio_cip);
-	release_region(sio_cip, 2);
 }
 
 /* ---------------------------------------------------------------------
@@ -885,9 +879,6 @@ static ssize_t set_vrm(struct device *dev, struct device_attribute *attr,
 	if (err)
 		return err;
 
-	if (val > 255)
-		return -EINVAL;
-
 	data->vrm = val;
 
 	return count;
@@ -1161,8 +1152,10 @@ static int vt1211_probe(struct platform_device *pdev)
 	int i, err;
 
 	data = devm_kzalloc(dev, sizeof(struct vt1211_data), GFP_KERNEL);
-	if (!data)
+	if (!data) {
+		dev_err(dev, "Out of memory\n");
 		return -ENOMEM;
+	}
 
 	res = platform_get_resource(pdev, IORESOURCE_IO, 0);
 	if (!devm_request_region(dev, res->start, resource_size(res),
@@ -1239,6 +1232,7 @@ static int vt1211_remove(struct platform_device *pdev)
 
 static struct platform_driver vt1211_driver = {
 	.driver = {
+		.owner = THIS_MODULE,
 		.name  = DRVNAME,
 	},
 	.probe  = vt1211_probe,
@@ -1288,14 +1282,11 @@ EXIT:
 
 static int __init vt1211_find(int sio_cip, unsigned short *address)
 {
-	int err;
+	int err = -ENODEV;
 	int devid;
 
-	err = superio_enter(sio_cip);
-	if (err)
-		return err;
+	superio_enter(sio_cip);
 
-	err = -ENODEV;
 	devid = force_id ? force_id : superio_inb(sio_cip, SIO_VT1211_DEVID);
 	if (devid != SIO_VT1211_ID)
 		goto EXIT;

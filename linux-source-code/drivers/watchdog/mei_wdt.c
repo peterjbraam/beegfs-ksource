@@ -389,8 +389,6 @@ static int mei_wdt_register(struct mei_wdt *wdt)
 	wdt->wdd.max_timeout = MEI_WDT_MAX_TIMEOUT;
 
 	watchdog_set_drvdata(&wdt->wdd, wdt);
-	watchdog_stop_on_reboot(&wdt->wdd);
-
 	ret = watchdog_register_device(&wdt->wdd);
 	if (ret) {
 		dev_err(dev, "unable to register watchdog device = %d.\n", ret);
@@ -701,25 +699,7 @@ static struct mei_cl_driver mei_wdt_driver = {
 	.remove = mei_wdt_remove,
 };
 
-static int __init mei_wdt_init(void)
-{
-	int ret;
-
-	ret = mei_cldev_driver_register(&mei_wdt_driver);
-	if (ret) {
-		pr_err(KBUILD_MODNAME ": module registration failed\n");
-		return ret;
-	}
-	return 0;
-}
-
-static void __exit mei_wdt_exit(void)
-{
-	mei_cldev_driver_unregister(&mei_wdt_driver);
-}
-
-module_init(mei_wdt_init);
-module_exit(mei_wdt_exit);
+module_mei_cl_driver(mei_wdt_driver);
 
 MODULE_AUTHOR("Intel Corporation");
 MODULE_LICENSE("GPL");

@@ -105,7 +105,7 @@ static int __init fail_iommu_debugfs(void)
 	struct dentry *dir = fault_create_debugfs_attr("fail_iommu",
 						       NULL, &fail_iommu);
 
-	return PTR_ERR_OR_ZERO(dir);
+	return PTR_RET(dir);
 }
 late_initcall(fail_iommu_debugfs);
 
@@ -208,7 +208,7 @@ static unsigned long iommu_range_alloc(struct device *dev,
 	 * We don't need to disable preemption here because any CPU can
 	 * safely use any IOMMU pool.
 	 */
-	pool_nr = __this_cpu_read(iommu_pool_hash) & (tbl->nr_pools - 1);
+	pool_nr = __raw_get_cpu_var(iommu_pool_hash) & (tbl->nr_pools - 1);
 
 	if (largealloc)
 		pool = &(tbl->large_pool);
@@ -307,7 +307,7 @@ static dma_addr_t iommu_alloc(struct device *dev, struct iommu_table *tbl,
 			      void *page, unsigned int npages,
 			      enum dma_data_direction direction,
 			      unsigned long mask, unsigned int align_order,
-			      unsigned long attrs)
+			      struct dma_attrs *attrs)
 {
 	unsigned long entry;
 	dma_addr_t ret = DMA_ERROR_CODE;
@@ -431,7 +431,7 @@ static void iommu_free(struct iommu_table *tbl, dma_addr_t dma_addr,
 int ppc_iommu_map_sg(struct device *dev, struct iommu_table *tbl,
 		     struct scatterlist *sglist, int nelems,
 		     unsigned long mask, enum dma_data_direction direction,
-		     unsigned long attrs)
+		     struct dma_attrs *attrs)
 {
 	dma_addr_t dma_next = 0, dma_addr;
 	struct scatterlist *s, *outs, *segstart;
@@ -479,8 +479,7 @@ int ppc_iommu_map_sg(struct device *dev, struct iommu_table *tbl,
 
 		/* Handle failure */
 		if (unlikely(entry == DMA_ERROR_CODE)) {
-			if (!(attrs & DMA_ATTR_NO_WARN) &&
-			    printk_ratelimit())
+			if (printk_ratelimit())
 				dev_info(dev, "iommu_alloc failed, tbl %p "
 					 "vaddr %lx npages %lu\n", tbl, vaddr,
 					 npages);
@@ -575,7 +574,7 @@ int ppc_iommu_map_sg(struct device *dev, struct iommu_table *tbl,
 
 void ppc_iommu_unmap_sg(struct iommu_table *tbl, struct scatterlist *sglist,
 			int nelems, enum dma_data_direction direction,
-			unsigned long attrs)
+			struct dma_attrs *attrs)
 {
 	struct scatterlist *sg;
 
@@ -754,7 +753,7 @@ void iommu_free_table(struct iommu_table *tbl, const char *node_name)
 dma_addr_t iommu_map_page(struct device *dev, struct iommu_table *tbl,
 			  struct page *page, unsigned long offset, size_t size,
 			  unsigned long mask, enum dma_data_direction direction,
-			  unsigned long attrs)
+			  struct dma_attrs *attrs)
 {
 	dma_addr_t dma_handle = DMA_ERROR_CODE;
 	void *vaddr;
@@ -765,9 +764,9 @@ dma_addr_t iommu_map_page(struct device *dev, struct iommu_table *tbl,
 
 	vaddr = page_address(page) + offset;
 	uaddr = (unsigned long)vaddr;
+	npages = iommu_num_pages(uaddr, size, IOMMU_PAGE_SIZE(tbl));
 
 	if (tbl) {
-		npages = iommu_num_pages(uaddr, size, IOMMU_PAGE_SIZE(tbl));
 		align = 0;
 		if (tbl->it_page_shift < PAGE_SHIFT && size >= PAGE_SIZE &&
 		    ((unsigned long)vaddr & ~PAGE_MASK) == 0)
@@ -777,8 +776,7 @@ dma_addr_t iommu_map_page(struct device *dev, struct iommu_table *tbl,
 					 mask >> tbl->it_page_shift, align,
 					 attrs);
 		if (dma_handle == DMA_ERROR_CODE) {
-			if (!(attrs & DMA_ATTR_NO_WARN) &&
-			    printk_ratelimit())  {
+			if (printk_ratelimit())  {
 				dev_info(dev, "iommu_alloc failed, tbl %p "
 					 "vaddr %p npages %d\n", tbl, vaddr,
 					 npages);
@@ -792,7 +790,7 @@ dma_addr_t iommu_map_page(struct device *dev, struct iommu_table *tbl,
 
 void iommu_unmap_page(struct iommu_table *tbl, dma_addr_t dma_handle,
 		      size_t size, enum dma_data_direction direction,
-		      unsigned long attrs)
+		      struct dma_attrs *attrs)
 {
 	unsigned int npages;
 
@@ -847,7 +845,7 @@ void *iommu_alloc_coherent(struct device *dev, struct iommu_table *tbl,
 	nio_pages = size >> tbl->it_page_shift;
 	io_order = get_iommu_order(size, tbl);
 	mapping = iommu_alloc(dev, tbl, ret, nio_pages, DMA_BIDIRECTIONAL,
-			      mask >> tbl->it_page_shift, io_order, 0);
+			      mask >> tbl->it_page_shift, io_order, NULL);
 	if (mapping == DMA_ERROR_CODE) {
 		free_pages((unsigned long)ret, order);
 		return NULL;

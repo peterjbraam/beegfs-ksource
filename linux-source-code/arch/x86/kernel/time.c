@@ -11,7 +11,6 @@
 
 #include <linux/clockchips.h>
 #include <linux/interrupt.h>
-#include <linux/irq.h>
 #include <linux/i8253.h>
 #include <linux/time.h>
 #include <linux/export.h>
@@ -23,11 +22,15 @@
 #include <asm/hpet.h>
 #include <asm/time.h>
 
+#ifdef CONFIG_X86_64
+DEFINE_VVAR(volatile unsigned long, jiffies) = INITIAL_JIFFIES;
+#endif
+
 unsigned long profile_pc(struct pt_regs *regs)
 {
 	unsigned long pc = instruction_pointer(regs);
 
-	if (!user_mode(regs) && in_lock_functions(pc)) {
+	if (!user_mode_vm(regs) && in_lock_functions(pc)) {
 #ifdef CONFIG_FRAME_POINTER
 		return *(unsigned long *)(regs->bp + sizeof(long));
 #else
@@ -59,14 +62,12 @@ static irqreturn_t timer_interrupt(int irq, void *dev_id)
 
 static struct irqaction irq0  = {
 	.handler = timer_interrupt,
-	.flags = IRQF_NOBALANCING | IRQF_IRQPOLL | IRQF_TIMER,
+	.flags = IRQF_DISABLED | IRQF_NOBALANCING | IRQF_IRQPOLL | IRQF_TIMER,
 	.name = "timer"
 };
 
 void __init setup_default_timer_irq(void)
 {
-	if (!nr_legacy_irqs())
-		return;
 	setup_irq(0, &irq0);
 }
 

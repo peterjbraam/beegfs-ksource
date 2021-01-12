@@ -58,7 +58,7 @@ struct sock_xprt {
 	/*
 	 * Saved socket callback addresses
 	 */
-	void			(*old_data_ready)(struct sock *);
+	void			(*old_data_ready)(struct sock *, int);
 	void			(*old_state_change)(struct sock *);
 	void			(*old_write_space)(struct sock *);
 	void			(*old_error_report)(struct sock *);

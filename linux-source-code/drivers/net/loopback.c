@@ -39,6 +39,7 @@
 #include <linux/errno.h>
 #include <linux/fcntl.h>
 #include <linux/in.h>
+#include <linux/init.h>
 
 #include <asm/uaccess.h>
 #include <asm/io.h>
@@ -97,8 +98,8 @@ static netdev_tx_t loopback_xmit(struct sk_buff *skb,
 	return NETDEV_TX_OK;
 }
 
-static struct rtnl_link_stats64 *loopback_get_stats64(struct net_device *dev,
-						      struct rtnl_link_stats64 *stats)
+static void loopback_get_stats64(struct net_device *dev,
+				 struct rtnl_link_stats64 *stats)
 {
 	u64 bytes = 0;
 	u64 packets = 0;
@@ -122,7 +123,6 @@ static struct rtnl_link_stats64 *loopback_get_stats64(struct net_device *dev,
 	stats->tx_packets = packets;
 	stats->rx_bytes   = bytes;
 	stats->tx_bytes   = bytes;
-	return stats;
 }
 
 static u32 always_on(struct net_device *dev)
@@ -136,17 +136,16 @@ static const struct ethtool_ops loopback_ethtool_ops = {
 
 static int loopback_dev_init(struct net_device *dev)
 {
-	dev->lstats = netdev_alloc_pcpu_stats(struct pcpu_lstats);
+	dev->lstats = alloc_percpu(struct pcpu_lstats);
 	if (!dev->lstats)
 		return -ENOMEM;
+
 	return 0;
 }
 
 static void loopback_dev_free(struct net_device *dev)
 {
-	dev_net(dev)->loopback_dev = NULL;
 	free_percpu(dev->lstats);
-	free_netdev(dev);
 }
 
 static const struct net_device_ops loopback_ops = {
@@ -164,7 +163,6 @@ static void loopback_setup(struct net_device *dev)
 {
 	dev->mtu		= 64 * 1024;
 	dev->hard_header_len	= ETH_HLEN;	/* 14	*/
-	dev->min_header_len	= ETH_HLEN;	/* 14	*/
 	dev->addr_len		= ETH_ALEN;	/* 6	*/
 	dev->type		= ARPHRD_LOOPBACK;	/* 0x0001*/
 	dev->flags		= IFF_LOOPBACK;
@@ -184,7 +182,8 @@ static void loopback_setup(struct net_device *dev)
 	dev->ethtool_ops	= &loopback_ethtool_ops;
 	dev->header_ops		= &eth_header_ops;
 	dev->netdev_ops		= &loopback_ops;
-	dev->destructor		= loopback_dev_free;
+	dev->extended->needs_free_netdev	= true;
+	dev->extended->priv_destructor	= loopback_dev_free;
 }
 
 /* Setup and register the loopback device. */
@@ -194,7 +193,7 @@ static __net_init int loopback_net_init(struct net *net)
 	int err;
 
 	err = -ENOMEM;
-	dev = alloc_netdev(0, "lo", NET_NAME_UNKNOWN, loopback_setup);
+	dev = alloc_netdev(0, "lo", loopback_setup);
 	if (!dev)
 		goto out;
 

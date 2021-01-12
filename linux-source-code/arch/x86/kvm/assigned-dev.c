@@ -51,9 +51,11 @@ struct kvm_assigned_dev_kernel {
 static struct kvm_assigned_dev_kernel *kvm_find_assigned_dev(struct list_head *head,
 						      int assigned_dev_id)
 {
+	struct list_head *ptr;
 	struct kvm_assigned_dev_kernel *match;
 
-	list_for_each_entry(match, head, list) {
+	list_for_each(ptr, head) {
+		match = list_entry(ptr, struct kvm_assigned_dev_kernel, list);
 		if (match->assigned_dev_id == assigned_dev_id)
 			return match;
 	}
@@ -371,10 +373,14 @@ static void kvm_free_assigned_device(struct kvm *kvm,
 
 void kvm_free_all_assigned_devices(struct kvm *kvm)
 {
-	struct kvm_assigned_dev_kernel *assigned_dev, *tmp;
+	struct list_head *ptr, *ptr2;
+	struct kvm_assigned_dev_kernel *assigned_dev;
 
-	list_for_each_entry_safe(assigned_dev, tmp,
-				 &kvm->arch.assigned_dev_head, list) {
+	list_for_each_safe(ptr, ptr2, &kvm->arch.assigned_dev_head) {
+		assigned_dev = list_entry(ptr,
+					  struct kvm_assigned_dev_kernel,
+					  list);
+
 		kvm_free_assigned_device(kvm, assigned_dev);
 	}
 }
@@ -445,8 +451,7 @@ static int assigned_device_enable_host_msix(struct kvm *kvm,
 	if (dev->entries_nr == 0)
 		return r;
 
-	r = pci_enable_msix_exact(dev->dev,
-				  dev->host_msix_entries, dev->entries_nr);
+	r = pci_enable_msix(dev->dev, dev->host_msix_entries, dev->entries_nr);
 	if (r)
 		return r;
 
@@ -676,7 +681,7 @@ static int probe_sysfs_permissions(struct pci_dev *dev)
 		if (r)
 			return r;
 
-		inode = d_backing_inode(path.dentry);
+		inode = path.dentry->d_inode;
 
 		r = inode_permission(inode, MAY_READ | MAY_WRITE | MAY_ACCESS);
 		path_put(&path);

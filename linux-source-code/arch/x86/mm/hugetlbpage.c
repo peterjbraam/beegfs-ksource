@@ -71,7 +71,9 @@ int pud_huge(pud_t pud)
 }
 #endif
 
-#ifdef CONFIG_HUGETLB_PAGE
+/* x86_64 also uses this file */
+
+#ifdef HAVE_ARCH_HUGETLB_UNMAPPED_AREA
 static unsigned long hugetlb_get_unmapped_area_bottomup(struct file *file,
 		unsigned long addr, unsigned long len,
 		unsigned long pgoff, unsigned long flags)
@@ -81,7 +83,7 @@ static unsigned long hugetlb_get_unmapped_area_bottomup(struct file *file,
 
 	info.flags = 0;
 	info.length = len;
-	info.low_limit = current->mm->mmap_legacy_base;
+	info.low_limit = TASK_UNMAPPED_BASE;
 	info.high_limit = TASK_SIZE;
 	info.align_mask = PAGE_MASK & ~huge_page_mask(h);
 	info.align_offset = 0;
@@ -154,7 +156,8 @@ hugetlb_get_unmapped_area(struct file *file, unsigned long addr,
 		return hugetlb_get_unmapped_area_topdown(file, addr, len,
 				pgoff, flags);
 }
-#endif /* CONFIG_HUGETLB_PAGE */
+
+#endif /*HAVE_ARCH_HUGETLB_UNMAPPED_AREA*/
 
 #ifdef CONFIG_X86_64
 static __init int setup_hugepagesz(char *opt)
@@ -162,10 +165,9 @@ static __init int setup_hugepagesz(char *opt)
 	unsigned long ps = memparse(opt, &opt);
 	if (ps == PMD_SIZE) {
 		hugetlb_add_hstate(PMD_SHIFT - PAGE_SHIFT);
-	} else if (ps == PUD_SIZE && boot_cpu_has(X86_FEATURE_GBPAGES)) {
+	} else if (ps == PUD_SIZE && cpu_has_gbpages) {
 		hugetlb_add_hstate(PUD_SHIFT - PAGE_SHIFT);
 	} else {
-		hugetlb_bad_size();
 		printk(KERN_ERR "hugepagesz: Unsupported page size %lu M\n",
 			ps >> 20);
 		return 0;
@@ -178,7 +180,7 @@ __setup("hugepagesz=", setup_hugepagesz);
 static __init int gigantic_pages_init(void)
 {
 	/* With compaction or CMA we can allocate gigantic pages at runtime */
-	if (boot_cpu_has(X86_FEATURE_GBPAGES) && !size_to_hstate(1UL << PUD_SHIFT))
+	if (cpu_has_gbpages && !size_to_hstate(1UL << PUD_SHIFT))
 		hugetlb_add_hstate(PUD_SHIFT - PAGE_SHIFT);
 	return 0;
 }

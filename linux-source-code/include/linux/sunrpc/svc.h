@@ -46,6 +46,7 @@ struct svc_pool {
 	struct svc_pool_stats	sp_stats;	/* statistics on pool operation */
 #define	SP_TASK_PENDING		(0)		/* still work to do even if no
 						 * xprt is queued. */
+#define SP_CONGESTED		(1)
 	unsigned long		sp_flags;
 } ____cacheline_aligned_in_smp;
 
@@ -107,7 +108,7 @@ struct svc_serv {
 	spinlock_t		sv_cb_lock;	/* protects the svc_cb_list */
 	wait_queue_head_t	sv_cb_waitq;	/* sleep here if there are no
 						 * entries in the svc_cb_list */
-	struct svc_xprt		*sv_bc_xprt;	/* callback on fore channel */
+	bool			sv_bc_enabled;	/* service uses backchannel */
 #endif /* CONFIG_SUNRPC_BACKCHANNEL */
 };
 
@@ -129,7 +130,7 @@ static inline void svc_get(struct svc_serv *serv)
  *
  * These happen to all be powers of 2, which is not strictly
  * necessary but helps enforce the real limitation, which is
- * that they should be multiples of PAGE_SIZE.
+ * that they should be multiples of PAGE_CACHE_SIZE.
  *
  * For UDP transports, a block plus NFS,RPC, and UDP headers
  * has to fit into the IP datagram limit of 64K.  The largest
@@ -403,10 +404,14 @@ struct svc_version {
 	struct svc_procedure *	vs_proc;	/* per-procedure info */
 	u32			vs_xdrsize;	/* xdrsize needed for this version */
 
-	unsigned int		vs_hidden : 1,	/* Don't register with portmapper.
-						 * Only used for nfsacl so far. */
-				vs_rpcb_optnl:1;/* Don't care the result of register.
-						 * Only used for nfsv4. */
+	/* Don't register with rpcbind */
+	bool			vs_hidden;
+
+	/* Don't care if the rpcbind registration fails */
+	bool			vs_rpcb_optnl;
+
+	/* Need xprt with congestion control */
+	bool			vs_need_cong_ctrl;
 
 	/* Override dispatch function (e.g. when caching replies).
 	 * A return value of 0 means drop the request. 
@@ -473,7 +478,6 @@ void		   svc_pool_map_put(void);
 struct svc_serv *  svc_create_pooled(struct svc_program *, unsigned int,
 			struct svc_serv_ops *);
 int		   svc_set_num_threads(struct svc_serv *, struct svc_pool *, int);
-int		   svc_set_num_threads_sync(struct svc_serv *, struct svc_pool *, int);
 int		   svc_pool_stats_open(struct svc_serv *serv, struct file *file);
 void		   svc_destroy(struct svc_serv *);
 void		   svc_shutdown_net(struct svc_serv *, struct net *);
@@ -487,6 +491,8 @@ void		   svc_wake_up(struct svc_serv *);
 void		   svc_reserve(struct svc_rqst *rqstp, int space);
 struct svc_pool *  svc_pool_for_cpu(struct svc_serv *serv, int cpu);
 char *		   svc_print_addr(struct svc_rqst *, char *, size_t);
+unsigned int	   svc_fill_write_vector(struct svc_rqst *rqstp,
+					 struct kvec *first, size_t total);
 
 #define	RPC_MAX_ADDRBUFLEN	(63U)
 

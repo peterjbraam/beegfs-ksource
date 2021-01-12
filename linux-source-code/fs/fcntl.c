@@ -51,14 +51,13 @@ static int setfl(int fd, struct file * filp, unsigned long arg)
 	       if (arg & O_NDELAY)
 		   arg |= O_NONBLOCK;
 
-	/* Pipe packetized mode is controlled by O_DIRECT flag */
-	if (!S_ISFIFO(filp->f_inode->i_mode) && (arg & O_DIRECT)) {
+	if (arg & O_DIRECT) {
 		if (!filp->f_mapping || !filp->f_mapping->a_ops ||
 			!filp->f_mapping->a_ops->direct_IO)
 				return -EINVAL;
 	}
 
-	if (filp->f_op->check_flags)
+	if (filp->f_op && filp->f_op->check_flags)
 		error = filp->f_op->check_flags(arg);
 	if (error)
 		return error;
@@ -66,7 +65,8 @@ static int setfl(int fd, struct file * filp, unsigned long arg)
 	/*
 	 * ->fasync() is responsible for setting the FASYNC bit.
 	 */
-	if (((arg ^ filp->f_flags) & FASYNC) && filp->f_op->fasync) {
+	if (((arg ^ filp->f_flags) & FASYNC) && filp->f_op &&
+			filp->f_op->fasync) {
 		error = filp->f_op->fasync(fd, filp, (arg & FASYNC) != 0);
 		if (error < 0)
 			goto out;
@@ -99,32 +99,36 @@ static void f_modown(struct file *filp, struct pid *pid, enum pid_type type,
 	write_unlock_irq(&filp->f_owner.lock);
 }
 
-void __f_setown(struct file *filp, struct pid *pid, enum pid_type type,
+int __f_setown(struct file *filp, struct pid *pid, enum pid_type type,
 		int force)
 {
-	security_file_set_fowner(filp);
+	int err;
+
+	err = security_file_set_fowner(filp);
+	if (err)
+		return err;
+
 	f_modown(filp, pid, type, force);
+	return 0;
 }
 EXPORT_SYMBOL(__f_setown);
 
-void f_setown(struct file *filp, unsigned long arg, int force)
+int f_setown(struct file *filp, unsigned long arg, int force)
 {
 	enum pid_type type;
 	struct pid *pid;
 	int who = arg;
+	int result;
 	type = PIDTYPE_PID;
 	if (who < 0) {
-		/* avoid overflow below */
-		if (who == INT_MIN)
-			return;
-
 		type = PIDTYPE_PGID;
 		who = -who;
 	}
 	rcu_read_lock();
 	pid = find_vpid(who);
-	__f_setown(filp, pid, type, force);
+	result = __f_setown(filp, pid, type, force);
 	rcu_read_unlock();
+	return result;
 }
 EXPORT_SYMBOL(f_setown);
 
@@ -178,7 +182,7 @@ static int f_setown_ex(struct file *filp, unsigned long arg)
 	if (owner.pid && !pid)
 		ret = -ESRCH;
 	else
-		 __f_setown(filp, pid, type, 1);
+		ret = __f_setown(filp, pid, type, 1);
 	rcu_read_unlock();
 
 	return ret;
@@ -248,6 +252,8 @@ static int f_getowner_uids(struct file *filp, unsigned long arg)
 static long do_fcntl(int fd, unsigned int cmd, unsigned long arg,
 		struct file *filp)
 {
+	void __user *argp = (void __user *)arg;
+	struct flock flock;
 	long err = -EINVAL;
 
 	switch (cmd) {
@@ -275,7 +281,11 @@ static long do_fcntl(int fd, unsigned int cmd, unsigned long arg,
 	case F_OFD_GETLK:
 #endif
 	case F_GETLK:
-		err = fcntl_getlk(filp, cmd, (struct flock __user *) arg);
+		if (copy_from_user(&flock, argp, sizeof(flock)))
+			return -EFAULT;
+		err = fcntl_getlk(filp, cmd, &flock);
+		if (!err && copy_to_user(argp, &flock, sizeof(flock)))
+			return -EFAULT;
 		break;
 #if BITS_PER_LONG != 32
 	/* 32-bit arches must use fcntl64() */
@@ -285,7 +295,9 @@ static long do_fcntl(int fd, unsigned int cmd, unsigned long arg,
 		/* Fallthrough */
 	case F_SETLK:
 	case F_SETLKW:
-		err = fcntl_setlk(fd, filp, cmd, (struct flock __user *) arg);
+		if (copy_from_user(&flock, argp, sizeof(flock)))
+			return -EFAULT;
+		err = fcntl_setlk(fd, filp, cmd, &flock);
 		break;
 	case F_GETOWN:
 		/*
@@ -299,8 +311,7 @@ static long do_fcntl(int fd, unsigned int cmd, unsigned long arg,
 		force_successful_syscall_return();
 		break;
 	case F_SETOWN:
-		f_setown(filp, arg, 1);
-		err = 0;
+		err = f_setown(filp, arg, 1);
 		break;
 	case F_GETOWN_EX:
 		err = f_getown_ex(filp, arg);
@@ -385,7 +396,9 @@ out:
 SYSCALL_DEFINE3(fcntl64, unsigned int, fd, unsigned int, cmd,
 		unsigned long, arg)
 {	
+	void __user *argp = (void __user *)arg;
 	struct fd f = fdget_raw(fd);
+	struct flock64 flock;
 	long err = -EBADF;
 
 	if (!f.file)
@@ -403,14 +416,21 @@ SYSCALL_DEFINE3(fcntl64, unsigned int, fd, unsigned int, cmd,
 	switch (cmd) {
 	case F_GETLK64:
 	case F_OFD_GETLK:
-		err = fcntl_getlk64(f.file, cmd, (struct flock64 __user *) arg);
+		err = -EFAULT;
+		if (copy_from_user(&flock, argp, sizeof(flock)))
+			break;
+		err = fcntl_getlk64(f.file, cmd, &flock);
+		if (!err && copy_to_user(argp, &flock, sizeof(flock)))
+			err = -EFAULT;
 		break;
 	case F_SETLK64:
 	case F_SETLKW64:
 	case F_OFD_SETLK:
 	case F_OFD_SETLKW:
-		err = fcntl_setlk64(fd, f.file, cmd,
-				(struct flock64 __user *) arg);
+		err = -EFAULT;
+		if (copy_from_user(&flock, argp, sizeof(flock)))
+			break;
+		err = fcntl_setlk64(fd, f.file, cmd, &flock);
 		break;
 	default:
 		err = do_fcntl(fd, cmd, arg, f.file);
@@ -511,11 +531,11 @@ void send_sigio(struct fown_struct *fown, int fd, int band)
 	if (!pid)
 		goto out_unlock_fown;
 	
-	read_lock(&tasklist_lock);
+	qread_lock(&tasklist_lock);
 	do_each_pid_task(pid, type, p) {
 		send_sigio_to_task(p, fown, fd, band, group);
 	} while_each_pid_task(pid, type, p);
-	read_unlock(&tasklist_lock);
+	qread_unlock(&tasklist_lock);
  out_unlock_fown:
 	read_unlock(&fown->lock);
 }
@@ -549,11 +569,11 @@ int send_sigurg(struct fown_struct *fown)
 
 	ret = 1;
 	
-	read_lock(&tasklist_lock);
+	qread_lock(&tasklist_lock);
 	do_each_pid_task(pid, type, p) {
 		send_sigurg_to_task(p, fown, group);
 	} while_each_pid_task(pid, type, p);
-	read_unlock(&tasklist_lock);
+	qread_unlock(&tasklist_lock);
  out_unlock_fown:
 	read_unlock(&fown->lock);
 	return ret;
@@ -745,10 +765,15 @@ static int __init fcntl_init(void)
 	 * Exceptions: O_NONBLOCK is a two bit define on parisc; O_NDELAY
 	 * is defined as O_NONBLOCK on some platforms and not on others.
 	 */
-	BUILD_BUG_ON(21 - 1 /* for O_RDONLY being 0 */ !=
-		HWEIGHT32(
-			(VALID_OPEN_FLAGS & ~(O_NONBLOCK | O_NDELAY)) |
-			__FMODE_EXEC | __FMODE_NONOTIFY));
+	BUILD_BUG_ON(19 - 1 /* for O_RDONLY being 0 */ != HWEIGHT32(
+		O_RDONLY	| O_WRONLY	| O_RDWR	|
+		O_CREAT		| O_EXCL	| O_NOCTTY	|
+		O_TRUNC		| O_APPEND	| /* O_NONBLOCK	| */
+		__O_SYNC	| O_DSYNC	| FASYNC	|
+		O_DIRECT	| O_LARGEFILE	| O_DIRECTORY	|
+		O_NOFOLLOW	| O_NOATIME	| O_CLOEXEC	|
+		__FMODE_EXEC	| O_PATH
+		));
 
 	fasync_cache = kmem_cache_create("fasync_cache",
 		sizeof(struct fasync_struct), 0, SLAB_PANIC, NULL);

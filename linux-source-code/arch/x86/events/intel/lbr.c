@@ -77,11 +77,9 @@ static enum {
 	 LBR_IND_JMP	|\
 	 LBR_FAR)
 
-#define LBR_FROM_FLAG_MISPRED	BIT_ULL(63)
-#define LBR_FROM_FLAG_IN_TX	BIT_ULL(62)
-#define LBR_FROM_FLAG_ABORT	BIT_ULL(61)
-
-#define LBR_FROM_SIGNEXT_2MSB	(BIT_ULL(60) | BIT_ULL(59))
+#define LBR_FROM_FLAG_MISPRED  (1ULL << 63)
+#define LBR_FROM_FLAG_IN_TX    (1ULL << 62)
+#define LBR_FROM_FLAG_ABORT    (1ULL << 61)
 
 /*
  * x86control flow change classification
@@ -109,6 +107,9 @@ enum {
 	X86_BR_ZERO_CALL	= 1 << 15,/* zero length call */
 	X86_BR_CALL_STACK	= 1 << 16,/* call stack */
 	X86_BR_IND_JMP		= 1 << 17,/* indirect jump */
+
+	X86_BR_TYPE_SAVE	= 1 << 18,/* indicate to save branch type */
+
 };
 
 #define X86_BR_PLM (X86_BR_USER | X86_BR_KERNEL)
@@ -148,8 +149,8 @@ static void intel_pmu_lbr_filter(struct cpu_hw_events *cpuc);
 
 static void __intel_pmu_lbr_enable(bool pmi)
 {
-	struct cpu_hw_events *cpuc = this_cpu_ptr(&cpu_hw_events);
-	u64 debugctl, lbr_select = 0, orig_debugctl;
+	struct cpu_hw_events *cpuc = &__get_cpu_var(cpu_hw_events);
+	u64 debugctl, lbr_select = 0;
 
 	/*
 	 * No need to unfreeze manually, as v4 can do that as part
@@ -168,7 +169,6 @@ static void __intel_pmu_lbr_enable(bool pmi)
 		wrmsrl(MSR_LBR_SELECT, lbr_select);
 
 	rdmsrl(MSR_IA32_DEBUGCTLMSR, debugctl);
-	orig_debugctl = debugctl;
 	debugctl |= DEBUGCTLMSR_LBR;
 	/*
 	 * LBR callstack does not work well with FREEZE_LBRS_ON_PMI.
@@ -177,8 +177,7 @@ static void __intel_pmu_lbr_enable(bool pmi)
 	 */
 	if (!(lbr_select & LBR_CALL_STACK))
 		debugctl |= DEBUGCTLMSR_FREEZE_LBRS_ON_PMI;
-	if (orig_debugctl != debugctl)
-		wrmsrl(MSR_IA32_DEBUGCTLMSR, debugctl);
+	wrmsrl(MSR_IA32_DEBUGCTLMSR, debugctl);
 }
 
 static void __intel_pmu_lbr_disable(void)
@@ -237,97 +236,6 @@ enum {
 	LBR_VALID,
 };
 
-/*
- * For formats with LBR_TSX flags (e.g. LBR_FORMAT_EIP_FLAGS2), bits 61:62 in
- * MSR_LAST_BRANCH_FROM_x are the TSX flags when TSX is supported, but when
- * TSX is not supported they have no consistent behavior:
- *
- *   - For wrmsr(), bits 61:62 are considered part of the sign extension.
- *   - For HW updates (branch captures) bits 61:62 are always OFF and are not
- *     part of the sign extension.
- *
- * Therefore, if:
- *
- *   1) LBR has TSX format
- *   2) CPU has no TSX support enabled
- *
- * ... then any value passed to wrmsr() must be sign extended to 63 bits and any
- * value from rdmsr() must be converted to have a 61 bits sign extension,
- * ignoring the TSX flags.
- */
-static inline bool lbr_from_signext_quirk_needed(void)
-{
-	int lbr_format = x86_pmu.intel_cap.lbr_format;
-	bool tsx_support = boot_cpu_has(X86_FEATURE_HLE) ||
-			   boot_cpu_has(X86_FEATURE_RTM);
-
-	return !tsx_support && (lbr_desc[lbr_format] & LBR_TSX);
-}
-
-DEFINE_STATIC_KEY_FALSE(lbr_from_quirk_key);
-
-/* If quirk is enabled, ensure sign extension is 63 bits: */
-inline u64 lbr_from_signext_quirk_wr(u64 val)
-{
-	if (static_branch_unlikely(&lbr_from_quirk_key)) {
-		/*
-		 * Sign extend into bits 61:62 while preserving bit 63.
-		 *
-		 * Quirk is enabled when TSX is disabled. Therefore TSX bits
-		 * in val are always OFF and must be changed to be sign
-		 * extension bits. Since bits 59:60 are guaranteed to be
-		 * part of the sign extension bits, we can just copy them
-		 * to 61:62.
-		 */
-		val |= (LBR_FROM_SIGNEXT_2MSB & val) << 2;
-	}
-	return val;
-}
-
-/*
- * If quirk is needed, ensure sign extension is 61 bits:
- */
-u64 lbr_from_signext_quirk_rd(u64 val)
-{
-	if (static_branch_unlikely(&lbr_from_quirk_key)) {
-		/*
-		 * Quirk is on when TSX is not enabled. Therefore TSX
-		 * flags must be read as OFF.
-		 */
-		val &= ~(LBR_FROM_FLAG_IN_TX | LBR_FROM_FLAG_ABORT);
-	}
-	return val;
-}
-
-static inline void wrlbr_from(unsigned int idx, u64 val)
-{
-	val = lbr_from_signext_quirk_wr(val);
-	wrmsrl(x86_pmu.lbr_from + idx, val);
-}
-
-static inline void wrlbr_to(unsigned int idx, u64 val)
-{
-	wrmsrl(x86_pmu.lbr_to + idx, val);
-}
-
-static inline u64 rdlbr_from(unsigned int idx)
-{
-	u64 val;
-
-	rdmsrl(x86_pmu.lbr_from + idx, val);
-
-	return lbr_from_signext_quirk_rd(val);
-}
-
-static inline u64 rdlbr_to(unsigned int idx)
-{
-	u64 val;
-
-	rdmsrl(x86_pmu.lbr_to + idx, val);
-
-	return val;
-}
-
 static void __intel_pmu_lbr_restore(struct x86_perf_task_context *task_ctx)
 {
 	int i;
@@ -341,33 +249,22 @@ static void __intel_pmu_lbr_restore(struct x86_perf_task_context *task_ctx)
 	}
 
 	mask = x86_pmu.lbr_nr - 1;
-	tos = task_ctx->tos;
-	for (i = 0; i < task_ctx->valid_lbrs; i++) {
+	tos = intel_pmu_lbr_tos();
+	for (i = 0; i < tos; i++) {
 		lbr_idx = (tos - i) & mask;
-		wrlbr_from(lbr_idx, task_ctx->lbr_from[i]);
-		wrlbr_to  (lbr_idx, task_ctx->lbr_to[i]);
-
+		wrmsrl(x86_pmu.lbr_from + lbr_idx, task_ctx->lbr_from[i]);
+		wrmsrl(x86_pmu.lbr_to + lbr_idx, task_ctx->lbr_to[i]);
 		if (x86_pmu.intel_cap.lbr_format == LBR_FORMAT_INFO)
 			wrmsrl(MSR_LBR_INFO_0 + lbr_idx, task_ctx->lbr_info[i]);
 	}
-
-	for (; i < x86_pmu.lbr_nr; i++) {
-		lbr_idx = (tos - i) & mask;
-		wrlbr_from(lbr_idx, 0);
-		wrlbr_to(lbr_idx, 0);
-		if (x86_pmu.intel_cap.lbr_format == LBR_FORMAT_INFO)
-			wrmsrl(MSR_LBR_INFO_0 + lbr_idx, 0);
-	}
-
-	wrmsrl(x86_pmu.lbr_tos, tos);
 	task_ctx->lbr_stack_state = LBR_NONE;
 }
 
 static void __intel_pmu_lbr_save(struct x86_perf_task_context *task_ctx)
 {
-	unsigned lbr_idx, mask;
-	u64 tos, from;
 	int i;
+	unsigned lbr_idx, mask;
+	u64 tos;
 
 	if (task_ctx->lbr_callstack_users == 0) {
 		task_ctx->lbr_stack_state = LBR_NONE;
@@ -376,24 +273,23 @@ static void __intel_pmu_lbr_save(struct x86_perf_task_context *task_ctx)
 
 	mask = x86_pmu.lbr_nr - 1;
 	tos = intel_pmu_lbr_tos();
-	for (i = 0; i < x86_pmu.lbr_nr; i++) {
+	for (i = 0; i < tos; i++) {
 		lbr_idx = (tos - i) & mask;
-		from = rdlbr_from(lbr_idx);
-		if (!from)
-			break;
-		task_ctx->lbr_from[i] = from;
-		task_ctx->lbr_to[i]   = rdlbr_to(lbr_idx);
+		rdmsrl(x86_pmu.lbr_from + lbr_idx, task_ctx->lbr_from[i]);
+		rdmsrl(x86_pmu.lbr_to + lbr_idx, task_ctx->lbr_to[i]);
 		if (x86_pmu.intel_cap.lbr_format == LBR_FORMAT_INFO)
 			rdmsrl(MSR_LBR_INFO_0 + lbr_idx, task_ctx->lbr_info[i]);
 	}
-	task_ctx->valid_lbrs = i;
-	task_ctx->tos = tos;
 	task_ctx->lbr_stack_state = LBR_VALID;
 }
 
 void intel_pmu_lbr_sched_task(struct perf_event_context *ctx, bool sched_in)
 {
+	struct cpu_hw_events *cpuc = this_cpu_ptr(&cpu_hw_events);
 	struct x86_perf_task_context *task_ctx;
+
+	if (!cpuc->lbr_users)
+		return;
 
 	/*
 	 * If LBR callstack feature is enabled and the stack was saved when
@@ -426,7 +322,7 @@ static inline bool branch_user_callstack(unsigned br_sel)
 
 void intel_pmu_lbr_add(struct perf_event *event)
 {
-	struct cpu_hw_events *cpuc = this_cpu_ptr(&cpu_hw_events);
+	struct cpu_hw_events *cpuc = &__get_cpu_var(cpu_hw_events);
 	struct x86_perf_task_context *task_ctx;
 
 	if (!x86_pmu.lbr_nr)
@@ -458,6 +354,8 @@ void intel_pmu_lbr_add(struct perf_event *event)
 	 * be 'new'. Conversely, a new event can get installed through the
 	 * context switch path for the first time.
 	 */
+	if (x86_pmu.intel_cap.pebs_baseline && event->attr.precise_ip > 0)
+		cpuc->lbr_pebs_users++;
 	perf_sched_cb_inc(event->ctx->pmu);
 	if (!cpuc->lbr_users++ && !event->total_time_running)
 		intel_pmu_lbr_reset();
@@ -465,7 +363,7 @@ void intel_pmu_lbr_add(struct perf_event *event)
 
 void intel_pmu_lbr_del(struct perf_event *event)
 {
-	struct cpu_hw_events *cpuc = this_cpu_ptr(&cpu_hw_events);
+	struct cpu_hw_events *cpuc = &__get_cpu_var(cpu_hw_events);
 	struct x86_perf_task_context *task_ctx;
 
 	if (!x86_pmu.lbr_nr)
@@ -477,14 +375,17 @@ void intel_pmu_lbr_del(struct perf_event *event)
 		task_ctx->lbr_callstack_users--;
 	}
 
+	if (x86_pmu.intel_cap.pebs_baseline && event->attr.precise_ip > 0)
+		cpuc->lbr_pebs_users--;
 	cpuc->lbr_users--;
 	WARN_ON_ONCE(cpuc->lbr_users < 0);
+	WARN_ON_ONCE(cpuc->lbr_pebs_users < 0);
 	perf_sched_cb_dec(event->ctx->pmu);
 }
 
 void intel_pmu_lbr_enable_all(bool pmi)
 {
-	struct cpu_hw_events *cpuc = this_cpu_ptr(&cpu_hw_events);
+	struct cpu_hw_events *cpuc = &__get_cpu_var(cpu_hw_events);
 
 	if (cpuc->lbr_users)
 		__intel_pmu_lbr_enable(pmi);
@@ -492,7 +393,7 @@ void intel_pmu_lbr_enable_all(bool pmi)
 
 void intel_pmu_lbr_disable_all(void)
 {
-	struct cpu_hw_events *cpuc = this_cpu_ptr(&cpu_hw_events);
+	struct cpu_hw_events *cpuc = &__get_cpu_var(cpu_hw_events);
 
 	if (cpuc->lbr_users)
 		__intel_pmu_lbr_disable();
@@ -523,6 +424,7 @@ static void intel_pmu_lbr_read_32(struct cpu_hw_events *cpuc)
 		cpuc->lbr_entries[i].in_tx	= 0;
 		cpuc->lbr_entries[i].abort	= 0;
 		cpuc->lbr_entries[i].cycles	= 0;
+		cpuc->lbr_entries[i].type	= 0;
 		cpuc->lbr_entries[i].reserved	= 0;
 	}
 	cpuc->lbr_stack.nr = i;
@@ -535,7 +437,7 @@ static void intel_pmu_lbr_read_32(struct cpu_hw_events *cpuc)
  */
 static void intel_pmu_lbr_read_64(struct cpu_hw_events *cpuc)
 {
-	bool need_info = false, call_stack = false;
+	bool need_info = false;
 	unsigned long mask = x86_pmu.lbr_nr - 1;
 	int lbr_format = x86_pmu.intel_cap.lbr_format;
 	u64 tos = intel_pmu_lbr_tos();
@@ -546,7 +448,7 @@ static void intel_pmu_lbr_read_64(struct cpu_hw_events *cpuc)
 	if (cpuc->lbr_sel) {
 		need_info = !(cpuc->lbr_sel->config & LBR_NO_INFO);
 		if (cpuc->lbr_sel->config & LBR_CALL_STACK)
-			call_stack = true;
+			num = tos;
 	}
 
 	for (i = 0; i < num; i++) {
@@ -556,15 +458,8 @@ static void intel_pmu_lbr_read_64(struct cpu_hw_events *cpuc)
 		u16 cycles = 0;
 		int lbr_flags = lbr_desc[lbr_format];
 
-		from = rdlbr_from(lbr_idx);
-		to   = rdlbr_to(lbr_idx);
-
-		/*
-		 * Read LBR call stack entries
-		 * until invalid entry (0s) is detected.
-		 */
-		if (call_stack && !from)
-			break;
+		rdmsrl(x86_pmu.lbr_from + lbr_idx, from);
+		rdmsrl(x86_pmu.lbr_to   + lbr_idx, to);
 
 		if (lbr_format == LBR_FORMAT_INFO && need_info) {
 			u64 info;
@@ -616,6 +511,7 @@ static void intel_pmu_lbr_read_64(struct cpu_hw_events *cpuc)
 		cpuc->lbr_entries[out].in_tx	 = in_tx;
 		cpuc->lbr_entries[out].abort	 = abort;
 		cpuc->lbr_entries[out].cycles	 = cycles;
+		cpuc->lbr_entries[out].type	 = 0;
 		cpuc->lbr_entries[out].reserved	 = 0;
 		out++;
 	}
@@ -624,9 +520,15 @@ static void intel_pmu_lbr_read_64(struct cpu_hw_events *cpuc)
 
 void intel_pmu_lbr_read(void)
 {
-	struct cpu_hw_events *cpuc = this_cpu_ptr(&cpu_hw_events);
+	struct cpu_hw_events *cpuc = &__get_cpu_var(cpu_hw_events);
 
-	if (!cpuc->lbr_users)
+	/*
+	 * Don't read when all LBRs users are using adaptive PEBS.
+	 *
+	 * This could be smarter and actually check the event,
+	 * but this simple approach seems to work for now.
+	 */
+	if (!cpuc->lbr_users || cpuc->lbr_users == cpuc->lbr_pebs_users)
 		return;
 
 	if (x86_pmu.intel_cap.lbr_format == LBR_FORMAT_32)
@@ -693,6 +595,10 @@ static int intel_pmu_setup_sw_lbr_filter(struct perf_event *event)
 
 	if (br_type & PERF_SAMPLE_BRANCH_CALL)
 		mask |= X86_BR_CALL | X86_BR_ZERO_CALL;
+
+	if (br_type & PERF_SAMPLE_BRANCH_TYPE_SAVE)
+		mask |= X86_BR_TYPE_SAVE;
+
 	/*
 	 * stash actual user request into reg, it may
 	 * be used by fixup code for some CPU
@@ -773,7 +679,7 @@ int intel_pmu_setup_lbr_filter(struct perf_event *event)
 
 /*
  * return the type of control flow change at address "from"
- * instruction is not necessarily a branch (in case of interrupt).
+ * intruction is not necessarily a branch (in case of interrupt).
  *
  * The branch type returned also includes the priv level of the
  * target of the control flow change (X86_BR_USER, X86_BR_KERNEL).
@@ -946,6 +852,43 @@ static int branch_type(unsigned long from, unsigned long to, int abort)
 	return ret;
 }
 
+#define X86_BR_TYPE_MAP_MAX	16
+
+static int branch_map[X86_BR_TYPE_MAP_MAX] = {
+	PERF_BR_CALL,		/* X86_BR_CALL */
+	PERF_BR_RET,		/* X86_BR_RET */
+	PERF_BR_SYSCALL,	/* X86_BR_SYSCALL */
+	PERF_BR_SYSRET,		/* X86_BR_SYSRET */
+	PERF_BR_UNKNOWN,	/* X86_BR_INT */
+	PERF_BR_UNKNOWN,	/* X86_BR_IRET */
+	PERF_BR_COND,		/* X86_BR_JCC */
+	PERF_BR_UNCOND,		/* X86_BR_JMP */
+	PERF_BR_UNKNOWN,	/* X86_BR_IRQ */
+	PERF_BR_IND_CALL,	/* X86_BR_IND_CALL */
+	PERF_BR_UNKNOWN,	/* X86_BR_ABORT */
+	PERF_BR_UNKNOWN,	/* X86_BR_IN_TX */
+	PERF_BR_UNKNOWN,	/* X86_BR_NO_TX */
+	PERF_BR_CALL,		/* X86_BR_ZERO_CALL */
+	PERF_BR_UNKNOWN,	/* X86_BR_CALL_STACK */
+	PERF_BR_IND,		/* X86_BR_IND_JMP */
+};
+
+static int
+common_branch_type(int type)
+{
+	int i;
+
+	type >>= 2; /* skip X86_BR_USER and X86_BR_KERNEL */
+
+	if (type) {
+		i = __ffs(type);
+		if (i < X86_BR_TYPE_MAP_MAX)
+			return branch_map[i];
+	}
+
+	return PERF_BR_UNKNOWN;
+}
+
 /*
  * implement actual branch filter based on user demand.
  * Hardware may not exactly satisfy that request, thus
@@ -962,7 +905,8 @@ intel_pmu_lbr_filter(struct cpu_hw_events *cpuc)
 	bool compress = false;
 
 	/* if sampling all branches, then nothing to filter */
-	if ((br_sel & X86_BR_ALL) == X86_BR_ALL)
+	if (((br_sel & X86_BR_ALL) == X86_BR_ALL) &&
+	    ((br_sel & X86_BR_TYPE_SAVE) != X86_BR_TYPE_SAVE))
 		return;
 
 	for (i = 0; i < cpuc->lbr_stack.nr; i++) {
@@ -983,6 +927,9 @@ intel_pmu_lbr_filter(struct cpu_hw_events *cpuc)
 			cpuc->lbr_entries[i].from = 0;
 			compress = true;
 		}
+
+		if ((br_sel & X86_BR_TYPE_SAVE) == X86_BR_TYPE_SAVE)
+			cpuc->lbr_entries[i].type = common_branch_type(type);
 	}
 
 	if (!compress)
@@ -1000,6 +947,28 @@ intel_pmu_lbr_filter(struct cpu_hw_events *cpuc)
 		}
 		i++;
 	}
+}
+
+void intel_pmu_store_pebs_lbrs(struct pebs_lbr *lbr)
+{
+	struct cpu_hw_events *cpuc = this_cpu_ptr(&cpu_hw_events);
+	int i;
+
+	cpuc->lbr_stack.nr = x86_pmu.lbr_nr;
+	for (i = 0; i < x86_pmu.lbr_nr; i++) {
+		u64 info = lbr->lbr[i].info;
+		struct perf_branch_entry *e = &cpuc->lbr_entries[i];
+
+		e->from		= lbr->lbr[i].from;
+		e->to		= lbr->lbr[i].to;
+		e->mispred	= !!(info & LBR_INFO_MISPRED);
+		e->predicted	= !(info & LBR_INFO_MISPRED);
+		e->in_tx	= !!(info & LBR_INFO_IN_TX);
+		e->abort	= !!(info & LBR_INFO_ABORT);
+		e->cycles	= info & LBR_INFO_CYCLES;
+		e->reserved	= 0;
+	}
+	intel_pmu_lbr_filter(cpuc);
 }
 
 /*
@@ -1036,7 +1005,6 @@ static const int snb_lbr_sel_map[PERF_SAMPLE_BRANCH_MAX_SHIFT] = {
 	[PERF_SAMPLE_BRANCH_IND_CALL_SHIFT]	= LBR_IND_CALL,
 	[PERF_SAMPLE_BRANCH_COND_SHIFT]		= LBR_JCC,
 	[PERF_SAMPLE_BRANCH_IND_JUMP_SHIFT]	= LBR_IND_JMP,
-	[PERF_SAMPLE_BRANCH_CALL_SHIFT]		= LBR_REL_CALL,
 };
 
 static const int hsw_lbr_sel_map[PERF_SAMPLE_BRANCH_MAX_SHIFT] = {
@@ -1052,7 +1020,6 @@ static const int hsw_lbr_sel_map[PERF_SAMPLE_BRANCH_MAX_SHIFT] = {
 	[PERF_SAMPLE_BRANCH_CALL_STACK_SHIFT]	= LBR_REL_CALL | LBR_IND_CALL
 						| LBR_RETURN | LBR_CALL_STACK,
 	[PERF_SAMPLE_BRANCH_IND_JUMP_SHIFT]	= LBR_IND_JMP,
-	[PERF_SAMPLE_BRANCH_CALL_SHIFT]		= LBR_REL_CALL,
 };
 
 /* core */
@@ -1118,9 +1085,6 @@ void intel_pmu_lbr_init_hsw(void)
 
 	x86_pmu.lbr_sel_mask = LBR_SEL_MASK;
 	x86_pmu.lbr_sel_map  = hsw_lbr_sel_map;
-
-	if (lbr_from_signext_quirk_needed())
-		static_branch_enable(&lbr_from_quirk_key);
 }
 
 /* skylake */
@@ -1151,7 +1115,7 @@ void __init intel_pmu_lbr_init_atom(void)
 	 * on PMU interrupt
 	 */
 	if (boot_cpu_data.x86_model == 28
-	    && boot_cpu_data.x86_stepping < 10) {
+	    && boot_cpu_data.x86_mask < 10) {
 		pr_cont("LBR disabled due to erratum");
 		return;
 	}

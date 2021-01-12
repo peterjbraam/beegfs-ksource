@@ -15,16 +15,12 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/mm.h>
-#include <linux/highmem.h>
 #include <linux/slab.h>
+#include <linux/sched.h>
+#include <linux/atomic.h>
+#include <linux/jump_label.h>
+#include <asm/thread_info.h>
 #include <asm/sections.h>
-
-enum {
-	BAD_STACK = -1,
-	NOT_STACK = 0,
-	GOOD_FRAME,
-	GOOD_STACK,
-};
 
 /*
  * Checks if a given pointer and length is contained by the current
@@ -125,7 +121,7 @@ static inline const char *check_kernel_text_object(const void *ptr,
 static inline const char *check_bogus_address(const void *ptr, unsigned long n)
 {
 	/* Reject if object wraps past end of memory. */
-	if ((unsigned long)ptr + (n - 1) < (unsigned long)ptr)
+	if (ptr + n < ptr)
 		return "<wrapped address>";
 
 	/* Reject if NULL or ZERO-allocation. */
@@ -208,22 +204,14 @@ static inline const char *check_heap_object(const void *ptr, unsigned long n,
 	 * Some architectures (arm64) return true for virt_addr_valid() on
 	 * vmalloced addresses. Work around this by checking for vmalloc
 	 * first.
-	 *
-	 * We also need to check for module addresses explicitly since we
-	 * may copy static data from modules to userspace
 	 */
-	if (is_vmalloc_or_module_addr(ptr))
+	if (is_vmalloc_addr(ptr))
 		return NULL;
 
 	if (!virt_addr_valid(ptr))
 		return NULL;
 
-	/*
-	 * When CONFIG_HIGHMEM=y, kmap_to_page() will give either the
-	 * highmem page or fallback to virt_to_page(). The following
-	 * is effectively a highmem-aware virt_to_head_page().
-	 */
-	page = compound_head(kmap_to_page((void *)ptr));
+	page = virt_to_head_page(ptr);
 
 	/* Check slab allocator for flags and size. */
 	if (PageSlab(page))
@@ -232,6 +220,8 @@ static inline const char *check_heap_object(const void *ptr, unsigned long n,
 	/* Verify object does not incorrectly span multiple pages. */
 	return check_page_span(ptr, n, page, to_user);
 }
+
+static struct static_key bypass_usercopy_checks = STATIC_KEY_INIT_FALSE;
 
 /*
  * Validates that the given object is:
@@ -242,6 +232,9 @@ static inline const char *check_heap_object(const void *ptr, unsigned long n,
 void __check_object_size(const void *ptr, unsigned long n, bool to_user)
 {
 	const char *err;
+
+	if (static_key_enabled(&bypass_usercopy_checks))
+		return;
 
 	/* Skip all tests if size is zero. */
 	if (!n)
@@ -284,3 +277,22 @@ report:
 	report_usercopy(ptr, n, to_user, err);
 }
 EXPORT_SYMBOL(__check_object_size);
+
+
+static bool enable_checks __initdata = true;
+
+static int __init parse_hardened_usercopy(char *str)
+{
+	return strtobool(str, &enable_checks);
+}
+
+__setup("hardened_usercopy=", parse_hardened_usercopy);
+
+static int __init set_hardened_usercopy(void)
+{
+	if (enable_checks == false)
+		static_key_slow_inc(&bypass_usercopy_checks);
+	return 1;
+}
+
+late_initcall(set_hardened_usercopy);

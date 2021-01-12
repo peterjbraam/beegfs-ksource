@@ -55,7 +55,6 @@ static const char atl2_driver_name[] = "atl2";
 static const char atl2_driver_string[] = "Atheros(R) L2 Ethernet Driver";
 static const char atl2_copyright[] = "Copyright (c) 2007 Atheros Corporation.";
 static const char atl2_driver_version[] = ATL2_DRV_VERSION;
-static const struct ethtool_ops atl2_ethtool_ops;
 
 MODULE_AUTHOR("Atheros Corporation <xiong.huang@atheros.com>, Chris Snook <csnook@redhat.com>");
 MODULE_DESCRIPTION("Atheros Fast Ethernet Network Driver");
@@ -71,6 +70,8 @@ static const struct pci_device_id atl2_pci_tbl[] = {
 	{0,}
 };
 MODULE_DEVICE_TABLE(pci, atl2_pci_tbl);
+
+static void atl2_set_ethtool_ops(struct net_device *netdev);
 
 static void atl2_check_options(struct atl2_adapter *adapter);
 
@@ -1313,7 +1314,7 @@ static const struct net_device_ops atl2_netdev_ops = {
 	.ndo_set_rx_mode	= atl2_set_multi,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_set_mac_address	= atl2_set_mac,
-	.ndo_change_mtu		= atl2_change_mtu,
+	.ndo_change_mtu_rh74	= atl2_change_mtu,
 	.ndo_fix_features	= atl2_fix_features,
 	.ndo_set_features	= atl2_set_features,
 	.ndo_do_ioctl		= atl2_ioctl,
@@ -1338,10 +1339,12 @@ static int atl2_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
 	struct net_device *netdev;
 	struct atl2_adapter *adapter;
-	static int cards_found = 0;
+	static int cards_found;
 	unsigned long mmio_start;
 	int mmio_len;
 	int err;
+
+	cards_found = 0;
 
 	err = pci_enable_device(pdev);
 	if (err)
@@ -1394,7 +1397,7 @@ static int atl2_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	atl2_setup_pcicmd(pdev);
 
 	netdev->netdev_ops = &atl2_netdev_ops;
-	netdev->ethtool_ops = &atl2_ethtool_ops;
+	atl2_set_ethtool_ops(netdev);
 	netdev->watchdog_timeo = 5 * HZ;
 	strncpy(netdev->name, pci_name(pdev), sizeof(netdev->name) - 1);
 
@@ -1434,11 +1437,13 @@ static int atl2_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	atl2_check_options(adapter);
 
-	setup_timer(&adapter->watchdog_timer, atl2_watchdog,
-		    (unsigned long)adapter);
+	init_timer(&adapter->watchdog_timer);
+	adapter->watchdog_timer.function = atl2_watchdog;
+	adapter->watchdog_timer.data = (unsigned long) adapter;
 
-	setup_timer(&adapter->phy_config_timer, atl2_phy_config,
-		    (unsigned long)adapter);
+	init_timer(&adapter->phy_config_timer);
+	adapter->phy_config_timer.function = atl2_phy_config;
+	adapter->phy_config_timer.data = (unsigned long) adapter;
 
 	INIT_WORK(&adapter->reset_task, atl2_reset_task);
 	INIT_WORK(&adapter->link_chg_task, atl2_link_chg_task);
@@ -1765,8 +1770,8 @@ static int atl2_get_settings(struct net_device *netdev,
 		else
 			ecmd->duplex = DUPLEX_HALF;
 	} else {
-		ethtool_cmd_speed_set(ecmd, SPEED_UNKNOWN);
-		ecmd->duplex = DUPLEX_UNKNOWN;
+		ethtool_cmd_speed_set(ecmd, -1);
+		ecmd->duplex = -1;
 	}
 
 	ecmd->autoneg = AUTONEG_ENABLE;
@@ -2095,6 +2100,11 @@ static const struct ethtool_ops atl2_ethtool_ops = {
 	.get_eeprom		= atl2_get_eeprom,
 	.set_eeprom		= atl2_set_eeprom,
 };
+
+static void atl2_set_ethtool_ops(struct net_device *netdev)
+{
+	SET_ETHTOOL_OPS(netdev, &atl2_ethtool_ops);
+}
 
 #define LBYTESWAP(a)  ((((a) & 0x00ff00ff) << 8) | \
 	(((a) & 0xff00ff00) >> 8))
@@ -2485,6 +2495,7 @@ static s32 atl2_get_speed_and_duplex(struct atl2_hw *hw, u16 *speed,
 		break;
 	default:
 		return ATLX_ERR_PHY_SPEED;
+		break;
 	}
 
 	if (phy_data & MII_ATLX_PSSR_DPLX)
@@ -2924,9 +2935,11 @@ static int atl2_validate_option(int *value, struct atl2_option *opt)
 		case OPTION_ENABLED:
 			printk(KERN_INFO "%s Enabled\n", opt->name);
 			return 0;
+			break;
 		case OPTION_DISABLED:
 			printk(KERN_INFO "%s Disabled\n", opt->name);
 			return 0;
+			break;
 		}
 		break;
 	case range_option:

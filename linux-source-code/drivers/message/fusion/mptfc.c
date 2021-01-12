@@ -204,7 +204,7 @@ mptfc_block_error_handler(struct scsi_cmnd *SCpnt,
 	 || (loops > 0 && ioc->active == 0)) {
 		spin_unlock_irqrestore(shost->host_lock, flags);
 		dfcprintk (ioc, printk(MYIOC_s_DEBUG_FMT
-			"mptfc_block_error_handler.%d: %d:%llu, port status is "
+			"mptfc_block_error_handler.%d: %d:%d, port status is "
 			"%x, active flag %d, deferring %s recovery.\n",
 			ioc->name, ioc->sh->host_no,
 			SCpnt->device->id, SCpnt->device->lun,
@@ -218,7 +218,7 @@ mptfc_block_error_handler(struct scsi_cmnd *SCpnt,
 	if (ready == DID_NO_CONNECT || !SCpnt->device->hostdata
 	 || ioc->active == 0) {
 		dfcprintk (ioc, printk(MYIOC_s_DEBUG_FMT
-			"%s.%d: %d:%llu, failing recovery, "
+			"%s.%d: %d:%d, failing recovery, "
 			"port state %x, active %d, vdevice %p.\n", caller,
 			ioc->name, ioc->sh->host_no,
 			SCpnt->device->id, SCpnt->device->lun, ready,
@@ -226,7 +226,7 @@ mptfc_block_error_handler(struct scsi_cmnd *SCpnt,
 		return FAILED;
 	}
 	dfcprintk (ioc, printk(MYIOC_s_DEBUG_FMT
-		"%s.%d: %d:%llu, executing recovery.\n", caller,
+		"%s.%d: %d:%d, executing recovery.\n", caller,
 		ioc->name, ioc->sh->host_no,
 		SCpnt->device->id, SCpnt->device->lun));
 	return (*func)(SCpnt);
@@ -525,7 +525,8 @@ mptfc_target_destroy(struct scsi_target *starget)
 		if (ri)	/* better be! */
 			ri->starget = NULL;
 	}
-	kfree(starget->hostdata);
+	if (starget->hostdata)
+		kfree(starget->hostdata);
 	starget->hostdata = NULL;
 }
 
@@ -1324,11 +1325,10 @@ mptfc_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	snprintf(ioc->fc_rescan_work_q_name, sizeof(ioc->fc_rescan_work_q_name),
 		 "mptfc_wq_%d", sh->host_no);
 	ioc->fc_rescan_work_q =
-		alloc_ordered_workqueue(ioc->fc_rescan_work_q_name,
-					WQ_MEM_RECLAIM);
+		create_singlethread_workqueue(ioc->fc_rescan_work_q_name);
 	if (!ioc->fc_rescan_work_q) {
 		error = -ENOMEM;
-		goto out_mptfc_probe;
+		goto out_mptfc_host;
 	}
 
 	/*
@@ -1349,6 +1349,9 @@ mptfc_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	flush_workqueue(ioc->fc_rescan_work_q);
 
 	return 0;
+
+out_mptfc_host:
+	scsi_remove_host(sh);
 
 out_mptfc_probe:
 
@@ -1528,6 +1531,8 @@ static void mptfc_remove(struct pci_dev *pdev)
 			ioc->fc_data.fc_port_page1[ii].data = NULL;
 		}
 	}
+
+	scsi_remove_host(ioc->sh);
 
 	mptscsih_remove(pdev);
 }

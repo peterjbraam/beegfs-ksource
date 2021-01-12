@@ -187,7 +187,7 @@ static int scm_request_prepare(struct scm_request *scmrq)
 	struct request *req = scmrq->request[pos];
 	struct req_iterator iter;
 	struct aidaw *aidaw;
-	struct bio_vec bv;
+	struct bio_vec *bv;
 
 	aidaw = scm_aidaw_fetch(scmrq, blk_rq_bytes(req));
 	if (!aidaw)
@@ -201,9 +201,9 @@ static int scm_request_prepare(struct scm_request *scmrq)
 	msb->data_addr = (u64) aidaw;
 
 	rq_for_each_segment(bv, req, iter) {
-		WARN_ON(bv.bv_offset);
-		msb->blk_count += bv.bv_len >> 12;
-		aidaw->data_addr = (u64) page_address(bv.bv_page);
+		WARN_ON(bv->bv_offset);
+		msb->blk_count += bv->bv_len >> 12;
+		aidaw->data_addr = (u64) page_address(bv->bv_page);
 		aidaw++;
 	}
 
@@ -300,12 +300,8 @@ static void scm_blk_request(struct request_queue *rq)
 	struct request *req;
 
 	while ((req = blk_peek_request(rq))) {
-		if (req->cmd_type != REQ_TYPE_FS) {
-			blk_start_request(req);
-			blk_dump_rq_flags(req, KMSG_COMPONENT " bad request");
-			__blk_end_request_all(req, -EIO);
+		if (req->cmd_type != REQ_TYPE_FS)
 			continue;
-		}
 
 		if (!scm_permit_request(bdev, req))
 			goto out;
@@ -512,6 +508,7 @@ int scm_blk_dev_setup(struct scm_blk_dev *bdev, struct scm_device *scmdev)
 		goto out_queue;
 
 	rq->queuedata = scmdev;
+	bdev->gendisk->driverfs_dev = &scmdev->dev;
 	bdev->gendisk->private_data = scmdev;
 	bdev->gendisk->fops = &scm_blk_devops;
 	bdev->gendisk->queue = rq;
@@ -530,7 +527,7 @@ int scm_blk_dev_setup(struct scm_blk_dev *bdev, struct scm_device *scmdev)
 
 	/* 512 byte sectors */
 	set_capacity(bdev->gendisk, scmdev->size >> 9);
-	device_add_disk(&scmdev->dev, bdev->gendisk);
+	add_disk(bdev->gendisk);
 	return 0;
 
 out_queue:

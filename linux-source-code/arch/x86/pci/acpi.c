@@ -114,16 +114,6 @@ static const struct dmi_system_id pci_crs_quirks[] __initconst = {
 			DMI_MATCH(DMI_BIOS_VERSION, "6JET85WW (1.43 )"),
 		},
 	},
-	/* https://bugzilla.kernel.org/show_bug.cgi?id=42606 */
-	{
-		.callback = set_nouse_crs,
-		.ident = "Supermicro X8DTH",
-		.matches = {
-			DMI_MATCH(DMI_SYS_VENDOR, "Supermicro"),
-			DMI_MATCH(DMI_PRODUCT_NAME, "X8DTH-i/6/iF/6F"),
-			DMI_MATCH(DMI_BIOS_VERSION, "2.0a"),
-		},
-	},
 
 	/* https://bugzilla.kernel.org/show_bug.cgi?id=15362 */
 	{
@@ -385,16 +375,9 @@ struct pci_bus *pci_acpi_scan_root(struct acpi_pci_root *root)
 
 int pcibios_root_bridge_prepare(struct pci_host_bridge *bridge)
 {
-	/*
-	 * We pass NULL as parent to pci_create_root_bus(), so if it is not NULL
-	 * here, pci_create_root_bus() has been called by someone else and
-	 * sysdata is likely to be different from what we expect.  Let it go in
-	 * that case.
-	 */
-	if (!bridge->dev.parent) {
-		struct pci_sysdata *sd = bridge->bus->sysdata;
-		ACPI_COMPANION_SET(&bridge->dev, sd->companion);
-	}
+	struct pci_sysdata *sd = bridge->bus->sysdata;
+
+	ACPI_COMPANION_SET(&bridge->dev, sd->companion);
 	return 0;
 }
 

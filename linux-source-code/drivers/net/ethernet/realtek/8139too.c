@@ -112,7 +112,6 @@
 #include <linux/io.h>
 #include <linux/uaccess.h>
 #include <linux/gfp.h>
-#include <linux/if_vlan.h>
 #include <asm/irq.h>
 
 #define RTL8139_DRIVER_NAME   DRV_NAME " Fast Ethernet driver " DRV_VERSION
@@ -183,13 +182,10 @@ static int debug = -1;
 /* Number of Tx descriptor registers. */
 #define NUM_TX_DESC	4
 
-/* max supported ethernet frame size -- must be at least (dev->mtu+18+4).*/
-#define MAX_ETH_FRAME_SIZE	1792
+/* max supported ethernet frame size -- must be at least (dev->mtu+14+4).*/
+#define MAX_ETH_FRAME_SIZE	1536
 
-/* max supported payload size */
-#define MAX_ETH_DATA_SIZE (MAX_ETH_FRAME_SIZE - VLAN_ETH_HLEN - ETH_FCS_LEN)
-
-/* Size of the Tx bounce buffers -- must be at least (dev->mtu+18+4). */
+/* Size of the Tx bounce buffers -- must be at least (dev->mtu+14+4). */
 #define TX_BUF_SIZE	MAX_ETH_FRAME_SIZE
 #define TX_BUF_TOT_LEN	(TX_BUF_SIZE * NUM_TX_DESC)
 
@@ -653,9 +649,8 @@ static int rtl8139_poll(struct napi_struct *napi, int budget);
 static irqreturn_t rtl8139_interrupt (int irq, void *dev_instance);
 static int rtl8139_close (struct net_device *dev);
 static int netdev_ioctl (struct net_device *dev, struct ifreq *rq, int cmd);
-static struct rtnl_link_stats64 *rtl8139_get_stats64(struct net_device *dev,
-						    struct rtnl_link_stats64
-						    *stats);
+static void rtl8139_get_stats64(struct net_device *dev,
+				struct rtnl_link_stats64 *stats);
 static void rtl8139_set_rx_mode (struct net_device *dev);
 static void __set_rx_mode (struct net_device *dev);
 static void rtl8139_hw_start (struct net_device *dev);
@@ -731,6 +726,7 @@ static void __rtl8139_cleanup_dev (struct net_device *dev)
 	pci_release_regions (pdev);
 
 	free_netdev(dev);
+	pci_set_drvdata (pdev, NULL);
 }
 
 
@@ -787,15 +783,12 @@ static struct net_device *rtl8139_init_board(struct pci_dev *pdev)
 	if (rc)
 		goto err_out;
 
-	disable_dev_on_err = 1;
 	rc = pci_request_regions (pdev, DRV_NAME);
 	if (rc)
 		goto err_out;
+	disable_dev_on_err = 1;
 
 	pci_set_master (pdev);
-
-	u64_stats_init(&tp->rx_stats.syncp);
-	u64_stats_init(&tp->tx_stats.syncp);
 
 retry:
 	/* PIO bar register comes first. */
@@ -924,19 +917,11 @@ static int rtl8139_set_features(struct net_device *dev, netdev_features_t featur
 	return 0;
 }
 
-static int rtl8139_change_mtu(struct net_device *dev, int new_mtu)
-{
-	if (new_mtu < 68 || new_mtu > MAX_ETH_DATA_SIZE)
-		return -EINVAL;
-	dev->mtu = new_mtu;
-	return 0;
-}
-
 static const struct net_device_ops rtl8139_netdev_ops = {
 	.ndo_open		= rtl8139_open,
 	.ndo_stop		= rtl8139_close,
 	.ndo_get_stats64	= rtl8139_get_stats64,
-	.ndo_change_mtu		= rtl8139_change_mtu,
+	.ndo_change_mtu_rh74	= eth_change_mtu,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_set_mac_address 	= rtl8139_set_mac_address,
 	.ndo_start_xmit		= rtl8139_start_xmit,
@@ -1110,7 +1095,6 @@ static int rtl8139_init_one(struct pci_dev *pdev,
 	return 0;
 
 err_out:
-	netif_napi_del(&tp->napi);
 	__rtl8139_cleanup_dev (dev);
 	pci_disable_device (pdev);
 	return i;
@@ -1125,7 +1109,6 @@ static void rtl8139_remove_one(struct pci_dev *pdev)
 	assert (dev != NULL);
 
 	cancel_delayed_work_sync(&tp->thread);
-	netif_napi_del(&tp->napi);
 
 	unregister_netdev (dev);
 
@@ -1667,10 +1650,6 @@ static void rtl8139_tx_timeout_task (struct work_struct *work)
 	int i;
 	u8 tmp8;
 
-	napi_disable(&tp->napi);
-	netif_stop_queue(dev);
-	synchronize_sched();
-
 	netdev_dbg(dev, "Transmit timeout, status %02x %04x %04x media %02x\n",
 		   RTL_R8(ChipCmd), RTL_R16(IntrStatus),
 		   RTL_R16(IntrMask), RTL_R8(MediaStatus));
@@ -1700,10 +1679,10 @@ static void rtl8139_tx_timeout_task (struct work_struct *work)
 	spin_unlock_irq(&tp->lock);
 
 	/* ...and finally, reset everything */
-	napi_enable(&tp->napi);
-	rtl8139_hw_start(dev);
-	netif_wake_queue(dev);
-
+	if (netif_running(dev)) {
+		rtl8139_hw_start (dev);
+		netif_wake_queue (dev);
+	}
 	spin_unlock_bh(&tp->rx_lock);
 }
 
@@ -1735,9 +1714,9 @@ static netdev_tx_t rtl8139_start_xmit (struct sk_buff *skb,
 		if (len < ETH_ZLEN)
 			memset(tp->tx_buf[entry], 0, ETH_ZLEN);
 		skb_copy_and_csum_dev(skb, tp->tx_buf[entry]);
-		dev_kfree_skb_any(skb);
+		dev_kfree_skb(skb);
 	} else {
-		dev_kfree_skb_any(skb);
+		dev_kfree_skb(skb);
 		dev->stats.tx_dropped++;
 		return NETDEV_TX_OK;
 	}
@@ -2233,7 +2212,7 @@ static void rtl8139_poll_controller(struct net_device *dev)
 	struct rtl8139_private *tp = netdev_priv(dev);
 	const int irq = tp->pci_dev->irq;
 
-	disable_irq_nosync(irq);
+	disable_irq(irq);
 	rtl8139_interrupt(irq, dev);
 	enable_irq(irq);
 }
@@ -2521,7 +2500,7 @@ static int netdev_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 }
 
 
-static struct rtnl_link_stats64 *
+static void
 rtl8139_get_stats64(struct net_device *dev, struct rtnl_link_stats64 *stats)
 {
 	struct rtl8139_private *tp = netdev_priv(dev);
@@ -2549,8 +2528,6 @@ rtl8139_get_stats64(struct net_device *dev, struct rtnl_link_stats64 *stats)
 		stats->tx_packets = tp->tx_stats.packets;
 		stats->tx_bytes = tp->tx_stats.bytes;
 	} while (u64_stats_fetch_retry_irq(&tp->tx_stats.syncp, start));
-
-	return stats;
 }
 
 /* Set or clear the multicast filter for this adaptor.

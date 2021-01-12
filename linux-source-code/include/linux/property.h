@@ -33,8 +33,6 @@ enum dev_dma_attr {
 	DEV_DMA_COHERENT,
 };
 
-struct fwnode_handle *dev_fwnode(struct device *dev);
-
 bool device_property_present(struct device *dev, const char *propname);
 int device_property_read_u8_array(struct device *dev, const char *propname,
 				  u8 *val, size_t nval);
@@ -192,7 +190,7 @@ struct property_entry {
 	.length = ARRAY_SIZE(_val_) * sizeof(_type_),		\
 	.is_array = true,					\
 	.is_string = false,					\
-	{ .pointer = { ._type_##_data = _val_ } },		\
+	{ .pointer = { _type_##_data = _val_ } },		\
 }
 
 #define PROPERTY_ENTRY_U8_ARRAY(_name_, _val_)			\
@@ -233,7 +231,7 @@ struct property_entry {
 #define PROPERTY_ENTRY_STRING(_name_, _val_)		\
 (struct property_entry) {				\
 	.name = _name_,					\
-	.length = sizeof(const char *),			\
+	.length = sizeof(_val_),			\
 	.is_string = true,				\
 	{ .value = { .str = _val_ } },			\
 }

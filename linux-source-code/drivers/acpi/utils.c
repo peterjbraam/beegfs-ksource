@@ -16,6 +16,10 @@
  *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  *  General Public License for more details.
  *
+ *  You should have received a copy of the GNU General Public License along
+ *  with this program; if not, write to the Free Software Foundation, Inc.,
+ *  59 Temple Place, Suite 330, Boston, MA 02111-1307 USA.
+ *
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  */
 
@@ -26,6 +30,9 @@
 #include <linux/types.h>
 #include <linux/hardirq.h>
 #include <linux/acpi.h>
+#include <linux/dmi.h>
+#include <acpi/acpi_bus.h>
+#include <acpi/acpi_drivers.h>
 #include <linux/dynamic_debug.h>
 
 #include "internal.h"
@@ -97,6 +104,10 @@ acpi_extract_package(union acpi_object *package,
 
 		union acpi_object *element = &(package->package.elements[i]);
 
+		if (!element) {
+			return AE_BAD_DATA;
+		}
+
 		switch (element->type) {
 
 		case ACPI_TYPE_INTEGER:
@@ -113,7 +124,7 @@ acpi_extract_package(union acpi_object *package,
 				break;
 			default:
 				printk(KERN_WARNING PREFIX "Invalid package element"
-					      " [%d]: got number, expecting"
+					      " [%d]: got number, expecing"
 					      " [%c]\n",
 					      i, format_string[i]);
 				return AE_BAD_DATA;
@@ -133,13 +144,14 @@ acpi_extract_package(union acpi_object *package,
 				break;
 			case 'B':
 				size_required +=
-				    sizeof(u8 *) + element->buffer.length;
+				    sizeof(u8 *) +
+				    (element->buffer.length * sizeof(u8));
 				tail_offset += sizeof(u8 *);
 				break;
 			default:
 				printk(KERN_WARNING PREFIX "Invalid package element"
 					      " [%d] got string/buffer,"
-					      " expecting [%c]\n",
+					      " expecing [%c]\n",
 					      i, format_string[i]);
 				return AE_BAD_DATA;
 				break;
@@ -175,19 +187,11 @@ acpi_extract_package(union acpi_object *package,
 	/*
 	 * Validate output buffer.
 	 */
-	if (buffer->length == ACPI_ALLOCATE_BUFFER) {
-		buffer->pointer = ACPI_ALLOCATE_ZEROED(size_required);
-		if (!buffer->pointer)
-			return AE_NO_MEMORY;
+	if (buffer->length < size_required) {
 		buffer->length = size_required;
-	} else {
-		if (buffer->length < size_required) {
-			buffer->length = size_required;
-			return AE_BUFFER_OVERFLOW;
-		} else if (buffer->length != size_required ||
-			   !buffer->pointer) {
-			return AE_BAD_PARAMETER;
-		}
+		return AE_BUFFER_OVERFLOW;
+	} else if (buffer->length != size_required || !buffer->pointer) {
+		return AE_BAD_PARAMETER;
 	}
 
 	head = buffer->pointer;
@@ -200,6 +204,10 @@ acpi_extract_package(union acpi_object *package,
 
 		u8 **pointer = NULL;
 		union acpi_object *element = &(package->package.elements[i]);
+
+		if (!element) {
+			return AE_BAD_DATA;
+		}
 
 		switch (element->type) {
 
@@ -247,7 +255,7 @@ acpi_extract_package(union acpi_object *package,
 				memcpy(tail, element->buffer.pointer,
 				       element->buffer.length);
 				head += sizeof(u8 *);
-				tail += element->buffer.length;
+				tail += element->buffer.length * sizeof(u8);
 				break;
 			default:
 				/* Should never get here */
@@ -339,16 +347,22 @@ acpi_evaluate_reference(acpi_handle handle,
 	package = buffer.pointer;
 
 	if ((buffer.length == 0) || !package) {
+		printk(KERN_ERR PREFIX "No return object (len %X ptr %p)\n",
+			    (unsigned)buffer.length, package);
 		status = AE_BAD_DATA;
 		acpi_util_eval_error(handle, pathname, status);
 		goto end;
 	}
 	if (package->type != ACPI_TYPE_PACKAGE) {
+		printk(KERN_ERR PREFIX "Expecting a [Package], found type %X\n",
+			    package->type);
 		status = AE_BAD_DATA;
 		acpi_util_eval_error(handle, pathname, status);
 		goto end;
 	}
 	if (!package->package.count) {
+		printk(KERN_ERR PREFIX "[Package] has zero elements (%p)\n",
+			    package);
 		status = AE_BAD_DATA;
 		acpi_util_eval_error(handle, pathname, status);
 		goto end;
@@ -367,13 +381,17 @@ acpi_evaluate_reference(acpi_handle handle,
 
 		if (element->type != ACPI_TYPE_LOCAL_REFERENCE) {
 			status = AE_BAD_DATA;
+			printk(KERN_ERR PREFIX
+				    "Expecting a [Reference] package element, found type %X\n",
+				    element->type);
 			acpi_util_eval_error(handle, pathname, status);
 			break;
 		}
 
 		if (!element->reference.handle) {
+			printk(KERN_WARNING PREFIX "Invalid reference in"
+			       " package %s\n", pathname);
 			status = AE_NULL_ENTRY;
-			acpi_util_eval_error(handle, pathname, status);
 			break;
 		}
 		/* Get the  acpi_handle. */
@@ -669,6 +687,7 @@ EXPORT_SYMBOL(acpi_evaluate_dsm);
  * @uuid: UUID of requested functions, should be 16 bytes at least
  * @rev: revision number of requested functions
  * @funcs: bitmap of requested functions
+ * @exclude: excluding special value, used to support i915 and nouveau
  *
  * Evaluate device's _DSM method to check whether it supports requested
  * functions. Currently only support 64 functions at maximum, should be
@@ -692,8 +711,18 @@ bool acpi_check_dsm(acpi_handle handle, const u8 *uuid, u64 rev, u64 funcs)
 		mask = obj->integer.value;
 	else if (obj->type == ACPI_TYPE_BUFFER)
 		for (i = 0; i < obj->buffer.length && i < 8; i++)
-			mask |= (((u64)obj->buffer.pointer[i]) << (i * 8));
+			mask |= (((u8)obj->buffer.pointer[i]) << (i * 8));
 	ACPI_FREE(obj);
+
+	/*
+	 * RHEL7: If this is a Cisco system and a mask of 0x80 is returned
+	 * then set the value to 0x81 so the Bit 0 check passes.
+	 */
+	if ((mask == 0x80) &&
+	    dmi_match(DMI_BIOS_VENDOR, "Cisco Systems, Inc.")) {
+		acpi_handle_warn(handle, FW_WARN "Cisco Systems, Inc.: _DSM mask returns 0x80 but should return 0x81.  Please contact Cisco Systems, Inc. for a BIOS upgrade.\n");
+		mask = 0x81;
+	}
 
 	/*
 	 * Bit 0 indicates whether there's support for any functions other than
@@ -735,18 +764,3 @@ bool acpi_dev_found(const char *hid)
 	return found;
 }
 EXPORT_SYMBOL(acpi_dev_found);
-
-/*
- * acpi_backlight= handling, this is done here rather then in video_detect.c
- * because __setup cannot be used in modules.
- */
-char acpi_video_backlight_string[16];
-EXPORT_SYMBOL(acpi_video_backlight_string);
-
-static int __init acpi_backlight(char *str)
-{
-	strlcpy(acpi_video_backlight_string, str,
-		sizeof(acpi_video_backlight_string));
-	return 1;
-}
-__setup("acpi_backlight=", acpi_backlight);

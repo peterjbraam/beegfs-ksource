@@ -19,6 +19,7 @@
 #include <linux/sched.h>
 #include <linux/firmware.h>
 #include <linux/export.h>
+#include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/dma-mapping.h>
 #include <linux/dmaengine.h>
@@ -203,7 +204,7 @@ static struct dw_dma_chip *dw_probe(struct device *dev, struct resource *mem,
 
 	chip->dev = dev;
 
-	err = dw_dma_probe(chip);
+	err = dw_dma_probe(chip, NULL);
 	if (err)
 		return ERR_PTR(err);
 
@@ -1252,15 +1253,11 @@ struct sst_dsp *sst_dsp_new(struct device *dev,
 		goto irq_err;
 
 	err = sst_dma_new(sst);
-	if (err)  {
-		dev_err(dev, "sst_dma_new failed %d\n", err);
-		goto dma_err;
-	}
+	if (err)
+		dev_warn(dev, "sst_dma_new failed %d\n", err);
 
 	return sst;
 
-dma_err:
-	free_irq(sst->irq, sst);
 irq_err:
 	if (sst->ops->free)
 		sst->ops->free(sst);

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Host Wire Adapter:
  * Driver glue, HWA-specific functions, bridges to WAHC and WUSBHC
@@ -173,7 +174,7 @@ out:
 	return result;
 
 error_set_cluster_id:
-	wusb_cluster_id_put(addr);
+	wusb_cluster_id_put(wusbhc->cluster_id);
 error_cluster_id_get:
 	goto out;
 
@@ -614,7 +615,7 @@ error:
 	return result;
 }
 
-static struct hc_driver hwahc_hc_driver = {
+static const struct hc_driver hwahc_hc_driver = {
 	.description = "hwa-hcd",
 	.product_desc = "Wireless USB HWA host controller",
 	.hcd_priv_size = sizeof(struct hwahc) - sizeof(struct usb_hcd),
@@ -860,7 +861,7 @@ static void hwahc_disconnect(struct usb_interface *usb_iface)
 	usb_put_hcd(usb_hcd);
 }
 
-static struct usb_device_id hwahc_id_table[] = {
+static const struct usb_device_id hwahc_id_table[] = {
 	/* Alereon 5310 */
 	{ USB_DEVICE_AND_INTERFACE_INFO(0x13dc, 0x5310, 0xe0, 0x02, 0x01),
 	  .driver_info = WUSB_QUIRK_ALEREON_HWA_CONCAT_ISOC |

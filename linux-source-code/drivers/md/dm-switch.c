@@ -251,7 +251,7 @@ static void switch_dtr(struct dm_target *ti)
  */
 static int switch_ctr(struct dm_target *ti, unsigned argc, char **argv)
 {
-	static struct dm_arg _args[] = {
+	static const struct dm_arg _args[] = {
 		{1, (KMALLOC_MAX_SIZE - sizeof(struct switch_ctx)) / sizeof(struct switch_path), "Invalid number of paths"},
 		{1, UINT_MAX, "Invalid region size"},
 		{0, 0, "Invalid number of optional args"},
@@ -319,11 +319,11 @@ error:
 static int switch_map(struct dm_target *ti, struct bio *bio)
 {
 	struct switch_ctx *sctx = ti->private;
-	sector_t offset = dm_target_offset(ti, bio->bi_iter.bi_sector);
+	sector_t offset = dm_target_offset(ti, bio->bi_sector);
 	unsigned path_nr = switch_get_path_nr(sctx, offset);
 
 	bio->bi_bdev = sctx->path_list[path_nr].dmdev->bdev;
-	bio->bi_iter.bi_sector = sctx->path_list[path_nr].start + offset;
+	bio->bi_sector = sctx->path_list[path_nr].start + offset;
 
 	return DM_MAPIO_REMAPPED;
 }
@@ -511,8 +511,7 @@ static void switch_status(struct dm_target *ti, status_type_t type,
  *
  * Passthrough all ioctls to the path for sector 0
  */
-static int switch_prepare_ioctl(struct dm_target *ti,
-		struct block_device **bdev, fmode_t *mode)
+static int switch_prepare_ioctl(struct dm_target *ti, struct block_device **bdev)
 {
 	struct switch_ctx *sctx = ti->private;
 	unsigned path_nr;
@@ -520,7 +519,6 @@ static int switch_prepare_ioctl(struct dm_target *ti,
 	path_nr = switch_get_path_nr(sctx, 0);
 
 	*bdev = sctx->path_list[path_nr].dmdev->bdev;
-	*mode = sctx->path_list[path_nr].dmdev->mode;
 
 	/*
 	 * Only pass ioctls through if the device sizes match exactly.

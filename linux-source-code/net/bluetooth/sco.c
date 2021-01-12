@@ -392,8 +392,7 @@ static void sco_sock_cleanup_listen(struct sock *parent)
  */
 static void sco_sock_kill(struct sock *sk)
 {
-	if (!sock_flag(sk, SOCK_ZAPPED) || sk->sk_socket ||
-	    sock_flag(sk, SOCK_DEAD))
+	if (!sock_flag(sk, SOCK_ZAPPED) || sk->sk_socket)
 		return;
 
 	BT_DBG("sk %p state %d", sk, sk->sk_state);
@@ -466,11 +465,11 @@ static struct proto sco_proto = {
 };
 
 static struct sock *sco_sock_alloc(struct net *net, struct socket *sock,
-				   int proto, gfp_t prio, int kern)
+				   int proto, gfp_t prio)
 {
 	struct sock *sk;
 
-	sk = sk_alloc(net, PF_BLUETOOTH, prio, &sco_proto, kern);
+	sk = sk_alloc(net, PF_BLUETOOTH, prio, &sco_proto);
 	if (!sk)
 		return NULL;
 
@@ -507,7 +506,7 @@ static int sco_sock_create(struct net *net, struct socket *sock, int protocol,
 
 	sock->ops = &sco_sock_ops;
 
-	sk = sco_sock_alloc(net, sock, protocol, GFP_ATOMIC, kern);
+	sk = sco_sock_alloc(net, sock, protocol, GFP_ATOMIC);
 	if (!sk)
 		return -ENOMEM;
 
@@ -700,8 +699,8 @@ static int sco_sock_getname(struct socket *sock, struct sockaddr *addr,
 	return 0;
 }
 
-static int sco_sock_sendmsg(struct socket *sock, struct msghdr *msg,
-			    size_t len)
+static int sco_sock_sendmsg(struct kiocb *iocb, struct socket *sock,
+			    struct msghdr *msg, size_t len)
 {
 	struct sock *sk = sock->sk;
 	int err;
@@ -770,8 +769,8 @@ static void sco_conn_defer_accept(struct hci_conn *conn, u16 setting)
 	}
 }
 
-static int sco_sock_recvmsg(struct socket *sock, struct msghdr *msg,
-			    size_t len, int flags)
+static int sco_sock_recvmsg(struct kiocb *iocb, struct socket *sock,
+			    struct msghdr *msg, size_t len, int flags)
 {
 	struct sock *sk = sock->sk;
 	struct sco_pinfo *pi = sco_pi(sk);
@@ -789,7 +788,7 @@ static int sco_sock_recvmsg(struct socket *sock, struct msghdr *msg,
 
 	release_sock(sk);
 
-	return bt_sock_recvmsg(sock, msg, len, flags);
+	return bt_sock_recvmsg(iocb, sock, msg, len, flags);
 }
 
 static int sco_sock_setsockopt(struct socket *sock, int level, int optname,
@@ -1051,7 +1050,7 @@ static void sco_conn_ready(struct sco_conn *conn)
 		bh_lock_sock(parent);
 
 		sk = sco_sock_alloc(sock_net(parent), NULL,
-				    BTPROTO_SCO, GFP_ATOMIC, 0);
+				    BTPROTO_SCO, GFP_ATOMIC);
 		if (!sk) {
 			bh_unlock_sock(parent);
 			sco_conn_unlock(conn);
@@ -1072,7 +1071,7 @@ static void sco_conn_ready(struct sco_conn *conn)
 			sk->sk_state = BT_CONNECTED;
 
 		/* Wake up parent */
-		parent->sk_data_ready(parent);
+		parent->sk_data_ready(parent, 1);
 
 		bh_unlock_sock(parent);
 

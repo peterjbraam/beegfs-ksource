@@ -1,7 +1,9 @@
 #include "../perf.h"
+#include <errno.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <linux/kernel.h>
 #include "session.h"
 #include "thread.h"
 #include "thread-stack.h"
@@ -41,6 +43,7 @@ struct thread *thread__new(pid_t pid, pid_t tid)
 		thread->ppid = -1;
 		thread->cpu = -1;
 		INIT_LIST_HEAD(&thread->comm_list);
+		init_rwsem(&thread->comm_lock);
 
 		comm_str = malloc(32);
 		if (!comm_str)
@@ -53,7 +56,7 @@ struct thread *thread__new(pid_t pid, pid_t tid)
 			goto err_thread;
 
 		list_add(&comm->list, &thread->comm_list);
-		atomic_set(&thread->refcnt, 1);
+		refcount_set(&thread->refcnt, 1);
 		RB_CLEAR_NODE(&thread->rb_node);
 	}
 
@@ -76,25 +79,30 @@ void thread__delete(struct thread *thread)
 		map_groups__put(thread->mg);
 		thread->mg = NULL;
 	}
+
+	down_write(&thread->comm_lock);
 	list_for_each_entry_safe(comm, tmp, &thread->comm_list, list) {
 		list_del(&comm->list);
 		comm__free(comm);
 	}
+	up_write(&thread->comm_lock);
+
 	unwind__finish_access(thread);
 
+	exit_rwsem(&thread->comm_lock);
 	free(thread);
 }
 
 struct thread *thread__get(struct thread *thread)
 {
 	if (thread)
-		atomic_inc(&thread->refcnt);
+		refcount_inc(&thread->refcnt);
 	return thread;
 }
 
 void thread__put(struct thread *thread)
 {
-	if (thread && atomic_dec_and_test(&thread->refcnt)) {
+	if (thread && refcount_dec_and_test(&thread->refcnt)) {
 		/*
 		 * Remove it from the dead_threads list, as last reference
 		 * is gone.
@@ -114,29 +122,19 @@ struct comm *thread__comm(const struct thread *thread)
 
 struct comm *thread__exec_comm(const struct thread *thread)
 {
-	struct comm *comm, *last = NULL, *second_last = NULL;
+	struct comm *comm, *last = NULL;
 
 	list_for_each_entry(comm, &thread->comm_list, list) {
 		if (comm->exec)
 			return comm;
-		second_last = last;
 		last = comm;
 	}
-
-	/*
-	 * 'last' with no start time might be the parent's comm of a synthesized
-	 * thread (created by processing a synthesized fork event). For a main
-	 * thread, that is very probably wrong. Prefer a later comm to avoid
-	 * that case.
-	 */
-	if (second_last && !last->start && thread->pid_ == thread->tid)
-		return second_last;
 
 	return last;
 }
 
-int __thread__set_comm(struct thread *thread, const char *str, u64 timestamp,
-		       bool exec)
+static int ____thread__set_comm(struct thread *thread, const char *str,
+				u64 timestamp, bool exec)
 {
 	struct comm *new, *curr = thread__comm(thread);
 
@@ -160,6 +158,17 @@ int __thread__set_comm(struct thread *thread, const char *str, u64 timestamp,
 	return 0;
 }
 
+int __thread__set_comm(struct thread *thread, const char *str, u64 timestamp,
+		       bool exec)
+{
+	int ret;
+
+	down_write(&thread->comm_lock);
+	ret = ____thread__set_comm(thread, str, timestamp, exec);
+	up_write(&thread->comm_lock);
+	return ret;
+}
+
 int thread__set_comm_from_proc(struct thread *thread)
 {
 	char path[64];
@@ -177,7 +186,7 @@ int thread__set_comm_from_proc(struct thread *thread)
 	return err;
 }
 
-const char *thread__comm_str(const struct thread *thread)
+static const char *__thread__comm_str(const struct thread *thread)
 {
 	const struct comm *comm = thread__comm(thread);
 
@@ -185,6 +194,17 @@ const char *thread__comm_str(const struct thread *thread)
 		return NULL;
 
 	return comm__str(comm);
+}
+
+const char *thread__comm_str(const struct thread *thread)
+{
+	const char *str;
+
+	down_read((struct rw_semaphore *)&thread->comm_lock);
+	str = __thread__comm_str(thread);
+	up_read((struct rw_semaphore *)&thread->comm_lock);
+
+	return str;
 }
 
 /* CHECKME: it should probably better return the max comm len from its comm list */
@@ -223,22 +243,19 @@ int thread__insert_map(struct thread *thread, struct map *map)
 static int __thread__prepare_access(struct thread *thread)
 {
 	bool initialized = false;
-	int i, err = 0;
+	int err = 0;
+	struct maps *maps = &thread->mg->maps;
+	struct map *map;
 
-	for (i = 0; i < MAP__NR_TYPES; ++i) {
-		struct maps *maps = &thread->mg->maps[i];
-		struct map *map;
+	down_read(&maps->lock);
 
-		pthread_rwlock_rdlock(&maps->lock);
-
-		for (map = maps__first(maps); map; map = map__next(map)) {
-			err = unwind__prepare_access(thread, map, &initialized);
-			if (err || initialized)
-				break;
-		}
-
-		pthread_rwlock_unlock(&maps->lock);
+	for (map = maps__first(maps); map; map = map__next(map)) {
+		err = unwind__prepare_access(thread, map, &initialized);
+		if (err || initialized)
+			break;
 	}
+
+	up_read(&maps->lock);
 
 	return err;
 }
@@ -254,10 +271,9 @@ static int thread__prepare_access(struct thread *thread)
 }
 
 static int thread__clone_map_groups(struct thread *thread,
-				    struct thread *parent)
+				    struct thread *parent,
+				    bool do_maps_clone)
 {
-	int i;
-
 	/* This is new thread, we share map groups for process. */
 	if (thread->pid_ == parent->pid_)
 		return thread__prepare_access(thread);
@@ -267,16 +283,11 @@ static int thread__clone_map_groups(struct thread *thread,
 			 thread->pid_, thread->tid, parent->pid_, parent->tid);
 		return 0;
 	}
-
 	/* But this one is new process, copy maps. */
-	for (i = 0; i < MAP__NR_TYPES; ++i)
-		if (map_groups__clone(thread, parent->mg, i) < 0)
-			return -ENOMEM;
-
-	return 0;
+	return do_maps_clone ? map_groups__clone(thread, parent->mg) : 0;
 }
 
-int thread__fork(struct thread *thread, struct thread *parent, u64 timestamp)
+int thread__fork(struct thread *thread, struct thread *parent, u64 timestamp, bool do_maps_clone)
 {
 	if (parent->comm_set) {
 		const char *comm = thread__comm_str(parent);
@@ -289,11 +300,10 @@ int thread__fork(struct thread *thread, struct thread *parent, u64 timestamp)
 	}
 
 	thread->ppid = parent->tid;
-	return thread__clone_map_groups(thread, parent);
+	return thread__clone_map_groups(thread, parent, do_maps_clone);
 }
 
-void thread__find_cpumode_addr_location(struct thread *thread,
-					enum map_type type, u64 addr,
+void thread__find_cpumode_addr_location(struct thread *thread, u64 addr,
 					struct addr_location *al)
 {
 	size_t i;
@@ -305,7 +315,7 @@ void thread__find_cpumode_addr_location(struct thread *thread,
 	};
 
 	for (i = 0; i < ARRAY_SIZE(cpumodes); i++) {
-		thread__find_addr_location(thread, cpumodes[i], type, addr, al);
+		thread__find_symbol(thread, cpumodes[i], addr, al);
 		if (al->map)
 			break;
 	}

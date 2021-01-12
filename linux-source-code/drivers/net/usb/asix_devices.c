@@ -136,9 +136,9 @@ static const struct ethtool_ops ax88172_ethtool_ops = {
 	.get_eeprom_len		= asix_get_eeprom_len,
 	.get_eeprom		= asix_get_eeprom,
 	.set_eeprom		= asix_set_eeprom,
-	.get_settings		= usbnet_get_settings,
-	.set_settings		= usbnet_set_settings,
 	.nway_reset		= usbnet_nway_reset,
+	.get_link_ksettings	= usbnet_get_link_ksettings,
+	.set_link_ksettings	= usbnet_set_link_ksettings,
 };
 
 static void ax88172_set_multicast(struct net_device *net)
@@ -205,7 +205,8 @@ static const struct net_device_ops ax88172_netdev_ops = {
 	.ndo_stop		= usbnet_stop,
 	.ndo_start_xmit		= usbnet_start_xmit,
 	.ndo_tx_timeout		= usbnet_tx_timeout,
-	.ndo_change_mtu		= usbnet_change_mtu,
+	.ndo_change_mtu_rh74	= usbnet_change_mtu,
+	.ndo_get_stats64	= usbnet_get_stats64,
 	.ndo_set_mac_address 	= eth_mac_addr,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_do_ioctl		= asix_ioctl,
@@ -237,7 +238,7 @@ static void asix_phy_reset(struct usbnet *dev, unsigned int reset_bits)
 static int ax88172_bind(struct usbnet *dev, struct usb_interface *intf)
 {
 	int ret = 0;
-	u8 buf[ETH_ALEN] = {0};
+	u8 buf[ETH_ALEN];
 	int i;
 	unsigned long gpio_bits = dev->driver_info->data;
 
@@ -301,9 +302,9 @@ static const struct ethtool_ops ax88772_ethtool_ops = {
 	.get_eeprom_len		= asix_get_eeprom_len,
 	.get_eeprom		= asix_get_eeprom,
 	.set_eeprom		= asix_set_eeprom,
-	.get_settings		= usbnet_get_settings,
-	.set_settings		= usbnet_set_settings,
 	.nway_reset		= usbnet_nway_reset,
+	.get_link_ksettings	= usbnet_get_link_ksettings,
+	.set_link_ksettings	= usbnet_set_link_ksettings,
 };
 
 static int ax88772_link_reset(struct usbnet *dev)
@@ -346,7 +347,7 @@ static int ax88772_reset(struct usbnet *dev)
 	if (ret < 0)
 		goto out;
 
-	asix_write_medium_mode(dev, AX88772_MEDIUM_DEFAULT, 0);
+	ret = asix_write_medium_mode(dev, AX88772_MEDIUM_DEFAULT, 0);
 	if (ret < 0)
 		goto out;
 
@@ -590,7 +591,8 @@ static const struct net_device_ops ax88772_netdev_ops = {
 	.ndo_stop		= usbnet_stop,
 	.ndo_start_xmit		= usbnet_start_xmit,
 	.ndo_tx_timeout		= usbnet_tx_timeout,
-	.ndo_change_mtu		= usbnet_change_mtu,
+	.ndo_change_mtu_rh74	= usbnet_change_mtu,
+	.ndo_get_stats64	= usbnet_get_stats64,
 	.ndo_set_mac_address 	= asix_set_mac_address,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_do_ioctl		= asix_ioctl,
@@ -687,28 +689,36 @@ static int asix_resume(struct usb_interface *intf)
 static int ax88772_bind(struct usbnet *dev, struct usb_interface *intf)
 {
 	int ret, i;
-	u8 buf[ETH_ALEN] = {0}, chipcode = 0;
+	u8 buf[ETH_ALEN], chipcode = 0;
 	u32 phyid;
 	struct asix_common_private *priv;
 
-	usbnet_get_endpoints(dev,intf);
+	usbnet_get_endpoints(dev, intf);
 
-	/* Get the MAC address */
-	if (dev->driver_info->data & FLAG_EEPROM_MAC) {
-		for (i = 0; i < (ETH_ALEN >> 1); i++) {
-			ret = asix_read_cmd(dev, AX_CMD_READ_EEPROM, 0x04 + i,
-					    0, 2, buf + i * 2, 0);
-			if (ret < 0)
-				break;
-		}
+	/* Maybe the boot loader passed the MAC address via device tree */
+	if (!eth_platform_get_mac_address(&dev->udev->dev, buf)) {
+		netif_dbg(dev, ifup, dev->net,
+			  "MAC address read from device tree");
 	} else {
-		ret = asix_read_cmd(dev, AX_CMD_READ_NODE_ID,
-				0, 0, ETH_ALEN, buf, 0);
-	}
+		/* Try getting the MAC address from EEPROM */
+		if (dev->driver_info->data & FLAG_EEPROM_MAC) {
+			for (i = 0; i < (ETH_ALEN >> 1); i++) {
+				ret = asix_read_cmd(dev, AX_CMD_READ_EEPROM,
+						    0x04 + i, 0, 2, buf + i * 2,
+						    0);
+				if (ret < 0)
+					break;
+			}
+		} else {
+			ret = asix_read_cmd(dev, AX_CMD_READ_NODE_ID,
+					    0, 0, ETH_ALEN, buf, 0);
+		}
 
-	if (ret < 0) {
-		netdev_dbg(dev->net, "Failed to read MAC address: %d\n", ret);
-		return ret;
+		if (ret < 0) {
+			netdev_dbg(dev->net, "Failed to read MAC address: %d\n",
+				   ret);
+			return ret;
+		}
 	}
 
 	asix_set_netdev_dev_addr(dev, buf);
@@ -729,13 +739,8 @@ static int ax88772_bind(struct usbnet *dev, struct usb_interface *intf)
 	asix_read_cmd(dev, AX_CMD_STATMNGSTS_REG, 0, 0, 1, &chipcode, 0);
 	chipcode &= AX_CHIPCODE_MASK;
 
-	ret = (chipcode == AX_AX88772_CHIPCODE) ? ax88772_hw_reset(dev, 0) :
-						  ax88772a_hw_reset(dev, 0);
-
-	if (ret < 0) {
-		netdev_dbg(dev->net, "Failed to reset AX88772: %d\n", ret);
-		return ret;
-	}
+	(chipcode == AX_AX88772_CHIPCODE) ? ax88772_hw_reset(dev, 0) :
+					    ax88772a_hw_reset(dev, 0);
 
 	/* Read PHYID register *AFTER* the PHY was reset properly */
 	phyid = asix_get_phyid(dev);
@@ -769,6 +774,7 @@ static int ax88772_bind(struct usbnet *dev, struct usb_interface *intf)
 
 static void ax88772_unbind(struct usbnet *dev, struct usb_interface *intf)
 {
+	asix_rx_fixup_common_free(dev->driver_priv);
 	kfree(dev->driver_priv);
 }
 
@@ -782,9 +788,9 @@ static const struct ethtool_ops ax88178_ethtool_ops = {
 	.get_eeprom_len		= asix_get_eeprom_len,
 	.get_eeprom		= asix_get_eeprom,
 	.set_eeprom		= asix_set_eeprom,
-	.get_settings		= usbnet_get_settings,
-	.set_settings		= usbnet_set_settings,
 	.nway_reset		= usbnet_nway_reset,
+	.get_link_ksettings	= usbnet_get_link_ksettings,
+	.set_link_ksettings	= usbnet_set_link_ksettings,
 };
 
 static int marvell_phy_init(struct usbnet *dev)
@@ -1054,17 +1060,18 @@ static const struct net_device_ops ax88178_netdev_ops = {
 	.ndo_stop		= usbnet_stop,
 	.ndo_start_xmit		= usbnet_start_xmit,
 	.ndo_tx_timeout		= usbnet_tx_timeout,
+	.ndo_get_stats64	= usbnet_get_stats64,
 	.ndo_set_mac_address 	= asix_set_mac_address,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_set_rx_mode	= asix_set_multicast,
 	.ndo_do_ioctl 		= asix_ioctl,
-	.ndo_change_mtu 	= ax88178_change_mtu,
+	.ndo_change_mtu_rh74	= ax88178_change_mtu,
 };
 
 static int ax88178_bind(struct usbnet *dev, struct usb_interface *intf)
 {
 	int ret;
-	u8 buf[ETH_ALEN] = {0};
+	u8 buf[ETH_ALEN];
 
 	usbnet_get_endpoints(dev,intf);
 

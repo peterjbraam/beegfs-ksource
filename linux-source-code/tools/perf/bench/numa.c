@@ -4,6 +4,7 @@
  * numa: Simulate NUMA-sensitive workload and measure their NUMA performance
  */
 
+#include <inttypes.h>
 /* For the CLR_() macros */
 #include <pthread.h>
 
@@ -30,14 +31,11 @@
 #include <sys/wait.h>
 #include <sys/prctl.h>
 #include <sys/types.h>
+#include <linux/kernel.h>
 #include <linux/time64.h>
 
 #include <numa.h>
 #include <numaif.h>
-
-#ifndef RUSAGE_THREAD
-# define RUSAGE_THREAD 1
-#endif
 
 /*
  * Regular printout to the terminal, supressed if -q is specified:
@@ -47,6 +45,7 @@
 /*
  * Debug printf:
  */
+#undef dprintf
 #define dprintf(x...) do { if (g && g->p.show_details >= 1) printf(x); } while (0)
 
 struct thread_data {
@@ -175,7 +174,7 @@ static const struct option options[] = {
 	OPT_UINTEGER('s', "nr_secs"	, &p0.nr_secs,		"max number of seconds to run (default: 5 secs)"),
 	OPT_UINTEGER('u', "usleep"	, &p0.sleep_usecs,	"usecs to sleep per loop iteration"),
 
-	OPT_BOOLEAN('R', "data_reads"	, &p0.data_reads,	"access the data via writes (can be mixed with -W)"),
+	OPT_BOOLEAN('R', "data_reads"	, &p0.data_reads,	"access the data via reads (can be mixed with -W)"),
 	OPT_BOOLEAN('W', "data_writes"	, &p0.data_writes,	"access the data via writes (can be mixed with -R)"),
 	OPT_BOOLEAN('B', "data_backwards", &p0.data_backwards,	"access the data backwards as well"),
 	OPT_BOOLEAN('Z', "data_zero_memset", &p0.data_zero_memset,"access the data via glibc bzero only"),
@@ -190,7 +189,8 @@ static const struct option options[] = {
 	OPT_INCR   ('d', "show_details"	, &p0.show_details,	"Show details"),
 	OPT_INCR   ('a', "all"		, &p0.run_all,		"Run all tests in the suite"),
 	OPT_INTEGER('H', "thp"		, &p0.thp,		"MADV_NOHUGEPAGE < 0 < MADV_HUGEPAGE"),
-	OPT_BOOLEAN('c', "show_convergence", &p0.show_convergence, "show convergence details"),
+	OPT_BOOLEAN('c', "show_convergence", &p0.show_convergence, "show convergence details, "
+		    "convergence is reached when each process (all its threads) is running on a single NUMA node."),
 	OPT_BOOLEAN('m', "measure_convergence",	&p0.measure_convergence, "measure convergence latency"),
 	OPT_BOOLEAN('q', "quiet"	, &p0.show_quiet,	"quiet mode"),
 	OPT_BOOLEAN('S', "serialize-startup", &p0.serialize_startup,"serialize thread startup"),
@@ -743,7 +743,7 @@ static inline uint32_t lfsr_32(uint32_t lfsr)
  * kernel (KSM, zero page, etc.) cannot optimize away RAM
  * accesses:
  */
-static inline u64 access_data(u64 *data __attribute__((unused)), u64 val)
+static inline u64 access_data(u64 *data, u64 val)
 {
 	if (g->p.data_reads)
 		val += *data;
@@ -1189,7 +1189,7 @@ static void *worker_thread(void *__tdata)
 		/* Check whether our max runtime timed out: */
 		if (g->p.nr_secs) {
 			timersub(&stop, &start0, &diff);
-			if ((u32)diff.tv_sec >= g->p.nr_secs) {
+			if ((u32)diff.tv_sec >= (time_t)g->p.nr_secs) {
 				g->stop_work = true;
 				break;
 			}
@@ -1688,11 +1688,11 @@ static void init_params(struct params *p, const char *name, int argc, const char
 	p->data_rand_walk		= true;
 	p->nr_loops			= -1;
 	p->init_random			= true;
+	p->run_all			= argc == 1;
 	p->mb_global_str		= "1";
 	p->nr_proc			= 1;
 	p->nr_threads			= 1;
 	p->nr_secs			= 5;
-	p->run_all			= argc == 1;
 }
 
 static int run_bench_numa(const char *name, const char **argv)
@@ -1818,7 +1818,7 @@ static int bench_all(void)
 	return 0;
 }
 
-int bench_numa(int argc, const char **argv, const char *prefix __maybe_unused)
+int bench_numa(int argc, const char **argv)
 {
 	init_params(&p0, "main,", argc, argv);
 	argc = parse_options(argc, argv, options, bench_numa_usage, 0);

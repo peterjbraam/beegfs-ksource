@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2016, Intel Corp.
+ * Copyright (C) 2000 - 2013, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -83,9 +83,7 @@
  * Should the subsystem abort the loading of an ACPI table if the
  * table checksum is incorrect?
  */
-#ifndef ACPI_CHECKSUM_ABORT
 #define ACPI_CHECKSUM_ABORT             FALSE
-#endif
 
 /*
  * Generate a version of ACPICA that only supports "reduced hardware"
@@ -102,9 +100,7 @@
  *      ACPI PM timer
  *      FACS table (Waking vectors and Global Lock)
  */
-#ifndef ACPI_REDUCED_HARDWARE
 #define ACPI_REDUCED_HARDWARE           FALSE
-#endif
 
 /******************************************************************************
  *
@@ -128,13 +124,17 @@
 
 #define ACPI_DEFAULT_PAGE_SIZE          4096	/* Must be power of 2 */
 
-/* owner_id tracking. 8 entries allows for 255 owner_ids */
+/* owner_id tracking. 128 entries allows for 4095 owner_ids */
 
-#define ACPI_NUM_OWNERID_MASKS          8
+#define ACPI_NUM_OWNERID_MASKS          128
 
 /* Size of the root table array is increased by this increment */
 
 #define ACPI_ROOT_TABLE_SIZE_INCREMENT  4
+
+/* Maximum number of While() loop iterations before forced abort */
+
+#define ACPI_MAX_LOOP_ITERATIONS        0xFFFF
 
 /* Maximum sleep allowed via Sleep() operator */
 
@@ -143,10 +143,6 @@
 /* Address Range lists are per-space_id (Memory and I/O only) */
 
 #define ACPI_ADDRESS_RANGE_MAX          2
-
-/* Maximum number of While() loops before abort */
-
-#define ACPI_MAX_LOOP_COUNT             0xFFFF
 
 /******************************************************************************
  *
@@ -216,24 +212,6 @@
 
 #define ACPI_NUM_sx_d_METHODS           4
 #define ACPI_NUM_sx_w_METHODS           5
-
-/******************************************************************************
- *
- * Miscellaneous constants
- *
- *****************************************************************************/
-
-/* UUID constants */
-
-#define UUID_BUFFER_LENGTH          16	/* Length of UUID in memory */
-#define UUID_STRING_LENGTH          36	/* Total length of a UUID string */
-
-/* Positions for required hyphens (dashes) in UUID strings */
-
-#define UUID_HYPHEN1_OFFSET         8
-#define UUID_HYPHEN2_OFFSET         13
-#define UUID_HYPHEN3_OFFSET         18
-#define UUID_HYPHEN4_OFFSET         23
 
 /******************************************************************************
  *

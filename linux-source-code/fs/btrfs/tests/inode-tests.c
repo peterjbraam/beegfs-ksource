@@ -245,7 +245,6 @@ static noinline int test_btrfs_get_extent(u32 sectorsize, u32 nodesize)
 		return ret;
 	}
 
-	inode->i_mode = S_IFREG;
 	BTRFS_I(inode)->location.type = BTRFS_INODE_ITEM_KEY;
 	BTRFS_I(inode)->location.objectid = BTRFS_FIRST_FREE_OBJECTID;
 	BTRFS_I(inode)->location.offset = 0;
@@ -270,7 +269,7 @@ static noinline int test_btrfs_get_extent(u32 sectorsize, u32 nodesize)
 
 	/*
 	 * We will just free a dummy node if it's ref count is 2 so we need an
-	 * extra ref so our searches don't accidentally release our page.
+	 * extra ref so our searches don't accidently release our page.
 	 */
 	extent_buffer_get(root->node);
 	btrfs_set_header_nritems(root->node, 0);

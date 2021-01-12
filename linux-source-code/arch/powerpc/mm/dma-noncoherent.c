@@ -33,7 +33,6 @@
 #include <linux/export.h>
 
 #include <asm/tlbflush.h>
-#include <asm/dma.h>
 
 #include "mmu_decl.h"
 
@@ -288,7 +287,9 @@ void __dma_free_coherent(size_t size, void *vaddr)
 			pte_clear(&init_mm, addr, ptep);
 			if (pfn_valid(pfn)) {
 				struct page *page = pfn_to_page(pfn);
-				__free_reserved_page(page);
+
+				ClearPageReserved(page);
+				__free_page(page);
 			}
 		}
 		addr += PAGE_SIZE;
@@ -327,7 +328,7 @@ void __dma_sync(void *vaddr, size_t size, int direction)
 		 * invalidate only when cache-line aligned otherwise there is
 		 * the potential for discarding uncommitted data from the cache
 		 */
-		if ((start | end) & (L1_CACHE_BYTES - 1))
+		if ((start & (L1_CACHE_BYTES - 1)) || (size & (L1_CACHE_BYTES - 1)))
 			flush_dcache_range(start, end);
 		else
 			invalidate_dcache_range(start, end);

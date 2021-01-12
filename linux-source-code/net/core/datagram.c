@@ -48,8 +48,6 @@
 #include <linux/highmem.h>
 #include <linux/spinlock.h>
 #include <linux/slab.h>
-#include <linux/pagemap.h>
-#include <linux/uio.h>
 
 #include <net/protocol.h>
 #include <linux/skbuff.h>
@@ -96,7 +94,7 @@ int __skb_wait_for_more_packets(struct sock *sk, int *err, long *timeo_p,
 	if (error)
 		goto out_err;
 
-	if (READ_ONCE(sk->sk_receive_queue.prev) != skb)
+	if (sk->sk_receive_queue.prev != skb)
 		goto out;
 
 	/* Socket shut down? */
@@ -165,6 +163,7 @@ done:
  *	__skb_try_recv_datagram - Receive a datagram skbuff
  *	@sk: socket
  *	@flags: MSG_ flags
+ *	@destructor: invoked under the receive lock on successful dequeue
  *	@peeked: returns non-zero if this packet has been seen before
  *	@off: an offset in bytes to peek skb from. Returns an offset
  *	      within an skb where data actually starts
@@ -197,6 +196,8 @@ done:
  *	the standard around please.
  */
 struct sk_buff *__skb_try_recv_datagram(struct sock *sk, unsigned int flags,
+					void (*destructor)(struct sock *sk,
+							   struct sk_buff *skb),
 					int *peeked, int *off, int *err,
 					struct sk_buff **last)
 {
@@ -241,9 +242,11 @@ struct sk_buff *__skb_try_recv_datagram(struct sock *sk, unsigned int flags,
 				}
 
 				atomic_inc(&skb->users);
-			} else
+			} else {
 				__skb_unlink(skb, queue);
-
+				if (destructor)
+					destructor(sk, skb);
+			}
 			spin_unlock_irqrestore(&queue->lock, cpu_flags);
 			*off = _off;
 			return skb;
@@ -262,6 +265,8 @@ no_packet:
 EXPORT_SYMBOL(__skb_try_recv_datagram);
 
 struct sk_buff *__skb_recv_datagram(struct sock *sk, unsigned int flags,
+				    void (*destructor)(struct sock *sk,
+						       struct sk_buff *skb),
 				    int *peeked, int *off, int *err)
 {
 	struct sk_buff *skb, *last;
@@ -270,8 +275,8 @@ struct sk_buff *__skb_recv_datagram(struct sock *sk, unsigned int flags,
 	timeo = sock_rcvtimeo(sk, flags & MSG_DONTWAIT);
 
 	do {
-		skb = __skb_try_recv_datagram(sk, flags, peeked, off, err,
-					      &last);
+		skb = __skb_try_recv_datagram(sk, flags, destructor, peeked,
+					      off, err, &last);
 		if (skb)
 			return skb;
 
@@ -290,7 +295,7 @@ struct sk_buff *skb_recv_datagram(struct sock *sk, unsigned int flags,
 	int peeked, off = 0;
 
 	return __skb_recv_datagram(sk, flags | (noblock ? MSG_DONTWAIT : 0),
-				   &peeked, &off, err);
+				   NULL, &peeked, &off, err);
 }
 EXPORT_SYMBOL(skb_recv_datagram);
 
@@ -301,19 +306,16 @@ void skb_free_datagram(struct sock *sk, struct sk_buff *skb)
 }
 EXPORT_SYMBOL(skb_free_datagram);
 
-void __skb_free_datagram_locked(struct sock *sk, struct sk_buff *skb, int len)
+void skb_free_datagram_locked(struct sock *sk, struct sk_buff *skb)
 {
 	bool slow;
 
 	if (likely(atomic_read(&skb->users) == 1))
 		smp_rmb();
-	else if (likely(!atomic_dec_and_test(&skb->users))) {
-		sk_peek_offset_bwd(sk, len);
+	else if (likely(!atomic_dec_and_test(&skb->users)))
 		return;
-	}
 
 	slow = lock_sock_fast(sk);
-	sk_peek_offset_bwd(sk, len);
 	skb_orphan(skb);
 	sk_mem_reclaim_partial(sk);
 	unlock_sock_fast(sk, slow);
@@ -321,7 +323,32 @@ void __skb_free_datagram_locked(struct sock *sk, struct sk_buff *skb, int len)
 	/* skb is now orphaned, can be freed outside of locked section */
 	__kfree_skb(skb);
 }
-EXPORT_SYMBOL(__skb_free_datagram_locked);
+EXPORT_SYMBOL(skb_free_datagram_locked);
+
+int __sk_queue_drop_skb(struct sock *sk, struct sk_buff *skb,
+			unsigned int flags,
+			void (*destructor)(struct sock *sk,
+					   struct sk_buff *skb))
+{
+	int err = 0;
+
+	if (flags & MSG_PEEK) {
+		err = -ENOENT;
+		spin_lock_bh(&sk->sk_receive_queue.lock);
+		if (skb == skb_peek(&sk->sk_receive_queue)) {
+			__skb_unlink(skb, &sk->sk_receive_queue);
+			atomic_dec(&skb->users);
+			if (destructor)
+				destructor(sk, skb);
+			err = 0;
+		}
+		spin_unlock_bh(&sk->sk_receive_queue.lock);
+	}
+
+	atomic_inc(&sk->sk_drops);
+	return err;
+}
+EXPORT_SYMBOL(__sk_queue_drop_skb);
 
 /**
  *	skb_kill_datagram - Free a datagram skbuff forcibly
@@ -346,39 +373,28 @@ EXPORT_SYMBOL(__skb_free_datagram_locked);
 
 int skb_kill_datagram(struct sock *sk, struct sk_buff *skb, unsigned int flags)
 {
-	int err = 0;
-
-	if (flags & MSG_PEEK) {
-		err = -ENOENT;
-		spin_lock_bh(&sk->sk_receive_queue.lock);
-		if (skb->next) {
-			__skb_unlink(skb, &sk->sk_receive_queue);
-			atomic_dec(&skb->users);
-			err = 0;
-		}
-		spin_unlock_bh(&sk->sk_receive_queue.lock);
-	}
+	int err = __sk_queue_drop_skb(sk, skb, flags, NULL);
 
 	kfree_skb(skb);
-	atomic_inc(&sk->sk_drops);
 	sk_mem_reclaim_partial(sk);
-
 	return err;
 }
 EXPORT_SYMBOL(skb_kill_datagram);
 
 /**
- *	skb_copy_datagram_iter - Copy a datagram to an iovec iterator.
+ *	skb_copy_datagram_iovec - Copy a datagram to an iovec.
  *	@skb: buffer to copy
  *	@offset: offset in the buffer to start copying from
- *	@to: iovec iterator to copy to
+ *	@to: io vector to copy to
  *	@len: amount of data to copy from buffer to iovec
+ *
+ *	Note: the iovec is modified during the copy.
  */
-int skb_copy_datagram_iter(const struct sk_buff *skb, int offset,
-			   struct iov_iter *to, int len)
+int skb_copy_datagram_iovec(const struct sk_buff *skb, int offset,
+			    struct iovec *to, int len)
 {
 	int start = skb_headlen(skb);
-	int i, copy = start - offset, start_off = offset, n;
+	int i, copy = start - offset;
 	struct sk_buff *frag_iter;
 
 	trace_skb_copy_datagram_iovec(skb, len);
@@ -387,97 +403,7 @@ int skb_copy_datagram_iter(const struct sk_buff *skb, int offset,
 	if (copy > 0) {
 		if (copy > len)
 			copy = len;
-		n = copy_to_iter(skb->data + offset, copy, to);
-		offset += n;
-		if (n != copy)
-			goto short_copy;
-		if ((len -= copy) == 0)
-			return 0;
-	}
-
-	/* Copy paged appendix. Hmm... why does this look so complicated? */
-	for (i = 0; i < skb_shinfo(skb)->nr_frags; i++) {
-		int end;
-		const skb_frag_t *frag = &skb_shinfo(skb)->frags[i];
-
-		WARN_ON(start > offset + len);
-
-		end = start + skb_frag_size(frag);
-		if ((copy = end - offset) > 0) {
-			if (copy > len)
-				copy = len;
-			n = copy_page_to_iter(skb_frag_page(frag),
-					      frag->page_offset + offset -
-					      start, copy, to);
-			offset += n;
-			if (n != copy)
-				goto short_copy;
-			if (!(len -= copy))
-				return 0;
-		}
-		start = end;
-	}
-
-	skb_walk_frags(skb, frag_iter) {
-		int end;
-
-		WARN_ON(start > offset + len);
-
-		end = start + frag_iter->len;
-		if ((copy = end - offset) > 0) {
-			if (copy > len)
-				copy = len;
-			if (skb_copy_datagram_iter(frag_iter, offset - start,
-						   to, copy))
-				goto fault;
-			if ((len -= copy) == 0)
-				return 0;
-			offset += copy;
-		}
-		start = end;
-	}
-	if (!len)
-		return 0;
-
-	/* This is not really a user copy fault, but rather someone
-	 * gave us a bogus length on the skb.  We should probably
-	 * print a warning here as it may indicate a kernel bug.
-	 */
-
-fault:
-	iov_iter_revert(to, offset - start_off);
-	return -EFAULT;
-
-short_copy:
-	if (iov_iter_count(to))
-		goto fault;
-
-	return 0;
-}
-EXPORT_SYMBOL(skb_copy_datagram_iter);
-
-/**
- *	skb_copy_datagram_from_iter - Copy a datagram from an iov_iter.
- *	@skb: buffer to copy
- *	@offset: offset in the buffer to start copying to
- *	@from: the copy source
- *	@len: amount of data to copy to buffer from iovec
- *
- *	Returns 0 or -EFAULT.
- */
-int skb_copy_datagram_from_iter(struct sk_buff *skb, int offset,
-				 struct iov_iter *from,
-				 int len)
-{
-	int start = skb_headlen(skb);
-	int i, copy = start - offset;
-	struct sk_buff *frag_iter;
-
-	/* Copy header. */
-	if (copy > 0) {
-		if (copy > len)
-			copy = len;
-		if (copy_from_iter(skb->data + offset, copy, from) != copy)
+		if (memcpy_toiovec(to, skb->data + offset, copy))
 			goto fault;
 		if ((len -= copy) == 0)
 			return 0;
@@ -493,16 +419,18 @@ int skb_copy_datagram_from_iter(struct sk_buff *skb, int offset,
 
 		end = start + skb_frag_size(frag);
 		if ((copy = end - offset) > 0) {
-			size_t copied;
+			int err;
+			u8  *vaddr;
+			struct page *page = skb_frag_page(frag);
 
 			if (copy > len)
 				copy = len;
-			copied = copy_page_from_iter(skb_frag_page(frag),
-					  frag->page_offset + offset - start,
-					  copy, from);
-			if (copied != copy)
+			vaddr = kmap(page);
+			err = memcpy_toiovec(to, vaddr + frag->page_offset +
+					     offset - start, copy);
+			kunmap(page);
+			if (err)
 				goto fault;
-
 			if (!(len -= copy))
 				return 0;
 			offset += copy;
@@ -519,9 +447,9 @@ int skb_copy_datagram_from_iter(struct sk_buff *skb, int offset,
 		if ((copy = end - offset) > 0) {
 			if (copy > len)
 				copy = len;
-			if (skb_copy_datagram_from_iter(frag_iter,
-							offset - start,
-							from, copy))
+			if (skb_copy_datagram_iovec(frag_iter,
+						    offset - start,
+						    to, copy))
 				goto fault;
 			if ((len -= copy) == 0)
 				return 0;
@@ -535,82 +463,212 @@ int skb_copy_datagram_from_iter(struct sk_buff *skb, int offset,
 fault:
 	return -EFAULT;
 }
-EXPORT_SYMBOL(skb_copy_datagram_from_iter);
+EXPORT_SYMBOL(skb_copy_datagram_iovec);
 
 /**
- *	zerocopy_sg_from_iter - Build a zerocopy datagram from an iov_iter
+ *	skb_copy_datagram_const_iovec - Copy a datagram to an iovec.
  *	@skb: buffer to copy
- *	@from: the source to copy from
+ *	@offset: offset in the buffer to start copying from
+ *	@to: io vector to copy to
+ *	@to_offset: offset in the io vector to start copying to
+ *	@len: amount of data to copy from buffer to iovec
  *
- *	The function will first copy up to headlen, and then pin the userspace
- *	pages and build frags through them.
- *
- *	Returns 0, -EFAULT or -EMSGSIZE.
+ *	Returns 0 or -EFAULT.
+ *	Note: the iovec is not modified during the copy.
  */
-int zerocopy_sg_from_iter(struct sk_buff *skb, struct iov_iter *from)
-{
-	int len = iov_iter_count(from);
-	int copy = min_t(int, skb_headlen(skb), len);
-	int frag = 0;
-
-	/* copy up to skb headlen */
-	if (skb_copy_datagram_from_iter(skb, 0, from, copy))
-		return -EFAULT;
-
-	while (iov_iter_count(from)) {
-		struct page *pages[MAX_SKB_FRAGS];
-		size_t start;
-		ssize_t copied;
-		unsigned long truesize;
-		int n = 0;
-
-		if (frag == MAX_SKB_FRAGS)
-			return -EMSGSIZE;
-
-		copied = iov_iter_get_pages(from, pages, ~0U,
-					    MAX_SKB_FRAGS - frag, &start);
-		if (copied < 0)
-			return -EFAULT;
-
-		iov_iter_advance(from, copied);
-
-		truesize = PAGE_ALIGN(copied + start);
-		skb->data_len += copied;
-		skb->len += copied;
-		skb->truesize += truesize;
-		atomic_add(truesize, &skb->sk->sk_wmem_alloc);
-		while (copied) {
-			int size = min_t(int, copied, PAGE_SIZE - start);
-			skb_fill_page_desc(skb, frag++, pages[n], start, size);
-			start = 0;
-			copied -= size;
-			n++;
-		}
-	}
-	return 0;
-}
-EXPORT_SYMBOL(zerocopy_sg_from_iter);
-
-static int skb_copy_and_csum_datagram(const struct sk_buff *skb, int offset,
-				      struct iov_iter *to, int len,
-				      __wsum *csump)
+int skb_copy_datagram_const_iovec(const struct sk_buff *skb, int offset,
+				  const struct iovec *to, int to_offset,
+				  int len)
 {
 	int start = skb_headlen(skb);
-	int i, copy = start - offset, start_off = offset;
+	int i, copy = start - offset;
 	struct sk_buff *frag_iter;
-	int pos = 0;
-	int n;
 
 	/* Copy header. */
 	if (copy > 0) {
 		if (copy > len)
 			copy = len;
-		n = csum_and_copy_to_iter(skb->data + offset, copy, csump, to);
-		offset += n;
-		if (n != copy)
+		if (memcpy_toiovecend(to, skb->data + offset, to_offset, copy))
 			goto fault;
 		if ((len -= copy) == 0)
 			return 0;
+		offset += copy;
+		to_offset += copy;
+	}
+
+	/* Copy paged appendix. Hmm... why does this look so complicated? */
+	for (i = 0; i < skb_shinfo(skb)->nr_frags; i++) {
+		int end;
+		const skb_frag_t *frag = &skb_shinfo(skb)->frags[i];
+
+		WARN_ON(start > offset + len);
+
+		end = start + skb_frag_size(frag);
+		if ((copy = end - offset) > 0) {
+			int err;
+			u8  *vaddr;
+			struct page *page = skb_frag_page(frag);
+
+			if (copy > len)
+				copy = len;
+			vaddr = kmap(page);
+			err = memcpy_toiovecend(to, vaddr + frag->page_offset +
+						offset - start, to_offset, copy);
+			kunmap(page);
+			if (err)
+				goto fault;
+			if (!(len -= copy))
+				return 0;
+			offset += copy;
+			to_offset += copy;
+		}
+		start = end;
+	}
+
+	skb_walk_frags(skb, frag_iter) {
+		int end;
+
+		WARN_ON(start > offset + len);
+
+		end = start + frag_iter->len;
+		if ((copy = end - offset) > 0) {
+			if (copy > len)
+				copy = len;
+			if (skb_copy_datagram_const_iovec(frag_iter,
+							  offset - start,
+							  to, to_offset,
+							  copy))
+				goto fault;
+			if ((len -= copy) == 0)
+				return 0;
+			offset += copy;
+			to_offset += copy;
+		}
+		start = end;
+	}
+	if (!len)
+		return 0;
+
+fault:
+	return -EFAULT;
+}
+EXPORT_SYMBOL(skb_copy_datagram_const_iovec);
+
+/**
+ *	skb_copy_datagram_from_iovec - Copy a datagram from an iovec.
+ *	@skb: buffer to copy
+ *	@offset: offset in the buffer to start copying to
+ *	@from: io vector to copy to
+ *	@from_offset: offset in the io vector to start copying from
+ *	@len: amount of data to copy to buffer from iovec
+ *
+ *	Returns 0 or -EFAULT.
+ *	Note: the iovec is not modified during the copy.
+ */
+int skb_copy_datagram_from_iovec(struct sk_buff *skb, int offset,
+				 const struct iovec *from, int from_offset,
+				 int len)
+{
+	int start = skb_headlen(skb);
+	int i, copy = start - offset;
+	struct sk_buff *frag_iter;
+
+	/* Copy header. */
+	if (copy > 0) {
+		if (copy > len)
+			copy = len;
+		if (memcpy_fromiovecend(skb->data + offset, from, from_offset,
+					copy))
+			goto fault;
+		if ((len -= copy) == 0)
+			return 0;
+		offset += copy;
+		from_offset += copy;
+	}
+
+	/* Copy paged appendix. Hmm... why does this look so complicated? */
+	for (i = 0; i < skb_shinfo(skb)->nr_frags; i++) {
+		int end;
+		const skb_frag_t *frag = &skb_shinfo(skb)->frags[i];
+
+		WARN_ON(start > offset + len);
+
+		end = start + skb_frag_size(frag);
+		if ((copy = end - offset) > 0) {
+			int err;
+			u8  *vaddr;
+			struct page *page = skb_frag_page(frag);
+
+			if (copy > len)
+				copy = len;
+			vaddr = kmap(page);
+			err = memcpy_fromiovecend(vaddr + frag->page_offset +
+						  offset - start,
+						  from, from_offset, copy);
+			kunmap(page);
+			if (err)
+				goto fault;
+
+			if (!(len -= copy))
+				return 0;
+			offset += copy;
+			from_offset += copy;
+		}
+		start = end;
+	}
+
+	skb_walk_frags(skb, frag_iter) {
+		int end;
+
+		WARN_ON(start > offset + len);
+
+		end = start + frag_iter->len;
+		if ((copy = end - offset) > 0) {
+			if (copy > len)
+				copy = len;
+			if (skb_copy_datagram_from_iovec(frag_iter,
+							 offset - start,
+							 from,
+							 from_offset,
+							 copy))
+				goto fault;
+			if ((len -= copy) == 0)
+				return 0;
+			offset += copy;
+			from_offset += copy;
+		}
+		start = end;
+	}
+	if (!len)
+		return 0;
+
+fault:
+	return -EFAULT;
+}
+EXPORT_SYMBOL(skb_copy_datagram_from_iovec);
+
+static int skb_copy_and_csum_datagram(const struct sk_buff *skb, int offset,
+				      u8 __user *to, int len,
+				      __wsum *csump)
+{
+	int start = skb_headlen(skb);
+	int i, copy = start - offset;
+	struct sk_buff *frag_iter;
+	int pos = 0;
+
+	/* Copy header. */
+	if (copy > 0) {
+		int err = 0;
+		if (copy > len)
+			copy = len;
+		*csump = csum_and_copy_to_user(skb->data + offset, to, copy,
+					       *csump, &err);
+		if (err)
+			goto fault;
+		if ((len -= copy) == 0)
+			return 0;
+		offset += copy;
+		to += copy;
 		pos = copy;
 	}
 
@@ -622,22 +680,26 @@ static int skb_copy_and_csum_datagram(const struct sk_buff *skb, int offset,
 
 		end = start + skb_frag_size(frag);
 		if ((copy = end - offset) > 0) {
-			__wsum csum2 = 0;
+			__wsum csum2;
+			int err = 0;
+			u8  *vaddr;
 			struct page *page = skb_frag_page(frag);
-			u8  *vaddr = kmap(page);
 
 			if (copy > len)
 				copy = len;
-			n = csum_and_copy_to_iter(vaddr + frag->page_offset +
-						  offset - start, copy,
-						  &csum2, to);
+			vaddr = kmap(page);
+			csum2 = csum_and_copy_to_user(vaddr +
+							frag->page_offset +
+							offset - start,
+						      to, copy, 0, &err);
 			kunmap(page);
-			offset += n;
-			if (n != copy)
+			if (err)
 				goto fault;
 			*csump = csum_block_add(*csump, csum2, pos);
 			if (!(len -= copy))
 				return 0;
+			offset += copy;
+			to += copy;
 			pos += copy;
 		}
 		start = end;
@@ -662,6 +724,7 @@ static int skb_copy_and_csum_datagram(const struct sk_buff *skb, int offset,
 			if ((len -= copy) == 0)
 				return 0;
 			offset += copy;
+			to += copy;
 			pos += copy;
 		}
 		start = end;
@@ -670,7 +733,6 @@ static int skb_copy_and_csum_datagram(const struct sk_buff *skb, int offset,
 		return 0;
 
 fault:
-	iov_iter_revert(to, offset - start_off);
 	return -EFAULT;
 }
 
@@ -718,51 +780,62 @@ __sum16 __skb_checksum_complete(struct sk_buff *skb)
 EXPORT_SYMBOL(__skb_checksum_complete);
 
 /**
- *	skb_copy_and_csum_datagram_msg - Copy and checksum skb to user iovec.
+ *	skb_copy_and_csum_datagram_iovec - Copy and checkum skb to user iovec.
  *	@skb: skbuff
  *	@hlen: hardware length
- *	@msg: destination
+ *	@iov: io vector
+ *	@len: amount of data to copy from skb to iov
  *
  *	Caller _must_ check that skb will fit to this iovec.
  *
  *	Returns: 0       - success.
  *		 -EINVAL - checksum failure.
- *		 -EFAULT - fault during copy.
+ *		 -EFAULT - fault during copy. Beware, in this case iovec
+ *			   can be modified!
  */
-int skb_copy_and_csum_datagram_msg(struct sk_buff *skb,
-				   int hlen, struct msghdr *msg)
+int skb_copy_and_csum_datagram_iovec(struct sk_buff *skb,
+				     int hlen, struct iovec *iov, int len)
 {
 	__wsum csum;
 	int chunk = skb->len - hlen;
 
+	if (chunk > len)
+		chunk = len;
+
 	if (!chunk)
 		return 0;
 
-	if (msg_data_left(msg) < chunk) {
+	/* Skip filled elements.
+	 * Pretty silly, look at memcpy_toiovec, though 8)
+	 */
+	while (!iov->iov_len)
+		iov++;
+
+	if (iov->iov_len < chunk) {
 		if (__skb_checksum_complete(skb))
-			return -EINVAL;
-		if (skb_copy_datagram_msg(skb, hlen, msg, chunk))
+			goto csum_error;
+		if (skb_copy_datagram_iovec(skb, hlen, iov, chunk))
 			goto fault;
 	} else {
 		csum = csum_partial(skb->data, hlen, skb->csum);
-		if (skb_copy_and_csum_datagram(skb, hlen, &msg->msg_iter,
+		if (skb_copy_and_csum_datagram(skb, hlen, iov->iov_base,
 					       chunk, &csum))
 			goto fault;
-
-		if (csum_fold(csum)) {
-			iov_iter_revert(&msg->msg_iter, chunk);
-			return -EINVAL;
-		}
-
+		if (csum_fold(csum))
+			goto csum_error;
 		if (unlikely(skb->ip_summed == CHECKSUM_COMPLETE) &&
 		    !skb->csum_complete_sw)
 			netdev_rx_csum_fault(NULL);
+		iov->iov_len -= chunk;
+		iov->iov_base += chunk;
 	}
 	return 0;
+csum_error:
+	return -EINVAL;
 fault:
 	return -EFAULT;
 }
-EXPORT_SYMBOL(skb_copy_and_csum_datagram_msg);
+EXPORT_SYMBOL(skb_copy_and_csum_datagram_iovec);
 
 /**
  * 	datagram_poll - generic datagram poll
@@ -814,7 +887,7 @@ unsigned int datagram_poll(struct file *file, struct socket *sock,
 	if (sock_writeable(sk))
 		mask |= POLLOUT | POLLWRNORM | POLLWRBAND;
 	else
-		sk_set_bit(SOCKWQ_ASYNC_NOSPACE, sk);
+		set_bit(SOCK_ASYNC_NOSPACE, &sk->sk_socket->flags);
 
 	return mask;
 }

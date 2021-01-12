@@ -38,6 +38,7 @@
 #define HP_SW_PATH_PASSIVE		1
 
 struct hp_sw_dh_data {
+	struct scsi_dh_data dh_data;
 	unsigned char sense[SCSI_SENSE_BUFFERSIZE];
 	int path_state;
 	int retries;
@@ -48,6 +49,11 @@ struct hp_sw_dh_data {
 };
 
 static int hp_sw_start_stop(struct hp_sw_dh_data *);
+
+static inline struct hp_sw_dh_data *get_hp_sw_data(struct scsi_device *sdev)
+{
+	return container_of(sdev->scsi_dh_data, struct hp_sw_dh_data, dh_data);
+}
 
 /*
  * tur_done - Handle TEST UNIT READY return status
@@ -261,7 +267,7 @@ static int hp_sw_start_stop(struct hp_sw_dh_data *h)
 
 static int hp_sw_prep_fn(struct scsi_device *sdev, struct request *req)
 {
-	struct hp_sw_dh_data *h = sdev->handler_data;
+	struct hp_sw_dh_data *h = get_hp_sw_data(sdev);
 	int ret = BLKPREP_OK;
 
 	if (h->path_state != HP_SW_PATH_ACTIVE) {
@@ -286,7 +292,7 @@ static int hp_sw_activate(struct scsi_device *sdev,
 				activate_complete fn, void *data)
 {
 	int ret = SCSI_DH_OK;
-	struct hp_sw_dh_data *h = sdev->handler_data;
+	struct hp_sw_dh_data *h = get_hp_sw_data(sdev);
 
 	ret = hp_sw_tur(sdev, h);
 
@@ -305,38 +311,37 @@ static int hp_sw_activate(struct scsi_device *sdev,
 	return 0;
 }
 
-static int hp_sw_bus_attach(struct scsi_device *sdev)
+static const struct {
+	char *vendor;
+	char *model;
+} hp_sw_dh_data_list[] = {
+	{"COMPAQ", "MSA1000 VOLUME"},
+	{"COMPAQ", "HSV110"},
+	{"HP", "HSV100"},
+	{"DEC", "HSG80"},
+	{NULL, NULL},
+};
+
+static bool hp_sw_match(struct scsi_device *sdev)
 {
-	struct hp_sw_dh_data *h;
-	int ret;
+	int i;
 
-	h = kzalloc(sizeof(*h), GFP_KERNEL);
-	if (!h)
-		return -ENOMEM;
-	h->path_state = HP_SW_PATH_UNINITIALIZED;
-	h->retries = HP_SW_RETRIES;
-	h->sdev = sdev;
+	if (scsi_device_tpgs(sdev))
+		return false;
 
-	ret = hp_sw_tur(sdev, h);
-	if (ret != SCSI_DH_OK || h->path_state == HP_SW_PATH_UNINITIALIZED)
-		goto failed;
-
-	sdev_printk(KERN_INFO, sdev, "%s: attached to %s path\n",
-		    HP_SW_NAME, h->path_state == HP_SW_PATH_ACTIVE?
-		    "active":"passive");
-
-	sdev->handler_data = h;
-	return 0;
-failed:
-	kfree(h);
-	return -EINVAL;
+	for (i = 0; hp_sw_dh_data_list[i].vendor; i++) {
+		if (!strncmp(sdev->vendor, hp_sw_dh_data_list[i].vendor,
+			strlen(hp_sw_dh_data_list[i].vendor)) &&
+		    !strncmp(sdev->model, hp_sw_dh_data_list[i].model,
+			strlen(hp_sw_dh_data_list[i].model))) {
+			return true;
+		}
+	}
+	return false;
 }
 
-static void hp_sw_bus_detach( struct scsi_device *sdev )
-{
-	kfree(sdev->handler_data);
-	sdev->handler_data = NULL;
-}
+static int hp_sw_bus_attach(struct scsi_device *sdev);
+static void hp_sw_bus_detach( struct scsi_device *sdev);
 
 static struct scsi_device_handler hp_sw_dh = {
 	.name		= HP_SW_NAME,
@@ -345,11 +350,65 @@ static struct scsi_device_handler hp_sw_dh = {
 	.detach		= hp_sw_bus_detach,
 	.activate	= hp_sw_activate,
 	.prep_fn	= hp_sw_prep_fn,
+	.match		= hp_sw_match,
 };
+
+static int hp_sw_bus_attach(struct scsi_device *sdev)
+{
+	struct hp_sw_dh_data *h;
+	unsigned long flags;
+	int ret;
+
+	h = kzalloc(sizeof(*h), GFP_KERNEL);
+	if (!h) {
+		sdev_printk(KERN_ERR, sdev, "%s: Attach Failed\n",
+			    HP_SW_NAME);
+		return -ENOMEM;
+	}
+
+	h->dh_data.scsi_dh = &hp_sw_dh;
+	h->path_state = HP_SW_PATH_UNINITIALIZED;
+	h->retries = HP_SW_RETRIES;
+	h->sdev = sdev;
+
+	ret = hp_sw_tur(sdev, h);
+	if (ret != SCSI_DH_OK || h->path_state == HP_SW_PATH_UNINITIALIZED)
+		goto failed;
+
+	spin_lock_irqsave(sdev->request_queue->queue_lock, flags);
+	sdev->scsi_dh_data = &h->dh_data;
+	spin_unlock_irqrestore(sdev->request_queue->queue_lock, flags);
+
+	sdev_printk(KERN_INFO, sdev, "%s: attached to %s path\n",
+		    HP_SW_NAME, h->path_state == HP_SW_PATH_ACTIVE?
+		    "active":"passive");
+
+	return 0;
+
+failed:
+	kfree(h);
+	sdev_printk(KERN_ERR, sdev, "%s: not attached\n",
+		    HP_SW_NAME);
+	return -EINVAL;
+}
+
+static void hp_sw_bus_detach( struct scsi_device *sdev )
+{
+	struct hp_sw_dh_data *h = get_hp_sw_data(sdev);
+	unsigned long flags;
+
+	spin_lock_irqsave(sdev->request_queue->queue_lock, flags);
+	sdev->scsi_dh_data = NULL;
+	spin_unlock_irqrestore(sdev->request_queue->queue_lock, flags);
+
+	sdev_printk(KERN_NOTICE, sdev, "%s: Detached\n", HP_SW_NAME);
+
+	kfree(h);
+}
 
 static int __init hp_sw_init(void)
 {
-	return scsi_register_device_handler(&hp_sw_dh);
+	return scsi_register_device_handler(&hp_sw_dh, NULL, 0);
 }
 
 static void __exit hp_sw_exit(void)

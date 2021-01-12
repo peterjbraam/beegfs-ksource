@@ -570,9 +570,6 @@ struct drm_i915_reg_descriptor {
 #define REG32(_reg, ...) \
 	{ .addr = (_reg), __VA_ARGS__ }
 
-#define REG32_IDX(_reg, idx) \
-	{ .addr = _reg(idx) }
-
 /*
  * Convenience macro for adding 64-bit registers.
  *
@@ -670,7 +667,6 @@ static const struct drm_i915_reg_descriptor gen9_blt_regs[] = {
 	REG64_IDX(RING_TIMESTAMP, BSD_RING_BASE),
 	REG32(BCS_SWCTRL),
 	REG64_IDX(RING_TIMESTAMP, BLT_RING_BASE),
-	REG32_IDX(RING_CTX_TIMESTAMP, BLT_RING_BASE),
 	REG64_IDX(BCS_GPR, 0),
 	REG64_IDX(BCS_GPR, 1),
 	REG64_IDX(BCS_GPR, 2),
@@ -950,7 +946,7 @@ void intel_engine_init_cmd_parser(struct intel_engine_cs *engine)
 		if (IS_HASWELL(engine->i915)) {
 			cmd_tables = hsw_render_ring_cmd_table;
 			cmd_table_count =
-				ARRAY_SIZE(hsw_render_ring_cmd_table);
+			  ARRAY_SIZE(hsw_render_ring_cmd_table);
 		} else {
 			cmd_tables = gen7_render_cmd_table;
 			cmd_table_count = ARRAY_SIZE(gen7_render_cmd_table);
@@ -963,6 +959,7 @@ void intel_engine_init_cmd_parser(struct intel_engine_cs *engine)
 			engine->reg_tables = ivb_render_reg_tables;
 			engine->reg_table_count = ARRAY_SIZE(ivb_render_reg_tables);
 		}
+
 		engine->get_cmd_length_mask = gen7_render_get_cmd_length_mask;
 		break;
 	case VCS:
@@ -1148,13 +1145,13 @@ static u32 *copy_batch(struct drm_i915_gem_object *dst_obj,
 		goto unpin_src;
 	}
 
-	dst = i915_gem_object_pin_map(dst_obj, I915_MAP_WB);
+	dst = i915_gem_object_pin_map(dst_obj, I915_MAP_FORCE_WB);
 	if (IS_ERR(dst))
 		goto unpin_dst;
 
 	src = ERR_PTR(-ENODEV);
 	if (src_needs_clflush &&
-	    i915_memcpy_from_wc((void *)(uintptr_t)batch_start_offset, NULL, 0)) {
+	    i915_can_memcpy_from_wc(NULL, batch_start_offset, 0)) {
 		src = i915_gem_object_pin_map(src_obj, I915_MAP_WC);
 		if (!IS_ERR(src)) {
 			i915_memcpy_from_wc(dst,
@@ -1234,8 +1231,8 @@ static bool check_cmd(const struct intel_engine_cs *engine,
 				find_reg(engine, reg_addr);
 
 			if (!reg) {
-				DRM_DEBUG_DRIVER("CMD: Rejected register 0x%08X in command: 0x%08X (exec_id=%d)\n",
-						 reg_addr, *cmd, engine->exec_id);
+				DRM_DEBUG_DRIVER("CMD: Rejected register 0x%08X in command: 0x%08X (%s)\n",
+						 reg_addr, *cmd, engine->name);
 				return false;
 			}
 
@@ -1296,11 +1293,11 @@ static bool check_cmd(const struct intel_engine_cs *engine,
 				desc->bits[i].mask;
 
 			if (dword != desc->bits[i].expected) {
-				DRM_DEBUG_DRIVER("CMD: Rejected command 0x%08X for bitmask 0x%08X (exp=0x%08X act=0x%08X) (exec_id=%d)\n",
+				DRM_DEBUG_DRIVER("CMD: Rejected command 0x%08X for bitmask 0x%08X (exp=0x%08X act=0x%08X) (%s)\n",
 						 *cmd,
 						 desc->bits[i].mask,
 						 desc->bits[i].expected,
-						 dword, engine->exec_id);
+						 dword, engine->name);
 				return false;
 			}
 		}
@@ -1510,9 +1507,9 @@ int intel_engine_cmd_parser(struct i915_gem_context *ctx,
 	} while (1);
 
 	if (needs_clflush_after) {
-		void *ptr = ptr_mask_bits(shadow_batch_obj->mapping);
-		drm_clflush_virt_range(ptr,
-				       (void *)(cmd + 1) - ptr);
+		void *ptr = page_mask_bits(shadow_batch_obj->mm.mapping);
+
+		drm_clflush_virt_range(ptr, (void *)(cmd + 1) - ptr);
 	}
 
 err:
@@ -1532,10 +1529,11 @@ err:
 int i915_cmd_parser_get_version(struct drm_i915_private *dev_priv)
 {
 	struct intel_engine_cs *engine;
+	enum intel_engine_id id;
 	bool active = false;
 
 	/* If the command parser is not enabled, report 0 - unsupported */
-	for_each_engine(engine, dev_priv) {
+	for_each_engine(engine, dev_priv, id) {
 		if (intel_engine_using_cmd_parser(engine)) {
 			active = true;
 			break;

@@ -153,17 +153,30 @@ int nfsd_vers(int vers, enum vers_op change)
 	return 0;
 }
 
+static void
+nfsd_adjust_nfsd_versions4(void)
+{
+	unsigned i;
+
+	for (i = 0; i <= NFSD_SUPPORTED_MINOR_VERSION; i++) {
+		if (nfsd_supported_minorversions[i])
+			return;
+	}
+	nfsd_vers(4, NFSD_CLEAR);
+}
+
 int nfsd_minorversion(u32 minorversion, enum vers_op change)
 {
-	if (minorversion > NFSD_SUPPORTED_MINOR_VERSION &&
-	    change != NFSD_AVAIL)
+	if (minorversion > NFSD_SUPPORTED_MINOR_VERSION)
 		return -1;
 	switch(change) {
 	case NFSD_SET:
 		nfsd_supported_minorversions[minorversion] = true;
+		nfsd_vers(4, NFSD_SET);
 		break;
 	case NFSD_CLEAR:
 		nfsd_supported_minorversions[minorversion] = false;
+		nfsd_adjust_nfsd_versions4();
 		break;
 	case NFSD_TEST:
 		return nfsd_supported_minorversions[minorversion];
@@ -320,7 +333,8 @@ static int nfsd_inetaddr_event(struct notifier_block *this, unsigned long event,
 	struct nfsd_net *nn = net_generic(net, nfsd_net_id);
 	struct sockaddr_in sin;
 
-	if (event != NETDEV_DOWN)
+	if ((event != NETDEV_DOWN) ||
+	    !atomic_inc_not_zero(&nn->ntf_refcnt))
 		goto out;
 
 	if (nn->nfsd_serv) {
@@ -329,6 +343,8 @@ static int nfsd_inetaddr_event(struct notifier_block *this, unsigned long event,
 		sin.sin_addr.s_addr = ifa->ifa_local;
 		svc_age_temp_xprts_now(nn->nfsd_serv, (struct sockaddr *)&sin);
 	}
+	atomic_dec(&nn->ntf_refcnt);
+	wake_up(&nn->ntf_wq);
 
 out:
 	return NOTIFY_DONE;
@@ -348,7 +364,8 @@ static int nfsd_inet6addr_event(struct notifier_block *this,
 	struct nfsd_net *nn = net_generic(net, nfsd_net_id);
 	struct sockaddr_in6 sin6;
 
-	if (event != NETDEV_DOWN)
+	if ((event != NETDEV_DOWN) ||
+	    !atomic_inc_not_zero(&nn->ntf_refcnt))
 		goto out;
 
 	if (nn->nfsd_serv) {
@@ -357,7 +374,8 @@ static int nfsd_inet6addr_event(struct notifier_block *this,
 		sin6.sin6_addr = ifa->addr;
 		svc_age_temp_xprts_now(nn->nfsd_serv, (struct sockaddr *)&sin6);
 	}
-
+	atomic_dec(&nn->ntf_refcnt);
+	wake_up(&nn->ntf_wq);
 out:
 	return NOTIFY_DONE;
 }
@@ -374,6 +392,7 @@ static void nfsd_last_thread(struct svc_serv *serv, struct net *net)
 {
 	struct nfsd_net *nn = net_generic(net, nfsd_net_id);
 
+	atomic_dec(&nn->ntf_refcnt);
 	/* check if the notifier still has clients */
 	if (atomic_dec_return(&nfsd_notifier_refcount) == 0) {
 		unregister_inetaddr_notifier(&nfsd_inetaddr_notifier);
@@ -381,6 +400,7 @@ static void nfsd_last_thread(struct svc_serv *serv, struct net *net)
 		unregister_inet6addr_notifier(&nfsd_inet6addr_notifier);
 #endif
 	}
+	wait_event(nn->ntf_wq, atomic_read(&nn->ntf_refcnt) == 0);
 
 	/*
 	 * write_ports can create the server without actually starting
@@ -393,26 +413,30 @@ static void nfsd_last_thread(struct svc_serv *serv, struct net *net)
 		return;
 
 	nfsd_shutdown_net(net);
-	pr_info("nfsd: last server has exited, flushing export cache\n");
+	printk(KERN_WARNING "nfsd: last server has exited, flushing export "
+			    "cache\n");
 	nfsd_export_flush(net);
 }
 
 void nfsd_reset_versions(void)
 {
+	int found_one = 0;
 	int i;
 
-	for (i = 0; i < NFSD_NRVERS; i++)
-		if (nfsd_vers(i, NFSD_TEST))
-			return;
+	for (i = NFSD_MINVERS; i < NFSD_NRVERS; i++) {
+		if (nfsd_program.pg_vers[i])
+			found_one = 1;
+	}
 
-	for (i = 0; i < NFSD_NRVERS; i++)
-		if (i != 4)
-			nfsd_vers(i, NFSD_SET);
-		else {
-			int minor = 0;
-			while (nfsd_minorversion(minor, NFSD_SET) >= 0)
-				minor++;
-		}
+	if (!found_one) {
+		for (i = NFSD_MINVERS; i < NFSD_NRVERS; i++)
+			nfsd_program.pg_vers[i] = nfsd_version[i];
+#if defined(CONFIG_NFSD_V2_ACL) || defined(CONFIG_NFSD_V3_ACL)
+		for (i = NFSD_ACL_MINVERS; i < NFSD_ACL_NRVERS; i++)
+			nfsd_acl_program.pg_vers[i] =
+				nfsd_acl_version[i];
+#endif
+	}
 }
 
 /*
@@ -499,7 +523,8 @@ int nfsd_create_serv(struct net *net)
 		register_inet6addr_notifier(&nfsd_inet6addr_notifier);
 #endif
 	}
-	do_gettimeofday(&nn->nfssvc_boot);		/* record boot time */
+	atomic_inc(&nn->ntf_refcnt);
+	ktime_get_real_ts64(&nn->nfssvc_boot); /* record boot time */
 	return 0;
 }
 
@@ -658,8 +683,8 @@ nfsd(void *vrqstp)
 	mutex_lock(&nfsd_mutex);
 
 	/* At this point, the thread shares current->fs
-	 * with the init process. We need to create files with a
-	 * umask of 0 instead of init's umask. */
+	 * with the init process. We need to create files with the
+	 * umask as defined by the client instead of init's umask. */
 	if (unshare_fs_struct() < 0) {
 		printk("Unable to start nfsd thread: out of memory\n");
 		goto out;

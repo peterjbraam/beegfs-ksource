@@ -9,8 +9,6 @@
 #include <sound/hdaudio.h>
 #include "trace.h"
 
-static void process_unsol_events(struct work_struct *work);
-
 static const struct hdac_bus_ops default_ops = {
 	.command = snd_hdac_bus_send_cmd,
 	.get_response = snd_hdac_bus_get_response,
@@ -37,7 +35,7 @@ int snd_hdac_bus_init(struct hdac_bus *bus, struct device *dev,
 	bus->io_ops = io_ops;
 	INIT_LIST_HEAD(&bus->stream_list);
 	INIT_LIST_HEAD(&bus->codec_list);
-	INIT_WORK(&bus->unsol_work, process_unsol_events);
+	INIT_WORK(&bus->unsol_work, snd_hdac_bus_process_unsol_events);
 	spin_lock_init(&bus->reg_lock);
 	mutex_init(&bus->cmd_mutex);
 	bus->irq = -1;
@@ -148,14 +146,13 @@ EXPORT_SYMBOL_GPL(snd_hdac_bus_queue_event);
 /*
  * process queued unsolicited events
  */
-static void process_unsol_events(struct work_struct *work)
+void snd_hdac_bus_process_unsol_events(struct work_struct *work)
 {
 	struct hdac_bus *bus = container_of(work, struct hdac_bus, unsol_work);
 	struct hdac_device *codec;
 	struct hdac_driver *drv;
 	unsigned int rp, caddr, res;
 
-	spin_lock_irq(&bus->reg_lock);
 	while (bus->unsol_rp != bus->unsol_wp) {
 		rp = (bus->unsol_rp + 1) % HDA_UNSOL_QUEUE_SIZE;
 		bus->unsol_rp = rp;
@@ -167,14 +164,12 @@ static void process_unsol_events(struct work_struct *work)
 		codec = bus->caddr_tbl[caddr & 0x0f];
 		if (!codec || !codec->dev.driver)
 			continue;
-		spin_unlock_irq(&bus->reg_lock);
 		drv = drv_to_hdac_driver(codec->dev.driver);
 		if (drv->unsol_event)
 			drv->unsol_event(codec, res);
-		spin_lock_irq(&bus->reg_lock);
 	}
-	spin_unlock_irq(&bus->reg_lock);
 }
+EXPORT_SYMBOL_GPL(snd_hdac_bus_process_unsol_events);
 
 /**
  * snd_hdac_bus_add_device - Add a codec to bus
@@ -216,5 +211,6 @@ void snd_hdac_bus_remove_device(struct hdac_bus *bus,
 	bus->caddr_tbl[codec->addr] = NULL;
 	clear_bit(codec->addr, &bus->codec_powered);
 	bus->num_codecs--;
+	flush_work(&bus->unsol_work);
 }
 EXPORT_SYMBOL_GPL(snd_hdac_bus_remove_device);

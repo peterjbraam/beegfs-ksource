@@ -1,126 +1,54 @@
 #ifndef _ASM_X86_KAISER_H
 #define _ASM_X86_KAISER_H
-
-#include <uapi/asm/processor-flags.h> /* For PCID constants */
-
 /*
- * This file includes the definitions for the KAISER feature.
- * KAISER is a counter measure against x86_64 side channel attacks on
- * the kernel virtual memory.  It has a shadow pgd for every process: the
- * shadow pgd has a minimalistic kernel-set mapped, but includes the whole
- * user memory. Within a kernel context switch, or when an interrupt is handled,
- * the pgd is switched to the normal one. When the system switches to user mode,
- * the shadow pgd is enabled. By this, the virtual memory caches are freed,
- * and the user may not attack the whole kernel memory.
+ * Copyright(c) 2017 Intel Corporation. All rights reserved.
  *
- * A minimalistic kernel mapping holds the parts needed to be mapped in user
- * mode, such as the entry/exit functions of the user space, or the stacks.
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * Based on work published here: https://github.com/IAIK/KAISER
+ * Modified by Dave Hansen <dave.hansen@intel.com to actually work.
  */
 
-#define KAISER_SHADOW_PGD_OFFSET 0x1000
+#define KAISER_SHADOW_PCID_ASID	1
 
-#ifdef __ASSEMBLY__
-#ifdef CONFIG_PAGE_TABLE_ISOLATION
+#define KAISER_PCP_ENABLED	(1<<0)
+#define KAISER_PCP_PCID		(1<<1)
 
-.macro _SWITCH_TO_KERNEL_CR3 reg
-movq %cr3, \reg
-andq $(~(X86_CR3_PCID_ASID_MASK | KAISER_SHADOW_PGD_OFFSET)), \reg
-/* If PCID enabled, set X86_CR3_PCID_NOFLUSH_BIT */
-ALTERNATIVE "", "bts $63, \reg", X86_FEATURE_PCID
-movq \reg, %cr3
-.endm
-
-.macro _SWITCH_TO_USER_CR3 reg regb
-/*
- * regb must be the low byte portion of reg: because we have arranged
- * for the low byte of the user PCID to serve as the high byte of NOFLUSH
- * (0x80 for each when PCID is enabled, or 0x00 when PCID and NOFLUSH are
- * not enabled): so that the one register can update both memory and cr3.
- */
-movq %cr3, \reg
-orq  PER_CPU_VAR(x86_cr3_pcid_user), \reg
-js   9f
-/* If PCID enabled, FLUSH this time, reset to NOFLUSH for next time */
-movb \regb, PER_CPU_VAR(x86_cr3_pcid_user+7)
-9:
-movq \reg, %cr3
-.endm
-
-.macro SWITCH_KERNEL_CR3
-ALTERNATIVE "jmp 8f", "pushq %rax", X86_FEATURE_KAISER
-_SWITCH_TO_KERNEL_CR3 %rax
-popq %rax
-8:
-.endm
-
-.macro SWITCH_USER_CR3
-ALTERNATIVE "jmp 8f", "pushq %rax", X86_FEATURE_KAISER
-_SWITCH_TO_USER_CR3 %rax %al
-popq %rax
-8:
-.endm
-
-.macro SWITCH_KERNEL_CR3_NO_STACK
-ALTERNATIVE "jmp 8f", \
-	__stringify(movq %rax, PER_CPU_VAR(unsafe_stack_register_backup)), \
-	X86_FEATURE_KAISER
-_SWITCH_TO_KERNEL_CR3 %rax
-movq PER_CPU_VAR(unsafe_stack_register_backup), %rax
-8:
-.endm
-
-#else /* CONFIG_PAGE_TABLE_ISOLATION */
-
-.macro SWITCH_KERNEL_CR3
-.endm
-.macro SWITCH_USER_CR3
-.endm
-.macro SWITCH_KERNEL_CR3_NO_STACK
-.endm
-
-#endif /* CONFIG_PAGE_TABLE_ISOLATION */
-
-#else /* __ASSEMBLY__ */
+#ifndef __ASSEMBLY__
 
 #ifdef CONFIG_PAGE_TABLE_ISOLATION
-/*
- * Upon kernel/user mode switch, it may happen that the address
- * space has to be switched before the registers have been
- * stored.  To change the address space, another register is
- * needed.  A register therefore has to be stored/restored.
-*/
-DECLARE_PER_CPU_USER_MAPPED(unsigned long, unsafe_stack_register_backup);
-
-DECLARE_PER_CPU(unsigned long, x86_cr3_pcid_user);
-
-extern char __per_cpu_user_mapped_start[], __per_cpu_user_mapped_end[];
-
-extern int kaiser_enabled;
-extern void __init kaiser_check_boottime_disable(void);
-#else
-#define kaiser_enabled	0
-static inline void __init kaiser_check_boottime_disable(void) {}
-#endif /* CONFIG_PAGE_TABLE_ISOLATION */
-
-/*
- * Kaiser function prototypes are needed even when CONFIG_PAGE_TABLE_ISOLATION is not set,
- * so as to build with tests on kaiser_enabled instead of #ifdefs.
- */
+#include <linux/percpu.h>
 
 /**
- *  kaiser_add_mapping - map a virtual memory part to the shadow (user) mapping
+ *  kaiser_add_mapping - map a kernel range into the user page tables
  *  @addr: the start address of the range
  *  @size: the size of the range
  *  @flags: The mapping flags of the pages
  *
- *  The mapping is done on a global scope, so no bigger
- *  synchronization has to be done.  the pages have to be
- *  manually unmapped again when they are not needed any longer.
+ *  Use this on all data and code that need to be mapped into both
+ *  copies of the page tables.  This includes the code that switches
+ *  to/from userspace and all of the hardware structures that are
+ *  virtually-addressed and needed in userspace like the interrupt
+ *  table.
  */
-extern int kaiser_add_mapping(unsigned long addr, unsigned long size, unsigned long flags);
+extern int kaiser_add_mapping(unsigned long addr, unsigned long size,
+			      pteval_t flags);
 
 /**
- *  kaiser_remove_mapping - unmap a virtual memory part of the shadow mapping
+ *  kaiser_add_mapping_cpu_entry - map the cpu entry area
+ *  @cpu: the CPU for which the entry area is being mapped
+ */
+extern void kaiser_add_mapping_cpu_entry(int cpu);
+
+/**
+ *  kaiser_remove_mapping - remove a kernel mapping from the userpage tables
  *  @addr: the start address of the range
  *  @size: the size of the range
  */
@@ -136,6 +64,18 @@ extern void kaiser_remove_mapping(unsigned long start, unsigned long size);
  */
 extern void kaiser_init(void);
 
-#endif /* __ASSEMBLY */
+extern bool is_kaiser_pgd(pgd_t *pgd);
+
+extern int kaiser_enabled;
+static __always_inline bool kaiser_active(void)
+{
+	return __this_cpu_read(kaiser_enabled_pcp);
+}
+
+#else
+static inline void kaiser_add_mapping_cpu_entry(int cpu) {}
+#endif
+
+#endif /* __ASSEMBLY__ */
 
 #endif /* _ASM_X86_KAISER_H */

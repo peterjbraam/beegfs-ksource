@@ -3,7 +3,7 @@
  *
  * Implementation of FSF commands.
  *
- * Copyright IBM Corp. 2002, 2015
+ * Copyright IBM Corp. 2002, 2018
  */
 
 #define KMSG_COMPONENT "zfcp"
@@ -119,7 +119,7 @@ static void zfcp_fsf_link_down_info_eval(struct zfcp_fsf_req *req,
 	if (atomic_read(&adapter->status) & ZFCP_STATUS_ADAPTER_LINK_UNPLUGGED)
 		return;
 
-	atomic_or(ZFCP_STATUS_ADAPTER_LINK_UNPLUGGED, &adapter->status);
+	atomic_set_mask(ZFCP_STATUS_ADAPTER_LINK_UNPLUGGED, &adapter->status);
 
 	zfcp_scsi_schedule_rports_block(adapter);
 
@@ -209,7 +209,7 @@ static void zfcp_fsf_status_read_link_down(struct zfcp_fsf_req *req)
 		break;
 	case FSF_STATUS_READ_SUB_FIRMWARE_UPDATE:
 		zfcp_fsf_link_down_info_eval(req, NULL);
-	}
+	};
 }
 
 static void zfcp_fsf_status_read_handler(struct zfcp_fsf_req *req)
@@ -355,7 +355,7 @@ static void zfcp_fsf_protstatus_eval(struct zfcp_fsf_req *req)
 		zfcp_erp_adapter_shutdown(adapter, 0, "fspse_3");
 		break;
 	case FSF_PROT_HOST_CONNECTION_INITIALIZING:
-		atomic_or(ZFCP_STATUS_ADAPTER_HOST_CON_INIT,
+		atomic_set_mask(ZFCP_STATUS_ADAPTER_HOST_CON_INIT,
 				&adapter->status);
 		break;
 	case FSF_PROT_DUPLICATE_REQUEST_ID:
@@ -448,6 +448,9 @@ void zfcp_fsf_req_dismiss_all(struct zfcp_adapter *adapter)
 #define ZFCP_FSF_PORTSPEED_10GBIT	(1 <<  3)
 #define ZFCP_FSF_PORTSPEED_8GBIT	(1 <<  4)
 #define ZFCP_FSF_PORTSPEED_16GBIT	(1 <<  5)
+#define ZFCP_FSF_PORTSPEED_32GBIT	(1 <<  6)
+#define ZFCP_FSF_PORTSPEED_64GBIT	(1 <<  7)
+#define ZFCP_FSF_PORTSPEED_128GBIT	(1 <<  8)
 #define ZFCP_FSF_PORTSPEED_NOT_NEGOTIATED (1 << 15)
 
 static u32 zfcp_fsf_convert_portspeed(u32 fsf_speed)
@@ -465,6 +468,12 @@ static u32 zfcp_fsf_convert_portspeed(u32 fsf_speed)
 		fdmi_speed |= FC_PORTSPEED_8GBIT;
 	if (fsf_speed & ZFCP_FSF_PORTSPEED_16GBIT)
 		fdmi_speed |= FC_PORTSPEED_16GBIT;
+	if (fsf_speed & ZFCP_FSF_PORTSPEED_32GBIT)
+		fdmi_speed |= FC_PORTSPEED_32GBIT;
+	if (fsf_speed & ZFCP_FSF_PORTSPEED_64GBIT)
+		fdmi_speed |= FC_PORTSPEED_64GBIT;
+	if (fsf_speed & ZFCP_FSF_PORTSPEED_128GBIT)
+		fdmi_speed |= FC_PORTSPEED_128GBIT;
 	if (fsf_speed & ZFCP_FSF_PORTSPEED_NOT_NEGOTIATED)
 		fdmi_speed |= FC_PORTSPEED_NOT_NEGOTIATED;
 	return fdmi_speed;
@@ -567,7 +576,7 @@ static void zfcp_fsf_exchange_config_data_handler(struct zfcp_fsf_req *req)
 			zfcp_erp_adapter_shutdown(adapter, 0, "fsecdh1");
 			return;
 		}
-		atomic_or(ZFCP_STATUS_ADAPTER_XCONFIG_OK,
+		atomic_set_mask(ZFCP_STATUS_ADAPTER_XCONFIG_OK,
 				&adapter->status);
 		break;
 	case FSF_EXCHANGE_CONFIG_DATA_INCOMPLETE:
@@ -580,7 +589,7 @@ static void zfcp_fsf_exchange_config_data_handler(struct zfcp_fsf_req *req)
 
 		/* avoids adapter shutdown to be able to recognize
 		 * events such as LINK UP */
-		atomic_or(ZFCP_STATUS_ADAPTER_XCONFIG_OK,
+		atomic_set_mask(ZFCP_STATUS_ADAPTER_XCONFIG_OK,
 				&adapter->status);
 		zfcp_fsf_link_down_info_eval(req,
 			&qtcb->header.fsf_status_qual.link_down_info);
@@ -782,8 +791,7 @@ int zfcp_fsf_status_read(struct zfcp_qdio *qdio)
 	if (zfcp_qdio_sbal_get(qdio))
 		goto out;
 
-	req = zfcp_fsf_req_create(qdio, FSF_QTCB_UNSOLICITED_STATUS,
-				  SBAL_SFLAGS0_TYPE_STATUS,
+	req = zfcp_fsf_req_create(qdio, FSF_QTCB_UNSOLICITED_STATUS, 0,
 				  adapter->pool.status_read_req);
 	if (IS_ERR(req)) {
 		retval = PTR_ERR(req);
@@ -1412,9 +1420,9 @@ static void zfcp_fsf_open_port_handler(struct zfcp_fsf_req *req)
 		break;
 	case FSF_GOOD:
 		port->handle = header->port_handle;
-		atomic_or(ZFCP_STATUS_COMMON_OPEN |
+		atomic_set_mask(ZFCP_STATUS_COMMON_OPEN |
 				ZFCP_STATUS_PORT_PHYS_OPEN, &port->status);
-		atomic_andnot(ZFCP_STATUS_COMMON_ACCESS_BOXED,
+		atomic_clear_mask(ZFCP_STATUS_COMMON_ACCESS_BOXED,
 		                  &port->status);
 		/* check whether D_ID has changed during open */
 		/*
@@ -1594,7 +1602,6 @@ int zfcp_fsf_open_wka_port(struct zfcp_fc_wka_port *wka_port)
 {
 	struct zfcp_qdio *qdio = wka_port->adapter->qdio;
 	struct zfcp_fsf_req *req;
-	unsigned long req_id = 0;
 	int retval = -EIO;
 
 	spin_lock_irq(&qdio->req_q_lock);
@@ -1617,8 +1624,6 @@ int zfcp_fsf_open_wka_port(struct zfcp_fc_wka_port *wka_port)
 	hton24(req->qtcb->bottom.support.d_id, wka_port->d_id);
 	req->data = wka_port;
 
-	req_id = req->req_id;
-
 	zfcp_fsf_start_timer(req, ZFCP_FSF_REQUEST_TIMEOUT);
 	retval = zfcp_fsf_req_send(req);
 	if (retval)
@@ -1626,7 +1631,7 @@ int zfcp_fsf_open_wka_port(struct zfcp_fc_wka_port *wka_port)
 out:
 	spin_unlock_irq(&qdio->req_q_lock);
 	if (!retval)
-		zfcp_dbf_rec_run_wka("fsowp_1", wka_port, req_id);
+		zfcp_dbf_rec_run_wka("fsowp_1", wka_port, req->req_id);
 	return retval;
 }
 
@@ -1652,7 +1657,6 @@ int zfcp_fsf_close_wka_port(struct zfcp_fc_wka_port *wka_port)
 {
 	struct zfcp_qdio *qdio = wka_port->adapter->qdio;
 	struct zfcp_fsf_req *req;
-	unsigned long req_id = 0;
 	int retval = -EIO;
 
 	spin_lock_irq(&qdio->req_q_lock);
@@ -1675,8 +1679,6 @@ int zfcp_fsf_close_wka_port(struct zfcp_fc_wka_port *wka_port)
 	req->data = wka_port;
 	req->qtcb->header.port_handle = wka_port->handle;
 
-	req_id = req->req_id;
-
 	zfcp_fsf_start_timer(req, ZFCP_FSF_REQUEST_TIMEOUT);
 	retval = zfcp_fsf_req_send(req);
 	if (retval)
@@ -1684,7 +1686,7 @@ int zfcp_fsf_close_wka_port(struct zfcp_fc_wka_port *wka_port)
 out:
 	spin_unlock_irq(&qdio->req_q_lock);
 	if (!retval)
-		zfcp_dbf_rec_run_wka("fscwp_1", wka_port, req_id);
+		zfcp_dbf_rec_run_wka("fscwp_1", wka_port, req->req_id);
 	return retval;
 }
 
@@ -1705,10 +1707,10 @@ static void zfcp_fsf_close_physical_port_handler(struct zfcp_fsf_req *req)
 	case FSF_PORT_BOXED:
 		/* can't use generic zfcp_erp_modify_port_status because
 		 * ZFCP_STATUS_COMMON_OPEN must not be reset for the port */
-		atomic_andnot(ZFCP_STATUS_PORT_PHYS_OPEN, &port->status);
+		atomic_clear_mask(ZFCP_STATUS_PORT_PHYS_OPEN, &port->status);
 		shost_for_each_device(sdev, port->adapter->scsi_host)
 			if (sdev_to_zfcp(sdev)->port == port)
-				atomic_andnot(ZFCP_STATUS_COMMON_OPEN,
+				atomic_clear_mask(ZFCP_STATUS_COMMON_OPEN,
 						  &sdev_to_zfcp(sdev)->status);
 		zfcp_erp_set_port_status(port, ZFCP_STATUS_COMMON_ACCESS_BOXED);
 		zfcp_erp_port_reopen(port, ZFCP_STATUS_COMMON_ERP_FAILED,
@@ -1728,10 +1730,10 @@ static void zfcp_fsf_close_physical_port_handler(struct zfcp_fsf_req *req)
 		/* can't use generic zfcp_erp_modify_port_status because
 		 * ZFCP_STATUS_COMMON_OPEN must not be reset for the port
 		 */
-		atomic_andnot(ZFCP_STATUS_PORT_PHYS_OPEN, &port->status);
+		atomic_clear_mask(ZFCP_STATUS_PORT_PHYS_OPEN, &port->status);
 		shost_for_each_device(sdev, port->adapter->scsi_host)
 			if (sdev_to_zfcp(sdev)->port == port)
-				atomic_andnot(ZFCP_STATUS_COMMON_OPEN,
+				atomic_clear_mask(ZFCP_STATUS_COMMON_OPEN,
 						  &sdev_to_zfcp(sdev)->status);
 		break;
 	}
@@ -1794,7 +1796,7 @@ static void zfcp_fsf_open_lun_handler(struct zfcp_fsf_req *req)
 
 	zfcp_sdev = sdev_to_zfcp(sdev);
 
-	atomic_andnot(ZFCP_STATUS_COMMON_ACCESS_DENIED |
+	atomic_clear_mask(ZFCP_STATUS_COMMON_ACCESS_DENIED |
 			  ZFCP_STATUS_COMMON_ACCESS_BOXED,
 			  &zfcp_sdev->status);
 
@@ -1850,7 +1852,7 @@ static void zfcp_fsf_open_lun_handler(struct zfcp_fsf_req *req)
 
 	case FSF_GOOD:
 		zfcp_sdev->lun_handle = header->lun_handle;
-		atomic_or(ZFCP_STATUS_COMMON_OPEN, &zfcp_sdev->status);
+		atomic_set_mask(ZFCP_STATUS_COMMON_OPEN, &zfcp_sdev->status);
 		break;
 	}
 }
@@ -1941,7 +1943,7 @@ static void zfcp_fsf_close_lun_handler(struct zfcp_fsf_req *req)
 		}
 		break;
 	case FSF_GOOD:
-		atomic_andnot(ZFCP_STATUS_COMMON_OPEN, &zfcp_sdev->status);
+		atomic_clear_mask(ZFCP_STATUS_COMMON_OPEN, &zfcp_sdev->status);
 		break;
 	}
 }
@@ -2415,4 +2417,13 @@ void zfcp_fsf_reqid_check(struct zfcp_qdio *qdio, int sbal_idx)
 		if (likely(sbale->eflags & SBAL_EFLAGS_LAST_ENTRY))
 			break;
 	}
+}
+
+struct zfcp_fsf_req *zfcp_fsf_get_req(struct zfcp_qdio *qdio,
+				      struct qdio_buffer *sbal)
+{
+	struct qdio_buffer_element *sbale = &sbal->element[0];
+	u64 req_id = (unsigned long) sbale->addr;
+
+	return zfcp_reqlist_find(qdio->adapter->req_list, req_id);
 }

@@ -2,7 +2,7 @@
 #define _TRACE_KVMMMU_H
 
 #include <linux/tracepoint.h>
-#include <linux/trace_events.h>
+#include <linux/ftrace_event.h>
 
 #undef TRACE_SYSTEM
 #define TRACE_SYSTEM kvmmmu
@@ -30,15 +30,17 @@
 								        \
 	role.word = __entry->role;					\
 									\
-	trace_seq_printf(p, "sp gen %lx gfn %llx %u%s q%u%s %s%s"	\
-			 " %snxe root %u %s%c",	__entry->mmu_valid_gen,	\
+	trace_seq_printf(p, "sp gen %lx gfn %llx l%u %u-byte q%u%s %s%s"	\
+			 " %snxe %sad root %u %s%c",			\
+			 __entry->mmu_valid_gen,			\
 			 __entry->gfn, role.level,			\
-			 role.cr4_pae ? " pae" : "",			\
+			 role.gpte_is_8_bytes ? 8 : 4,			\
 			 role.quadrant,					\
 			 role.direct ? " direct" : "",			\
 			 access_str[role.access],			\
 			 role.invalid ? " invalid" : "",		\
 			 role.nxe ? "" : "!",				\
+			 role.ad_disabled ? "!" : "",			\
 			 __entry->root_count,				\
 			 __entry->unsync ? "unsync" : "sync", 0);	\
 	saved_ptr;							\
@@ -336,7 +338,7 @@ TRACE_EVENT(
 		/* These depend on page entry type, so compute them now.  */
 		__field(bool, r)
 		__field(bool, x)
-		__field(signed char, u)
+		__field(u8, u)
 	),
 
 	TP_fast_assign(
@@ -352,7 +354,7 @@ TRACE_EVENT(
 	TP_printk("gfn %llx spte %llx (%s%s%s%s) level %d at %llx",
 		  __entry->gfn, __entry->spte,
 		  __entry->r ? "r" : "-",
-		  __entry->spte & PT_PRESENT_MASK ? "w" : "-",
+		  __entry->spte & PT_WRITABLE_MASK ? "w" : "-",
 		  __entry->x ? "x" : "-",
 		  __entry->u == -1 ? "" : (__entry->u ? "u" : "-"),
 		  __entry->level, __entry->sptep

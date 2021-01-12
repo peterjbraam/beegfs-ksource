@@ -31,7 +31,6 @@
 #include <linux/cpu.h>
 #include <linux/notifier.h>
 #include <linux/topology.h>
-#include <linux/profile.h>
 
 #include <asm/ptrace.h>
 #include <linux/atomic.h>
@@ -55,7 +54,6 @@
 #include <asm/debug.h>
 #include <asm/kexec.h>
 #include <asm/asm-prototypes.h>
-#include <asm/cpu_has_feature.h>
 
 #ifdef DEBUG
 #include <asm/udbg.h>
@@ -334,8 +332,9 @@ void smp_send_debugger_break(void)
 	if (unlikely(!smp_ops))
 		return;
 
-	for_each_online_cpu(cpu)
-		if (cpu != me)
+	for_each_present_cpu(cpu)
+		if (cpu != me && (cpu_online(cpu) ||
+			(kdump_in_progress() && crash_wake_offline)))
 			do_message_pass(cpu, PPC_MSG_DEBUGGER_BREAK);
 }
 #endif
@@ -448,11 +447,25 @@ void generic_cpu_die(unsigned int cpu)
 
 	for (i = 0; i < 100; i++) {
 		smp_rmb();
-		if (is_cpu_dead(cpu))
+		if (per_cpu(cpu_state, cpu) == CPU_DEAD)
 			return;
 		msleep(100);
 	}
 	printk(KERN_ERR "CPU%d didn't die...\n", cpu);
+}
+
+void generic_mach_cpu_die(void)
+{
+	unsigned int cpu;
+
+	local_irq_disable();
+	idle_task_exit();
+	cpu = smp_processor_id();
+	printk(KERN_DEBUG "CPU%d offline\n", cpu);
+	__get_cpu_var(cpu_state) = CPU_DEAD;
+	smp_wmb();
+	while (__get_cpu_var(cpu_state) != CPU_UP_PREPARE)
+		cpu_relax();
 }
 
 void generic_set_cpu_dead(unsigned int cpu)
@@ -473,11 +486,6 @@ void generic_set_cpu_up(unsigned int cpu)
 int generic_check_cpu_restart(unsigned int cpu)
 {
 	return per_cpu(cpu_state, cpu) == CPU_UP_PREPARE;
-}
-
-int is_cpu_dead(unsigned int cpu)
-{
-	return per_cpu(cpu_state, cpu) == CPU_DEAD;
 }
 
 static bool secondaries_inhibited(void)
@@ -567,7 +575,7 @@ int __cpu_up(unsigned int cpu, struct task_struct *tidle)
 	if (smp_ops->give_timebase)
 		smp_ops->give_timebase();
 
-	/* Wait until cpu puts itself in the online & active maps */
+	/* Wait until cpu puts itself in the online map */
 	while (!cpu_online(cpu))
 		cpu_relax();
 
@@ -596,7 +604,6 @@ out:
 	of_node_put(np);
 	return id;
 }
-EXPORT_SYMBOL_GPL(cpu_to_core_id);
 
 /* Helper routines for cpu to core mapping */
 int cpu_core_index_of_thread(int cpu)
@@ -754,7 +761,7 @@ void start_secondary(void *unused)
 
 	local_irq_enable();
 
-	cpu_startup_entry(CPUHP_AP_ONLINE_IDLE);
+	cpu_startup_entry(CPUHP_ONLINE);
 
 	BUG();
 }
@@ -763,28 +770,6 @@ int setup_profiling_timer(unsigned int multiplier)
 {
 	return 0;
 }
-
-#ifdef CONFIG_SCHED_SMT
-/* cpumask of CPUs with asymetric SMT dependancy */
-static int powerpc_smt_flags(void)
-{
-	int flags = SD_SHARE_CPUCAPACITY | SD_SHARE_PKG_RESOURCES;
-
-	if (cpu_has_feature(CPU_FTR_ASYM_SMT)) {
-		printk_once(KERN_INFO "Enabling Asymmetric SMT scheduling\n");
-		flags |= SD_ASYM_PACKING;
-	}
-	return flags;
-}
-#endif
-
-static struct sched_domain_topology_level powerpc_topology[] = {
-#ifdef CONFIG_SCHED_SMT
-	{ cpu_smt_mask, powerpc_smt_flags, SD_INIT_NAME(SMT) },
-#endif
-	{ cpu_cpu_mask, SD_INIT_NAME(DIE) },
-	{ NULL, },
-};
 
 void __init smp_cpus_done(unsigned int max_cpus)
 {
@@ -808,10 +793,22 @@ void __init smp_cpus_done(unsigned int max_cpus)
 	if (smp_ops && smp_ops->bringup_done)
 		smp_ops->bringup_done();
 
+	/*
+	 * On a shared LPAR, associativity needs to be requested.
+	 * Hence, get numa topology before dumping cpu topology
+	 */
+	shared_proc_topology_init();
 	dump_numa_cpu_topology();
 
-	set_sched_topology(powerpc_topology);
+}
 
+int arch_sd_sibling_asym_packing(void)
+{
+	if (cpu_has_feature(CPU_FTR_ASYM_SMT)) {
+		printk_once(KERN_INFO "Enabling Asymmetric SMT scheduling\n");
+		return SD_ASYM_PACKING;
+	}
+	return 0;
 }
 
 #ifdef CONFIG_HOTPLUG_CPU
@@ -830,7 +827,7 @@ int __cpu_disable(void)
 
 	/* Update sibling maps */
 	base = cpu_first_thread_sibling(cpu);
-	for (i = 0; i < threads_per_core && base + i < nr_cpu_ids; i++) {
+	for (i = 0; i < threads_per_core; i++) {
 		cpumask_clear_cpu(cpu, cpu_sibling_mask(base + i));
 		cpumask_clear_cpu(base + i, cpu_sibling_mask(cpu));
 		cpumask_clear_cpu(cpu, cpu_core_mask(base + i));

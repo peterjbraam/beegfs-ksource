@@ -9,6 +9,7 @@
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/jiffies.h>
+#include <linux/netdevice.h>
 #include <linux/skbuff.h>
 #include <linux/string.h>
 #include <linux/types.h>
@@ -26,6 +27,30 @@ static const u16 nla_attr_minlen[NLA_TYPE_MAX+1] = {
 	[NLA_S32]	= sizeof(s32),
 	[NLA_S64]	= sizeof(s64),
 };
+
+static int validate_nla_bitfield32(const struct nlattr *nla,
+				   u32 *valid_flags_allowed)
+{
+	const struct nla_bitfield32 *bf = nla_data(nla);
+	u32 *valid_flags_mask = valid_flags_allowed;
+
+	if (!valid_flags_allowed)
+		return -EINVAL;
+
+	/*disallow invalid bit selector */
+	if (bf->selector & ~*valid_flags_mask)
+		return -EINVAL;
+
+	/*disallow invalid bit values */
+	if (bf->value & ~*valid_flags_mask)
+		return -EINVAL;
+
+	/*disallow valid bit values that are not selected*/
+	if (bf->value & ~bf->selector)
+		return -EINVAL;
+
+	return 0;
+}
 
 static int validate_nla(const struct nlattr *nla, int maxtype,
 			const struct nla_policy *policy)
@@ -45,6 +70,12 @@ static int validate_nla(const struct nlattr *nla, int maxtype,
 		if (attrlen > 0)
 			return -ERANGE;
 		break;
+
+	case NLA_BITFIELD32:
+		if (attrlen != sizeof(struct nla_bitfield32))
+			return -ERANGE;
+
+		return validate_nla_bitfield32(nla, pt->validation_data);
 
 	case NLA_NUL_STRING:
 		if (pt->len)
@@ -135,7 +166,6 @@ int nla_validate(const struct nlattr *head, int len, int maxtype,
 errout:
 	return err;
 }
-EXPORT_SYMBOL(nla_validate);
 
 /**
  * nla_policy_len - Determin the max. length of a policy
@@ -162,7 +192,6 @@ nla_policy_len(const struct nla_policy *p, int n)
 
 	return len;
 }
-EXPORT_SYMBOL(nla_policy_len);
 
 /**
  * nla_parse - Parse a stream of attributes into a tb buffer
@@ -209,7 +238,6 @@ int nla_parse(struct nlattr **tb, int maxtype, const struct nlattr *head,
 errout:
 	return err;
 }
-EXPORT_SYMBOL(nla_parse);
 
 /**
  * nla_find - Find a specific attribute in a stream of attributes
@@ -230,7 +258,6 @@ struct nlattr *nla_find(const struct nlattr *head, int len, int attrtype)
 
 	return NULL;
 }
-EXPORT_SYMBOL(nla_find);
 
 /**
  * nla_strlcpy - Copy string attribute payload into a sized buffer
@@ -261,7 +288,6 @@ size_t nla_strlcpy(char *dst, const struct nlattr *nla, size_t dstsize)
 
 	return srclen;
 }
-EXPORT_SYMBOL(nla_strlcpy);
 
 /**
  * nla_memcpy - Copy a netlink attribute into another memory area
@@ -279,12 +305,9 @@ int nla_memcpy(void *dest, const struct nlattr *src, int count)
 	int minlen = min_t(int, count, nla_len(src));
 
 	memcpy(dest, nla_data(src), minlen);
-	if (count > minlen)
-		memset(dest + minlen, 0, count - minlen);
 
 	return minlen;
 }
-EXPORT_SYMBOL(nla_memcpy);
 
 /**
  * nla_memcmp - Compare an attribute with sized memory area
@@ -302,7 +325,6 @@ int nla_memcmp(const struct nlattr *nla, const void *data,
 
 	return d;
 }
-EXPORT_SYMBOL(nla_memcmp);
 
 /**
  * nla_strcmp - Compare a string attribute against a string
@@ -311,21 +333,14 @@ EXPORT_SYMBOL(nla_memcmp);
  */
 int nla_strcmp(const struct nlattr *nla, const char *str)
 {
-	int len = strlen(str);
-	char *buf = nla_data(nla);
-	int attrlen = nla_len(nla);
-	int d;
+	int len = strlen(str) + 1;
+	int d = nla_len(nla) - len;
 
-	if (attrlen > 0 && buf[attrlen - 1] == '\0')
-		attrlen--;
-
-	d = attrlen - len;
 	if (d == 0)
 		d = memcmp(nla_data(nla), str, len);
 
 	return d;
 }
-EXPORT_SYMBOL(nla_strcmp);
 
 #ifdef CONFIG_NET
 /**
@@ -344,7 +359,7 @@ struct nlattr *__nla_reserve(struct sk_buff *skb, int attrtype, int attrlen)
 {
 	struct nlattr *nla;
 
-	nla = (struct nlattr *) skb_put(skb, nla_total_size(attrlen));
+	nla = skb_put(skb, nla_total_size(attrlen));
 	nla->nla_type = attrtype;
 	nla->nla_len = nla_attr_size(attrlen);
 
@@ -609,8 +624,17 @@ int nla_append(struct sk_buff *skb, int attrlen, const void *data)
 	if (unlikely(skb_tailroom(skb) < NLA_ALIGN(attrlen)))
 		return -EMSGSIZE;
 
-	memcpy(skb_put(skb, attrlen), data, attrlen);
+	skb_put_data(skb, data, attrlen);
 	return 0;
 }
 EXPORT_SYMBOL(nla_append);
 #endif
+
+EXPORT_SYMBOL(nla_validate);
+EXPORT_SYMBOL(nla_policy_len);
+EXPORT_SYMBOL(nla_parse);
+EXPORT_SYMBOL(nla_find);
+EXPORT_SYMBOL(nla_strlcpy);
+EXPORT_SYMBOL(nla_memcpy);
+EXPORT_SYMBOL(nla_memcmp);
+EXPORT_SYMBOL(nla_strcmp);

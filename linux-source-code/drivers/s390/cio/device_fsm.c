@@ -44,7 +44,7 @@ static void ccw_timeout_log(struct ccw_device *cdev)
 	sch = to_subchannel(cdev->dev.parent);
 	private = to_io_private(sch);
 	orb = &private->orb;
-	cc = stsch(sch->schid, &schib);
+	cc = stsch_err(sch->schid, &schib);
 
 	printk(KERN_WARNING "cio: ccw device timeout occurred at %llx, "
 	       "device information:\n", get_tod_clock());
@@ -66,8 +66,10 @@ static void ccw_timeout_log(struct ccw_device *cdev)
 			       sizeof(struct tcw), 0);
 	} else {
 		printk(KERN_WARNING "cio: orb indicates command mode\n");
-		if ((void *)(addr_t)orb->cmd.cpa == &private->sense_ccw ||
-		    (void *)(addr_t)orb->cmd.cpa == cdev->private->iccws)
+		if ((void *)(addr_t)orb->cmd.cpa ==
+		    &private->dma_area->sense_ccw ||
+		    (void *)(addr_t)orb->cmd.cpa ==
+		    cdev->private->dma_area->iccws)
 			printk(KERN_WARNING "cio: last channel program "
 			       "(intern):\n");
 		else
@@ -182,18 +184,22 @@ ccw_device_cancel_halt_clear(struct ccw_device *cdev)
 void ccw_device_update_sense_data(struct ccw_device *cdev)
 {
 	memset(&cdev->id, 0, sizeof(cdev->id));
-	cdev->id.cu_type   = cdev->private->senseid.cu_type;
-	cdev->id.cu_model  = cdev->private->senseid.cu_model;
-	cdev->id.dev_type  = cdev->private->senseid.dev_type;
-	cdev->id.dev_model = cdev->private->senseid.dev_model;
+	cdev->id.cu_type = cdev->private->dma_area->senseid.cu_type;
+	cdev->id.cu_model = cdev->private->dma_area->senseid.cu_model;
+	cdev->id.dev_type = cdev->private->dma_area->senseid.dev_type;
+	cdev->id.dev_model = cdev->private->dma_area->senseid.dev_model;
 }
 
 int ccw_device_test_sense_data(struct ccw_device *cdev)
 {
-	return cdev->id.cu_type == cdev->private->senseid.cu_type &&
-		cdev->id.cu_model == cdev->private->senseid.cu_model &&
-		cdev->id.dev_type == cdev->private->senseid.dev_type &&
-		cdev->id.dev_model == cdev->private->senseid.dev_model;
+	return cdev->id.cu_type ==
+		cdev->private->dma_area->senseid.cu_type &&
+		cdev->id.cu_model ==
+		cdev->private->dma_area->senseid.cu_model &&
+		cdev->id.dev_type ==
+		cdev->private->dma_area->senseid.dev_type &&
+		cdev->id.dev_model ==
+		cdev->private->dma_area->senseid.dev_model;
 }
 
 /*
@@ -381,7 +387,7 @@ ccw_device_done(struct ccw_device *cdev, int state)
 		cio_disable_subchannel(sch);
 
 	/* Reset device status. */
-	memset(&cdev->private->irb, 0, sizeof(struct irb));
+	memset(&cdev->private->dma_area->irb, 0, sizeof(struct irb));
 
 	cdev->private->state = state;
 
@@ -537,13 +543,14 @@ callback:
 		ccw_device_done(cdev, DEV_STATE_ONLINE);
 		/* Deliver fake irb to device driver, if needed. */
 		if (cdev->private->flags.fake_irb) {
-			create_fake_irb(&cdev->private->irb,
+			create_fake_irb(&cdev->private->dma_area->irb,
 					cdev->private->flags.fake_irb);
 			cdev->private->flags.fake_irb = 0;
 			if (cdev->handler)
 				cdev->handler(cdev, cdev->private->intparm,
-					      &cdev->private->irb);
-			memset(&cdev->private->irb, 0, sizeof(struct irb));
+					      &cdev->private->dma_area->irb);
+			memset(&cdev->private->dma_area->irb, 0,
+			       sizeof(struct irb));
 		}
 		ccw_device_report_path_events(cdev);
 		break;
@@ -699,7 +706,8 @@ ccw_device_online_verify(struct ccw_device *cdev, enum dev_event dev_event)
 
 	if (scsw_actl(&sch->schib.scsw) != 0 ||
 	    (scsw_stctl(&sch->schib.scsw) & SCSW_STCTL_STATUS_PEND) ||
-	    (scsw_stctl(&cdev->private->irb.scsw) & SCSW_STCTL_STATUS_PEND)) {
+	    (scsw_stctl(&cdev->private->dma_area->irb.scsw) &
+	     SCSW_STCTL_STATUS_PEND)) {
 		/*
 		 * No final status yet or final status not yet delivered
 		 * to the device driver. Can't do path verification now,
@@ -731,44 +739,6 @@ static void ccw_device_boxed_verify(struct ccw_device *cdev,
 }
 
 /*
- * Pass interrupt to device driver.
- */
-static int ccw_device_call_handler(struct ccw_device *cdev)
-{
-	unsigned int stctl;
-	int ending_status;
-
-	/*
-	 * we allow for the device action handler if .
-	 *  - we received ending status
-	 *  - the action handler requested to see all interrupts
-	 *  - we received an intermediate status
-	 *  - fast notification was requested (primary status)
-	 *  - unsolicited interrupts
-	 */
-	stctl = scsw_stctl(&cdev->private->irb.scsw);
-	ending_status = (stctl & SCSW_STCTL_SEC_STATUS) ||
-		(stctl == (SCSW_STCTL_ALERT_STATUS | SCSW_STCTL_STATUS_PEND)) ||
-		(stctl == SCSW_STCTL_STATUS_PEND);
-	if (!ending_status &&
-	    !cdev->private->options.repall &&
-	    !(stctl & SCSW_STCTL_INTER_STATUS) &&
-	    !(cdev->private->options.fast &&
-	      (stctl & SCSW_STCTL_PRIM_STATUS)))
-		return 0;
-
-	if (ending_status)
-		ccw_device_set_timeout(cdev, 0);
-
-	if (cdev->handler)
-		cdev->handler(cdev, cdev->private->intparm,
-			      &cdev->private->irb);
-
-	memset(&cdev->private->irb, 0, sizeof(struct irb));
-	return 1;
-}
-
-/*
  * Got an interrupt for a normal io (state online).
  */
 static void
@@ -777,7 +747,7 @@ ccw_device_irq(struct ccw_device *cdev, enum dev_event dev_event)
 	struct irb *irb;
 	int is_cmd;
 
-	irb = this_cpu_ptr(&cio_irb);
+	irb = (struct irb *)&S390_lowcore.irb;
 	is_cmd = !scsw_is_tm(&irb->scsw);
 	/* Check for unsolicited interrupt. */
 	if (!scsw_is_solicited(&irb->scsw)) {
@@ -786,7 +756,8 @@ ccw_device_irq(struct ccw_device *cdev, enum dev_event dev_event)
 			/* Unit check but no sense data. Need basic sense. */
 			if (ccw_device_do_sense(cdev, irb) != 0)
 				goto call_handler_unsol;
-			memcpy(&cdev->private->irb, irb, sizeof(struct irb));
+			memcpy(&cdev->private->dma_area->irb, irb,
+			       sizeof(struct irb));
 			cdev->private->state = DEV_STATE_W4SENSE;
 			cdev->private->intparm = 0;
 			return;
@@ -822,7 +793,6 @@ ccw_device_online_timeout(struct ccw_device *cdev, enum dev_event dev_event)
 
 	ccw_device_set_timeout(cdev, 0);
 	cdev->private->iretry = 255;
-	cdev->private->async_kill_io_rc = -ETIMEDOUT;
 	ret = ccw_device_cancel_halt_clear(cdev);
 	if (ret == -EBUSY) {
 		ccw_device_set_timeout(cdev, 3*HZ);
@@ -844,7 +814,7 @@ ccw_device_w4sense(struct ccw_device *cdev, enum dev_event dev_event)
 {
 	struct irb *irb;
 
-	irb = this_cpu_ptr(&cio_irb);
+	irb = (struct irb *)&S390_lowcore.irb;
 	/* Check for unsolicited interrupt. */
 	if (scsw_stctl(&irb->scsw) ==
 	    (SCSW_STCTL_STATUS_PEND | SCSW_STCTL_ALERT_STATUS)) {
@@ -869,7 +839,7 @@ ccw_device_w4sense(struct ccw_device *cdev, enum dev_event dev_event)
 	if (scsw_fctl(&irb->scsw) &
 	    (SCSW_FCTL_CLEAR_FUNC | SCSW_FCTL_HALT_FUNC)) {
 		cdev->private->flags.dosense = 0;
-		memset(&cdev->private->irb, 0, sizeof(struct irb));
+		memset(&cdev->private->dma_area->irb, 0, sizeof(struct irb));
 		ccw_device_accumulate_irb(cdev, irb);
 		goto call_handler;
 	}
@@ -899,7 +869,7 @@ ccw_device_killing_irq(struct ccw_device *cdev, enum dev_event dev_event)
 	/* OK, i/o is dead now. Call interrupt handler. */
 	if (cdev->handler)
 		cdev->handler(cdev, cdev->private->intparm,
-			      ERR_PTR(cdev->private->async_kill_io_rc));
+			      ERR_PTR(-EIO));
 }
 
 static void
@@ -916,16 +886,14 @@ ccw_device_killing_timeout(struct ccw_device *cdev, enum dev_event dev_event)
 	ccw_device_online_verify(cdev, 0);
 	if (cdev->handler)
 		cdev->handler(cdev, cdev->private->intparm,
-			      ERR_PTR(cdev->private->async_kill_io_rc));
+			      ERR_PTR(-EIO));
 }
 
 void ccw_device_kill_io(struct ccw_device *cdev)
 {
 	int ret;
 
-	ccw_device_set_timeout(cdev, 0);
 	cdev->private->iretry = 255;
-	cdev->private->async_kill_io_rc = -EIO;
 	ret = ccw_device_cancel_halt_clear(cdev);
 	if (ret == -EBUSY) {
 		ccw_device_set_timeout(cdev, 3*HZ);

@@ -9,9 +9,9 @@
  * 2 as published by the Free Software Foundation.
  */
 
+#include <linux/cpu.h>
 #include <linux/kernel.h>
 #include <linux/kobject.h>
-#include <linux/sched.h>
 #include <linux/smp.h>
 #include <linux/stat.h>
 #include <linux/completion.h>
@@ -19,9 +19,9 @@
 #include <linux/delay.h>
 #include <linux/slab.h>
 
-#include <asm/machdep.h>
 #include <asm/rtas.h>
 #include "pseries.h"
+#include "../../kernel/cacheinfo.h"
 
 static struct kobject *mobility_kobj;
 
@@ -192,8 +192,8 @@ static int update_dt_node(__be32 phandle, s32 scope)
 				break;
 
 			case 0x80000000:
-				of_remove_property(dn, of_find_property(dn,
-							prop_name, NULL));
+				prop = of_find_property(dn, prop_name, NULL);
+				of_remove_property(dn, prop);
 				prop = NULL;
 				break;
 
@@ -207,11 +207,7 @@ static int update_dt_node(__be32 phandle, s32 scope)
 
 				prop_data += vd;
 			}
-
-			cond_resched();
 		}
-
-		cond_resched();
 	} while (rtas_rc == 1);
 
 	of_node_put(dn);
@@ -235,7 +231,7 @@ static int add_dt_node(__be32 parent_phandle, __be32 drc_index)
 		return -ENOENT;
 	}
 
-	rc = dlpar_attach_node(dn);
+	rc = dlpar_attach_node(dn, parent_dn);
 	if (rc)
 		dlpar_free_cc_nodes(dn);
 
@@ -287,12 +283,8 @@ int pseries_devicetree_update(s32 scope)
 					add_dt_node(phandle, drc_index);
 					break;
 				}
-
-				cond_resched();
 			}
 		}
-
-		cond_resched();
 	} while (rc == 1);
 
 	kfree(rtas_buf);
@@ -318,10 +310,27 @@ void post_mobility_fixup(void)
 	if (rc)
 		printk(KERN_ERR "Post-mobility activate-fw failed: %d\n", rc);
 
+	/*
+	 * We don't want CPUs to go online/offline while the device
+	 * tree is being updated.
+	 */
+	cpu_hotplug_disable();
+
+	/*
+	 * It's common for the destination firmware to replace cache
+	 * nodes.  Release all of the cacheinfo hierarchy's references
+	 * before updating the device tree.
+	 */
+	cacheinfo_teardown();
+
 	rc = pseries_devicetree_update(MIGRATION_SCOPE);
 	if (rc)
 		printk(KERN_ERR "Post-mobility device tree update "
 			"failed: %d\n", rc);
+
+	cacheinfo_rebuild();
+
+	cpu_hotplug_enable();
 
 	/* Possibly switch to a new RFI flush type */
 	pseries_setup_rfi_flush();
@@ -339,6 +348,8 @@ static ssize_t migrate_store(struct class *class, struct class_attribute *attr,
 	if (rc)
 		return rc;
 
+	stop_topology_update();
+
 	do {
 		rc = rtas_ibm_suspend_me(streamid);
 		if (rc == -EAGAIN)
@@ -349,6 +360,9 @@ static ssize_t migrate_store(struct class *class, struct class_attribute *attr,
 		return rc;
 
 	post_mobility_fixup();
+
+	start_topology_update();
+
 	return count;
 }
 
@@ -381,4 +395,4 @@ static int __init mobility_sysfs_init(void)
 
 	return 0;
 }
-machine_device_initcall(pseries, mobility_sysfs_init);
+device_initcall(mobility_sysfs_init);

@@ -23,13 +23,13 @@ extern int iscsit_find_cmd_for_recovery(struct iscsi_session *, struct iscsi_cmd
 			struct iscsi_conn_recovery **, itt_t);
 extern void iscsit_add_cmd_to_immediate_queue(struct iscsi_cmd *, struct iscsi_conn *, u8);
 extern struct iscsi_queue_req *iscsit_get_cmd_from_immediate_queue(struct iscsi_conn *);
-extern void iscsit_add_cmd_to_response_queue(struct iscsi_cmd *, struct iscsi_conn *, u8);
+extern int iscsit_add_cmd_to_response_queue(struct iscsi_cmd *, struct iscsi_conn *, u8);
 extern struct iscsi_queue_req *iscsit_get_cmd_from_response_queue(struct iscsi_conn *);
 extern void iscsit_remove_cmd_from_tx_queues(struct iscsi_cmd *, struct iscsi_conn *);
 extern bool iscsit_conn_all_queues_empty(struct iscsi_conn *);
 extern void iscsit_free_queue_reqs_for_conn(struct iscsi_conn *);
 extern void iscsit_release_cmd(struct iscsi_cmd *);
-extern void __iscsit_free_cmd(struct iscsi_cmd *, bool, bool);
+extern void __iscsit_free_cmd(struct iscsi_cmd *, bool);
 extern void iscsit_free_cmd(struct iscsi_cmd *, bool);
 extern int iscsit_check_session_usage_count(struct iscsi_session *);
 extern void iscsit_dec_session_usage_count(struct iscsi_session *);
@@ -56,5 +56,6 @@ extern int rx_data(struct iscsi_conn *, struct kvec *, int, int);
 extern int tx_data(struct iscsi_conn *, struct kvec *, int, int);
 extern void iscsit_collect_login_stats(struct iscsi_conn *, u8, u8);
 extern struct iscsi_tiqn *iscsit_snmp_get_tiqn(struct iscsi_conn *);
+extern void iscsit_fill_cxn_timeout_err_stats(struct iscsi_session *);
 
 #endif /*** ISCSI_TARGET_UTIL_H ***/

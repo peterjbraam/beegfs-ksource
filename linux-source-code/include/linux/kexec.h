@@ -1,32 +1,15 @@
 #ifndef LINUX_KEXEC_H
 #define LINUX_KEXEC_H
 
-#define IND_DESTINATION_BIT 0
-#define IND_INDIRECTION_BIT 1
-#define IND_DONE_BIT        2
-#define IND_SOURCE_BIT      3
-
-#define IND_DESTINATION  (1 << IND_DESTINATION_BIT)
-#define IND_INDIRECTION  (1 << IND_INDIRECTION_BIT)
-#define IND_DONE         (1 << IND_DONE_BIT)
-#define IND_SOURCE       (1 << IND_SOURCE_BIT)
-#define IND_FLAGS (IND_DESTINATION | IND_INDIRECTION | IND_DONE | IND_SOURCE)
-
-#if !defined(__ASSEMBLY__)
-
-#include <asm/io.h>
-
 #include <uapi/linux/kexec.h>
 
 #ifdef CONFIG_KEXEC_CORE
 #include <linux/list.h>
-#include <linux/linkage.h>
 #include <linux/compat.h>
 #include <linux/ioport.h>
-#include <linux/elfcore.h>
-#include <linux/elf.h>
 #include <linux/module.h>
 #include <asm/kexec.h>
+#include <linux/crash_core.h>
 
 /* Verify architecture specific macros are defined */
 
@@ -43,7 +26,7 @@
 #endif
 
 #ifndef KEXEC_CONTROL_MEMORY_GFP
-#define KEXEC_CONTROL_MEMORY_GFP (GFP_KERNEL | __GFP_NORETRY)
+#define KEXEC_CONTROL_MEMORY_GFP GFP_KERNEL
 #endif
 
 #ifndef KEXEC_CONTROL_PAGE_SIZE
@@ -62,20 +45,7 @@
 #define KEXEC_CRASH_MEM_ALIGN PAGE_SIZE
 #endif
 
-#define KEXEC_NOTE_HEAD_BYTES ALIGN(sizeof(struct elf_note), 4)
-#define KEXEC_CORE_NOTE_NAME "CORE"
-#define KEXEC_CORE_NOTE_NAME_BYTES ALIGN(sizeof(KEXEC_CORE_NOTE_NAME), 4)
-#define KEXEC_CORE_NOTE_DESC_BYTES ALIGN(sizeof(struct elf_prstatus), 4)
-/*
- * The per-cpu notes area is a list of notes terminated by a "NULL"
- * note header.  For kdump, the code in vmcore.c runs in the context
- * of the second kernel to combine them into one note.
- */
-#ifndef KEXEC_NOTE_BYTES
-#define KEXEC_NOTE_BYTES ( (KEXEC_NOTE_HEAD_BYTES * 2) +		\
-			    KEXEC_CORE_NOTE_NAME_BYTES +		\
-			    KEXEC_CORE_NOTE_DESC_BYTES )
-#endif
+#define KEXEC_CORE_NOTE_NAME	CRASH_CORE_NOTE_NAME
 
 /*
  * This structure is used to hold the arguments that are used when loading
@@ -83,6 +53,10 @@
  */
 
 typedef unsigned long kimage_entry_t;
+#define IND_DESTINATION  0x1
+#define IND_INDIRECTION  0x2
+#define IND_DONE         0x4
+#define IND_SOURCE       0x8
 
 struct kexec_segment {
 	/*
@@ -232,39 +206,6 @@ extern void crash_kexec(struct pt_regs *);
 int kexec_should_crash(struct task_struct *);
 int kexec_crash_loaded(void);
 void crash_save_cpu(struct pt_regs *regs, int cpu);
-void crash_save_vmcoreinfo(void);
-void arch_crash_save_vmcoreinfo(void);
-__printf(1, 2)
-void vmcoreinfo_append_str(const char *fmt, ...);
-phys_addr_t paddr_vmcoreinfo_note(void);
-
-#define VMCOREINFO_OSRELEASE(value) \
-	vmcoreinfo_append_str("OSRELEASE=%s\n", value)
-#define VMCOREINFO_PAGESIZE(value) \
-	vmcoreinfo_append_str("PAGESIZE=%ld\n", value)
-#define VMCOREINFO_SYMBOL(name) \
-	vmcoreinfo_append_str("SYMBOL(%s)=%lx\n", #name, (unsigned long)&name)
-#define VMCOREINFO_SIZE(name) \
-	vmcoreinfo_append_str("SIZE(%s)=%lu\n", #name, \
-			      (unsigned long)sizeof(name))
-#define VMCOREINFO_STRUCT_SIZE(name) \
-	vmcoreinfo_append_str("SIZE(%s)=%lu\n", #name, \
-			      (unsigned long)sizeof(struct name))
-#define VMCOREINFO_OFFSET(name, field) \
-	vmcoreinfo_append_str("OFFSET(%s.%s)=%lu\n", #name, #field, \
-			      (unsigned long)offsetof(struct name, field))
-#define VMCOREINFO_LENGTH(name, value) \
-	vmcoreinfo_append_str("LENGTH(%s)=%lu\n", #name, (unsigned long)value)
-#define VMCOREINFO_NUMBER(name) \
-	vmcoreinfo_append_str("NUMBER(%s)=%ld\n", #name, (long)name)
-#define VMCOREINFO_CONFIG(name) \
-	vmcoreinfo_append_str("CONFIG_%s=y\n", #name)
-#define VMCOREINFO_PAGE_OFFSET(value) \
-	vmcoreinfo_append_str("PAGE_OFFSET=%lx\n", (unsigned long)value)
-#define VMCOREINFO_VMALLOC_START(value) \
-	vmcoreinfo_append_str("VMALLOC_START=%lx\n", (unsigned long)value)
-#define VMCOREINFO_VMEMMAP_START(value) \
-	vmcoreinfo_append_str("VMEMMAP_START=%lx\n", (unsigned long)value)
 
 extern struct kimage *kexec_image;
 extern struct kimage *kexec_crash_image;
@@ -285,31 +226,15 @@ extern int kexec_load_disabled;
 #define KEXEC_FILE_FLAGS	(KEXEC_FILE_UNLOAD | KEXEC_FILE_ON_CRASH | \
 				 KEXEC_FILE_NO_INITRAMFS)
 
-#define VMCOREINFO_BYTES           (4096)
-#define VMCOREINFO_NOTE_NAME       "VMCOREINFO"
-#define VMCOREINFO_NOTE_NAME_BYTES ALIGN(sizeof(VMCOREINFO_NOTE_NAME), 4)
-#define VMCOREINFO_NOTE_SIZE       (KEXEC_NOTE_HEAD_BYTES*2 + VMCOREINFO_BYTES \
-				    + VMCOREINFO_NOTE_NAME_BYTES)
-
 /* Location of a reserved region to hold the crash kernel.
  */
 extern struct resource crashk_res;
 extern struct resource crashk_low_res;
-typedef u32 note_buf_t[KEXEC_NOTE_BYTES/4];
 extern note_buf_t __percpu *crash_notes;
-extern u32 vmcoreinfo_note[VMCOREINFO_NOTE_SIZE/4];
-extern size_t vmcoreinfo_size;
-extern size_t vmcoreinfo_max_size;
 
 /* flag to track if kexec reboot is in progress */
 extern bool kexec_in_progress;
 
-int __init parse_crashkernel(char *cmdline, unsigned long long system_ram,
-		unsigned long long *crash_size, unsigned long long *crash_base);
-int parse_crashkernel_high(char *cmdline, unsigned long long system_ram,
-		unsigned long long *crash_size, unsigned long long *crash_base);
-int parse_crashkernel_low(char *cmdline, unsigned long long system_ram,
-		unsigned long long *crash_size, unsigned long long *crash_base);
 int crash_shrink_memory(unsigned long new_size);
 size_t crash_get_memory_size(void);
 void crash_free_reserved_phys_range(unsigned long begin, unsigned long end);
@@ -327,43 +252,13 @@ int __weak arch_kexec_apply_relocations(const Elf_Ehdr *ehdr, Elf_Shdr *sechdrs,
 void arch_kexec_protect_crashkres(void);
 void arch_kexec_unprotect_crashkres(void);
 
-#ifndef page_to_boot_pfn
-static inline unsigned long page_to_boot_pfn(struct page *page)
-{
-	return page_to_pfn(page);
-}
+#ifndef arch_kexec_post_alloc_pages
+static inline int arch_kexec_post_alloc_pages(void *vaddr, unsigned int pages, gfp_t gfp) { return 0; }
 #endif
 
-#ifndef boot_pfn_to_page
-static inline struct page *boot_pfn_to_page(unsigned long boot_pfn)
-{
-	return pfn_to_page(boot_pfn);
-}
+#ifndef arch_kexec_pre_free_pages
+static inline void arch_kexec_pre_free_pages(void *vaddr, unsigned int pages) { }
 #endif
-
-#ifndef phys_to_boot_phys
-static inline unsigned long phys_to_boot_phys(phys_addr_t phys)
-{
-	return phys;
-}
-#endif
-
-#ifndef boot_phys_to_phys
-static inline phys_addr_t boot_phys_to_phys(unsigned long boot_phys)
-{
-	return boot_phys;
-}
-#endif
-
-static inline unsigned long virt_to_boot_phys(void *addr)
-{
-	return phys_to_boot_phys(__pa((unsigned long)addr));
-}
-
-static inline void *boot_phys_to_virt(unsigned long entry)
-{
-	return phys_to_virt(boot_phys_to_phys(entry));
-}
 
 #else /* !CONFIG_KEXEC_CORE */
 struct pt_regs;
@@ -372,9 +267,5 @@ static inline void __crash_kexec(struct pt_regs *regs) { }
 static inline void crash_kexec(struct pt_regs *regs) { }
 static inline int kexec_should_crash(struct task_struct *p) { return 0; }
 static inline int kexec_crash_loaded(void) { return 0; }
-#define kexec_in_progress false
 #endif /* CONFIG_KEXEC_CORE */
-
-#endif /* !defined(__ASSEBMLY__) */
-
 #endif /* LINUX_KEXEC_H */

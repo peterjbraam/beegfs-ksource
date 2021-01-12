@@ -91,7 +91,7 @@ xfs_icreate_item_unlock(
 {
 	struct xfs_icreate_item	*icp = ICR_ITEM(lip);
 
-	if (icp->ic_item.li_flags & XFS_LI_ABORTED)
+	if (test_bit(XFS_LI_ABORTED, &lip->li_flags))
 		kmem_zone_free(xfs_icreate_zone, icp);
 	return;
 }
@@ -133,7 +133,7 @@ xfs_icreate_item_committing(
 /*
  * This is the ops vector shared by all buf log items.
  */
-static struct xfs_item_ops xfs_icreate_item_ops = {
+static const struct xfs_item_ops xfs_icreate_item_ops = {
 	.iop_size	= xfs_icreate_item_size,
 	.iop_format	= xfs_icreate_item_format,
 	.iop_pin	= xfs_icreate_item_pin,

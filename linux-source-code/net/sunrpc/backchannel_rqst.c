@@ -281,9 +281,9 @@ void xprt_free_bc_rqst(struct rpc_rqst *req)
 	dprintk("RPC:       free backchannel req=%p\n", req);
 
 	req->rq_connect_cookie = xprt->connect_cookie - 1;
-	smp_mb__before_atomic();
+	smp_mb__before_clear_bit();
 	clear_bit(RPC_BC_PA_IN_USE, &req->rq_bc_pa_state);
-	smp_mb__after_atomic();
+	smp_mb__after_clear_bit();
 
 	/*
 	 * Return it to the list of preallocations so that it

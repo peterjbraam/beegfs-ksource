@@ -192,8 +192,7 @@ static void rose_kill_by_device(struct net_device *dev)
 
 		if (rose->device == dev) {
 			rose_disconnect(s, ENETUNREACH, ROSE_OUT_OF_ORDER, 0);
-			if (rose->neighbour)
-				rose->neighbour->use--;
+			rose->neighbour->use--;
 			rose->device = NULL;
 		}
 	}
@@ -521,7 +520,7 @@ static int rose_create(struct net *net, struct socket *sock, int protocol,
 	if (sock->type != SOCK_SEQPACKET || protocol != 0)
 		return -ESOCKTNOSUPPORT;
 
-	sk = sk_alloc(net, PF_ROSE, GFP_ATOMIC, &rose_proto, kern);
+	sk = sk_alloc(net, PF_ROSE, GFP_ATOMIC, &rose_proto);
 	if (sk == NULL)
 		return -ENOMEM;
 
@@ -560,7 +559,7 @@ static struct sock *rose_make_new(struct sock *osk)
 	if (osk->sk_type != SOCK_SEQPACKET)
 		return NULL;
 
-	sk = sk_alloc(sock_net(osk), PF_ROSE, GFP_ATOMIC, &rose_proto, 0);
+	sk = sk_alloc(sock_net(osk), PF_ROSE, GFP_ATOMIC, &rose_proto);
 	if (sk == NULL)
 		return NULL;
 
@@ -1013,7 +1012,7 @@ int rose_rx_call_request(struct sk_buff *skb, struct net_device *dev, struct ros
 	make_rose->source_call   = facilities.source_call;
 	make_rose->source_ndigis = facilities.source_ndigis;
 	for (n = 0 ; n < facilities.source_ndigis ; n++)
-		make_rose->source_digis[n] = facilities.source_digis[n];
+		make_rose->source_digis[n]= facilities.source_digis[n];
 	make_rose->neighbour     = neigh;
 	make_rose->device        = dev;
 	make_rose->facilities    = facilities;
@@ -1042,16 +1041,17 @@ int rose_rx_call_request(struct sk_buff *skb, struct net_device *dev, struct ros
 	rose_start_heartbeat(make);
 
 	if (!sock_flag(sk, SOCK_DEAD))
-		sk->sk_data_ready(sk);
+		sk->sk_data_ready(sk, skb->len);
 
 	return 1;
 }
 
-static int rose_sendmsg(struct socket *sock, struct msghdr *msg, size_t len)
+static int rose_sendmsg(struct kiocb *iocb, struct socket *sock,
+			struct msghdr *msg, size_t len)
 {
 	struct sock *sk = sock->sk;
 	struct rose_sock *rose = rose_sk(sk);
-	DECLARE_SOCKADDR(struct sockaddr_rose *, usrose, msg->msg_name);
+	struct sockaddr_rose *usrose = (struct sockaddr_rose *)msg->msg_name;
 	int err;
 	struct full_sockaddr_rose srose;
 	struct sk_buff *skb;
@@ -1211,8 +1211,8 @@ static int rose_sendmsg(struct socket *sock, struct msghdr *msg, size_t len)
 }
 
 
-static int rose_recvmsg(struct socket *sock, struct msghdr *msg, size_t size,
-			int flags)
+static int rose_recvmsg(struct kiocb *iocb, struct socket *sock,
+			struct msghdr *msg, size_t size, int flags)
 {
 	struct sock *sk = sock->sk;
 	struct rose_sock *rose = rose_sk(sk);
@@ -1249,12 +1249,10 @@ static int rose_recvmsg(struct socket *sock, struct msghdr *msg, size_t size,
 		msg->msg_flags |= MSG_TRUNC;
 	}
 
-	skb_copy_datagram_msg(skb, 0, msg, copied);
+	skb_copy_datagram_iovec(skb, 0, msg->msg_iov, copied);
 
 	if (msg->msg_name) {
 		struct sockaddr_rose *srose;
-		DECLARE_SOCKADDR(struct full_sockaddr_rose *, full_srose,
-				 msg->msg_name);
 
 		memset(msg->msg_name, 0, sizeof(struct full_sockaddr_rose));
 		srose = msg->msg_name;
@@ -1262,9 +1260,18 @@ static int rose_recvmsg(struct socket *sock, struct msghdr *msg, size_t size,
 		srose->srose_addr   = rose->dest_addr;
 		srose->srose_call   = rose->dest_call;
 		srose->srose_ndigis = rose->dest_ndigis;
-		for (n = 0 ; n < rose->dest_ndigis ; n++)
-			full_srose->srose_digis[n] = rose->dest_digis[n];
-		msg->msg_namelen = sizeof(struct full_sockaddr_rose);
+		if (msg->msg_namelen >= sizeof(struct full_sockaddr_rose)) {
+			struct full_sockaddr_rose *full_srose = (struct full_sockaddr_rose *)msg->msg_name;
+			for (n = 0 ; n < rose->dest_ndigis ; n++)
+				full_srose->srose_digis[n] = rose->dest_digis[n];
+			msg->msg_namelen = sizeof(struct full_sockaddr_rose);
+		} else {
+			if (rose->dest_ndigis >= 1) {
+				srose->srose_ndigis = 1;
+				srose->srose_digi = rose->dest_digis[0];
+			}
+			msg->msg_namelen = sizeof(struct sockaddr_rose);
+		}
 	}
 
 	skb_free_datagram(sk, skb);
@@ -1538,7 +1545,7 @@ static int __init rose_proto_init(void)
 		char name[IFNAMSIZ];
 
 		sprintf(name, "rose%d", i);
-		dev = alloc_netdev(0, name, NET_NAME_UNKNOWN, rose_setup);
+		dev = alloc_netdev(0, name, rose_setup);
 		if (!dev) {
 			printk(KERN_ERR "ROSE: rose_proto_init - unable to allocate memory\n");
 			rc = -ENOMEM;
@@ -1555,7 +1562,7 @@ static int __init rose_proto_init(void)
 	}
 
 	sock_register(&rose_family_ops);
-	register_netdevice_notifier(&rose_dev_notifier);
+	register_netdevice_notifier_rh(&rose_dev_notifier);
 
 	ax25_register_pid(&rose_pid);
 	ax25_linkfail_register(&rose_linkfail_notifier);
@@ -1617,7 +1624,7 @@ static void __exit rose_exit(void)
 #ifdef CONFIG_SYSCTL
 	rose_unregister_sysctl();
 #endif
-	unregister_netdevice_notifier(&rose_dev_notifier);
+	unregister_netdevice_notifier_rh(&rose_dev_notifier);
 
 	sock_unregister(PF_ROSE);
 

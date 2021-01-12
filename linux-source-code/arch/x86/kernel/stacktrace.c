@@ -5,7 +5,7 @@
  */
 #include <linux/sched.h>
 #include <linux/stacktrace.h>
-#include <linux/export.h>
+#include <linux/module.h>
 #include <linux/uaccess.h>
 #include <asm/stacktrace.h>
 #include <asm/unwind.h>
@@ -28,7 +28,7 @@ static int save_stack_address(struct stack_trace *trace, unsigned long addr,
 	return 0;
 }
 
-static void __save_stack_trace(struct stack_trace *trace,
+static void noinline __save_stack_trace(struct stack_trace *trace,
 			       struct task_struct *task, struct pt_regs *regs,
 			       bool nosched)
 {
@@ -54,6 +54,7 @@ static void __save_stack_trace(struct stack_trace *trace,
  */
 void save_stack_trace(struct stack_trace *trace)
 {
+	trace->skip++;
 	__save_stack_trace(trace, current, NULL, false);
 }
 EXPORT_SYMBOL_GPL(save_stack_trace);
@@ -65,14 +66,61 @@ void save_stack_trace_regs(struct pt_regs *regs, struct stack_trace *trace)
 
 void save_stack_trace_tsk(struct task_struct *tsk, struct stack_trace *trace)
 {
-	if (!try_get_task_stack(tsk))
-		return;
+	if (tsk == current)
+		trace->skip++;
 
 	__save_stack_trace(trace, tsk, NULL, true);
-
-	put_task_stack(tsk);
 }
 EXPORT_SYMBOL_GPL(save_stack_trace_tsk);
+
+#ifdef CONFIG_HAVE_RELIABLE_STACKTRACE
+
+static int __always_inline
+__save_stack_trace_reliable(struct stack_trace *trace,
+			    struct task_struct *task)
+{
+	struct unwind_state state;
+	unsigned long addr;
+
+	for (unwind_start(&state, task, NULL, NULL); !unwind_done(&state);
+	     unwind_next_frame(&state)) {
+
+		addr = unwind_get_return_address(&state);
+
+		/*
+		 * A NULL or invalid return address probably means there's some
+		 * generated code which __kernel_text_address() doesn't know
+		 * about.
+		 */
+		if (!addr)
+			return -EINVAL;
+
+		if (save_stack_address(trace, addr, 1))
+			return -EINVAL;
+	}
+
+	/* Check for stack corruption */
+	if (unwind_error(&state))
+		return -EINVAL;
+
+	if (trace->nr_entries < trace->max_entries)
+		trace->entries[trace->nr_entries++] = ULONG_MAX;
+
+	return 0;
+}
+
+/*
+ * This function returns an error if it detects any unreliable features of the
+ * stack.  Otherwise it guarantees that the stack trace is reliable.
+ *
+ * If the task is not 'current', the caller *must* ensure the task is inactive.
+ */
+int save_stack_trace_tsk_reliable(struct task_struct *tsk,
+				  struct stack_trace *trace)
+{
+	return __save_stack_trace_reliable(trace, tsk);
+}
+#endif /* CONFIG_HAVE_RELIABLE_STACKTRACE */
 
 /* Userspace stacktrace - based on kernel/trace/trace_sysprof.c */
 
@@ -86,7 +134,7 @@ copy_stack_frame(const void __user *fp, struct stack_frame_user *frame)
 {
 	int ret;
 
-	if (!access_ok(VERIFY_READ, fp, sizeof(*frame)))
+	if (__range_not_ok(fp, sizeof(*frame), TASK_SIZE))
 		return 0;
 
 	ret = 1;
@@ -136,4 +184,3 @@ void save_stack_trace_user(struct stack_trace *trace)
 	if (trace->nr_entries < trace->max_entries)
 		trace->entries[trace->nr_entries++] = ULONG_MAX;
 }
-

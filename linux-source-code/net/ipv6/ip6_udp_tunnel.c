@@ -19,9 +19,11 @@ int udp_sock_create6(struct net *net, struct udp_port_cfg *cfg,
 	int err;
 	struct socket *sock = NULL;
 
-	err = sock_create_kern(net, AF_INET6, SOCK_DGRAM, 0, &sock);
+	err = sock_create_kern(AF_INET6, SOCK_DGRAM, 0, &sock);
 	if (err < 0)
 		goto error;
+
+	sk_change_net(sock->sk, net);
 
 	if (cfg->ipv6_v6only) {
 		int val = 1;
@@ -63,7 +65,7 @@ int udp_sock_create6(struct net *net, struct udp_port_cfg *cfg,
 error:
 	if (sock) {
 		kernel_sock_shutdown(sock, SHUT_RDWR);
-		sock_release(sock);
+		sk_release_kernel(sock->sk);
 	}
 	*sockp = NULL;
 	return err;
@@ -89,6 +91,9 @@ int udp_tunnel6_xmit_skb(struct dst_entry *dst, struct sock *sk,
 
 	uh->len = htons(skb->len);
 
+	memset(&(IPCB(skb)->opt), 0, sizeof(IPCB(skb)->opt));
+	IPCB(skb)->flags &= ~(IPSKB_XFRM_TUNNEL_SIZE | IPSKB_XFRM_TRANSFORMED
+			    | IPSKB_REROUTED);
 	skb_dst_set(skb, dst);
 
 	udp6_set_csum(nocheck, skb, saddr, daddr, skb->len);

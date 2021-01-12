@@ -53,9 +53,6 @@ static int dh_check_params_length(unsigned int p_len)
 
 static int dh_set_params(struct dh_ctx *ctx, struct dh *params)
 {
-	if (unlikely(!params->p || !params->g))
-		return -EINVAL;
-
 	if (dh_check_params_length(params->p_size << 3))
 		return -EINVAL;
 
@@ -70,7 +67,8 @@ static int dh_set_params(struct dh_ctx *ctx, struct dh *params)
 	return 0;
 }
 
-static int dh_set_secret(struct crypto_kpp *tfm, void *buf, unsigned int len)
+static int dh_set_secret(struct crypto_kpp *tfm, const void *buf,
+			 unsigned int len)
 {
 	struct dh_ctx *ctx = dh_get_ctx(tfm);
 	struct dh params;
@@ -125,7 +123,7 @@ static int dh_compute_value(struct kpp_request *req)
 	if (ret)
 		goto err_free_base;
 
-	ret = mpi_write_to_sgl(val, req->dst, req->dst_len, &sign);
+	ret = mpi_write_to_sgl(val, req->dst, &req->dst_len, &sign);
 	if (ret)
 		goto err_free_base;
 

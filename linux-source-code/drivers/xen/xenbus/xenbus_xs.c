@@ -44,12 +44,12 @@
 #include <linux/fcntl.h>
 #include <linux/kthread.h>
 #include <linux/rwsem.h>
+#include <linux/module.h>
 #include <linux/mutex.h>
 #include <asm/xen/hypervisor.h>
 #include <xen/xenbus.h>
 #include <xen/xen.h>
 #include "xenbus_comms.h"
-#include "xenbus_probe.h"
 
 struct xs_stored_msg {
 	struct list_head list;
@@ -139,29 +139,6 @@ static int get_error(const char *errorstring)
 	return xsd_errors[i].errnum;
 }
 
-static bool xenbus_ok(void)
-{
-	switch (xen_store_domain_type) {
-	case XS_LOCAL:
-		switch (system_state) {
-		case SYSTEM_POWER_OFF:
-		case SYSTEM_RESTART:
-		case SYSTEM_HALT:
-			return false;
-		default:
-			break;
-		}
-		return true;
-	case XS_PV:
-	case XS_HVM:
-		/* FIXME: Could check that the remote domain is alive,
-		 * but it is normally initial domain. */
-		return true;
-	default:
-		break;
-	}
-	return false;
-}
 static void *read_reply(enum xsd_sockmsg_type *type, unsigned int *len)
 {
 	struct xs_stored_msg *msg;
@@ -171,20 +148,9 @@ static void *read_reply(enum xsd_sockmsg_type *type, unsigned int *len)
 
 	while (list_empty(&xs_state.reply_list)) {
 		spin_unlock(&xs_state.reply_lock);
-		if (xenbus_ok())
-			/* XXX FIXME: Avoid synchronous wait for response here. */
-			wait_event_timeout(xs_state.reply_waitq,
-					   !list_empty(&xs_state.reply_list),
-					   msecs_to_jiffies(500));
-		else {
-			/*
-			 * If we are in the process of being shut-down there is
-			 * no point of trying to contact XenBus - it is either
-			 * killed (xenstored application) or the other domain
-			 * has been killed or is unreachable.
-			 */
-			return ERR_PTR(-EIO);
-		}
+		/* XXX FIXME: Avoid synchronous wait for response here. */
+		wait_event(xs_state.reply_waitq,
+			   !list_empty(&xs_state.reply_list));
 		spin_lock(&xs_state.reply_lock);
 	}
 
@@ -232,10 +198,10 @@ static void transaction_resume(void)
 void *xenbus_dev_request_and_reply(struct xsd_sockmsg *msg)
 {
 	void *ret;
-	enum xsd_sockmsg_type type = msg->type;
+	struct xsd_sockmsg req_msg = *msg;
 	int err;
 
-	if (type == XS_TRANSACTION_START)
+	if (req_msg.type == XS_TRANSACTION_START)
 		transaction_start();
 
 	mutex_lock(&xs_state.request_mutex);
@@ -250,7 +216,8 @@ void *xenbus_dev_request_and_reply(struct xsd_sockmsg *msg)
 	mutex_unlock(&xs_state.request_mutex);
 
 	if ((msg->type == XS_TRANSACTION_END) ||
-	    ((type == XS_TRANSACTION_START) && (msg->type == XS_ERROR)))
+	    ((req_msg.type == XS_TRANSACTION_START) &&
+	     (msg->type == XS_ERROR)))
 		transaction_end();
 
 	return ret;
@@ -699,8 +666,6 @@ int register_xenbus_watch(struct xenbus_watch *watch)
 
 	sprintf(token, "%lX", (long)watch);
 
-	watch->nr_pending = 0;
-
 	down_read(&xs_state.watch_mutex);
 
 	spin_lock(&watches_lock);
@@ -750,15 +715,12 @@ void unregister_xenbus_watch(struct xenbus_watch *watch)
 
 	/* Cancel pending watch events. */
 	spin_lock(&watch_events_lock);
-	if (watch->nr_pending) {
-		list_for_each_entry_safe(msg, tmp, &watch_events, list) {
-			if (msg->u.watch.handle != watch)
-				continue;
-			list_del(&msg->list);
-			kfree(msg->u.watch.vec);
-			kfree(msg);
-		}
-		watch->nr_pending = 0;
+	list_for_each_entry_safe(msg, tmp, &watch_events, list) {
+		if (msg->u.watch.handle != watch)
+			continue;
+		list_del(&msg->list);
+		kfree(msg->u.watch.vec);
+		kfree(msg);
 	}
 	spin_unlock(&watch_events_lock);
 
@@ -805,6 +767,7 @@ void xs_suspend_cancel(void)
 
 static int xenwatch_thread(void *unused)
 {
+	struct list_head *ent;
 	struct xs_stored_msg *msg;
 
 	for (;;) {
@@ -817,15 +780,13 @@ static int xenwatch_thread(void *unused)
 		mutex_lock(&xenwatch_mutex);
 
 		spin_lock(&watch_events_lock);
-		msg = list_first_entry_or_null(&watch_events,
-				struct xs_stored_msg, list);
-		if (msg) {
-			list_del(&msg->list);
-			msg->u.watch.handle->nr_pending--;
-		}
+		ent = watch_events.next;
+		if (ent != &watch_events)
+			list_del(ent);
 		spin_unlock(&watch_events_lock);
 
-		if (msg) {
+		if (ent != &watch_events) {
+			msg = list_entry(ent, struct xs_stored_msg, list);
 			msg->u.watch.handle->callback(
 				msg->u.watch.handle,
 				(const char **)msg->u.watch.vec,
@@ -907,15 +868,9 @@ static int process_msg(void)
 		spin_lock(&watches_lock);
 		msg->u.watch.handle = find_watch(
 			msg->u.watch.vec[XS_WATCH_TOKEN]);
-		if (msg->u.watch.handle != NULL &&
-				(!msg->u.watch.handle->will_handle ||
-				 msg->u.watch.handle->will_handle(
-					 msg->u.watch.handle,
-					 (const char **)msg->u.watch.vec,
-					 msg->u.watch.vec_size))) {
+		if (msg->u.watch.handle != NULL) {
 			spin_lock(&watch_events_lock);
 			list_add_tail(&msg->list, &watch_events);
-			msg->u.watch.handle->nr_pending++;
 			wake_up(&watch_events_waitq);
 			spin_unlock(&watch_events_lock);
 		} else {

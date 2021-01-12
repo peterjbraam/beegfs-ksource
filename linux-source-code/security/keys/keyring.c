@@ -73,8 +73,6 @@ static inline unsigned keyring_hash(const char *desc)
  * can be treated as ordinary keys in addition to having their own special
  * operations.
  */
-static int keyring_preparse(struct key_preparsed_payload *prep);
-static void keyring_free_preparse(struct key_preparsed_payload *prep);
 static int keyring_instantiate(struct key *keyring,
 			       struct key_preparsed_payload *prep);
 static void keyring_revoke(struct key *keyring);
@@ -86,9 +84,8 @@ static long keyring_read(const struct key *keyring,
 struct key_type key_type_keyring = {
 	.name		= "keyring",
 	.def_datalen	= 0,
-	.preparse	= keyring_preparse,
-	.free_preparse	= keyring_free_preparse,
 	.instantiate	= keyring_instantiate,
+	.match		= user_match,
 	.revoke		= keyring_revoke,
 	.destroy	= keyring_destroy,
 	.describe	= keyring_describe,
@@ -118,26 +115,11 @@ static void keyring_publish_name(struct key *keyring)
 		if (!keyring_name_hash[bucket].next)
 			INIT_LIST_HEAD(&keyring_name_hash[bucket]);
 
-		list_add_tail(&keyring->name_link,
+		list_add_tail(&keyring->type_data.link,
 			      &keyring_name_hash[bucket]);
 
 		write_unlock(&keyring_name_lock);
 	}
-}
-
-/*
- * Preparse a keyring payload
- */
-static int keyring_preparse(struct key_preparsed_payload *prep)
-{
-	return prep->datalen != 0 ? -EINVAL : 0;
-}
-
-/*
- * Free a preparse of a user defined key payload
- */
-static void keyring_free_preparse(struct key_preparsed_payload *prep)
-{
 }
 
 /*
@@ -148,10 +130,17 @@ static void keyring_free_preparse(struct key_preparsed_payload *prep)
 static int keyring_instantiate(struct key *keyring,
 			       struct key_preparsed_payload *prep)
 {
-	assoc_array_init(&keyring->keys);
-	/* make the keyring available by name if it has one */
-	keyring_publish_name(keyring);
-	return 0;
+	int ret;
+
+	ret = -EINVAL;
+	if (prep->datalen == 0) {
+		assoc_array_init(&keyring->keys);
+		/* make the keyring available by name if it has one */
+		keyring_publish_name(keyring);
+		ret = 0;
+	}
+
+	return ret;
 }
 
 /*
@@ -387,9 +376,9 @@ static void keyring_destroy(struct key *keyring)
 	if (keyring->description) {
 		write_lock(&keyring_name_lock);
 
-		if (keyring->name_link.next != NULL &&
-		    !list_empty(&keyring->name_link))
-			list_del(&keyring->name_link);
+		if (keyring->type_data.link.next != NULL &&
+		    !list_empty(&keyring->type_data.link))
+			list_del(&keyring->type_data.link);
 
 		write_unlock(&keyring_name_lock);
 	}
@@ -486,17 +475,13 @@ static long keyring_read(const struct key *keyring,
  */
 struct key *keyring_alloc(const char *description, kuid_t uid, kgid_t gid,
 			  const struct cred *cred, key_perm_t perm,
-			  unsigned long flags,
-			  int (*restrict_link)(struct key *,
-					       const struct key_type *,
-					       const union key_payload *),
-			  struct key *dest)
+			  unsigned long flags, struct key *dest)
 {
 	struct key *keyring;
 	int ret;
 
 	keyring = key_alloc(&key_type_keyring, description,
-			    uid, gid, cred, perm, flags, restrict_link);
+			    uid, gid, cred, perm, flags);
 	if (!IS_ERR(keyring)) {
 		ret = key_instantiate_and_link(keyring, NULL, 0, dest, NULL);
 		if (ret < 0) {
@@ -508,35 +493,6 @@ struct key *keyring_alloc(const char *description, kuid_t uid, kgid_t gid,
 	return keyring;
 }
 EXPORT_SYMBOL(keyring_alloc);
-
-/**
- * restrict_link_reject - Give -EPERM to restrict link
- * @keyring: The keyring being added to.
- * @type: The type of key being added.
- * @payload: The payload of the key intended to be added.
- *
- * Reject the addition of any links to a keyring.  It can be overridden by
- * passing KEY_ALLOC_BYPASS_RESTRICTION to key_instantiate_and_link() when
- * adding a key to a keyring.
- *
- * This is meant to be passed as the restrict_link parameter to
- * keyring_alloc().
- */
-int restrict_link_reject(struct key *keyring,
-			 const struct key_type *type,
-			 const union key_payload *payload)
-{
-	return -EPERM;
-}
-
-/*
- * By default, we keys found by getting an exact match on their descriptions.
- */
-bool key_default_cmp(const struct key *key,
-		     const struct key_match_data *match_data)
-{
-	return strcmp(key->description, match_data->raw_data) == 0;
-}
 
 /*
  * Iteration function to consider each key found.
@@ -558,6 +514,8 @@ static int keyring_search_iterator(const void *object, void *iterator_data)
 
 	/* skip invalidated, revoked and expired keys */
 	if (ctx->flags & KEYRING_SEARCH_DO_STATE_CHECK) {
+		time_t expiry = READ_ONCE(key->expiry);
+
 		if (kflags & ((1 << KEY_FLAG_INVALIDATED) |
 			      (1 << KEY_FLAG_REVOKED))) {
 			ctx->result = ERR_PTR(-EKEYREVOKED);
@@ -565,7 +523,7 @@ static int keyring_search_iterator(const void *object, void *iterator_data)
 			goto skipped;
 		}
 
-		if (key->expiry && ctx->now.tv_sec >= key->expiry) {
+		if (expiry && ctx->now.tv_sec >= expiry) {
 			if (!(ctx->flags & KEYRING_SEARCH_SKIP_EXPIRED))
 				ctx->result = ERR_PTR(-EKEYEXPIRED);
 			kleave(" = %d [expire]", ctx->skipped_ret);
@@ -574,7 +532,7 @@ static int keyring_search_iterator(const void *object, void *iterator_data)
 	}
 
 	/* keys that don't match */
-	if (!ctx->match_data.cmp(key, &ctx->match_data)) {
+	if (!ctx->match(key, ctx->match_data)) {
 		kleave(" = 0 [!match]");
 		return 0;
 	}
@@ -582,7 +540,7 @@ static int keyring_search_iterator(const void *object, void *iterator_data)
 	/* key must have search permissions */
 	if (!(ctx->flags & KEYRING_SEARCH_NO_CHECK_PERM) &&
 	    key_task_permission(make_key_ref(key, ctx->possessed),
-				ctx->cred, KEY_NEED_SEARCH) < 0) {
+				ctx->cred, KEY_SEARCH) < 0) {
 		ctx->result = ERR_PTR(-EACCES);
 		kleave(" = %d [!perm]", ctx->skipped_ret);
 		goto skipped;
@@ -613,7 +571,8 @@ skipped:
  */
 static int search_keyring(struct key *keyring, struct keyring_search_context *ctx)
 {
-	if (ctx->match_data.lookup_type == KEYRING_SEARCH_LOOKUP_DIRECT) {
+	if ((ctx->flags & KEYRING_SEARCH_LOOKUP_TYPE) ==
+	    KEYRING_SEARCH_LOOKUP_DIRECT) {
 		const void *object;
 
 		object = assoc_array_find(&keyring->keys,
@@ -652,10 +611,13 @@ static bool search_nested_keyrings(struct key *keyring,
 	BUG_ON((ctx->flags & STATE_CHECKS) == 0 ||
 	       (ctx->flags & STATE_CHECKS) == STATE_CHECKS);
 
+	if (ctx->index_key.description)
+		ctx->index_key.desc_len = strlen(ctx->index_key.description);
+
 	/* Check to see if this top-level keyring is what we are looking for
 	 * and whether it is valid or not.
 	 */
-	if (ctx->match_data.lookup_type == KEYRING_SEARCH_LOOKUP_ITERATE ||
+	if (ctx->flags & KEYRING_SEARCH_LOOKUP_ITERATE ||
 	    keyring_compare_object(keyring, &ctx->index_key)) {
 		ctx->skipped_ret = 2;
 		switch (ctx->iterator(keyring_key_to_ptr(keyring), ctx)) {
@@ -691,7 +653,7 @@ descend_to_keyring:
 	 * Non-keyrings avoid the leftmost branch of the root entirely (root
 	 * slots 1-15).
 	 */
-	ptr = ACCESS_ONCE(keyring->keys.root);
+	ptr = READ_ONCE(keyring->keys.root);
 	if (!ptr)
 		goto not_this_keyring;
 
@@ -705,7 +667,7 @@ descend_to_keyring:
 		if ((shortcut->index_key[0] & ASSOC_ARRAY_FAN_MASK) != 0)
 			goto not_this_keyring;
 
-		ptr = ACCESS_ONCE(shortcut->next_node);
+		ptr = READ_ONCE(shortcut->next_node);
 		node = assoc_array_ptr_to_node(ptr);
 		goto begin_node;
 	}
@@ -725,7 +687,7 @@ descend_to_node:
 	if (assoc_array_ptr_is_shortcut(ptr)) {
 		shortcut = assoc_array_ptr_to_shortcut(ptr);
 		smp_read_barrier_depends();
-		ptr = ACCESS_ONCE(shortcut->next_node);
+		ptr = READ_ONCE(shortcut->next_node);
 		BUG_ON(!assoc_array_ptr_is_node(ptr));
 	}
 	node = assoc_array_ptr_to_node(ptr);
@@ -737,7 +699,7 @@ begin_node:
 ascend_to_node:
 	/* Go through the slots in a node */
 	for (; slot < ASSOC_ARRAY_FAN_OUT; slot++) {
-		ptr = ACCESS_ONCE(node->slots[slot]);
+		ptr = READ_ONCE(node->slots[slot]);
 
 		if (assoc_array_ptr_is_meta(ptr) && node->back_pointer)
 			goto descend_to_node;
@@ -758,7 +720,7 @@ ascend_to_node:
 		/* Search a nested keyring */
 		if (!(ctx->flags & KEYRING_SEARCH_NO_CHECK_PERM) &&
 		    key_task_permission(make_key_ref(key, ctx->possessed),
-					ctx->cred, KEY_NEED_SEARCH) < 0)
+					ctx->cred, KEY_SEARCH) < 0)
 			continue;
 
 		/* stack the current position */
@@ -775,13 +737,13 @@ ascend_to_node:
 	/* We've dealt with all the slots in the current node, so now we need
 	 * to ascend to the parent and continue processing there.
 	 */
-	ptr = ACCESS_ONCE(node->back_pointer);
+	ptr = READ_ONCE(node->back_pointer);
 	slot = node->parent_slot;
 
 	if (ptr && assoc_array_ptr_is_shortcut(ptr)) {
 		shortcut = assoc_array_ptr_to_shortcut(ptr);
 		smp_read_barrier_depends();
-		ptr = ACCESS_ONCE(shortcut->back_pointer);
+		ptr = READ_ONCE(shortcut->back_pointer);
 		slot = shortcut->parent_slot;
 	}
 	if (!ptr)
@@ -880,7 +842,7 @@ key_ref_t keyring_search_aux(key_ref_t keyring_ref,
 		return ERR_PTR(-ENOTDIR);
 
 	if (!(ctx->flags & KEYRING_SEARCH_NO_CHECK_PERM)) {
-		err = key_task_permission(keyring_ref, ctx->cred, KEY_NEED_SEARCH);
+		err = key_task_permission(keyring_ref, ctx->cred, KEY_SEARCH);
 		if (err < 0)
 			return ERR_PTR(err);
 	}
@@ -909,27 +871,17 @@ key_ref_t keyring_search(key_ref_t keyring,
 	struct keyring_search_context ctx = {
 		.index_key.type		= type,
 		.index_key.description	= description,
-		.index_key.desc_len	= strlen(description),
 		.cred			= current_cred(),
-		.match_data.cmp		= key_default_cmp,
-		.match_data.raw_data	= description,
-		.match_data.lookup_type	= KEYRING_SEARCH_LOOKUP_DIRECT,
-		.flags			= KEYRING_SEARCH_DO_STATE_CHECK,
+		.match			= type->match,
+		.match_data		= description,
+		.flags			= (type->def_lookup_type |
+					   KEYRING_SEARCH_DO_STATE_CHECK),
 	};
-	key_ref_t key;
-	int ret;
 
-	if (type->match_preparse) {
-		ret = type->match_preparse(&ctx.match_data);
-		if (ret < 0)
-			return ERR_PTR(ret);
-	}
+	if (!ctx.match)
+		return ERR_PTR(-ENOKEY);
 
-	key = keyring_search_aux(keyring, &ctx);
-
-	if (type->match_free)
-		type->match_free(&ctx.match_data);
-	return key;
+	return keyring_search_aux(keyring, &ctx);
 }
 EXPORT_SYMBOL(keyring_search);
 
@@ -1007,7 +959,7 @@ struct key *find_keyring_by_name(const char *name, bool uid_keyring)
 		 * that's readable and that hasn't been revoked */
 		list_for_each_entry(keyring,
 				    &keyring_name_hash[bucket],
-				    name_link
+				    type_data.link
 				    ) {
 			if (!kuid_has_mapping(current_user_ns(), keyring->user->uid))
 				continue;
@@ -1024,7 +976,7 @@ struct key *find_keyring_by_name(const char *name, bool uid_keyring)
 					continue;
 			} else {
 				if (key_permission(make_key_ref(keyring, 0),
-						   KEY_NEED_SEARCH) < 0)
+						   KEY_SEARCH) < 0)
 					continue;
 			}
 
@@ -1054,7 +1006,7 @@ static int keyring_detect_cycle_iterator(const void *object,
 
 	/* We might get a keyring with matching index-key that is nonetheless a
 	 * different keyring. */
-	if (key != ctx->match_data.raw_data)
+	if (key != ctx->match_data)
 		return 0;
 
 	ctx->result = ERR_PTR(-EDEADLK);
@@ -1071,14 +1023,14 @@ static int keyring_detect_cycle_iterator(const void *object,
 static int keyring_detect_cycle(struct key *A, struct key *B)
 {
 	struct keyring_search_context ctx = {
-		.index_key		= A->index_key,
-		.match_data.raw_data	= A,
-		.match_data.lookup_type = KEYRING_SEARCH_LOOKUP_DIRECT,
-		.iterator		= keyring_detect_cycle_iterator,
-		.flags			= (KEYRING_SEARCH_NO_STATE_CHECK |
-					   KEYRING_SEARCH_NO_UPDATE_TIME |
-					   KEYRING_SEARCH_NO_CHECK_PERM |
-					   KEYRING_SEARCH_DETECT_TOO_DEEP),
+		.index_key	= A->index_key,
+		.match_data	= A,
+		.iterator	= keyring_detect_cycle_iterator,
+		.flags		= (KEYRING_SEARCH_LOOKUP_DIRECT |
+				   KEYRING_SEARCH_NO_STATE_CHECK |
+				   KEYRING_SEARCH_NO_UPDATE_TIME |
+				   KEYRING_SEARCH_NO_CHECK_PERM |
+				   KEYRING_SEARCH_DETECT_TOO_DEEP),
 	};
 
 	rcu_read_lock();
@@ -1213,16 +1165,6 @@ void __key_link_end(struct key *keyring,
 	up_write(&keyring->sem);
 }
 
-/*
- * Check addition of keys to restricted keyrings.
- */
-static int __key_link_check_restriction(struct key *keyring, struct key *key)
-{
-	if (!keyring->restrict_link)
-		return 0;
-	return keyring->restrict_link(keyring, key->type, &key->payload);
-}
-
 /**
  * key_link - Link a key to a keyring
  * @keyring: The keyring to make the link in.
@@ -1253,12 +1195,14 @@ int key_link(struct key *keyring, struct key *key)
 	key_check(keyring);
 	key_check(key);
 
+	if (test_bit(KEY_FLAG_TRUSTED_ONLY, &keyring->flags) &&
+	    !test_bit(KEY_FLAG_TRUSTED, &key->flags))
+		return -EPERM;
+
 	ret = __key_link_begin(keyring, &key->index_key, &edit);
 	if (ret == 0) {
 		kdebug("begun {%d,%d}", keyring->serial, atomic_read(&keyring->usage));
-		ret = __key_link_check_restriction(keyring, key);
-		if (ret == 0)
-			ret = __key_link_check_live_key(keyring, key);
+		ret = __key_link_check_live_key(keyring, key);
 		if (ret == 0)
 			__key_link(key, &edit);
 		__key_link_end(keyring, &key->index_key, edit);

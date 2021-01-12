@@ -23,15 +23,14 @@ MODULE_ALIAS("ip6t_bpf");
 static int bpf_mt_check(const struct xt_mtchk_param *par)
 {
 	struct xt_bpf_info *info = par->matchinfo;
-	struct sock_fprog_kern program;
+	struct sock_fprog program;
 
 	if (info->bpf_program_num_elem > XT_BPF_MAX_NUM_INSTR)
 		return -EINVAL;
 
 	program.len = info->bpf_program_num_elem;
-	program.filter = info->bpf_program;
-
-	if (bpf_prog_create(&info->filter, &program)) {
+	program.filter = (struct sock_filter __user *) info->bpf_program;
+	if (sk_unattached_filter_create(&info->filter, &program)) {
 		pr_info("bpf: check failed: parse error\n");
 		return -EINVAL;
 	}
@@ -43,13 +42,13 @@ static bool bpf_mt(const struct sk_buff *skb, struct xt_action_param *par)
 {
 	const struct xt_bpf_info *info = par->matchinfo;
 
-	return BPF_PROG_RUN(info->filter, skb);
+	return SK_RUN_FILTER(info->filter, skb);
 }
 
 static void bpf_mt_destroy(const struct xt_mtdtor_param *par)
 {
 	const struct xt_bpf_info *info = par->matchinfo;
-	bpf_prog_destroy(info->filter);
+	sk_unattached_filter_destroy(info->filter);
 }
 
 static struct xt_match bpf_mt_reg __read_mostly = {

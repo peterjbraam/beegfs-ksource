@@ -244,7 +244,7 @@ static u8 mlx4_en_dcbnl_set_state(struct net_device *dev, u8 state)
 		priv->flags &= ~MLX4_EN_FLAG_DCB_ENABLED;
 	}
 
-	if (mlx4_en_setup_tc(dev, num_tcs))
+	if (mlx4_en_alloc_tx_queue_per_tc(dev, num_tcs))
 		return 1;
 
 	return 0;
@@ -254,7 +254,7 @@ static u8 mlx4_en_dcbnl_set_state(struct net_device *dev, u8 state)
  * otherwise returns 0 as the invalid user priority bitmap to
  * indicate an error.
  */
-static int mlx4_en_dcbnl_getapp(struct net_device *netdev, u8 idtype, u16 id)
+static u8 mlx4_en_dcbnl_getapp(struct net_device *netdev, u8 idtype, u16 id)
 {
 	struct mlx4_en_priv *priv = netdev_priv(netdev);
 	struct dcb_app app = {
@@ -267,7 +267,7 @@ static int mlx4_en_dcbnl_getapp(struct net_device *netdev, u8 idtype, u16 id)
 	return dcb_getapp(netdev, &app);
 }
 
-static int mlx4_en_dcbnl_setapp(struct net_device *netdev, u8 idtype,
+static u8 mlx4_en_dcbnl_setapp(struct net_device *netdev, u8 idtype,
 				u16 id, u8 up)
 {
 	struct mlx4_en_priv *priv = netdev_priv(netdev);
@@ -309,7 +309,7 @@ static int mlx4_en_ets_validate(struct mlx4_en_priv *priv, struct ieee_ets *ets)
 	int has_ets_tc = 0;
 
 	for (i = 0; i < IEEE_8021QAZ_MAX_TCS; i++) {
-		if (ets->prio_tc[i] >= MLX4_EN_NUM_UP) {
+		if (ets->prio_tc[i] >= MLX4_EN_NUM_UP_HIGH) {
 			en_err(priv, "Bad priority in UP <=> TC mapping. TC: %d, UP: %d\n",
 					i, ets->prio_tc[i]);
 			return -EINVAL;
@@ -326,7 +326,7 @@ static int mlx4_en_ets_validate(struct mlx4_en_priv *priv, struct ieee_ets *ets)
 		default:
 			en_err(priv, "TC[%d]: Not supported TSA: %d\n",
 					i, ets->tc_tsa[i]);
-			return -ENOTSUPP;
+			return -EOPNOTSUPP;
 		}
 	}
 
@@ -487,7 +487,7 @@ static u8 mlx4_en_dcbnl_setdcbx(struct net_device *dev, u8 mode)
 			goto err;
 		if (mlx4_en_dcbnl_ieee_setpfc(dev, &pfc))
 			goto err;
-		if (mlx4_en_setup_tc(dev, 0))
+		if (mlx4_en_alloc_tx_queue_per_tc(dev, 0))
 			goto err;
 	}
 
@@ -712,9 +712,6 @@ const struct dcbnl_rtnl_ops mlx4_en_dcbnl_ops = {
 	.ieee_setets		= mlx4_en_dcbnl_ieee_setets,
 	.ieee_getmaxrate	= mlx4_en_dcbnl_ieee_getmaxrate,
 	.ieee_setmaxrate	= mlx4_en_dcbnl_ieee_setmaxrate,
-	.ieee_getqcn		= mlx4_en_dcbnl_ieee_getqcn,
-	.ieee_setqcn		= mlx4_en_dcbnl_ieee_setqcn,
-	.ieee_getqcnstats	= mlx4_en_dcbnl_ieee_getqcnstats,
 	.ieee_getpfc		= mlx4_en_dcbnl_ieee_getpfc,
 	.ieee_setpfc		= mlx4_en_dcbnl_ieee_setpfc,
 
@@ -732,6 +729,12 @@ const struct dcbnl_rtnl_ops mlx4_en_dcbnl_ops = {
 
 	.getdcbx	= mlx4_en_dcbnl_getdcbx,
 	.setdcbx	= mlx4_en_dcbnl_setdcbx,
+};
+
+const struct dcbnl_rtnl_ops_ext mlx4_en_dcbnl_ops_ext = {
+	.ieee_getqcn	= mlx4_en_dcbnl_ieee_getqcn,
+	.ieee_setqcn	= mlx4_en_dcbnl_ieee_setqcn,
+	.ieee_getqcnstats = mlx4_en_dcbnl_ieee_getqcnstats,
 };
 
 const struct dcbnl_rtnl_ops mlx4_en_dcbnl_pfc_ops = {

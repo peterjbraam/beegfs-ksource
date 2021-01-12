@@ -38,9 +38,7 @@
 #include <asm/hw_irq.h>
 #include <asm/context_tracking.h>
 #include <asm/tm.h>
-#include <asm/ppc-opcode.h>
 #include <asm/barrier.h>
-#include <asm/export.h>
 #ifdef CONFIG_PPC_BOOK3S
 #include <asm/exception-64s.h>
 #else
@@ -80,12 +78,7 @@ END_FTR_SECTION_IFSET(CPU_FTR_TM)
 	std	r0,GPR0(r1)
 	std	r10,GPR1(r1)
 	beq	2f			/* if from kernel mode */
-#ifdef CONFIG_PPC_FSL_BOOK3E
-START_BTB_FLUSH_SECTION
-	BTB_FLUSH(r10)
-END_BTB_FLUSH_SECTION
-#endif
-	ACCOUNT_CPU_USER_ENTRY(r13, r10, r11)
+	ACCOUNT_CPU_USER_ENTRY(r10, r11)
 2:	std	r2,GPR2(r1)
 	std	r3,GPR3(r1)
 	mfcr	r2
@@ -152,7 +145,7 @@ END_FW_FTR_SECTION_IFSET(FW_FEATURE_SPLPAR)
 #ifdef CONFIG_PPC_BOOK3E
 	wrteei	1
 #else
-	li	r11,MSR_RI
+	ld	r11,PACAKMSR(r13)
 	ori	r11,r11,MSR_EE
 	mtmsrd	r11,1
 #endif /* CONFIG_PPC_BOOK3E */
@@ -165,7 +158,7 @@ END_FW_FTR_SECTION_IFSET(FW_FEATURE_SPLPAR)
 
 	CURRENT_THREAD_INFO(r11, r1)
 	ld	r10,TI_FLAGS(r11)
-	andi.	r11,r10,_TIF_SYSCALL_DOTRACE
+	andi.	r11,r10,_TIF_SYSCALL_T_OR_A
 	bne	syscall_dotrace		/* does not return */
 	cmpldi	0,r0,NR_syscalls
 	bge-	syscall_enosys
@@ -217,6 +210,7 @@ system_call:			/* label this so stack traces look sane */
 #ifdef CONFIG_PPC_BOOK3E
 	wrteei	0
 #else
+	ld	r10,PACAKMSR(r13)
 	/*
 	 * For performance reasons we clear RI the same time that we
 	 * clear EE. We only need to clear RI just before we restore r13
@@ -224,36 +218,16 @@ system_call:			/* label this so stack traces look sane */
 	 * We have to be careful to restore RI if we branch anywhere from
 	 * here (eg syscall_exit_work).
 	 */
-	li	r11,0
+	li	r9,MSR_RI
+	andc	r11,r10,r9
 	mtmsrd	r11,1
 #endif /* CONFIG_PPC_BOOK3E */
 
 	ld	r9,TI_FLAGS(r12)
 	li	r11,-MAX_ERRNO
-	andi.	r0,r9,(_TIF_SYSCALL_DOTRACE|_TIF_SINGLESTEP|_TIF_USER_WORK_MASK|_TIF_PERSYSCALL_MASK)
+	andi.	r0,r9,(_TIF_SYSCALL_T_OR_A|_TIF_SINGLESTEP|_TIF_USER_WORK_MASK|_TIF_PERSYSCALL_MASK)
 	bne-	syscall_exit_work
-
-	andi.	r0,r8,MSR_FP
-	beq 2f
-#ifdef CONFIG_ALTIVEC
-	andis.	r0,r8,MSR_VEC@h
-	bne	3f
-#endif
-2:	addi    r3,r1,STACK_FRAME_OVERHEAD
-#ifdef CONFIG_PPC_BOOK3S
-	li	r10,MSR_RI
-	mtmsrd	r10,1		/* Restore RI */
-#endif
-	bl	restore_math
-#ifdef CONFIG_PPC_BOOK3S
-	li	r11,0
-	mtmsrd	r11,1
-#endif
-	ld	r8,_MSR(r1)
-	ld	r3,RESULT(r1)
-	li	r11,-MAX_ERRNO
-
-3:	cmpld	r3,r11
+	cmpld	r3,r11
 	ld	r5,_CCR(r1)
 	bge-	syscall_error
 .Lsyscall_error_cont:
@@ -265,12 +239,8 @@ END_FTR_SECTION_IFCLR(CPU_FTR_STCX_CHECKS_ADDRESS)
 	ld	r4,_LINK(r1)
 
 	beq-	1f
-	ACCOUNT_CPU_USER_EXIT(r13, r11, r12)
-
-BEGIN_FTR_SECTION
-	HMT_MEDIUM_LOW
-END_FTR_SECTION_IFSET(CPU_FTR_HAS_PPR)
-
+	ACCOUNT_CPU_USER_EXIT(r11, r12)
+	HMT_MEDIUM_LOW_HAS_PPR
 	ld	r13,GPR13(r1)	/* only restore r13 if returning to usermode */
 	ld	r2,GPR2(r1)
 	ld	r1,GPR1(r1)
@@ -337,7 +307,6 @@ syscall_enosys:
 	
 syscall_exit_work:
 #ifdef CONFIG_PPC_BOOK3S
-	li	r10,MSR_RI
 	mtmsrd	r10,1		/* Restore RI */
 #endif
 	/* If TIF_RESTOREALL is set, don't scribble on either r3 or ccr.
@@ -370,21 +339,15 @@ syscall_exit_work:
 	subi	r12,r12,TI_FLAGS
 
 4:	/* Anything else left to do? */
-BEGIN_FTR_SECTION
-	lis	r3,INIT_PPR@highest	/* Set thread.ppr = 3 */
-	ld	r10,PACACURRENT(r13)
-	sldi	r3,r3,32	/* bits 11-13 are used for ppr */
-	std	r3,TASKTHREADPPR(r10)
-END_FTR_SECTION_IFSET(CPU_FTR_HAS_PPR)
-
-	andi.	r0,r9,(_TIF_SYSCALL_DOTRACE|_TIF_SINGLESTEP)
+	SET_DEFAULT_THREAD_PPR(r3, r10)		/* Set thread.ppr = 3 */
+	andi.	r0,r9,(_TIF_SYSCALL_T_OR_A|_TIF_SINGLESTEP)
 	beq	ret_from_except_lite
 
 	/* Re-enable interrupts */
 #ifdef CONFIG_PPC_BOOK3E
 	wrteei	1
 #else
-	li	r10,MSR_RI
+	ld	r10,PACAKMSR(r13)
 	ori	r10,r10,MSR_EE
 	mtmsrd	r10,1
 #endif /* CONFIG_PPC_BOOK3E */
@@ -398,13 +361,13 @@ END_FTR_SECTION_IFSET(CPU_FTR_HAS_PPR)
 tabort_syscall:
 	/* Firstly we need to enable TM in the kernel */
 	mfmsr	r10
-	li	r9, 1
-	rldimi	r10, r9, MSR_TM_LG, 63-MSR_TM_LG
+	li	r13, 1
+	rldimi	r10, r13, MSR_TM_LG, 63-MSR_TM_LG
 	mtmsrd	r10, 0
 
 	/* tabort, this dooms the transaction, nothing else */
-	li	r9, (TM_CAUSE_SYSCALL|TM_CAUSE_PERSISTENT)
-	TABORT(R9)
+	li	r13, (TM_CAUSE_SYSCALL|TM_CAUSE_PERSISTENT)
+	TABORT(R13)
 
 	/*
 	 * Return directly to userspace. We have corrupted user register state,
@@ -412,8 +375,8 @@ tabort_syscall:
 	 * resume after the tbegin of the aborted transaction with the
 	 * checkpointed register state.
 	 */
-	li	r9, MSR_RI
-	andc	r10, r10, r9
+	li	r13, MSR_RI
+	andc	r10, r10, r13
 	mtmsrd	r10, 1
 	mtspr	SPRN_SRR0, r11
 	mtspr	SPRN_SRR1, r12
@@ -572,10 +535,42 @@ _GLOBAL(_switch)
 	/* r3-r13 are caller saved -- Cort */
 	SAVE_8GPRS(14, r1)
 	SAVE_10GPRS(22, r1)
-	std	r0,_NIP(r1)	/* Return to switch caller */
+	mflr	r20		/* Return to switch caller */
+	mfmsr	r22
+	li	r0, MSR_FP
+#ifdef CONFIG_VSX
+BEGIN_FTR_SECTION
+	oris	r0,r0,MSR_VSX@h	/* Disable VSX */
+END_FTR_SECTION_IFSET(CPU_FTR_VSX)
+#endif /* CONFIG_VSX */
+#ifdef CONFIG_ALTIVEC
+BEGIN_FTR_SECTION
+	oris	r0,r0,MSR_VEC@h	/* Disable altivec */
+	mfspr	r24,SPRN_VRSAVE	/* save vrsave register value */
+	std	r24,THREAD_VRSAVE(r3)
+END_FTR_SECTION_IFSET(CPU_FTR_ALTIVEC)
+#endif /* CONFIG_ALTIVEC */
+	and.	r0,r0,r22
+	beq+	1f
+	andc	r22,r22,r0
+	MTMSRD(r22)
+	isync
+1:	std	r20,_NIP(r1)
 	mfcr	r23
 	std	r23,_CCR(r1)
 	std	r1,KSP(r3)	/* Set old stack pointer */
+
+#ifdef CONFIG_PPC_BOOK3S_64
+BEGIN_FTR_SECTION
+	/* Event based branch registers */
+	mfspr	r0, SPRN_BESCR
+	std	r0, THREAD_BESCR(r3)
+	mfspr	r0, SPRN_EBBHR
+	std	r0, THREAD_EBBHR(r3)
+	mfspr	r0, SPRN_EBBRR
+	std	r0, THREAD_EBBRR(r3)
+END_FTR_SECTION_IFSET(CPU_FTR_ARCH_207S)
+#endif
 
 	FLUSH_COUNT_CACHE
 
@@ -598,14 +593,6 @@ BEGIN_FTR_SECTION
 	ldarx	r6,0,r1
 END_FTR_SECTION_IFSET(CPU_FTR_STCX_CHECKS_ADDRESS)
 
-BEGIN_FTR_SECTION
-/*
- * A cp_abort (copy paste abort) here ensures that when context switching, a
- * copy from one process can't leak into the paste of another.
- */
-	PPC_CP_ABORT
-END_FTR_SECTION_IFSET(CPU_FTR_ARCH_300)
-
 #ifdef CONFIG_PPC_BOOK3S
 /* Cancel all explict user streams as they will have no use after context
  * switch and will stop the HW from creating streams itself
@@ -617,17 +604,18 @@ END_FTR_SECTION_IFSET(CPU_FTR_ARCH_300)
 	std	r6,PACACURRENT(r13)	/* Set new 'current' */
 
 	ld	r8,KSP(r4)	/* new stack pointer */
-#ifdef CONFIG_PPC_STD_MMU_64
-BEGIN_MMU_FTR_SECTION
-	b	2f
-END_MMU_FTR_SECTION_IFSET(MMU_FTR_TYPE_RADIX)
+#ifdef CONFIG_PPC_BOOK3S
 BEGIN_FTR_SECTION
+  BEGIN_FTR_SECTION_NESTED(95)
 	clrrdi	r6,r8,28	/* get its ESID */
 	clrrdi	r9,r1,28	/* get current sp ESID */
-FTR_SECTION_ELSE
+  FTR_SECTION_ELSE_NESTED(95)
 	clrrdi	r6,r8,40	/* get its 1T ESID */
 	clrrdi	r9,r1,40	/* get current sp 1T ESID */
-ALT_MMU_FTR_SECTION_END_IFCLR(MMU_FTR_1T_SEGMENT)
+  ALT_MMU_FTR_SECTION_END_NESTED_IFCLR(MMU_FTR_1T_SEGMENT, 95)
+FTR_SECTION_ELSE
+	b	2f
+ALT_MMU_FTR_SECTION_END_IFSET(MMU_FTR_SLB)
 	clrldi.	r0,r6,2		/* is new ESID c00000000? */
 	cmpd	cr1,r6,r9	/* or is new ESID the same as current ESID? */
 	cror	eq,4*cr1+eq,eq
@@ -661,13 +649,12 @@ END_MMU_FTR_SECTION_IFSET(MMU_FTR_1T_SEGMENT)
 	 * actually hit this code path.
 	 */
 
-	isync
 	slbie	r6
 	slbie	r6		/* Workaround POWER5 < DD2.1 issue */
 	slbmte	r7,r0
 	isync
 2:
-#endif /* CONFIG_PPC_STD_MMU_64 */
+#endif /* !CONFIG_PPC_BOOK3S */
 
 	CURRENT_THREAD_INFO(r7, r8)  /* base of new stack */
 	/* Note: this uses SWITCH_FRAME_SIZE rather than INT_FRAME_SIZE
@@ -677,6 +664,47 @@ END_MMU_FTR_SECTION_IFSET(MMU_FTR_1T_SEGMENT)
 
 	mr	r1,r8		/* start using new stack pointer */
 	std	r7,PACAKSAVE(r13)
+
+#ifdef CONFIG_PPC_BOOK3S_64
+BEGIN_FTR_SECTION
+	/* Event based branch registers */
+	ld	r0, THREAD_BESCR(r4)
+	mtspr	SPRN_BESCR, r0
+	ld	r0, THREAD_EBBHR(r4)
+	mtspr	SPRN_EBBHR, r0
+	ld	r0, THREAD_EBBRR(r4)
+	mtspr	SPRN_EBBRR, r0
+
+	ld	r0,THREAD_TAR(r4)
+	mtspr	SPRN_TAR,r0
+END_FTR_SECTION_IFSET(CPU_FTR_ARCH_207S)
+#endif
+
+#ifdef CONFIG_ALTIVEC
+BEGIN_FTR_SECTION
+	ld	r0,THREAD_VRSAVE(r4)
+	mtspr	SPRN_VRSAVE,r0		/* if G4, restore VRSAVE reg */
+END_FTR_SECTION_IFSET(CPU_FTR_ALTIVEC)
+#endif /* CONFIG_ALTIVEC */
+#ifdef CONFIG_PPC64
+BEGIN_FTR_SECTION
+	lwz	r6,THREAD_DSCR_INHERIT(r4)
+	ld	r0,THREAD_DSCR(r4)
+	cmpwi	r6,0
+	bne	1f
+	ld	r0,PACA_DSCR_DEFAULT(r13)
+1:
+BEGIN_FTR_SECTION_NESTED(70)
+	mfspr	r8, SPRN_FSCR
+	rldimi	r8, r6, FSCR_DSCR_LG, (63 - FSCR_DSCR_LG)
+	mtspr	SPRN_FSCR, r8
+END_FTR_SECTION_NESTED(CPU_FTR_ARCH_207S, CPU_FTR_ARCH_207S, 70)
+	cmpd	r0,r25
+	beq	2f
+	mtspr	SPRN_DSCR,r0
+2:
+END_FTR_SECTION_IFSET(CPU_FTR_DSCR)
+#endif
 
 	ld	r6,_CCR(r1)
 	mtcrf	0xFF,r6
@@ -708,7 +736,7 @@ _GLOBAL(ret_from_except_lite)
 #ifdef CONFIG_PPC_BOOK3E
 	wrteei	0
 #else
-	li	r10,MSR_RI
+	ld	r10,PACAKMSR(r13) /* Get kernel MSR without EE */
 	mtmsrd	r10,1		  /* Update machine state */
 #endif /* CONFIG_PPC_BOOK3E */
 
@@ -726,8 +754,8 @@ _GLOBAL(ret_from_except_lite)
 
 	/* Check current_thread_info()->flags */
 	andi.	r0,r4,_TIF_USER_WORK_MASK
-	bne	1f
 #ifdef CONFIG_PPC_BOOK3E
+	bne	1f
 	/*
 	 * Check to see if the dbcr0 register is set up to debug.
 	 * Use the internal debug mode bit to do this.
@@ -742,9 +770,7 @@ _GLOBAL(ret_from_except_lite)
 	mtspr	SPRN_DBSR,r10
 	b	restore
 #else
-	addi	r3,r1,STACK_FRAME_OVERHEAD
-	bl	restore_math
-	b	restore
+	beq	restore
 #endif
 1:	andi.	r0,r4,_TIF_NEED_RESCHED
 	beq	2f
@@ -761,13 +787,7 @@ _GLOBAL(ret_from_except_lite)
 3:
 #endif
 	bl	save_nvgprs
-	/*
-	 * Use a non volatile GPR to save and restore our thread_info flags
-	 * across the call to restore_interrupts.
-	 */
-	mr	r30,r4
 	bl	restore_interrupts
-	mr	r4,r30
 	addi	r3,r1,STACK_FRAME_OVERHEAD
 	bl	do_notify_resume
 	b	ret_from_except
@@ -840,7 +860,7 @@ resume_kernel:
 #ifdef CONFIG_PPC_BOOK3E
 	wrteei	0
 #else
-	li	r10,MSR_RI
+	ld	r10,PACAKMSR(r13) /* Get kernel MSR without EE */
 	mtmsrd	r10,1		  /* Update machine state */
 #endif /* CONFIG_PPC_BOOK3E */
 #endif /* CONFIG_PREEMPT */
@@ -930,7 +950,8 @@ END_FTR_SECTION_IFSET(CPU_FTR_HAS_PPR)
 	 * userspace and we take an exception after restoring r13,
 	 * we end up corrupting the userspace r13 value.
 	 */
-	li	r4,0
+	ld	r4,PACAKMSR(r13) /* Get kernel MSR without EE */
+	andc	r4,r4,r0	 /* r0 contains MSR_RI here */
 	mtmsrd	r4,1
 
 #ifdef CONFIG_PPC_TRANSACTIONAL_MEM
@@ -947,7 +968,7 @@ END_FTR_SECTION_IFSET(CPU_FTR_HAS_PPR)
 BEGIN_FTR_SECTION
 	mtspr	SPRN_PPR,r2	/* Restore PPR */
 END_FTR_SECTION_IFSET(CPU_FTR_HAS_PPR)
-	ACCOUNT_CPU_USER_EXIT(r13, r2, r4)
+	ACCOUNT_CPU_USER_EXIT(r2, r4)
 	REST_GPR(13, r1)
 
 	mtspr	SPRN_SRR1,r3
@@ -971,6 +992,13 @@ END_FTR_SECTION_IFSET(CPU_FTR_HAS_PPR)
 	mtcrf	0xFF,r2
 	ld	r2,_NIP(r1)
 	mtspr	SPRN_SRR0,r2
+
+	/*
+	 * Leaving a stale exception_marker on the stack can confuse
+	 * the reliable stack unwinder later on. Clear it.
+	 */
+	li	r2,0
+	std	r2,STACK_FRAME_OVERHEAD-16(r1)
 
 	ld	r0,GPR0(r1)
 	ld	r2,GPR2(r1)
@@ -1282,7 +1310,6 @@ _GLOBAL(enter_prom)
 #ifdef CONFIG_DYNAMIC_FTRACE
 _GLOBAL(mcount)
 _GLOBAL(_mcount)
-EXPORT_SYMBOL(_mcount)
 	mflr	r12
 	mtctr	r12
 	mtlr	r0
@@ -1339,14 +1366,10 @@ _GLOBAL(ftrace_caller)
 	stdu	r1,-SWITCH_FRAME_SIZE(r1)
 
 	/* Save all gprs to pt_regs */
-	SAVE_GPR(0, r1)
-	SAVE_10GPRS(2, r1)
-	SAVE_10GPRS(12, r1)
-	SAVE_10GPRS(22, r1)
-
-	/* Save previous stack pointer (r1) */
-	addi	r8, r1, SWITCH_FRAME_SIZE
-	std	r8, GPR1(r1)
+	SAVE_8GPRS(0,r1)
+	SAVE_8GPRS(8,r1)
+	SAVE_8GPRS(16,r1)
+	SAVE_8GPRS(24,r1)
 
 	/* Load special regs for save below */
 	mfmsr   r8
@@ -1400,10 +1423,10 @@ ftrace_call:
 #endif
 
 	/* Restore gprs */
-	REST_GPR(0,r1)
-	REST_10GPRS(2,r1)
-	REST_10GPRS(12,r1)
-	REST_10GPRS(22,r1)
+	REST_8GPRS(0,r1)
+	REST_8GPRS(8,r1)
+	REST_8GPRS(16,r1)
+	REST_8GPRS(24,r1)
 
 	/* Restore callee's TOC */
 	ld	r2, 24(r1)
@@ -1450,34 +1473,25 @@ _GLOBAL(ftrace_stub)
 	 *  - we have no stack frame and can not allocate one
 	 *  - LR points back to the original caller (in A)
 	 *  - CTR holds the new NIP in C
-	 *  - r0 & r12 are free
-	 *
-	 * r0 can't be used as the base register for a DS-form load or store, so
-	 * we temporarily shuffle r1 (stack pointer) into r0 and then put it back.
+	 *  - r0, r11 & r12 are free
 	 */
 livepatch_handler:
 	CURRENT_THREAD_INFO(r12, r1)
 
-	/* Save stack pointer into r0 */
-	mr	r0, r1
-
 	/* Allocate 3 x 8 bytes */
-	ld	r1, TI_livepatch_sp(r12)
-	addi	r1, r1, 24
-	std	r1, TI_livepatch_sp(r12)
+	ld	r11, TI_livepatch_sp(r12)
+	addi	r11, r11, 24
+	std	r11, TI_livepatch_sp(r12)
 
 	/* Save toc & real LR on livepatch stack */
-	std	r2,  -24(r1)
+	std	r2,  -24(r11)
 	mflr	r12
-	std	r12, -16(r1)
+	std	r12, -16(r11)
 
 	/* Store stack end marker */
 	lis     r12, STACK_END_MAGIC@h
 	ori     r12, r12, STACK_END_MAGIC@l
-	std	r12, -8(r1)
-
-	/* Restore real stack pointer */
-	mr	r1, r0
+	std	r12, -8(r11)
 
 	/* Put ctr in r12 for global entry and branch there */
 	mfctr	r12
@@ -1485,36 +1499,30 @@ livepatch_handler:
 
 	/*
 	 * Now we are returning from the patched function to the original
-	 * caller A. We are free to use r0 and r12, and we can use r2 until we
+	 * caller A. We are free to use r11, r12 and we can use r2 until we
 	 * restore it.
 	 */
 
 	CURRENT_THREAD_INFO(r12, r1)
 
-	/* Save stack pointer into r0 */
-	mr	r0, r1
-
-	ld	r1, TI_livepatch_sp(r12)
+	ld	r11, TI_livepatch_sp(r12)
 
 	/* Check stack marker hasn't been trashed */
 	lis     r2,  STACK_END_MAGIC@h
 	ori     r2,  r2, STACK_END_MAGIC@l
-	ld	r12, -8(r1)
+	ld	r12, -8(r11)
 1:	tdne	r12, r2
 	EMIT_BUG_ENTRY 1b, __FILE__, __LINE__ - 1, 0
 
 	/* Restore LR & toc from livepatch stack */
-	ld	r12, -16(r1)
+	ld	r12, -16(r11)
 	mtlr	r12
-	ld	r2,  -24(r1)
+	ld	r2,  -24(r11)
 
 	/* Pop livepatch stack frame */
-	CURRENT_THREAD_INFO(r12, r0)
-	subi	r1, r1, 24
-	std	r1, TI_livepatch_sp(r12)
-
-	/* Restore real stack pointer */
-	mr	r1, r0
+	CURRENT_THREAD_INFO(r12, r1)
+	subi	r11, r11, 24
+	std	r11, TI_livepatch_sp(r12)
 
 	/* Return to original caller of live patched function */
 	blr
@@ -1523,7 +1531,6 @@ livepatch_handler:
 
 #else
 _GLOBAL_TOC(_mcount)
-EXPORT_SYMBOL(_mcount)
 	/* Taken from output of objdump from lib64/glibc */
 	mflr	r3
 	ld	r11, 0(r1)
@@ -1629,6 +1636,28 @@ _GLOBAL(ftrace_graph_caller)
 
 _GLOBAL(return_to_handler)
 	/* need to save return values */
+	std	r4,  -24(r1)
+	std	r3,  -16(r1)
+	std	r31, -8(r1)
+	mr	r31, r1
+	stdu	r1, -112(r1)
+
+	bl	ftrace_return_to_handler
+	nop
+
+	/* return value has real return address */
+	mtlr	r3
+
+	ld	r1, 0(r1)
+	ld	r4,  -24(r1)
+	ld	r3,  -16(r1)
+	ld	r31, -8(r1)
+
+	/* Jump back to real return address */
+	blr
+
+_GLOBAL(mod_return_to_handler)
+	/* need to save return values */
 	std	r4,  -32(r1)
 	std	r3,  -24(r1)
 	/* save TOC */
@@ -1638,7 +1667,7 @@ _GLOBAL(return_to_handler)
 	stdu	r1, -112(r1)
 
 	/*
-	 * We might be called from a module.
+	 * We are in a module using the module's TOC.
 	 * Switch to our TOC to run inside the core kernel.
 	 */
 	ld	r2, PACATOC(r13)

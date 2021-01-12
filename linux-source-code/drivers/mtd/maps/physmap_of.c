@@ -15,6 +15,7 @@
 
 #include <linux/module.h>
 #include <linux/types.h>
+#include <linux/init.h>
 #include <linux/device.h>
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/map.h>
@@ -24,11 +25,11 @@
 #include <linux/of_address.h>
 #include <linux/of_platform.h>
 #include <linux/slab.h>
-#include "physmap_of_versatile.h"
 
 struct of_flash_list {
 	struct mtd_info *mtd;
 	struct map_info map;
+	struct resource *res;
 };
 
 struct of_flash {
@@ -47,16 +48,26 @@ static int of_flash_remove(struct platform_device *dev)
 		return 0;
 	dev_set_drvdata(&dev->dev, NULL);
 
-	if (info->cmtd) {
+	if (info->cmtd != info->list[0].mtd) {
 		mtd_device_unregister(info->cmtd);
-		if (info->cmtd != info->list[0].mtd)
-			mtd_concat_destroy(info->cmtd);
+		mtd_concat_destroy(info->cmtd);
 	}
 
-	for (i = 0; i < info->list_size; i++)
+	if (info->cmtd)
+		mtd_device_unregister(info->cmtd);
+
+	for (i = 0; i < info->list_size; i++) {
 		if (info->list[i].mtd)
 			map_destroy(info->list[i].mtd);
 
+		if (info->list[i].map.virt)
+			iounmap(info->list[i].map.virt);
+
+		if (info->list[i].res) {
+			release_resource(info->list[i].res);
+			kfree(info->list[i].res);
+		}
+	}
 	return 0;
 }
 
@@ -93,7 +104,7 @@ static struct mtd_info *obsolete_probe(struct platform_device *dev,
 		if (strcmp(of_probe, "ROM") != 0)
 			dev_warn(&dev->dev, "obsolete_probe: don't know probe "
 				 "type '%s', mapping as rom\n", of_probe);
-		return do_map_probe("map_rom", map);
+		return do_map_probe("mtd_rom", map);
 	}
 }
 
@@ -122,8 +133,6 @@ static const char * const *of_get_probes(struct device_node *dp)
 			count++;
 
 	res = kzalloc((count + 1)*sizeof(*res), GFP_KERNEL);
-	if (!res)
-		return NULL;
 	count = 0;
 	while (cplen > 0) {
 		res[count] = cp;
@@ -141,7 +150,7 @@ static void of_free_probes(const char * const *probes)
 		kfree(probes);
 }
 
-static const struct of_device_id of_flash_match[];
+static struct of_device_id of_flash_match[];
 static int of_flash_probe(struct platform_device *dev)
 {
 	const char * const *part_probe_types;
@@ -158,6 +167,7 @@ static int of_flash_probe(struct platform_device *dev)
 	int reg_tuple_size;
 	struct mtd_info **mtd_list = NULL;
 	resource_size_t res_size;
+	struct mtd_part_parser_data ppdata;
 	bool map_indirect;
 	const char *mtd_name = NULL;
 
@@ -177,7 +187,7 @@ static int of_flash_probe(struct platform_device *dev)
 	 * consists internally of 2 non-identical NOR chips on one die.
 	 */
 	p = of_get_property(dp, "reg", &count);
-	if (!p || count % reg_tuple_size != 0) {
+	if (count % reg_tuple_size != 0) {
 		dev_err(&dev->dev, "Malformed reg property on %s\n",
 				dev->dev.of_node->full_name);
 		err = -EINVAL;
@@ -214,11 +224,10 @@ static int of_flash_probe(struct platform_device *dev)
 
 		err = -EBUSY;
 		res_size = resource_size(&res);
-		info->list[i].map.virt = devm_ioremap_resource(&dev->dev, &res);
-		if (IS_ERR(info->list[i].map.virt)) {
-			err = PTR_ERR(info->list[i].map.virt);
+		info->list[i].res = request_mem_region(res.start, res_size,
+						       dev_name(&dev->dev));
+		if (!info->list[i].res)
 			goto err_out;
-		}
 
 		err = -ENXIO;
 		width = of_get_property(dp, "bank-width", NULL);
@@ -233,10 +242,14 @@ static int of_flash_probe(struct platform_device *dev)
 		info->list[i].map.size = res_size;
 		info->list[i].map.bankwidth = be32_to_cpup(width);
 		info->list[i].map.device_node = dp;
-		err = of_flash_probe_versatile(dev, dp, &info->list[i].map);
-		if (err) {
-			dev_err(&dev->dev, "Can't probe Versatile VPP\n");
-			return err;
+
+		err = -ENOMEM;
+		info->list[i].map.virt = ioremap(info->list[i].map.phys,
+						 info->list[i].map.size);
+		if (!info->list[i].map.virt) {
+			dev_err(&dev->dev, "Failed to ioremap() flash"
+				" region\n");
+			goto err_out;
 		}
 
 		simple_map_init(&info->list[i].map);
@@ -259,16 +272,6 @@ static int of_flash_probe(struct platform_device *dev)
 			info->list[i].mtd = obsolete_probe(dev,
 							   &info->list[i].map);
 		}
-
-		/* Fall back to mapping region as ROM */
-		if (!info->list[i].mtd) {
-			dev_warn(&dev->dev,
-				"do_map_probe() failed for type %s\n",
-				 probe_type);
-
-			info->list[i].mtd = do_map_probe("map_rom",
-							 &info->list[i].map);
-		}
 		mtd_list[i] = info->list[i].mtd;
 
 		err = -ENXIO;
@@ -278,6 +281,7 @@ static int of_flash_probe(struct platform_device *dev)
 		} else {
 			info->list_size++;
 		}
+		info->list[i].mtd->owner = THIS_MODULE;
 		info->list[i].mtd->dev.parent = &dev->dev;
 	}
 
@@ -298,14 +302,9 @@ static int of_flash_probe(struct platform_device *dev)
 	if (err)
 		goto err_out;
 
-	info->cmtd->dev.parent = &dev->dev;
-	mtd_set_of_node(info->cmtd, dp);
+	ppdata.of_node = dp;
 	part_probe_types = of_get_probes(dp);
-	if (!part_probe_types) {
-		err = -ENOMEM;
-		goto err_out;
-	}
-	mtd_device_parse_register(info->cmtd, part_probe_types, NULL,
+	mtd_device_parse_register(info->cmtd, part_probe_types, &ppdata,
 			NULL, 0);
 	of_free_probes(part_probe_types);
 
@@ -321,7 +320,7 @@ err_flash_remove:
 	return err;
 }
 
-static const struct of_device_id of_flash_match[] = {
+static struct of_device_id of_flash_match[] = {
 	{
 		.compatible	= "cfi-flash",
 		.data		= (void *)"cfi_probe",
@@ -342,10 +341,6 @@ static const struct of_device_id of_flash_match[] = {
 		.data           = (void *)"map_ram",
 	},
 	{
-		.compatible     = "mtd-rom",
-		.data           = (void *)"map_rom",
-	},
-	{
 		.type		= "rom",
 		.compatible	= "direct-mapped"
 	},
@@ -356,6 +351,7 @@ MODULE_DEVICE_TABLE(of, of_flash_match);
 static struct platform_driver of_flash_driver = {
 	.driver = {
 		.name = "of-flash",
+		.owner = THIS_MODULE,
 		.of_match_table = of_flash_match,
 	},
 	.probe		= of_flash_probe,

@@ -11,6 +11,7 @@
 #include <linux/init.h>
 #include <linux/blkdev.h>
 #include <linux/bio.h>
+#include <linux/dax.h>
 #include <linux/slab.h>
 #include <linux/log2.h>
 
@@ -263,19 +264,17 @@ static int stripe_map_range(struct stripe_c *sc, struct bio *bio,
 {
 	sector_t begin, end;
 
-	stripe_map_range_sector(sc, bio->bi_iter.bi_sector,
-				target_stripe, &begin);
+	stripe_map_range_sector(sc, bio->bi_sector, target_stripe, &begin);
 	stripe_map_range_sector(sc, bio_end_sector(bio),
 				target_stripe, &end);
 	if (begin < end) {
 		bio->bi_bdev = sc->stripe[target_stripe].dev->bdev;
-		bio->bi_iter.bi_sector = begin +
-			sc->stripe[target_stripe].physical_start;
-		bio->bi_iter.bi_size = to_bytes(end - begin);
+		bio->bi_sector = begin + sc->stripe[target_stripe].physical_start;
+		bio->bi_size = to_bytes(end - begin);
 		return DM_MAPIO_REMAPPED;
 	} else {
 		/* The range doesn't map to the target stripe */
-		bio_endio(bio);
+		bio_endio(bio, 0);
 		return DM_MAPIO_SUBMITTED;
 	}
 }
@@ -286,50 +285,92 @@ static int stripe_map(struct dm_target *ti, struct bio *bio)
 	uint32_t stripe;
 	unsigned target_bio_nr;
 
-	if (bio->bi_opf & REQ_PREFLUSH) {
+	if (bio->bi_rw & REQ_FLUSH) {
 		target_bio_nr = dm_bio_get_target_bio_nr(bio);
 		BUG_ON(target_bio_nr >= sc->stripes);
 		bio->bi_bdev = sc->stripe[target_bio_nr].dev->bdev;
 		return DM_MAPIO_REMAPPED;
 	}
-	if (unlikely(bio_op(bio) == REQ_OP_DISCARD) ||
-	    unlikely(bio_op(bio) == REQ_OP_WRITE_SAME)) {
+	if (unlikely(bio->bi_rw & REQ_DISCARD) ||
+	    unlikely(bio->bi_rw & REQ_WRITE_SAME)) {
 		target_bio_nr = dm_bio_get_target_bio_nr(bio);
 		BUG_ON(target_bio_nr >= sc->stripes);
 		return stripe_map_range(sc, bio, target_bio_nr);
 	}
 
-	stripe_map_sector(sc, bio->bi_iter.bi_sector,
-			  &stripe, &bio->bi_iter.bi_sector);
+	stripe_map_sector(sc, bio->bi_sector, &stripe, &bio->bi_sector);
 
-	bio->bi_iter.bi_sector += sc->stripe[stripe].physical_start;
+	bio->bi_sector += sc->stripe[stripe].physical_start;
 	bio->bi_bdev = sc->stripe[stripe].dev->bdev;
 
 	return DM_MAPIO_REMAPPED;
 }
 
-static long stripe_direct_access(struct dm_target *ti, sector_t sector,
-				 void **kaddr, pfn_t *pfn, long size)
+#if IS_ENABLED(CONFIG_DAX_DRIVER)
+static long stripe_dax_direct_access(struct dm_target *ti, pgoff_t pgoff,
+		long nr_pages, void **kaddr, pfn_t *pfn)
 {
+	sector_t dev_sector, sector = pgoff * PAGE_SECTORS;
 	struct stripe_c *sc = ti->private;
-	uint32_t stripe;
+	struct dax_device *dax_dev;
 	struct block_device *bdev;
-	struct blk_dax_ctl dax = {
-		.size = size,
-	};
+	uint32_t stripe;
 	long ret;
 
-	stripe_map_sector(sc, sector, &stripe, &dax.sector);
-
-	dax.sector += sc->stripe[stripe].physical_start;
+	stripe_map_sector(sc, sector, &stripe, &dev_sector);
+	dev_sector += sc->stripe[stripe].physical_start;
+	dax_dev = sc->stripe[stripe].dev->dax_dev;
 	bdev = sc->stripe[stripe].dev->bdev;
 
-	ret = bdev_direct_access(bdev, &dax);
-	*kaddr = dax.addr;
-	*pfn = dax.pfn;
-
-	return ret;
+	ret = bdev_dax_pgoff(bdev, dev_sector, nr_pages * PAGE_SIZE, &pgoff);
+	if (ret)
+		return ret;
+	return dax_direct_access(dax_dev, pgoff, nr_pages, kaddr, pfn);
 }
+
+static int stripe_dax_memcpy_fromiovecend(struct dm_target *ti, pgoff_t pgoff,
+		void *addr, const struct iovec *iov, int offset, int len)
+{
+	sector_t dev_sector, sector = pgoff * PAGE_SECTORS;
+	struct stripe_c *sc = ti->private;
+	struct dax_device *dax_dev;
+	struct block_device *bdev;
+	uint32_t stripe;
+
+	stripe_map_sector(sc, sector, &stripe, &dev_sector);
+	dev_sector += sc->stripe[stripe].physical_start;
+	dax_dev = sc->stripe[stripe].dev->dax_dev;
+	bdev = sc->stripe[stripe].dev->bdev;
+
+	if (bdev_dax_pgoff(bdev, dev_sector, ALIGN(len, PAGE_SIZE), &pgoff))
+		return 0;
+	return dax_memcpy_fromiovecend(dax_dev, pgoff, addr, iov, offset, len);
+}
+
+static int stripe_dax_memcpy_toiovecend(struct dm_target *ti, pgoff_t pgoff,
+		const struct iovec *iov, void *addr, int offset, int len)
+{
+	sector_t dev_sector, sector = pgoff * PAGE_SECTORS;
+	struct stripe_c *sc = ti->private;
+	struct dax_device *dax_dev;
+	struct block_device *bdev;
+	uint32_t stripe;
+
+	stripe_map_sector(sc, sector, &stripe, &dev_sector);
+	dev_sector += sc->stripe[stripe].physical_start;
+	dax_dev = sc->stripe[stripe].dev->dax_dev;
+	bdev = sc->stripe[stripe].dev->bdev;
+
+	if (bdev_dax_pgoff(bdev, dev_sector, ALIGN(len, PAGE_SIZE), &pgoff))
+		return 0;
+	return dax_memcpy_toiovecend(dax_dev, pgoff, iov, addr, offset, len);
+}
+
+#else
+#define stripe_dax_direct_access NULL
+#define stripe_dax_memcpy_fromiovecend NULL
+#define stripe_dax_memcpy_toiovecend NULL
+#endif
 
 /*
  * Stripe status:
@@ -383,7 +424,7 @@ static int stripe_end_io(struct dm_target *ti, struct bio *bio, int error)
 	if (!error)
 		return 0; /* I/O complete */
 
-	if ((error == -EWOULDBLOCK) && (bio->bi_opf & REQ_RAHEAD))
+	if ((error == -EWOULDBLOCK) && (bio->bi_rw & REQ_RAHEAD))
 		return error;
 
 	if (error == -EOPNOTSUPP)
@@ -437,6 +478,26 @@ static void stripe_io_hints(struct dm_target *ti,
 	blk_limits_io_opt(limits, chunk_size * sc->stripes);
 }
 
+static int stripe_merge(struct dm_target *ti, struct bvec_merge_data *bvm,
+			struct bio_vec *biovec, int max_size)
+{
+	struct stripe_c *sc = ti->private;
+	sector_t bvm_sector = bvm->bi_sector;
+	uint32_t stripe;
+	struct request_queue *q;
+
+	stripe_map_sector(sc, bvm_sector, &stripe, &bvm_sector);
+
+	q = bdev_get_queue(sc->stripe[stripe].dev->bdev);
+	if (!q->merge_bvec_fn)
+		return max_size;
+
+	bvm->bi_bdev = sc->stripe[stripe].dev->bdev;
+	bvm->bi_sector = sc->stripe[stripe].physical_start + bvm_sector;
+
+	return min(max_size, q->merge_bvec_fn(q, bvm, biovec));
+}
+
 static struct target_type stripe_target = {
 	.name   = "striped",
 	.version = {1, 6, 0},
@@ -448,7 +509,10 @@ static struct target_type stripe_target = {
 	.status = stripe_status,
 	.iterate_devices = stripe_iterate_devices,
 	.io_hints = stripe_io_hints,
-	.direct_access = stripe_direct_access,
+	.merge  = stripe_merge,
+	.direct_access = stripe_dax_direct_access,
+	.dax_memcpy_fromiovecend = stripe_dax_memcpy_fromiovecend,
+	.dax_memcpy_toiovecend = stripe_dax_memcpy_toiovecend,
 };
 
 int __init dm_stripe_init(void)
@@ -456,8 +520,10 @@ int __init dm_stripe_init(void)
 	int r;
 
 	r = dm_register_target(&stripe_target);
-	if (r < 0)
+	if (r < 0) {
 		DMWARN("target registration failed");
+		return r;
+	}
 
 	return r;
 }

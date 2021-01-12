@@ -3,13 +3,13 @@
 
 #include <linux/err.h>
 #include <linux/scatterlist.h>
+#include <linux/sched.h>
 #include <linux/slab.h>
 #include <crypto/aes.h>
 #include <crypto/skcipher.h>
 #include <linux/key-type.h>
 
 #include <keys/ceph-type.h>
-#include <keys/user-type.h>
 #include <linux/ceph/decode.h>
 #include "crypto.h"
 
@@ -289,7 +289,8 @@ int ceph_crypt(const struct ceph_crypto_key *key, bool encrypt,
 	}
 }
 
-static int ceph_key_preparse(struct key_preparsed_payload *prep)
+static int ceph_key_instantiate(struct key *key,
+				struct key_preparsed_payload *prep)
 {
 	struct ceph_crypto_key *ckey;
 	size_t datalen = prep->datalen;
@@ -298,6 +299,10 @@ static int ceph_key_preparse(struct key_preparsed_payload *prep)
 
 	ret = -EINVAL;
 	if (datalen <= 0 || datalen > 32767 || !prep->data)
+		goto err;
+
+	ret = key_payload_reserve(key, datalen);
+	if (ret < 0)
 		goto err;
 
 	ret = -ENOMEM;
@@ -311,8 +316,7 @@ static int ceph_key_preparse(struct key_preparsed_payload *prep)
 	if (ret < 0)
 		goto err_ckey;
 
-	prep->payload.data[0] = ckey;
-	prep->quotalen = datalen;
+	key->payload.data = ckey;
 	return 0;
 
 err_ckey:
@@ -321,16 +325,13 @@ err:
 	return ret;
 }
 
-static void ceph_key_free_preparse(struct key_preparsed_payload *prep)
+static int ceph_key_match(const struct key *key, const void *description)
 {
-	struct ceph_crypto_key *ckey = prep->payload.data[0];
-	ceph_crypto_key_destroy(ckey);
-	kfree(ckey);
+	return strcmp(key->description, description) == 0;
 }
 
-static void ceph_key_destroy(struct key *key)
-{
-	struct ceph_crypto_key *ckey = key->payload.data[0];
+static void ceph_key_destroy(struct key *key) {
+	struct ceph_crypto_key *ckey = key->payload.data;
 
 	ceph_crypto_key_destroy(ckey);
 	kfree(ckey);
@@ -338,16 +339,17 @@ static void ceph_key_destroy(struct key *key)
 
 struct key_type key_type_ceph = {
 	.name		= "ceph",
-	.preparse	= ceph_key_preparse,
-	.free_preparse	= ceph_key_free_preparse,
-	.instantiate	= generic_key_instantiate,
+	.instantiate	= ceph_key_instantiate,
+	.match		= ceph_key_match,
 	.destroy	= ceph_key_destroy,
 };
 
-int ceph_crypto_init(void) {
+int __init ceph_crypto_init(void)
+{
 	return register_key_type(&key_type_ceph);
 }
 
-void ceph_crypto_shutdown(void) {
+void ceph_crypto_shutdown(void)
+{
 	unregister_key_type(&key_type_ceph);
 }

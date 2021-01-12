@@ -24,12 +24,16 @@
  * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with GNU CC; see the file COPYING.  If not, see
- * <http://www.gnu.org/licenses/>.
+ * along with GNU CC; see the file COPYING.  If not, write to
+ * the Free Software Foundation, 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
  *
  * Please send any bug reports or fixes you make to the
  * email address(es):
- *    lksctp developers <linux-sctp@vger.kernel.org>
+ *    lksctp developers <lksctp-developers@lists.sourceforge.net>
+ *
+ * Or submit a bug report through the following website:
+ *    http://www.sf.net/projects/lksctp
  *
  * Written or modified by:
  *    La Monte H.P. Yarroll <piggy@acm.org>
@@ -39,6 +43,9 @@
  *    Hui Huang             <hui.huang@nokia.com>
  *    Sridhar Samudrala	    <sri@us.ibm.com>
  *    Ardelle Fan	    <ardelle.fan@intel.com>
+ *
+ * Any bugs reported given to us we will try to fix... any fixes shared will
+ * be incorporated into the next SCTP release.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -146,7 +153,7 @@ void sctp_transport_free(struct sctp_transport *transport)
 
 	/* Delete the ICMP proto unreachable timer if it's active. */
 	if (del_timer(&transport->proto_unreach_timer))
-		sctp_transport_put(transport);
+		sctp_association_put(transport->asoc);
 
 	sctp_transport_put(transport);
 }
@@ -228,7 +235,7 @@ void sctp_transport_pmtu(struct sctp_transport *transport, struct sock *sk)
 {
 	/* If we don't have a fresh route, look one up */
 	if (!transport->dst || transport->dst->obsolete) {
-		dst_release(transport->dst);
+		sctp_transport_dst_release(transport);
 		transport->af_specific->get_dst(transport, &transport->saddr,
 						&transport->fl, sk);
 	}
@@ -239,33 +246,46 @@ void sctp_transport_pmtu(struct sctp_transport *transport, struct sock *sk)
 		transport->pathmtu = SCTP_DEFAULT_MAXSEGMENT;
 }
 
-void sctp_transport_update_pmtu(struct sock *sk, struct sctp_transport *t, u32 pmtu)
+bool sctp_transport_update_pmtu(struct sctp_transport *t, u32 pmtu)
 {
-	struct dst_entry *dst;
+	struct dst_entry *dst = sctp_transport_dst_check(t);
+	struct sock *sk = t->asoc->base.sk;
+	bool change = true;
 
 	if (unlikely(pmtu < SCTP_DEFAULT_MINSEGMENT)) {
-		pr_warn("%s: Reported pmtu %d too low, using default minimum of %d\n",
-			__func__, pmtu,
-			SCTP_DEFAULT_MINSEGMENT);
-		/* Use default minimum segment size and disable
-		 * pmtu discovery on this transport.
-		 */
-		t->pathmtu = SCTP_DEFAULT_MINSEGMENT;
-	} else {
-		t->pathmtu = pmtu;
+		pr_warn_ratelimited("%s: Reported pmtu %d too low, using default minimum of %d\n",
+				    __func__, pmtu, SCTP_DEFAULT_MINSEGMENT);
+		/* Use default minimum segment instead */
+		pmtu = SCTP_DEFAULT_MINSEGMENT;
 	}
-
-	dst = sctp_transport_dst_check(t);
-	if (!dst)
-		t->af_specific->get_dst(t, &t->saddr, &t->fl, sk);
+	pmtu = SCTP_TRUNC4(pmtu);
 
 	if (dst) {
+		struct sctp_pf *pf = sctp_get_pf_specific(dst->ops->family);
+		union sctp_addr addr;
+
+		pf->af->from_sk(&addr, sk);
+		pf->to_sk_daddr(&t->ipaddr, sk);
 		dst->ops->update_pmtu(dst, sk, NULL, pmtu);
+		pf->to_sk_daddr(&addr, sk);
 
 		dst = sctp_transport_dst_check(t);
-		if (!dst)
-			t->af_specific->get_dst(t, &t->saddr, &t->fl, sk);
 	}
+
+	if (!dst) {
+		t->af_specific->get_dst(t, &t->saddr, &t->fl, sk);
+		dst = t->dst;
+	}
+
+	if (dst) {
+		/* Re-fetch, as under layers may have a higher minimum size */
+		pmtu = SCTP_TRUNC4(max_t(__u32, dst_mtu(dst),
+					 SCTP_DEFAULT_MINSEGMENT));
+		change = t->pathmtu != pmtu;
+	}
+	t->pathmtu = pmtu;
+
+	return change;
 }
 
 /* Caches the dst entry and source address for a transport's destination
@@ -337,7 +357,7 @@ void sctp_transport_update_rto(struct sctp_transport *tp, __u32 rtt)
 		 * 1/8, rto_alpha would be expressed as 3.
 		 */
 		tp->rttvar = tp->rttvar - (tp->rttvar >> net->sctp.rto_beta)
-			+ (((__u32)abs((__s64)tp->srtt - (__s64)rtt)) >> net->sctp.rto_beta);
+			+ (((__u32)abs64((__s64)tp->srtt - (__s64)rtt)) >> net->sctp.rto_beta);
 		tp->srtt = tp->srtt - (tp->srtt >> net->sctp.rto_alpha)
 			+ (rtt >> net->sctp.rto_alpha);
 	} else {
@@ -398,14 +418,6 @@ void sctp_transport_raise_cwnd(struct sctp_transport *transport,
 	    TSN_lte(asoc->fast_recovery_exit, sack_ctsn))
 		asoc->fast_recovery = 0;
 
-	/* The appropriate cwnd increase algorithm is performed if, and only
-	 * if the cumulative TSN whould advanced and the congestion window is
-	 * being fully utilized.
-	 */
-	if (TSN_lte(sack_ctsn, transport->asoc->ctsn_ack_point) ||
-	    (flight_size < cwnd))
-		return;
-
 	ssthresh = transport->ssthresh;
 	pba = transport->partial_bytes_acked;
 	pmtu = transport->asoc->pathmtu;
@@ -428,6 +440,14 @@ void sctp_transport_raise_cwnd(struct sctp_transport *transport,
 		if (asoc->fast_recovery)
 			return;
 
+		/* The appropriate cwnd increase algorithm is performed
+		 * if, and only if the congestion window is being fully
+		 * utilized.  Note that RFC4960 Errata 3.22 removed the
+		 * other condition on ctsn moving.
+		 */
+		if (flight_size < cwnd)
+			return;
+
 		if (bytes_acked > pmtu)
 			cwnd += pmtu;
 		else
@@ -439,23 +459,33 @@ void sctp_transport_raise_cwnd(struct sctp_transport *transport,
 			 flight_size, pba);
 	} else {
 		/* RFC 2960 7.2.2 Whenever cwnd is greater than ssthresh,
-		 * upon each SACK arrival that advances the Cumulative TSN Ack
-		 * Point, increase partial_bytes_acked by the total number of
-		 * bytes of all new chunks acknowledged in that SACK including
-		 * chunks acknowledged by the new Cumulative TSN Ack and by
-		 * Gap Ack Blocks.
+		 * upon each SACK arrival, increase partial_bytes_acked
+		 * by the total number of bytes of all new chunks
+		 * acknowledged in that SACK including chunks
+		 * acknowledged by the new Cumulative TSN Ack and by Gap
+		 * Ack Blocks. (updated by RFC4960 Errata 3.22)
 		 *
-		 * When partial_bytes_acked is equal to or greater than cwnd
-		 * and before the arrival of the SACK the sender had cwnd or
-		 * more bytes of data outstanding (i.e., before arrival of the
-		 * SACK, flightsize was greater than or equal to cwnd),
-		 * increase cwnd by MTU, and reset partial_bytes_acked to
-		 * (partial_bytes_acked - cwnd).
+		 * When partial_bytes_acked is greater than cwnd and
+		 * before the arrival of the SACK the sender had less
+		 * bytes of data outstanding than cwnd (i.e., before
+		 * arrival of the SACK, flightsize was less than cwnd),
+		 * reset partial_bytes_acked to cwnd. (RFC 4960 Errata
+		 * 3.26)
+		 *
+		 * When partial_bytes_acked is equal to or greater than
+		 * cwnd and before the arrival of the SACK the sender
+		 * had cwnd or more bytes of data outstanding (i.e.,
+		 * before arrival of the SACK, flightsize was greater
+		 * than or equal to cwnd), partial_bytes_acked is reset
+		 * to (partial_bytes_acked - cwnd). Next, cwnd is
+		 * increased by MTU. (RFC 4960 Errata 3.12)
 		 */
 		pba += bytes_acked;
-		if (pba >= cwnd) {
+		if (pba > cwnd && flight_size < cwnd)
+			pba = cwnd;
+		if (pba >= cwnd && flight_size >= cwnd) {
+			pba = pba - cwnd;
 			cwnd += pmtu;
-			pba = ((cwnd < pba) ? (pba - cwnd) : 0);
 		}
 
 		pr_debug("%s: congestion avoidance: transport:%p, "
@@ -552,6 +582,8 @@ void sctp_transport_lower_cwnd(struct sctp_transport *transport,
 		 */
 		transport->cwnd = max(transport->cwnd/2,
 					 4*asoc->pathmtu);
+		/* RFC 4960 Errata 3.27.2: also adjust sshthresh */
+		transport->ssthresh = transport->cwnd;
 		break;
 	}
 
@@ -659,4 +691,19 @@ void sctp_transport_immediate_rtx(struct sctp_transport *t)
 		if (!mod_timer(&t->T3_rtx_timer, jiffies + t->rto))
 			sctp_transport_hold(t);
 	}
+	return;
+}
+
+/* Drop dst */
+void sctp_transport_dst_release(struct sctp_transport *t)
+{
+	dst_release(t->dst);
+	t->dst = NULL;
+	t->dst_pending_confirm = 0;
+}
+
+/* Schedule neighbour confirm */
+void sctp_transport_dst_confirm(struct sctp_transport *t)
+{
+	t->dst_pending_confirm = 1;
 }

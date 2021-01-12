@@ -329,17 +329,23 @@ extern void _memcpy_toio(volatile void __iomem *dest, const void *src,
  * When CONFIG_PPC_INDIRECT_MMIO is set, the platform can provide hooks
  * on all MMIOs. (Note that this is all 64 bits only for now)
  *
- * To help platforms who may need to differentiate MMIO addresses in
+ * To help platforms who may need to differenciate MMIO addresses in
  * their hooks, a bitfield is reserved for use by the platform near the
  * top of MMIO addresses (not PIO, those have to cope the hard way).
  *
- * The highest address in the kernel virtual space are:
+ * This bit field is 12 bits and is at the top of the IO virtual
+ * addresses PCI_IO_INDIRECT_TOKEN_MASK.
  *
- *  d0003fffffffffff	# with Hash MMU
- *  c00fffffffffffff	# with Radix MMU
+ * The kernel virtual space is thus:
  *
- * The top 4 bits are reserved as the region ID on hash, leaving us 8 bits
- * that can be used for the field.
+ *  0xD000000000000000		: vmalloc
+ *  0xD000080000000000		: PCI PHB IO space
+ *  0xD000080080000000		: ioremap
+ *  0xD0000fffffffffff		: end of ioremap region
+ *
+ * Since the top 4 bits are reserved as the region ID, we use thus
+ * the next 12 bits and keep 4 bits available for the future if the
+ * virtual address space is ever to be extended.
  *
  * The direct IO mapping operations will then mask off those bits
  * before doing the actual access, though that only happen when
@@ -351,8 +357,8 @@ extern void _memcpy_toio(volatile void __iomem *dest, const void *src,
  */
 
 #ifdef CONFIG_PPC_INDIRECT_MMIO
-#define PCI_IO_IND_TOKEN_SHIFT	52
-#define PCI_IO_IND_TOKEN_MASK	(0xfful << PCI_IO_IND_TOKEN_SHIFT)
+#define PCI_IO_IND_TOKEN_MASK	0x0fff000000000000ul
+#define PCI_IO_IND_TOKEN_SHIFT	48
 #define PCI_FIX_ADDR(addr)						\
 	((PCI_IO_ADDR)(((unsigned long)(addr)) & ~PCI_IO_IND_TOKEN_MASK))
 #define PCI_GET_ADDR_TOKEN(addr)					\
@@ -755,7 +761,6 @@ extern void __iomem *ioremap_prot(phys_addr_t address, unsigned long size,
 				  unsigned long flags);
 extern void __iomem *ioremap_wc(phys_addr_t address, unsigned long size);
 #define ioremap_nocache(addr, size)	ioremap((addr), (size))
-#define ioremap_uc(addr, size)		ioremap((addr), (size))
 
 extern void iounmap(volatile void __iomem *addr);
 
@@ -889,6 +894,9 @@ static inline void * bus_to_virt(unsigned long address)
 #define clrsetbits_le16(addr, clear, set) clrsetbits(le16, addr, clear, set)
 
 #define clrsetbits_8(addr, clear, set) clrsetbits(8, addr, clear, set)
+
+void __iomem *devm_ioremap_prot(struct device *dev, resource_size_t offset,
+				size_t size, unsigned long flags);
 
 #endif /* __KERNEL__ */
 

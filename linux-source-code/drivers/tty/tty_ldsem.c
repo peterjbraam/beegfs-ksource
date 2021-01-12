@@ -39,10 +39,17 @@
 				lock_acquire(&(l)->dep_map, s, t, r, c, n, i)
 # define __rel(l, n, i)				\
 				lock_release(&(l)->dep_map, n, i)
-#define lockdep_acquire(l, s, t, i)		__acq(l, s, t, 0, 1, NULL, i)
-#define lockdep_acquire_nest(l, s, t, n, i)	__acq(l, s, t, 0, 1, n, i)
-#define lockdep_acquire_read(l, s, t, i)	__acq(l, s, t, 1, 1, NULL, i)
-#define lockdep_release(l, n, i)		__rel(l, n, i)
+# ifdef CONFIG_PROVE_LOCKING
+#  define lockdep_acquire(l, s, t, i)		__acq(l, s, t, 0, 2, NULL, i)
+#  define lockdep_acquire_nest(l, s, t, n, i)	__acq(l, s, t, 0, 2, n, i)
+#  define lockdep_acquire_read(l, s, t, i)	__acq(l, s, t, 1, 2, NULL, i)
+#  define lockdep_release(l, n, i)		__rel(l, n, i)
+# else
+#  define lockdep_acquire(l, s, t, i)		__acq(l, s, t, 0, 1, NULL, i)
+#  define lockdep_acquire_nest(l, s, t, n, i)	__acq(l, s, t, 0, 1, n, i)
+#  define lockdep_acquire_read(l, s, t, i)	__acq(l, s, t, 1, 1, NULL, i)
+#  define lockdep_release(l, n, i)		__rel(l, n, i)
+# endif
 #else
 # define lockdep_acquire(l, s, t, i)		do { } while (0)
 # define lockdep_acquire_nest(l, s, t, n, i)	do { } while (0)
@@ -137,7 +144,8 @@ static void __ldsem_wake_readers(struct ld_semaphore *sem)
 
 	list_for_each_entry_safe(waiter, next, &sem->read_wait, list) {
 		tsk = waiter->task;
-		smp_store_release(&waiter->task, NULL);
+		smp_mb();
+		waiter->task = NULL;
 		wake_up_process(tsk);
 		put_task_struct(tsk);
 	}
@@ -233,7 +241,7 @@ down_read_failed(struct ld_semaphore *sem, long count, long timeout)
 	for (;;) {
 		set_task_state(tsk, TASK_UNINTERRUPTIBLE);
 
-		if (!smp_load_acquire(&waiter.task))
+		if (!waiter.task)
 			break;
 		if (!timeout)
 			break;
@@ -298,24 +306,13 @@ down_write_failed(struct ld_semaphore *sem, long count, long timeout)
 		timeout = schedule_timeout(timeout);
 		raw_spin_lock_irq(&sem->wait_lock);
 		set_task_state(tsk, TASK_UNINTERRUPTIBLE);
-		locked = writer_trylock(sem);
-		if (locked)
+		if ((locked = writer_trylock(sem)))
 			break;
 	}
 
 	if (!locked)
 		ldsem_atomic_update(-LDSEM_WAIT_BIAS, sem);
 	list_del(&waiter.list);
-
-	/*
-	 * In case of timeout, wake up every reader who gave the right of way
-	 * to writer. Prevent separation readers into two groups:
-	 * one that helds semaphore and another that sleeps.
-	 * (in case of no contention with a writer)
-	 */
-	if (!locked && list_empty(&sem->write_wait))
-		__ldsem_wake_readers(sem);
-
 	raw_spin_unlock_irq(&sem->wait_lock);
 
 	__set_task_state(tsk, TASK_RUNNING);
@@ -328,7 +325,7 @@ down_write_failed(struct ld_semaphore *sem, long count, long timeout)
 
 
 
-static int __ldsem_down_read_nested(struct ld_semaphore *sem,
+static inline int __ldsem_down_read_nested(struct ld_semaphore *sem,
 					   int subclass, long timeout)
 {
 	long count;
@@ -347,7 +344,7 @@ static int __ldsem_down_read_nested(struct ld_semaphore *sem,
 	return 1;
 }
 
-static int __ldsem_down_write_nested(struct ld_semaphore *sem,
+static inline int __ldsem_down_write_nested(struct ld_semaphore *sem,
 					    int subclass, long timeout)
 {
 	long count;

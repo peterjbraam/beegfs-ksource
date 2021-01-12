@@ -27,6 +27,7 @@
 #include <asm/pgtable.h>
 #include <asm/setup.h>
 #include <asm/kaslr.h>
+#include <asm/uv/uv.h>
 
 #include "mm_internal.h"
 
@@ -87,7 +88,7 @@ static inline unsigned long get_padding(struct kaslr_memory_region *region)
  */
 static inline bool kaslr_memory_enabled(void)
 {
-	return kaslr_enabled() && !IS_ENABLED(CONFIG_KASAN);
+	return kaslr_enabled() && !config_enabled(CONFIG_KASAN);
 }
 
 /* Initialize base and padding for each memory region randomized with KASLR */
@@ -104,10 +105,10 @@ void __init kernel_randomize_memory(void)
 	 * consistent with the vaddr_start/vaddr_end variables.
 	 */
 	BUILD_BUG_ON(vaddr_start >= vaddr_end);
-	BUILD_BUG_ON(IS_ENABLED(CONFIG_X86_ESPFIX64) &&
+	BUILD_BUG_ON(config_enabled(CONFIG_X86_ESPFIX64) &&
 		     vaddr_end >= EFI_VA_END);
-	BUILD_BUG_ON((IS_ENABLED(CONFIG_X86_ESPFIX64) ||
-		      IS_ENABLED(CONFIG_EFI)) &&
+	BUILD_BUG_ON((config_enabled(CONFIG_X86_ESPFIX64) ||
+		      config_enabled(CONFIG_EFI)) &&
 		     vaddr_end >= __START_KERNEL_map);
 	BUILD_BUG_ON(vaddr_end > __START_KERNEL_map);
 
@@ -123,7 +124,7 @@ void __init kernel_randomize_memory(void)
 		CONFIG_RANDOMIZE_MEMORY_PHYSICAL_PADDING;
 
 	/* Adapt phyiscal memory region size based on available memory */
-	if (memory_tb < kaslr_regions[0].size_tb)
+	if (memory_tb < kaslr_regions[0].size_tb && !is_early_uv_system())
 		kaslr_regions[0].size_tb = memory_tb;
 
 	/* Calculate entropy available between regions */
@@ -189,6 +190,6 @@ void __meminit init_trampoline(void)
 		*pud_tramp = *pud;
 	}
 
-	/* Avoid set_pgd(), in case it's complicated by CONFIG_PAGE_TABLE_ISOLATION */
-	trampoline_pgd_entry = __pgd(_KERNPG_TABLE | __pa(pud_page_tramp));
+	set_pgd(&trampoline_pgd_entry,
+		__pgd(_KERNPG_TABLE | __pa(pud_page_tramp)));
 }

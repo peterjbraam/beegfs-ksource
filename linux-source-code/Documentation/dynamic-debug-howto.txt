@@ -285,7 +285,7 @@ The dyndbg option is a "fake" module parameter, which means:
 
 - modules do not need to define it explicitly
 - every module gets it tacitly, whether they use pr_debug or not
-- it doesn't appear in /sys/module/$module/parameters/
+- it doesnt appear in /sys/module/$module/parameters/
   To see it, grep the control file, or inspect /proc/cmdline.
 
 For CONFIG_DYNAMIC_DEBUG kernels, any settings given at boot-time (or
@@ -321,7 +321,7 @@ nullarbor:~ # echo -n 'func svc_process -p' >
 nullarbor:~ # echo -n 'format "nfsd: READ" +p' >
 				<debugfs>/dynamic_debug/control
 
-// enable messages in files of which the paths include string "usb"
+// enable messages in files of which the pathes include string "usb"
 nullarbor:~ # echo -n '*usb* +p' > <debugfs>/dynamic_debug/control
 
 // enable all messages

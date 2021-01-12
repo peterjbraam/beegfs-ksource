@@ -21,6 +21,8 @@ extern struct zfcp_port *zfcp_port_enqueue(struct zfcp_adapter *, u64, u32,
 					   u32);
 extern void zfcp_sg_free_table(struct scatterlist *, int);
 extern int zfcp_sg_setup_table(struct scatterlist *, int);
+extern void zfcp_device_unregister(struct device *,
+				   const struct attribute_group *);
 extern void zfcp_adapter_release(struct kref *);
 extern void zfcp_adapter_unregister(struct zfcp_adapter *);
 
@@ -68,8 +70,6 @@ extern void zfcp_erp_clear_port_status(struct zfcp_port *, u32);
 extern int  zfcp_erp_port_reopen(struct zfcp_port *, int, char *);
 extern void zfcp_erp_port_shutdown(struct zfcp_port *, int, char *);
 extern void zfcp_erp_port_forced_reopen(struct zfcp_port *, int, char *);
-extern void zfcp_erp_port_forced_reopen_all(struct zfcp_adapter *adapter,
-					    int clear, char *dbftag);
 extern void zfcp_erp_set_lun_status(struct scsi_device *, u32);
 extern void zfcp_erp_clear_lun_status(struct scsi_device *, u32);
 extern void zfcp_erp_lun_reopen(struct scsi_device *, int, char *);
@@ -141,6 +141,8 @@ extern int zfcp_qdio_sbals_from_sg(struct zfcp_qdio *, struct zfcp_qdio_req *,
 extern int zfcp_qdio_open(struct zfcp_qdio *);
 extern void zfcp_qdio_close(struct zfcp_qdio *);
 extern void zfcp_qdio_siosl(struct zfcp_adapter *);
+extern struct zfcp_fsf_req *zfcp_fsf_get_req(struct zfcp_qdio *,
+					     struct qdio_buffer *);
 
 /* zfcp_scsi.c */
 extern struct scsi_transport_template *zfcp_scsi_transport_template;
@@ -155,13 +157,12 @@ extern void zfcp_scsi_set_prot(struct zfcp_adapter *);
 extern void zfcp_scsi_dif_sense_error(struct scsi_cmnd *, int);
 
 /* zfcp_sysfs.c */
-extern const struct attribute_group *zfcp_unit_attr_groups[];
+extern struct attribute_group zfcp_sysfs_unit_attrs;
 extern struct attribute_group zfcp_sysfs_adapter_attrs;
-extern const struct attribute_group *zfcp_port_attr_groups[];
+extern struct attribute_group zfcp_sysfs_port_attrs;
 extern struct mutex zfcp_sysfs_port_units_mutex;
 extern struct device_attribute *zfcp_sysfs_sdev_attrs[];
 extern struct device_attribute *zfcp_sysfs_shost_attrs[];
-bool zfcp_sysfs_port_is_removing(const struct zfcp_port *const port);
 
 /* zfcp_unit.c */
 extern int zfcp_unit_add(struct zfcp_port *, u64);

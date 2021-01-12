@@ -5,7 +5,7 @@
  *  All rights reserved.
  *
  *  Benny Halevy <bhalevy@panasas.com>
- *  Boaz Harrosh <ooo@electrozaur.com>
+ *  Boaz Harrosh <bharrosh@panasas.com>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License version 2
@@ -476,7 +476,10 @@ static struct page *__r4w_get_page(void *priv, u64 offset, bool *uptodate)
 		}
 		unlock_page(page);
 	}
-	*uptodate = PageUptodate(page);
+	if (PageDirty(page) || PageWriteback(page))
+		*uptodate = true;
+	else
+		*uptodate = PageUptodate(page);
 	dprintk("%s: index=0x%lx uptodate=%d\n", __func__, index, *uptodate);
 	return page;
 }
@@ -486,7 +489,7 @@ static void __r4w_put_page(void *priv, struct page *page)
 	dprintk("%s: index=0x%lx\n", __func__,
 		(page == ZERO_PAGE(0)) ? -1UL : page->index);
 	if (ZERO_PAGE(0) != page)
-		put_page(page);
+		page_cache_release(page);
 	return;
 }
 
@@ -655,9 +658,11 @@ objlayout_init(void)
 		printk(KERN_INFO
 			"NFS: %s: Registering OSD pNFS Layout Driver failed: error=%d\n",
 			__func__, ret);
-	else
+	else {
 		printk(KERN_INFO "NFS: %s: Registered OSD pNFS Layout Driver\n",
 			__func__);
+		mark_tech_preview("OSD pNFS Layout Driver", NULL);
+	}
 	return ret;
 }
 

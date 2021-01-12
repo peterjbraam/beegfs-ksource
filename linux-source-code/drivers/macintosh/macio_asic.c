@@ -24,8 +24,6 @@
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/slab.h>
-#include <linux/of_address.h>
-#include <linux/of_irq.h>
 
 #include <asm/machdep.h>
 #include <asm/macio.h>
@@ -236,7 +234,7 @@ static void macio_create_fixup_irq(struct macio_dev *dev, int index,
 	unsigned int irq;
 
 	irq = irq_create_mapping(NULL, line);
-	if (!irq) {
+	if (irq != NO_IRQ) {
 		dev->interrupt[index].start = irq;
 		dev->interrupt[index].flags = IORESOURCE_IRQ;
 		dev->interrupt[index].name = dev_name(&dev->ofdev.dev);
@@ -299,7 +297,7 @@ static void macio_setup_interrupts(struct macio_dev *dev)
 			break;
 		res = &dev->interrupt[j];
 		irq = irq_of_parse_and_map(np, i++);
-		if (!irq)
+		if (irq == NO_IRQ)
 			break;
 		res->start = irq;
 		res->flags = IORESOURCE_IRQ;

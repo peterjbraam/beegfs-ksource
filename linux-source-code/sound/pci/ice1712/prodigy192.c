@@ -31,7 +31,7 @@
  *		  Experimentally I found out that only a combination of
  *		  OCKS0=1, OCKS1=1 (128fs, 64fs output) and ice1724 -
  *		  VT1724_MT_I2S_MCLK_128X=0 (256fs input) yields correct
- *		  sampling rate. That means that the FPGA doubles the
+ *		  sampling rate. That means the the FPGA doubles the
  *		  MCK01 rate.
  *
  *	Copyright (c) 2003 Takashi Iwai <tiwai@suse.de>
@@ -651,9 +651,8 @@ static void stac9460_proc_regs_read(struct snd_info_entry *entry,
 
 static void stac9460_proc_init(struct snd_ice1712 *ice)
 {
-	struct snd_info_entry *entry;
-	if (!snd_card_proc_new(ice->card, "stac9460_codec", &entry))
-		snd_info_set_text_ops(entry, ice, stac9460_proc_regs_read);
+	snd_card_ro_proc_new(ice->card, "stac9460_codec", ice,
+			     stac9460_proc_regs_read);
 }
 
 

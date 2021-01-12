@@ -53,11 +53,12 @@ static int mc_recoverable_range_len;
 
 struct device_node *opal_node;
 static DEFINE_SPINLOCK(opal_write_lock);
+extern u64 opal_mc_secondary_handler[];
 static struct atomic_notifier_head opal_msg_notifier_head[OPAL_MSG_TYPE_MAX];
 static uint32_t opal_heartbeat;
 static struct task_struct *kopald_tsk;
 
-void opal_configure_cores(void)
+static void opal_reinit_cores(void)
 {
 	/* Do the actual re-init, This will clobber all FPRs, VRs, etc...
 	 *
@@ -70,17 +71,13 @@ void opal_configure_cores(void)
 #else
 	opal_reinit_cpus(OPAL_REINIT_CPUS_HILE_LE);
 #endif
-
-	/* Restore some bits */
-	if (cur_cpu_spec->cpu_restore)
-		cur_cpu_spec->cpu_restore();
 }
 
 int __init early_init_dt_scan_opal(unsigned long node,
 				   const char *uname, int depth, void *data)
 {
 	const void *basep, *entryp, *sizep;
-	int basesz, entrysz, runtimesz;
+	unsigned long basesz, entrysz, runtimesz;
 
 	if (depth != 1 || strcmp(uname, "ibm,opal") != 0)
 		return 0;
@@ -96,19 +93,31 @@ int __init early_init_dt_scan_opal(unsigned long node,
 	opal.entry = of_read_number(entryp, entrysz/4);
 	opal.size = of_read_number(sizep, runtimesz/4);
 
-	pr_debug("OPAL Base  = 0x%llx (basep=%p basesz=%d)\n",
+	pr_debug("OPAL Base  = 0x%llx (basep=%p basesz=%ld)\n",
 		 opal.base, basep, basesz);
-	pr_debug("OPAL Entry = 0x%llx (entryp=%p basesz=%d)\n",
+	pr_debug("OPAL Entry = 0x%llx (entryp=%p basesz=%ld)\n",
 		 opal.entry, entryp, entrysz);
-	pr_debug("OPAL Entry = 0x%llx (sizep=%p runtimesz=%d)\n",
+	pr_debug("OPAL Entry = 0x%llx (sizep=%p runtimesz=%ld)\n",
 		 opal.size, sizep, runtimesz);
 
+	powerpc_firmware_features |= FW_FEATURE_OPAL;
 	if (of_flat_dt_is_compatible(node, "ibm,opal-v3")) {
-		powerpc_firmware_features |= FW_FEATURE_OPAL;
-		pr_info("OPAL detected !\n");
+		powerpc_firmware_features |= FW_FEATURE_OPALv2;
+		powerpc_firmware_features |= FW_FEATURE_OPALv3;
+		printk("OPAL V3 detected !\n");
+	} else if (of_flat_dt_is_compatible(node, "ibm,opal-v2")) {
+		powerpc_firmware_features |= FW_FEATURE_OPALv2;
+		printk("OPAL V2 detected !\n");
 	} else {
-		panic("OPAL != V3 detected, no longer supported.\n");
+		printk("OPAL V1 detected !\n");
 	}
+
+	/* Reinit all cores with the right endian */
+	opal_reinit_cores();
+
+	/* Restore some bits */
+	if (cur_cpu_spec->cpu_restore)
+		cur_cpu_spec->cpu_restore();
 
 	return 1;
 }
@@ -116,7 +125,7 @@ int __init early_init_dt_scan_opal(unsigned long node,
 int __init early_init_dt_scan_recoverable_ranges(unsigned long node,
 				   const char *uname, int depth, void *data)
 {
-	int i, psize, size;
+	unsigned long i, psize, size;
 	const __be32 *prop;
 
 	if (depth != 1 || strcmp(uname, "ibm,opal") != 0)
@@ -198,7 +207,7 @@ static int __init opal_register_exception_handlers(void)
 	 * start catching/handling HMI directly in Linux.
 	 */
 	if (!opal_check_token(OPAL_HANDLE_HMI)) {
-		pr_info("Old firmware detected, OPAL handles HMIs.\n");
+		pr_info("opal: Old firmware detected, OPAL handles HMIs.\n");
 		opal_register_exception_handler(
 				OPAL_HYPERVISOR_MAINTENANCE_HANDLER,
 				0, glue);
@@ -216,7 +225,7 @@ machine_early_initcall(powernv, opal_register_exception_handlers);
  * Opal message notifier based on message type. Allow subscribers to get
  * notified for specific messgae type.
  */
-int opal_message_notifier_register(enum opal_msg_type msg_type,
+int opal_message_notifier_register(enum OpalMessageType msg_type,
 					struct notifier_block *nb)
 {
 	if (!nb || msg_type >= OPAL_MSG_TYPE_MAX) {
@@ -230,7 +239,7 @@ int opal_message_notifier_register(enum opal_msg_type msg_type,
 }
 EXPORT_SYMBOL_GPL(opal_message_notifier_register);
 
-int opal_message_notifier_unregister(enum opal_msg_type msg_type,
+int opal_message_notifier_unregister(enum OpalMessageType msg_type,
 				     struct notifier_block *nb)
 {
 	return atomic_notifier_chain_unregister(
@@ -262,7 +271,7 @@ static void opal_handle_message(void)
 
 	/* check for errors. */
 	if (ret) {
-		pr_warning("%s: Failed to retrieve opal message, err=%lld\n",
+		pr_warning("%s: Failed to retrive opal message, err=%lld\n",
 				__func__, ret);
 		return;
 	}
@@ -271,7 +280,7 @@ static void opal_handle_message(void)
 
 	/* Sanity check */
 	if (type >= OPAL_MSG_TYPE_MAX) {
-		pr_warn_once("%s: Unknown message type: %u\n", __func__, type);
+		pr_warning("%s: Unknown message type: %u\n", __func__, type);
 		return;
 	}
 	opal_message_do_notify(type, (void *)&msg);
@@ -319,7 +328,7 @@ int opal_get_chars(uint32_t vtermno, char *buf, int count)
 	if ((be64_to_cpu(evt) & OPAL_EVENT_CONSOLE_INPUT) == 0)
 		return 0;
 	len = cpu_to_be64(count);
-	rc = opal_console_read(vtermno, &len, buf);
+	rc = opal_console_read(vtermno, &len, buf);	
 	if (rc == OPAL_SUCCESS)
 		return be64_to_cpu(len);
 	return 0;
@@ -345,15 +354,17 @@ int opal_put_chars(uint32_t vtermno, const char *data, int total_len)
 	 * enough room and be done with it
 	 */
 	spin_lock_irqsave(&opal_write_lock, flags);
-	rc = opal_console_write_buffer_space(vtermno, &olen);
-	len = be64_to_cpu(olen);
-	if (rc || len < total_len) {
-		spin_unlock_irqrestore(&opal_write_lock, flags);
-		/* Closed -> drop characters */
-		if (rc)
-			return total_len;
-		opal_poll_events(NULL);
-		return -EAGAIN;
+	if (firmware_has_feature(FW_FEATURE_OPALv2)) {
+		rc = opal_console_write_buffer_space(vtermno, &olen);
+		len = be64_to_cpu(olen);
+		if (rc || len < total_len) {
+			spin_unlock_irqrestore(&opal_write_lock, flags);
+			/* Closed -> drop characters */
+			if (rc)
+				return total_len;
+			opal_poll_events(NULL);
+			return -EAGAIN;
+		}
 	}
 
 	/* We still try to handle partial completions, though they
@@ -369,7 +380,7 @@ int opal_put_chars(uint32_t vtermno, const char *data, int total_len)
 		/* Closed or other error drop */
 		if (rc != OPAL_SUCCESS && rc != OPAL_BUSY &&
 		    rc != OPAL_BUSY_EVENT) {
-			written += total_len;
+			written = total_len;
 			break;
 		}
 		if (rc == OPAL_SUCCESS) {
@@ -399,7 +410,6 @@ static int opal_recover_mce(struct pt_regs *regs,
 
 	if (!(regs->msr & MSR_RI)) {
 		/* If MSR_RI isn't set, we cannot recover */
-		pr_err("Machine check interrupt unrecoverable: MSR(RI=0)\n");
 		recovered = 0;
 	} else if (evt->disposition == MCE_DISPOSITION_RECOVERED) {
 		/* Platform corrected itself */
@@ -479,12 +489,9 @@ int opal_machine_check(struct pt_regs *regs)
 	 *    PRD component would have already got notified about this
 	 *    error through other channels.
 	 *
-	 * If hardware marked this as an unrecoverable MCE, we are
-	 * going to panic anyway. Even if it didn't, it's not safe to
-	 * continue at this point, so we should explicitly panic.
+	 * In any case, let us just fall through. We anyway heading
+	 * down to panic path.
 	 */
-
-	panic("PowerNV Unrecovered Machine Check");
 	return 0;
 }
 
@@ -509,21 +516,15 @@ int opal_hmi_exception_early(struct pt_regs *regs)
 /* HMI exception handler called in virtual mode during check_irq_replay. */
 int opal_handle_hmi_exception(struct pt_regs *regs)
 {
-	s64 rc;
-	__be64 evt = 0;
-
 	/*
 	 * Check if HMI event is available.
-	 * if Yes, then call opal_poll_events to pull opal messages and
-	 * process them.
+	 * if Yes, then wake kopald to process them.
 	 */
 	if (!local_paca->hmi_event_available)
 		return 0;
 
 	local_paca->hmi_event_available = 0;
-	rc = opal_poll_events(&evt);
-	if (rc == OPAL_SUCCESS && evt)
-		opal_handle_events(be64_to_cpu(evt));
+	opal_wake_poller();
 
 	return 1;
 }
@@ -547,7 +548,7 @@ bool opal_mce_check_early_recovery(struct pt_regs *regs)
 		goto out;
 
 	if ((regs->nip >= opal.base) &&
-			(regs->nip < (opal.base + opal.size)))
+			(regs->nip <= (opal.base + opal.size)))
 		recover_addr = find_recovery_address(regs->nip);
 
 	/*
@@ -579,10 +580,7 @@ static ssize_t symbol_map_read(struct file *fp, struct kobject *kobj,
 				       bin_attr->size);
 }
 
-static struct bin_attribute symbol_map_attr = {
-	.attr = {.name = "symbol_map", .mode = 0400},
-	.read = symbol_map_read
-};
+static BIN_ATTR_RO(symbol_map, 0);
 
 static void opal_export_symmap(void)
 {
@@ -599,10 +597,10 @@ static void opal_export_symmap(void)
 		return;
 
 	/* Setup attributes */
-	symbol_map_attr.private = __va(be64_to_cpu(syms[0]));
-	symbol_map_attr.size = be64_to_cpu(syms[1]);
+	bin_attr_symbol_map.private = __va(be64_to_cpu(syms[0]));
+	bin_attr_symbol_map.size = be64_to_cpu(syms[1]);
 
-	rc = sysfs_create_bin_file(opal_kobj, &symbol_map_attr);
+	rc = sysfs_create_bin_file(opal_kobj, &bin_attr_symbol_map);
 	if (rc)
 		pr_warn("Error %d creating OPAL symbols file\n", rc);
 }
@@ -618,13 +616,7 @@ static void __init opal_dump_region_init(void)
 
 	/* Register kernel log buffer */
 	addr = log_buf_addr_get();
-	if (addr == NULL)
-		return;
-
 	size = log_buf_len_get();
-	if (size == 0)
-		return;
-
 	rc = opal_register_dump_region(OPAL_DUMP_REGION_LOG_BUF,
 				       __pa(addr), size);
 	/* Don't warn if this is just an older OPAL that doesn't
@@ -645,25 +637,22 @@ static void opal_pdev_init(struct device_node *opal_node,
 			of_platform_device_create(np, NULL, NULL);
 }
 
-static void opal_i2c_create_devs(void)
-{
-	struct device_node *np;
-
-	for_each_compatible_node(np, NULL, "ibm,opal-i2c")
-		of_platform_device_create(np, NULL, NULL);
-}
-
 static int kopald(void *unused)
 {
 	unsigned long timeout = msecs_to_jiffies(opal_heartbeat) + 1;
-	__be64 events;
 
 	set_freezable();
 	do {
 		try_to_freeze();
-		opal_poll_events(&events);
-		opal_handle_events(be64_to_cpu(events));
-		schedule_timeout_interruptible(timeout);
+
+		opal_handle_events();
+
+		set_current_state(TASK_INTERRUPTIBLE);
+		if (opal_have_pending_events())
+			__set_current_state(TASK_RUNNING);
+		else
+			schedule_timeout(timeout);
+
 	} while (!kthread_should_stop());
 
 	return 0;
@@ -686,6 +675,15 @@ static void opal_init_heartbeat(void)
 		kopald_tsk = kthread_run(kopald, NULL, "kopald");
 }
 
+static void opal_i2c_create_devs(void)
+{
+	struct device_node *np;
+
+	for_each_compatible_node(np, NULL, "ibm,opal-i2c")
+		of_platform_device_create(np, NULL, NULL);
+}
+
+
 static int __init opal_init(void)
 {
 	struct device_node *np, *consoles, *leds;
@@ -698,7 +696,10 @@ static int __init opal_init(void)
 	}
 
 	/* Register OPAL consoles if any ports */
-	consoles = of_find_node_by_path("/ibm,opal/consoles");
+	if (firmware_has_feature(FW_FEATURE_OPALv2))
+		consoles = of_find_node_by_path("/ibm,opal/consoles");
+	else
+		consoles = of_node_get(opal_node);
 	if (consoles) {
 		for_each_child_of_node(consoles, np) {
 			if (strcmp(np->name, "serial"))
@@ -707,6 +708,9 @@ static int __init opal_init(void)
 		}
 		of_node_put(consoles);
 	}
+
+	/* Setup a heatbeat thread if requested by OPAL */
+	opal_init_heartbeat();
 
 	/* Initialise OPAL messaging system */
 	opal_message_init();
@@ -723,18 +727,12 @@ static int __init opal_init(void)
 	/* Create i2c platform devices */
 	opal_i2c_create_devs();
 
-	/* Setup a heatbeat thread if requested by OPAL */
-	opal_init_heartbeat();
-
 	/* Create leds platform devices */
 	leds = of_find_node_by_path("/ibm,opal/leds");
 	if (leds) {
 		of_platform_device_create(leds, "opal_leds", NULL);
 		of_node_put(leds);
 	}
-
-	/* Initialise OPAL message log interface */
-	opal_msglog_init();
 
 	/* Create "opal" kobject under /sys/firmware */
 	rc = opal_sysfs_init();
@@ -751,17 +749,14 @@ static int __init opal_init(void)
 		opal_platform_dump_init();
 		/* Setup system parameters interface */
 		opal_sys_param_init();
-		/* Setup message log sysfs interface. */
-		opal_msglog_sysfs_init();
+		/* Setup message log interface. */
+		opal_msglog_init();
 	}
 
 	/* Initialize platform devices: IPMI backend, PRD & flash interface */
 	opal_pdev_init(opal_node, "ibm,opal-ipmi");
 	opal_pdev_init(opal_node, "ibm,opal-flash");
 	opal_pdev_init(opal_node, "ibm,opal-prd");
-
-	/* Initialise platform device: oppanel interface */
-	opal_pdev_init(opal_node, "ibm,opal-oppanel");
 
 	/* Initialise OPAL kmsg dumper for flushing console on panic */
 	opal_kmsg_init();
@@ -877,7 +872,6 @@ int opal_error_code(int rc)
 	case OPAL_ASYNC_COMPLETION:	return -EINPROGRESS;
 	case OPAL_BUSY_EVENT:		return -EBUSY;
 	case OPAL_NO_MEM:		return -ENOMEM;
-	case OPAL_PERMISSION:		return -EPERM;
 
 	case OPAL_UNSUPPORTED:		return -EIO;
 	case OPAL_HARDWARE:		return -EIO;
@@ -897,5 +891,3 @@ EXPORT_SYMBOL_GPL(opal_i2c_request);
 /* Export these symbols for PowerNV LED class driver */
 EXPORT_SYMBOL_GPL(opal_leds_get_ind);
 EXPORT_SYMBOL_GPL(opal_leds_set_ind);
-/* Export this symbol for PowerNV Operator Panel class driver */
-EXPORT_SYMBOL_GPL(opal_write_oppanel_async);

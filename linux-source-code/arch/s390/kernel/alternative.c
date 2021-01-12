@@ -26,7 +26,7 @@ static struct brcl_insn __initdata_or_module nop48 = {
 	0xc004, 0
 };
 
-static const void *nops[] __initdata_or_module = {
+static const void * __initdata_or_module nops[] = {
 	&nop16,
 	&nop32,
 	&nop48
@@ -94,7 +94,7 @@ static void __init_or_module __apply_alternatives(struct alt_instr *start,
 			insnbuf_sz += a->instrlen - a->replacementlen;
 		}
 
-		s390_kernel_write(instr, insnbuf, insnbuf_sz);
+		probe_kernel_write(instr, insnbuf, insnbuf_sz);
 	}
 }
 

@@ -26,6 +26,7 @@ enum {
 	NDA_IFINDEX,
 	NDA_MASTER,
 	NDA_LINK_NETNSID,
+	NDA_SRC_VNI,
 	__NDA_MAX
 };
 
@@ -40,6 +41,7 @@ enum {
 #define NTF_MASTER	0x04
 #define NTF_PROXY	0x08	/* == ATF_PUBL */
 #define NTF_EXT_LEARNED	0x10
+#define NTF_OFFLOADED   0x20
 #define NTF_ROUTER	0x80
 
 /*
@@ -60,7 +62,7 @@ enum {
 
 /* NUD_NOARP & NUD_PERMANENT are pseudostates, they never change
    and make no address resolution or NUD.
-   NUD_PERMANENT also cannot be deleted by garbage collectors.
+   NUD_PERMANENT is also cannot be deleted by garbage collectors.
  */
 
 struct nda_cacheinfo {
@@ -106,7 +108,6 @@ struct ndt_stats {
 	__u64		ndts_rcv_probes_ucast;
 	__u64		ndts_periodic_gc_runs;
 	__u64		ndts_forced_gc_runs;
-	__u64		ndts_table_fulls;
 };
 
 enum {
@@ -127,7 +128,7 @@ enum {
 	NDTPA_PROXY_QLEN,		/* u32 */
 	NDTPA_LOCKTIME,			/* u64, msecs */
 	NDTPA_QUEUE_LENBYTES,		/* u32 */
-	NDTPA_MCAST_REPROBES,		/* u32 */
+	__RH_RESERVED_NDTPA_MCAST_REPROBES,	/* u32 */
 	NDTPA_PAD,
 	__NDTPA_MAX
 };

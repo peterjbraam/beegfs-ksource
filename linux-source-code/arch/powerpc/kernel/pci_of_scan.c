@@ -38,15 +38,13 @@ static u32 get_int_prop(struct device_node *np, const char *name, u32 def)
  * @addr0: value of 1st cell of a device tree PCI address.
  * @bridge: Set this flag if the address is from a bridge 'ranges' property
  */
-static unsigned int pci_parse_of_flags(u32 addr0, int bridge)
+unsigned int pci_parse_of_flags(u32 addr0, int bridge)
 {
 	unsigned int flags = 0;
 
 	if (addr0 & 0x02000000) {
 		flags = IORESOURCE_MEM | PCI_BASE_ADDRESS_SPACE_MEMORY;
 		flags |= (addr0 >> 22) & PCI_BASE_ADDRESS_MEM_TYPE_64;
-		if (flags & PCI_BASE_ADDRESS_MEM_TYPE_64)
-			flags |= IORESOURCE_MEM_64;
 		flags |= (addr0 >> 28) & PCI_BASE_ADDRESS_MEM_TYPE_1M;
 		if (addr0 & 0x40000000)
 			flags |= IORESOURCE_PREFETCH
@@ -82,16 +80,10 @@ static void of_pci_parse_addrs(struct device_node *node, struct pci_dev *dev)
 	const __be32 *addrs;
 	u32 i;
 	int proplen;
-	bool mark_unset = false;
 
 	addrs = of_get_property(node, "assigned-addresses", &proplen);
-	if (!addrs || !proplen) {
-		addrs = of_get_property(node, "reg", &proplen);
-		if (!addrs || !proplen)
-			return;
-		mark_unset = true;
-	}
-
+	if (!addrs)
+		return;
 	pr_debug("    parse addresses (%d bytes) @ %p\n", proplen, addrs);
 	for (; proplen >= 20; proplen -= 20, addrs += 5) {
 		flags = pci_parse_of_flags(of_read_number(addrs, 1), 0);
@@ -110,14 +102,12 @@ static void of_pci_parse_addrs(struct device_node *node, struct pci_dev *dev)
 			res = &dev->resource[(i - PCI_BASE_ADDRESS_0) >> 2];
 		} else if (i == dev->rom_base_reg) {
 			res = &dev->resource[PCI_ROM_RESOURCE];
-			flags |= IORESOURCE_READONLY;
+			flags |= IORESOURCE_READONLY | IORESOURCE_CACHEABLE;
 		} else {
 			printk(KERN_ERR "PCI: bad cfg reg num 0x%x\n", i);
 			continue;
 		}
 		res->flags = flags;
-		if (mark_unset)
-			res->flags |= IORESOURCE_UNSET;
 		res->name = pci_name(dev);
 		region.start = base;
 		region.end = base + size - 1;
@@ -188,7 +178,7 @@ struct pci_dev *of_create_pci_dev(struct device_node *node,
 		dev->hdr_type = PCI_HEADER_TYPE_NORMAL;
 		dev->rom_base_reg = PCI_ROM_ADDRESS;
 		/* Maybe do a default OF mapping here */
-		dev->irq = 0;
+		dev->irq = NO_IRQ;
 	}
 
 	of_pci_parse_addrs(node, dev);

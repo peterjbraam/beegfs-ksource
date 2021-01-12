@@ -22,20 +22,19 @@ static int mdsmap_show(struct seq_file *s, void *p)
 {
 	int i;
 	struct ceph_fs_client *fsc = s->private;
+	struct ceph_mdsmap *mdsmap;
 
-	if (fsc->mdsc == NULL || fsc->mdsc->mdsmap == NULL)
+	if (!fsc->mdsc || !fsc->mdsc->mdsmap)
 		return 0;
-	seq_printf(s, "epoch %d\n", fsc->mdsc->mdsmap->m_epoch);
-	seq_printf(s, "root %d\n", fsc->mdsc->mdsmap->m_root);
-	seq_printf(s, "session_timeout %d\n",
-		       fsc->mdsc->mdsmap->m_session_timeout);
-	seq_printf(s, "session_autoclose %d\n",
-		       fsc->mdsc->mdsmap->m_session_autoclose);
-	for (i = 0; i < fsc->mdsc->mdsmap->m_max_mds; i++) {
-		struct ceph_entity_addr *addr =
-			&fsc->mdsc->mdsmap->m_info[i].addr;
-		int state = fsc->mdsc->mdsmap->m_info[i].state;
-
+	mdsmap = fsc->mdsc->mdsmap;
+	seq_printf(s, "epoch %d\n", mdsmap->m_epoch);
+	seq_printf(s, "root %d\n", mdsmap->m_root);
+	seq_printf(s, "max_mds %d\n", mdsmap->m_max_mds);
+	seq_printf(s, "session_timeout %d\n", mdsmap->m_session_timeout);
+	seq_printf(s, "session_autoclose %d\n", mdsmap->m_session_autoclose);
+	for (i = 0; i < mdsmap->m_num_mds; i++) {
+		struct ceph_entity_addr *addr = &mdsmap->m_info[i].addr;
+		int state = mdsmap->m_info[i].state;
 		seq_printf(s, "\tmds%d\t%s\t(%s)\n", i,
 			       ceph_pr_addr(&addr->in_addr),
 			       ceph_mds_state_name(state));
@@ -70,7 +69,7 @@ static int mdsc_show(struct seq_file *s, void *p)
 
 		seq_printf(s, "%s", ceph_mds_op_name(req->r_op));
 
-		if (req->r_got_unsafe)
+		if (test_bit(CEPH_MDS_R_GOT_UNSAFE, &req->r_req_flags))
 			seq_puts(s, "\t(unsafe)");
 		else
 			seq_puts(s, "\t");
@@ -84,7 +83,7 @@ static int mdsc_show(struct seq_file *s, void *p)
 				path = NULL;
 			spin_lock(&req->r_dentry->d_lock);
 			seq_printf(s, " #%llx/%pd (%s)",
-				   ceph_ino(d_inode(req->r_dentry->d_parent)),
+				   ceph_ino(req->r_dentry->d_parent->d_inode),
 				   req->r_dentry,
 				   path ? path : "");
 			spin_unlock(&req->r_dentry->d_lock);
@@ -260,7 +259,7 @@ int ceph_fs_debugfs_init(struct ceph_fs_client *fsc)
 		goto out;
 
 	fsc->debugfs_mdsmap = debugfs_create_file("mdsmap",
-					0600,
+					0400,
 					fsc->client->debugfs_dir,
 					fsc,
 					&mdsmap_show_fops);
@@ -268,7 +267,7 @@ int ceph_fs_debugfs_init(struct ceph_fs_client *fsc)
 		goto out;
 
 	fsc->debugfs_mds_sessions = debugfs_create_file("mds_sessions",
-					0600,
+					0400,
 					fsc->client->debugfs_dir,
 					fsc,
 					&mds_sessions_show_fops);
@@ -276,7 +275,7 @@ int ceph_fs_debugfs_init(struct ceph_fs_client *fsc)
 		goto out;
 
 	fsc->debugfs_mdsc = debugfs_create_file("mdsc",
-						0600,
+						0400,
 						fsc->client->debugfs_dir,
 						fsc,
 						&mdsc_show_fops);
@@ -292,7 +291,7 @@ int ceph_fs_debugfs_init(struct ceph_fs_client *fsc)
 		goto out;
 
 	fsc->debugfs_dentry_lru = debugfs_create_file("dentry_lru",
-					0600,
+					0400,
 					fsc->client->debugfs_dir,
 					fsc,
 					&dentry_lru_show_fops);

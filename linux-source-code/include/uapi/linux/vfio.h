@@ -33,9 +33,6 @@
 /* Check if EEH is supported */
 #define VFIO_EEH			5
 
-/* Two-stage IOMMU */
-#define VFIO_TYPE1_NESTING_IOMMU	6	/* Implies v2 */
-
 #define VFIO_SPAPR_TCE_v2_IOMMU		7
 
 /*
@@ -196,12 +193,20 @@ struct vfio_device_info {
 	__u32	flags;
 #define VFIO_DEVICE_FLAGS_RESET	(1 << 0)	/* Device supports reset */
 #define VFIO_DEVICE_FLAGS_PCI	(1 << 1)	/* vfio-pci device */
-#define VFIO_DEVICE_FLAGS_PLATFORM (1 << 2)	/* vfio-platform device */
-#define VFIO_DEVICE_FLAGS_AMBA  (1 << 3)	/* vfio-amba device */
 	__u32	num_regions;	/* Max region index + 1 */
 	__u32	num_irqs;	/* Max IRQ index + 1 */
 };
 #define VFIO_DEVICE_GET_INFO		_IO(VFIO_TYPE, VFIO_BASE + 7)
+
+/*
+ * Vendor driver using Mediated device framework should provide device_api
+ * attribute in supported type attribute groups. Device API string should be one
+ * of the following corresponding to device flags in vfio_device_info structure.
+ */
+
+#define VFIO_DEVICE_API_PCI_STRING		"vfio-pci"
+#define VFIO_DEVICE_API_PLATFORM_STRING		"vfio-platform"
+#define VFIO_DEVICE_API_AMBA_STRING		"vfio-amba"
 
 /**
  * VFIO_DEVICE_GET_REGION_INFO - _IOWR(VFIO_TYPE, VFIO_BASE + 8,
@@ -283,10 +288,7 @@ struct vfio_region_info_cap_type {
 #define VFIO_REGION_TYPE_PCI_VENDOR_TYPE	(1 << 31)
 #define VFIO_REGION_TYPE_PCI_VENDOR_MASK	(0xffff)
 
-/* 8086 Vendor sub-types */
 #define VFIO_REGION_SUBTYPE_INTEL_IGD_OPREGION	(1)
-#define VFIO_REGION_SUBTYPE_INTEL_IGD_HOST_CFG	(2)
-#define VFIO_REGION_SUBTYPE_INTEL_IGD_LPC_CFG	(3)
 
 /**
  * VFIO_DEVICE_GET_IRQ_INFO - _IOWR(VFIO_TYPE, VFIO_BASE + 9,
@@ -474,6 +476,68 @@ struct vfio_pci_hot_reset {
 
 #define VFIO_DEVICE_PCI_HOT_RESET	_IO(VFIO_TYPE, VFIO_BASE + 13)
 
+/**
+ * VFIO_DEVICE_QUERY_GFX_PLANE - _IOW(VFIO_TYPE, VFIO_BASE + 14,
+ *                                    struct vfio_device_query_gfx_plane)
+ *
+ * Set the drm_plane_type and flags, then retrieve the gfx plane info.
+ *
+ * flags supported:
+ * - VFIO_GFX_PLANE_TYPE_PROBE and VFIO_GFX_PLANE_TYPE_DMABUF are set
+ *   to ask if the mdev supports dma-buf. 0 on support, -EINVAL on no
+ *   support for dma-buf.
+ * - VFIO_GFX_PLANE_TYPE_PROBE and VFIO_GFX_PLANE_TYPE_REGION are set
+ *   to ask if the mdev supports region. 0 on support, -EINVAL on no
+ *   support for region.
+ * - VFIO_GFX_PLANE_TYPE_DMABUF or VFIO_GFX_PLANE_TYPE_REGION is set
+ *   with each call to query the plane info.
+ * - Others are invalid and return -EINVAL.
+ *
+ * Note:
+ * 1. Plane could be disabled by guest. In that case, success will be
+ *    returned with zero-initialized drm_format, size, width and height
+ *    fields.
+ * 2. x_hot/y_hot is set to 0xFFFFFFFF if no hotspot information available
+ *
+ * Return: 0 on success, -errno on other failure.
+ */
+struct vfio_device_gfx_plane_info {
+	__u32 argsz;
+	__u32 flags;
+#define VFIO_GFX_PLANE_TYPE_PROBE (1 << 0)
+#define VFIO_GFX_PLANE_TYPE_DMABUF (1 << 1)
+#define VFIO_GFX_PLANE_TYPE_REGION (1 << 2)
+	/* in */
+	__u32 drm_plane_type;	/* type of plane: DRM_PLANE_TYPE_* */
+	/* out */
+	__u32 drm_format;	/* drm format of plane */
+	__u64 drm_format_mod;   /* tiled mode */
+	__u32 width;	/* width of plane */
+	__u32 height;	/* height of plane */
+	__u32 stride;	/* stride of plane */
+	__u32 size;	/* size of plane in bytes, align on page*/
+	__u32 x_pos;	/* horizontal position of cursor plane */
+	__u32 y_pos;	/* vertical position of cursor plane*/
+	__u32 x_hot;    /* horizontal position of cursor hotspot */
+	__u32 y_hot;    /* vertical position of cursor hotspot */
+	union {
+		__u32 region_index;	/* region index */
+		__u32 dmabuf_id;	/* dma-buf id */
+	};
+};
+
+#define VFIO_DEVICE_QUERY_GFX_PLANE _IO(VFIO_TYPE, VFIO_BASE + 14)
+
+/**
+ * VFIO_DEVICE_GET_GFX_DMABUF - _IOW(VFIO_TYPE, VFIO_BASE + 15, __u32)
+ *
+ * Return a new dma-buf file descriptor for an exposed guest framebuffer
+ * described by the provided dmabuf_id. The dmabuf_id is returned from VFIO_
+ * DEVICE_QUERY_GFX_PLANE as a token of the exposed guest framebuffer.
+ */
+
+#define VFIO_DEVICE_GET_GFX_DMABUF _IO(VFIO_TYPE, VFIO_BASE + 15)
+
 /* -------- API for Type1 VFIO IOMMU -------- */
 
 /**
@@ -587,23 +651,12 @@ struct vfio_iommu_spapr_tce_info {
  * - unfreeze IO/DMA for frozen PE;
  * - read PE state;
  * - reset PE;
- * - configure PE;
- * - inject EEH error.
+ * - configure PE.
  */
-struct vfio_eeh_pe_err {
-	__u32 type;
-	__u32 func;
-	__u64 addr;
-	__u64 mask;
-};
-
 struct vfio_eeh_pe_op {
 	__u32 argsz;
 	__u32 flags;
 	__u32 op;
-	union {
-		struct vfio_eeh_pe_err err;
-	};
 };
 
 #define VFIO_EEH_PE_DISABLE		0	/* Disable EEH functionality */
@@ -620,7 +673,6 @@ struct vfio_eeh_pe_op {
 #define VFIO_EEH_PE_RESET_HOT		6	/* Assert hot reset          */
 #define VFIO_EEH_PE_RESET_FUNDAMENTAL	7	/* Assert fundamental reset  */
 #define VFIO_EEH_PE_CONFIGURE		8	/* PE configuration          */
-#define VFIO_EEH_PE_INJECT_ERR		9	/* Inject EEH error          */
 
 #define VFIO_EEH_PE_OP			_IO(VFIO_TYPE, VFIO_BASE + 21)
 
@@ -663,10 +715,8 @@ struct vfio_iommu_spapr_tce_create {
 	__u32 flags;
 	/* in */
 	__u32 page_shift;
-	__u32 __resv1;
 	__u64 window_size;
 	__u32 levels;
-	__u32 __resv2;
 	/* out */
 	__u64 start_addr;
 };

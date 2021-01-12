@@ -2086,17 +2086,21 @@ typedef struct dfs_referral_level_3 { /* version 4 is same, + one flag bit */
 	__u8   ServiceSiteGuid[16];  /* MBZ, ignored */
 } __attribute__((packed)) REFERRAL3;
 
-typedef struct smb_com_transaction_get_dfs_refer_rsp {
-	struct smb_hdr hdr;	/* wct = 10 */
-	struct trans2_resp t2;
-	__u16 ByteCount;
-	__u8 Pad;
+struct get_dfs_referral_rsp {
 	__le16 PathConsumed;
 	__le16 NumberOfReferrals;
 	__le32 DFSFlags;
 	REFERRAL3 referrals[1];	/* array of level 3 dfs_referral structures */
 	/* followed by the strings pointed to by the referral structures */
-} __attribute__((packed)) TRANSACTION2_GET_DFS_REFER_RSP;
+} __packed;
+
+typedef struct smb_com_transaction_get_dfs_refer_rsp {
+	struct smb_hdr hdr;	/* wct = 10 */
+	struct trans2_resp t2;
+	__u16 ByteCount;
+	__u8 Pad;
+	struct get_dfs_referral_rsp dfs_data;
+} __packed TRANSACTION2_GET_DFS_REFER_RSP;
 
 /* DFS Flags */
 #define DFSREF_REFERRAL_SERVER  0x00000001 /* all targets are DFS roots */
@@ -2754,7 +2758,26 @@ typedef struct file_xattr_info {
 } __attribute__((packed)) FILE_XATTR_INFO; /* extended attribute info
 					      level 0x205 */
 
-/* flags for lsattr and chflags commands removed arein uapi/linux/fs.h */
+
+/* flags for chattr command */
+#define EXT_SECURE_DELETE		0x00000001 /* EXT3_SECRM_FL */
+#define EXT_ENABLE_UNDELETE		0x00000002 /* EXT3_UNRM_FL */
+/* Reserved for compress file 0x4 */
+#define EXT_SYNCHRONOUS			0x00000008 /* EXT3_SYNC_FL */
+#define EXT_IMMUTABLE_FL		0x00000010 /* EXT3_IMMUTABLE_FL */
+#define EXT_OPEN_APPEND_ONLY		0x00000020 /* EXT3_APPEND_FL */
+#define EXT_DO_NOT_BACKUP		0x00000040 /* EXT3_NODUMP_FL */
+#define EXT_NO_UPDATE_ATIME		0x00000080 /* EXT3_NOATIME_FL */
+/* 0x100 through 0x800 reserved for compression flags and are GET-ONLY */
+#define EXT_HASH_TREE_INDEXED_DIR	0x00001000 /* GET-ONLY EXT3_INDEX_FL */
+/* 0x2000 reserved for IMAGIC_FL */
+#define EXT_JOURNAL_THIS_FILE	0x00004000 /* GET-ONLY EXT3_JOURNAL_DATA_FL */
+/* 0x8000 reserved for EXT3_NOTAIL_FL */
+#define EXT_SYNCHRONOUS_DIR		0x00010000 /* EXT3_DIRSYNC_FL */
+#define EXT_TOPDIR			0x00020000 /* EXT3_TOPDIR_FL */
+
+#define EXT_SET_MASK			0x000300FF
+#define EXT_GET_MASK			0x0003DFFF
 
 typedef struct file_chattr_info {
 	__le64	mask; /* list of all possible attribute bits */

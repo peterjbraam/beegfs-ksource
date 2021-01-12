@@ -8,9 +8,9 @@
 #include <linux/dma-mapping.h>
 #include <linux/scatterlist.h>
 
-static void *dma_noop_alloc(struct device *dev, size_t size,
+void *dma_noop_alloc(struct device *dev, size_t size,
 			    dma_addr_t *dma_handle, gfp_t gfp,
-			    unsigned long attrs)
+			    struct dma_attrs *attrs)
 {
 	void *ret;
 
@@ -20,24 +20,23 @@ static void *dma_noop_alloc(struct device *dev, size_t size,
 	return ret;
 }
 
-static void dma_noop_free(struct device *dev, size_t size,
+void dma_noop_free(struct device *dev, size_t size,
 			  void *cpu_addr, dma_addr_t dma_addr,
-			  unsigned long attrs)
+			  struct dma_attrs *attrs)
 {
 	free_pages((unsigned long)cpu_addr, get_order(size));
 }
 
-static dma_addr_t dma_noop_map_page(struct device *dev, struct page *page,
+dma_addr_t dma_noop_map_page(struct device *dev, struct page *page,
 				      unsigned long offset, size_t size,
 				      enum dma_data_direction dir,
-				      unsigned long attrs)
+				      struct dma_attrs *attrs)
 {
 	return page_to_phys(page) + offset;
 }
 
-static int dma_noop_map_sg(struct device *dev, struct scatterlist *sgl, int nents,
-			     enum dma_data_direction dir,
-			     unsigned long attrs)
+int dma_noop_map_sg(struct device *dev, struct scatterlist *sgl, int nents,
+			     enum dma_data_direction dir, struct dma_attrs *attrs)
 {
 	int i;
 	struct scatterlist *sg;
@@ -54,12 +53,12 @@ static int dma_noop_map_sg(struct device *dev, struct scatterlist *sgl, int nent
 	return nents;
 }
 
-static int dma_noop_mapping_error(struct device *dev, dma_addr_t dma_addr)
+int dma_noop_mapping_error(struct device *dev, dma_addr_t dma_addr)
 {
 	return 0;
 }
 
-static int dma_noop_supported(struct device *dev, u64 mask)
+int dma_noop_supported(struct device *dev, u64 mask)
 {
 	return 1;
 }

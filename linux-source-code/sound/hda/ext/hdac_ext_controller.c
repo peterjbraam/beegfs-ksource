@@ -155,8 +155,6 @@ struct hdac_ext_link *snd_hdac_ext_bus_get_link(struct hdac_ext_bus *ebus,
 		return NULL;
 	if (ebus->idx != bus_idx)
 		return NULL;
-	if (addr < 0 || addr > 31)
-		return NULL;
 
 	list_for_each_entry(hlink, &ebus->hlink_list, list) {
 		for (i = 0; i < HDA_MAX_CODECS; i++) {
@@ -173,7 +171,7 @@ static int check_hdac_link_power_active(struct hdac_ext_link *link, bool enable)
 {
 	int timeout;
 	u32 val;
-	int mask = (1 << AZX_MLCTL_CPA);
+	int mask = (1 << AZX_MLCTL_CPA_SHIFT);
 
 	udelay(3);
 	timeout = 150;
@@ -181,10 +179,10 @@ static int check_hdac_link_power_active(struct hdac_ext_link *link, bool enable)
 	do {
 		val = readl(link->ml_addr + AZX_REG_ML_LCTL);
 		if (enable) {
-			if (((val & mask) >> AZX_MLCTL_CPA))
+			if (((val & mask) >> AZX_MLCTL_CPA_SHIFT))
 				return 0;
 		} else {
-			if (!((val & mask) >> AZX_MLCTL_CPA))
+			if (!((val & mask) >> AZX_MLCTL_CPA_SHIFT))
 				return 0;
 		}
 		udelay(3);

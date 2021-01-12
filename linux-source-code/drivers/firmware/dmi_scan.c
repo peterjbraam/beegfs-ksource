@@ -7,6 +7,7 @@
 #include <linux/efi.h>
 #include <linux/bootmem.h>
 #include <linux/random.h>
+#include <linux/io.h>
 #include <asm/dmi.h>
 #include <asm/unaligned.h>
 
@@ -18,7 +19,7 @@ EXPORT_SYMBOL_GPL(dmi_kobj);
  * of and an antecedent to, SMBIOS, which stands for System
  * Management BIOS.  See further: http://www.dmtf.org/standards
  */
-static const char dmi_empty_string[] = "";
+static const char dmi_empty_string[] = "        ";
 
 static u32 dmi_ver __initdata;
 static u32 dmi_len;
@@ -37,6 +38,7 @@ static char dmi_ids_string[128] __initdata;
 static struct dmi_memdev_info {
 	const char *device;
 	const char *bank;
+	u64 size;		/* bytes */
 	u16 handle;
 } *dmi_memdev;
 static int dmi_memdev_nr;
@@ -44,21 +46,25 @@ static int dmi_memdev_nr;
 static const char * __init dmi_string_nosave(const struct dmi_header *dm, u8 s)
 {
 	const u8 *bp = ((u8 *) dm) + dm->length;
-	const u8 *nsp;
 
 	if (s) {
-		while (--s > 0 && *bp)
+		s--;
+		while (s > 0 && *bp) {
 			bp += strlen(bp) + 1;
+			s--;
+		}
 
-		/* Strings containing only spaces are considered empty */
-		nsp = bp;
-		while (*nsp == ' ')
-			nsp++;
-		if (*nsp != '\0')
+		if (*bp != 0) {
+			size_t len = strlen(bp)+1;
+			size_t cmp_len = len > 8 ? 8 : len;
+
+			if (!memcmp(bp, dmi_empty_string, cmp_len))
+				return dmi_empty_string;
 			return bp;
+		}
 	}
 
-	return dmi_empty_string;
+	return "";
 }
 
 static const char * __init dmi_string(const struct dmi_header *dm, u8 s)
@@ -317,58 +323,39 @@ static void __init dmi_save_ipmi_device(const struct dmi_header *dm)
 	list_add_tail(&dev->list, &dmi_devices);
 }
 
-static void __init dmi_save_dev_pciaddr(int instance, int segment, int bus,
-					int devfn, const char *name, int type)
+static void __init dmi_save_dev_onboard(int instance, int segment, int bus,
+					int devfn, const char *name)
 {
-	struct dmi_dev_onboard *dev;
+	struct dmi_dev_onboard *onboard_dev;
 
-	/* Ignore invalid values */
-	if (type == DMI_DEV_TYPE_DEV_SLOT &&
-	    segment == 0xFFFF && bus == 0xFF && devfn == 0xFF)
+	onboard_dev = dmi_alloc(sizeof(*onboard_dev) + strlen(name) + 1);
+	if (!onboard_dev)
 		return;
 
-	dev = dmi_alloc(sizeof(*dev) + strlen(name) + 1);
-	if (!dev)
-		return;
+	onboard_dev->instance = instance;
+	onboard_dev->segment = segment;
+	onboard_dev->bus = bus;
+	onboard_dev->devfn = devfn;
 
-	dev->instance = instance;
-	dev->segment = segment;
-	dev->bus = bus;
-	dev->devfn = devfn;
+	strcpy((char *)&onboard_dev[1], name);
+	onboard_dev->dev.type = DMI_DEV_TYPE_DEV_ONBOARD;
+	onboard_dev->dev.name = (char *)&onboard_dev[1];
+	onboard_dev->dev.device_data = onboard_dev;
 
-	strcpy((char *)&dev[1], name);
-	dev->dev.type = type;
-	dev->dev.name = (char *)&dev[1];
-	dev->dev.device_data = dev;
-
-	list_add(&dev->dev.list, &dmi_devices);
+	list_add(&onboard_dev->dev.list, &dmi_devices);
 }
 
 static void __init dmi_save_extended_devices(const struct dmi_header *dm)
 {
-	const char *name;
-	const u8 *d = (u8 *)dm;
+	const u8 *d = (u8 *) dm + 5;
 
 	/* Skip disabled device */
-	if ((d[0x5] & 0x80) == 0)
+	if ((*d & 0x80) == 0)
 		return;
 
-	name = dmi_string_nosave(dm, d[0x4]);
-	dmi_save_dev_pciaddr(d[0x6], *(u16 *)(d + 0x7), d[0x9], d[0xA], name,
-			     DMI_DEV_TYPE_DEV_ONBOARD);
-	dmi_save_one_device(d[0x5] & 0x7f, name);
-}
-
-static void __init dmi_save_system_slot(const struct dmi_header *dm)
-{
-	const u8 *d = (u8 *)dm;
-
-	/* Need SMBIOS 2.6+ structure */
-	if (dm->length < 0x11)
-		return;
-	dmi_save_dev_pciaddr(*(u16 *)(d + 0x9), *(u16 *)(d + 0xD), d[0xF],
-			     d[0x10], dmi_string_nosave(dm, d[0x4]),
-			     DMI_DEV_TYPE_DEV_SLOT);
+	dmi_save_dev_onboard(*(d+1), *(u16 *)(d+2), *(d+4), *(d+5),
+			     dmi_string_nosave(dm, *(d-1)));
+	dmi_save_one_device(*d & 0x7f, dmi_string_nosave(dm, *(d - 1)));
 }
 
 static void __init count_mem_devices(const struct dmi_header *dm, void *v)
@@ -382,6 +369,8 @@ static void __init save_mem_devices(const struct dmi_header *dm, void *v)
 {
 	const char *d = (const char *)dm;
 	static int nr;
+	u64 bytes;
+	u16 size;
 
 	if (dm->type != DMI_ENTRY_MEM_DEVICE)
 		return;
@@ -392,6 +381,20 @@ static void __init save_mem_devices(const struct dmi_header *dm, void *v)
 	dmi_memdev[nr].handle = get_unaligned(&dm->handle);
 	dmi_memdev[nr].device = dmi_string(dm, d[0x10]);
 	dmi_memdev[nr].bank = dmi_string(dm, d[0x11]);
+
+	size = get_unaligned((u16 *)&d[0xC]);
+	if (size == 0)
+		bytes = 0;
+	else if (size == 0xffff)
+		bytes = ~0ull;
+	else if (size & 0x8000)
+		bytes = (u64)(size & 0x7fff) << 10;
+	else if (size != 0x7fff)
+		bytes = (u64)size << 20;
+	else
+		bytes = (u64)get_unaligned((u32 *)&d[0x1C]) << 20;
+
+	dmi_memdev[nr].size = bytes;
 	nr++;
 }
 
@@ -440,9 +443,6 @@ static void __init dmi_decode(const struct dmi_header *dm, void *dummy)
 		dmi_save_ident(dm, DMI_CHASSIS_VERSION, 6);
 		dmi_save_ident(dm, DMI_CHASSIS_SERIAL, 7);
 		dmi_save_ident(dm, DMI_CHASSIS_ASSET_TAG, 8);
-		break;
-	case 9:		/* System Slots */
-		dmi_save_system_slot(dm);
 		break;
 	case 10:	/* Onboard Devices Information */
 		dmi_save_devices(dm);
@@ -556,7 +556,7 @@ static int __init dmi_present(const u8 *buf)
 					dmi_ver >> 16, (dmi_ver >> 8) & 0xFF);
 			}
 			dmi_format_ids(dmi_ids_string, sizeof(dmi_ids_string));
-			printk(KERN_DEBUG "DMI: %s\n", dmi_ids_string);
+			pr_info("DMI: %s\n", dmi_ids_string);
 			return 0;
 		}
 	}
@@ -584,7 +584,7 @@ static int __init dmi_smbios3_present(const u8 *buf)
 				dmi_ver >> 16, (dmi_ver >> 8) & 0xFF,
 				dmi_ver & 0xFF);
 			dmi_format_ids(dmi_ids_string, sizeof(dmi_ids_string));
-			pr_debug("DMI: %s\n", dmi_ids_string);
+			pr_info("DMI: %s\n", dmi_ids_string);
 			return 0;
 		}
 	}
@@ -887,7 +887,7 @@ EXPORT_SYMBOL(dmi_name_in_vendors);
  *	@from: previous device found in search, or %NULL for new search.
  *
  *	Iterates through the list of known onboard devices. If a device is
- *	found with a matching @type and @name, a pointer to its device
+ *	found with a matching @vendor and @device, a pointer to its device
  *	structure is returned.  Otherwise, %NULL is returned.
  *	A new search is initiated by passing %NULL as the @from argument.
  *	If @from is not %NULL, searches continue from next device.
@@ -1043,3 +1043,17 @@ void dmi_memdev_name(u16 handle, const char **bank, const char **device)
 	}
 }
 EXPORT_SYMBOL_GPL(dmi_memdev_name);
+
+u64 dmi_memdev_size(u16 handle)
+{
+	int n;
+
+	if (dmi_memdev) {
+		for (n = 0; n < dmi_memdev_nr; n++) {
+			if (handle == dmi_memdev[n].handle)
+				return dmi_memdev[n].size;
+		}
+	}
+	return ~0ull;
+}
+EXPORT_SYMBOL_GPL(dmi_memdev_size);

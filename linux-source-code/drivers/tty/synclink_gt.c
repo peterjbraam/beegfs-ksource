@@ -89,7 +89,7 @@
  * module identification
  */
 static char *driver_name     = "SyncLink GT";
-static char *slgt_driver_name = "synclink_gt";
+static char *tty_driver_name = "synclink_gt";
 static char *tty_dev_prefix  = "ttySLG";
 MODULE_LICENSE("GPL");
 #define MGSL_MAGIC 0x5401
@@ -726,7 +726,7 @@ static void close(struct tty_struct *tty, struct file *filp)
 		goto cleanup;
 
 	mutex_lock(&info->port.mutex);
-	if (tty_port_initialized(&info->port))
+ 	if (info->port.flags & ASYNC_INITIALIZED)
  		wait_until_sent(tty, info->timeout);
 	flush_buffer(tty);
 	tty_ldisc_flush(tty);
@@ -756,9 +756,9 @@ static void hangup(struct tty_struct *tty)
 
 	spin_lock_irqsave(&info->port.lock, flags);
 	info->port.count = 0;
+	info->port.flags &= ~ASYNC_NORMAL_ACTIVE;
 	info->port.tty = NULL;
 	spin_unlock_irqrestore(&info->port.lock, flags);
-	tty_port_set_active(&info->port, 0);
 	mutex_unlock(&info->port.mutex);
 
 	wake_up_interruptible(&info->port.open_wait);
@@ -774,7 +774,8 @@ static void set_termios(struct tty_struct *tty, struct ktermios *old_termios)
 	change_params(info);
 
 	/* Handle transition to B0 status */
-	if ((old_termios->c_cflag & CBAUD) && !C_BAUD(tty)) {
+	if (old_termios->c_cflag & CBAUD &&
+	    !(tty->termios.c_cflag & CBAUD)) {
 		info->signals &= ~(SerialSignal_RTS | SerialSignal_DTR);
 		spin_lock_irqsave(&info->lock,flags);
 		set_signals(info);
@@ -782,17 +783,21 @@ static void set_termios(struct tty_struct *tty, struct ktermios *old_termios)
 	}
 
 	/* Handle transition away from B0 status */
-	if (!(old_termios->c_cflag & CBAUD) && C_BAUD(tty)) {
+	if (!(old_termios->c_cflag & CBAUD) &&
+	    tty->termios.c_cflag & CBAUD) {
 		info->signals |= SerialSignal_DTR;
-		if (!C_CRTSCTS(tty) || !tty_throttled(tty))
+ 		if (!(tty->termios.c_cflag & CRTSCTS) ||
+ 		    !tty_throttled(tty)) {
 			info->signals |= SerialSignal_RTS;
+ 		}
 		spin_lock_irqsave(&info->lock,flags);
 	 	set_signals(info);
 		spin_unlock_irqrestore(&info->lock,flags);
 	}
 
 	/* Handle turning off CRTSCTS */
-	if ((old_termios->c_cflag & CRTSCTS) && !C_CRTSCTS(tty)) {
+	if (old_termios->c_cflag & CRTSCTS &&
+	    !(tty->termios.c_cflag & CRTSCTS)) {
 		tty->hw_stopped = 0;
 		tx_release(tty);
 	}
@@ -893,7 +898,7 @@ static void wait_until_sent(struct tty_struct *tty, int timeout)
 	if (sanity_check(info, tty->name, "wait_until_sent"))
 		return;
 	DBGINFO(("%s wait_until_sent entry\n", info->device_name));
-	if (!tty_port_initialized(&info->port))
+	if (!(info->port.flags & ASYNC_INITIALIZED))
 		goto exit;
 
 	orig_jiffies = jiffies;
@@ -1032,7 +1037,7 @@ static int ioctl(struct tty_struct *tty,
 
 	if ((cmd != TIOCGSERIAL) && (cmd != TIOCSSERIAL) &&
 	    (cmd != TIOCMIWAIT)) {
-		if (tty_io_error(tty))
+		if (tty->flags & (1 << TTY_IO_ERROR))
 		    return -EIO;
 	}
 
@@ -1187,13 +1192,14 @@ static long slgt_compat_ioctl(struct tty_struct *tty,
 			 unsigned int cmd, unsigned long arg)
 {
 	struct slgt_info *info = tty->driver_data;
-	int rc;
+	int rc = -ENOIOCTLCMD;
 
 	if (sanity_check(info, tty->name, "compat_ioctl"))
 		return -ENODEV;
 	DBGINFO(("%s compat_ioctl() cmd=%08X\n", info->device_name, cmd));
 
 	switch (cmd) {
+
 	case MGSL_IOCSPARAMS32:
 		rc = set_params32(info, compat_ptr(arg));
 		break;
@@ -1213,11 +1219,18 @@ static long slgt_compat_ioctl(struct tty_struct *tty,
 	case MGSL_IOCWAITGPIO:
 	case MGSL_IOCGXSYNC:
 	case MGSL_IOCGXCTRL:
-		rc = ioctl(tty, cmd, (unsigned long)compat_ptr(arg));
-		break;
-	default:
+	case MGSL_IOCSTXIDLE:
+	case MGSL_IOCTXENABLE:
+	case MGSL_IOCRXENABLE:
+	case MGSL_IOCTXABORT:
+	case TIOCMIWAIT:
+	case MGSL_IOCSIF:
+	case MGSL_IOCSXSYNC:
+	case MGSL_IOCSXCTRL:
 		rc = ioctl(tty, cmd, arg);
+		break;
 	}
+
 	DBGINFO(("%s compat_ioctl() cmd=%08X rc=%d\n", info->device_name, cmd, rc));
 	return rc;
 }
@@ -1349,10 +1362,10 @@ static void throttle(struct tty_struct * tty)
 	DBGINFO(("%s throttle\n", info->device_name));
 	if (I_IXOFF(tty))
 		send_xchar(tty, STOP_CHAR(tty));
-	if (C_CRTSCTS(tty)) {
+ 	if (tty->termios.c_cflag & CRTSCTS) {
 		spin_lock_irqsave(&info->lock,flags);
 		info->signals &= ~SerialSignal_RTS;
-		set_signals(info);
+	 	set_signals(info);
 		spin_unlock_irqrestore(&info->lock,flags);
 	}
 }
@@ -1374,10 +1387,10 @@ static void unthrottle(struct tty_struct * tty)
 		else
 			send_xchar(tty, START_CHAR(tty));
 	}
-	if (C_CRTSCTS(tty)) {
+ 	if (tty->termios.c_cflag & CRTSCTS) {
 		spin_lock_irqsave(&info->lock,flags);
 		info->signals |= SerialSignal_RTS;
-		set_signals(info);
+	 	set_signals(info);
 		spin_unlock_irqrestore(&info->lock,flags);
 	}
 }
@@ -1517,8 +1530,7 @@ static int hdlcdev_open(struct net_device *dev)
 	DBGINFO(("%s hdlcdev_open\n", dev->name));
 
 	/* generic HDLC layer open processing */
-	rc = hdlc_open(dev);
-	if (rc)
+	if ((rc = hdlc_open(dev)))
 		return rc;
 
 	/* arbitrate between network and tty opens */
@@ -1760,7 +1772,7 @@ static void hdlcdev_rx(struct slgt_info *info, char *buf, int size)
 static const struct net_device_ops hdlcdev_ops = {
 	.ndo_open       = hdlcdev_open,
 	.ndo_stop       = hdlcdev_close,
-	.ndo_change_mtu = hdlc_change_mtu,
+	.ndo_change_mtu_rh74 = hdlc_change_mtu,
 	.ndo_start_xmit = hdlc_start_xmit,
 	.ndo_do_ioctl   = hdlcdev_ioctl,
 	.ndo_tx_timeout = hdlcdev_tx_timeout,
@@ -1782,8 +1794,7 @@ static int hdlcdev_init(struct slgt_info *info)
 
 	/* allocate and initialize network and HDLC layer objects */
 
-	dev = alloc_hdlcdev(info);
-	if (!dev) {
+	if (!(dev = alloc_hdlcdev(info))) {
 		printk(KERN_ERR "%s hdlc device alloc failure\n", info->device_name);
 		return -ENOMEM;
 	}
@@ -1804,8 +1815,7 @@ static int hdlcdev_init(struct slgt_info *info)
 	hdlc->xmit   = hdlcdev_xmit;
 
 	/* register objects with HDLC layer */
-	rc = register_hdlc_device(dev);
-	if (rc) {
+	if ((rc = register_hdlc_device(dev))) {
 		printk(KERN_WARNING "%s:unable to register hdlc device\n",__FILE__);
 		free_netdev(dev);
 		return rc;
@@ -1860,8 +1870,7 @@ static void rx_async(struct slgt_info *info)
 
 			stat = 0;
 
-			status = *(p + 1) & (BIT1 + BIT0);
-			if (status) {
+			if ((status = *(p+1) & (BIT1 + BIT0))) {
 				if (status & BIT1)
 					icount->parity++;
 				else if (status & BIT0)
@@ -2072,7 +2081,7 @@ static void dcd_change(struct slgt_info *info, unsigned short status)
 	wake_up_interruptible(&info->event_wait_q);
 	info->pending_bh |= BH_STATUS;
 
-	if (tty_port_check_carrier(&info->port)) {
+	if (info->port.flags & ASYNC_CHECK_CD) {
 		if (info->signals & SerialSignal_DCD)
 			wake_up_interruptible(&info->port.open_wait);
 		else {
@@ -2413,7 +2422,7 @@ static int startup(struct slgt_info *info)
 {
 	DBGINFO(("%s startup\n", info->device_name));
 
-	if (tty_port_initialized(&info->port))
+	if (info->port.flags & ASYNC_INITIALIZED)
 		return 0;
 
 	if (!info->tx_buf) {
@@ -2434,7 +2443,7 @@ static int startup(struct slgt_info *info)
 	if (info->port.tty)
 		clear_bit(TTY_IO_ERROR, &info->port.tty->flags);
 
-	tty_port_set_initialized(&info->port, 1);
+	info->port.flags |= ASYNC_INITIALIZED;
 
 	return 0;
 }
@@ -2446,7 +2455,7 @@ static void shutdown(struct slgt_info *info)
 {
 	unsigned long flags;
 
-	if (!tty_port_initialized(&info->port))
+	if (!(info->port.flags & ASYNC_INITIALIZED))
 		return;
 
 	DBGINFO(("%s shutdown\n", info->device_name));
@@ -2481,7 +2490,7 @@ static void shutdown(struct slgt_info *info)
 	if (info->port.tty)
 		set_bit(TTY_IO_ERROR, &info->port.tty->flags);
 
-	tty_port_set_initialized(&info->port, 0);
+	info->port.flags &= ~ASYNC_INITIALIZED;
 }
 
 static void program_hw(struct slgt_info *info)
@@ -2568,16 +2577,23 @@ static void change_params(struct slgt_info *info)
 	}
 	info->timeout += HZ/50;		/* Add .02 seconds of slop */
 
-	tty_port_set_cts_flow(&info->port, cflag & CRTSCTS);
-	tty_port_set_check_carrier(&info->port, ~cflag & CLOCAL);
+	if (cflag & CRTSCTS)
+		info->port.flags |= ASYNC_CTS_FLOW;
+	else
+		info->port.flags &= ~ASYNC_CTS_FLOW;
+
+	if (cflag & CLOCAL)
+		info->port.flags &= ~ASYNC_CHECK_CD;
+	else
+		info->port.flags |= ASYNC_CHECK_CD;
 
 	/* process tty input control flags */
 
 	info->read_status_mask = IRQ_RXOVER;
 	if (I_INPCK(info->port.tty))
 		info->read_status_mask |= MASK_PARITY | MASK_FRAMING;
-	if (I_BRKINT(info->port.tty) || I_PARMRK(info->port.tty))
-		info->read_status_mask |= MASK_BREAK;
+ 	if (I_BRKINT(info->port.tty) || I_PARMRK(info->port.tty))
+ 		info->read_status_mask |= MASK_BREAK;
 	if (I_IGNPAR(info->port.tty))
 		info->ignore_status_mask |= MASK_PARITY | MASK_FRAMING;
 	if (I_IGNBRK(info->port.tty)) {
@@ -3208,7 +3224,7 @@ static int tiocmset(struct tty_struct *tty,
 		info->signals &= ~SerialSignal_DTR;
 
 	spin_lock_irqsave(&info->lock,flags);
-	set_signals(info);
+ 	set_signals(info);
 	spin_unlock_irqrestore(&info->lock,flags);
 	return 0;
 }
@@ -3219,7 +3235,7 @@ static int carrier_raised(struct tty_port *port)
 	struct slgt_info *info = container_of(port, struct slgt_info, port);
 
 	spin_lock_irqsave(&info->lock,flags);
-	get_signals(info);
+ 	get_signals(info);
 	spin_unlock_irqrestore(&info->lock,flags);
 	return (info->signals & SerialSignal_DCD) ? 1 : 0;
 }
@@ -3234,7 +3250,7 @@ static void dtr_rts(struct tty_port *port, int on)
 		info->signals |= SerialSignal_RTS | SerialSignal_DTR;
 	else
 		info->signals &= ~(SerialSignal_RTS | SerialSignal_DTR);
-	set_signals(info);
+ 	set_signals(info);
 	spin_unlock_irqrestore(&info->lock,flags);
 }
 
@@ -3254,13 +3270,13 @@ static int block_til_ready(struct tty_struct *tty, struct file *filp,
 
 	DBGINFO(("%s block_til_ready\n", tty->driver->name));
 
-	if (filp->f_flags & O_NONBLOCK || tty_io_error(tty)) {
+	if (filp->f_flags & O_NONBLOCK || tty->flags & (1 << TTY_IO_ERROR)){
 		/* nonblock mode is set or port is not enabled */
-		tty_port_set_active(port, 1);
+		port->flags |= ASYNC_NORMAL_ACTIVE;
 		return 0;
 	}
 
-	if (C_CLOCAL(tty))
+	if (tty->termios.c_cflag & CLOCAL)
 		do_clocal = true;
 
 	/* Wait for carrier detect and the line to become
@@ -3279,12 +3295,12 @@ static int block_til_ready(struct tty_struct *tty, struct file *filp,
 	port->blocked_open++;
 
 	while (1) {
-		if (C_BAUD(tty) && tty_port_initialized(port))
+		if (C_BAUD(tty) && test_bit(ASYNCB_INITIALIZED, &port->flags))
 			tty_port_raise_dtr_rts(port);
 
 		set_current_state(TASK_INTERRUPTIBLE);
 
-		if (tty_hung_up_p(filp) || !tty_port_initialized(port)) {
+		if (tty_hung_up_p(filp) || !(port->flags & ASYNC_INITIALIZED)){
 			retval = (port->flags & ASYNC_HUP_NOTIFY) ?
 					-EAGAIN : -ERESTARTSYS;
 			break;
@@ -3313,7 +3329,7 @@ static int block_til_ready(struct tty_struct *tty, struct file *filp,
 	port->blocked_open--;
 
 	if (!retval)
-		tty_port_set_active(port, 1);
+		port->flags |= ASYNC_NORMAL_ACTIVE;
 
 	DBGINFO(("%s block_til_ready ready, rc=%d\n", tty->driver->name, retval));
 	return retval;
@@ -3357,10 +3373,11 @@ static int alloc_desc(struct slgt_info *info)
 	unsigned int pbufs;
 
 	/* allocate memory to hold descriptor lists */
-	info->bufs = pci_zalloc_consistent(info->pdev, DESC_LIST_SIZE,
-					   &info->bufs_dma_addr);
+	info->bufs = pci_alloc_consistent(info->pdev, DESC_LIST_SIZE, &info->bufs_dma_addr);
 	if (info->bufs == NULL)
 		return -ENOMEM;
+
+	memset(info->bufs, 0, DESC_LIST_SIZE);
 
 	info->rbufs = (struct slgt_desc*)info->bufs;
 	info->tbufs = ((struct slgt_desc*)info->bufs) + info->rbuf_count;
@@ -3729,8 +3746,7 @@ static void slgt_cleanup(void)
 	if (serial_driver) {
 		for (info=slgt_device_list ; info != NULL ; info=info->next_device)
 			tty_unregister_device(serial_driver, info->line);
-		rc = tty_unregister_driver(serial_driver);
-		if (rc)
+		if ((rc = tty_unregister_driver(serial_driver)))
 			DBGERR(("tty_unregister_driver error=%d\n", rc));
 		put_tty_driver(serial_driver);
 	}
@@ -3779,7 +3795,7 @@ static int __init slgt_init(void)
 
 	/* Initialize the tty_driver structure */
 
-	serial_driver->driver_name = slgt_driver_name;
+	serial_driver->driver_name = tty_driver_name;
 	serial_driver->name = tty_dev_prefix;
 	serial_driver->major = ttymajor;
 	serial_driver->minor_start = 64;

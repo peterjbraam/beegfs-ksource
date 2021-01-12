@@ -115,13 +115,11 @@ static int pm860x_rtc_read_time(struct device *dev, struct rtc_time *tm)
 	pm860x_page_bulk_read(info->i2c, REG0_ADDR, 8, buf);
 	dev_dbg(info->dev, "%x-%x-%x-%x-%x-%x-%x-%x\n", buf[0], buf[1],
 		buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]);
-	base = ((unsigned long)buf[1] << 24) | (buf[3] << 16) |
-		(buf[5] << 8) | buf[7];
+	base = (buf[1] << 24) | (buf[3] << 16) | (buf[5] << 8) | buf[7];
 
 	/* load 32-bit read-only counter */
 	pm860x_bulk_read(info->i2c, PM8607_RTC_COUNTER1, 4, buf);
-	data = ((unsigned long)buf[3] << 24) | (buf[2] << 16) |
-		(buf[1] << 8) | buf[0];
+	data = (buf[3] << 24) | (buf[2] << 16) | (buf[1] << 8) | buf[0];
 	ticks = base + data;
 	dev_dbg(info->dev, "get base:0x%lx, RO count:0x%lx, ticks:0x%lx\n",
 		base, data, ticks);
@@ -147,8 +145,7 @@ static int pm860x_rtc_set_time(struct device *dev, struct rtc_time *tm)
 
 	/* load 32-bit read-only counter */
 	pm860x_bulk_read(info->i2c, PM8607_RTC_COUNTER1, 4, buf);
-	data = ((unsigned long)buf[3] << 24) | (buf[2] << 16) |
-		(buf[1] << 8) | buf[0];
+	data = (buf[3] << 24) | (buf[2] << 16) | (buf[1] << 8) | buf[0];
 	base = ticks - data;
 	dev_dbg(info->dev, "set base:0x%lx, RO count:0x%lx, ticks:0x%lx\n",
 		base, data, ticks);
@@ -173,12 +170,10 @@ static int pm860x_rtc_read_alarm(struct device *dev, struct rtc_wkalrm *alrm)
 	pm860x_page_bulk_read(info->i2c, REG0_ADDR, 8, buf);
 	dev_dbg(info->dev, "%x-%x-%x-%x-%x-%x-%x-%x\n", buf[0], buf[1],
 		buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]);
-	base = ((unsigned long)buf[1] << 24) | (buf[3] << 16) |
-		(buf[5] << 8) | buf[7];
+	base = (buf[1] << 24) | (buf[3] << 16) | (buf[5] << 8) | buf[7];
 
 	pm860x_bulk_read(info->i2c, PM8607_RTC_EXPIRE1, 4, buf);
-	data = ((unsigned long)buf[3] << 24) | (buf[2] << 16) |
-		(buf[1] << 8) | buf[0];
+	data = (buf[3] << 24) | (buf[2] << 16) | (buf[1] << 8) | buf[0];
 	ticks = base + data;
 	dev_dbg(info->dev, "get base:0x%lx, RO count:0x%lx, ticks:0x%lx\n",
 		base, data, ticks);
@@ -203,13 +198,11 @@ static int pm860x_rtc_set_alarm(struct device *dev, struct rtc_wkalrm *alrm)
 	pm860x_page_bulk_read(info->i2c, REG0_ADDR, 8, buf);
 	dev_dbg(info->dev, "%x-%x-%x-%x-%x-%x-%x-%x\n", buf[0], buf[1],
 		buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]);
-	base = ((unsigned long)buf[1] << 24) | (buf[3] << 16) |
-		(buf[5] << 8) | buf[7];
+	base = (buf[1] << 24) | (buf[3] << 16) | (buf[5] << 8) | buf[7];
 
 	/* load 32-bit read-only counter */
 	pm860x_bulk_read(info->i2c, PM8607_RTC_COUNTER1, 4, buf);
-	data = ((unsigned long)buf[3] << 24) | (buf[2] << 16) |
-		(buf[1] << 8) | buf[0];
+	data = (buf[3] << 24) | (buf[2] << 16) | (buf[1] << 8) | buf[0];
 	ticks = base + data;
 	dev_dbg(info->dev, "get base:0x%lx, RO count:0x%lx, ticks:0x%lx\n",
 		base, data, ticks);
@@ -300,7 +293,7 @@ static int pm860x_rtc_dt_init(struct platform_device *pdev,
 	int ret;
 	if (!np)
 		return -ENODEV;
-	np = of_get_child_by_name(np, "rtc");
+	np = of_find_node_by_name(np, "rtc");
 	if (!np) {
 		dev_err(&pdev->dev, "failed to find rtc node\n");
 		return -ENODEV;
@@ -308,7 +301,6 @@ static int pm860x_rtc_dt_init(struct platform_device *pdev,
 	ret = of_property_read_u32(np, "marvell,88pm860x-vrtc", &info->vrtc);
 	if (ret)
 		info->vrtc = 0;
-	of_node_put(np);
 	return 0;
 }
 #else
@@ -324,7 +316,7 @@ static int pm860x_rtc_probe(struct platform_device *pdev)
 	unsigned long ticks = 0;
 	int ret;
 
-	pdata = dev_get_platdata(&pdev->dev);
+	pdata = pdev->dev.platform_data;
 
 	info = devm_kzalloc(&pdev->dev, sizeof(struct pm860x_rtc_info),
 			    GFP_KERNEL);
@@ -421,11 +413,12 @@ static int pm860x_rtc_remove(struct platform_device *pdev)
 	struct pm860x_rtc_info *info = platform_get_drvdata(pdev);
 
 #ifdef VRTC_CALIBRATION
-	cancel_delayed_work_sync(&info->calib_work);
+	flush_scheduled_work();
 	/* disable measurement */
 	pm860x_set_bits(info->i2c, PM8607_MEAS_EN2, MEAS2_VRTC, 0);
 #endif	/* VRTC_CALIBRATION */
 
+	platform_set_drvdata(pdev, NULL);
 	return 0;
 }
 
@@ -455,6 +448,7 @@ static SIMPLE_DEV_PM_OPS(pm860x_rtc_pm_ops, pm860x_rtc_suspend, pm860x_rtc_resum
 static struct platform_driver pm860x_rtc_driver = {
 	.driver		= {
 		.name	= "88pm860x-rtc",
+		.owner	= THIS_MODULE,
 		.pm	= &pm860x_rtc_pm_ops,
 	},
 	.probe		= pm860x_rtc_probe,

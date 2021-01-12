@@ -5,7 +5,6 @@
 #include <linux/sched.h>
 #include <linux/kref.h>
 #include <linux/nsproxy.h>
-#include <linux/ns_common.h>
 #include <linux/err.h>
 #include <uapi/linux/utsname.h>
 
@@ -24,8 +23,8 @@ struct uts_namespace {
 	struct kref kref;
 	struct new_utsname name;
 	struct user_namespace *user_ns;
-	struct ucounts *ucounts;
-	struct ns_common ns;
+	unsigned int proc_inum;
+	RH_KABI_EXTEND(struct ucounts *ucounts)
 };
 extern struct uts_namespace init_uts_ns;
 

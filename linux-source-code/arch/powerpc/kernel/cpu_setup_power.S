@@ -15,7 +15,7 @@
 #include <asm/ppc_asm.h>
 #include <asm/asm-offsets.h>
 #include <asm/cache.h>
-#include <asm/book3s/64/mmu-hash.h>
+#include <asm/mmu-hash64.h>
 
 /* Entry: r3 = crap, r4 = ptr to cputable entry
  *
@@ -28,7 +28,6 @@ _GLOBAL(__setup_cpu_power7)
 	beqlr
 	li	r0,0
 	mtspr	SPRN_LPID,r0
-	mtspr	SPRN_PCR,r0
 	mfspr	r3,SPRN_LPCR
 	bl	__init_LPCR
 	bl	__init_tlb_power7
@@ -42,7 +41,6 @@ _GLOBAL(__restore_cpu_power7)
 	beqlr
 	li	r0,0
 	mtspr	SPRN_LPID,r0
-	mtspr	SPRN_PCR,r0
 	mfspr	r3,SPRN_LPCR
 	bl	__init_LPCR
 	bl	__init_tlb_power7
@@ -53,20 +51,17 @@ _GLOBAL(__setup_cpu_power8)
 	mflr	r11
 	bl	__init_FSCR
 	bl	__init_PMU
-	bl	__init_PMU_ISA207
 	bl	__init_hvmode_206
 	mtlr	r11
 	beqlr
 	li	r0,0
 	mtspr	SPRN_LPID,r0
-	mtspr	SPRN_PCR,r0
 	mfspr	r3,SPRN_LPCR
 	ori	r3, r3, LPCR_PECEDH
 	bl	__init_LPCR
 	bl	__init_HFSCR
 	bl	__init_tlb_power8
 	bl	__init_PMU_HV
-	bl	__init_PMU_HV_ISA207
 	mtlr	r11
 	blr
 
@@ -74,68 +69,51 @@ _GLOBAL(__restore_cpu_power8)
 	mflr	r11
 	bl	__init_FSCR
 	bl	__init_PMU
-	bl	__init_PMU_ISA207
 	mfmsr	r3
 	rldicl.	r0,r3,4,63
 	mtlr	r11
 	beqlr
 	li	r0,0
 	mtspr	SPRN_LPID,r0
-	mtspr	SPRN_PCR,r0
 	mfspr   r3,SPRN_LPCR
 	ori	r3, r3, LPCR_PECEDH
 	bl	__init_LPCR
 	bl	__init_HFSCR
 	bl	__init_tlb_power8
 	bl	__init_PMU_HV
-	bl	__init_PMU_HV_ISA207
 	mtlr	r11
 	blr
 
 _GLOBAL(__setup_cpu_power9)
 	mflr	r11
 	bl	__init_FSCR
-	bl	__init_PMU
 	bl	__init_hvmode_206
 	mtlr	r11
 	beqlr
 	li	r0,0
 	mtspr	SPRN_LPID,r0
-	mtspr	SPRN_PID,r0
-	mtspr	SPRN_PCR,r0
 	mfspr	r3,SPRN_LPCR
-	LOAD_REG_IMMEDIATE(r4, LPCR_PECEDH | LPCR_PECE_HVEE | LPCR_HVICE)
-	or	r3, r3, r4
-	LOAD_REG_IMMEDIATE(r4, LPCR_UPRT | LPCR_HR)
-	andc	r3, r3, r4
+	ori	r3, r3, LPCR_PECEDH
 	bl	__init_LPCR
 	bl	__init_HFSCR
 	bl	__init_tlb_power9
-	bl	__init_PMU_HV
 	mtlr	r11
 	blr
 
 _GLOBAL(__restore_cpu_power9)
 	mflr	r11
 	bl	__init_FSCR
-	bl	__init_PMU
 	mfmsr	r3
 	rldicl.	r0,r3,4,63
 	mtlr	r11
 	beqlr
 	li	r0,0
 	mtspr	SPRN_LPID,r0
-	mtspr	SPRN_PID,r0
-	mtspr	SPRN_PCR,r0
 	mfspr   r3,SPRN_LPCR
-	LOAD_REG_IMMEDIATE(r4, LPCR_PECEDH | LPCR_PECE_HVEE | LPCR_HVICE)
-	or	r3, r3, r4
-	LOAD_REG_IMMEDIATE(r4, LPCR_UPRT | LPCR_HR)
-	andc	r3, r3, r4
+	ori	r3, r3, LPCR_PECEDH
 	bl	__init_LPCR
 	bl	__init_HFSCR
 	bl	__init_tlb_power9
-	bl	__init_PMU_HV
 	mtlr	r11
 	blr
 
@@ -230,22 +208,14 @@ __init_tlb_power9:
 __init_PMU_HV:
 	li	r5,0
 	mtspr	SPRN_MMCRC,r5
-	blr
-
-__init_PMU_HV_ISA207:
-	li	r5,0
 	mtspr	SPRN_MMCRH,r5
 	blr
 
 __init_PMU:
 	li	r5,0
+	mtspr	SPRN_MMCRS,r5
 	mtspr	SPRN_MMCRA,r5
 	mtspr	SPRN_MMCR0,r5
 	mtspr	SPRN_MMCR1,r5
 	mtspr	SPRN_MMCR2,r5
-	blr
-
-__init_PMU_ISA207:
-	li	r5,0
-	mtspr	SPRN_MMCRS,r5
 	blr

@@ -67,7 +67,7 @@ static struct nd_blk_region *to_ndbr(struct nd_namespace_blk *nsblk)
 	return container_of(nd_region, struct nd_blk_region, nd_region);
 }
 
-#ifdef CONFIG_BLK_DEV_INTEGRITY
+#ifdef CONFIG_BLK_DEV_INTEGRITY__BROKEN__
 static int nd_blk_rw_integrity(struct nd_namespace_blk *nsblk,
 		struct bio_integrity_payload *bip, u64 lba, int rw)
 {
@@ -75,7 +75,8 @@ static int nd_blk_rw_integrity(struct nd_namespace_blk *nsblk,
 	unsigned int len = nsblk_meta_size(nsblk);
 	resource_size_t	dev_offset, ns_offset;
 	u32 internal_lbasize, sector_size;
-	int err = 0;
+	struct bio_vec *bv;
+	int err = 0, i;
 
 	internal_lbasize = nsblk_internal_lbasize(nsblk);
 	sector_size = nsblk_sector_size(nsblk);
@@ -84,21 +85,16 @@ static int nd_blk_rw_integrity(struct nd_namespace_blk *nsblk,
 	if (dev_offset == SIZE_MAX)
 		return -EIO;
 
-	while (len) {
+	bip_for_each_vec(bv, bip, i) {
 		unsigned int cur_len;
-		struct bio_vec bv;
 		void *iobuf;
 
-		bv = bvec_iter_bvec(bip->bip_vec, bip->bip_iter);
-		/*
-		 * The 'bv' obtained from bvec_iter_bvec has its .bv_len and
-		 * .bv_offset already adjusted for iter->bi_bvec_done, and we
-		 * can use those directly
-		 */
+		if (!len)
+			break;
 
-		cur_len = min(len, bv.bv_len);
-		iobuf = kmap_atomic(bv.bv_page);
-		err = ndbr->do_io(ndbr, dev_offset, iobuf + bv.bv_offset,
+		cur_len = min(len, bv->bv_len);
+		iobuf = kmap_atomic(bv->bv_page);
+		err = ndbr->do_io(ndbr, dev_offset, iobuf + bv->bv_offset,
 				cur_len, rw);
 		kunmap_atomic(iobuf);
 		if (err)
@@ -106,13 +102,13 @@ static int nd_blk_rw_integrity(struct nd_namespace_blk *nsblk,
 
 		len -= cur_len;
 		dev_offset += cur_len;
-		bvec_iter_advance(bip->bip_vec, &bip->bip_iter, cur_len);
 	}
+	BUG_ON(len);
 
 	return err;
 }
 
-#else /* CONFIG_BLK_DEV_INTEGRITY */
+#else /* CONFIG_BLK_DEV_INTEGRITY__BROKEN__ */
 static int nd_blk_rw_integrity(struct nd_namespace_blk *nsblk,
 		struct bio_integrity_payload *bip, u64 lba, int rw)
 {
@@ -169,14 +165,14 @@ static int nsblk_do_bvec(struct nd_namespace_blk *nsblk,
 	return err;
 }
 
-static blk_qc_t nd_blk_make_request(struct request_queue *q, struct bio *bio)
+static void nd_blk_make_request(struct request_queue *q, struct bio *bio)
 {
 	struct bio_integrity_payload *bip;
 	struct nd_namespace_blk *nsblk;
-	struct bvec_iter iter;
+	struct bio_vec *bvec;
 	unsigned long start;
-	struct bio_vec bvec;
-	int err = 0, rw;
+	sector_t sector = bio->bi_sector;
+	int err = 0, rw, i;
 	bool do_acct;
 
 	/*
@@ -186,39 +182,39 @@ static blk_qc_t nd_blk_make_request(struct request_queue *q, struct bio *bio)
 	 * another kernel subsystem, and we just pass it through.
 	 */
 	if (bio_integrity_enabled(bio) && bio_integrity_prep(bio)) {
-		bio->bi_error = -EIO;
+		err = -EIO;
 		goto out;
 	}
 
-	bip = bio_integrity(bio);
+	bip = bio->bi_integrity;
 	nsblk = q->queuedata;
 	rw = bio_data_dir(bio);
 	do_acct = nd_iostat_start(bio, &start);
-	bio_for_each_segment(bvec, bio, iter) {
-		unsigned int len = bvec.bv_len;
+	bio_for_each_segment(bvec, bio, i) {
+		unsigned int len = bvec->bv_len;
 
 		BUG_ON(len > PAGE_SIZE);
-		err = nsblk_do_bvec(nsblk, bip, bvec.bv_page, len,
-				bvec.bv_offset, rw, iter.bi_sector);
+		err = nsblk_do_bvec(nsblk, bip, bvec->bv_page, len,
+				bvec->bv_offset, rw, sector);
 		if (err) {
 			dev_dbg(&nsblk->common.dev,
 					"io error in %s sector %lld, len %d,\n",
 					(rw == READ) ? "READ" : "WRITE",
-					(unsigned long long) iter.bi_sector, len);
-			bio->bi_error = err;
+					(unsigned long long) sector, len);
 			break;
 		}
+		sector += len >> SECTOR_SHIFT;
 	}
 	if (do_acct)
 		nd_iostat_end(bio, start);
 
  out:
-	bio_endio(bio);
-	return BLK_QC_T_NONE;
+	bio_endio(bio, err);
 }
 
 static int nsblk_rw_bytes(struct nd_namespace_common *ndns,
-		resource_size_t offset, void *iobuf, size_t n, int rw)
+		resource_size_t offset, void *iobuf, size_t n, int rw,
+		unsigned long flags)
 {
 	struct nd_namespace_blk *nsblk = to_nd_namespace_blk(&ndns->dev);
 	struct nd_blk_region *ndbr = to_ndbr(nsblk);
@@ -281,25 +277,18 @@ static int nsblk_attach_disk(struct nd_namespace_blk *nsblk)
 	if (!disk)
 		return -ENOMEM;
 
+	disk->driverfs_dev	= dev;
 	disk->first_minor	= 0;
 	disk->fops		= &nd_blk_fops;
 	disk->queue		= q;
 	disk->flags		= GENHD_FL_EXT_DEVT;
 	nvdimm_namespace_disk_name(&nsblk->common, disk->disk_name);
+	set_capacity(disk, available_disk_size >> SECTOR_SHIFT);
+	add_disk(disk);
 
 	if (devm_add_action_or_reset(dev, nd_blk_release_disk, disk))
 		return -ENOMEM;
 
-	if (nsblk_meta_size(nsblk)) {
-		int rc = nd_integrity_init(disk, nsblk_meta_size(nsblk));
-
-		if (rc)
-			return rc;
-	}
-
-	set_capacity(disk, available_disk_size >> SECTOR_SHIFT);
-	device_add_disk(dev, disk);
-	revalidate_disk(disk);
 	return 0;
 }
 

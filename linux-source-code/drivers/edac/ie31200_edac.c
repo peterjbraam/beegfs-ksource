@@ -18,10 +18,12 @@
  * 0c04: Xeon E3-1200 v3/4th Gen Core Processor DRAM Controller
  * 0c08: Xeon E3-1200 v3 Processor DRAM Controller
  * 1918: Xeon E3-1200 v5 Skylake Host Bridge/DRAM Registers
+ * 5918: Xeon E3-1200 Xeon E3-1200 v6/7th Gen Core Processor Host Bridge/DRAM Registers
  *
  * Based on Intel specification:
  * http://www.intel.com/content/dam/www/public/us/en/documents/datasheets/xeon-e3-1200v3-vol-2-datasheet.pdf
  * http://www.intel.com/content/www/us/en/processors/xeon/xeon-e3-1200-family-vol-2-datasheet.html
+ * http://www.intel.com/content/www/us/en/processors/core/7th-gen-core-family-mobile-h-processor-lines-datasheet-vol-2.html
  *
  * According to the above datasheet (p.16):
  * "
@@ -40,7 +42,7 @@
 #include <linux/pci_ids.h>
 #include <linux/edac.h>
 
-#include <linux/io-64-nonatomic-lo-hi.h>
+#include <asm-generic/io-64-nonatomic-lo-hi.h>
 #include "edac_core.h"
 
 #define IE31200_REVISION "1.0"
@@ -57,6 +59,7 @@
 #define PCI_DEVICE_ID_INTEL_IE31200_HB_6 0x0c04
 #define PCI_DEVICE_ID_INTEL_IE31200_HB_7 0x0c08
 #define PCI_DEVICE_ID_INTEL_IE31200_HB_8 0x1918
+#define PCI_DEVICE_ID_INTEL_IE31200_HB_9 0x5918
 
 #define IE31200_DIMMS			4
 #define IE31200_RANKS			8
@@ -145,8 +148,6 @@
 	(n << (28 + (2 * skl) - PAGE_SHIFT))
 
 static int nr_channels;
-static struct pci_dev *mci_pdev;
-static int ie31200_registered = 1;
 
 struct ie31200_priv {
 	void __iomem *window;
@@ -378,7 +379,12 @@ static int ie31200_probe1(struct pci_dev *pdev, int dev_idx)
 	void __iomem *window;
 	struct ie31200_priv *priv;
 	u32 addr_decode, mad_offset;
-	bool skl = (pdev->device == PCI_DEVICE_ID_INTEL_IE31200_HB_8);
+
+	/*
+	 * Kaby Lake seems to work like Skylake. Please re-visit this logic
+	 * when adding new CPU support.
+	 */
+	bool skl = (pdev->device >= PCI_DEVICE_ID_INTEL_IE31200_HB_8);
 
 	edac_dbg(0, "MC:\n");
 
@@ -514,16 +520,12 @@ fail_free:
 static int ie31200_init_one(struct pci_dev *pdev,
 			    const struct pci_device_id *ent)
 {
-	int rc;
-
 	edac_dbg(0, "MC:\n");
+
 	if (pci_enable_device(pdev) < 0)
 		return -EIO;
-	rc = ie31200_probe1(pdev, ent->driver_data);
-	if (rc == 0 && !mci_pdev)
-		mci_pdev = pci_dev_get(pdev);
 
-	return rc;
+	return ie31200_probe1(pdev, ent->driver_data);
 }
 
 static void ie31200_remove_one(struct pci_dev *pdev)
@@ -532,8 +534,6 @@ static void ie31200_remove_one(struct pci_dev *pdev)
 	struct ie31200_priv *priv;
 
 	edac_dbg(0, "\n");
-	pci_dev_put(mci_pdev);
-	mci_pdev = NULL;
 	mci = edac_mc_del_mc(&pdev->dev);
 	if (!mci)
 		return;
@@ -568,6 +568,9 @@ static const struct pci_device_id ie31200_pci_tbl[] = {
 		PCI_VEND_DEV(INTEL, IE31200_HB_8), PCI_ANY_ID, PCI_ANY_ID, 0, 0,
 		IE31200},
 	{
+		PCI_VEND_DEV(INTEL, IE31200_HB_9), PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		IE31200},
+	{
 		0,
 	}            /* 0 terminated list. */
 };
@@ -582,53 +585,17 @@ static struct pci_driver ie31200_driver = {
 
 static int __init ie31200_init(void)
 {
-	int pci_rc, i;
-
 	edac_dbg(3, "MC:\n");
 	/* Ensure that the OPSTATE is set correctly for POLL or NMI */
 	opstate_init();
 
-	pci_rc = pci_register_driver(&ie31200_driver);
-	if (pci_rc < 0)
-		goto fail0;
-
-	if (!mci_pdev) {
-		ie31200_registered = 0;
-		for (i = 0; ie31200_pci_tbl[i].vendor != 0; i++) {
-			mci_pdev = pci_get_device(ie31200_pci_tbl[i].vendor,
-						  ie31200_pci_tbl[i].device,
-						  NULL);
-			if (mci_pdev)
-				break;
-		}
-		if (!mci_pdev) {
-			edac_dbg(0, "ie31200 pci_get_device fail\n");
-			pci_rc = -ENODEV;
-			goto fail1;
-		}
-		pci_rc = ie31200_init_one(mci_pdev, &ie31200_pci_tbl[i]);
-		if (pci_rc < 0) {
-			edac_dbg(0, "ie31200 init fail\n");
-			pci_rc = -ENODEV;
-			goto fail1;
-		}
-	}
-	return 0;
-
-fail1:
-	pci_unregister_driver(&ie31200_driver);
-fail0:
-	pci_dev_put(mci_pdev);
-
-	return pci_rc;
+	return pci_register_driver(&ie31200_driver);
 }
 
 static void __exit ie31200_exit(void)
 {
 	edac_dbg(3, "MC:\n");
 	pci_unregister_driver(&ie31200_driver);
-	if (!ie31200_registered)
-		ie31200_remove_one(mci_pdev);
 }
 
 module_init(ie31200_init);

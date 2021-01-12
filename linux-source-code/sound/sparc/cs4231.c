@@ -429,8 +429,7 @@ static void snd_cs4231_advance_dma(struct cs4231_dma_control *dma_cont,
 		unsigned int period_size = snd_pcm_lib_period_bytes(substream);
 		unsigned int offset = period_size * (*periods_sent);
 
-		if (WARN_ON(period_size >= (1 << 24)))
-			return;
+		BUG_ON(period_size >= (1 << 24));
 
 		if (dma_cont->request(dma_cont,
 				      runtime->dma_addr + offset, period_size))
@@ -907,24 +906,18 @@ static int snd_cs4231_playback_prepare(struct snd_pcm_substream *substream)
 	struct snd_cs4231 *chip = snd_pcm_substream_chip(substream);
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	unsigned long flags;
-	int ret = 0;
 
 	spin_lock_irqsave(&chip->lock, flags);
 
 	chip->image[CS4231_IFACE_CTRL] &= ~(CS4231_PLAYBACK_ENABLE |
 					    CS4231_PLAYBACK_PIO);
 
-	if (WARN_ON(runtime->period_size > 0xffff + 1)) {
-		ret = -EINVAL;
-		goto out;
-	}
+	BUG_ON(runtime->period_size > 0xffff + 1);
 
 	chip->p_periods_sent = 0;
-
-out:
 	spin_unlock_irqrestore(&chip->lock, flags);
 
-	return ret;
+	return 0;
 }
 
 static int snd_cs4231_capture_hw_params(struct snd_pcm_substream *substream,
@@ -1146,8 +1139,10 @@ static int snd_cs4231_playback_open(struct snd_pcm_substream *substream)
 	runtime->hw = snd_cs4231_playback;
 
 	err = snd_cs4231_open(chip, CS4231_MODE_PLAY);
-	if (err < 0)
+	if (err < 0) {
+		snd_free_pages(runtime->dma_area, runtime->dma_bytes);
 		return err;
+	}
 	chip->playback_substream = substream;
 	chip->p_periods_sent = 0;
 	snd_pcm_set_sync(substream);
@@ -1165,8 +1160,10 @@ static int snd_cs4231_capture_open(struct snd_pcm_substream *substream)
 	runtime->hw = snd_cs4231_capture;
 
 	err = snd_cs4231_open(chip, CS4231_MODE_RECORD);
-	if (err < 0)
+	if (err < 0) {
+		snd_free_pages(runtime->dma_area, runtime->dma_bytes);
 		return err;
+	}
 	chip->capture_substream = substream;
 	chip->c_periods_sent = 0;
 	snd_pcm_set_sync(substream);
@@ -1281,11 +1278,19 @@ static int snd_cs4231_timer(struct snd_card *card)
 static int snd_cs4231_info_mux(struct snd_kcontrol *kcontrol,
 			       struct snd_ctl_elem_info *uinfo)
 {
-	static const char * const texts[4] = {
+	static char *texts[4] = {
 		"Line", "CD", "Mic", "Mix"
 	};
 
-	return snd_ctl_enum_info(uinfo, 2, 4, texts);
+	uinfo->type = SNDRV_CTL_ELEM_TYPE_ENUMERATED;
+	uinfo->count = 2;
+	uinfo->value.enumerated.items = 4;
+	if (uinfo->value.enumerated.item > 3)
+		uinfo->value.enumerated.item = 3;
+	strcpy(uinfo->value.enumerated.name,
+		texts[uinfo->value.enumerated.item]);
+
+	return 0;
 }
 
 static int snd_cs4231_get_mux(struct snd_kcontrol *kcontrol,
@@ -2107,6 +2112,7 @@ MODULE_DEVICE_TABLE(of, cs4231_match);
 static struct platform_driver cs4231_driver = {
 	.driver = {
 		.name = "audio",
+		.owner = THIS_MODULE,
 		.of_match_table = cs4231_match,
 	},
 	.probe		= cs4231_probe,

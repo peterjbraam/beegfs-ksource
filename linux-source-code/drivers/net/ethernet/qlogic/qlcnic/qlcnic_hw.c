@@ -474,7 +474,7 @@ int qlcnic_nic_del_mac(struct qlcnic_adapter *adapter, const u8 *addr)
 	/* Delete MAC from the existing list */
 	list_for_each(head, &adapter->mac_list) {
 		cur = list_entry(head, struct qlcnic_mac_vlan_list, list);
-		if (ether_addr_equal(addr, cur->mac_addr)) {
+		if (memcmp(addr, cur->mac_addr, ETH_ALEN) == 0) {
 			err = qlcnic_sre_macaddr_change(adapter, cur->mac_addr,
 							0, QLCNIC_MAC_DEL);
 			if (err)
@@ -496,7 +496,7 @@ int qlcnic_nic_add_mac(struct qlcnic_adapter *adapter, const u8 *addr, u16 vlan,
 	/* look up if already exists */
 	list_for_each(head, &adapter->mac_list) {
 		cur = list_entry(head, struct qlcnic_mac_vlan_list, list);
-		if (ether_addr_equal(addr, cur->mac_addr) &&
+		if (memcmp(addr, cur->mac_addr, ETH_ALEN) == 0 &&
 		    cur->vlan_id == vlan)
 			return 0;
 	}
@@ -965,7 +965,7 @@ void qlcnic_82xx_config_ipaddr(struct qlcnic_adapter *adapter,
 	rv = qlcnic_send_cmd_descs(adapter, (struct cmd_desc_type0 *)&req, 1);
 	if (rv != 0)
 		dev_err(&adapter->netdev->dev,
-				"could not notify %s IP 0x%x request\n",
+				"could not notify %s IP 0x%x reuqest\n",
 				(cmd == QLCNIC_IP_UP) ? "Add" : "Remove", ip);
 }
 
@@ -1023,12 +1023,6 @@ int qlcnic_change_mtu(struct net_device *netdev, int mtu)
 {
 	struct qlcnic_adapter *adapter = netdev_priv(netdev);
 	int rc = 0;
-
-	if (mtu < P3P_MIN_MTU || mtu > P3P_MAX_MTU) {
-		dev_err(&adapter->netdev->dev, "%d bytes < mtu < %d bytes"
-			" not supported\n", P3P_MAX_MTU, P3P_MIN_MTU);
-		return -EINVAL;
-	}
 
 	rc = qlcnic_fw_cmd_set_mtu(adapter, mtu);
 

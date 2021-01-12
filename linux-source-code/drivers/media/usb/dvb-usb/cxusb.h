@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _DVB_USB_CXUSB_H_
 #define _DVB_USB_CXUSB_H_
 
@@ -28,15 +29,8 @@
 #define CMD_ANALOG        0x50
 #define CMD_DIGITAL       0x51
 
-/* Max transfer size done by I2C transfer functions */
-#define MAX_XFER_SIZE  80
-
 struct cxusb_state {
 	u8 gpio_write_state[3];
-	struct i2c_client *i2c_client_demod;
-	struct i2c_client *i2c_client_tuner;
-
-	unsigned char data[MAX_XFER_SIZE];
 };
 
 #endif

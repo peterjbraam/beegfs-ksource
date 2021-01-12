@@ -30,6 +30,7 @@
 #include <linux/device.h>
 #include <linux/module.h>
 #include <linux/of_device.h>
+#include <linux/of.h>
 #include <linux/pm_runtime.h>
 #include <linux/slab.h>
 
@@ -165,14 +166,14 @@ of_mipi_dsi_device_add(struct mipi_dsi_host *host, struct device_node *node)
 	u32 reg;
 
 	if (of_modalias_node(node, info.type, sizeof(info.type)) < 0) {
-		dev_err(dev, "modalias failure on %s\n", node->full_name);
+		dev_err(dev, "modalias failure on %pOF\n", node);
 		return ERR_PTR(-EINVAL);
 	}
 
 	ret = of_property_read_u32(node, "reg", &reg);
 	if (ret) {
-		dev_err(dev, "device node %s has no valid reg property: %d\n",
-			node->full_name, ret);
+		dev_err(dev, "device node %pOF has no valid reg property: %d\n",
+			node, ret);
 		return ERR_PTR(-EINVAL);
 	}
 
@@ -498,8 +499,9 @@ int mipi_dsi_shutdown_peripheral(struct mipi_dsi_device *dsi)
 		.tx_buf = (u8 [2]) { 0, 0 },
 		.tx_len = 2,
 	};
+	int ret = mipi_dsi_device_transfer(dsi, &msg);
 
-	return mipi_dsi_device_transfer(dsi, &msg);
+	return (ret < 0) ? ret : 0;
 }
 EXPORT_SYMBOL(mipi_dsi_shutdown_peripheral);
 
@@ -517,8 +519,9 @@ int mipi_dsi_turn_on_peripheral(struct mipi_dsi_device *dsi)
 		.tx_buf = (u8 [2]) { 0, 0 },
 		.tx_len = 2,
 	};
+	int ret = mipi_dsi_device_transfer(dsi, &msg);
 
-	return mipi_dsi_device_transfer(dsi, &msg);
+	return (ret < 0) ? ret : 0;
 }
 EXPORT_SYMBOL(mipi_dsi_turn_on_peripheral);
 
@@ -541,8 +544,9 @@ int mipi_dsi_set_maximum_return_packet_size(struct mipi_dsi_device *dsi,
 		.tx_len = sizeof(tx),
 		.tx_buf = tx,
 	};
+	int ret = mipi_dsi_device_transfer(dsi, &msg);
 
-	return mipi_dsi_device_transfer(dsi, &msg);
+	return (ret < 0) ? ret : 0;
 }
 EXPORT_SYMBOL(mipi_dsi_set_maximum_return_packet_size);
 
@@ -1029,11 +1033,11 @@ EXPORT_SYMBOL(mipi_dsi_dcs_set_pixel_format);
  */
 int mipi_dsi_dcs_set_tear_scanline(struct mipi_dsi_device *dsi, u16 scanline)
 {
-	u8 payload[2] = { scanline >> 8, scanline & 0xff };
+	u8 payload[3] = { MIPI_DCS_SET_TEAR_SCANLINE, scanline >> 8,
+			  scanline & 0xff };
 	ssize_t err;
 
-	err = mipi_dsi_dcs_write(dsi, MIPI_DCS_SET_TEAR_SCANLINE, payload,
-				 sizeof(payload));
+	err = mipi_dsi_generic_write(dsi, payload, sizeof(payload));
 	if (err < 0)
 		return err;
 

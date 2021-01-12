@@ -54,6 +54,15 @@ extern const struct nf_nat_l4proto nf_nat_l4proto_udp;
 extern const struct nf_nat_l4proto nf_nat_l4proto_icmp;
 extern const struct nf_nat_l4proto nf_nat_l4proto_icmpv6;
 extern const struct nf_nat_l4proto nf_nat_l4proto_unknown;
+#ifdef CONFIG_NF_NAT_PROTO_DCCP
+extern const struct nf_nat_l4proto nf_nat_l4proto_dccp;
+#endif
+#ifdef CONFIG_NF_NAT_PROTO_SCTP
+extern const struct nf_nat_l4proto nf_nat_l4proto_sctp;
+#endif
+#ifdef CONFIG_NF_NAT_PROTO_UDPLITE
+extern const struct nf_nat_l4proto nf_nat_l4proto_udplite;
+#endif
 
 bool nf_nat_l4proto_in_range(const struct nf_conntrack_tuple *tuple,
 			     enum nf_nat_manip_type maniptype,
@@ -64,7 +73,7 @@ void nf_nat_l4proto_unique_tuple(const struct nf_nat_l3proto *l3proto,
 				 struct nf_conntrack_tuple *tuple,
 				 const struct nf_nat_range *range,
 				 enum nf_nat_manip_type maniptype,
-				 const struct nf_conn *ct, u16 *rover);
+				 const struct nf_conn *ct);
 
 int nf_nat_l4proto_nlattr_to_range(struct nlattr *tb[],
 				   struct nf_nat_range *range);

@@ -58,7 +58,7 @@ int kvmppc_emulate_loadstore(struct kvm_vcpu *vcpu)
 	/* this default type might be overwritten by subcategories */
 	kvmppc_set_exit_type(vcpu, EMULATED_INST_EXITS);
 
-	emulated = kvmppc_get_last_inst(vcpu, INST_GENERIC, &inst);
+	emulated = kvmppc_get_last_inst(vcpu, false, &inst);
 	if (emulated != EMULATE_DONE)
 		return emulated;
 

@@ -27,6 +27,13 @@ struct mempolicy;
  * parent/subdir are used for the directory structure (every /proc file has a
  * parent, but "subdir" is empty for all non-directory entries).
  * subdir_node is used to build the rb tree "subdir" of the parent.
+ *
+ * Because proc_dir_entry structure pointers are passed as arguments for some
+ * whitelisted functions, changes in this structure break kernel's ABI.
+ * But, proc_dir_entry is an internal structure for procfs, it is not defined
+ * anywhere else other than here, and should be handled internally in procfs
+ * only, so, changes in this structure should be bypassed by kABI checker, and
+ * such changes should not impact of procfs users.
  */
 struct proc_dir_entry {
 	unsigned int low_ino;
@@ -37,9 +44,13 @@ struct proc_dir_entry {
 	loff_t size;
 	const struct inode_operations *proc_iops;
 	const struct file_operations *proc_fops;
+#ifdef __GENKSYMS__
+	struct proc_dir_entry *next, *parent, *subdir;
+#else
 	struct proc_dir_entry *parent;
 	struct rb_root subdir;
 	struct rb_node subdir_node;
+#endif
 	void *data;
 	atomic_t count;		/* use count */
 	atomic_t in_use;	/* number of callers into module in progress; */
@@ -53,6 +64,7 @@ struct proc_dir_entry {
 
 union proc_op {
 	int (*proc_get_link)(struct dentry *, struct path *);
+	int (*proc_read)(struct task_struct *task, char *page);
 	int (*proc_show)(struct seq_file *m,
 		struct pid_namespace *ns, struct pid *pid,
 		struct task_struct *task);
@@ -60,13 +72,13 @@ union proc_op {
 
 struct proc_inode {
 	struct pid *pid;
-	unsigned int fd;
+	int fd;
 	union proc_op op;
 	struct proc_dir_entry *pde;
 	struct ctl_table_header *sysctl;
 	struct ctl_table *sysctl_entry;
 	struct hlist_node sysctl_inodes;
-	const struct proc_ns_operations *ns_ops;
+	struct proc_ns ns;
 	struct inode vfs_inode;
 };
 
@@ -113,10 +125,10 @@ static inline int task_dumpable(struct task_struct *task)
 	return 0;
 }
 
-static inline unsigned name_to_int(const struct qstr *qstr)
+static inline unsigned name_to_int(struct dentry *dentry)
 {
-	const char *name = qstr->name;
-	int len = qstr->len;
+	const char *name = dentry->d_name.name;
+	int len = dentry->d_name.len;
 	unsigned n = 0;
 
 	if (len > 1 && *name == '0')
@@ -163,27 +175,29 @@ extern int proc_pid_statm(struct seq_file *, struct pid_namespace *,
 extern const struct dentry_operations pid_dentry_operations;
 extern int pid_getattr(struct vfsmount *, struct dentry *, struct kstat *);
 extern int proc_setattr(struct dentry *, struct iattr *);
-extern struct inode *proc_pid_make_inode(struct super_block *, struct task_struct *);
+extern struct inode *proc_pid_make_inode(struct super_block *, struct task_struct *, umode_t);
 extern int pid_revalidate(struct dentry *, unsigned int);
 extern int pid_delete_dentry(const struct dentry *);
-extern int proc_pid_readdir(struct file *, struct dir_context *);
+extern int proc_pid_readdir(struct file *, void *, filldir_t);
 extern struct dentry *proc_pid_lookup(struct inode *, struct dentry *, unsigned int);
 extern loff_t mem_lseek(struct file *, loff_t, int);
 
 /* Lookups */
-typedef int instantiate_t(struct inode *, struct dentry *,
+typedef struct dentry *instantiate_t(struct inode *, struct dentry *,
 				     struct task_struct *, const void *);
-extern bool proc_fill_cache(struct file *, struct dir_context *, const char *, int,
+extern int proc_fill_cache(struct file *, void *, filldir_t, const char *, int,
 			   instantiate_t, struct task_struct *, const void *);
 
 /*
  * generic.c
  */
+extern spinlock_t proc_subdir_lock;
+
 extern struct dentry *proc_lookup(struct inode *, struct dentry *, unsigned int);
 extern struct dentry *proc_lookup_de(struct proc_dir_entry *, struct inode *,
 				     struct dentry *);
-extern int proc_readdir(struct file *, struct dir_context *);
-extern int proc_readdir_de(struct proc_dir_entry *, struct file *, struct dir_context *);
+extern int proc_readdir(struct file *, void *, filldir_t);
+extern int proc_readdir_de(struct proc_dir_entry *, struct file *, void *, filldir_t);
 
 static inline struct proc_dir_entry *pde_get(struct proc_dir_entry *pde)
 {
@@ -198,6 +212,13 @@ static inline bool is_empty_pde(const struct proc_dir_entry *pde)
 }
 struct proc_dir_entry *proc_create_mount_point(const char *name);
 
+extern struct proc_dir_entry *pde_subdir_first(struct proc_dir_entry *dir);
+extern struct proc_dir_entry *pde_subdir_next(struct proc_dir_entry *dir);
+extern struct proc_dir_entry *pde_subdir_find(struct proc_dir_entry *dir,
+					      const char *name, unsigned int len);
+extern bool pde_subdir_insert (struct proc_dir_entry *dir,
+			       struct proc_dir_entry *de);
+
 /*
  * inode.c
  */
@@ -207,7 +228,6 @@ struct pde_opener {
 	int closing;
 	struct completion *c;
 };
-extern const struct inode_operations proc_link_inode_operations;
 
 extern const struct inode_operations proc_pid_link_inode_operations;
 
@@ -215,6 +235,13 @@ extern void proc_init_inodecache(void);
 extern struct inode *proc_get_inode(struct super_block *, struct proc_dir_entry *);
 extern int proc_fill_super(struct super_block *, void *data, int flags);
 extern void proc_entry_rundown(struct proc_dir_entry *);
+
+/*
+ * proc_devtree.c
+ */
+#ifdef CONFIG_PROC_DEVICETREE
+extern void proc_device_tree_init(void);
+#endif
 
 /*
  * proc_namespaces.c
@@ -238,12 +265,6 @@ static inline int proc_net_init(void) { return 0; }
  * proc_self.c
  */
 extern int proc_setup_self(struct super_block *);
-
-/*
- * proc_thread_self.c
- */
-extern int proc_setup_thread_self(struct super_block *);
-extern void proc_thread_self_init(void);
 
 /*
  * proc_sysctl.c

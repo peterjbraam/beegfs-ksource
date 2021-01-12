@@ -703,10 +703,6 @@ static void ata_pio_sector(struct ata_queued_cmd *qc)
 	unsigned int offset;
 	unsigned char *buf;
 
-	if (!qc->cursg) {
-		qc->curbytes = qc->nbytes;
-		return;
-	}
 	if (qc->curbytes == qc->nbytes - qc->sect_size)
 		ap->hsm_task_state = HSM_ST_LAST;
 
@@ -746,8 +742,6 @@ static void ata_pio_sector(struct ata_queued_cmd *qc)
 
 	if (qc->cursg_ofs == qc->cursg->length) {
 		qc->cursg = sg_next(qc->cursg);
-		if (!qc->cursg)
-			ap->hsm_task_state = HSM_ST_LAST;
 		qc->cursg_ofs = 0;
 	}
 }
@@ -1487,6 +1481,7 @@ unsigned int ata_sff_qc_issue(struct ata_queued_cmd *qc)
 		break;
 
 	default:
+		WARN_ON_ONCE(1);
 		return AC_ERR_SYSTEM;
 	}
 
@@ -2439,6 +2434,15 @@ int ata_pci_sff_activate_host(struct ata_host *host,
 		mask = (1 << 2) | (1 << 0);
 		if ((tmp8 & mask) != mask)
 			legacy_mode = 1;
+#if defined(CONFIG_NO_ATA_LEGACY)
+		/* Some platforms with PCI limits cannot address compat
+		   port space. In that case we punt if their firmware has
+		   left a device in compatibility mode */
+		if (legacy_mode) {
+			printk(KERN_ERR "ata: Compatibility mode ATA is not supported on this platform, skipping.\n");
+			return -EOPNOTSUPP;
+		}
+#endif
 	}
 
 	if (!devres_open_group(dev, NULL, GFP_KERNEL))
@@ -2742,14 +2746,12 @@ static void ata_bmdma_fill_sg_dumb(struct ata_queued_cmd *qc)
  *	LOCKING:
  *	spin_lock_irqsave(host lock)
  */
-enum ata_completion_errors ata_bmdma_qc_prep(struct ata_queued_cmd *qc)
+void ata_bmdma_qc_prep(struct ata_queued_cmd *qc)
 {
 	if (!(qc->flags & ATA_QCFLAG_DMAMAP))
-		return AC_ERR_OK;
+		return;
 
 	ata_bmdma_fill_sg(qc);
-
-	return AC_ERR_OK;
 }
 EXPORT_SYMBOL_GPL(ata_bmdma_qc_prep);
 
@@ -2762,14 +2764,12 @@ EXPORT_SYMBOL_GPL(ata_bmdma_qc_prep);
  *	LOCKING:
  *	spin_lock_irqsave(host lock)
  */
-enum ata_completion_errors ata_bmdma_dumb_qc_prep(struct ata_queued_cmd *qc)
+void ata_bmdma_dumb_qc_prep(struct ata_queued_cmd *qc)
 {
 	if (!(qc->flags & ATA_QCFLAG_DMAMAP))
-		return AC_ERR_OK;
+		return;
 
 	ata_bmdma_fill_sg_dumb(qc);
-
-	return AC_ERR_OK;
 }
 EXPORT_SYMBOL_GPL(ata_bmdma_dumb_qc_prep);
 
@@ -3220,11 +3220,11 @@ void ata_pci_bmdma_init(struct ata_host *host)
 	 * ->sff_irq_clear method.  Try to initialize bmdma_addr
 	 * regardless of dma masks.
 	 */
-	rc = dma_set_mask(&pdev->dev, ATA_DMA_MASK);
+	rc = pci_set_dma_mask(pdev, ATA_DMA_MASK);
 	if (rc)
 		ata_bmdma_nodma(host, "failed to set dma mask");
 	if (!rc) {
-		rc = dma_set_coherent_mask(&pdev->dev, ATA_DMA_MASK);
+		rc = pci_set_consistent_dma_mask(pdev, ATA_DMA_MASK);
 		if (rc)
 			ata_bmdma_nodma(host,
 					"failed to set consistent dma mask");

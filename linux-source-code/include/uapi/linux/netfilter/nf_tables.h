@@ -3,7 +3,6 @@
 
 #define NFT_TABLE_MAXNAMELEN	32
 #define NFT_CHAIN_MAXNAMELEN	32
-#define NFT_SET_MAXNAMELEN	32
 #define NFT_USERDATA_MAXLEN	256
 
 /**
@@ -24,7 +23,7 @@ enum nft_registers {
 	__NFT_REG_MAX,
 
 	NFT_REG32_00	= 8,
-	NFT_REG32_01,
+	MFT_REG32_01,
 	NFT_REG32_02,
 	NFT_REG32_03,
 	NFT_REG32_04,
@@ -114,7 +113,7 @@ enum nf_tables_msg_types {
  * @NFTA_LIST_ELEM: list element (NLA_NESTED)
  */
 enum nft_list_attributes {
-	NFTA_LIST_UNSPEC,
+	NFTA_LIST_UNPEC,
 	NFTA_LIST_ELEM,
 	__NFTA_LIST_MAX
 };
@@ -125,13 +124,11 @@ enum nft_list_attributes {
  *
  * @NFTA_HOOK_HOOKNUM: netfilter hook number (NLA_U32)
  * @NFTA_HOOK_PRIORITY: netfilter hook priority (NLA_U32)
- * @NFTA_HOOK_DEV: netdevice name (NLA_STRING)
  */
 enum nft_hook_attributes {
 	NFTA_HOOK_UNSPEC,
 	NFTA_HOOK_HOOKNUM,
 	NFTA_HOOK_PRIORITY,
-	NFTA_HOOK_DEV,
 	__NFTA_HOOK_MAX
 };
 #define NFTA_HOOK_MAX		(__NFTA_HOOK_MAX - 1)
@@ -546,6 +543,10 @@ enum nft_cmp_attributes {
 };
 #define NFTA_CMP_MAX		(__NFTA_CMP_MAX - 1)
 
+enum nft_lookup_flags {
+	NFT_LOOKUP_F_INV = (1 << 0),
+};
+
 /**
  * enum nft_range_ops - nf_tables range operator
  *
@@ -575,10 +576,6 @@ enum nft_range_attributes {
 };
 #define NFTA_RANGE_MAX		(__NFTA_RANGE_MAX - 1)
 
-enum nft_lookup_flags {
-	NFT_LOOKUP_F_INV = (1 << 0),
-};
-
 /**
  * enum nft_lookup_attributes - nf_tables set lookup expression netlink attributes
  *
@@ -604,10 +601,6 @@ enum nft_dynset_ops {
 	NFT_DYNSET_OP_UPDATE,
 };
 
-enum nft_dynset_flags {
-	NFT_DYNSET_F_INV	= (1 << 0),
-};
-
 /**
  * enum nft_dynset_attributes - dynset expression attributes
  *
@@ -618,7 +611,6 @@ enum nft_dynset_flags {
  * @NFTA_DYNSET_SREG_DATA: source register of the data (NLA_U32)
  * @NFTA_DYNSET_TIMEOUT: timeout value for the new element (NLA_U64)
  * @NFTA_DYNSET_EXPR: expression (NLA_NESTED: nft_expr_attributes)
- * @NFTA_DYNSET_FLAGS: flags (NLA_U32)
  */
 enum nft_dynset_attributes {
 	NFTA_DYNSET_UNSPEC,
@@ -630,7 +622,6 @@ enum nft_dynset_attributes {
 	NFTA_DYNSET_TIMEOUT,
 	NFTA_DYNSET_EXPR,
 	NFTA_DYNSET_PAD,
-	NFTA_DYNSET_FLAGS,
 	__NFTA_DYNSET_MAX,
 };
 #define NFTA_DYNSET_MAX		(__NFTA_DYNSET_MAX - 1)
@@ -728,7 +719,6 @@ enum nft_exthdr_attributes {
  * @NFT_META_IIFGROUP: packet input interface group
  * @NFT_META_OIFGROUP: packet output interface group
  * @NFT_META_CGROUP: socket control group (skb->sk->sk_classid)
- * @NFT_META_PRANDOM: a 32bit pseudo-random number
  */
 enum nft_meta_keys {
 	NFT_META_LEN,
@@ -755,30 +745,7 @@ enum nft_meta_keys {
 	NFT_META_IIFGROUP,
 	NFT_META_OIFGROUP,
 	NFT_META_CGROUP,
-	NFT_META_PRANDOM,
 };
-
-/**
- * enum nft_hash_attributes - nf_tables hash expression netlink attributes
- *
- * @NFTA_HASH_SREG: source register (NLA_U32)
- * @NFTA_HASH_DREG: destination register (NLA_U32)
- * @NFTA_HASH_LEN: source data length (NLA_U32)
- * @NFTA_HASH_MODULUS: modulus value (NLA_U32)
- * @NFTA_HASH_SEED: seed value (NLA_U32)
- * @NFTA_HASH_OFFSET: add this offset value to hash result (NLA_U32)
- */
-enum nft_hash_attributes {
-	NFTA_HASH_UNSPEC,
-	NFTA_HASH_SREG,
-	NFTA_HASH_DREG,
-	NFTA_HASH_LEN,
-	NFTA_HASH_MODULUS,
-	NFTA_HASH_SEED,
-	NFTA_HASH_OFFSET,
-	__NFTA_HASH_MAX,
-};
-#define NFTA_HASH_MAX	(__NFTA_HASH_MAX - 1)
 
 /**
  * enum nft_meta_attributes - nf_tables meta expression netlink attributes
@@ -923,14 +890,12 @@ enum nft_log_attributes {
  * @NFTA_QUEUE_NUM: netlink queue to send messages to (NLA_U16)
  * @NFTA_QUEUE_TOTAL: number of queues to load balance packets on (NLA_U16)
  * @NFTA_QUEUE_FLAGS: various flags (NLA_U16)
- * @NFTA_QUEUE_SREG_QNUM: source register of queue number (NLA_U32: nft_registers)
  */
 enum nft_queue_attributes {
 	NFTA_QUEUE_UNSPEC,
 	NFTA_QUEUE_NUM,
 	NFTA_QUEUE_TOTAL,
 	NFTA_QUEUE_FLAGS,
-	NFTA_QUEUE_SREG_QNUM,
 	__NFTA_QUEUE_MAX
 };
 #define NFTA_QUEUE_MAX		(__NFTA_QUEUE_MAX - 1)
@@ -938,25 +903,6 @@ enum nft_queue_attributes {
 #define NFT_QUEUE_FLAG_BYPASS		0x01 /* for compatibility with v2 */
 #define NFT_QUEUE_FLAG_CPU_FANOUT	0x02 /* use current CPU (no hashing) */
 #define NFT_QUEUE_FLAG_MASK		0x03
-
-enum nft_quota_flags {
-	NFT_QUOTA_F_INV		= (1 << 0),
-};
-
-/**
- * enum nft_quota_attributes - nf_tables quota expression netlink attributes
- *
- * @NFTA_QUOTA_BYTES: quota in bytes (NLA_U16)
- * @NFTA_QUOTA_FLAGS: flags (NLA_U32)
- */
-enum nft_quota_attributes {
-	NFTA_QUOTA_UNSPEC,
-	NFTA_QUOTA_BYTES,
-	NFTA_QUOTA_FLAGS,
-	NFTA_QUOTA_PAD,
-	__NFTA_QUOTA_MAX
-};
-#define NFTA_QUOTA_MAX		(__NFTA_QUOTA_MAX - 1)
 
 /**
  * enum nft_reject_types - nf_tables reject expression reject types
@@ -1086,18 +1032,6 @@ enum nft_dup_attributes {
 #define NFTA_DUP_MAX		(__NFTA_DUP_MAX - 1)
 
 /**
- * enum nft_fwd_attributes - nf_tables fwd expression netlink attributes
- *
- * @NFTA_FWD_SREG_DEV: source register of output interface (NLA_U32: nft_register)
- */
-enum nft_fwd_attributes {
-	NFTA_FWD_UNSPEC,
-	NFTA_FWD_SREG_DEV,
-	__NFTA_FWD_MAX
-};
-#define NFTA_FWD_MAX	(__NFTA_FWD_MAX - 1)
-
-/**
  * enum nft_gen_attributes - nf_tables ruleset generation attributes
  *
  * @NFTA_GEN_ID: Ruleset generation ID (NLA_U32)
@@ -1129,7 +1063,7 @@ enum nft_gen_attributes {
  * @NFTA_TRACE_NFPROTO: nf protocol processed (NLA_U32)
  * @NFTA_TRACE_POLICY: policy that decided fate of packet (NLA_U32)
  */
-enum nft_trace_attributes {
+enum nft_trace_attibutes {
 	NFTA_TRACE_UNSPEC,
 	NFTA_TRACE_TABLE,
 	NFTA_TRACE_CHAIN,
@@ -1160,30 +1094,4 @@ enum nft_trace_types {
 	__NFT_TRACETYPE_MAX
 };
 #define NFT_TRACETYPE_MAX (__NFT_TRACETYPE_MAX - 1)
-
-/**
- * enum nft_ng_attributes - nf_tables number generator expression netlink attributes
- *
- * @NFTA_NG_DREG: destination register (NLA_U32)
- * @NFTA_NG_MODULUS: maximum counter value (NLA_U32)
- * @NFTA_NG_TYPE: operation type (NLA_U32)
- * @NFTA_NG_OFFSET: offset to be added to the counter (NLA_U32)
- */
-enum nft_ng_attributes {
-	NFTA_NG_UNSPEC,
-	NFTA_NG_DREG,
-	NFTA_NG_MODULUS,
-	NFTA_NG_TYPE,
-	NFTA_NG_OFFSET,
-	__NFTA_NG_MAX
-};
-#define NFTA_NG_MAX	(__NFTA_NG_MAX - 1)
-
-enum nft_ng_types {
-	NFT_NG_INCREMENTAL,
-	NFT_NG_RANDOM,
-	__NFT_NG_MAX
-};
-#define NFT_NG_MAX	(__NFT_NG_MAX - 1)
-
 #endif /* _LINUX_NF_TABLES_H */

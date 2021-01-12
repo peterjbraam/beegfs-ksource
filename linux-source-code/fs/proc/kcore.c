@@ -60,6 +60,29 @@ static LIST_HEAD(kclist_head);
 static DEFINE_RWLOCK(kclist_lock);
 static int kcore_need_update = 1;
 
+/*
+ * Returns > 0 for RAM pages, 0 for non-RAM pages, < 0 on error
+ * Same as oldmem_pfn_is_ram in vmcore
+ */
+static int (*mem_pfn_is_ram)(unsigned long pfn);
+
+int __init register_mem_pfn_is_ram(int (*fn)(unsigned long pfn))
+{
+	if (mem_pfn_is_ram)
+		return -EBUSY;
+	mem_pfn_is_ram = fn;
+	return 0;
+}
+
+static int pfn_is_ram(unsigned long pfn)
+{
+	if (mem_pfn_is_ram)
+		return mem_pfn_is_ram(pfn);
+	else
+		return 1;
+}
+
+
 void
 kclist_add(struct kcore_list *new, void *addr, size_t size, int type)
 {
@@ -92,7 +115,7 @@ static size_t get_kcore_size(int *nphdr, size_t *elf_buflen)
 			     roundup(sizeof(CORE_STR), 4)) +
 			roundup(sizeof(struct elf_prstatus), 4) +
 			roundup(sizeof(struct elf_prpsinfo), 4) +
-			roundup(arch_task_struct_size, 4);
+			roundup(sizeof(struct task_struct), 4);
 	*elf_buflen = PAGE_ALIGN(*elf_buflen);
 	return size + *elf_buflen;
 }
@@ -172,7 +195,7 @@ get_sparsemem_vmemmap_info(struct kcore_list *ent, struct list_head *head)
 
 	start = ((unsigned long)pfn_to_page(pfn)) & PAGE_MASK;
 	end = ((unsigned long)pfn_to_page(pfn + nr_pages)) - 1;
-	end = PAGE_ALIGN(end);
+	end = ALIGN(end, PAGE_SIZE);
 	/* overlap check (because we have to align page */
 	list_for_each_entry(tmp, head, list) {
 		if (tmp->type != KCORE_VMEMMAP)
@@ -255,7 +278,8 @@ static int kcore_update_ram(void)
 	end_pfn = 0;
 	for_each_node_state(nid, N_MEMORY) {
 		unsigned long node_end;
-		node_end = node_end_pfn(nid);
+		node_end  = NODE_DATA(nid)->node_start_pfn +
+			NODE_DATA(nid)->node_spanned_pages;
 		if (end_pfn < node_end)
 			end_pfn = node_end;
 	}
@@ -373,7 +397,10 @@ static void elf_kcore_store_hdr(char *bufp, int nphdr, int dataoff)
 		phdr->p_flags	= PF_R|PF_W|PF_X;
 		phdr->p_offset	= kc_vaddr_to_offset(m->addr) + dataoff;
 		phdr->p_vaddr	= (size_t)m->addr;
-		phdr->p_paddr	= 0;
+		if (m->type == KCORE_RAM || m->type == KCORE_TEXT)
+			phdr->p_paddr	= __pa(m->addr);
+		else
+			phdr->p_paddr	= (elf_addr_t)-1;
 		phdr->p_filesz	= phdr->p_memsz	= m->size;
 		phdr->p_align	= PAGE_SIZE;
 	}
@@ -407,7 +434,7 @@ static void elf_kcore_store_hdr(char *bufp, int nphdr, int dataoff)
 	prpsinfo.pr_zomb	= 0;
 
 	strcpy(prpsinfo.pr_fname, "vmlinux");
-	strlcpy(prpsinfo.pr_psargs, saved_command_line, sizeof(prpsinfo.pr_psargs));
+	strncpy(prpsinfo.pr_psargs, saved_command_line, ELF_PRARGSZ);
 
 	nhdr->p_filesz	+= notesize(&notes[1]);
 	bufp = storenote(&notes[1], bufp);
@@ -415,7 +442,7 @@ static void elf_kcore_store_hdr(char *bufp, int nphdr, int dataoff)
 	/* set up the task structure */
 	notes[2].name	= CORE_STR;
 	notes[2].type	= NT_TASKSTRUCT;
-	notes[2].datasz	= arch_task_struct_size;
+	notes[2].datasz	= sizeof(struct task_struct);
 	notes[2].data	= current;
 
 	nhdr->p_filesz	+= notesize(&notes[2]);
@@ -486,7 +513,7 @@ read_kcore(struct file *file, char __user *buffer, size_t buflen, loff_t *fpos)
 	start = kc_offset_to_vaddr(*fpos - elf_buflen);
 	if ((tsz = (PAGE_SIZE - (start & ~PAGE_MASK))) > buflen)
 		tsz = buflen;
-		
+
 	while (buflen) {
 		struct kcore_list *m;
 
@@ -498,6 +525,9 @@ read_kcore(struct file *file, char __user *buffer, size_t buflen, loff_t *fpos)
 		read_unlock(&kclist_lock);
 
 		if (&m->list == &kclist_head) {
+			if (clear_user(buffer, tsz))
+				return -EFAULT;
+		} else if (!pfn_is_ram(__pa(start) >> PAGE_SHIFT)) {
 			if (clear_user(buffer, tsz))
 				return -EFAULT;
 		} else if (is_vmalloc_or_module_addr((void *)start)) {
@@ -551,9 +581,9 @@ static int open_kcore(struct inode *inode, struct file *filp)
 	if (kcore_need_update)
 		kcore_update_ram();
 	if (i_size_read(inode) != proc_root_kcore->size) {
-		inode_lock(inode);
+		mutex_lock(&inode->i_mutex);
 		i_size_write(inode, proc_root_kcore->size);
-		inode_unlock(inode);
+		mutex_unlock(&inode->i_mutex);
 	}
 	return 0;
 }
@@ -615,10 +645,8 @@ static void __init proc_kcore_text_init(void)
 struct kcore_list kcore_modules;
 static void __init add_modules_range(void)
 {
-	if (MODULES_VADDR != VMALLOC_START && MODULES_END != VMALLOC_END) {
-		kclist_add(&kcore_modules, (void *)MODULES_VADDR,
+	kclist_add(&kcore_modules, (void *)MODULES_VADDR,
 			MODULES_END - MODULES_VADDR, KCORE_VMALLOC);
-	}
 }
 #else
 static void __init add_modules_range(void)
@@ -646,4 +674,4 @@ static int __init proc_kcore_init(void)
 
 	return 0;
 }
-fs_initcall(proc_kcore_init);
+module_init(proc_kcore_init);

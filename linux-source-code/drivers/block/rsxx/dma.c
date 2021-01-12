@@ -684,8 +684,7 @@ int rsxx_dma_queue_bio(struct rsxx_cardinfo *card,
 			   void *cb_data)
 {
 	struct list_head dma_list[RSXX_MAX_TARGETS];
-	struct bio_vec bvec;
-	struct bvec_iter iter;
+	struct bio_vec *bvec;
 	unsigned long long addr8;
 	unsigned int laddr;
 	unsigned int bv_len;
@@ -697,7 +696,7 @@ int rsxx_dma_queue_bio(struct rsxx_cardinfo *card,
 	int st;
 	int i;
 
-	addr8 = bio->bi_iter.bi_sector << 9; /* sectors are 512 bytes */
+	addr8 = bio->bi_sector << 9; /* sectors are 512 bytes */
 	atomic_set(n_dmas, 0);
 
 	for (i = 0; i < card->n_targets; i++) {
@@ -705,8 +704,8 @@ int rsxx_dma_queue_bio(struct rsxx_cardinfo *card,
 		dma_cnt[i] = 0;
 	}
 
-	if (bio_op(bio) == REQ_OP_DISCARD) {
-		bv_len = bio->bi_iter.bi_size;
+	if (bio->bi_rw & REQ_DISCARD) {
+		bv_len = bio->bi_size;
 
 		while (bv_len > 0) {
 			tgt   = rsxx_get_dma_tgt(card, addr8);
@@ -723,9 +722,9 @@ int rsxx_dma_queue_bio(struct rsxx_cardinfo *card,
 			bv_len -= RSXX_HW_BLK_SIZE;
 		}
 	} else {
-		bio_for_each_segment(bvec, bio, iter) {
-			bv_len = bvec.bv_len;
-			bv_off = bvec.bv_offset;
+		bio_for_each_segment(bvec, bio, i) {
+			bv_len = bvec->bv_len;
+			bv_off = bvec->bv_offset;
 
 			while (bv_len > 0) {
 				tgt   = rsxx_get_dma_tgt(card, addr8);
@@ -737,7 +736,7 @@ int rsxx_dma_queue_bio(struct rsxx_cardinfo *card,
 				st = rsxx_queue_dma(card, &dma_list[tgt],
 							bio_data_dir(bio),
 							dma_off, dma_len,
-							laddr, bvec.bv_page,
+							laddr, bvec->bv_page,
 							bv_off, cb, cb_data);
 				if (st)
 					goto bvec_err;

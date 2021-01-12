@@ -33,12 +33,9 @@
 #include <scsi/scsi_device.h>
 #include <scsi/scsi_driver.h>
 #include <scsi/scsi_eh.h>
-#include <scsi/scsi_common.h>
 #include <scsi/scsi_transport.h>
 #include <scsi/scsi_host.h>
 #include <scsi/scsi_ioctl.h>
-#include <scsi/scsi_dh.h>
-#include <scsi/sg.h>
 
 #include "scsi_priv.h"
 #include "scsi_logging.h"
@@ -192,7 +189,7 @@ scsi_abort_command(struct scsi_cmnd *scmd)
 		SCSI_LOG_ERROR_RECOVERY(3,
 			scmd_printk(KERN_INFO, scmd,
 				    "previous abort failed\n"));
-		BUG_ON(delayed_work_pending(&scmd->abort_work));
+		cancel_delayed_work(&scmd->abort_work);
 		return FAILED;
 	}
 
@@ -251,6 +248,9 @@ int scsi_eh_scmd_add(struct scsi_cmnd *scmd, int eh_flag)
 	scmd->eh_eflags |= eh_flag;
 	list_add_tail(&scmd->eh_entry, &shost->eh_cmd_q);
 	shost->host_failed++;
+
+	mb();
+
 	scsi_eh_wakeup(shost);
  out_unlock:
 	spin_unlock_irqrestore(shost->host_lock, flags);
@@ -315,9 +315,6 @@ int scsi_block_when_processing_errors(struct scsi_device *sdev)
 	wait_event(sdev->host->host_wait, !scsi_host_in_recovery(sdev->host));
 
 	online = scsi_device_online(sdev);
-
-	SCSI_LOG_ERROR_RECOVERY(5, sdev_printk(KERN_INFO, sdev,
-		"%s: rtn: %d\n", __func__, online));
 
 	return online;
 }
@@ -418,6 +415,12 @@ static void scsi_report_sense(struct scsi_device *sdev,
 				    "threshold.\n");
 		}
 
+		if (sshdr->asc == 0x29) {
+			evt_type = SDEV_EVT_POWER_ON_RESET_OCCURRED;
+			sdev_printk(KERN_WARNING, sdev,
+				    "Power-on or device reset occurred\n");
+		}
+
 		if (sshdr->asc == 0x2a && sshdr->ascq == 0x01) {
 			evt_type = SDEV_EVT_MODE_PARAMETER_CHANGE_REPORTED;
 			sdev_printk(KERN_WARNING, sdev,
@@ -452,7 +455,7 @@ static void scsi_report_sense(struct scsi_device *sdev,
  *	When a deferred error is detected the current command has
  *	not been executed and needs retrying.
  */
-int scsi_check_sense(struct scsi_cmnd *scmd)
+static int scsi_check_sense(struct scsi_cmnd *scmd)
 {
 	struct scsi_device *sdev = scmd->device;
 	struct scsi_sense_hdr sshdr;
@@ -465,10 +468,11 @@ int scsi_check_sense(struct scsi_cmnd *scmd)
 	if (scsi_sense_is_deferred(&sshdr))
 		return NEEDS_RETRY;
 
-	if (sdev->handler && sdev->handler->check_sense) {
+	if (sdev->scsi_dh_data && sdev->scsi_dh_data->scsi_dh &&
+			sdev->scsi_dh_data->scsi_dh->check_sense) {
 		int rc;
 
-		rc = sdev->handler->check_sense(sdev, &sshdr);
+		rc = sdev->scsi_dh_data->scsi_dh->check_sense(sdev, &sshdr);
 		if (rc != SCSI_RETURN_NOT_HANDLED)
 			return rc;
 		/* handler does not care. Drop down to default handling */
@@ -592,8 +596,10 @@ int scsi_check_sense(struct scsi_cmnd *scmd)
 	case ILLEGAL_REQUEST:
 		if (sshdr.asc == 0x20 || /* Invalid command operation code */
 		    sshdr.asc == 0x21 || /* Logical block address out of range */
+		    sshdr.asc == 0x22 || /* Invalid function */
 		    sshdr.asc == 0x24 || /* Invalid field in cdb */
-		    sshdr.asc == 0x26) { /* Parameter value invalid */
+		    sshdr.asc == 0x26 || /* Parameter value invalid */
+		    sshdr.asc == 0x27) { /* Write protected */
 			set_host_byte(scmd, DID_TARGET_FAILURE);
 		}
 		return SUCCESS;
@@ -602,14 +608,13 @@ int scsi_check_sense(struct scsi_cmnd *scmd)
 		return SUCCESS;
 	}
 }
-EXPORT_SYMBOL_GPL(scsi_check_sense);
 
 static void scsi_handle_queue_ramp_up(struct scsi_device *sdev)
 {
 	struct scsi_host_template *sht = sdev->host->hostt;
 	struct scsi_device *tmp_sdev;
 
-	if (!sht->track_queue_depth ||
+	if (!sht->change_queue_depth ||
 	    sdev->queue_depth >= sdev->max_queue_depth)
 		return;
 
@@ -630,8 +635,12 @@ static void scsi_handle_queue_ramp_up(struct scsi_device *sdev)
 		    tmp_sdev->id != sdev->id ||
 		    tmp_sdev->queue_depth == sdev->max_queue_depth)
 			continue;
-
-		scsi_change_queue_depth(tmp_sdev, tmp_sdev->queue_depth + 1);
+		/*
+		 * call back into LLD to increase queue_depth by one
+		 * with ramp up reason code.
+		 */
+		sht->change_queue_depth(tmp_sdev, tmp_sdev->queue_depth + 1,
+					SCSI_QDEPTH_RAMP_UP);
 		sdev->last_queue_ramp_up = jiffies;
 	}
 }
@@ -641,7 +650,7 @@ static void scsi_handle_queue_full(struct scsi_device *sdev)
 	struct scsi_host_template *sht = sdev->host->hostt;
 	struct scsi_device *tmp_sdev;
 
-	if (!sht->track_queue_depth)
+	if (!sht->change_queue_depth)
 		return;
 
 	shost_for_each_device(tmp_sdev, sdev->host) {
@@ -653,7 +662,8 @@ static void scsi_handle_queue_full(struct scsi_device *sdev)
 		 * the device when we got the queue full so we start
 		 * from the highest possible value and work our way down.
 		 */
-		scsi_track_queue_full(tmp_sdev, tmp_sdev->queue_depth - 1);
+		sht->change_queue_depth(tmp_sdev, tmp_sdev->queue_depth - 1,
+					SCSI_QDEPTH_QFULL);
 	}
 }
 
@@ -1811,16 +1821,12 @@ int scsi_decide_disposition(struct scsi_cmnd *scmd)
 		 * that it indicates SUCCESS.
 		 */
 		return SUCCESS;
+	case DID_SOFT_ERROR:
 		/*
 		 * when the low level driver returns did_soft_error,
 		 * it is responsible for keeping an internal retry counter
 		 * in order to avoid endless loops (db)
-		 *
-		 * actually this is a bug in this function here.  we should
-		 * be mindful of the maximum number of retries specified
-		 * and not get stuck in a loop.
 		 */
-	case DID_SOFT_ERROR:
 		goto maybe_retry;
 	case DID_IMM_RETRY:
 		return NEEDS_RETRY;
@@ -1970,7 +1976,7 @@ static void scsi_eh_lock_door(struct scsi_device *sdev)
 	struct request *req;
 
 	/*
-	 * blk_get_request with GFP_KERNEL (__GFP_RECLAIM) sleeps until a
+	 * blk_get_request with GFP_KERNEL (__GFP_WAIT) sleeps until a
 	 * request becomes available
 	 */
 	req = blk_get_request(sdev->request_queue, READ, GFP_KERNEL);
@@ -2316,44 +2322,105 @@ void scsi_report_device_reset(struct Scsi_Host *shost, int channel, int target)
 }
 EXPORT_SYMBOL(scsi_report_device_reset);
 
+static struct scsi_cmnd *scsi_reset_alloc_cmd(struct scsi_device *dev)
+{
+	struct request *rq;
+	struct Scsi_Host *shost = dev->host;
+	struct scsi_cmnd *cmd;
+
+	rq = kzalloc(sizeof(struct request) + sizeof(struct scsi_cmnd) +
+		     shost->hostt->cmd_size + sizeof(struct request_aux),
+		     GFP_KERNEL);
+	if (!rq)
+		return ERR_PTR(-ENOMEM);
+
+	blk_rq_init(NULL, rq);
+	if (!shost_use_blk_mq(shost)) {
+		cmd = scsi_get_command(dev, GFP_KERNEL);
+		if (!cmd) {
+			kfree(rq);
+			return ERR_PTR(-ENOMEM);
+		}
+	} else {
+		unsigned long flags;
+
+		cmd = (struct scsi_cmnd *)(rq + 1);
+		cmd->device = dev;
+		INIT_LIST_HEAD(&cmd->list);
+		INIT_DELAYED_WORK(&cmd->abort_work, scmd_eh_abort_handler);
+		cmd->jiffies_at_alloc = jiffies;
+		if (shost->use_cmd_list) {
+			spin_lock_irqsave(&dev->list_lock, flags);
+			list_add_tail(&cmd->list, &dev->cmd_list);
+			spin_unlock_irqrestore(&dev->list_lock, flags);
+		}
+	}
+	cmd->request = rq;
+	cmd->cmnd = rq->cmd;
+
+	return cmd;
+}
+
+static void scsi_reset_free_cmd(struct scsi_cmnd *cmd)
+{
+	struct Scsi_Host *shost = cmd->device->host;
+	void *request = cmd->request;
+
+	if (!shost_use_blk_mq(shost))
+		scsi_next_command(cmd);
+	else {
+		struct scsi_device *dev = cmd->device;
+		unsigned long flags;
+
+		if (shost->use_cmd_list) {
+			spin_lock_irqsave(&dev->list_lock, flags);
+			list_del_init(&cmd->list);
+			spin_unlock_irqrestore(&dev->list_lock, flags);
+		}
+	}
+	kfree(request);
+}
+
 static void
 scsi_reset_provider_done_command(struct scsi_cmnd *scmd)
 {
 }
 
-/**
- * scsi_ioctl_reset: explicitly reset a host/bus/target/device
- * @dev:	scsi_device to operate on
- * @arg:	reset type (see sg.h)
+/*
+ * Function:	scsi_reset_provider
+ *
+ * Purpose:	Send requested reset to a bus or device at any phase.
+ *
+ * Arguments:	device	- device to send reset to
+ *		flag - reset type (see scsi.h)
+ *
+ * Returns:	SUCCESS/FAILURE.
+ *
+ * Notes:	This is used by the SCSI Generic driver to provide
+ *		Bus/Device reset capability.
  */
 int
-scsi_ioctl_reset(struct scsi_device *dev, int __user *arg)
+scsi_reset_provider(struct scsi_device *dev, int flag)
 {
 	struct scsi_cmnd *scmd;
 	struct Scsi_Host *shost = dev->host;
-	struct request req;
 	unsigned long flags;
-	int error = 0, rtn, val;
-
-	if (!capable(CAP_SYS_ADMIN) || !capable(CAP_SYS_RAWIO))
-		return -EACCES;
-
-	error = get_user(val, arg);
-	if (error)
-		return error;
+	int rtn;
 
 	if (scsi_autopm_get_host(shost) < 0)
-		return -EIO;
+		return FAILED;
 
-	error = -EIO;
-	scmd = scsi_get_command(dev, GFP_KERNEL);
-	if (!scmd)
+	if (!get_device(&dev->sdev_gendev)) {
+		rtn = FAILED;
 		goto out_put_autopm_host;
+	}
 
-	blk_rq_init(NULL, &req);
-	scmd->request = &req;
-
-	scmd->cmnd = req.cmd;
+	scmd = scsi_reset_alloc_cmd(dev);
+	if (IS_ERR(scmd)) {
+		rtn = FAILED;
+		put_device(&dev->sdev_gendev);
+		goto out_put_autopm_host;
+	}
 
 	scmd->scsi_done		= scsi_reset_provider_done_command;
 	memset(&scmd->sdb, 0, sizeof(scmd->sdb));
@@ -2366,36 +2433,28 @@ scsi_ioctl_reset(struct scsi_device *dev, int __user *arg)
 	shost->tmf_in_progress = 1;
 	spin_unlock_irqrestore(shost->host_lock, flags);
 
-	switch (val & ~SG_SCSI_RESET_NO_ESCALATE) {
-	case SG_SCSI_RESET_NOTHING:
-		rtn = SUCCESS;
-		break;
-	case SG_SCSI_RESET_DEVICE:
+	switch (flag) {
+	case SCSI_TRY_RESET_DEVICE:
 		rtn = scsi_try_bus_device_reset(scmd);
-		if (rtn == SUCCESS || (val & SG_SCSI_RESET_NO_ESCALATE))
-			break;
-		/* FALLTHROUGH */
-	case SG_SCSI_RESET_TARGET:
-		rtn = scsi_try_target_reset(scmd);
-		if (rtn == SUCCESS || (val & SG_SCSI_RESET_NO_ESCALATE))
-			break;
-		/* FALLTHROUGH */
-	case SG_SCSI_RESET_BUS:
-		rtn = scsi_try_bus_reset(scmd);
-		if (rtn == SUCCESS || (val & SG_SCSI_RESET_NO_ESCALATE))
-			break;
-		/* FALLTHROUGH */
-	case SG_SCSI_RESET_HOST:
-		rtn = scsi_try_host_reset(scmd);
 		if (rtn == SUCCESS)
 			break;
-	default:
 		/* FALLTHROUGH */
-		rtn = FAILED;
+	case SCSI_TRY_RESET_TARGET:
+		rtn = scsi_try_target_reset(scmd);
+		if (rtn == SUCCESS)
+			break;
+		/* FALLTHROUGH */
+	case SCSI_TRY_RESET_BUS:
+		rtn = scsi_try_bus_reset(scmd);
+		if (rtn == SUCCESS)
+			break;
+		/* FALLTHROUGH */
+	case SCSI_TRY_RESET_HOST:
+		rtn = scsi_try_host_reset(scmd);
 		break;
+	default:
+		rtn = FAILED;
 	}
-
-	error = (rtn == SUCCESS) ? 0 : -EIO;
 
 	spin_lock_irqsave(shost->host_lock, flags);
 	shost->tmf_in_progress = 0;
@@ -2410,15 +2469,79 @@ scsi_ioctl_reset(struct scsi_device *dev, int __user *arg)
 			     "waking up host to restart after TMF\n"));
 
 	wake_up(&shost->host_wait);
+
 	scsi_run_host_queues(shost);
 
-	scsi_put_command(scmd);
-
+	scsi_reset_free_cmd(scmd);
 out_put_autopm_host:
 	scsi_autopm_put_host(shost);
-	return error;
+	return rtn;
 }
-EXPORT_SYMBOL(scsi_ioctl_reset);
+EXPORT_SYMBOL(scsi_reset_provider);
+
+/**
+ * scsi_normalize_sense - normalize main elements from either fixed or
+ *			descriptor sense data format into a common format.
+ *
+ * @sense_buffer:	byte array containing sense data returned by device
+ * @sb_len:		number of valid bytes in sense_buffer
+ * @sshdr:		pointer to instance of structure that common
+ *			elements are written to.
+ *
+ * Notes:
+ *	The "main elements" from sense data are: response_code, sense_key,
+ *	asc, ascq and additional_length (only for descriptor format).
+ *
+ *	Typically this function can be called after a device has
+ *	responded to a SCSI command with the CHECK_CONDITION status.
+ *
+ * Return value:
+ *	true if valid sense data information found, else false;
+ */
+bool scsi_normalize_sense(const u8 *sense_buffer, int sb_len,
+			  struct scsi_sense_hdr *sshdr)
+{
+	if (!sense_buffer || !sb_len)
+		return false;
+
+	memset(sshdr, 0, sizeof(struct scsi_sense_hdr));
+
+	sshdr->response_code = (sense_buffer[0] & 0x7f);
+
+	if (!scsi_sense_valid(sshdr))
+		return false;
+
+	if (sshdr->response_code >= 0x72) {
+		/*
+		 * descriptor format
+		 */
+		if (sb_len > 1)
+			sshdr->sense_key = (sense_buffer[1] & 0xf);
+		if (sb_len > 2)
+			sshdr->asc = sense_buffer[2];
+		if (sb_len > 3)
+			sshdr->ascq = sense_buffer[3];
+		if (sb_len > 7)
+			sshdr->additional_length = sense_buffer[7];
+	} else {
+		/*
+		 * fixed format
+		 */
+		if (sb_len > 2)
+			sshdr->sense_key = (sense_buffer[2] & 0xf);
+		if (sb_len > 7) {
+			sb_len = (sb_len < (sense_buffer[7] + 8)) ?
+					 sb_len : (sense_buffer[7] + 8);
+			if (sb_len > 12)
+				sshdr->asc = sense_buffer[12];
+			if (sb_len > 13)
+				sshdr->ascq = sense_buffer[13];
+		}
+	}
+
+	return true;
+}
+EXPORT_SYMBOL(scsi_normalize_sense);
 
 bool scsi_command_normalize_sense(const struct scsi_cmnd *cmd,
 				  struct scsi_sense_hdr *sshdr)
@@ -2427,6 +2550,45 @@ bool scsi_command_normalize_sense(const struct scsi_cmnd *cmd,
 			SCSI_SENSE_BUFFERSIZE, sshdr);
 }
 EXPORT_SYMBOL(scsi_command_normalize_sense);
+
+/**
+ * scsi_sense_desc_find - search for a given descriptor type in	descriptor sense data format.
+ * @sense_buffer:	byte array of descriptor format sense data
+ * @sb_len:		number of valid bytes in sense_buffer
+ * @desc_type:		value of descriptor type to find
+ *			(e.g. 0 -> information)
+ *
+ * Notes:
+ *	only valid when sense data is in descriptor format
+ *
+ * Return value:
+ *	pointer to start of (first) descriptor if found else NULL
+ */
+const u8 * scsi_sense_desc_find(const u8 * sense_buffer, int sb_len,
+				int desc_type)
+{
+	int add_sen_len, add_len, desc_len, k;
+	const u8 * descp;
+
+	if ((sb_len < 8) || (0 == (add_sen_len = sense_buffer[7])))
+		return NULL;
+	if ((sense_buffer[0] < 0x72) || (sense_buffer[0] > 0x73))
+		return NULL;
+	add_sen_len = (add_sen_len < (sb_len - 8)) ?
+			add_sen_len : (sb_len - 8);
+	descp = &sense_buffer[8];
+	for (desc_len = 0, k = 0; k < add_sen_len; k += desc_len) {
+		descp += desc_len;
+		add_len = (k < (add_sen_len - 1)) ? descp[1]: -1;
+		desc_len = add_len + 2;
+		if (descp[0] == desc_type)
+			return descp;
+		if (add_len < 0) // short descriptor ??
+			break;
+	}
+	return NULL;
+}
+EXPORT_SYMBOL(scsi_sense_desc_find);
 
 /**
  * scsi_get_sense_info_fld - get information field from sense data (either fixed or descriptor format)
@@ -2477,3 +2639,31 @@ int scsi_get_sense_info_fld(const u8 * sense_buffer, int sb_len,
 	}
 }
 EXPORT_SYMBOL(scsi_get_sense_info_fld);
+
+/**
+ * scsi_build_sense_buffer - build sense data in a buffer
+ * @desc:	Sense format (non zero == descriptor format,
+ * 		0 == fixed format)
+ * @buf:	Where to build sense data
+ * @key:	Sense key
+ * @asc:	Additional sense code
+ * @ascq:	Additional sense code qualifier
+ *
+ **/
+void scsi_build_sense_buffer(int desc, u8 *buf, u8 key, u8 asc, u8 ascq)
+{
+	if (desc) {
+		buf[0] = 0x72;	/* descriptor, current */
+		buf[1] = key;
+		buf[2] = asc;
+		buf[3] = ascq;
+		buf[7] = 0;
+	} else {
+		buf[0] = 0x70;	/* fixed, current */
+		buf[2] = key;
+		buf[7] = 0xa;
+		buf[12] = asc;
+		buf[13] = ascq;
+	}
+}
+EXPORT_SYMBOL(scsi_build_sense_buffer);

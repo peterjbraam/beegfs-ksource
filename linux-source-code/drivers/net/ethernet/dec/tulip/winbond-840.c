@@ -353,7 +353,7 @@ static const struct net_device_ops netdev_ops = {
 	.ndo_set_rx_mode	= set_rx_mode,
 	.ndo_do_ioctl		= netdev_ioctl,
 	.ndo_tx_timeout		= tx_timeout,
-	.ndo_change_mtu		= eth_change_mtu,
+	.ndo_change_mtu_rh74	= eth_change_mtu,
 	.ndo_set_mac_address	= eth_mac_addr,
 	.ndo_validate_addr	= eth_validate_addr,
 };
@@ -468,6 +468,7 @@ static int w840_probe1(struct pci_dev *pdev, const struct pci_device_id *ent)
 	return 0;
 
 err_out_cleardev:
+	pci_set_drvdata(pdev, NULL);
 	pci_iounmap(pdev, ioaddr);
 err_out_free_res:
 	pci_release_regions(pdev);
@@ -904,10 +905,10 @@ static void init_registers(struct net_device *dev)
 	}
 #elif defined(__powerpc__) || defined(__i386__) || defined(__alpha__) || defined(__ia64__) || defined(__x86_64__)
 	i |= 0xE000;
-#elif defined(CONFIG_SPARC) || defined (CONFIG_PARISC) || defined(CONFIG_ARM)
+#elif defined(CONFIG_SPARC) || defined (CONFIG_PARISC)
 	i |= 0x4800;
 #else
-	dev_warn(&dev->dev, "unknown CPU architecture, using default csr0 setting\n");
+#warning Processor architecture undefined
 	i |= 0x4800;
 #endif
 	iowrite32(i, ioaddr + PCIBusCfg);
@@ -1541,6 +1542,8 @@ static void w840_remove1(struct pci_dev *pdev)
 		pci_iounmap(pdev, np->base_addr);
 		free_netdev(dev);
 	}
+
+	pci_set_drvdata(pdev, NULL);
 }
 
 #ifdef CONFIG_PM

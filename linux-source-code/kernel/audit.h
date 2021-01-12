@@ -25,6 +25,10 @@
 #include <uapi/linux/mqueue.h>
 #include <linux/tty.h>
 
+#ifdef __GENKSYMS__
+#define AUDIT_DEBUG 0
+#endif
+
 /* AUDIT_NAMES is the number of slots we reserve in the audit_context
  * for saving names from getname().  If we get more names we will allocate
  * a name dynamically and also add those to the list anchored by names_list. */
@@ -68,6 +72,7 @@ struct audit_cap_data {
 		unsigned int	fE;		/* effective bit of file cap */
 		kernel_cap_t	effective;	/* effective set of process */
 	};
+	RH_KABI_EXTEND(kernel_cap_t		ambient;)
 };
 
 /* When fs/namei.c:getname() is called, we store the pointer in name and bump
@@ -80,7 +85,9 @@ struct audit_names {
 
 	struct filename		*name;
 	int			name_len;	/* number of chars to log */
-	bool			hidden;		/* don't log this record */
+#ifdef __GENKSYMS__
+	bool			name_put;	/* call __putname()? */
+#endif
 
 	unsigned long		ino;
 	dev_t			dev;
@@ -92,12 +99,20 @@ struct audit_names {
 	struct audit_cap_data	fcap;
 	unsigned int		fcap_ver;
 	unsigned char		type;		/* record type */
+	bool			hidden;		/* don't log this record */
 	/*
 	 * This was an allocated audit_names and not from the array of
 	 * names allocated in the task audit context.  Thus this name
 	 * should be freed on syscall exit.
 	 */
 	bool			should_free;
+
+#ifdef __GENKSYMS__
+#if AUDIT_DEBUG
+	int			put_count;
+	int			ino_count;
+#endif
+#endif
 };
 
 struct audit_proctitle {
@@ -199,18 +214,22 @@ struct audit_context {
 		struct {
 			int			argc;
 		} execve;
+		RH_KABI_EXTEND(struct {
+			char			*name;
+		} module;)
 	};
+	RH_KABI_EXTEND(struct audit_proctitle proctitle;)
 	int fds[2];
-	struct audit_proctitle proctitle;
 };
 
-extern u32 audit_ever_enabled;
+extern int audit_ever_enabled;
 
 extern void audit_copy_inode(struct audit_names *name,
 			     const struct dentry *dentry,
-			     struct inode *inode);
+			     struct inode *inode, unsigned int flags);
 extern void audit_log_cap(struct audit_buffer *ab, char *prefix,
 			  kernel_cap_t *cap);
+extern void audit_log_fcaps(struct audit_buffer *ab, struct audit_names *name);
 extern void audit_log_name(struct audit_context *context,
 			   struct audit_names *n, struct path *path,
 			   int record_num, int *call_panic);
@@ -241,15 +260,10 @@ extern void		    audit_panic(const char *message);
 
 struct audit_netlink_list {
 	__u32 portid;
-	struct net *net;
 	struct sk_buff_head q;
 };
 
 int audit_send_list(void *);
-
-struct audit_net {
-	struct sock *nlsk;
-};
 
 extern int selinux_audit_rule_update(void);
 
@@ -259,9 +273,6 @@ extern void audit_free_rule_rcu(struct rcu_head *);
 extern struct list_head audit_filter_list[];
 
 extern struct audit_entry *audit_dupe_rule(struct audit_krule *old);
-
-extern void audit_log_d_path_exe(struct audit_buffer *ab,
-				 struct mm_struct *mm);
 
 extern struct tty_struct *audit_get_tty(struct task_struct *tsk);
 extern void audit_put_tty(struct tty_struct *tty);
@@ -305,7 +316,7 @@ extern int audit_exe_compare(struct task_struct *tsk, struct audit_fsnotify_mark
 #ifdef CONFIG_AUDIT_TREE
 extern struct audit_chunk *audit_tree_lookup(const struct inode *);
 extern void audit_put_chunk(struct audit_chunk *);
-extern bool audit_tree_match(struct audit_chunk *, struct audit_tree *);
+extern int audit_tree_match(struct audit_chunk *, struct audit_tree *);
 extern int audit_make_tree(struct audit_krule *, char *, u32);
 extern int audit_add_tree_rule(struct audit_krule *);
 extern int audit_remove_tree_rule(struct audit_krule *);

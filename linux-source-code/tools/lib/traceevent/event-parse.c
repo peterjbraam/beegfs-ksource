@@ -33,6 +33,7 @@
 #include <stdint.h>
 #include <limits.h>
 #include <linux/string.h>
+#include <linux/time64.h>
 
 #include <netinet/in.h>
 #include "event-parse.h"
@@ -267,10 +268,10 @@ static int add_new_comm(struct pevent *pevent, const char *comm, int pid)
 		errno = ENOMEM;
 		return -1;
 	}
-	pevent->cmdlines = cmdlines;
 
 	cmdlines[pevent->cmdline_count].comm = strdup(comm);
 	if (!cmdlines[pevent->cmdline_count].comm) {
+		free(cmdlines);
 		errno = ENOMEM;
 		return -1;
 	}
@@ -281,6 +282,7 @@ static int add_new_comm(struct pevent *pevent, const char *comm, int pid)
 		pevent->cmdline_count++;
 
 	qsort(cmdlines, pevent->cmdline_count, sizeof(*cmdlines), cmdline_cmp);
+	pevent->cmdlines = cmdlines;
 
 	return 0;
 }
@@ -829,6 +831,7 @@ static void free_arg(struct print_arg *arg)
 		free_flag_sym(arg->symbol.symbols);
 		break;
 	case PRINT_HEX:
+	case PRINT_HEX_STR:
 		free_arg(arg->hex.field);
 		free_arg(arg->hex.size);
 		break;
@@ -1091,7 +1094,7 @@ static enum event_type __read_token(char **tok)
 		if (strcmp(*tok, "LOCAL_PR_FMT") == 0) {
 			free(*tok);
 			*tok = NULL;
-			return force_token("\"\%s\" ", tok);
+			return force_token("\"%s\" ", tok);
 		} else if (strcmp(*tok, "STA_PR_FMT") == 0) {
 			free(*tok);
 			*tok = NULL;
@@ -2203,7 +2206,7 @@ eval_type_str(unsigned long long val, const char *type, int pointer)
 		return val & 0xffffffff;
 
 	if (strcmp(type, "u64") == 0 ||
-	    strcmp(type, "s64") == 0)
+	    strcmp(type, "s64"))
 		return val;
 
 	if (strcmp(type, "s8") == 0)
@@ -2427,7 +2430,7 @@ static int arg_num_eval(struct print_arg *arg, long long *val)
 static char *arg_eval (struct print_arg *arg)
 {
 	long long val;
-	static char buf[24];
+	static char buf[20];
 
 	switch (arg->type) {
 	case PRINT_ATOM:
@@ -2627,10 +2630,11 @@ out_free:
 }
 
 static enum event_type
-process_hex(struct event_format *event, struct print_arg *arg, char **tok)
+process_hex_common(struct event_format *event, struct print_arg *arg,
+		   char **tok, enum print_arg_type type)
 {
 	memset(arg, 0, sizeof(*arg));
-	arg->type = PRINT_HEX;
+	arg->type = type;
 
 	if (alloc_and_process_delim(event, ",", &arg->hex.field))
 		goto out;
@@ -2646,6 +2650,19 @@ free_field:
 out:
 	*tok = NULL;
 	return EVENT_ERROR;
+}
+
+static enum event_type
+process_hex(struct event_format *event, struct print_arg *arg, char **tok)
+{
+	return process_hex_common(event, arg, tok, PRINT_HEX);
+}
+
+static enum event_type
+process_hex_str(struct event_format *event, struct print_arg *arg,
+		char **tok)
+{
+	return process_hex_common(event, arg, tok, PRINT_HEX_STR);
 }
 
 static enum event_type
@@ -2764,7 +2781,6 @@ process_dynamic_array_len(struct event_format *event, struct print_arg *arg,
 	if (read_expected(EVENT_DELIM, ")") < 0)
 		goto out_err;
 
-	free_token(token);
 	type = read_token(&token);
 	*tok = token;
 
@@ -3007,6 +3023,10 @@ process_function(struct event_format *event, struct print_arg *arg,
 	if (strcmp(token, "__print_hex") == 0) {
 		free_token(token);
 		return process_hex(event, arg, tok);
+	}
+	if (strcmp(token, "__print_hex_str") == 0) {
+		free_token(token);
+		return process_hex_str(event, arg, tok);
 	}
 	if (strcmp(token, "__print_array") == 0) {
 		free_token(token);
@@ -3546,6 +3566,7 @@ eval_num_arg(void *data, int size, struct event_format *event, struct print_arg 
 	case PRINT_SYMBOL:
 	case PRINT_INT_ARRAY:
 	case PRINT_HEX:
+	case PRINT_HEX_STR:
 		break;
 	case PRINT_TYPE:
 		val = eval_num_arg(data, size, event, arg->typecast.item);
@@ -3949,6 +3970,11 @@ static void print_str_arg(struct trace_seq *s, void *data, int size,
 				val &= ~fval;
 			}
 		}
+		if (val) {
+			if (print && arg->flags.delim)
+				trace_seq_puts(s, arg->flags.delim);
+			trace_seq_printf(s, "0x%llx", val);
+		}
 		break;
 	case PRINT_SYMBOL:
 		val = eval_num_arg(data, size, event, arg->symbol.field);
@@ -3959,8 +3985,11 @@ static void print_str_arg(struct trace_seq *s, void *data, int size,
 				break;
 			}
 		}
+		if (!flag)
+			trace_seq_printf(s, "0x%llx", val);
 		break;
 	case PRINT_HEX:
+	case PRINT_HEX_STR:
 		if (arg->hex.field->type == PRINT_DYNAMIC_ARRAY) {
 			unsigned long offset;
 			offset = pevent_read_number(pevent,
@@ -3980,7 +4009,7 @@ static void print_str_arg(struct trace_seq *s, void *data, int size,
 		}
 		len = eval_num_arg(data, size, event, arg->hex.size);
 		for (i = 0; i < len; i++) {
-			if (i)
+			if (i && arg->type == PRINT_HEX)
 				trace_seq_putc(s, ' ');
 			trace_seq_printf(s, "%02x", hex[i]);
 		}
@@ -4244,7 +4273,7 @@ static struct print_arg *make_bprint_args(char *fmt, void *data, int size, struc
 	if (asprintf(&arg->atom.atom, "%lld", ip) < 0)
 		goto out_free;
 
-	/* skip the first "%ps: " */
+	/* skip the first "%pf: " */
 	for (ptr = fmt + 5, bptr = data + field->offset;
 	     bptr < data + size && *ptr; ptr++) {
 		int ls = 0;
@@ -4271,6 +4300,26 @@ static struct print_arg *make_bprint_args(char *fmt, void *data, int size, struc
 				goto process_again;
 			case 'p':
 				ls = 1;
+				if (isalnum(ptr[1])) {
+					ptr++;
+					/* Check for special pointers */
+					switch (*ptr) {
+					case 's':
+					case 'S':
+					case 'f':
+					case 'F':
+						break;
+					default:
+						/*
+						 * Older kernels do not process
+						 * dereferenced pointers.
+						 * Only process if the pointer
+						 * value is a printable.
+						 */
+						if (isprint(*(char *)bptr))
+							goto process_string;
+					}
+				}
 				/* fall through */
 			case 'd':
 			case 'u':
@@ -4323,6 +4372,7 @@ static struct print_arg *make_bprint_args(char *fmt, void *data, int size, struc
 
 				break;
 			case 's':
+ process_string:
 				arg = alloc_arg();
 				if (!arg) {
 					do_warning_event(event, "%s(%d): not enough memory!",
@@ -4930,6 +4980,11 @@ static void pretty_print(struct trace_seq *s, void *data, int size, struct event
 				if (isalnum(ptr[1]))
 					ptr++;
 
+				if (arg->type == PRINT_BSTRING) {
+					trace_seq_puts(s, arg->string.string);
+					break;
+				}
+
 				if (*ptr == 'F' || *ptr == 'f' ||
 				    *ptr == 'S' || *ptr == 's') {
 					show_func = *ptr;
@@ -5192,15 +5247,41 @@ struct event_format *pevent_data_event_from_type(struct pevent *pevent, int type
 }
 
 /**
- * pevent_data_pid - parse the PID from raw data
+ * pevent_data_pid - parse the PID from record
  * @pevent: a handle to the pevent
  * @rec: the record to parse
  *
- * This returns the PID from a raw data.
+ * This returns the PID from a record.
  */
 int pevent_data_pid(struct pevent *pevent, struct pevent_record *rec)
 {
 	return parse_common_pid(pevent, rec->data);
+}
+
+/**
+ * pevent_data_preempt_count - parse the preempt count from the record
+ * @pevent: a handle to the pevent
+ * @rec: the record to parse
+ *
+ * This returns the preempt count from a record.
+ */
+int pevent_data_preempt_count(struct pevent *pevent, struct pevent_record *rec)
+{
+	return parse_common_pc(pevent, rec->data);
+}
+
+/**
+ * pevent_data_flags - parse the latency flags from the record
+ * @pevent: a handle to the pevent
+ * @rec: the record to parse
+ *
+ * This returns the latency flags from a record.
+ *
+ *  Use trace_flag_type enum for the flags (see event-parse.h).
+ */
+int pevent_data_flags(struct pevent *pevent, struct pevent_record *rec)
+{
+	return parse_common_flags(pevent, rec->data);
 }
 
 /**
@@ -5425,8 +5506,8 @@ void pevent_print_event_time(struct pevent *pevent, struct trace_seq *s,
 	use_usec_format = is_timestamp_in_us(pevent->trace_clock,
 							use_trace_clock);
 	if (use_usec_format) {
-		secs = record->ts / NSECS_PER_SEC;
-		nsecs = record->ts - secs * NSECS_PER_SEC;
+		secs = record->ts / NSEC_PER_SEC;
+		nsecs = record->ts - secs * NSEC_PER_SEC;
 	}
 
 	if (pevent->latency_format) {
@@ -5438,10 +5519,10 @@ void pevent_print_event_time(struct pevent *pevent, struct trace_seq *s,
 			usecs = nsecs;
 			p = 9;
 		} else {
-			usecs = (nsecs + 500) / NSECS_PER_USEC;
+			usecs = (nsecs + 500) / NSEC_PER_USEC;
 			/* To avoid usecs larger than 1 sec */
-			if (usecs >= 1000000) {
-				usecs -= 1000000;
+			if (usecs >= USEC_PER_SEC) {
+				usecs -= USEC_PER_SEC;
 				secs++;
 			}
 			p = 6;
@@ -5485,8 +5566,14 @@ void pevent_print_event(struct pevent *pevent, struct trace_seq *s,
 
 	event = pevent_find_event_by_record(pevent, record);
 	if (!event) {
-		do_warning("ug! no event found for type %d",
-			   trace_parse_common_type(pevent, record->data));
+		int i;
+		int type = trace_parse_common_type(pevent, record->data);
+
+		do_warning("ug! no event found for type %d", type);
+		trace_seq_printf(s, "[UNKNOWN TYPE %d]", type);
+		for (i = 0; i < record->size; i++)
+			trace_seq_printf(s, " %02x",
+					 ((unsigned char *)record->data)[i]);
 		return;
 	}
 
@@ -5696,6 +5783,13 @@ static void print_args(struct print_arg *args)
 		break;
 	case PRINT_HEX:
 		printf("__print_hex(");
+		print_args(args->hex.field);
+		printf(", ");
+		print_args(args->hex.size);
+		printf(")");
+		break;
+	case PRINT_HEX_STR:
+		printf("__print_hex_str(");
 		print_args(args->hex.field);
 		printf(", ");
 		print_args(args->hex.size);

@@ -26,7 +26,7 @@
 #include <linux/freezer.h>
 #include <linux/videodev2.h>
 #include <media/v4l2-common.h>
-#include <media/drv-intf/msp3400.h>
+#include <media/msp3400.h>
 #include <linux/kthread.h>
 #include <linux/suspend.h>
 #include "msp3400-driver.h"
@@ -660,6 +660,7 @@ restart:
 			break;
 		case 0: /* 4.5 */
 			state->detected_std = V4L2_STD_MN;
+			/* fall-through */
 		default:
 no_second:
 			state->second = msp3400c_carrier_detect_main[max1].cdo;

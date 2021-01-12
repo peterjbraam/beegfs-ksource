@@ -115,11 +115,6 @@ static void se401_read_req(struct gspca_dev *gspca_dev, u16 req, int silent)
 			pr_err("read req failed req %#04x error %d\n",
 			       req, err);
 		gspca_dev->usb_err = err;
-		/*
-		 * Make sure the buffer is zeroed to avoid uninitialized
-		 * values.
-		 */
-		memset(gspca_dev->usb_buf, 0, READ_REQ_SIZE);
 	}
 }
 
@@ -359,9 +354,9 @@ static int sd_start(struct gspca_dev *gspca_dev)
 
 	/* set size + mode */
 	se401_write_req(gspca_dev, SE401_REQ_SET_WIDTH,
-			gspca_dev->pixfmt.width * mult, 0);
+			gspca_dev->width * mult, 0);
 	se401_write_req(gspca_dev, SE401_REQ_SET_HEIGHT,
-			gspca_dev->pixfmt.height * mult, 0);
+			gspca_dev->height * mult, 0);
 	/*
 	 * HDG: disabled this as it does not seem to do anything
 	 * se401_write_req(gspca_dev, SE401_REQ_SET_OUTPUT_MODE,
@@ -485,7 +480,7 @@ static void sd_complete_frame(struct gspca_dev *gspca_dev, u8 *data, int len)
 static void sd_pkt_scan_janggu(struct gspca_dev *gspca_dev, u8 *data, int len)
 {
 	struct sd *sd = (struct sd *)gspca_dev;
-	int imagesize = gspca_dev->pixfmt.width * gspca_dev->pixfmt.height;
+	int imagesize = gspca_dev->width * gspca_dev->height;
 	int i, plen, bits, pixels, info, count;
 
 	if (sd->restart_stream)

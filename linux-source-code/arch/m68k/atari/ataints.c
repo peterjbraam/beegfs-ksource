@@ -41,7 +41,6 @@
 #include <linux/init.h>
 #include <linux/seq_file.h>
 #include <linux/module.h>
-#include <linux/irq.h>
 
 #include <asm/traps.h>
 
@@ -142,7 +141,7 @@ struct mfptimerbase {
 	.name		= "MFP Timer D"
 };
 
-static irqreturn_t mfp_timer_d_handler(int irq, void *dev_id)
+static irqreturn_t mfptimer_handler(int irq, void *dev_id)
 {
 	struct mfptimerbase *base = dev_id;
 	int mach_irq;
@@ -334,9 +333,6 @@ void __init atari_init_IRQ(void)
 	m68k_setup_irq_controller(&atari_mfptimer_chip, handle_simple_irq,
 				  IRQ_MFP_TIMER1, 8);
 
-	irq_set_status_flags(IRQ_MFP_TIMER1, IRQ_IS_POLLED);
-	irq_set_status_flags(IRQ_MFP_TIMER2, IRQ_IS_POLLED);
-
 	/* prepare timer D data for use as poll interrupt */
 	/* set Timer D data Register - needs to be > 0 */
 	st_mfp.tim_dt_d = 254;	/* < 100 Hz */
@@ -344,7 +340,7 @@ void __init atari_init_IRQ(void)
 	st_mfp.tim_ct_cd = (st_mfp.tim_ct_cd & 0xf0) | 0x6;
 
 	/* request timer D dispatch handler */
-	if (request_irq(IRQ_MFP_TIMD, mfp_timer_d_handler, IRQF_SHARED,
+	if (request_irq(IRQ_MFP_TIMD, mfptimer_handler, IRQF_SHARED,
 			stmfp_base.name, &stmfp_base))
 		pr_err("Couldn't register %s interrupt\n", stmfp_base.name);
 

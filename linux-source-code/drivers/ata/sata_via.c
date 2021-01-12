@@ -114,7 +114,7 @@ static struct pci_driver svia_pci_driver = {
 	.name			= DRV_NAME,
 	.id_table		= svia_pci_tbl,
 	.probe			= svia_init_one,
-#ifdef CONFIG_PM_SLEEP
+#ifdef CONFIG_PM
 	.suspend		= ata_pci_device_suspend,
 	.resume			= svia_pci_device_resume,
 #endif
@@ -514,10 +514,10 @@ static int vt6421_prepare_host(struct pci_dev *pdev, struct ata_host **r_host)
 	for (i = 0; i < host->n_ports; i++)
 		vt6421_init_addrs(host->ports[i]);
 
-	rc = dma_set_mask(&pdev->dev, ATA_DMA_MASK);
+	rc = pci_set_dma_mask(pdev, ATA_DMA_MASK);
 	if (rc)
 		return rc;
-	rc = dma_set_coherent_mask(&pdev->dev, ATA_DMA_MASK);
+	rc = pci_set_consistent_dma_mask(pdev, ATA_DMA_MASK);
 	if (rc)
 		return rc;
 
@@ -644,16 +644,14 @@ static void svia_configure(struct pci_dev *pdev, int board_id,
 		pci_write_config_byte(pdev, SATA_NATIVE_MODE, tmp8);
 	}
 
-	if (board_id == vt6421) {
-		/* enable IRQ on hotplug */
-		pci_read_config_byte(pdev, SVIA_MISC_3, &tmp8);
-		if ((tmp8 & SATA_HOTPLUG) != SATA_HOTPLUG) {
-			dev_dbg(&pdev->dev,
-				"enabling SATA hotplug (0x%x)\n",
-				(int) tmp8);
-			tmp8 |= SATA_HOTPLUG;
-			pci_write_config_byte(pdev, SVIA_MISC_3, tmp8);
-		}
+	/* enable IRQ on hotplug */
+	pci_read_config_byte(pdev, SVIA_MISC_3, &tmp8);
+	if ((tmp8 & SATA_HOTPLUG) != SATA_HOTPLUG) {
+		dev_dbg(&pdev->dev,
+			"enabling SATA hotplug (0x%x)\n",
+			(int) tmp8);
+		tmp8 |= SATA_HOTPLUG;
+		pci_write_config_byte(pdev, SVIA_MISC_3, tmp8);
 	}
 
 	/*

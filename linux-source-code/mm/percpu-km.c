@@ -49,6 +49,7 @@ static struct pcpu_chunk *pcpu_create_chunk(void)
 {
 	const int nr_pages = pcpu_group_sizes[0] >> PAGE_SHIFT;
 	struct pcpu_chunk *chunk;
+	unsigned long flags;
 	struct page *pages;
 	int i;
 
@@ -66,11 +67,14 @@ static struct pcpu_chunk *pcpu_create_chunk(void)
 		pcpu_set_page_chunk(nth_page(pages, i), chunk);
 
 	chunk->data = pages;
-	chunk->base_addr = page_address(pages) - pcpu_group_offsets[0];
+	chunk->base_addr = page_address(pages);
 
-	spin_lock_irq(&pcpu_lock);
+	spin_lock_irqsave(&pcpu_lock, flags);
 	pcpu_chunk_populated(chunk, 0, nr_pages);
-	spin_unlock_irq(&pcpu_lock);
+	spin_unlock_irqrestore(&pcpu_lock, flags);
+
+	pcpu_stats_chunk_alloc();
+	trace_percpu_create_chunk(chunk->base_addr);
 
 	return chunk;
 }
@@ -79,7 +83,13 @@ static void pcpu_destroy_chunk(struct pcpu_chunk *chunk)
 {
 	const int nr_pages = pcpu_group_sizes[0] >> PAGE_SHIFT;
 
-	if (chunk && chunk->data)
+	if (!chunk)
+		return;
+
+	pcpu_stats_chunk_dealloc();
+	trace_percpu_destroy_chunk(chunk->base_addr);
+
+	if (chunk->data)
 		__free_pages(chunk->data, order_base_2(nr_pages));
 	pcpu_free_chunk(chunk);
 }

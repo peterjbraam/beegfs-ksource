@@ -86,16 +86,17 @@ struct btrfs_root;
 struct btrfs_io_bio;
 struct io_failure_record;
 
-typedef	int (extent_submit_bio_hook_t)(struct inode *inode, struct bio *bio,
-				       int mirror_num, unsigned long bio_flags,
-				       u64 bio_offset);
+typedef	int (extent_submit_bio_hook_t)(struct inode *inode, int rw,
+				       struct bio *bio, int mirror_num,
+				       unsigned long bio_flags, u64 bio_offset);
 struct extent_io_ops {
 	int (*fill_delalloc)(struct inode *inode, struct page *locked_page,
 			     u64 start, u64 end, int *page_started,
 			     unsigned long *nr_written);
 	int (*writepage_start_hook)(struct page *page, u64 start, u64 end);
+	int (*writepage_io_hook)(struct page *page, u64 start, u64 end);
 	extent_submit_bio_hook_t *submit_bio_hook;
-	int (*merge_bio_hook)(struct page *page, unsigned long offset,
+	int (*merge_bio_hook)(int rw, struct page *page, unsigned long offset,
 			      size_t size, struct bio *bio,
 			      unsigned long bio_flags);
 	int (*readpage_io_failed_hook)(struct page *page, int failed_mirror);
@@ -142,7 +143,7 @@ struct extent_state {
 };
 
 #define INLINE_EXTENT_BUFFER_PAGES 16
-#define MAX_INLINE_EXTENT_BUFFER_SIZE (INLINE_EXTENT_BUFFER_PAGES * PAGE_SIZE)
+#define MAX_INLINE_EXTENT_BUFFER_SIZE (INLINE_EXTENT_BUFFER_PAGES * PAGE_CACHE_SIZE)
 struct extent_buffer {
 	u64 start;
 	unsigned long len;
@@ -387,8 +388,8 @@ void wait_on_extent_buffer_writeback(struct extent_buffer *eb);
 
 static inline unsigned long num_extent_pages(u64 start, u64 len)
 {
-	return ((start + len + PAGE_SIZE - 1) >> PAGE_SHIFT) -
-		(start >> PAGE_SHIFT);
+	return ((start + len + PAGE_CACHE_SIZE - 1) >> PAGE_CACHE_SHIFT) -
+		(start >> PAGE_CACHE_SHIFT);
 }
 
 static inline void extent_buffer_get(struct extent_buffer *eb)
@@ -396,14 +397,15 @@ static inline void extent_buffer_get(struct extent_buffer *eb)
 	atomic_inc(&eb->refs);
 }
 
-int memcmp_extent_buffer(const struct extent_buffer *eb, const void *ptrv,
-			 unsigned long start, unsigned long len);
-void read_extent_buffer(const struct extent_buffer *eb, void *dst,
+int memcmp_extent_buffer(struct extent_buffer *eb, const void *ptrv,
+			  unsigned long start,
+			  unsigned long len);
+void read_extent_buffer(struct extent_buffer *eb, void *dst,
 			unsigned long start,
 			unsigned long len);
-int read_extent_buffer_to_user_nofault(const struct extent_buffer *eb,
-				       void __user *dst, unsigned long start,
-				       unsigned long len);
+int read_extent_buffer_to_user(struct extent_buffer *eb, void __user *dst,
+			       unsigned long start,
+			       unsigned long len);
 void write_extent_buffer(struct extent_buffer *eb, const void *src,
 			 unsigned long start, unsigned long len);
 void copy_extent_buffer(struct extent_buffer *dst, struct extent_buffer *src,
@@ -427,10 +429,10 @@ void set_extent_buffer_uptodate(struct extent_buffer *eb);
 void clear_extent_buffer_uptodate(struct extent_buffer *eb);
 int extent_buffer_uptodate(struct extent_buffer *eb);
 int extent_buffer_under_io(struct extent_buffer *eb);
-int map_private_extent_buffer(const struct extent_buffer *eb,
-			      unsigned long offset, unsigned long min_len,
-			      char **map, unsigned long *map_start,
-			      unsigned long *map_len);
+int map_private_extent_buffer(struct extent_buffer *eb, unsigned long offset,
+		      unsigned long min_len, char **map,
+		      unsigned long *map_start,
+		      unsigned long *map_len);
 void extent_range_clear_dirty_for_io(struct inode *inode, u64 start, u64 end);
 void extent_range_redirty_for_io(struct inode *inode, u64 start, u64 end);
 void extent_clear_unlock_delalloc(struct inode *inode, u64 start, u64 end,

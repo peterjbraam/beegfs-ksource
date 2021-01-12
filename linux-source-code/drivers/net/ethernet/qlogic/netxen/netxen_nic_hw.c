@@ -579,9 +579,8 @@ static int
 netxen_send_cmd_descs(struct netxen_adapter *adapter,
 		struct cmd_desc_type0 *cmd_desc_arr, int nr_desc)
 {
-	u32 i, producer, consumer;
+	u32 i, producer;
 	struct netxen_cmd_buffer *pbuf;
-	struct cmd_desc_type0 *cmd_desc;
 	struct nx_host_tx_ring *tx_ring;
 
 	i = 0;
@@ -593,7 +592,6 @@ netxen_send_cmd_descs(struct netxen_adapter *adapter,
 	__netif_tx_lock_bh(tx_ring->txq);
 
 	producer = tx_ring->producer;
-	consumer = tx_ring->sw_consumer;
 
 	if (nr_desc >= netxen_tx_avail(tx_ring)) {
 		netif_tx_stop_queue(tx_ring->txq);
@@ -608,8 +606,6 @@ netxen_send_cmd_descs(struct netxen_adapter *adapter,
 	}
 
 	do {
-		cmd_desc = &cmd_desc_arr[i];
-
 		pbuf = &tx_ring->cmd_buf_arr[producer];
 		pbuf->skb = NULL;
 		pbuf->frag_count = 0;
@@ -987,19 +983,7 @@ int netxen_send_lro_cleanup(struct netxen_adapter *adapter)
 int netxen_nic_change_mtu(struct net_device *netdev, int mtu)
 {
 	struct netxen_adapter *adapter = netdev_priv(netdev);
-	int max_mtu;
 	int rc = 0;
-
-	if (NX_IS_REVISION_P3(adapter->ahw.revision_id))
-		max_mtu = P3_MAX_MTU;
-	else
-		max_mtu = P2_MAX_MTU;
-
-	if (mtu > max_mtu) {
-		printk(KERN_ERR "%s: mtu > %d bytes unsupported\n",
-				netdev->name, max_mtu);
-		return -EINVAL;
-	}
 
 	if (adapter->set_mtu)
 		rc = adapter->set_mtu(adapter, mtu);
@@ -2336,7 +2320,7 @@ netxen_md_rdqueue(struct netxen_adapter *adapter,
 				 loop_cnt++) {
 		NX_WR_DUMP_REG(select_addr, adapter->ahw.pci_base0, queue_id);
 		read_addr = queueEntry->read_addr;
-		for (k = 0; k < read_cnt; k--) {
+		for (k = 0; k < read_cnt; k++) {
 			NX_RD_DUMP_REG(read_addr, adapter->ahw.pci_base0,
 							&read_value);
 			*data_buff++ = read_value;
@@ -2375,7 +2359,7 @@ static int netxen_md_entry_err_chk(struct netxen_adapter *adapter,
 static int netxen_parse_md_template(struct netxen_adapter *adapter)
 {
 	int num_of_entries, buff_level, e_cnt, esize;
-	int end_cnt = 0, rv = 0, sane_start = 0, sane_end = 0;
+	int rv = 0, sane_start = 0, sane_end = 0;
 	char *dbuff;
 	void *template_buff = adapter->mdump.md_template;
 	char *dump_buff = adapter->mdump.md_capture_buff;
@@ -2411,8 +2395,6 @@ static int netxen_parse_md_template(struct netxen_adapter *adapter)
 			break;
 		case RDEND:
 			entry->hdr.driver_flags |= NX_DUMP_SKIP;
-			if (!sane_end)
-				end_cnt = e_cnt;
 			sane_end += 1;
 			break;
 		case CNTRL:

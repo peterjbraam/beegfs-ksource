@@ -36,7 +36,9 @@ struct rtnl_link_stats {
 	__u32	rx_compressed;
 	__u32	tx_compressed;
 
+#ifndef __GENKSYMS__
 	__u32	rx_nohandler;		/* dropped, no handler found	*/
+#endif
 };
 
 /* The main device statistics structure */
@@ -71,7 +73,9 @@ struct rtnl_link_stats64 {
 	__u64	rx_compressed;
 	__u64	tx_compressed;
 
+#ifndef __GENKSYMS__
 	__u64	rx_nohandler;		/* dropped, no handler found	*/
+#endif
 };
 
 /* The struct should be in sync with struct ifmap */
@@ -156,7 +160,13 @@ enum {
 	IFLA_GSO_MAX_SEGS,
 	IFLA_GSO_MAX_SIZE,
 	IFLA_PAD,
-	IFLA_XDP,
+	__RH_RESERVED_IFLA_XDP,
+	IFLA_EVENT,
+	IFLA_NEW_NETNSID,
+	IFLA_IF_NETNSID,
+	__RH_RESERVED_IFLA_CARRIER_UP_COUNT,
+	__RH_RESERVED_IFLA_CARRIER_DOWN_COUNT,
+	IFLA_NEW_IFINDEX,
 	__IFLA_MAX
 };
 
@@ -275,6 +285,8 @@ enum {
 	IFLA_BR_PAD,
 	IFLA_BR_VLAN_STATS_ENABLED,
 	IFLA_BR_MCAST_STATS_ENABLED,
+	IFLA_BR_MCAST_IGMP_VERSION,
+	IFLA_BR_MCAST_MLD_VERSION,
 	__IFLA_BR_MAX,
 };
 
@@ -319,6 +331,9 @@ enum {
 	IFLA_BRPORT_MULTICAST_ROUTER,
 	IFLA_BRPORT_PAD,
 	IFLA_BRPORT_MCAST_FLOOD,
+	IFLA_BRPORT_MCAST_TO_UCAST,
+	IFLA_BRPORT_VLAN_TUNNEL,
+	IFLA_BRPORT_BCAST_FLOOD,
 	__IFLA_BRPORT_MAX
 };
 #define IFLA_BRPORT_MAX (__IFLA_BRPORT_MAX - 1)
@@ -379,10 +394,6 @@ enum {
 	IFLA_MACVLAN_UNSPEC,
 	IFLA_MACVLAN_MODE,
 	IFLA_MACVLAN_FLAGS,
-	IFLA_MACVLAN_MACADDR_MODE,
-	IFLA_MACVLAN_MACADDR,
-	IFLA_MACVLAN_MACADDR_DATA,
-	IFLA_MACVLAN_MACADDR_COUNT,
 	__IFLA_MACVLAN_MAX,
 };
 
@@ -393,34 +404,9 @@ enum macvlan_mode {
 	MACVLAN_MODE_VEPA    = 2, /* talk to other ports through ext bridge */
 	MACVLAN_MODE_BRIDGE  = 4, /* talk to bridge ports directly */
 	MACVLAN_MODE_PASSTHRU = 8,/* take over the underlying device */
-	MACVLAN_MODE_SOURCE  = 16,/* use source MAC address list to assign */
-};
-
-enum macvlan_macaddr_mode {
-	MACVLAN_MACADDR_ADD,
-	MACVLAN_MACADDR_DEL,
-	MACVLAN_MACADDR_FLUSH,
-	MACVLAN_MACADDR_SET,
 };
 
 #define MACVLAN_FLAG_NOPROMISC	1
-
-/* VRF section */
-enum {
-	IFLA_VRF_UNSPEC,
-	IFLA_VRF_TABLE,
-	__IFLA_VRF_MAX
-};
-
-#define IFLA_VRF_MAX (__IFLA_VRF_MAX - 1)
-
-enum {
-	IFLA_VRF_PORT_UNSPEC,
-	IFLA_VRF_PORT_TABLE,
-	__IFLA_VRF_PORT_MAX
-};
-
-#define IFLA_VRF_PORT_MAX (__IFLA_VRF_PORT_MAX - 1)
 
 /* MACSEC section */
 enum {
@@ -450,22 +436,6 @@ enum macsec_validation_type {
 	MACSEC_VALIDATE_STRICT = 2,
 	__MACSEC_VALIDATE_END,
 	MACSEC_VALIDATE_MAX = __MACSEC_VALIDATE_END - 1,
-};
-
-/* IPVLAN section */
-enum {
-	IFLA_IPVLAN_UNSPEC,
-	IFLA_IPVLAN_MODE,
-	__IFLA_IPVLAN_MAX
-};
-
-#define IFLA_IPVLAN_MAX (__IFLA_IPVLAN_MAX - 1)
-
-enum ipvlan_mode {
-	IPVLAN_MODE_L2 = 0,
-	IPVLAN_MODE_L3,
-	IPVLAN_MODE_L3S,
-	IPVLAN_MODE_MAX
 };
 
 /* VXLAN section */
@@ -498,6 +468,7 @@ enum {
 	IFLA_VXLAN_COLLECT_METADATA,
 	IFLA_VXLAN_LABEL,
 	IFLA_VXLAN_GPE,
+	IFLA_VXLAN_TTL_INHERIT,
 	__IFLA_VXLAN_MAX
 };
 #define IFLA_VXLAN_MAX	(__IFLA_VXLAN_MAX - 1)
@@ -524,24 +495,6 @@ enum {
 	__IFLA_GENEVE_MAX
 };
 #define IFLA_GENEVE_MAX	(__IFLA_GENEVE_MAX - 1)
-
-/* PPP section */
-enum {
-	IFLA_PPP_UNSPEC,
-	IFLA_PPP_DEV_FD,
-	__IFLA_PPP_MAX
-};
-#define IFLA_PPP_MAX (__IFLA_PPP_MAX - 1)
-
-/* GTP section */
-enum {
-	IFLA_GTP_UNSPEC,
-	IFLA_GTP_FD0,
-	IFLA_GTP_FD1,
-	IFLA_GTP_PDP_HASHSIZE,
-	__IFLA_GTP_MAX,
-};
-#define IFLA_GTP_MAX (__IFLA_GTP_MAX - 1)
 
 /* Bonding section */
 
@@ -710,6 +663,8 @@ enum {
 	IFLA_VF_STATS_BROADCAST,
 	IFLA_VF_STATS_MULTICAST,
 	IFLA_VF_STATS_PAD,
+	IFLA_VF_STATS_RX_DROPPED,
+	IFLA_VF_STATS_TX_DROPPED,
 	__IFLA_VF_STATS_MAX,
 };
 
@@ -810,22 +765,6 @@ enum {
 
 #define IFLA_IPOIB_MAX (__IFLA_IPOIB_MAX - 1)
 
-
-/* HSR section */
-
-enum {
-	IFLA_HSR_UNSPEC,
-	IFLA_HSR_SLAVE1,
-	IFLA_HSR_SLAVE2,
-	IFLA_HSR_MULTICAST_SPEC,	/* Last byte of supervision addr */
-	IFLA_HSR_SUPERVISION_ADDR,	/* Supervision frame multicast addr */
-	IFLA_HSR_SEQ_NR,
-	IFLA_HSR_VERSION,		/* HSR version */
-	__IFLA_HSR_MAX,
-};
-
-#define IFLA_HSR_MAX (__IFLA_HSR_MAX - 1)
-
 /* STATS section */
 
 struct if_stats_msg {
@@ -860,6 +799,7 @@ enum {
 enum {
 	LINK_XSTATS_TYPE_UNSPEC,
 	LINK_XSTATS_TYPE_BRIDGE,
+	LINK_XSTATS_TYPE_BOND,
 	__LINK_XSTATS_TYPE_MAX
 };
 #define LINK_XSTATS_TYPE_MAX (__LINK_XSTATS_TYPE_MAX - 1)
@@ -872,15 +812,32 @@ enum {
 };
 #define IFLA_OFFLOAD_XSTATS_MAX (__IFLA_OFFLOAD_XSTATS_MAX - 1)
 
-/* XDP section */
-
 enum {
-	IFLA_XDP_UNSPEC,
-	IFLA_XDP_FD,
-	IFLA_XDP_ATTACHED,
-	__IFLA_XDP_MAX,
+	IFLA_EVENT_NONE,
+	IFLA_EVENT_REBOOT,		/* internal reset / reboot */
+	IFLA_EVENT_FEATURES,		/* change in offload features */
+	IFLA_EVENT_BONDING_FAILOVER,	/* change in active slave */
+	IFLA_EVENT_NOTIFY_PEERS,	/* re-sent grat. arp/ndisc */
+	IFLA_EVENT_IGMP_RESEND,		/* re-sent IGMP JOIN */
+	IFLA_EVENT_BONDING_OPTIONS,	/* change in bonding options */
 };
 
-#define IFLA_XDP_MAX (__IFLA_XDP_MAX - 1)
+/* tun section */
+
+enum {
+	IFLA_TUN_UNSPEC,
+	IFLA_TUN_OWNER,
+	IFLA_TUN_GROUP,
+	IFLA_TUN_TYPE,
+	IFLA_TUN_PI,
+	IFLA_TUN_VNET_HDR,
+	IFLA_TUN_PERSIST,
+	IFLA_TUN_MULTI_QUEUE,
+	IFLA_TUN_NUM_QUEUES,
+	IFLA_TUN_NUM_DISABLED_QUEUES,
+	__IFLA_TUN_MAX,
+};
+
+#define IFLA_TUN_MAX (__IFLA_TUN_MAX - 1)
 
 #endif /* _UAPI_LINUX_IF_LINK_H */

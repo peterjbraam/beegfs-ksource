@@ -12,7 +12,6 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/moduleparam.h>
-#include <linux/kernel.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/string.h>
@@ -28,7 +27,6 @@
 #include <linux/slab.h>
 #include <linux/export.h>
 #include <linux/if_vlan.h>
-#include <net/dsa.h>
 #include <net/tcp.h>
 #include <net/udp.h>
 #include <net/addrconf.h>
@@ -106,57 +104,33 @@ static void queue_process(struct work_struct *work)
 	while ((skb = skb_dequeue(&npinfo->txq))) {
 		struct net_device *dev = skb->dev;
 		struct netdev_queue *txq;
-		unsigned int q_index;
 
 		if (!netif_device_present(dev) || !netif_running(dev)) {
-			kfree_skb(skb);
+			__kfree_skb(skb);
 			continue;
 		}
 
+		txq = skb_get_tx_queue(dev, skb);
+
 		local_irq_save(flags);
-		/* check if skb->queue_mapping is still valid */
-		q_index = skb_get_queue_mapping(skb);
-		if (unlikely(q_index >= dev->real_num_tx_queues)) {
-			q_index = q_index % dev->real_num_tx_queues;
-			skb_set_queue_mapping(skb, q_index);
-		}
-		txq = netdev_get_tx_queue(dev, q_index);
-		HARD_TX_LOCK(dev, txq, smp_processor_id());
+		__netif_tx_lock(txq, smp_processor_id());
 		if (netif_xmit_frozen_or_stopped(txq) ||
-		    !dev_xmit_complete(netpoll_start_xmit(skb, dev, txq))) {
+		    netpoll_start_xmit(skb, dev, txq) != NETDEV_TX_OK) {
 			skb_queue_head(&npinfo->txq, skb);
-			HARD_TX_UNLOCK(dev, txq);
+			__netif_tx_unlock(txq);
 			local_irq_restore(flags);
 
 			schedule_delayed_work(&npinfo->tx_work, HZ/10);
 			return;
 		}
-		HARD_TX_UNLOCK(dev, txq);
+		__netif_tx_unlock(txq);
 		local_irq_restore(flags);
 	}
 }
 
-/*
- * Check whether delayed processing was scheduled for our NIC. If so,
- * we attempt to grab the poll lock and use ->poll() to pump the card.
- * If this fails, either we've recursed in ->poll() or it's already
- * running on another CPU.
- *
- * Note: we don't mask interrupts with this lock because we're using
- * trylock here and interrupts are already disabled in the softirq
- * case. Further, we test the poll_owner to avoid recursion on UP
- * systems where the lock doesn't exist.
- */
 static void poll_one_napi(struct napi_struct *napi)
 {
-	int work = 0;
-
-	/* net_rx_action's ->poll() invocations and our's are
-	 * synchronized by this test which is only made while
-	 * holding the napi->poll_lock.
-	 */
-	if (!test_bit(NAPI_STATE_SCHED, &napi->state))
-		return;
+	int work;
 
 	/* If we set this bit but see that it has already been set,
 	 * that indicates that napi has been disabled and we need
@@ -170,7 +144,7 @@ static void poll_one_napi(struct napi_struct *napi)
 	 */
 	work = napi->poll(napi, 0);
 	WARN_ONCE(work, "%pF exceeded budget in poll\n", napi->poll);
-	trace_napi_poll(napi, work, 0);
+	trace_napi_poll(napi);
 
 	clear_bit(NAPI_STATE_NPSVC, &napi->state);
 }
@@ -178,26 +152,26 @@ static void poll_one_napi(struct napi_struct *napi)
 static void poll_napi(struct net_device *dev)
 {
 	struct napi_struct *napi;
+	int cpu = smp_processor_id();
 
-	list_for_each_entry_rcu(napi, &dev->napi_list, dev_list) {
-		if (napi->poll_owner != smp_processor_id() &&
-		    spin_trylock(&napi->poll_lock)) {
+	list_for_each_entry(napi, &dev->napi_list, dev_list) {
+		if (cmpxchg(&napi->poll_owner, -1, cpu) == -1) {
 			poll_one_napi(napi);
-			spin_unlock(&napi->poll_lock);
+			smp_store_release(&napi->poll_owner, -1);
 		}
 	}
 }
 
-static void netpoll_poll_dev(struct net_device *dev)
+void netpoll_poll_dev(struct net_device *dev)
 {
-	const struct net_device_ops *ops;
 	struct netpoll_info *ni = rcu_dereference_bh(dev->npinfo);
+	const struct net_device_ops *ops;
 
 	/* Don't do any rx activity if the dev_lock mutex is held
 	 * the dev_open/close paths use this to block netpoll activity
 	 * while changing device state
 	 */
-	if (down_trylock(&ni->dev_lock))
+	if (!ni || down_trylock(&ni->dev_lock))
 		return;
 
 	if (!netif_running(dev)) {
@@ -206,13 +180,8 @@ static void netpoll_poll_dev(struct net_device *dev)
 	}
 
 	ops = dev->netdev_ops;
-	if (!ops->ndo_poll_controller) {
-		up(&ni->dev_lock);
-		return;
-	}
-
-	/* Process pending work on NIC */
-	ops->ndo_poll_controller(dev);
+	if (ops->ndo_poll_controller)
+		ops->ndo_poll_controller(dev);
 
 	poll_napi(dev);
 
@@ -220,6 +189,7 @@ static void netpoll_poll_dev(struct net_device *dev)
 
 	zap_completion_queue();
 }
+EXPORT_SYMBOL(netpoll_poll_dev);
 
 void netpoll_poll_disable(struct net_device *dev)
 {
@@ -277,7 +247,7 @@ static void zap_completion_queue(void)
 		while (clist != NULL) {
 			struct sk_buff *skb = clist;
 			clist = clist->next;
-			if (!skb_irq_freeable(skb)) {
+			if (skb->destructor) {
 				atomic_inc(&skb->users);
 				dev_kfree_skb_any(skb); /* put this one back */
 			} else {
@@ -339,7 +309,7 @@ void netpoll_send_skb_on_dev(struct netpoll *np, struct sk_buff *skb,
 
 	npinfo = rcu_dereference_bh(np->dev->npinfo);
 	if (!npinfo || !netif_running(dev) || !netif_device_present(dev)) {
-		dev_kfree_skb_irq(skb);
+		__kfree_skb(skb);
 		return;
 	}
 
@@ -352,13 +322,13 @@ void netpoll_send_skb_on_dev(struct netpoll *np, struct sk_buff *skb,
 		/* try until next clock tick */
 		for (tries = jiffies_to_usecs(1)/USEC_PER_POLL;
 		     tries > 0; --tries) {
-			if (HARD_TX_TRYLOCK(dev, txq)) {
+			if (__netif_tx_trylock(txq)) {
 				if (!netif_xmit_stopped(txq))
 					status = netpoll_start_xmit(skb, dev, txq);
 
-				HARD_TX_UNLOCK(dev, txq);
+				__netif_tx_unlock(txq);
 
-				if (dev_xmit_complete(status))
+				if (status == NETDEV_TX_OK)
 					break;
 
 			}
@@ -375,7 +345,7 @@ void netpoll_send_skb_on_dev(struct netpoll *np, struct sk_buff *skb,
 
 	}
 
-	if (!dev_xmit_complete(status)) {
+	if (status != NETDEV_TX_OK) {
 		skb_queue_tail(&npinfo->txq, skb);
 		schedule_delayed_work(&npinfo->tx_work,0);
 	}
@@ -391,8 +361,6 @@ void netpoll_send_udp(struct netpoll *np, const char *msg, int len)
 	struct ethhdr *eth;
 	static atomic_t ip_ident;
 	struct ipv6hdr *ip6h;
-
-	WARN_ON_ONCE(!irqs_disabled());
 
 	udp_len = len + sizeof(*udph);
 	if (np->ipv6)
@@ -442,7 +410,7 @@ void netpoll_send_udp(struct netpoll *np, const char *msg, int len)
 		ip6h->saddr = np->local_ip.in6;
 		ip6h->daddr = np->remote_ip.in6;
 
-		eth = (struct ethhdr *) skb_push(skb, ETH_HLEN);
+		eth = skb_push(skb, ETH_HLEN);
 		skb_reset_mac_header(skb);
 		skb->protocol = eth->h_proto = htons(ETH_P_IPV6);
 	} else {
@@ -471,7 +439,7 @@ void netpoll_send_udp(struct netpoll *np, const char *msg, int len)
 		put_unaligned(np->remote_ip.ip, &(iph->daddr));
 		iph->check    = ip_fast_csum((unsigned char *)iph, iph->ihl);
 
-		eth = (struct ethhdr *) skb_push(skb, ETH_HLEN);
+		eth = skb_push(skb, ETH_HLEN);
 		skb_reset_mac_header(skb);
 		skb->protocol = eth->h_proto = htons(ETH_P_IP);
 	}
@@ -614,8 +582,7 @@ int __netpoll_setup(struct netpoll *np, struct net_device *ndev)
 	strlcpy(np->dev_name, ndev->name, IFNAMSIZ);
 	INIT_WORK(&np->cleanup_work, netpoll_async_cleanup);
 
-	if ((ndev->priv_flags & IFF_DISABLE_NETPOLL) ||
-	    !ndev->netdev_ops->ndo_poll_controller) {
+	if (ndev->priv_flags & IFF_DISABLE_NETPOLL) {
 		np_err(np, "%s doesn't support polling, aborting\n",
 		       np->dev_name);
 		err = -ENOTSUPP;
@@ -637,7 +604,7 @@ int __netpoll_setup(struct netpoll *np, struct net_device *ndev)
 
 		ops = np->dev->netdev_ops;
 		if (ops->ndo_netpoll_setup) {
-			err = ops->ndo_netpoll_setup(ndev, npinfo);
+			err = ops->ndo_netpoll_setup(ndev, npinfo, GFP_KERNEL);
 			if (err)
 				goto free_npinfo;
 		}
@@ -662,34 +629,21 @@ EXPORT_SYMBOL_GPL(__netpoll_setup);
 
 int netpoll_setup(struct netpoll *np)
 {
-	struct net_device *ndev = NULL, *dev = NULL;
-	struct net *net = current->nsproxy->net_ns;
+	struct net_device *ndev = NULL;
 	struct in_device *in_dev;
 	int err;
 
 	rtnl_lock();
-	if (np->dev_name[0])
+	if (np->dev_name) {
+		struct net *net = current->nsproxy->net_ns;
 		ndev = __dev_get_by_name(net, np->dev_name);
-
+	}
 	if (!ndev) {
 		np_err(np, "%s doesn't exist, aborting\n", np->dev_name);
 		err = -ENODEV;
 		goto unlock;
 	}
 	dev_hold(ndev);
-
-	/* bring up DSA management network devices up first */
-	for_each_netdev(net, dev) {
-		if (!netdev_uses_dsa(dev))
-			continue;
-
-		err = dev_change_flags(dev, dev->flags | IFF_UP);
-		if (err < 0) {
-			np_err(np, "%s failed to open %s\n",
-			       np->dev_name, dev->name);
-			goto put;
-		}
-	}
 
 	if (netdev_master_upper_dev_get(ndev)) {
 		np_err(np, "%s is a slave device, aborting\n", np->dev_name);
@@ -842,10 +796,9 @@ void __netpoll_cleanup(struct netpoll *np)
 		if (ops->ndo_netpoll_cleanup)
 			ops->ndo_netpoll_cleanup(np->dev);
 
-		RCU_INIT_POINTER(np->dev->npinfo, NULL);
+		rcu_assign_pointer(np->dev->npinfo, NULL);
 		call_rcu_bh(&npinfo->rcu, rcu_cleanup_netpoll_info);
-	} else
-		RCU_INIT_POINTER(np->dev->npinfo, NULL);
+	}
 }
 EXPORT_SYMBOL_GPL(__netpoll_cleanup);
 
@@ -877,3 +830,9 @@ out:
 	rtnl_unlock();
 }
 EXPORT_SYMBOL(netpoll_cleanup);
+
+int netpoll_trap(void)
+{
+	return 0;
+}
+EXPORT_SYMBOL(netpoll_trap);

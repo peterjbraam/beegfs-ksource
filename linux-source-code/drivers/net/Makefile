@@ -6,7 +6,6 @@
 # Networking Core Drivers
 #
 obj-$(CONFIG_BONDING) += bonding/
-obj-$(CONFIG_IPVLAN) += ipvlan/
 obj-$(CONFIG_DUMMY) += dummy.o
 obj-$(CONFIG_EQUALIZER) += eql.o
 obj-$(CONFIG_IFB) += ifb.o
@@ -25,9 +24,8 @@ obj-$(CONFIG_VETH) += veth.o
 obj-$(CONFIG_VIRTIO_NET) += virtio_net.o
 obj-$(CONFIG_VXLAN) += vxlan.o
 obj-$(CONFIG_GENEVE) += geneve.o
-obj-$(CONFIG_GTP) += gtp.o
 obj-$(CONFIG_NLMON) += nlmon.o
-obj-$(CONFIG_NET_VRF) += vrf.o
+obj-$(CONFIG_VSOCKMON) += vsockmon.o
 
 #
 # Networking Drivers
@@ -72,3 +70,7 @@ obj-$(CONFIG_HYPERV_NET) += hyperv/
 obj-$(CONFIG_NTB_NETDEV) += ntb_netdev.o
 
 obj-$(CONFIG_FUJITSU_ES) += fjes/
+
+thunderbolt-net-y += thunderbolt.o
+obj-$(CONFIG_THUNDERBOLT_NET) += thunderbolt-net.o
+obj-$(CONFIG_NET_FAILOVER) += net_failover.o

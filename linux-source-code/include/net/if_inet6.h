@@ -18,6 +18,8 @@
 #include <net/snmp.h>
 #include <linux/ipv6.h>
 
+#include <linux/rh_kabi.h>
+
 /* inet6_dev.if_flags */
 
 #define IF_RA_OTHERCONF	0x80
@@ -35,6 +37,7 @@ enum {
 	INET6_IFADDR_STATE_DAD,
 	INET6_IFADDR_STATE_POSTDAD,
 	INET6_IFADDR_STATE_ERRDAD,
+	INET6_IFADDR_STATE_UP,
 	INET6_IFADDR_STATE_DEAD,
 };
 
@@ -55,6 +58,7 @@ struct inet6_ifaddr {
 	__u8			stable_privacy_retry;
 
 	__u16			scope;
+	__u64			dad_nonce;
 
 	unsigned long		cstamp;	/* created timestamp */
 	unsigned long		tstamp; /* updated timestamp */
@@ -146,6 +150,7 @@ struct ifacaddr6 {
 	struct ifacaddr6	*aca_next;
 	int			aca_users;
 	atomic_t		aca_refcnt;
+	spinlock_t		aca_lock;
 	unsigned long		aca_cstamp;
 	unsigned long		aca_tstamp;
 };
@@ -190,23 +195,23 @@ struct inet6_dev {
 	__u32			if_flags;
 	int			dead;
 
-	u32			desync_factor;
 	u8			rndid[8];
+	struct timer_list	regen_timer;
 	struct list_head	tempaddr_list;
 
 	struct in6_addr		token;
 
 	struct neigh_parms	*nd_parms;
+	struct inet6_dev	*next;
 	struct ipv6_devconf	cnf;
 	struct ipv6_devstat	stats;
 
 	struct timer_list	rs_timer;
-	__s32			rs_interval;	/* in jiffies */
 	__u8			rs_probes;
 
-	__u8			addr_gen_mode;
 	unsigned long		tstamp; /* ipv6InterfaceTable update timestamp */
 	struct rcu_head		rcu;
+	RH_KABI_EXTEND(__u8			addr_gen_mode)
 };
 
 static inline void ipv6_eth_mc_map(const struct in6_addr *addr, char *buf)

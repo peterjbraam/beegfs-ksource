@@ -28,8 +28,12 @@ extern int max_lock_depth; /* for sysctl */
  */
 struct rt_mutex {
 	raw_spinlock_t		wait_lock;
-	struct rb_root          waiters;
-	struct rb_node          *waiters_leftmost;
+#ifdef __GENKSYMS__
+	struct plist_head	wait_list;
+#else
+	struct rb_root		waiters;
+	struct rb_node		*waiters_leftmost;
+#endif
 	struct task_struct	*owner;
 #ifdef CONFIG_DEBUG_RT_MUTEXES
 	int			save_state;
@@ -90,9 +94,11 @@ extern void __rt_mutex_init(struct rt_mutex *lock, const char *name);
 extern void rt_mutex_destroy(struct rt_mutex *lock);
 
 extern void rt_mutex_lock(struct rt_mutex *lock);
-extern int rt_mutex_lock_interruptible(struct rt_mutex *lock);
+extern int rt_mutex_lock_interruptible(struct rt_mutex *lock,
+						int detect_deadlock);
 extern int rt_mutex_timed_lock(struct rt_mutex *lock,
-			       struct hrtimer_sleeper *timeout);
+					struct hrtimer_sleeper *timeout,
+					int detect_deadlock);
 
 extern int rt_mutex_trylock(struct rt_mutex *lock);
 

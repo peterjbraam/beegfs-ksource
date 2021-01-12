@@ -27,6 +27,8 @@
 #include <linux/spinlock.h>
 #include <linux/list.h>
 #include <linux/export.h>
+#include <scsi/scsi.h>
+#include <scsi/scsi_cmnd.h>
 
 #include <target/target_core_base.h>
 #include <target/target_core_backend.h>
@@ -182,12 +184,11 @@ void core_tmr_abort_task(
 			continue;
 
 		printk("ABORT_TASK: Found referenced %s task_tag: %llu\n",
-			se_cmd->se_tfo->get_fabric_name(), ref_tag);
+			se_cmd->se_tfo->fabric_name, ref_tag);
 
-		if (!__target_check_io_state(se_cmd, se_sess, 0)) {
-			spin_unlock_irqrestore(&se_sess->sess_cmd_lock, flags);
-			goto out;
-		}
+		if (!__target_check_io_state(se_cmd, se_sess, 0))
+			continue;
+
 		list_del_init(&se_cmd->se_cmd_list);
 		spin_unlock_irqrestore(&se_sess->sess_cmd_lock, flags);
 
@@ -200,14 +201,15 @@ void core_tmr_abort_task(
 		printk("ABORT_TASK: Sending TMR_FUNCTION_COMPLETE for"
 				" ref_tag: %llu\n", ref_tag);
 		tmr->response = TMR_FUNCTION_COMPLETE;
+		atomic_long_inc(&dev->aborts_complete);
 		return;
 	}
 	spin_unlock_irqrestore(&se_sess->sess_cmd_lock, flags);
 
-out:
 	printk("ABORT_TASK: Sending TMR_TASK_DOES_NOT_EXIST for ref_tag: %lld\n",
 			tmr->ref_task_tag);
 	tmr->response = TMR_TASK_DOES_NOT_EXIST;
+	atomic_long_inc(&dev->aborts_no_task);
 }
 
 static void core_tmr_drain_tmr_list(
@@ -226,13 +228,9 @@ static void core_tmr_drain_tmr_list(
 	 * LUN_RESET tmr..
 	 */
 	spin_lock_irqsave(&dev->se_tmr_lock, flags);
+	if (tmr)
+		list_del_init(&tmr->tmr_list);
 	list_for_each_entry_safe(tmr_p, tmr_pp, &dev->dev_tmr_list, tmr_list) {
-		/*
-		 * Allow the received TMR to return with FUNCTION_COMPLETE.
-		 */
-		if (tmr_p == tmr)
-			continue;
-
 		cmd = tmr_p->task_cmd;
 		if (!cmd) {
 			pr_err("Unable to locate struct se_cmd for TMR\n");
@@ -369,20 +367,10 @@ static void core_tmr_drain_state_list(
 		cmd = list_entry(drain_task_list.next, struct se_cmd, state_list);
 		list_del_init(&cmd->state_list);
 
-		pr_debug("LUN_RESET: %s cmd: %p"
-			" ITT/CmdSN: 0x%08llx/0x%08x, i_state: %d, t_state: %d"
-			"cdb: 0x%02x\n",
-			(preempt_and_abort_list) ? "Preempt" : "", cmd,
-			cmd->tag, 0,
-			cmd->se_tfo->get_cmd_state(cmd), cmd->t_state,
-			cmd->t_task_cdb[0]);
-		pr_debug("LUN_RESET: ITT[0x%08llx] - pr_res_key: 0x%016Lx"
-			" -- CMD_T_ACTIVE: %d"
-			" CMD_T_STOP: %d CMD_T_SENT: %d\n",
-			cmd->tag, cmd->pr_res_key,
-			(cmd->transport_state & CMD_T_ACTIVE) != 0,
-			(cmd->transport_state & CMD_T_STOP) != 0,
-			(cmd->transport_state & CMD_T_SENT) != 0);
+		target_show_cmd("LUN_RESET: ", cmd);
+		pr_debug("LUN_RESET: ITT[0x%08llx] - %s pr_res_key: 0x%016Lx\n",
+			 cmd->tag, (preempt_and_abort_list) ? "preempt" : "",
+			 cmd->pr_res_key);
 
 		/*
 		 * If the command may be queued onto a workqueue cancel it now.
@@ -432,7 +420,7 @@ int core_tmr_lun_reset(
 		if (tmr_nacl && tmr_tpg) {
 			pr_debug("LUN_RESET: TMR caller fabric: %s"
 				" initiator port %s\n",
-				tmr_tpg->se_tpg_tfo->get_fabric_name(),
+				tmr_tpg->se_tpg_tfo->fabric_name,
 				tmr_nacl->initiatorname);
 		}
 	}

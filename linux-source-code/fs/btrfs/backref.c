@@ -650,8 +650,7 @@ static int __resolve_indirect_ref(struct btrfs_fs_info *fs_info,
 	/* root node has been locked, we can release @subvol_srcu safely here */
 	srcu_read_unlock(&fs_info->subvol_srcu, index);
 
-	btrfs_debug(fs_info,
-		"search slot in root %llu (level %d, ref count %d) returned %d for key (%llu %u %llu)",
+	pr_debug("search slot in root %llu (level %d, ref count %d) returned %d for key (%llu %u %llu)\n",
 		 ref->root_id, level, ref->count, ret,
 		 ref->key_for_search.objectid, ref->key_for_search.type,
 		 ref->key_for_search.offset);
@@ -1550,7 +1549,6 @@ static int __btrfs_find_all_roots(struct btrfs_trans_handle *trans,
 		if (ret < 0 && ret != -ENOENT) {
 			ulist_free(tmp);
 			ulist_free(*roots);
-			*roots = NULL;
 			return ret;
 		}
 		node = ulist_next(tmp, &uiter);
@@ -1836,8 +1834,7 @@ int extent_from_logical(struct btrfs_fs_info *fs_info, u64 logical,
 
 	if (found_key->objectid > logical ||
 	    found_key->objectid + size <= logical) {
-		btrfs_debug(fs_info,
-			"logical %llu is not within any extent", logical);
+		pr_debug("logical %llu is not within any extent\n", logical);
 		return -ENOENT;
 	}
 
@@ -1848,8 +1845,7 @@ int extent_from_logical(struct btrfs_fs_info *fs_info, u64 logical,
 	ei = btrfs_item_ptr(eb, path->slots[0], struct btrfs_extent_item);
 	flags = btrfs_extent_flags(eb, ei);
 
-	btrfs_debug(fs_info,
-		"logical %llu is at position %llu within the extent (%llu EXTENT_ITEM %llu) flags %#llx size %u",
+	pr_debug("logical %llu is at position %llu within the extent (%llu EXTENT_ITEM %llu) flags %#llx size %u\n",
 		 logical, logical - found_key->objectid, found_key->objectid,
 		 found_key->offset, flags, item_size);
 
@@ -1970,24 +1966,20 @@ int tree_backref_for_extent(unsigned long *ptr, struct extent_buffer *eb,
 	return 0;
 }
 
-static int iterate_leaf_refs(struct btrfs_fs_info *fs_info,
-			     struct extent_inode_elem *inode_list,
-			     u64 root, u64 extent_item_objectid,
-			     iterate_extent_inodes_t *iterate, void *ctx)
+static int iterate_leaf_refs(struct extent_inode_elem *inode_list,
+				u64 root, u64 extent_item_objectid,
+				iterate_extent_inodes_t *iterate, void *ctx)
 {
 	struct extent_inode_elem *eie;
 	int ret = 0;
 
 	for (eie = inode_list; eie; eie = eie->next) {
-		btrfs_debug(fs_info,
-			    "ref for %llu resolved, key (%llu EXTEND_DATA %llu), root %llu",
-			    extent_item_objectid, eie->inum,
-			    eie->offset, root);
+		pr_debug("ref for %llu resolved, key (%llu EXTEND_DATA %llu), root %llu\n", extent_item_objectid,
+			 eie->inum, eie->offset, root);
 		ret = iterate(eie->inum, eie->offset, root, ctx);
 		if (ret) {
-			btrfs_debug(fs_info,
-				    "stopping iteration for %llu due to ret=%d",
-				    extent_item_objectid, ret);
+			pr_debug("stopping iteration for %llu due to ret=%d\n",
+				 extent_item_objectid, ret);
 			break;
 		}
 	}
@@ -2015,23 +2007,17 @@ int iterate_extent_inodes(struct btrfs_fs_info *fs_info,
 	struct ulist_iterator ref_uiter;
 	struct ulist_iterator root_uiter;
 
-	btrfs_debug(fs_info, "resolving all inodes for extent %llu",
+	pr_debug("resolving all inodes for extent %llu\n",
 			extent_item_objectid);
 
 	if (!search_commit_root) {
-		trans = btrfs_attach_transaction(fs_info->extent_root);
-		if (IS_ERR(trans)) {
-			if (PTR_ERR(trans) != -ENOENT &&
-			    PTR_ERR(trans) != -EROFS)
-				return PTR_ERR(trans);
-			trans = NULL;
-		}
-	}
-
-	if (trans)
+		trans = btrfs_join_transaction(fs_info->extent_root);
+		if (IS_ERR(trans))
+			return PTR_ERR(trans);
 		btrfs_get_tree_mod_seq(fs_info, &tree_mod_seq_elem);
-	else
+	} else {
 		down_read(&fs_info->commit_root_sem);
+	}
 
 	ret = btrfs_find_all_leafs(trans, fs_info, extent_item_objectid,
 				   tree_mod_seq_elem.seq, &refs,
@@ -2047,12 +2033,9 @@ int iterate_extent_inodes(struct btrfs_fs_info *fs_info,
 			break;
 		ULIST_ITER_INIT(&root_uiter);
 		while (!ret && (root_node = ulist_next(roots, &root_uiter))) {
-			btrfs_debug(fs_info,
-				    "root %llu references leaf %llu, data list %#llx",
-				    root_node->val, ref_node->val,
-				    ref_node->aux);
-			ret = iterate_leaf_refs(fs_info,
-						(struct extent_inode_elem *)
+			pr_debug("root %llu references leaf %llu, data list %#llx\n", root_node->val, ref_node->val,
+				 ref_node->aux);
+			ret = iterate_leaf_refs((struct extent_inode_elem *)
 						(uintptr_t)ref_node->aux,
 						root_node->val,
 						extent_item_objectid,
@@ -2063,7 +2046,7 @@ int iterate_extent_inodes(struct btrfs_fs_info *fs_info,
 
 	free_leaf_list(refs);
 out:
-	if (trans) {
+	if (!search_commit_root) {
 		btrfs_put_tree_mod_seq(fs_info, &tree_mod_seq_elem);
 		btrfs_end_transaction(trans, fs_info->extent_root);
 	} else {
@@ -2148,9 +2131,8 @@ static int iterate_inode_refs(u64 inum, struct btrfs_root *fs_root,
 		for (cur = 0; cur < btrfs_item_size(eb, item); cur += len) {
 			name_len = btrfs_inode_ref_name_len(eb, iref);
 			/* path must be released before calling iterate()! */
-			btrfs_debug(fs_root->fs_info,
-				"following ref at offset %u for inode %llu in tree %llu",
-				cur, found_key.objectid, fs_root->objectid);
+			pr_debug("following ref at offset %u for inode %llu in tree %llu\n", cur, found_key.objectid,
+				 fs_root->objectid);
 			ret = iterate(parent, name_len,
 				      (unsigned long)(iref + 1), eb, ctx);
 			if (ret)
@@ -2296,7 +2278,7 @@ static int inode_to_path(u64 inum, u32 name_len, unsigned long name_off,
  * from ipath->fspath->val[i].
  * when it returns, there are ipath->fspath->elem_cnt number of paths available
  * in ipath->fspath->val[]. when the allocated space wasn't sufficient, the
- * number of missed paths is recorded in ipath->fspath->elem_missed, otherwise,
+ * number of missed paths in recored in ipath->fspath->elem_missed, otherwise,
  * it's zero. ipath->fspath->bytes_missing holds the number of bytes that would
  * have been needed to return all paths.
  */

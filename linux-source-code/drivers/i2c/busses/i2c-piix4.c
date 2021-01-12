@@ -94,12 +94,6 @@
 #define SB800_PIIX4_PORT_IDX_ALT	0x2e
 #define SB800_PIIX4_PORT_IDX_SEL	0x2f
 #define SB800_PIIX4_PORT_IDX_MASK	0x06
-#define SB800_PIIX4_PORT_IDX_SHIFT	1
-
-/* On kerncz and Hudson2, SmBus0Sel is at bit 20:19 of PMx00 DecodeEn */
-#define SB800_PIIX4_PORT_IDX_KERNCZ		0x02
-#define SB800_PIIX4_PORT_IDX_MASK_KERNCZ	0x18
-#define SB800_PIIX4_PORT_IDX_SHIFT_KERNCZ	3
 
 /* insmod parameters */
 
@@ -155,8 +149,6 @@ static const struct dmi_system_id piix4_dmi_ibm[] = {
  */
 static DEFINE_MUTEX(piix4_mutex_sb800);
 static u8 piix4_port_sel_sb800;
-static u8 piix4_port_mask_sb800;
-static u8 piix4_port_shift_sb800;
 static const char *piix4_main_port_names_sb800[PIIX4_MAX_ADAPTERS] = {
 	" port 0", " port 2", " port 3", " port 4"
 };
@@ -355,17 +347,7 @@ static int piix4_setup_sb800(struct pci_dev *PIIX4_dev,
 
 	/* Find which register is used for port selection */
 	if (PIIX4_dev->vendor == PCI_VENDOR_ID_AMD) {
-		if (PIIX4_dev->device == PCI_DEVICE_ID_AMD_KERNCZ_SMBUS ||
-		    (PIIX4_dev->device == PCI_DEVICE_ID_AMD_HUDSON2_SMBUS &&
-		     PIIX4_dev->revision >= 0x1F)) {
-			piix4_port_sel_sb800 = SB800_PIIX4_PORT_IDX_KERNCZ;
-			piix4_port_mask_sb800 = SB800_PIIX4_PORT_IDX_MASK_KERNCZ;
-			piix4_port_shift_sb800 = SB800_PIIX4_PORT_IDX_SHIFT_KERNCZ;
-		} else {
-			piix4_port_sel_sb800 = SB800_PIIX4_PORT_IDX_ALT;
-			piix4_port_mask_sb800 = SB800_PIIX4_PORT_IDX_MASK;
-			piix4_port_shift_sb800 = SB800_PIIX4_PORT_IDX_SHIFT;
-		}
+		piix4_port_sel_sb800 = SB800_PIIX4_PORT_IDX_ALT;
 	} else {
 		mutex_lock(&piix4_mutex_sb800);
 		outb_p(SB800_PIIX4_PORT_IDX_SEL, SB800_PIIX4_SMB_IDX);
@@ -373,8 +355,6 @@ static int piix4_setup_sb800(struct pci_dev *PIIX4_dev,
 		piix4_port_sel_sb800 = (port_sel & 0x01) ?
 				       SB800_PIIX4_PORT_IDX_ALT :
 				       SB800_PIIX4_PORT_IDX;
-		piix4_port_mask_sb800 = SB800_PIIX4_PORT_IDX_MASK;
-		piix4_port_shift_sb800 = SB800_PIIX4_PORT_IDX_SHIFT;
 		mutex_unlock(&piix4_mutex_sb800);
 	}
 
@@ -636,8 +616,8 @@ static s32 piix4_access_sb800(struct i2c_adapter *adap, u16 addr,
 	smba_en_lo = inb_p(SB800_PIIX4_SMB_IDX + 1);
 
 	port = adapdata->port;
-	if ((smba_en_lo & piix4_port_mask_sb800) != port)
-		outb_p((smba_en_lo & ~piix4_port_mask_sb800) | port,
+	if ((smba_en_lo & SB800_PIIX4_PORT_IDX_MASK) != port)
+		outb_p((smba_en_lo & ~SB800_PIIX4_PORT_IDX_MASK) | port,
 		       SB800_PIIX4_SMB_IDX + 1);
 
 	retval = piix4_access(adap, addr, flags, read_write,
@@ -726,7 +706,7 @@ static int piix4_add_adapter(struct pci_dev *dev, unsigned short smba,
 
 	adapdata->smba = smba;
 	adapdata->sb800_main = sb800_main;
-	adapdata->port = port << piix4_port_shift_sb800;
+	adapdata->port = port << 1;
 
 	/* set up the sysfs linkage to our parent device */
 	adap->dev.parent = &dev->dev;
@@ -738,6 +718,7 @@ static int piix4_add_adapter(struct pci_dev *dev, unsigned short smba,
 
 	retval = i2c_add_adapter(adap);
 	if (retval) {
+		dev_err(&dev->dev, "Couldn't register adapter!\n");
 		kfree(adapdata);
 		kfree(adap);
 		release_region(smba, SMBIOSIZE);
@@ -840,8 +821,7 @@ static int piix4_probe(struct pci_dev *dev, const struct pci_device_id *id)
 	}
 
 	if (dev->vendor == PCI_VENDOR_ID_AMD &&
-	    (dev->device == PCI_DEVICE_ID_AMD_HUDSON2_SMBUS ||
-	     dev->device == PCI_DEVICE_ID_AMD_KERNCZ_SMBUS)) {
+	    dev->device == PCI_DEVICE_ID_AMD_HUDSON2_SMBUS) {
 		retval = piix4_setup_sb800(dev, id, 1);
 	}
 

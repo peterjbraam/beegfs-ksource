@@ -2803,7 +2803,7 @@ void
 bfa_ioc_get_adapter_manufacturer(struct bfa_ioc_s *ioc, char *manufacturer)
 {
 	memset((void *)manufacturer, 0, BFA_ADAPTER_MFG_NAME_LEN);
-	strlcpy(manufacturer, BFA_MFG_NAME, BFA_ADAPTER_MFG_NAME_LEN);
+	memcpy(manufacturer, BFA_MFG_NAME, BFA_ADAPTER_MFG_NAME_LEN);
 }
 
 void
@@ -3879,7 +3879,7 @@ bfa_sfp_show_comp(struct bfa_sfp_s *sfp, struct bfi_mbmsg_s *msg)
 		bfa_trc(sfp, sfp->data_valid);
 		if (sfp->data_valid) {
 			u32	size = sizeof(struct sfp_mem_s);
-			u8 *des = (u8 *)(sfp->sfpmem);
+			u8 *des = (u8 *) &(sfp->sfpmem->srlid_base);
 			memcpy(des, sfp->dbuf_kva, size);
 		}
 		/*
@@ -7007,7 +7007,7 @@ bfa_flash_sem_get(void __iomem *bar)
 	while (!bfa_raw_sem_get(bar)) {
 		if (--n <= 0)
 			return BFA_STATUS_BADFLASH;
-		mdelay(10);
+		udelay(10000);
 	}
 	return BFA_STATUS_OK;
 }

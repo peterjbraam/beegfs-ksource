@@ -30,6 +30,7 @@
 #include <linux/mm.h>
 #include <linux/memblock.h>
 #include <linux/spinlock.h>
+#include <linux/sched.h>	/* for show_stack */
 #include <linux/string.h>
 #include <linux/pci.h>
 #include <linux/dma-mapping.h>
@@ -120,10 +121,39 @@ static void iommu_pseries_free_group(struct iommu_table_group *table_group,
 	kfree(table_group);
 }
 
+static void tce_invalidate_pSeries_sw(struct iommu_table *tbl,
+				      __be64 *startp, __be64 *endp)
+{
+	u64 __iomem *invalidate = (u64 __iomem *)tbl->it_index;
+	unsigned long start, end, inc;
+
+	start = __pa(startp);
+	end = __pa(endp);
+	inc = L1_CACHE_BYTES; /* invalidate a cacheline of TCEs at a time */
+
+	/* If this is non-zero, change the format.  We shift the
+	 * address and or in the magic from the device tree. */
+	if (tbl->it_busno) {
+		start <<= 12;
+		end <<= 12;
+		inc <<= 12;
+		start |= tbl->it_busno;
+		end |= tbl->it_busno;
+	}
+
+	end |= inc - 1; /* round up end to be different than start */
+
+	mb(); /* Make sure TCEs in memory are written */
+	while (start <= end) {
+		out_be64(invalidate, start);
+		start += inc;
+	}
+}
+
 static int tce_build_pSeries(struct iommu_table *tbl, long index,
 			      long npages, unsigned long uaddr,
 			      enum dma_data_direction direction,
-			      unsigned long attrs)
+			      struct dma_attrs *attrs)
 {
 	u64 proto_tce;
 	__be64 *tcep, *tces;
@@ -144,6 +174,9 @@ static int tce_build_pSeries(struct iommu_table *tbl, long index,
 		uaddr += TCE_PAGE_SIZE;
 		tcep++;
 	}
+
+	if (tbl->it_type & TCE_PCI_SWINV_CREATE)
+		tce_invalidate_pSeries_sw(tbl, tces, tcep - 1);
 	return 0;
 }
 
@@ -156,6 +189,9 @@ static void tce_free_pSeries(struct iommu_table *tbl, long index, long npages)
 
 	while (npages--)
 		*(tcep++) = 0;
+
+	if (tbl->it_type & TCE_PCI_SWINV_FREE)
+		tce_invalidate_pSeries_sw(tbl, tces, tcep - 1);
 }
 
 static unsigned long tce_get_pseries(struct iommu_table *tbl, long index)
@@ -167,13 +203,13 @@ static unsigned long tce_get_pseries(struct iommu_table *tbl, long index)
 	return be64_to_cpu(*tcep);
 }
 
-static void tce_free_pSeriesLP(unsigned long liobn, long, long);
+static void tce_free_pSeriesLP(struct iommu_table*, long, long);
 static void tce_freemulti_pSeriesLP(struct iommu_table*, long, long);
 
-static int tce_build_pSeriesLP(unsigned long liobn, long tcenum, long tceshift,
+static int tce_build_pSeriesLP(struct iommu_table *tbl, long tcenum,
 				long npages, unsigned long uaddr,
 				enum dma_data_direction direction,
-				unsigned long attrs)
+				struct dma_attrs *attrs)
 {
 	u64 rc = 0;
 	u64 proto_tce, tce;
@@ -181,28 +217,28 @@ static int tce_build_pSeriesLP(unsigned long liobn, long tcenum, long tceshift,
 	int ret = 0;
 	long tcenum_start = tcenum, npages_start = npages;
 
-	rpn = __pa(uaddr) >> tceshift;
+	rpn = __pa(uaddr) >> TCE_SHIFT;
 	proto_tce = TCE_PCI_READ;
 	if (direction != DMA_TO_DEVICE)
 		proto_tce |= TCE_PCI_WRITE;
 
 	while (npages--) {
-		tce = proto_tce | (rpn & TCE_RPN_MASK) << tceshift;
-		rc = plpar_tce_put((u64)liobn, (u64)tcenum << tceshift, tce);
+		tce = proto_tce | (rpn & TCE_RPN_MASK) << TCE_RPN_SHIFT;
+		rc = plpar_tce_put((u64)tbl->it_index, (u64)tcenum << 12, tce);
 
 		if (unlikely(rc == H_NOT_ENOUGH_RESOURCES)) {
 			ret = (int)rc;
-			tce_free_pSeriesLP(liobn, tcenum_start,
+			tce_free_pSeriesLP(tbl, tcenum_start,
 			                   (npages_start - (npages + 1)));
 			break;
 		}
 
 		if (rc && printk_ratelimit()) {
 			printk("tce_build_pSeriesLP: plpar_tce_put failed. rc=%lld\n", rc);
-			printk("\tindex   = 0x%llx\n", (u64)liobn);
+			printk("\tindex   = 0x%llx\n", (u64)tbl->it_index);
 			printk("\ttcenum  = 0x%llx\n", (u64)tcenum);
 			printk("\ttce val = 0x%llx\n", tce );
-			dump_stack();
+			show_stack(current, (unsigned long *)__get_SP());
 		}
 
 		tcenum++;
@@ -216,7 +252,7 @@ static DEFINE_PER_CPU(__be64 *, tce_page);
 static int tce_buildmulti_pSeriesLP(struct iommu_table *tbl, long tcenum,
 				     long npages, unsigned long uaddr,
 				     enum dma_data_direction direction,
-				     unsigned long attrs)
+				     struct dma_attrs *attrs)
 {
 	u64 rc = 0;
 	u64 proto_tce;
@@ -228,14 +264,13 @@ static int tce_buildmulti_pSeriesLP(struct iommu_table *tbl, long tcenum,
 	unsigned long flags;
 
 	if ((npages == 1) || !firmware_has_feature(FW_FEATURE_MULTITCE)) {
-		return tce_build_pSeriesLP(tbl->it_index, tcenum,
-					   tbl->it_page_shift, npages, uaddr,
+		return tce_build_pSeriesLP(tbl, tcenum, npages, uaddr,
 		                           direction, attrs);
 	}
 
 	local_irq_save(flags);	/* to protect tcep and the page behind it */
 
-	tcep = __this_cpu_read(tce_page);
+	tcep = __get_cpu_var(tce_page);
 
 	/* This is safe to do since interrupts are off when we're called
 	 * from iommu_alloc{,_sg}()
@@ -245,11 +280,10 @@ static int tce_buildmulti_pSeriesLP(struct iommu_table *tbl, long tcenum,
 		/* If allocation fails, fall back to the loop implementation */
 		if (!tcep) {
 			local_irq_restore(flags);
-			return tce_build_pSeriesLP(tbl->it_index, tcenum,
-					tbl->it_page_shift,
-					npages, uaddr, direction, attrs);
+			return tce_build_pSeriesLP(tbl, tcenum, npages, uaddr,
+					    direction, attrs);
 		}
-		__this_cpu_write(tce_page, tcep);
+		__get_cpu_var(tce_page) = tcep;
 	}
 
 	rpn = __pa(uaddr) >> TCE_SHIFT;
@@ -293,23 +327,23 @@ static int tce_buildmulti_pSeriesLP(struct iommu_table *tbl, long tcenum,
 		printk("\tindex   = 0x%llx\n", (u64)tbl->it_index);
 		printk("\tnpages  = 0x%llx\n", (u64)npages);
 		printk("\ttce[0] val = 0x%llx\n", tcep[0]);
-		dump_stack();
+		show_stack(current, (unsigned long *)__get_SP());
 	}
 	return ret;
 }
 
-static void tce_free_pSeriesLP(unsigned long liobn, long tcenum, long npages)
+static void tce_free_pSeriesLP(struct iommu_table *tbl, long tcenum, long npages)
 {
 	u64 rc;
 
 	while (npages--) {
-		rc = plpar_tce_put((u64)liobn, (u64)tcenum << 12, 0);
+		rc = plpar_tce_put((u64)tbl->it_index, (u64)tcenum << 12, 0);
 
 		if (rc && printk_ratelimit()) {
 			printk("tce_free_pSeriesLP: plpar_tce_put failed. rc=%lld\n", rc);
-			printk("\tindex   = 0x%llx\n", (u64)liobn);
+			printk("\tindex   = 0x%llx\n", (u64)tbl->it_index);
 			printk("\ttcenum  = 0x%llx\n", (u64)tcenum);
-			dump_stack();
+			show_stack(current, (unsigned long *)__get_SP());
 		}
 
 		tcenum++;
@@ -322,7 +356,7 @@ static void tce_freemulti_pSeriesLP(struct iommu_table *tbl, long tcenum, long n
 	u64 rc;
 
 	if (!firmware_has_feature(FW_FEATURE_MULTITCE))
-		return tce_free_pSeriesLP(tbl->it_index, tcenum, npages);
+		return tce_free_pSeriesLP(tbl, tcenum, npages);
 
 	rc = plpar_tce_stuff((u64)tbl->it_index, (u64)tcenum << 12, 0, npages);
 
@@ -331,7 +365,7 @@ static void tce_freemulti_pSeriesLP(struct iommu_table *tbl, long tcenum, long n
 		printk("\trc      = %lld\n", rc);
 		printk("\tindex   = 0x%llx\n", (u64)tbl->it_index);
 		printk("\tnpages  = 0x%llx\n", (u64)npages);
-		dump_stack();
+		show_stack(current, (unsigned long *)__get_SP());
 	}
 }
 
@@ -346,7 +380,7 @@ static unsigned long tce_get_pSeriesLP(struct iommu_table *tbl, long tcenum)
 		printk("tce_get_pSeriesLP: plpar_tce_get failed. rc=%lld\n", rc);
 		printk("\tindex   = 0x%llx\n", (u64)tbl->it_index);
 		printk("\ttcenum  = 0x%llx\n", (u64)tcenum);
-		dump_stack();
+		show_stack(current, (unsigned long *)__get_SP());
 	}
 
 	return tce_ret;
@@ -437,21 +471,8 @@ static int tce_setrange_multi_pSeriesLP(unsigned long start_pfn,
 	u64 rc = 0;
 	long l, limit;
 
-	if (!firmware_has_feature(FW_FEATURE_MULTITCE)) {
-		unsigned long tceshift = be32_to_cpu(maprange->tce_shift);
-		unsigned long dmastart = (start_pfn << PAGE_SHIFT) +
-				be64_to_cpu(maprange->dma_base);
-		unsigned long tcenum = dmastart >> tceshift;
-		unsigned long npages = num_pfn << PAGE_SHIFT >> tceshift;
-		void *uaddr = __va(start_pfn << PAGE_SHIFT);
-
-		return tce_build_pSeriesLP(be32_to_cpu(maprange->liobn),
-				tcenum, tceshift, npages, (unsigned long) uaddr,
-				DMA_BIDIRECTIONAL, 0);
-	}
-
 	local_irq_disable();	/* to protect tcep and the page behind it */
-	tcep = __this_cpu_read(tce_page);
+	tcep = __get_cpu_var(tce_page);
 
 	if (!tcep) {
 		tcep = (__be64 *)__get_free_page(GFP_ATOMIC);
@@ -459,7 +480,7 @@ static int tce_setrange_multi_pSeriesLP(unsigned long start_pfn,
 			local_irq_enable();
 			return -ENOMEM;
 		}
-		__this_cpu_write(tce_page, tcep);
+		__get_cpu_var(tce_page) = tcep;
 	}
 
 	proto_tce = TCE_PCI_READ | TCE_PCI_WRITE;
@@ -512,12 +533,13 @@ static int tce_setrange_multi_pSeriesLP_walk(unsigned long start_pfn,
 	return tce_setrange_multi_pSeriesLP(start_pfn, num_pfn, arg);
 }
 
+#ifdef CONFIG_PCI
 static void iommu_table_setparms(struct pci_controller *phb,
 				 struct device_node *dn,
 				 struct iommu_table *tbl)
 {
 	struct device_node *node;
-	const unsigned long *basep;
+	const unsigned long *basep, *sw_inval;
 	const u32 *sizep;
 
 	node = phb->dn;
@@ -555,6 +577,22 @@ static void iommu_table_setparms(struct pci_controller *phb,
 	tbl->it_index = 0;
 	tbl->it_blocksize = 16;
 	tbl->it_type = TCE_PCI;
+
+	sw_inval = of_get_property(node, "linux,tce-sw-invalidate-info", NULL);
+	if (sw_inval) {
+		/*
+		 * This property contains information on how to
+		 * invalidate the TCE entry.  The first property is
+		 * the base MMIO address used to invalidate entries.
+		 * The second property tells us the format of the TCE
+		 * invalidate (whether it needs to be shifted) and
+		 * some magic routing info to add to our invalidate
+		 * command.
+		 */
+		tbl->it_index = (unsigned long) ioremap(sw_inval[0], 8);
+		tbl->it_busno = sw_inval[1]; /* overload this with magic */
+		tbl->it_type = TCE_PCI_SWINV_CREATE | TCE_PCI_SWINV_FREE;
+	}
 }
 
 /*
@@ -615,7 +653,8 @@ static void pci_dma_bus_setup_pSeries(struct pci_bus *bus)
 	while (isa_dn && isa_dn != dn)
 		isa_dn = isa_dn->parent;
 
-	of_node_put(isa_dn_orig);
+	if (isa_dn_orig)
+		of_node_put(isa_dn_orig);
 
 	/* Count number of direct PCI children of the PHB. */
 	for (children = 0, tmp = dn->child; tmp; tmp = tmp->sibling)
@@ -804,11 +843,11 @@ static void remove_ddw(struct device_node *np, bool remove_prop)
 
 	ret = rtas_call(ddw_avail[2], 1, 1, NULL, liobn);
 	if (ret)
-		pr_warning("%s: failed to remove direct window: rtas returned "
+		pr_warning("%s: failed to remove DMA window: rtas returned "
 			"%d to ibm,remove-pe-dma-window(%x) %llx\n",
 			np->full_name, ret, ddw_avail[2], liobn);
 	else
-		pr_debug("%s: successfully removed direct window: rtas returned "
+		pr_debug("%s: successfully removed DMA window: rtas returned "
 			"%d to ibm,remove-pe-dma-window(%x) %llx\n",
 			np->full_name, ret, ddw_avail[2], liobn);
 
@@ -1000,7 +1039,7 @@ static u64 enable_ddw(struct pci_dev *dev, struct device_node *pdn)
 	if (ret)
 		goto out_failed;
 
-       /*
+	/*
 	 * Query if there is a second window of size to map the
 	 * whole partition.  Query returns number of windows, largest
 	 * block assigned to PE (partition endpoint), and two bitmasks
@@ -1109,7 +1148,6 @@ out_free_prop:
 	kfree(win64);
 
 out_failed:
-
 	fpdn = kzalloc(sizeof(*fpdn), GFP_KERNEL);
 	if (!fpdn)
 		goto out_unlock;
@@ -1255,6 +1293,15 @@ static u64 dma_get_required_mask_pSeriesLP(struct device *dev)
 	return dma_iommu_ops.get_required_mask(dev);
 }
 
+#else  /* CONFIG_PCI */
+#define pci_dma_bus_setup_pSeries	NULL
+#define pci_dma_dev_setup_pSeries	NULL
+#define pci_dma_bus_setup_pSeriesLP	NULL
+#define pci_dma_dev_setup_pSeriesLP	NULL
+#define dma_set_mask_pSeriesLP		NULL
+#define dma_get_required_mask_pSeriesLP	NULL
+#endif /* !CONFIG_PCI */
+
 static int iommu_mem_notifier(struct notifier_block *nb, unsigned long action,
 		void *data)
 {
@@ -1295,11 +1342,10 @@ static struct notifier_block iommu_mem_nb = {
 	.notifier_call = iommu_mem_notifier,
 };
 
-static int iommu_reconfig_notifier(struct notifier_block *nb, unsigned long action, void *data)
+static int iommu_reconfig_notifier(struct notifier_block *nb, unsigned long action, void *node)
 {
 	int err = NOTIFY_OK;
-	struct of_reconfig_data *rd = data;
-	struct device_node *np = rd->dn;
+	struct device_node *np = node;
 	struct pci_dn *pci = PCI_DN(np);
 	struct direct_window *window;
 

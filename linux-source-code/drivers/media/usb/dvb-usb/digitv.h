@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _DVB_USB_DIGITV_H_
 #define _DVB_USB_DIGITV_H_
 
@@ -5,10 +6,7 @@
 #include "dvb-usb.h"
 
 struct digitv_state {
-	int is_nxt6000;
-
-	unsigned char sndbuf[7];
-	unsigned char rcvbuf[7];
+    int is_nxt6000;
 };
 
 /* protocol (from usblogging and the SDK:

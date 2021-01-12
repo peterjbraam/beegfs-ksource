@@ -63,7 +63,7 @@ struct lb_port_mapping {
 struct lb_priv_ex {
 	struct team *team;
 	struct lb_port_mapping tx_hash_to_port_mapping[LB_TX_HASHTABLE_SIZE];
-	struct sock_fprog_kern *orig_fprog;
+	struct sock_fprog *orig_fprog;
 	struct {
 		unsigned int refresh_interval; /* in tenths of second */
 		struct delayed_work refresh_dw;
@@ -72,7 +72,7 @@ struct lb_priv_ex {
 };
 
 struct lb_priv {
-	struct bpf_prog __rcu *fp;
+	struct sk_filter __rcu *fp;
 	lb_select_tx_port_func_t __rcu *select_tx_port_func;
 	struct lb_pcpu_stats __percpu *pcpu_stats;
 	struct lb_priv_ex *ex; /* priv extension */
@@ -137,7 +137,13 @@ static struct team_port *lb_htpm_select_tx_port(struct team *team,
 						struct sk_buff *skb,
 						unsigned char hash)
 {
-	return rcu_dereference_bh(LB_HTPM_PORT_BY_HASH(lb_priv, hash));
+	struct team_port *port;
+
+	port = rcu_dereference_bh(LB_HTPM_PORT_BY_HASH(lb_priv, hash));
+	if (likely(port))
+		return port;
+	/* If no valid port in the table, fall back to simple hash */
+	return lb_hash_select_tx_port(team, lb_priv, skb, hash);
 }
 
 struct lb_select_tx_port {
@@ -188,14 +194,14 @@ static lb_select_tx_port_func_t *lb_select_tx_port_get_func(const char *name)
 static unsigned int lb_get_skb_hash(struct lb_priv *lb_priv,
 				    struct sk_buff *skb)
 {
-	struct bpf_prog *fp;
+	struct sk_filter *fp;
 	uint32_t lhash;
 	unsigned char *c;
 
 	fp = rcu_dereference_bh(lb_priv->fp);
 	if (unlikely(!fp))
 		return 0;
-	lhash = BPF_PROG_RUN(fp, skb);
+	lhash = SK_RUN_FILTER(fp, skb);
 	c = (char *) &lhash;
 	return c[0] ^ c[1] ^ c[2] ^ c[3];
 }
@@ -255,10 +261,10 @@ static int lb_bpf_func_get(struct team *team, struct team_gsetter_ctx *ctx)
 	return 0;
 }
 
-static int __fprog_create(struct sock_fprog_kern **pfprog, u32 data_len,
+static int __fprog_create(struct sock_fprog **pfprog, u32 data_len,
 			  const void *data)
 {
-	struct sock_fprog_kern *fprog;
+	struct sock_fprog *fprog;
 	struct sock_filter *filter = (struct sock_filter *) data;
 
 	if (data_len % sizeof(struct sock_filter))
@@ -276,7 +282,7 @@ static int __fprog_create(struct sock_fprog_kern **pfprog, u32 data_len,
 	return 0;
 }
 
-static void __fprog_destroy(struct sock_fprog_kern *fprog)
+static void __fprog_destroy(struct sock_fprog *fprog)
 {
 	kfree(fprog->filter);
 	kfree(fprog);
@@ -285,9 +291,9 @@ static void __fprog_destroy(struct sock_fprog_kern *fprog)
 static int lb_bpf_func_set(struct team *team, struct team_gsetter_ctx *ctx)
 {
 	struct lb_priv *lb_priv = get_lb_priv(team);
-	struct bpf_prog *fp = NULL;
-	struct bpf_prog *orig_fp = NULL;
-	struct sock_fprog_kern *fprog = NULL;
+	struct sk_filter *fp = NULL;
+	struct sk_filter *orig_fp;
+	struct sock_fprog *fprog = NULL;
 	int err;
 
 	if (ctx->data.bin_val.len) {
@@ -295,7 +301,7 @@ static int lb_bpf_func_set(struct team *team, struct team_gsetter_ctx *ctx)
 				     ctx->data.bin_val.ptr);
 		if (err)
 			return err;
-		err = bpf_prog_create(&fp, fprog);
+		err = sk_unattached_filter_create(&fp, fprog);
 		if (err) {
 			__fprog_destroy(fprog);
 			return err;
@@ -307,30 +313,12 @@ static int lb_bpf_func_set(struct team *team, struct team_gsetter_ctx *ctx)
 		__fprog_destroy(lb_priv->ex->orig_fprog);
 		orig_fp = rcu_dereference_protected(lb_priv->fp,
 						lockdep_is_held(&team->lock));
+		sk_unattached_filter_destroy(orig_fp);
 	}
 
 	rcu_assign_pointer(lb_priv->fp, fp);
 	lb_priv->ex->orig_fprog = fprog;
-
-	if (orig_fp) {
-		synchronize_rcu();
-		bpf_prog_destroy(orig_fp);
-	}
 	return 0;
-}
-
-static void lb_bpf_func_free(struct team *team)
-{
-	struct lb_priv *lb_priv = get_lb_priv(team);
-	struct bpf_prog *fp;
-
-	if (!lb_priv->ex->orig_fprog)
-		return;
-
-	__fprog_destroy(lb_priv->ex->orig_fprog);
-	fp = rcu_dereference_protected(lb_priv->fp,
-				       lockdep_is_held(&team->lock));
-	bpf_prog_destroy(fp);
 }
 
 static int lb_tx_method_get(struct team *team, struct team_gsetter_ctx *ctx)
@@ -602,7 +590,7 @@ static int lb_init(struct team *team)
 {
 	struct lb_priv *lb_priv = get_lb_priv(team);
 	lb_select_tx_port_func_t *func;
-	int i, err;
+	int err;
 
 	/* set default tx port selector */
 	func = lb_select_tx_port_get_func("hash");
@@ -619,13 +607,6 @@ static int lb_init(struct team *team)
 		err = -ENOMEM;
 		goto err_alloc_pcpu_stats;
 	}
-
-	for_each_possible_cpu(i) {
-		struct lb_pcpu_stats *team_lb_stats;
-		team_lb_stats = per_cpu_ptr(lb_priv->pcpu_stats, i);
-		u64_stats_init(&team_lb_stats->syncp);
-	}
-
 
 	INIT_DELAYED_WORK(&lb_priv->ex->stats.refresh_dw, lb_stats_refresh);
 
@@ -647,7 +628,6 @@ static void lb_exit(struct team *team)
 
 	team_options_unregister(team, lb_options,
 				ARRAY_SIZE(lb_options));
-	lb_bpf_func_free(team);
 	cancel_delayed_work_sync(&lb_priv->ex->stats.refresh_dw);
 	free_percpu(lb_priv->pcpu_stats);
 	kfree(lb_priv->ex);

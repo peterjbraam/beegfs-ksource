@@ -31,14 +31,14 @@
 #include <asm/word-at-a-time.h>
 #include <asm/page.h>
 
-#ifndef __HAVE_ARCH_STRNCASECMP
+#ifndef __HAVE_ARCH_STRNICMP
 /**
- * strncasecmp - Case insensitive, length-limited string comparison
+ * strnicmp - Case insensitive, length-limited string comparison
  * @s1: One string
  * @s2: The other string
  * @len: the maximum number of characters to compare
  */
-int strncasecmp(const char *s1, const char *s2, size_t len)
+int strnicmp(const char *s1, const char *s2, size_t len)
 {
 	/* Yes, Virginia, it had better be unsigned */
 	unsigned char c1, c2;
@@ -60,7 +60,7 @@ int strncasecmp(const char *s1, const char *s2, size_t len)
 	} while (--len);
 	return (int)c1 - (int)c2;
 }
-EXPORT_SYMBOL(strncasecmp);
+EXPORT_SYMBOL(strnicmp);
 #endif
 
 #ifndef __HAVE_ARCH_STRCASECMP
@@ -75,6 +75,20 @@ int strcasecmp(const char *s1, const char *s2)
 	return c1 - c2;
 }
 EXPORT_SYMBOL(strcasecmp);
+#endif
+
+#ifndef __HAVE_ARCH_STRNCASECMP
+int strncasecmp(const char *s1, const char *s2, size_t n)
+{
+	int c1, c2;
+
+	do {
+		c1 = tolower(*s1++);
+		c2 = tolower(*s2++);
+	} while ((--n > 0) && c1 == c2 && c1 != 0);
+	return c1 - c2;
+}
+EXPORT_SYMBOL(strncasecmp);
 #endif
 
 #ifndef __HAVE_ARCH_STRCPY
@@ -97,7 +111,7 @@ EXPORT_SYMBOL(strcpy);
 
 #ifndef __HAVE_ARCH_STRNCPY
 /**
- * strncpy - Copy a length-limited, C-string
+ * strncpy - Copy a length-limited, %NUL-terminated string
  * @dest: Where to copy the string to
  * @src: Where to copy the string from
  * @count: The maximum number of bytes to copy
@@ -126,7 +140,7 @@ EXPORT_SYMBOL(strncpy);
 
 #ifndef __HAVE_ARCH_STRLCPY
 /**
- * strlcpy - Copy a C-string into a sized buffer
+ * strlcpy - Copy a %NUL terminated string into a sized buffer
  * @dest: Where to copy the string to
  * @src: Where to copy the string from
  * @size: size of destination buffer
@@ -202,14 +216,13 @@ ssize_t strscpy(char *dest, const char *src, size_t count)
 	while (max >= sizeof(unsigned long)) {
 		unsigned long c, data;
 
-		c = read_word_at_a_time(src+res);
+		c = *(unsigned long *)(src+res);
+		*(unsigned long *)(dest+res) = c;
 		if (has_zero(c, &data, &constants)) {
 			data = prep_zero_mask(c, data, &constants);
 			data = create_zero_mask(data);
-			*(unsigned long *)(dest+res) = c & zero_bytemask(data);
 			return res + find_zero(data);
 		}
-		*(unsigned long *)(dest+res) = c;
 		res += sizeof(unsigned long);
 		count -= sizeof(unsigned long);
 		max -= sizeof(unsigned long);
@@ -235,30 +248,6 @@ ssize_t strscpy(char *dest, const char *src, size_t count)
 EXPORT_SYMBOL(strscpy);
 #endif
 
-/**
- * stpcpy - copy a string from src to dest returning a pointer to the new end
- *          of dest, including src's %NUL-terminator. May overrun dest.
- * @dest: pointer to end of string being copied into. Must be large enough
- *        to receive copy.
- * @src: pointer to the beginning of string being copied from. Must not overlap
- *       dest.
- *
- * stpcpy differs from strcpy in a key way: the return value is a pointer
- * to the new %NUL-terminating character in @dest. (For strcpy, the return
- * value is a pointer to the start of @dest). This interface is considered
- * unsafe as it doesn't perform bounds checking of the inputs. As such it's
- * not recommended for usage. Instead, its definition is provided in case
- * the compiler lowers other libcalls to stpcpy.
- */
-char *stpcpy(char *__restrict__ dest, const char *__restrict__ src);
-char *stpcpy(char *__restrict__ dest, const char *__restrict__ src)
-{
-	while ((*dest++ = *src++) != '\0')
-		/* nothing */;
-	return --dest;
-}
-EXPORT_SYMBOL(stpcpy);
-
 #ifndef __HAVE_ARCH_STRCAT
 /**
  * strcat - Append one %NUL-terminated string to another
@@ -281,7 +270,7 @@ EXPORT_SYMBOL(strcat);
 
 #ifndef __HAVE_ARCH_STRNCAT
 /**
- * strncat - Append a length-limited, C-string to another
+ * strncat - Append a length-limited, %NUL-terminated string to another
  * @dest: The string to be appended to
  * @src: The string to append to it
  * @count: The maximum numbers of bytes to copy
@@ -310,7 +299,7 @@ EXPORT_SYMBOL(strncat);
 
 #ifndef __HAVE_ARCH_STRLCAT
 /**
- * strlcat - Append a length-limited, C-string to another
+ * strlcat - Append a length-limited, %NUL-terminated string to another
  * @dest: The string to be appended to
  * @src: The string to append to it
  * @count: The size of the destination buffer.
@@ -426,12 +415,12 @@ EXPORT_SYMBOL(strchrnul);
  */
 char *strrchr(const char *s, int c)
 {
-	const char *last = NULL;
-	do {
-		if (*s == (char)c)
-			last = s;
-	} while (*s++);
-	return (char *)last;
+       const char *p = s + strlen(s);
+       do {
+           if (*p == (char)c)
+               return (char *)p;
+       } while (--p >= s);
+       return NULL;
 }
 EXPORT_SYMBOL(strrchr);
 #endif
@@ -680,6 +669,32 @@ int match_string(const char * const *array, size_t n, const char *string)
 }
 EXPORT_SYMBOL(match_string);
 
+/**
+ * __sysfs_match_string - matches given string in an array
+ * @array: array of strings
+ * @n: number of strings in the array or -1 for NULL terminated arrays
+ * @str: string to match with
+ *
+ * Returns index of @str in the @array or -EINVAL, just like match_string().
+ * Uses sysfs_streq instead of strcmp for matching.
+ */
+int __sysfs_match_string(const char * const *array, size_t n, const char *str)
+{
+	const char *item;
+	int index;
+
+	for (index = 0; index < n; index++) {
+		item = array[index];
+		if (!item)
+			break;
+		if (sysfs_streq(item, str))
+			return index;
+	}
+
+	return -EINVAL;
+}
+EXPORT_SYMBOL(__sysfs_match_string);
+
 #ifndef __HAVE_ARCH_MEMSET
 /**
  * memset - Fill a region of memory with the given value
@@ -720,6 +735,72 @@ void memzero_explicit(void *s, size_t count)
 	barrier_data(s);
 }
 EXPORT_SYMBOL(memzero_explicit);
+
+#ifndef __HAVE_ARCH_MEMSET16
+/**
+ * memset16() - Fill a memory area with a uint16_t
+ * @s: Pointer to the start of the area.
+ * @v: The value to fill the area with
+ * @count: The number of values to store
+ *
+ * Differs from memset() in that it fills with a uint16_t instead
+ * of a byte.  Remember that @count is the number of uint16_ts to
+ * store, not the number of bytes.
+ */
+void *memset16(uint16_t *s, uint16_t v, size_t count)
+{
+	uint16_t *xs = s;
+
+	while (count--)
+		*xs++ = v;
+	return s;
+}
+EXPORT_SYMBOL(memset16);
+#endif
+
+#ifndef __HAVE_ARCH_MEMSET32
+/**
+ * memset32() - Fill a memory area with a uint32_t
+ * @s: Pointer to the start of the area.
+ * @v: The value to fill the area with
+ * @count: The number of values to store
+ *
+ * Differs from memset() in that it fills with a uint32_t instead
+ * of a byte.  Remember that @count is the number of uint32_ts to
+ * store, not the number of bytes.
+ */
+void *memset32(uint32_t *s, uint32_t v, size_t count)
+{
+	uint32_t *xs = s;
+
+	while (count--)
+		*xs++ = v;
+	return s;
+}
+EXPORT_SYMBOL(memset32);
+#endif
+
+#ifndef __HAVE_ARCH_MEMSET64
+/**
+ * memset64() - Fill a memory area with a uint64_t
+ * @s: Pointer to the start of the area.
+ * @v: The value to fill the area with
+ * @count: The number of values to store
+ *
+ * Differs from memset() in that it fills with a uint64_t instead
+ * of a byte.  Remember that @count is the number of uint64_ts to
+ * store, not the number of bytes.
+ */
+void *memset64(uint64_t *s, uint64_t v, size_t count)
+{
+	uint64_t *xs = s;
+
+	while (count--)
+		*xs++ = v;
+	return s;
+}
+EXPORT_SYMBOL(memset64);
+#endif
 
 #ifndef __HAVE_ARCH_MEMCPY
 /**
@@ -783,7 +864,7 @@ EXPORT_SYMBOL(memmove);
  * @count: The size of the area.
  */
 #undef memcmp
-__visible int memcmp(const void *cs, const void *ct, size_t count)
+int memcmp(const void *cs, const void *ct, size_t count)
 {
 	const unsigned char *su1, *su2;
 	int res = 0;
@@ -794,26 +875,6 @@ __visible int memcmp(const void *cs, const void *ct, size_t count)
 	return res;
 }
 EXPORT_SYMBOL(memcmp);
-#endif
-
-#ifndef __HAVE_ARCH_BCMP
-/**
- * bcmp - returns 0 if and only if the buffers have identical contents.
- * @a: pointer to first buffer.
- * @b: pointer to second buffer.
- * @len: size of buffers.
- *
- * The sign or magnitude of a non-zero return value has no particular
- * meaning, and architectures may implement their own more efficient bcmp(). So
- * while this particular implementation is a simple (tail) call to memcmp, do
- * not rely on anything but whether the return value is zero or non-zero.
- */
-#undef bcmp
-int bcmp(const void *a, const void *b, size_t len)
-{
-	return memcmp(a, b, len);
-}
-EXPORT_SYMBOL(bcmp);
 #endif
 
 #ifndef __HAVE_ARCH_MEMSCAN
@@ -944,9 +1005,9 @@ void *memchr_inv(const void *start, int c, size_t bytes)
 		return check_bytes8(start, value, bytes);
 
 	value64 = value;
-#if defined(CONFIG_ARCH_HAS_FAST_MULTIPLIER) && BITS_PER_LONG == 64
-	value64 *= 0x0101010101010101ULL;
-#elif defined(CONFIG_ARCH_HAS_FAST_MULTIPLIER)
+#if defined(ARCH_HAS_FAST_MULTIPLIER) && BITS_PER_LONG == 64
+	value64 *= 0x0101010101010101;
+#elif defined(ARCH_HAS_FAST_MULTIPLIER)
 	value64 *= 0x01010101;
 	value64 |= value64 << 32;
 #else
@@ -979,20 +1040,3 @@ void *memchr_inv(const void *start, int c, size_t bytes)
 	return check_bytes8(start, value, bytes % 8);
 }
 EXPORT_SYMBOL(memchr_inv);
-
-/**
- * strreplace - Replace all occurrences of character in string.
- * @s: The string to operate on.
- * @old: The character being replaced.
- * @new: The character @old is replaced with.
- *
- * Returns pointer to the nul byte at the end of @s.
- */
-char *strreplace(char *s, char old, char new)
-{
-	for (; *s; ++s)
-		if (*s == old)
-			*s = new;
-	return s;
-}
-EXPORT_SYMBOL(strreplace);

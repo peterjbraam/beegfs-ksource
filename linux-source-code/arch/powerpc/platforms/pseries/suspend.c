@@ -124,7 +124,7 @@ static int pseries_prepare_late(void)
 	atomic_set(&suspend_data.done, 0);
 	atomic_set(&suspend_data.error, 0);
 	suspend_data.complete = &suspend_work;
-	reinit_completion(&suspend_work);
+	INIT_COMPLETION(suspend_work);
 	return 0;
 }
 
@@ -224,6 +224,7 @@ static struct bus_type suspend_subsys = {
 
 static const struct platform_suspend_ops pseries_suspend_ops = {
 	.valid		= suspend_valid_only_mem,
+	.begin		= pseries_suspend_begin,
 	.prepare_late	= pseries_prepare_late,
 	.enter		= pseries_suspend_enter,
 };
@@ -264,7 +265,7 @@ static int __init pseries_suspend_init(void)
 {
 	int rc;
 
-	if (!firmware_has_feature(FW_FEATURE_LPAR))
+	if (!machine_is(pseries) || !firmware_has_feature(FW_FEATURE_LPAR))
 		return 0;
 
 	suspend_data.token = rtas_token("ibm,suspend-me");
@@ -279,4 +280,5 @@ static int __init pseries_suspend_init(void)
 	suspend_set_ops(&pseries_suspend_ops);
 	return 0;
 }
-machine_device_initcall(pseries, pseries_suspend_init);
+
+__initcall(pseries_suspend_init);

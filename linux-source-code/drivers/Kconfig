@@ -1,7 +1,5 @@
 menu "Device Drivers"
 
-source "drivers/amba/Kconfig"
-
 source "drivers/base/Kconfig"
 
 source "drivers/bus/Kconfig"
@@ -38,13 +36,13 @@ source "drivers/message/fusion/Kconfig"
 
 source "drivers/firewire/Kconfig"
 
+source "drivers/message/i2o/Kconfig"
+
 source "drivers/macintosh/Kconfig"
 
 source "drivers/net/Kconfig"
 
 source "drivers/isdn/Kconfig"
-
-source "drivers/lightnvm/Kconfig"
 
 # input before char - char/joystick depends on it. As does USB.
 
@@ -56,7 +54,7 @@ source "drivers/i2c/Kconfig"
 
 source "drivers/spi/Kconfig"
 
-source "drivers/spmi/Kconfig"
+source "drivers/ssbi/Kconfig"
 
 source "drivers/hsi/Kconfig"
 
@@ -71,6 +69,8 @@ source "drivers/gpio/Kconfig"
 source "drivers/w1/Kconfig"
 
 source "drivers/power/Kconfig"
+
+source "drivers/powercap/Kconfig"
 
 source "drivers/hwmon/Kconfig"
 
@@ -152,8 +152,6 @@ source "drivers/remoteproc/Kconfig"
 
 source "drivers/rpmsg/Kconfig"
 
-source "drivers/soc/Kconfig"
-
 source "drivers/devfreq/Kconfig"
 
 source "drivers/extcon/Kconfig"
@@ -174,32 +172,18 @@ source "drivers/ipack/Kconfig"
 
 source "drivers/reset/Kconfig"
 
-source "drivers/fmc/Kconfig"
-
-source "drivers/phy/Kconfig"
-
-source "drivers/powercap/Kconfig"
-
-source "drivers/mcb/Kconfig"
-
-source "drivers/perf/Kconfig"
-
 source "drivers/ras/Kconfig"
-
-source "drivers/thunderbolt/Kconfig"
-
-source "drivers/android/Kconfig"
 
 source "drivers/nvdimm/Kconfig"
 
 source "drivers/dax/Kconfig"
 
-source "drivers/nvmem/Kconfig"
-
 source "drivers/hwtracing/stm/Kconfig"
 
 source "drivers/hwtracing/intel_th/Kconfig"
 
-source "drivers/fpga/Kconfig"
+source "drivers/thunderbolt/Kconfig"
+
+source "drivers/nvmem/Kconfig"
 
 endmenu

@@ -116,12 +116,13 @@ int pm8001_mem_alloc(struct pci_dev *pdev, void **virt_addr,
 	u64 align_offset = 0;
 	if (align)
 		align_offset = (dma_addr_t)align - 1;
-	mem_virt_alloc = pci_zalloc_consistent(pdev, mem_size + align,
-					       &mem_dma_handle);
+	mem_virt_alloc =
+		pci_alloc_consistent(pdev, mem_size + align, &mem_dma_handle);
 	if (!mem_virt_alloc) {
 		pm8001_printk("memory allocation error\n");
 		return -1;
 	}
+	memset((void *)mem_virt_alloc, 0, mem_size+align);
 	*pphys_addr = mem_dma_handle;
 	phys_align = (*pphys_addr + align_offset) & ~align_offset;
 	*virt_addr = (void *)mem_virt_alloc + phys_align - *pphys_addr;
@@ -280,10 +281,7 @@ u32 pm8001_get_ncq_tag(struct sas_task *task, u32 *tag)
 	struct ata_queued_cmd *qc = task->uldd_task;
 	if (qc) {
 		if (qc->tf.command == ATA_CMD_FPDMA_WRITE ||
-		    qc->tf.command == ATA_CMD_FPDMA_READ ||
-		    qc->tf.command == ATA_CMD_FPDMA_RECV ||
-		    qc->tf.command == ATA_CMD_FPDMA_SEND ||
-		    qc->tf.command == ATA_CMD_NCQ_NON_DATA) {
+			qc->tf.command == ATA_CMD_FPDMA_READ) {
 			*tag = qc->tag;
 			return 1;
 		}
@@ -374,13 +372,6 @@ static int pm8001_task_exec(struct sas_task *task,
 		return 0;
 	}
 	pm8001_ha = pm8001_find_ha_by_dev(task->dev);
-	if (pm8001_ha->controller_fatal_error) {
-		struct task_status_struct *ts = &t->task_status;
-
-		ts->resp = SAS_TASK_UNDELIVERED;
-		t->task_done(t);
-		return 0;
-	}
 	PM8001_IO_DBG(pm8001_ha, pm8001_printk("pm8001_task_exec device \n "));
 	spin_lock_irqsave(&pm8001_ha->lock, flags);
 	do {
@@ -473,7 +464,7 @@ err_out:
 	dev_printk(KERN_ERR, pm8001_ha->dev, "pm8001 exec failed[%d]!\n", rc);
 	if (!sas_protocol_ata(t->task_proto))
 		if (n_elem)
-			dma_unmap_sg(pm8001_ha->dev, t->scatter, t->num_scatter,
+			dma_unmap_sg(pm8001_ha->dev, t->scatter, n_elem,
 				t->data_dir);
 out_done:
 	spin_unlock_irqrestore(&pm8001_ha->lock, flags);
@@ -534,7 +525,7 @@ void pm8001_ccb_task_free(struct pm8001_hba_info *pm8001_ha,
   * pm8001_alloc_dev - find a empty pm8001_device
   * @pm8001_ha: our hba card information
   */
-static struct pm8001_device *pm8001_alloc_dev(struct pm8001_hba_info *pm8001_ha)
+struct pm8001_device *pm8001_alloc_dev(struct pm8001_hba_info *pm8001_ha)
 {
 	u32 dev;
 	for (dev = 0; dev < PM8001_MAX_DEVICES; dev++) {
@@ -795,12 +786,11 @@ pm8001_exec_internal_task_abort(struct pm8001_hba_info *pm8001_ha,
 
 		res = pm8001_tag_alloc(pm8001_ha, &ccb_tag);
 		if (res)
-			goto ex_err;
+			return res;
 		ccb = &pm8001_ha->ccb_info[ccb_tag];
 		ccb->device = pm8001_dev;
 		ccb->ccb_tag = ccb_tag;
 		ccb->task = task;
-		ccb->n_elem = 0;
 
 		res = PM8001_CHIP_DISP->task_abort(pm8001_ha,
 			pm8001_dev, flag, task_tag, ccb_tag);
@@ -986,27 +976,19 @@ int pm8001_I_T_nexus_reset(struct domain_device *dev)
 	phy = sas_get_local_phy(dev);
 
 	if (dev_is_sata(dev)) {
+		DECLARE_COMPLETION_ONSTACK(completion_setstate);
 		if (scsi_is_sas_phy_local(phy)) {
 			rc = 0;
 			goto out;
 		}
 		rc = sas_phy_reset(phy, 1);
-		if (rc) {
-			PM8001_EH_DBG(pm8001_ha,
-			pm8001_printk("phy reset failed for device %x\n"
-			"with rc %d\n", pm8001_dev->device_id, rc));
-			rc = TMF_RESP_FUNC_FAILED;
-			goto out;
-		}
 		msleep(2000);
 		rc = pm8001_exec_internal_task_abort(pm8001_ha, pm8001_dev ,
 			dev, 1, 0);
-		if (rc) {
-			PM8001_EH_DBG(pm8001_ha,
-			pm8001_printk("task abort failed %x\n"
-			"with rc %d\n", pm8001_dev->device_id, rc));
-			rc = TMF_RESP_FUNC_FAILED;
-		}
+		pm8001_dev->setds_completion = &completion_setstate;
+		rc = PM8001_CHIP_DISP->set_dev_state_req(pm8001_ha,
+			pm8001_dev, 0x01);
+		wait_for_completion(&completion_setstate);
 	} else {
 		rc = sas_phy_reset(phy, 1);
 		msleep(2000);

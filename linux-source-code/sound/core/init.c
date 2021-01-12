@@ -49,8 +49,7 @@ static const struct file_operations snd_shutdown_f_ops;
 
 /* locked for registering/using */
 static DECLARE_BITMAP(snd_cards_lock, SNDRV_CARDS);
-struct snd_card *snd_cards[SNDRV_CARDS];
-EXPORT_SYMBOL(snd_cards);
+static struct snd_card *snd_cards[SNDRV_CARDS];
 
 static DEFINE_MUTEX(snd_card_mutex);
 
@@ -98,31 +97,6 @@ static int module_slot_match(struct module *module, int idx)
 #if IS_ENABLED(CONFIG_SND_MIXER_OSS)
 int (*snd_mixer_oss_notify_callback)(struct snd_card *card, int free_flag);
 EXPORT_SYMBOL(snd_mixer_oss_notify_callback);
-#endif
-
-#ifdef CONFIG_SND_PROC_FS
-static void snd_card_id_read(struct snd_info_entry *entry,
-			     struct snd_info_buffer *buffer)
-{
-	snd_iprintf(buffer, "%s\n", entry->card->id);
-}
-
-static int init_info_for_card(struct snd_card *card)
-{
-	struct snd_info_entry *entry;
-
-	entry = snd_info_create_card_entry(card, "id", card->proc_root);
-	if (!entry) {
-		dev_dbg(card->dev, "unable to create card entry\n");
-		return -ENOMEM;
-	}
-	entry->c.text.read = snd_card_id_read;
-	card->proc_id = entry;
-
-	return snd_info_card_register(card);
-}
-#else /* !CONFIG_SND_PROC_FS */
-#define init_info_for_card(card)
 #endif
 
 static int check_empty_slot(struct module *module, int slot)
@@ -248,15 +222,14 @@ int snd_card_new(struct device *parent, int idx, const char *xid,
 	INIT_LIST_HEAD(&card->devices);
 	init_rwsem(&card->controls_rwsem);
 	rwlock_init(&card->ctl_files_rwlock);
-	mutex_init(&card->user_ctl_lock);
 	INIT_LIST_HEAD(&card->controls);
 	INIT_LIST_HEAD(&card->ctl_files);
 	spin_lock_init(&card->files_lock);
 	INIT_LIST_HEAD(&card->files_list);
 #ifdef CONFIG_PM
-	mutex_init(&card->power_lock);
 	init_waitqueue_head(&card->power_sleep);
 #endif
+	init_waitqueue_head(&card->remove_sleep);
 
 	device_initialize(&card->card_dev);
 	card->card_dev.parent = parent;
@@ -293,6 +266,26 @@ int snd_card_new(struct device *parent, int idx, const char *xid,
   	return err;
 }
 EXPORT_SYMBOL(snd_card_new);
+
+/**
+ * snd_card_ref - Get the card object from the index
+ * @idx: the card index
+ *
+ * Returns a card object corresponding to the given index or NULL if not found.
+ * Release the object via snd_card_unref().
+ */
+struct snd_card *snd_card_ref(int idx)
+{
+	struct snd_card *card;
+
+	mutex_lock(&snd_card_mutex);
+	card = snd_cards[idx];
+	if (card)
+		get_device(&card->card_dev);
+	mutex_unlock(&snd_card_mutex);
+	return card;
+}
+EXPORT_SYMBOL_GPL(snd_card_ref);
 
 /* return non-zero if a card is already locked */
 int snd_card_locked(int card)
@@ -452,8 +445,36 @@ int snd_card_disconnect(struct snd_card *card)
 #endif
 	return 0;	
 }
-
 EXPORT_SYMBOL(snd_card_disconnect);
+
+/**
+ * snd_card_disconnect_sync - disconnect card and wait until files get closed
+ * @card: card object to disconnect
+ *
+ * This calls snd_card_disconnect() for disconnecting all belonging components
+ * and waits until all pending files get closed.
+ * It assures that all accesses from user-space finished so that the driver
+ * can release its resources gracefully.
+ */
+void snd_card_disconnect_sync(struct snd_card *card)
+{
+	int err;
+
+	err = snd_card_disconnect(card);
+	if (err < 0) {
+		dev_err(card->dev,
+			"snd_card_disconnect error (%d), skipping sync\n",
+			err);
+		return;
+	}
+
+	spin_lock_irq(&card->files_lock);
+	wait_event_lock_irq(card->remove_sleep,
+			    list_empty(&card->files_list),
+			    card->files_lock);
+	spin_unlock_irq(&card->files_lock);
+}
+EXPORT_SYMBOL_GPL(snd_card_disconnect_sync);
 
 static int snd_card_do_free(struct snd_card *card)
 {
@@ -464,7 +485,6 @@ static int snd_card_do_free(struct snd_card *card)
 	snd_device_free_all(card);
 	if (card->private_free)
 		card->private_free(card);
-	snd_info_free_entry(card->proc_id);
 	if (snd_info_card_free(card) < 0) {
 		dev_warn(card->dev, "unable to free card info\n");
 		/* Not fatal error */
@@ -643,7 +663,7 @@ card_id_show_attr(struct device *dev,
 		  struct device_attribute *attr, char *buf)
 {
 	struct snd_card *card = container_of(dev, struct snd_card, card_dev);
-	return snprintf(buf, PAGE_SIZE, "%s\n", card->id);
+	return scnprintf(buf, PAGE_SIZE, "%s\n", card->id);
 }
 
 static ssize_t
@@ -676,17 +696,17 @@ card_id_store_attr(struct device *dev, struct device_attribute *attr,
 	return count;
 }
 
-static DEVICE_ATTR(id, S_IRUGO | S_IWUSR, card_id_show_attr, card_id_store_attr);
+static DEVICE_ATTR(id, 0644, card_id_show_attr, card_id_store_attr);
 
 static ssize_t
 card_number_show_attr(struct device *dev,
 		     struct device_attribute *attr, char *buf)
 {
 	struct snd_card *card = container_of(dev, struct snd_card, card_dev);
-	return snprintf(buf, PAGE_SIZE, "%i\n", card->number);
+	return scnprintf(buf, PAGE_SIZE, "%i\n", card->number);
 }
 
-static DEVICE_ATTR(number, S_IRUGO, card_number_show_attr, NULL);
+static DEVICE_ATTR(number, 0444, card_number_show_attr, NULL);
 
 static struct attribute *card_dev_attrs[] = {
 	&dev_attr_id.attr,
@@ -718,7 +738,7 @@ int snd_card_add_dev_attr(struct snd_card *card,
 
 	dev_err(card->dev, "Too many groups assigned\n");
 	return -ENOSPC;
-};
+}
 EXPORT_SYMBOL_GPL(snd_card_add_dev_attr);
 
 /**
@@ -768,14 +788,16 @@ int snd_card_register(struct snd_card *card)
 	}
 	snd_cards[card->number] = card;
 	mutex_unlock(&snd_card_mutex);
-	init_info_for_card(card);
+	err = snd_info_card_register(card);
+	if (err < 0)
+		return err;
+
 #if IS_ENABLED(CONFIG_SND_MIXER_OSS)
 	if (snd_mixer_oss_notify_callback)
 		snd_mixer_oss_notify_callback(card, SND_MIXER_OSS_NOTIFY_REGISTER);
 #endif
 	return 0;
 }
-
 EXPORT_SYMBOL(snd_card_register);
 
 #ifdef CONFIG_SND_PROC_FS
@@ -895,7 +917,6 @@ int snd_component_add(struct snd_card *card, const char *component)
 	strcat(card->components, component);
 	return 0;
 }
-
 EXPORT_SYMBOL(snd_component_add);
 
 /**
@@ -930,7 +951,6 @@ int snd_card_file_add(struct snd_card *card, struct file *file)
 	spin_unlock(&card->files_lock);
 	return 0;
 }
-
 EXPORT_SYMBOL(snd_card_file_add);
 
 /**
@@ -963,6 +983,8 @@ int snd_card_file_remove(struct snd_card *card, struct file *file)
 			break;
 		}
 	}
+	if (list_empty(&card->files_list))
+		wake_up_all(&card->remove_sleep);
 	spin_unlock(&card->files_lock);
 	if (!found) {
 		dev_err(card->dev, "card file remove problem (%p)\n", file);
@@ -972,7 +994,6 @@ int snd_card_file_remove(struct snd_card *card, struct file *file)
 	put_device(&card->card_dev);
 	return 0;
 }
-
 EXPORT_SYMBOL(snd_card_file_remove);
 
 #ifdef CONFIG_PM
@@ -984,8 +1005,6 @@ EXPORT_SYMBOL(snd_card_file_remove);
  *  Waits until the power-state is changed.
  *
  *  Return: Zero if successful, or a negative error code.
- *
- *  Note: the power lock must be active before call.
  */
 int snd_power_wait(struct snd_card *card, unsigned int power_state)
 {
@@ -1005,13 +1024,10 @@ int snd_power_wait(struct snd_card *card, unsigned int power_state)
 		if (snd_power_get_state(card) == power_state)
 			break;
 		set_current_state(TASK_UNINTERRUPTIBLE);
-		snd_power_unlock(card);
 		schedule_timeout(30 * HZ);
-		snd_power_lock(card);
 	}
 	remove_wait_queue(&card->power_sleep, &wait);
 	return result;
 }
-
 EXPORT_SYMBOL(snd_power_wait);
 #endif /* CONFIG_PM */

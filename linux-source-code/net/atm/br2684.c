@@ -620,14 +620,14 @@ error:
 static const struct net_device_ops br2684_netdev_ops = {
 	.ndo_start_xmit 	= br2684_start_xmit,
 	.ndo_set_mac_address	= br2684_mac_addr,
-	.ndo_change_mtu		= eth_change_mtu,
+	.ndo_change_mtu_rh74	= eth_change_mtu,
 	.ndo_validate_addr	= eth_validate_addr,
 };
 
 static const struct net_device_ops br2684_netdev_ops_routed = {
 	.ndo_start_xmit 	= br2684_start_xmit,
 	.ndo_set_mac_address	= br2684_mac_addr,
-	.ndo_change_mtu		= eth_change_mtu
+	.ndo_change_mtu_rh74	= eth_change_mtu
 };
 
 static void br2684_setup(struct net_device *netdev)
@@ -682,8 +682,8 @@ static int br2684_create(void __user *arg)
 
 	netdev = alloc_netdev(sizeof(struct br2684_dev),
 			      ni.ifname[0] ? ni.ifname : "nas%d",
-			      NET_NAME_UNKNOWN,
-			      (payload == p_routed) ? br2684_setup_routed : br2684_setup);
+			      (payload == p_routed) ?
+			      br2684_setup_routed : br2684_setup);
 	if (!netdev)
 		return -ENOMEM;
 
@@ -802,10 +802,13 @@ static int br2684_seq_show(struct seq_file *seq, void *v)
 			   (brdev->payload == p_bridged) ? "bridged" : "routed",
 			   brvcc->copies_failed, brvcc->copies_needed);
 #ifdef CONFIG_ATM_BR2684_IPFILTER
+#define b1(var, byte)	((u8 *) &brvcc->filter.var)[byte]
+#define bs(var)		b1(var, 0), b1(var, 1), b1(var, 2), b1(var, 3)
 		if (brvcc->filter.netmask != 0)
-			seq_printf(seq, "    filter=%pI4/%pI4\n",
-				   &brvcc->filter.prefix,
-				   &brvcc->filter.netmask);
+			seq_printf(seq, "    filter=%d.%d.%d.%d/"
+				   "%d.%d.%d.%d\n", bs(prefix), bs(netmask));
+#undef bs
+#undef b1
 #endif /* CONFIG_ATM_BR2684_IPFILTER */
 	}
 	return 0;

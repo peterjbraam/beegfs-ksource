@@ -12,7 +12,7 @@
 #include <linux/proc_fs.h>
 #include <linux/threads.h>
 #include <linux/kernel.h>
-#include <linux/export.h>
+#include <linux/module.h>
 #include <linux/string.h>
 #include <linux/ctype.h>
 #include <linux/sched.h>
@@ -25,7 +25,7 @@
 #include <linux/kdebug.h>
 #include <linux/delay.h>
 #include <linux/crash_dump.h>
-#include <linux/reboot.h>
+#include <linux/memory.h>
 
 #include <asm/uv/uv_mmrs.h>
 #include <asm/uv/uv_hub.h>
@@ -37,6 +37,7 @@
 #include <asm/ipi.h>
 #include <asm/smp.h>
 #include <asm/x86_init.h>
+#include <asm/emergency-restart.h>
 #include <asm/nmi.h>
 
 DEFINE_PER_CPU(int, x2apic_extra_bits);
@@ -44,6 +45,7 @@ DEFINE_PER_CPU(int, x2apic_extra_bits);
 #define PR_DEVEL(fmt, args...)	pr_devel("%s: " fmt, __func__, args)
 
 static enum uv_system_type uv_system_type;
+static bool uv_hubless_system;
 static u64 gru_start_paddr, gru_end_paddr;
 static u64 gru_dist_base, gru_first_node_paddr = -1LL, gru_last_node_paddr;
 static u64 gru_dist_lmask, gru_dist_umask;
@@ -56,6 +58,7 @@ static struct {
 	unsigned int socketid_shift;	/* aka pnode_shift for UV1/2/3 */
 	unsigned int pnode_mask;
 	unsigned int gpa_shift;
+	unsigned int gnode_shift;
 } uv_cpuid;
 
 int uv_min_hub_revision_id;
@@ -131,8 +134,11 @@ static int __init early_get_pnodeid(void)
 	case UV3_HUB_PART_NUMBER_X:
 		uv_min_hub_revision_id += UV3_HUB_REVISION_BASE;
 		break;
+
+	/* Update: UV4A has only a modified revision to indicate HUB fixes */
 	case UV4_HUB_PART_NUMBER:
 		uv_min_hub_revision_id += UV4_HUB_REVISION_BASE - 1;
+		uv_cpuid.gnode_shift = 2; /* min partition is 4 sockets */
 		break;
 	}
 
@@ -145,6 +151,48 @@ static int __init early_get_pnodeid(void)
 		node_id.s.revision, node_id.s.part_number, node_id.s.node_id,
 		m_n_config.s.n_skt, uv_cpuid.pnode_mask, pnode);
 	return pnode;
+}
+
+static void __init uv_tsc_check_sync(void)
+{
+	u64 mmr;
+	int sync_state;
+	int mmr_shift;
+	char *state;
+	bool valid;
+
+	/* Accommodate different UV arch BIOSes */
+	mmr = uv_early_read_mmr(UVH_TSC_SYNC_MMR);
+	mmr_shift =
+		is_uv1_hub() ? 0 :
+		is_uv2_hub() ? UVH_TSC_SYNC_SHIFT_UV2K : UVH_TSC_SYNC_SHIFT;
+	if (mmr_shift)
+		sync_state = (mmr >> mmr_shift) & UVH_TSC_SYNC_MASK;
+	else
+		sync_state = 0;
+
+	switch (sync_state) {
+	case UVH_TSC_SYNC_VALID:
+		state = "in sync";
+		valid = true;
+		break;
+
+	case UVH_TSC_SYNC_INVALID:
+		state = "unstable";
+		valid = false;
+		break;
+	default:
+		state = "unknown: assuming valid";
+		valid = true;
+		break;
+	}
+	pr_info("UV: TSC sync state from BIOS:0%d(%s)\n", sync_state, state);
+
+	/* Mark flag that says TSC != 0 is valid for socket 0 */
+	if (valid)
+		mark_tsc_async_resets("UV BIOS");
+	else
+		mark_tsc_unstable("UV BIOS");
 }
 
 /* [copied from arch/x86/kernel/cpu/topology.c:detect_extended_topology()] */
@@ -220,8 +268,14 @@ static int __init uv_acpi_madt_oem_check(char *oem_id, char *oem_table_id)
 	int pnodeid;
 	int uv_apic;
 
-	if (strncmp(oem_id, "SGI", 3) != 0)
+	if (strncmp(oem_id, "SGI", 3) != 0) {
+		if (strncmp(oem_id, "NSGI", 4) == 0) {
+			uv_hubless_system = true;
+			pr_info("UV: OEM IDs %s/%s, HUBLESS\n",
+				oem_id, oem_table_id);
+		}
 		return 0;
+	}
 
 	if (numa_off) {
 		pr_err("UV: NUMA is off, disabling UV support\n");
@@ -274,6 +328,7 @@ static int __init uv_acpi_madt_oem_check(char *oem_id, char *oem_table_id)
 	pr_info("UV: OEM IDs %s/%s, System/HUB Types %d/%d, uv_apic %d\n",
 		oem_id, oem_table_id, uv_system_type,
 		uv_min_hub_revision_id, uv_apic);
+	uv_tsc_check_sync();
 
 	return uv_apic;
 
@@ -293,6 +348,12 @@ int is_uv_system(void)
 	return uv_system_type != UV_NONE;
 }
 EXPORT_SYMBOL_GPL(is_uv_system);
+
+int is_uv_hubless(void)
+{
+	return uv_hubless_system;
+}
+EXPORT_SYMBOL_GPL(is_uv_hubless);
 
 void **__uv_hub_info_list;
 EXPORT_SYMBOL_GPL(__uv_hub_info_list);
@@ -323,6 +384,51 @@ extern int uv_hub_info_version(void)
 	return UV_HUB_INFO_VERSION;
 }
 EXPORT_SYMBOL(uv_hub_info_version);
+
+/* Default UV memory block size is 2GB */
+static unsigned long mem_block_size = (2UL << 30);
+
+/* Kernel parameter to specify UV mem block size */
+static int parse_mem_block_size(char *ptr)
+{
+	unsigned long size = memparse(ptr, NULL);
+
+	/* Size will be rounded down by set_block_size() below */
+	mem_block_size = size;
+	return 0;
+}
+early_param("uv_memblksize", parse_mem_block_size);
+
+static __init int adj_blksize(u32 lgre)
+{
+	unsigned long base = (unsigned long)lgre << UV_GAM_RANGE_SHFT;
+	unsigned long size;
+
+	for (size = mem_block_size; size > MIN_MEMORY_BLOCK_SIZE; size >>= 1)
+		if (IS_ALIGNED(base, size))
+			break;
+
+	if (size >= mem_block_size)
+		return 0;
+
+	mem_block_size = size;
+	return 1;
+}
+
+static __init void set_block_size(void)
+{
+	unsigned int order = ffs(mem_block_size);
+
+	if (order) {
+		/* adjust for ffs return of 1..64 */
+		set_memory_block_size_order(order - 1);
+		pr_info("UV: mem_block_size set to 0x%lx\n", mem_block_size);
+	} else {
+		/* bad or zero value, default to 1UL << 31 (2GB) */
+		pr_err("UV: mem_block_size error with 0x%lx\n", mem_block_size);
+		set_memory_block_size_order(31);
+	}
+}
 
 /* Build GAM range lookup table */
 static __init void build_uv_gr_table(void)
@@ -418,6 +524,7 @@ static __init void build_uv_gr_table(void)
 
 static int uv_wakeup_secondary(int phys_apicid, unsigned long start_rip)
 {
+#ifdef CONFIG_SMP
 	unsigned long val;
 	int pnode;
 
@@ -435,6 +542,8 @@ static int uv_wakeup_secondary(int phys_apicid, unsigned long start_rip)
 	    APIC_DM_STARTUP;
 	uv_write_global_mmr64(pnode, UVH_IPI_INT, val);
 
+	atomic_set(&init_deasserted, 1);
+#endif
 	return 0;
 }
 
@@ -533,8 +642,11 @@ static unsigned int x2apic_get_apic_id(unsigned long x)
 
 static unsigned long set_apic_id(unsigned int id)
 {
-	/* CHECKME: Do we need to mask out the xapic extra bits? */
-	return id;
+	unsigned long x;
+
+	/* maskout x2apic_extra_bits ? */
+	x = id;
+	return x;
 }
 
 static unsigned int uv_read_apic_id(void)
@@ -557,7 +669,7 @@ static int uv_probe(void)
 	return apic == &apic_x2apic_uv_x;
 }
 
-static struct apic apic_x2apic_uv_x __ro_after_init = {
+static struct apic __refdata apic_x2apic_uv_x = {
 
 	.name				= "UV large system",
 	.probe				= uv_probe,
@@ -572,23 +684,28 @@ static struct apic apic_x2apic_uv_x __ro_after_init = {
 	.disable_esr			= 0,
 	.dest_logical			= APIC_DEST_LOGICAL,
 	.check_apicid_used		= NULL,
+	.check_apicid_present		= NULL,
 
 	.vector_allocation_domain	= default_vector_allocation_domain,
 	.init_apic_ldr			= uv_init_apic_ldr,
 
 	.ioapic_phys_id_map		= NULL,
 	.setup_apic_routing		= NULL,
+	.multi_timer_check		= NULL,
 	.cpu_present_to_apicid		= default_cpu_present_to_apicid,
 	.apicid_to_cpu_present		= NULL,
+	.setup_portio_remap		= NULL,
 	.check_phys_apicid_present	= default_check_phys_apicid_present,
+	.enable_apic_mode		= NULL,
 	.phys_pkg_id			= uv_phys_pkg_id,
+	.mps_oem_check			= NULL,
 
 	.get_apic_id			= x2apic_get_apic_id,
 	.set_apic_id			= set_apic_id,
+	.apic_id_mask			= 0xFFFFFFFFu,
 
 	.cpu_mask_to_apicid_and		= uv_cpu_mask_to_apicid_and,
 
-	.send_IPI			= uv_send_IPI_one,
 	.send_IPI_mask			= uv_send_IPI_mask,
 	.send_IPI_mask_allbutself	= uv_send_IPI_mask_allbutself,
 	.send_IPI_allbutself		= uv_send_IPI_allbutself,
@@ -596,6 +713,10 @@ static struct apic apic_x2apic_uv_x __ro_after_init = {
 	.send_IPI_self			= uv_send_IPI_self,
 
 	.wakeup_secondary_cpu		= uv_wakeup_secondary,
+	.trampoline_phys_low		= DEFAULT_TRAMPOLINE_PHYS_LOW,
+	.trampoline_phys_high		= DEFAULT_TRAMPOLINE_PHYS_HIGH,
+	.wait_for_init_deassert		= NULL,
+	.smp_callin_clear_local_apic	= NULL,
 	.inquire_remote_apic		= NULL,
 
 	.read				= native_apic_msr_read,
@@ -715,6 +836,7 @@ static __init void map_gru_high(int max_pnode)
 		return;
 	}
 
+	/* Only UV3 has distributed GRU mode */
 	if (is_uv3_hub() && gru.s3.mode) {
 		map_gru_distributed(gru.v);
 		return;
@@ -737,62 +859,60 @@ static __init void map_mmr_high(int max_pnode)
 		pr_info("UV: MMR disabled\n");
 }
 
-/*
- * This commonality works because both 0 & 1 versions of the MMIOH OVERLAY
- * and REDIRECT MMR regs are exactly the same on UV3.
- */
-struct mmioh_config {
-	unsigned long overlay;
-	unsigned long redirect;
-	char *id;
-};
-
-static __initdata struct mmioh_config mmiohs[] = {
-	{
-		UV3H_RH_GAM_MMIOH_OVERLAY_CONFIG0_MMR,
-		UV3H_RH_GAM_MMIOH_REDIRECT_CONFIG0_MMR,
-		"MMIOH0"
-	},
-	{
-		UV3H_RH_GAM_MMIOH_OVERLAY_CONFIG1_MMR,
-		UV3H_RH_GAM_MMIOH_REDIRECT_CONFIG1_MMR,
-		"MMIOH1"
-	},
-};
-
-/* UV3 & UV4 have identical MMIOH overlay configs */
-static __init void map_mmioh_high_uv3(int index, int min_pnode, int max_pnode)
+/* UV3/4 have identical MMIOH overlay configs, UV4A is slightly different */
+static __init void map_mmioh_high_uv34(int index, int min_pnode, int max_pnode)
 {
-	union uv3h_rh_gam_mmioh_overlay_config0_mmr_u overlay;
+	unsigned long overlay;
 	unsigned long mmr;
 	unsigned long base;
+	unsigned long nasid_mask;
+	unsigned long m_overlay;
 	int i, n, shift, m_io, max_io;
 	int nasid, lnasid, fi, li;
 	char *id;
 
-	id = mmiohs[index].id;
-	overlay.v = uv_read_local_mmr(mmiohs[index].overlay);
-	pr_info("UV: %s overlay 0x%lx base:0x%x m_io:%d\n",
-		id, overlay.v, overlay.s3.base, overlay.s3.m_io);
-	if (!overlay.s3.enable) {
+	if (index == 0) {
+		id = "MMIOH0";
+		m_overlay = UVH_RH_GAM_MMIOH_OVERLAY_CONFIG0_MMR;
+		overlay = uv_read_local_mmr(m_overlay);
+		base = overlay & UVH_RH_GAM_MMIOH_OVERLAY_CONFIG0_MMR_BASE_MASK;
+		mmr = UVH_RH_GAM_MMIOH_REDIRECT_CONFIG0_MMR;
+		m_io = (overlay & UVH_RH_GAM_MMIOH_OVERLAY_CONFIG0_MMR_M_IO_MASK)
+			>> UVH_RH_GAM_MMIOH_OVERLAY_CONFIG0_MMR_M_IO_SHFT;
+		shift = UVH_RH_GAM_MMIOH_OVERLAY_CONFIG0_MMR_M_IO_SHFT;
+		n = UVH_RH_GAM_MMIOH_REDIRECT_CONFIG0_MMR_DEPTH;
+		nasid_mask = UVH_RH_GAM_MMIOH_REDIRECT_CONFIG0_MMR_NASID_MASK;
+	} else {
+		id = "MMIOH1";
+		m_overlay = UVH_RH_GAM_MMIOH_OVERLAY_CONFIG1_MMR;
+		overlay = uv_read_local_mmr(m_overlay);
+		base = overlay & UVH_RH_GAM_MMIOH_OVERLAY_CONFIG1_MMR_BASE_MASK;
+		mmr = UVH_RH_GAM_MMIOH_REDIRECT_CONFIG1_MMR;
+		m_io = (overlay & UVH_RH_GAM_MMIOH_OVERLAY_CONFIG1_MMR_M_IO_MASK)
+			>> UVH_RH_GAM_MMIOH_OVERLAY_CONFIG1_MMR_M_IO_SHFT;
+		shift = UVH_RH_GAM_MMIOH_OVERLAY_CONFIG1_MMR_M_IO_SHFT;
+		n = UVH_RH_GAM_MMIOH_REDIRECT_CONFIG1_MMR_DEPTH;
+		nasid_mask = UVH_RH_GAM_MMIOH_REDIRECT_CONFIG1_MMR_NASID_MASK;
+	}
+	pr_info("UV: %s overlay 0x%lx base:0x%lx m_io:%d\n", id, overlay, base, m_io);
+	if (!(overlay & UVH_RH_GAM_MMIOH_OVERLAY_CONFIG0_MMR_ENABLE_MASK)) {
 		pr_info("UV: %s disabled\n", id);
 		return;
 	}
 
-	shift = UV3H_RH_GAM_MMIOH_OVERLAY_CONFIG0_MMR_BASE_SHFT;
-	base = (unsigned long)overlay.s3.base;
-	m_io = overlay.s3.m_io;
-	mmr = mmiohs[index].redirect;
-	n = UV3H_RH_GAM_MMIOH_REDIRECT_CONFIG0_MMR_DEPTH;
 	min_pnode *= 2;				/* convert to NASID */
 	max_pnode *= 2;
 	max_io = lnasid = fi = li = -1;
 
 	for (i = 0; i < n; i++) {
-		union uv3h_rh_gam_mmioh_redirect_config0_mmr_u redirect;
+		unsigned long m_redirect = mmr + i * 8;
+		unsigned long redirect = uv_read_local_mmr(m_redirect);
 
-		redirect.v = uv_read_local_mmr(mmr + i * 8);
-		nasid = redirect.s3.nasid;
+		nasid = redirect & nasid_mask;
+		if (i == 0)
+			pr_info("UV: %s redirect base 0x%lx(@0x%lx) 0x%04x\n",
+				id, redirect, m_redirect, nasid);
+
 		if (nasid < min_pnode || max_pnode < nasid)
 			nasid = -1;		/* invalid NASID */
 
@@ -815,9 +935,9 @@ static __init void map_mmioh_high_uv3(int index, int min_pnode, int max_pnode)
 				l = li;
 			}
 			addr1 = (base << shift) +
-				f * (1ULL << m_io);
+				f * (unsigned long)(1 << m_io);
 			addr2 = (base << shift) +
-				(l + 1) * (1ULL << m_io);
+				(l + 1) * (unsigned long)(1 << m_io);
 			pr_info("UV: %s[%03d..%03d] NASID 0x%04x ADDR 0x%016lx - 0x%016lx\n",
 				id, fi, li, lnasid, addr1, addr2);
 			if (max_io < l)
@@ -841,9 +961,9 @@ static __init void map_mmioh_high(int min_pnode, int max_pnode)
 	int shift, enable, m_io, n_io;
 
 	if (is_uv3_hub() || is_uv4_hub()) {
-		/* Map both MMIOH Regions */
-		map_mmioh_high_uv3(0, min_pnode, max_pnode);
-		map_mmioh_high_uv3(1, min_pnode, max_pnode);
+		/* Map both MMIOH regions: */
+		map_mmioh_high_uv34(0, min_pnode, max_pnode);
+		map_mmioh_high_uv34(1, min_pnode, max_pnode);
 		return;
 	}
 
@@ -921,16 +1041,16 @@ static void uv_heartbeat(unsigned long ignored)
 	uv_set_scir_bits(bits);
 
 	/* enable next timer period */
-	mod_timer(timer, jiffies + SCIR_CPU_HB_INTERVAL);
+	mod_timer_pinned(timer, jiffies + SCIR_CPU_HB_INTERVAL);
 }
 
-static int uv_heartbeat_enable(unsigned int cpu)
+static void uv_heartbeat_enable(int cpu)
 {
 	while (!uv_cpu_scir_info(cpu)->enabled) {
 		struct timer_list *timer = &uv_cpu_scir_info(cpu)->timer;
 
 		uv_set_cpu_scir_bits(cpu, SCIR_CPU_HEARTBEAT|SCIR_CPU_ACTIVITY);
-		setup_pinned_timer(timer, uv_heartbeat, cpu);
+		setup_timer(timer, uv_heartbeat, cpu);
 		timer->expires = jiffies + SCIR_CPU_HB_INTERVAL;
 		add_timer_on(timer, cpu);
 		uv_cpu_scir_info(cpu)->enabled = 1;
@@ -938,24 +1058,42 @@ static int uv_heartbeat_enable(unsigned int cpu)
 		/* also ensure that boot cpu is enabled */
 		cpu = 0;
 	}
-	return 0;
 }
 
 #ifdef CONFIG_HOTPLUG_CPU
-static int uv_heartbeat_disable(unsigned int cpu)
+static void uv_heartbeat_disable(int cpu)
 {
 	if (uv_cpu_scir_info(cpu)->enabled) {
 		uv_cpu_scir_info(cpu)->enabled = 0;
 		del_timer(&uv_cpu_scir_info(cpu)->timer);
 	}
 	uv_set_cpu_scir_bits(cpu, 0xff);
-	return 0;
+}
+
+/*
+ * cpu hotplug notifier
+ */
+static int uv_scir_cpu_notify(struct notifier_block *self, unsigned long action,
+			      void *hcpu)
+{
+	long cpu = (long)hcpu;
+
+	switch (action) {
+	case CPU_ONLINE:
+		uv_heartbeat_enable(cpu);
+		break;
+	case CPU_DOWN_PREPARE:
+		uv_heartbeat_disable(cpu);
+		break;
+	default:
+		break;
+	}
+	return NOTIFY_OK;
 }
 
 static __init void uv_scir_register_cpu_notifier(void)
 {
-	cpuhp_setup_state_nocalls(CPUHP_AP_ONLINE_DYN, "x86/x2apic-uvx:online",
-				  uv_heartbeat_enable, uv_heartbeat_disable);
+	hotcpu_notifier(uv_scir_cpu_notify, 0);
 }
 
 #else /* !CONFIG_HOTPLUG_CPU */
@@ -1008,7 +1146,7 @@ int uv_set_vga_state(struct pci_dev *pdev, bool decode,
  */
 void uv_cpu_init(void)
 {
-	/* CPU 0 initialization will be done via uv_system_init. */
+	/* CPU 0 initilization will be done via uv_system_init. */
 	if (smp_processor_id() == 0)
 		return;
 
@@ -1074,11 +1212,13 @@ void __init uv_init_hub_info(struct uv_hub_info_s *hub_info)
 		(1UL << uv_cpuid.gpa_shift) - 1;
 
 	node_id.v = uv_read_local_mmr(UVH_NODE_ID);
+	uv_cpuid.gnode_shift = max_t(unsigned int,
+					uv_cpuid.gnode_shift, mn.n_val);
 	hub_info->gnode_extra =
-		(node_id.s.node_id & ~((1 << mn.n_val) - 1)) >> 1;
+		(node_id.s.node_id & ~((1 << uv_cpuid.gnode_shift) - 1)) >> 1;
 
-	hub_info->gnode_upper =
-		((unsigned long)hub_info->gnode_extra << mn.m_val);
+	if (mn.m_val)
+		hub_info->gnode_upper = (u64)hub_info->gnode_extra << mn.m_val;
 
 	if (uv_gp_table) {
 		hub_info->global_mmr_base = uv_gp_table->mmr_base;
@@ -1137,21 +1277,34 @@ static void __init decode_gam_rng_tbl(unsigned long ptr)
 
 	uv_gre_table = gre;
 	for (; gre->type != UV_GAM_RANGE_TYPE_UNUSED; gre++) {
+		unsigned long size = ((unsigned long)(gre->limit - lgre)
+					<< UV_GAM_RANGE_SHFT);
+		int order = 0;
+		char suffix[] = " KMGTPE";
+		int flag = ' ';
+
+		while (size > 9999 && order < sizeof(suffix)) {
+			size /= 1024;
+			order++;
+		}
+
+		/* adjust max block size to current range start */
+		if (gre->type == 1 || gre->type == 2)
+			if (adj_blksize(lgre))
+				flag = '*';
+
 		if (!index) {
 			pr_info("UV: GAM Range Table...\n");
-			pr_info("UV:  # %20s %14s %5s %4s %5s %3s %2s\n",
-				"Range", "", "Size", "Type", "NASID",
-				"SID", "PN");
+			pr_info("UV:  # %20s %14s %6s %4s %5s %3s %2s\n", "Range", "", "Size", "Type", "NASID", "SID", "PN");
 		}
-		pr_info(
-		"UV: %2d: 0x%014lx-0x%014lx %5luG %3d   %04x  %02x %02x\n",
+		pr_info("UV: %2d: 0x%014lx-0x%014lx%c %5lu%c %3d   %04x  %02x %02x\n",
 			index++,
 			(unsigned long)lgre << UV_GAM_RANGE_SHFT,
 			(unsigned long)gre->limit << UV_GAM_RANGE_SHFT,
-			((unsigned long)(gre->limit - lgre)) >>
-				(30 - UV_GAM_RANGE_SHFT), /* 64M -> 1G */
+			flag, size, suffix[order],
 			gre->type, gre->nasid, gre->sockid, gre->pnode);
 
+		/* update to next range start */
 		lgre = gre->limit;
 		if (sock_min > gre->sockid)
 			sock_min = gre->sockid;
@@ -1172,19 +1325,25 @@ static void __init decode_gam_rng_tbl(unsigned long ptr)
 		index, _min_socket, _max_socket, _min_pnode, _max_pnode);
 }
 
-static void __init decode_uv_systab(void)
+static int __init decode_uv_systab(void)
 {
 	struct uv_systab *st;
 	int i;
 
+	if (uv_hub_info->hub_revision < UV4_HUB_REVISION_BASE)
+		return 0;	/* No extended UVsystab required */
+
 	st = uv_systab;
-	if ((!st || st->revision < UV_SYSTAB_VERSION_UV4) && !is_uv4_hub())
-		return;
-	if (st->revision != UV_SYSTAB_VERSION_UV4_LATEST) {
-		pr_crit(
+	if ((!st) || (st->revision < UV_SYSTAB_VERSION_UV4_LATEST)) {
+		int rev = st ? st->revision : 0;
+
+		pr_err(
 		"UV: BIOS UVsystab version(%x) mismatch, expecting(%x)\n",
-			st->revision, UV_SYSTAB_VERSION_UV4_LATEST);
-		BUG();
+			rev, UV_SYSTAB_VERSION_UV4_LATEST);
+		pr_err(
+		"UV: Cannot support UV operations, switching to generic PC\n");
+		uv_system_type = UV_NONE;
+		return -EINVAL;
 	}
 
 	for (i = 0; st->entry[i].type != UV_SYSTAB_TYPE_UNUSED; i++) {
@@ -1205,6 +1364,7 @@ static void __init decode_uv_systab(void)
 			break;
 		}
 	}
+	return 0;
 }
 
 /*
@@ -1354,7 +1514,7 @@ static void __init build_socket_tables(void)
 	}
 }
 
-void __init uv_system_init(void)
+static void __init uv_system_init_hub(void)
 {
 	struct uv_hub_info_s hub_info = {0};
 	int bytes, cpu, nodeid;
@@ -1373,9 +1533,11 @@ void __init uv_system_init(void)
 	map_low_mmrs();
 
 	uv_bios_init();			/* get uv_systab for decoding */
-	decode_uv_systab();
+	if (decode_uv_systab() < 0)
+		return;			/* UVsystab problem, abort UV init */
 	build_socket_tables();
 	build_uv_gr_table();
+	set_block_size();
 	uv_init_hub_info(&hub_info);
 	uv_possible_blades = num_possible_nodes();
 	if (!_node_to_pnode)
@@ -1488,6 +1650,21 @@ void __init uv_system_init(void)
 	 */
 	if (is_kdump_kernel())
 		reboot_type = BOOT_ACPI;
+}
+
+/*
+ * There is a small amount of UV specific code needed to initialize a
+ * UV system that does not have a "UV HUB" (referred to as "hubless").
+ */
+void __init uv_system_init(void)
+{
+	if (likely(!is_uv_system() && !is_uv_hubless()))
+		return;
+
+	if (is_uv_system())
+		uv_system_init_hub();
+	else
+		uv_nmi_setup_hubless();
 }
 
 apic_driver(apic_x2apic_uv_x);

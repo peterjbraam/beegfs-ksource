@@ -27,7 +27,6 @@
 #define __KVM_HAVE_PPC_SMT
 #define __KVM_HAVE_IRQCHIP
 #define __KVM_HAVE_IRQ_LINE
-#define __KVM_HAVE_GUEST_DEBUG
 
 struct kvm_regs {
 	__u64 pc;
@@ -333,15 +332,6 @@ struct kvm_create_spapr_tce {
 	__u32 window_size;
 };
 
-/* for KVM_CAP_SPAPR_TCE_64 */
-struct kvm_create_spapr_tce_64 {
-	__u64 liobn;
-	__u32 page_shift;
-	__u32 flags;
-	__u64 offset;	/* in pages */
-	__u64 size;	/* in pages */
-};
-
 /* for KVM_ALLOCATE_RMA */
 struct kvm_allocate_rma {
 	__u64 rma_size;
@@ -412,6 +402,31 @@ struct kvm_get_htab_header {
 	__u16	n_valid;
 	__u16	n_invalid;
 };
+
+/* For KVM_PPC_GET_CPU_CHAR */
+struct kvm_ppc_cpu_char {
+	__u64	character;		/* characteristics of the CPU */
+	__u64	behaviour;		/* recommended software behaviour */
+	__u64	character_mask;		/* valid bits in character */
+	__u64	behaviour_mask;		/* valid bits in behaviour */
+};
+
+/*
+ * Values for character and character_mask.
+ * These are identical to the values used by H_GET_CPU_CHARACTERISTICS.
+ */
+#define KVM_PPC_CPU_CHAR_SPEC_BAR_ORI31		(1ULL << 63)
+#define KVM_PPC_CPU_CHAR_BCCTRL_SERIALISED	(1ULL << 62)
+#define KVM_PPC_CPU_CHAR_L1D_FLUSH_ORI30	(1ULL << 61)
+#define KVM_PPC_CPU_CHAR_L1D_FLUSH_TRIG2	(1ULL << 60)
+#define KVM_PPC_CPU_CHAR_L1D_THREAD_PRIV	(1ULL << 59)
+#define KVM_PPC_CPU_CHAR_BR_HINT_HONOURED	(1ULL << 58)
+#define KVM_PPC_CPU_CHAR_MTTRIG_THR_RECONF	(1ULL << 57)
+#define KVM_PPC_CPU_CHAR_COUNT_CACHE_DIS	(1ULL << 56)
+
+#define KVM_PPC_CPU_BEHAV_FAVOUR_SECURITY	(1ULL << 63)
+#define KVM_PPC_CPU_BEHAV_L1D_FLUSH_PR		(1ULL << 62)
+#define KVM_PPC_CPU_BEHAV_BNDS_CHK_SPEC_BAR	(1ULL << 61)
 
 /* Per-vcpu XICS interrupt controller state */
 #define KVM_REG_PPC_ICP_STATE	(KVM_REG_PPC | KVM_REG_SIZE_U64 | 0x8c)
@@ -485,11 +500,6 @@ struct kvm_get_htab_header {
 
 /* FP and vector status/control registers */
 #define KVM_REG_PPC_FPSCR	(KVM_REG_PPC | KVM_REG_SIZE_U64 | 0x80)
-/*
- * VSCR register is documented as a 32-bit register in the ISA, but it can
- * only be accesses via a vector register. Expose VSCR as a 32-bit register
- * even though the kernel represents it as a 128-bit vector.
- */
 #define KVM_REG_PPC_VSCR	(KVM_REG_PPC | KVM_REG_SIZE_U32 | 0x81)
 
 /* Virtual processor areas */
@@ -570,8 +580,6 @@ struct kvm_get_htab_header {
 
 #define KVM_REG_PPC_DABRX	(KVM_REG_PPC | KVM_REG_SIZE_U32 | 0xb8)
 #define KVM_REG_PPC_WORT	(KVM_REG_PPC | KVM_REG_SIZE_U64 | 0xb9)
-#define KVM_REG_PPC_SPRG9	(KVM_REG_PPC | KVM_REG_SIZE_U64 | 0xba)
-#define KVM_REG_PPC_DBSR	(KVM_REG_PPC | KVM_REG_SIZE_U32 | 0xbb)
 
 /* Transactional Memory checkpointed state:
  * This is all GPRs, all VSX regs and a subset of SPRs
@@ -596,7 +604,6 @@ struct kvm_get_htab_header {
 #define KVM_REG_PPC_TM_VSCR	(KVM_REG_PPC_TM | KVM_REG_SIZE_U32 | 0x67)
 #define KVM_REG_PPC_TM_DSCR	(KVM_REG_PPC_TM | KVM_REG_SIZE_U64 | 0x68)
 #define KVM_REG_PPC_TM_TAR	(KVM_REG_PPC_TM | KVM_REG_SIZE_U64 | 0x69)
-#define KVM_REG_PPC_TM_XER	(KVM_REG_PPC_TM | KVM_REG_SIZE_U64 | 0x6a)
 
 /* PPC64 eXternal Interrupt Controller Specification */
 #define KVM_DEV_XICS_GRP_SOURCES	1	/* 64-bit source attributes */
@@ -609,5 +616,7 @@ struct kvm_get_htab_header {
 #define  KVM_XICS_LEVEL_SENSITIVE	(1ULL << 40)
 #define  KVM_XICS_MASKED		(1ULL << 41)
 #define  KVM_XICS_PENDING		(1ULL << 42)
+#define  KVM_XICS_PRESENTED		(1ULL << 43)
+#define  KVM_XICS_QUEUED		(1ULL << 44)
 
 #endif /* __LINUX_KVM_POWERPC_H */

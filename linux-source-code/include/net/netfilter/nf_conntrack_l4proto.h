@@ -55,15 +55,15 @@ struct nf_conntrack_l4proto {
 	void (*destroy)(struct nf_conn *ct);
 
 	int (*error)(struct net *net, struct nf_conn *tmpl, struct sk_buff *skb,
-		     unsigned int dataoff, enum ip_conntrack_info *ctinfo,
+		     unsigned int dataoff,
 		     u_int8_t pf, unsigned int hooknum);
 
 	/* Print out the per-protocol part of the tuple. Return like seq_* */
-	void (*print_tuple)(struct seq_file *s,
-			    const struct nf_conntrack_tuple *);
+	int (*print_tuple)(struct seq_file *s,
+			   const struct nf_conntrack_tuple *);
 
 	/* Print out the private part of the conntrack. */
-	void (*print_conntrack)(struct seq_file *s, struct nf_conn *);
+	int (*print_conntrack)(struct seq_file *s, struct nf_conn *);
 
 	/* Return the array of timeouts for this protocol. */
 	unsigned int *(*get_timeouts)(struct net *net);
@@ -125,14 +125,32 @@ struct nf_conntrack_l4proto *nf_ct_l4proto_find_get(u_int16_t l3proto,
 void nf_ct_l4proto_put(struct nf_conntrack_l4proto *p);
 
 /* Protocol pernet registration. */
+int nf_ct_l4proto_pernet_register_one(struct net *net,
+				      struct nf_conntrack_l4proto *proto);
+void nf_ct_l4proto_pernet_unregister_one(struct net *net,
+					 struct nf_conntrack_l4proto *proto);
 int nf_ct_l4proto_pernet_register(struct net *net,
-				  struct nf_conntrack_l4proto *proto);
+				  struct nf_conntrack_l4proto *proto[],
+				  unsigned int num_proto);
 void nf_ct_l4proto_pernet_unregister(struct net *net,
-				     struct nf_conntrack_l4proto *proto);
+				     struct nf_conntrack_l4proto *proto[],
+				     unsigned int num_proto);
 
 /* Protocol global registration. */
-int nf_ct_l4proto_register(struct nf_conntrack_l4proto *proto);
-void nf_ct_l4proto_unregister(struct nf_conntrack_l4proto *proto);
+int nf_ct_l4proto_register_one(struct nf_conntrack_l4proto *proto);
+void nf_ct_l4proto_unregister_one(struct nf_conntrack_l4proto *proto);
+int nf_ct_l4proto_register(struct nf_conntrack_l4proto *proto[],
+			   unsigned int num_proto);
+void nf_ct_l4proto_unregister(struct nf_conntrack_l4proto *proto[],
+			      unsigned int num_proto);
+
+static inline void nf_ct_kfree_compat_sysctl_table(struct nf_proto_net *pn)
+{
+#if defined(CONFIG_SYSCTL) && defined(CONFIG_NF_CONNTRACK_PROC_COMPAT)
+	kfree(pn->ctl_compat_table);
+	pn->ctl_compat_table = NULL;
+#endif
+}
 
 /* Generic netlink helpers */
 int nf_ct_port_tuple_to_nlattr(struct sk_buff *skb,

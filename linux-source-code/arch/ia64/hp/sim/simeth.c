@@ -115,7 +115,7 @@ simeth_probe (void)
 
 	r = simeth_probe1();
 
-	if (r == 0) register_netdevice_notifier(&simeth_dev_notifier);
+	if (r == 0) register_netdevice_notifier_rh(&simeth_dev_notifier);
 
 	return r;
 }

@@ -49,7 +49,6 @@ paddr_to_nid(unsigned long paddr)
 
 	return (i < num_node_memblks) ? node_memblk[i].nid : (num_node_memblks ? -1 : 0);
 }
-EXPORT_SYMBOL(paddr_to_nid);
 
 #if defined(CONFIG_SPARSEMEM) && defined(CONFIG_NUMA)
 /*
@@ -82,7 +81,7 @@ int __meminit __early_pfn_to_nid(unsigned long pfn,
 	return -1;
 }
 
-void numa_clear_node(int cpu)
+void __cpuinit numa_clear_node(int cpu)
 {
 	unmap_cpu_from_node(cpu, NUMA_NO_NODE);
 }

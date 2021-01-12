@@ -39,7 +39,7 @@ xfs_trim_extents(
 	xfs_daddr_t		start,
 	xfs_daddr_t		end,
 	xfs_daddr_t		minlen,
-	__uint64_t		*blocks_trimmed)
+	uint64_t		*blocks_trimmed)
 {
 	struct block_device	*bdev = mp->m_ddev_targp->bt_bdev;
 	struct xfs_btree_cur	*cur;
@@ -132,6 +132,11 @@ next_extent:
 		error = xfs_btree_decrement(cur, 0, &i);
 		if (error)
 			goto out_del_cursor;
+
+		if (fatal_signal_pending(current)) {
+			error = -ERESTARTSYS;
+			goto out_del_cursor;
+		}
 	}
 
 out_del_cursor:
@@ -161,13 +166,21 @@ xfs_ioc_trim(
 	struct fstrim_range	range;
 	xfs_daddr_t		start, end, minlen;
 	xfs_agnumber_t		start_agno, end_agno, agno;
-	__uint64_t		blocks_trimmed = 0;
+	uint64_t		blocks_trimmed = 0;
 	int			error, last_error = 0;
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 	if (!blk_queue_discard(q))
 		return -EOPNOTSUPP;
+
+	/*
+	 * We haven't recovered the log, so we cannot use our bnobt-guided
+	 * storage zapping commands.
+	 */
+	if (mp->m_flags & XFS_MOUNT_NORECOVERY)
+		return -EROFS;
+
 	if (copy_from_user(&range, urange, sizeof(range)))
 		return -EFAULT;
 
@@ -196,8 +209,11 @@ xfs_ioc_trim(
 	for (agno = start_agno; agno <= end_agno; agno++) {
 		error = xfs_trim_extents(mp, agno, start, end, minlen,
 					  &blocks_trimmed);
-		if (error)
+		if (error) {
 			last_error = error;
+			if (error == -ERESTARTSYS)
+				break;
+		}
 	}
 
 	if (last_error)

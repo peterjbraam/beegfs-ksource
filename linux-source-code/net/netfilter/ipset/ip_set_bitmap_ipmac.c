@@ -46,7 +46,7 @@ enum {
 
 /* Type structure */
 struct bitmap_ipmac {
-	unsigned long *members;	/* the set members */
+	void *members;		/* the set members */
 	u32 first_ip;		/* host byte order, included in range */
 	u32 last_ip;		/* host byte order, included in range */
 	u32 elements;		/* number of max elements in the set */
@@ -218,10 +218,6 @@ bitmap_ipmac_kadt(struct ip_set *set, const struct sk_buff *skb,
 	struct ip_set_ext ext = IP_SET_INIT_KEXT(skb, opt, set);
 	u32 ip;
 
-	/* MAC can be src only */
-	if (!(opt->flags & IPSET_DIM_TWO_SRC))
-		return 0;
-
 	ip = ntohl(ip4addr(skb, opt->flags & IPSET_DIM_ONE_SRC));
 	if (ip < map->first_ip || ip > map->last_ip)
 		return -IPSET_ERR_BITMAP_RANGE;
@@ -232,7 +228,14 @@ bitmap_ipmac_kadt(struct ip_set *set, const struct sk_buff *skb,
 		return -EINVAL;
 
 	e.id = ip_to_id(map, ip);
-	memcpy(e.ether, eth_hdr(skb)->h_source, ETH_ALEN);
+
+	if (opt->flags & IPSET_DIM_TWO_SRC)
+		ether_addr_copy(e.ether, eth_hdr(skb)->h_source);
+	else
+		ether_addr_copy(e.ether, eth_hdr(skb)->h_dest);
+
+	if (is_zero_ether_addr(e.ether))
+		return -EINVAL;
 
 	return adtfn(set, &e, &ext, &opt->ext, opt->cmdflags);
 }
@@ -299,7 +302,7 @@ static bool
 init_map_ipmac(struct ip_set *set, struct bitmap_ipmac *map,
 	       u32 first_ip, u32 last_ip, u32 elements)
 {
-	map->members = bitmap_zalloc(elements, GFP_KERNEL | __GFP_NOWARN);
+	map->members = ip_set_alloc(map->memsize);
 	if (!map->members)
 		return false;
 	map->first_ip = first_ip;
@@ -335,12 +338,8 @@ bitmap_ipmac_create(struct net *net, struct ip_set *set, struct nlattr *tb[],
 		ret = ip_set_get_hostipaddr4(tb[IPSET_ATTR_IP_TO], &last_ip);
 		if (ret)
 			return ret;
-		if (first_ip > last_ip) {
-			u32 tmp = first_ip;
-
-			first_ip = last_ip;
-			last_ip = tmp;
-		}
+		if (first_ip > last_ip)
+			swap(first_ip, last_ip);
 	} else if (tb[IPSET_ATTR_CIDR]) {
 		u8 cidr = nla_get_u8(tb[IPSET_ATTR_CIDR]);
 
@@ -363,7 +362,7 @@ bitmap_ipmac_create(struct net *net, struct ip_set *set, struct nlattr *tb[],
 	if (!map)
 		return -ENOMEM;
 
-	map->memsize = BITS_TO_LONGS(elements) * sizeof(unsigned long);
+	map->memsize = bitmap_bytes(0, elements - 1);
 	set->variant = &bitmap_ipmac;
 	if (!init_map_ipmac(set, map, first_ip, last_ip, elements)) {
 		kfree(map);

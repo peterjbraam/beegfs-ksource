@@ -28,6 +28,7 @@
  */
 #define MAP_SHARED	0x001		/* Share changes */
 #define MAP_PRIVATE	0x002		/* Changes are private */
+#define MAP_SHARED_VALIDATE 0x003	/* share + validate extension flags */
 #define MAP_TYPE	0x00f		/* Mask for type of mapping */
 #define MAP_FIXED	0x010		/* Interpret addr exactly */
 
@@ -75,7 +76,6 @@
 #define MADV_DONTNEED	4		/* don't need these pages */
 
 /* common parameters: try to keep these consistent across architectures */
-#define MADV_FREE	8		/* free pages only if memory pressure */
 #define MADV_REMOVE	9		/* remove these pages & resources */
 #define MADV_DONTFORK	10		/* don't inherit across fork */
 #define MADV_DOFORK	11		/* do inherit across fork */
@@ -104,10 +104,5 @@
  */
 #define MAP_HUGE_SHIFT	26
 #define MAP_HUGE_MASK	0x3f
-
-#define PKEY_DISABLE_ACCESS	0x1
-#define PKEY_DISABLE_WRITE	0x2
-#define PKEY_ACCESS_MASK	(PKEY_DISABLE_ACCESS |\
-				 PKEY_DISABLE_WRITE)
 
 #endif /* _ASM_MMAN_H */

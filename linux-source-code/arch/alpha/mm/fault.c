@@ -77,7 +77,7 @@ __load_new_mm_context(struct mm_struct *next_mm)
 /* Macro for exception fixup code to access integer registers.  */
 #define dpf_reg(r)							\
 	(((unsigned long *)regs)[(r) <= 8 ? (r) : (r) <= 15 ? (r)-16 :	\
-				 (r) <= 18 ? (r)+10 : (r)-10])
+				 (r) <= 18 ? (r)+8 : (r)-10])
 
 asmlinkage void
 do_page_fault(unsigned long address, unsigned long mmcsr,
@@ -88,7 +88,8 @@ do_page_fault(unsigned long address, unsigned long mmcsr,
 	const struct exception_table_entry *fixup;
 	int fault, si_code = SEGV_MAPERR;
 	siginfo_t info;
-	unsigned int flags = FAULT_FLAG_ALLOW_RETRY | FAULT_FLAG_KILLABLE;
+	unsigned int flags = (FAULT_FLAG_ALLOW_RETRY | FAULT_FLAG_KILLABLE |
+			      (cause > 0 ? FAULT_FLAG_WRITE : 0));
 
 	/* As of EV6, a load into $31/$f31 is a prefetch, and never faults
 	   (or is suppressed by the PALcode).  Support that for older CPUs
@@ -113,8 +114,7 @@ do_page_fault(unsigned long address, unsigned long mmcsr,
 	if (address >= TASK_SIZE)
 		goto vmalloc_fault;
 #endif
-	if (user_mode(regs))
-		flags |= FAULT_FLAG_USER;
+
 retry:
 	down_read(&mm->mmap_sem);
 	vma = find_vma(mm, address);
@@ -141,7 +141,6 @@ retry:
 	} else {
 		if (!(vma->vm_flags & VM_WRITE))
 			goto bad_area;
-		flags |= FAULT_FLAG_WRITE;
 	}
 
 	/* If for any reason at all we couldn't handle the fault,
@@ -155,8 +154,6 @@ retry:
 	if (unlikely(fault & VM_FAULT_ERROR)) {
 		if (fault & VM_FAULT_OOM)
 			goto out_of_memory;
-		else if (fault & VM_FAULT_SIGSEGV)
-			goto bad_area;
 		else if (fault & VM_FAULT_SIGBUS)
 			goto do_sigbus;
 		BUG();

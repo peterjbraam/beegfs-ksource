@@ -276,7 +276,11 @@
 #define H_COP			0x304
 #define H_GET_MPP_X		0x314
 #define H_SET_MODE		0x31C
-#define MAX_HCALL_OPCODE	H_SET_MODE
+#define H_BLOCK_REMOVE		0x328
+#define H_CLEAR_HPT		0x358
+#define H_RESIZE_HPT_PREPARE	0x36C
+#define H_RESIZE_HPT_COMMIT	0x370
+#define MAX_HCALL_OPCODE	H_RESIZE_HPT_COMMIT
 
 /* H_VIOCTL functions */
 #define H_GET_VIOA_DUMP_SIZE	0x01
@@ -291,6 +295,8 @@
 #define H_DISABLE_ALL_VIO_INTS	0x0A
 #define H_DISABLE_VIO_INTERRUPT	0x0B
 #define H_ENABLE_VIO_INTERRUPT	0x0C
+#define H_GET_SESSION_TOKEN	0x19
+#define H_SESSION_ERR_DETECTED	0x1A
 
 
 /* Platform specific hcalls, used by KVM */
@@ -324,7 +330,6 @@
 #define H_CPU_BEHAV_FLUSH_COUNT_CACHE	(1ull << 58) // IBM bit 5
 
 #ifndef __ASSEMBLY__
-#include <linux/types.h>
 
 /**
  * plpar_hcall_norets: - Make a pseries hypervisor call with no return arguments
@@ -449,12 +454,25 @@ static inline unsigned long cmo_get_page_size(void)
 {
 	return CMO_PageSize;
 }
-#endif /* CONFIG_PPC_PSERIES */
+
+extern long pSeries_enable_reloc_on_exc(void);
+extern long pSeries_disable_reloc_on_exc(void);
+
+extern long pseries_big_endian_exceptions(void);
+
+#include <asm/types.h>
 
 struct h_cpu_char_result {
 	u64 character;
 	u64 behaviour;
 };
+
+#else
+
+#define pSeries_enable_reloc_on_exc()  do {} while (0)
+#define pSeries_disable_reloc_on_exc() do {} while (0)
+
+#endif /* CONFIG_PPC_PSERIES */
 
 #endif /* __ASSEMBLY__ */
 #endif /* __KERNEL__ */

@@ -372,7 +372,7 @@ static int nlmsg_populate_rtr_fill(struct sk_buff *skb,
 	struct nlmsghdr *nlh;
 	struct nlattr *nest;
 
-	nlh = nlmsg_put(skb, pid, seq, type, sizeof(*bpm), 0);
+	nlh = nlmsg_put(skb, pid, seq, type, sizeof(*bpm), NLM_F_MULTI);
 	if (!nlh)
 		return -EMSGSIZE;
 
@@ -532,7 +532,7 @@ static int br_mdb_add_group(struct net_bridge *br, struct net_bridge_port *port,
 			break;
 	}
 
-	p = br_multicast_new_port_group(port, group, *pp, state);
+	p = br_multicast_new_port_group(port, group, *pp, state, NULL);
 	if (unlikely(!p))
 		return -ENOMEM;
 	rcu_assign_pointer(*pp, p);
@@ -598,7 +598,7 @@ static int br_mdb_add(struct sk_buff *skb, struct nlmsghdr *nlh)
 		return -EINVAL;
 
 	vg = nbp_vlan_group(p);
-	if (br_vlan_enabled(br) && vg && entry->vid == 0) {
+	if (br_vlan_enabled(br->dev) && vg && entry->vid == 0) {
 		list_for_each_entry(v, &vg->vlan_list, vlist) {
 			entry->vid = v->vid;
 			err = __br_mdb_add(net, br, entry);
@@ -692,7 +692,7 @@ static int br_mdb_del(struct sk_buff *skb, struct nlmsghdr *nlh)
 		return -EINVAL;
 
 	vg = nbp_vlan_group(p);
-	if (br_vlan_enabled(br) && vg && entry->vid == 0) {
+	if (br_vlan_enabled(br->dev) && vg && entry->vid == 0) {
 		list_for_each_entry(v, &vg->vlan_list, vlist) {
 			entry->vid = v->vid;
 			err = __br_mdb_del(br, entry);

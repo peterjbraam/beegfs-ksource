@@ -63,9 +63,6 @@ static int kernfs_get_target_path(struct kernfs_node *parent,
 		if (base == kn)
 			break;
 
-		if ((s - path) + 3 >= PATH_MAX)
-			return -ENAMETOOLONG;
-
 		strcpy(s, "../");
 		s += 3;
 		base = base->parent;
@@ -82,7 +79,7 @@ static int kernfs_get_target_path(struct kernfs_node *parent,
 	if (len < 2)
 		return -EINVAL;
 	len--;
-	if ((s - path) + len >= PATH_MAX)
+	if ((s - path) + len > PATH_MAX)
 		return -ENAMETOOLONG;
 
 	/* reverse fillup of target string from target to base */
@@ -91,7 +88,7 @@ static int kernfs_get_target_path(struct kernfs_node *parent,
 		int slen = strlen(kn->name);
 
 		len -= slen;
-		memcpy(s + len, kn->name, slen);
+		strncpy(s + len, kn->name, slen);
 		if (len)
 			s[--len] = '/';
 
@@ -103,7 +100,7 @@ static int kernfs_get_target_path(struct kernfs_node *parent,
 
 static int kernfs_getlink(struct dentry *dentry, char *path)
 {
-	struct kernfs_node *kn = dentry->d_fsdata;
+	struct kernfs_node *kn = kernfs_dentry_node(dentry);
 	struct kernfs_node *parent = kn->parent;
 	struct kernfs_node *target = kn->symlink.target_kn;
 	int error;
@@ -115,31 +112,35 @@ static int kernfs_getlink(struct dentry *dentry, char *path)
 	return error;
 }
 
-static const char *kernfs_iop_get_link(struct dentry *dentry,
-				       struct inode *inode,
-				       struct delayed_call *done)
+static void *kernfs_iop_follow_link(struct dentry *dentry, struct nameidata *nd)
 {
-	char *body;
-	int error;
-
-	if (!dentry)
-		return ERR_PTR(-ECHILD);
-	body = kzalloc(PAGE_SIZE, GFP_KERNEL);
-	if (!body)
-		return ERR_PTR(-ENOMEM);
-	error = kernfs_getlink(dentry, body);
-	if (unlikely(error < 0)) {
-		kfree(body);
-		return ERR_PTR(error);
+	int error = -ENOMEM;
+	unsigned long page = get_zeroed_page(GFP_KERNEL);
+	if (page) {
+		error = kernfs_getlink(dentry, (char *) page);
+		if (error < 0)
+			free_page((unsigned long)page);
 	}
-	set_delayed_call(done, kfree_link, body);
-	return body;
+	nd_set_link(nd, error ? ERR_PTR(error) : (char *)page);
+	return NULL;
+}
+
+static void kernfs_iop_put_link(struct dentry *dentry, struct nameidata *nd,
+				void *cookie)
+{
+	char *page = nd_get_link(nd);
+	if (!IS_ERR(page))
+		free_page((unsigned long)page);
 }
 
 const struct inode_operations kernfs_symlink_iops = {
+	.setxattr	= kernfs_iop_setxattr,
+	.removexattr	= kernfs_iop_removexattr,
+	.getxattr	= kernfs_iop_getxattr,
 	.listxattr	= kernfs_iop_listxattr,
 	.readlink	= generic_readlink,
-	.get_link	= kernfs_iop_get_link,
+	.follow_link	= kernfs_iop_follow_link,
+	.put_link	= kernfs_iop_put_link,
 	.setattr	= kernfs_iop_setattr,
 	.getattr	= kernfs_iop_getattr,
 	.permission	= kernfs_iop_permission,

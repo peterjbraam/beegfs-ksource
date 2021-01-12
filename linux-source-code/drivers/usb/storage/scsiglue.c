@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * Driver for USB Mass Storage compliant devices
  * SCSI layer glue code
@@ -25,23 +26,6 @@
  *
  * Also, for certain devices, the interrupt endpoint is used to convey
  * status of a command.
- *
- * Please see http://www.one-eyed-alien.net/~mdharm/linux-usb for more
- * information about this driver.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2, or (at your option) any
- * later version.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; if not, write to the Free Software Foundation, Inc.,
- * 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #include <linux/module.h>
@@ -90,8 +74,20 @@ static int slave_alloc (struct scsi_device *sdev)
 	sdev->inquiry_len = 36;
 
 	/*
-	 * Some host controllers may have alignment requirements.
-	 * We'll play it safe by requiring 512-byte alignment always.
+	 * USB has unusual DMA-alignment requirements: Although the
+	 * starting address of each scatter-gather element doesn't matter,
+	 * the length of each element except the last must be divisible
+	 * by the Bulk maxpacket value.  There's currently no way to
+	 * express this by block-layer constraints, so we'll cop out
+	 * and simply require addresses to be aligned at 512-byte
+	 * boundaries.  This is okay since most block I/O involves
+	 * hardware sectors that are multiples of 512 bytes in length,
+	 * and since host controllers up through USB 2.0 have maxpacket
+	 * values no larger than 512.
+	 *
+	 * But it doesn't suffice for Wireless USB, where Bulk maxpacket
+	 * values can be as large as 2048.  To make that work properly
+	 * will require changes to the block layer.
 	 */
 	blk_queue_update_dma_alignment(sdev->request_queue, (512 - 1));
 
@@ -115,7 +111,7 @@ static int slave_configure(struct scsi_device *sdev)
 		unsigned int max_sectors = 64;
 
 		if (us->fflags & US_FL_MAX_SECTORS_MIN)
-			max_sectors = PAGE_SIZE >> 9;
+			max_sectors = PAGE_CACHE_SIZE >> 9;
 		if (queue_max_hw_sectors(sdev->request_queue) > max_sectors)
 			blk_queue_max_hw_sectors(sdev->request_queue,
 					      max_sectors);
@@ -239,12 +235,8 @@ static int slave_configure(struct scsi_device *sdev)
 		if (!(us->fflags & US_FL_NEEDS_CAP16))
 			sdev->try_rc_10_first = 1;
 
-		/*
-		 * assume SPC3 or latter devices support sense size > 18
-		 * unless US_FL_BAD_SENSE quirk is specified.
-		 */
-		if (sdev->scsi_level > SCSI_SPC_2 &&
-		    !(us->fflags & US_FL_BAD_SENSE))
+		/* assume SPC3 or latter devices support sense size > 18 */
+		if (sdev->scsi_level > SCSI_SPC_2)
 			us->fflags |= US_FL_SANE_SENSE;
 
 		/*
@@ -616,6 +608,7 @@ static const struct scsi_host_template usb_stor_host_template = {
 
 	/* queue commands only, only one command per LUN */
 	.can_queue =			1,
+	.cmd_per_lun =			1,
 
 	/* unknown initiator id */
 	.this_id =			-1,

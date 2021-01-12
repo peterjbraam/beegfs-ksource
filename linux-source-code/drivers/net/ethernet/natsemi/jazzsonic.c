@@ -24,6 +24,7 @@
 #include <linux/fcntl.h>
 #include <linux/gfp.h>
 #include <linux/interrupt.h>
+#include <linux/init.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
 #include <linux/string.h>
@@ -82,7 +83,8 @@ static int jazzsonic_open(struct net_device* dev)
 {
 	int retval;
 
-	retval = request_irq(dev->irq, sonic_interrupt, 0, "sonic", dev);
+	retval = request_irq(dev->irq, sonic_interrupt, IRQF_DISABLED,
+				"sonic", dev);
 	if (retval) {
 		printk(KERN_ERR "%s: unable to get IRQ %d.\n",
 				dev->name, dev->irq);
@@ -247,15 +249,13 @@ static int jazz_sonic_probe(struct platform_device *pdev)
 		goto out;
 	err = register_netdev(dev);
 	if (err)
-		goto undo_probe1;
+		goto out1;
 
 	printk("%s: MAC %pM IRQ %d\n", dev->name, dev->dev_addr, dev->irq);
 
 	return 0;
 
-undo_probe1:
-	dma_free_coherent(lp->device, SIZEOF_SONIC_DESC * SONIC_BUS_SCALE(lp->dma_bitmode),
-			  lp->descriptors, lp->descriptors_laddr);
+out1:
 	release_mem_region(dev->base_addr, SONIC_MEM_SIZE);
 out:
 	free_netdev(dev);
@@ -289,6 +289,7 @@ static struct platform_driver jazz_sonic_driver = {
 	.remove	= jazz_sonic_device_remove,
 	.driver	= {
 		.name	= jazz_sonic_string,
+		.owner	= THIS_MODULE,
 	},
 };
 

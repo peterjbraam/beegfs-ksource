@@ -46,7 +46,7 @@
 
 #include <asm/io.h>
 
-#include "../fbdev/sticore.h"
+#include "../sticore.h"
 
 /* switching to graphics mode */
 #define BLANK 0
@@ -153,12 +153,13 @@ static void sticon_cursor(struct vc_data *conp, int mode)
     }
 }
 
-static int sticon_scroll(struct vc_data *conp, int t, int b, int dir, int count)
+static bool sticon_scroll(struct vc_data *conp, unsigned int t,
+		unsigned int b, enum con_scroll dir, unsigned int count)
 {
     struct sti_struct *sti = sticon_sti;
 
     if (vga_is_gfx)
-        return 0;
+        return false;
 
     sticon_cursor(conp, CM_ERASE);
 
@@ -174,7 +175,7 @@ static int sticon_scroll(struct vc_data *conp, int t, int b, int dir, int count)
 	break;
     }
 
-    return 0;
+    return false;
 }
 
 static void sticon_init(struct vc_data *c, int init)
@@ -343,7 +344,6 @@ static const struct consw sti_con = {
 
 static int __init sticonsole_init(void)
 {
-    int err;
     /* already initialized ? */
     if (sticon_sti)
 	 return 0;
@@ -354,10 +354,7 @@ static int __init sticonsole_init(void)
 
     if (conswitchp == &dummy_con) {
 	printk(KERN_INFO "sticon: Initializing STI text console.\n");
-	console_lock();
-	err = do_take_over_console(&sti_con, 0, MAX_NR_CONSOLES - 1, 1);
-	console_unlock();
-	return err;
+	return take_over_console(&sti_con, 0, MAX_NR_CONSOLES - 1, 1);
     }
     return 0;
 }

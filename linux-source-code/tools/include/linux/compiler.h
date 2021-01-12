@@ -17,6 +17,10 @@
 # define __always_inline	inline __attribute__((always_inline))
 #endif
 
+#ifndef noinline
+#define noinline
+#endif
+
 /* Are two types/vars the same type (ignoring qualifiers)? */
 #ifndef __same_type
 # define __same_type(a, b) __builtin_types_compatible_p(typeof(a), typeof(b))
@@ -34,8 +38,6 @@
 #endif
 
 #define __user
-#define __rcu
-#define __read_mostly
 
 #ifndef __attribute_const__
 # define __attribute_const__
@@ -64,8 +66,6 @@
 #ifndef unlikely
 # define unlikely(x)		__builtin_expect(!!(x), 0)
 #endif
-
-#define uninitialized_var(x) x = *(&(x))
 
 #define ACCESS_ONCE(x) (*(volatile typeof(x) *)&(x))
 
@@ -137,11 +137,21 @@ static __always_inline void __write_once_size(volatile void *p, void *res, int s
  * required ordering.
  */
 
-#define READ_ONCE(x) \
-	({ union { typeof(x) __val; char __c[1]; } __u; __read_once_size(&(x), __u.__c, sizeof(x)); __u.__val; })
+#define READ_ONCE(x)					\
+({							\
+	union { typeof(x) __val; char __c[1]; } __u =	\
+		{ .__c = { 0 } };			\
+	__read_once_size(&(x), __u.__c, sizeof(x));	\
+	__u.__val;					\
+})
 
-#define WRITE_ONCE(x, val) \
-	({ union { typeof(x) __val; char __c[1]; } __u = { .__val = (val) }; __write_once_size(&(x), __u.__c, sizeof(x)); __u.__val; })
+#define WRITE_ONCE(x, val)				\
+({							\
+	union { typeof(x) __val; char __c[1]; } __u =	\
+		{ .__val = (val) }; 			\
+	__write_once_size(&(x), __u.__c, sizeof(x));	\
+	__u.__val;					\
+})
 
 
 #ifndef __fallthrough

@@ -32,8 +32,8 @@
 #include <linux/sched.h>
 #include <linux/err.h>
 #include <linux/interrupt.h>
-#include <linux/of.h>
 #include <linux/platform_device.h>
+#include <linux/of.h>
 #include <linux/pm.h>
 #include <linux/pm_runtime.h>
 #include <linux/property.h>
@@ -123,11 +123,8 @@ static const struct acpi_device_id dw_i2c_acpi_match[] = {
 	{ "INT3432", 0 },
 	{ "INT3433", 0 },
 	{ "80860F41", 0 },
-	{ "808622C1", 0 },
 	{ "AMD0010", ACCESS_INTR_MASK },
 	{ "AMDI0010", ACCESS_INTR_MASK },
-	{ "AMDI0510", 0 },
-	{ "APMC0D0F", 0 },
 	{ }
 };
 MODULE_DEVICE_TABLE(acpi, dw_i2c_acpi_match);
@@ -137,18 +134,6 @@ static inline int dw_i2c_acpi_configure(struct platform_device *pdev)
 	return -ENODEV;
 }
 #endif
-
-static int i2c_dw_plat_prepare_clk(struct dw_i2c_dev *i_dev, bool prepare)
-{
-	if (IS_ERR(i_dev->clk))
-		return PTR_ERR(i_dev->clk);
-
-	if (prepare)
-		return clk_prepare_enable(i_dev->clk);
-
-	clk_disable_unprepare(i_dev->clk);
-	return 0;
-}
 
 static int dw_i2c_plat_probe(struct platform_device *pdev)
 {
@@ -237,13 +222,16 @@ static int dw_i2c_plat_probe(struct platform_device *pdev)
 	}
 
 	dev->clk = devm_clk_get(&pdev->dev, NULL);
-	if (!i2c_dw_plat_prepare_clk(dev, true)) {
-		dev->get_clk_rate_khz = i2c_dw_get_clk_rate_khz;
+	dev->get_clk_rate_khz = i2c_dw_get_clk_rate_khz;
+	if (IS_ERR(dev->clk))
+		return PTR_ERR(dev->clk);
+	clk_prepare_enable(dev->clk);
 
-		if (!dev->sda_hold_time && ht)
-			dev->sda_hold_time = div_u64(
-				(u64)dev->get_clk_rate_khz(dev) * ht + 500000,
-				1000000);
+	if (!dev->sda_hold_time && ht) {
+		u32 ic_clk = dev->get_clk_rate_khz(dev);
+
+		dev->sda_hold_time = div_u64((u64)ic_clk * ht + 500000,
+					     1000000);
 	}
 
 	if (!dev->tx_fifo_depth) {
@@ -256,9 +244,12 @@ static int dw_i2c_plat_probe(struct platform_device *pdev)
 
 	adap = &dev->adapter;
 	adap->owner = THIS_MODULE;
-	adap->class = I2C_CLASS_DEPRECATED;
+	adap->class = I2C_CLASS_HWMON;
 	ACPI_COMPANION_SET(&adap->dev, ACPI_COMPANION(&pdev->dev));
 	adap->dev.of_node = pdev->dev.of_node;
+	r = i2c_dw_probe(dev);
+	if (r)
+		return r;
 
 	if (dev->pm_runtime_disabled) {
 		pm_runtime_forbid(&pdev->dev);
@@ -269,11 +260,7 @@ static int dw_i2c_plat_probe(struct platform_device *pdev)
 		pm_runtime_enable(&pdev->dev);
 	}
 
-	r = i2c_dw_probe(dev);
-	if (r && !dev->pm_runtime_disabled)
-		pm_runtime_disable(&pdev->dev);
-
-	return r;
+	return 0;
 }
 
 static int dw_i2c_plat_remove(struct platform_device *pdev)
@@ -288,8 +275,7 @@ static int dw_i2c_plat_remove(struct platform_device *pdev)
 
 	pm_runtime_dont_use_autosuspend(&pdev->dev);
 	pm_runtime_put_sync(&pdev->dev);
-	if (!dev->pm_runtime_disabled)
-		pm_runtime_disable(&pdev->dev);
+	pm_runtime_disable(&pdev->dev);
 
 	return 0;
 }
@@ -302,68 +288,34 @@ static const struct of_device_id dw_i2c_of_match[] = {
 MODULE_DEVICE_TABLE(of, dw_i2c_of_match);
 #endif
 
-#ifdef CONFIG_PM_SLEEP
-static int dw_i2c_plat_prepare(struct device *dev)
-{
-	return pm_runtime_suspended(dev);
-}
-
-static void dw_i2c_plat_complete(struct device *dev)
-{
-	if (dev->power.direct_complete)
-		pm_request_resume(dev);
-}
-#else
-#define dw_i2c_plat_prepare	NULL
-#define dw_i2c_plat_complete	NULL
-#endif
-
 #ifdef CONFIG_PM
-static int dw_i2c_plat_runtime_suspend(struct device *dev)
+static int dw_i2c_suspend(struct device *dev)
 {
 	struct platform_device *pdev = to_platform_device(dev);
 	struct dw_i2c_dev *i_dev = platform_get_drvdata(pdev);
 
 	i2c_dw_disable(i_dev);
-	i2c_dw_plat_prepare_clk(i_dev, false);
+	clk_disable_unprepare(i_dev->clk);
 
 	return 0;
 }
 
-static int dw_i2c_plat_resume(struct device *dev)
+static int dw_i2c_resume(struct device *dev)
 {
 	struct platform_device *pdev = to_platform_device(dev);
 	struct dw_i2c_dev *i_dev = platform_get_drvdata(pdev);
 
-	i2c_dw_plat_prepare_clk(i_dev, true);
+	clk_prepare_enable(i_dev->clk);
 
 	if (!i_dev->pm_runtime_disabled)
 		i2c_dw_init(i_dev);
 
 	return 0;
 }
-
-#ifdef CONFIG_PM_SLEEP
-static int dw_i2c_plat_suspend(struct device *dev)
-{
-	pm_runtime_resume(dev);
-	return dw_i2c_plat_runtime_suspend(dev);
-}
 #endif
 
-static const struct dev_pm_ops dw_i2c_dev_pm_ops = {
-	.prepare = dw_i2c_plat_prepare,
-	.complete = dw_i2c_plat_complete,
-	SET_SYSTEM_SLEEP_PM_OPS(dw_i2c_plat_suspend, dw_i2c_plat_resume)
-	SET_RUNTIME_PM_OPS(dw_i2c_plat_runtime_suspend,
-			   dw_i2c_plat_resume,
-			   NULL)
-};
-
-#define DW_I2C_DEV_PMOPS (&dw_i2c_dev_pm_ops)
-#else
-#define DW_I2C_DEV_PMOPS NULL
-#endif
+static UNIVERSAL_DEV_PM_OPS(dw_i2c_dev_pm_ops, dw_i2c_suspend,
+			    dw_i2c_resume, NULL);
 
 /* work with hotplug and coldplug */
 MODULE_ALIAS("platform:i2c_designware");
@@ -373,9 +325,10 @@ static struct platform_driver dw_i2c_driver = {
 	.remove = dw_i2c_plat_remove,
 	.driver		= {
 		.name	= "i2c_designware",
+		.owner	= THIS_MODULE,
 		.of_match_table = of_match_ptr(dw_i2c_of_match),
 		.acpi_match_table = ACPI_PTR(dw_i2c_acpi_match),
-		.pm	= DW_I2C_DEV_PMOPS,
+		.pm	= &dw_i2c_dev_pm_ops,
 	},
 };
 

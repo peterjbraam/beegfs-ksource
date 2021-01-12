@@ -57,7 +57,7 @@ MODULE_PARM_DESC(cxgb3i_snd_win, "TCP send window in bytes (default=128KB)");
 
 static int cxgb3i_rx_credit_thres = 10 * 1024;
 module_param(cxgb3i_rx_credit_thres, int, 0644);
-MODULE_PARM_DESC(cxgb3i_rx_credit_thres,
+MODULE_PARM_DESC(rx_credit_thres,
 		 "RX credits return threshold in bytes (default=10KB)");
 
 static unsigned int cxgb3i_max_connect = 8 * 1024;
@@ -86,7 +86,7 @@ static struct scsi_host_template cxgb3i_host_template = {
 	.proc_name	= DRV_MODULE_NAME,
 	.can_queue	= CXGB3I_SCSI_HOST_QDEPTH,
 	.queuecommand	= iscsi_queuecommand,
-	.change_queue_depth = scsi_change_queue_depth,
+	.change_queue_depth = iscsi_change_queue_depth,
 	.sg_tablesize	= SG_ALL,
 	.max_sectors	= 0xFFFF,
 	.cmd_per_lun	= ISCSI_DEF_CMD_PER_LUN,
@@ -96,7 +96,6 @@ static struct scsi_host_template cxgb3i_host_template = {
 	.target_alloc	= iscsi_target_alloc,
 	.use_clustering	= DISABLE_CLUSTERING,
 	.this_id	= -1,
-	.track_queue_depth = 1,
 };
 
 static struct iscsi_transport cxgb3i_iscsi_transport = {
@@ -544,10 +543,10 @@ static int act_open_rpl_status_to_errno(int status)
 	}
 }
 
-static void act_open_retry_timer(unsigned long data)
+static void act_open_retry_timer(struct timer_list *t)
 {
+	struct cxgbi_sock *csk = from_timer(csk, t, retry_timer);
 	struct sk_buff *skb;
-	struct cxgbi_sock *csk = (struct cxgbi_sock *)data;
 
 	log_debug(1 << CXGBI_DBG_TOE | 1 << CXGBI_DBG_SOCK,
 		"csk 0x%p,%u,0x%lx,%u.\n",
@@ -585,8 +584,8 @@ static int do_act_open_rpl(struct t3cdev *tdev, struct sk_buff *skb, void *ctx)
 	cxgbi_sock_get(csk);
 	spin_lock_bh(&csk->lock);
 	if (rpl->status == CPL_ERR_CONN_EXIST &&
-	    csk->retry_timer.function != act_open_retry_timer) {
-		csk->retry_timer.function = act_open_retry_timer;
+	    csk->retry_timer.function != (TIMER_FUNC_TYPE)act_open_retry_timer) {
+		csk->retry_timer.function = (TIMER_FUNC_TYPE)act_open_retry_timer;
 		mod_timer(&csk->retry_timer, jiffies + HZ / 2);
 	} else
 		cxgbi_sock_fail_act_open(csk,
@@ -1143,7 +1142,7 @@ static void ddp_clear_map(struct cxgbi_device *cdev, struct cxgbi_ppm *ppm,
 }
 
 static int ddp_setup_conn_pgidx(struct cxgbi_sock *csk,
-				       unsigned int tid, int pg_idx, bool reply)
+				unsigned int tid, int pg_idx)
 {
 	struct sk_buff *skb = alloc_wr(sizeof(struct cpl_set_tcb_field), 0,
 					GFP_KERNEL);
@@ -1159,7 +1158,7 @@ static int ddp_setup_conn_pgidx(struct cxgbi_sock *csk,
 	req = (struct cpl_set_tcb_field *)skb->head;
 	req->wr.wr_hi = htonl(V_WR_OP(FW_WROPCODE_FORWARD));
 	OPCODE_TID(req) = htonl(MK_OPCODE_TID(CPL_SET_TCB_FIELD, tid));
-	req->reply = V_NO_REPLY(reply ? 0 : 1);
+	req->reply = V_NO_REPLY(1);
 	req->cpu_idx = 0;
 	req->word = htons(31);
 	req->mask = cpu_to_be64(0xF0000000);
@@ -1176,11 +1175,10 @@ static int ddp_setup_conn_pgidx(struct cxgbi_sock *csk,
  * @tid: connection id
  * @hcrc: header digest enabled
  * @dcrc: data digest enabled
- * @reply: request reply from h/w
  * set up the iscsi digest settings for a connection identified by tid
  */
 static int ddp_setup_conn_digest(struct cxgbi_sock *csk, unsigned int tid,
-			     int hcrc, int dcrc, int reply)
+				 int hcrc, int dcrc)
 {
 	struct sk_buff *skb = alloc_wr(sizeof(struct cpl_set_tcb_field), 0,
 					GFP_KERNEL);
@@ -1196,7 +1194,7 @@ static int ddp_setup_conn_digest(struct cxgbi_sock *csk, unsigned int tid,
 	req = (struct cpl_set_tcb_field *)skb->head;
 	req->wr.wr_hi = htonl(V_WR_OP(FW_WROPCODE_FORWARD));
 	OPCODE_TID(req) = htonl(MK_OPCODE_TID(CPL_SET_TCB_FIELD, tid));
-	req->reply = V_NO_REPLY(reply ? 0 : 1);
+	req->reply = V_NO_REPLY(1);
 	req->cpu_idx = 0;
 	req->word = htons(31);
 	req->mask = cpu_to_be64(0x0F000000);

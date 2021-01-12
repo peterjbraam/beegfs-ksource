@@ -2,7 +2,7 @@
 Ext4 Filesystem
 ===============
 
-Ext4 is an advanced level of the ext3 filesystem which incorporates
+Ext4 is an an advanced level of the ext3 filesystem which incorporates
 scalability and reliability enhancements for supporting large filesystems
 (64 bit) in keeping with increasing disk capacities and state-of-the-art
 feature requirements.
@@ -233,7 +233,7 @@ data_err=ignore(*)	Just print an error message if an error occurs
 data_err=abort		Abort the journal if an error occurs in a file
 			data buffer in ordered mode.
 
-grpid			New objects have the group ID of their parent.
+grpid			Give objects the same group ID as their creator.
 bsdgroups
 
 nogrpid		(*)	New objects have the group ID of their creator.

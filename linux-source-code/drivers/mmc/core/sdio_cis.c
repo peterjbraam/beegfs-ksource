@@ -30,9 +30,6 @@ static int cistpl_vers_1(struct mmc_card *card, struct sdio_func *func,
 	unsigned i, nr_strings;
 	char **buffer, *string;
 
-	if (size < 2)
-		return 0;
-
 	/* Find all null-terminated (including zero length) strings in
 	   the TPLLV1_INFO field. Trailing garbage is ignored. */
 	buf += 2;
@@ -265,7 +262,8 @@ static int sdio_read_cis(struct mmc_card *card, struct sdio_func *func)
 	else
 		prev = &card->tuples;
 
-	BUG_ON(*prev);
+	if (*prev)
+		return -EINVAL;
 
 	do {
 		unsigned char tpl_code, tpl_link;

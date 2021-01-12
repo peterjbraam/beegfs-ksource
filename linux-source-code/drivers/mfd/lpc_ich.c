@@ -54,12 +54,13 @@
  *	document number TBD : Avoton SoC
  *	document number TBD : Coleto Creek
  *	document number TBD : Wildcat Point-LP
- *	document number TBD : 9 Series
  *	document number TBD : Lewisburg
+ *	document number TBD : Apollo Lake SoC
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
+#include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/errno.h>
@@ -82,6 +83,8 @@
 
 #define ACPIBASE_GCS_OFF	0x3410
 #define ACPIBASE_GCS_END	0x3414
+
+#define SPIBASE_APL_SZ		4096
 
 #define GPIOBASE_ICH0		0x58
 #define GPIOCTRL_ICH0		0x5C
@@ -133,18 +136,24 @@ static struct resource gpio_ich_res[] = {
 	},
 };
 
-static struct mfd_cell lpc_ich_wdt_cell = {
-	.name = "iTCO_wdt",
-	.num_resources = ARRAY_SIZE(wdt_ich_res),
-	.resources = wdt_ich_res,
-	.ignore_resource_conflicts = true,
+enum lpc_cells {
+	LPC_WDT = 0,
+	LPC_GPIO,
 };
 
-static struct mfd_cell lpc_ich_gpio_cell = {
-	.name = "gpio_ich",
-	.num_resources = ARRAY_SIZE(gpio_ich_res),
-	.resources = gpio_ich_res,
-	.ignore_resource_conflicts = true,
+static struct mfd_cell lpc_ich_cells[] = {
+	[LPC_WDT] = {
+		.name = "iTCO_wdt",
+		.num_resources = ARRAY_SIZE(wdt_ich_res),
+		.resources = wdt_ich_res,
+		.ignore_resource_conflicts = true,
+	},
+	[LPC_GPIO] = {
+		.name = "gpio_ich",
+		.num_resources = ARRAY_SIZE(gpio_ich_res),
+		.resources = gpio_ich_res,
+		.ignore_resource_conflicts = true,
+	},
 };
 
 /* chipset related info */
@@ -213,12 +222,11 @@ enum lpc_chipsets {
 	LPC_BAYTRAIL,   /* Bay Trail SoC */
 	LPC_COLETO,	/* Coleto Creek */
 	LPC_WPT_LP,	/* Wildcat Point-LP */
-	LPC_BRASWELL,	/* Braswell SoC */
 	LPC_LEWISBURG,	/* Lewisburg */
-	LPC_9S,		/* 9 Series */
+	LPC_APL,	/* Apollo Lake SoC */
 };
 
-static struct lpc_ich_info lpc_chipset_info[] = {
+struct lpc_ich_info lpc_chipset_info[] = {
 	[LPC_ICH] = {
 		.name = "ICH",
 		.iTCO_version = 1,
@@ -306,7 +314,6 @@ static struct lpc_ich_info lpc_chipset_info[] = {
 	[LPC_NM10] = {
 		.name = "NM10",
 		.iTCO_version = 2,
-		.gpio_version = ICH_V7_GPIO,
 	},
 	[LPC_ICH8] = {
 		.name = "ICH8 or ICH8R",
@@ -488,7 +495,6 @@ static struct lpc_ich_info lpc_chipset_info[] = {
 	[LPC_PPT] = {
 		.name = "Panther Point",
 		.iTCO_version = 2,
-		.gpio_version = ICH_V5_GPIO,
 	},
 	[LPC_LPT] = {
 		.name = "Lynx Point",
@@ -516,20 +522,16 @@ static struct lpc_ich_info lpc_chipset_info[] = {
 		.iTCO_version = 2,
 	},
 	[LPC_WPT_LP] = {
-		.name = "Wildcat Point_LP",
+		.name = "Lynx Point_LP",
 		.iTCO_version = 2,
-	},
-	[LPC_BRASWELL] = {
-		.name = "Braswell SoC",
-		.iTCO_version = 3,
 	},
 	[LPC_LEWISBURG] = {
 		.name = "Lewisburg",
 		.iTCO_version = 2,
 	},
-	[LPC_9S] = {
-		.name = "9 Series",
-		.iTCO_version = 2,
+	[LPC_APL] = {
+		.name = "Apollo Lake SoC",
+		.iTCO_version = 5,
 	},
 };
 
@@ -540,7 +542,72 @@ static struct lpc_ich_info lpc_chipset_info[] = {
  * functions that probably will be registered by other drivers.
  */
 static const struct pci_device_id lpc_ich_ids[] = {
-	{ PCI_VDEVICE(INTEL, 0x0f1c), LPC_BAYTRAIL},
+	{ PCI_VDEVICE(INTEL, 0x2410), LPC_ICH},
+	{ PCI_VDEVICE(INTEL, 0x2420), LPC_ICH0},
+	{ PCI_VDEVICE(INTEL, 0x2440), LPC_ICH2},
+	{ PCI_VDEVICE(INTEL, 0x244c), LPC_ICH2M},
+	{ PCI_VDEVICE(INTEL, 0x2480), LPC_ICH3},
+	{ PCI_VDEVICE(INTEL, 0x248c), LPC_ICH3M},
+	{ PCI_VDEVICE(INTEL, 0x24c0), LPC_ICH4},
+	{ PCI_VDEVICE(INTEL, 0x24cc), LPC_ICH4M},
+	{ PCI_VDEVICE(INTEL, 0x2450), LPC_CICH},
+	{ PCI_VDEVICE(INTEL, 0x24d0), LPC_ICH5},
+	{ PCI_VDEVICE(INTEL, 0x25a1), LPC_6300ESB},
+	{ PCI_VDEVICE(INTEL, 0x2640), LPC_ICH6},
+	{ PCI_VDEVICE(INTEL, 0x2641), LPC_ICH6M},
+	{ PCI_VDEVICE(INTEL, 0x2642), LPC_ICH6W},
+	{ PCI_VDEVICE(INTEL, 0x2670), LPC_631XESB},
+	{ PCI_VDEVICE(INTEL, 0x2671), LPC_631XESB},
+	{ PCI_VDEVICE(INTEL, 0x2672), LPC_631XESB},
+	{ PCI_VDEVICE(INTEL, 0x2673), LPC_631XESB},
+	{ PCI_VDEVICE(INTEL, 0x2674), LPC_631XESB},
+	{ PCI_VDEVICE(INTEL, 0x2675), LPC_631XESB},
+	{ PCI_VDEVICE(INTEL, 0x2676), LPC_631XESB},
+	{ PCI_VDEVICE(INTEL, 0x2677), LPC_631XESB},
+	{ PCI_VDEVICE(INTEL, 0x2678), LPC_631XESB},
+	{ PCI_VDEVICE(INTEL, 0x2679), LPC_631XESB},
+	{ PCI_VDEVICE(INTEL, 0x267a), LPC_631XESB},
+	{ PCI_VDEVICE(INTEL, 0x267b), LPC_631XESB},
+	{ PCI_VDEVICE(INTEL, 0x267c), LPC_631XESB},
+	{ PCI_VDEVICE(INTEL, 0x267d), LPC_631XESB},
+	{ PCI_VDEVICE(INTEL, 0x267e), LPC_631XESB},
+	{ PCI_VDEVICE(INTEL, 0x267f), LPC_631XESB},
+	{ PCI_VDEVICE(INTEL, 0x27b8), LPC_ICH7},
+	{ PCI_VDEVICE(INTEL, 0x27b0), LPC_ICH7DH},
+	{ PCI_VDEVICE(INTEL, 0x27b9), LPC_ICH7M},
+	{ PCI_VDEVICE(INTEL, 0x27bd), LPC_ICH7MDH},
+	{ PCI_VDEVICE(INTEL, 0x27bc), LPC_NM10},
+	{ PCI_VDEVICE(INTEL, 0x2810), LPC_ICH8},
+	{ PCI_VDEVICE(INTEL, 0x2812), LPC_ICH8DH},
+	{ PCI_VDEVICE(INTEL, 0x2814), LPC_ICH8DO},
+	{ PCI_VDEVICE(INTEL, 0x2815), LPC_ICH8M},
+	{ PCI_VDEVICE(INTEL, 0x2811), LPC_ICH8ME},
+	{ PCI_VDEVICE(INTEL, 0x2918), LPC_ICH9},
+	{ PCI_VDEVICE(INTEL, 0x2916), LPC_ICH9R},
+	{ PCI_VDEVICE(INTEL, 0x2912), LPC_ICH9DH},
+	{ PCI_VDEVICE(INTEL, 0x2914), LPC_ICH9DO},
+	{ PCI_VDEVICE(INTEL, 0x2919), LPC_ICH9M},
+	{ PCI_VDEVICE(INTEL, 0x2917), LPC_ICH9ME},
+	{ PCI_VDEVICE(INTEL, 0x3a18), LPC_ICH10},
+	{ PCI_VDEVICE(INTEL, 0x3a16), LPC_ICH10R},
+	{ PCI_VDEVICE(INTEL, 0x3a1a), LPC_ICH10D},
+	{ PCI_VDEVICE(INTEL, 0x3a14), LPC_ICH10DO},
+	{ PCI_VDEVICE(INTEL, 0x3b00), LPC_PCH},
+	{ PCI_VDEVICE(INTEL, 0x3b01), LPC_PCHM},
+	{ PCI_VDEVICE(INTEL, 0x3b02), LPC_P55},
+	{ PCI_VDEVICE(INTEL, 0x3b03), LPC_PM55},
+	{ PCI_VDEVICE(INTEL, 0x3b06), LPC_H55},
+	{ PCI_VDEVICE(INTEL, 0x3b07), LPC_QM57},
+	{ PCI_VDEVICE(INTEL, 0x3b08), LPC_H57},
+	{ PCI_VDEVICE(INTEL, 0x3b09), LPC_HM55},
+	{ PCI_VDEVICE(INTEL, 0x3b0a), LPC_Q57},
+	{ PCI_VDEVICE(INTEL, 0x3b0b), LPC_HM57},
+	{ PCI_VDEVICE(INTEL, 0x3b0d), LPC_PCHMSFF},
+	{ PCI_VDEVICE(INTEL, 0x3b0f), LPC_QS57},
+	{ PCI_VDEVICE(INTEL, 0x3b12), LPC_3400},
+	{ PCI_VDEVICE(INTEL, 0x3b14), LPC_3420},
+	{ PCI_VDEVICE(INTEL, 0x3b16), LPC_3450},
+	{ PCI_VDEVICE(INTEL, 0x5031), LPC_EP80579},
 	{ PCI_VDEVICE(INTEL, 0x1c41), LPC_CPT},
 	{ PCI_VDEVICE(INTEL, 0x1c42), LPC_CPTD},
 	{ PCI_VDEVICE(INTEL, 0x1c43), LPC_CPTM},
@@ -574,6 +641,7 @@ static const struct pci_device_id lpc_ich_ids[] = {
 	{ PCI_VDEVICE(INTEL, 0x1c5f), LPC_CPT},
 	{ PCI_VDEVICE(INTEL, 0x1d40), LPC_PBG},
 	{ PCI_VDEVICE(INTEL, 0x1d41), LPC_PBG},
+	{ PCI_VDEVICE(INTEL, 0x2310), LPC_DH89XXCC},
 	{ PCI_VDEVICE(INTEL, 0x1e40), LPC_PPT},
 	{ PCI_VDEVICE(INTEL, 0x1e41), LPC_PPT},
 	{ PCI_VDEVICE(INTEL, 0x1e42), LPC_PPT},
@@ -606,79 +674,7 @@ static const struct pci_device_id lpc_ich_ids[] = {
 	{ PCI_VDEVICE(INTEL, 0x1e5d), LPC_PPT},
 	{ PCI_VDEVICE(INTEL, 0x1e5e), LPC_PPT},
 	{ PCI_VDEVICE(INTEL, 0x1e5f), LPC_PPT},
-	{ PCI_VDEVICE(INTEL, 0x1f38), LPC_AVN},
-	{ PCI_VDEVICE(INTEL, 0x1f39), LPC_AVN},
-	{ PCI_VDEVICE(INTEL, 0x1f3a), LPC_AVN},
-	{ PCI_VDEVICE(INTEL, 0x1f3b), LPC_AVN},
-	{ PCI_VDEVICE(INTEL, 0x229c), LPC_BRASWELL},
-	{ PCI_VDEVICE(INTEL, 0x2310), LPC_DH89XXCC},
-	{ PCI_VDEVICE(INTEL, 0x2390), LPC_COLETO},
-	{ PCI_VDEVICE(INTEL, 0x2410), LPC_ICH},
-	{ PCI_VDEVICE(INTEL, 0x2420), LPC_ICH0},
-	{ PCI_VDEVICE(INTEL, 0x2440), LPC_ICH2},
-	{ PCI_VDEVICE(INTEL, 0x244c), LPC_ICH2M},
-	{ PCI_VDEVICE(INTEL, 0x2450), LPC_CICH},
-	{ PCI_VDEVICE(INTEL, 0x2480), LPC_ICH3},
-	{ PCI_VDEVICE(INTEL, 0x248c), LPC_ICH3M},
-	{ PCI_VDEVICE(INTEL, 0x24c0), LPC_ICH4},
-	{ PCI_VDEVICE(INTEL, 0x24cc), LPC_ICH4M},
-	{ PCI_VDEVICE(INTEL, 0x24d0), LPC_ICH5},
-	{ PCI_VDEVICE(INTEL, 0x25a1), LPC_6300ESB},
-	{ PCI_VDEVICE(INTEL, 0x2640), LPC_ICH6},
-	{ PCI_VDEVICE(INTEL, 0x2641), LPC_ICH6M},
-	{ PCI_VDEVICE(INTEL, 0x2642), LPC_ICH6W},
-	{ PCI_VDEVICE(INTEL, 0x2670), LPC_631XESB},
-	{ PCI_VDEVICE(INTEL, 0x2671), LPC_631XESB},
-	{ PCI_VDEVICE(INTEL, 0x2672), LPC_631XESB},
-	{ PCI_VDEVICE(INTEL, 0x2673), LPC_631XESB},
-	{ PCI_VDEVICE(INTEL, 0x2674), LPC_631XESB},
-	{ PCI_VDEVICE(INTEL, 0x2675), LPC_631XESB},
-	{ PCI_VDEVICE(INTEL, 0x2676), LPC_631XESB},
-	{ PCI_VDEVICE(INTEL, 0x2677), LPC_631XESB},
-	{ PCI_VDEVICE(INTEL, 0x2678), LPC_631XESB},
-	{ PCI_VDEVICE(INTEL, 0x2679), LPC_631XESB},
-	{ PCI_VDEVICE(INTEL, 0x267a), LPC_631XESB},
-	{ PCI_VDEVICE(INTEL, 0x267b), LPC_631XESB},
-	{ PCI_VDEVICE(INTEL, 0x267c), LPC_631XESB},
-	{ PCI_VDEVICE(INTEL, 0x267d), LPC_631XESB},
-	{ PCI_VDEVICE(INTEL, 0x267e), LPC_631XESB},
-	{ PCI_VDEVICE(INTEL, 0x267f), LPC_631XESB},
-	{ PCI_VDEVICE(INTEL, 0x27b0), LPC_ICH7DH},
-	{ PCI_VDEVICE(INTEL, 0x27b8), LPC_ICH7},
-	{ PCI_VDEVICE(INTEL, 0x27b9), LPC_ICH7M},
-	{ PCI_VDEVICE(INTEL, 0x27bc), LPC_NM10},
-	{ PCI_VDEVICE(INTEL, 0x27bd), LPC_ICH7MDH},
-	{ PCI_VDEVICE(INTEL, 0x2810), LPC_ICH8},
-	{ PCI_VDEVICE(INTEL, 0x2811), LPC_ICH8ME},
-	{ PCI_VDEVICE(INTEL, 0x2812), LPC_ICH8DH},
-	{ PCI_VDEVICE(INTEL, 0x2814), LPC_ICH8DO},
-	{ PCI_VDEVICE(INTEL, 0x2815), LPC_ICH8M},
-	{ PCI_VDEVICE(INTEL, 0x2912), LPC_ICH9DH},
-	{ PCI_VDEVICE(INTEL, 0x2914), LPC_ICH9DO},
-	{ PCI_VDEVICE(INTEL, 0x2916), LPC_ICH9R},
-	{ PCI_VDEVICE(INTEL, 0x2917), LPC_ICH9ME},
-	{ PCI_VDEVICE(INTEL, 0x2918), LPC_ICH9},
-	{ PCI_VDEVICE(INTEL, 0x2919), LPC_ICH9M},
-	{ PCI_VDEVICE(INTEL, 0x3a14), LPC_ICH10DO},
-	{ PCI_VDEVICE(INTEL, 0x3a16), LPC_ICH10R},
-	{ PCI_VDEVICE(INTEL, 0x3a18), LPC_ICH10},
-	{ PCI_VDEVICE(INTEL, 0x3a1a), LPC_ICH10D},
-	{ PCI_VDEVICE(INTEL, 0x3b00), LPC_PCH},
-	{ PCI_VDEVICE(INTEL, 0x3b01), LPC_PCHM},
-	{ PCI_VDEVICE(INTEL, 0x3b02), LPC_P55},
-	{ PCI_VDEVICE(INTEL, 0x3b03), LPC_PM55},
-	{ PCI_VDEVICE(INTEL, 0x3b06), LPC_H55},
-	{ PCI_VDEVICE(INTEL, 0x3b07), LPC_QM57},
-	{ PCI_VDEVICE(INTEL, 0x3b08), LPC_H57},
-	{ PCI_VDEVICE(INTEL, 0x3b09), LPC_HM55},
-	{ PCI_VDEVICE(INTEL, 0x3b0a), LPC_Q57},
-	{ PCI_VDEVICE(INTEL, 0x3b0b), LPC_HM57},
-	{ PCI_VDEVICE(INTEL, 0x3b0d), LPC_PCHMSFF},
-	{ PCI_VDEVICE(INTEL, 0x3b0f), LPC_QS57},
-	{ PCI_VDEVICE(INTEL, 0x3b12), LPC_3400},
-	{ PCI_VDEVICE(INTEL, 0x3b14), LPC_3420},
-	{ PCI_VDEVICE(INTEL, 0x3b16), LPC_3450},
-	{ PCI_VDEVICE(INTEL, 0x5031), LPC_EP80579},
+	{ PCI_VDEVICE(INTEL, 0x5ae8), LPC_APL},
 	{ PCI_VDEVICE(INTEL, 0x8c40), LPC_LPT},
 	{ PCI_VDEVICE(INTEL, 0x8c41), LPC_LPT},
 	{ PCI_VDEVICE(INTEL, 0x8c42), LPC_LPT},
@@ -711,11 +707,14 @@ static const struct pci_device_id lpc_ich_ids[] = {
 	{ PCI_VDEVICE(INTEL, 0x8c5d), LPC_LPT},
 	{ PCI_VDEVICE(INTEL, 0x8c5e), LPC_LPT},
 	{ PCI_VDEVICE(INTEL, 0x8c5f), LPC_LPT},
-	{ PCI_VDEVICE(INTEL, 0x8cc1), LPC_9S},
-	{ PCI_VDEVICE(INTEL, 0x8cc2), LPC_9S},
-	{ PCI_VDEVICE(INTEL, 0x8cc3), LPC_9S},
-	{ PCI_VDEVICE(INTEL, 0x8cc4), LPC_9S},
-	{ PCI_VDEVICE(INTEL, 0x8cc6), LPC_9S},
+	{ PCI_VDEVICE(INTEL, 0x9c40), LPC_LPT_LP},
+	{ PCI_VDEVICE(INTEL, 0x9c41), LPC_LPT_LP},
+	{ PCI_VDEVICE(INTEL, 0x9c42), LPC_LPT_LP},
+	{ PCI_VDEVICE(INTEL, 0x9c43), LPC_LPT_LP},
+	{ PCI_VDEVICE(INTEL, 0x9c44), LPC_LPT_LP},
+	{ PCI_VDEVICE(INTEL, 0x9c45), LPC_LPT_LP},
+	{ PCI_VDEVICE(INTEL, 0x9c46), LPC_LPT_LP},
+	{ PCI_VDEVICE(INTEL, 0x9c47), LPC_LPT_LP},
 	{ PCI_VDEVICE(INTEL, 0x8d40), LPC_WBG},
 	{ PCI_VDEVICE(INTEL, 0x8d41), LPC_WBG},
 	{ PCI_VDEVICE(INTEL, 0x8d42), LPC_WBG},
@@ -748,14 +747,12 @@ static const struct pci_device_id lpc_ich_ids[] = {
 	{ PCI_VDEVICE(INTEL, 0x8d5d), LPC_WBG},
 	{ PCI_VDEVICE(INTEL, 0x8d5e), LPC_WBG},
 	{ PCI_VDEVICE(INTEL, 0x8d5f), LPC_WBG},
-	{ PCI_VDEVICE(INTEL, 0x9c40), LPC_LPT_LP},
-	{ PCI_VDEVICE(INTEL, 0x9c41), LPC_LPT_LP},
-	{ PCI_VDEVICE(INTEL, 0x9c42), LPC_LPT_LP},
-	{ PCI_VDEVICE(INTEL, 0x9c43), LPC_LPT_LP},
-	{ PCI_VDEVICE(INTEL, 0x9c44), LPC_LPT_LP},
-	{ PCI_VDEVICE(INTEL, 0x9c45), LPC_LPT_LP},
-	{ PCI_VDEVICE(INTEL, 0x9c46), LPC_LPT_LP},
-	{ PCI_VDEVICE(INTEL, 0x9c47), LPC_LPT_LP},
+	{ PCI_VDEVICE(INTEL, 0x1f38), LPC_AVN},
+	{ PCI_VDEVICE(INTEL, 0x1f39), LPC_AVN},
+	{ PCI_VDEVICE(INTEL, 0x1f3a), LPC_AVN},
+	{ PCI_VDEVICE(INTEL, 0x1f3b), LPC_AVN},
+	{ PCI_VDEVICE(INTEL, 0x0f1c), LPC_BAYTRAIL},
+	{ PCI_VDEVICE(INTEL, 0x2390), LPC_COLETO},
 	{ PCI_VDEVICE(INTEL, 0x9cc1), LPC_WPT_LP},
 	{ PCI_VDEVICE(INTEL, 0x9cc2), LPC_WPT_LP},
 	{ PCI_VDEVICE(INTEL, 0x9cc3), LPC_WPT_LP},
@@ -850,7 +847,7 @@ static int lpc_ich_finalize_wdt_cell(struct pci_dev *dev)
 	struct itco_wdt_platform_data *pdata;
 	struct lpc_ich_priv *priv = pci_get_drvdata(dev);
 	struct lpc_ich_info *info;
-	struct mfd_cell *cell = &lpc_ich_wdt_cell;
+	struct mfd_cell *cell = &lpc_ich_cells[LPC_WDT];
 
 	pdata = devm_kzalloc(&dev->dev, sizeof(*pdata), GFP_KERNEL);
 	if (!pdata)
@@ -869,7 +866,7 @@ static int lpc_ich_finalize_wdt_cell(struct pci_dev *dev)
 static void lpc_ich_finalize_gpio_cell(struct pci_dev *dev)
 {
 	struct lpc_ich_priv *priv = pci_get_drvdata(dev);
-	struct mfd_cell *cell = &lpc_ich_gpio_cell;
+	struct mfd_cell *cell = &lpc_ich_cells[LPC_GPIO];
 
 	cell->platform_data = &lpc_chipset_info[priv->chipset];
 	cell->pdata_size = sizeof(struct lpc_ich_info);
@@ -913,7 +910,7 @@ static int lpc_ich_init_gpio(struct pci_dev *dev)
 	base_addr = base_addr_cfg & 0x0000ff80;
 	if (!base_addr) {
 		dev_notice(&dev->dev, "I/O space for ACPI uninitialized\n");
-		lpc_ich_gpio_cell.num_resources--;
+		lpc_ich_cells[LPC_GPIO].num_resources--;
 		goto gpe0_done;
 	}
 
@@ -927,7 +924,7 @@ static int lpc_ich_init_gpio(struct pci_dev *dev)
 		 * the platform_device subsystem doesn't see this resource
 		 * or it will register an invalid region.
 		 */
-		lpc_ich_gpio_cell.num_resources--;
+		lpc_ich_cells[LPC_GPIO].num_resources--;
 		acpi_conflict = true;
 	} else {
 		lpc_ich_enable_acpi_space(dev);
@@ -967,12 +964,12 @@ gpe0_done:
 
 	lpc_ich_finalize_gpio_cell(dev);
 	ret = mfd_add_devices(&dev->dev, PLATFORM_DEVID_AUTO,
-			      &lpc_ich_gpio_cell, 1, NULL, 0, NULL);
+			      &lpc_ich_cells[LPC_GPIO], 1, NULL, 0, NULL);
 
 gpio_done:
 	if (acpi_conflict)
 		pr_warn("Resource conflict(s) found affecting %s\n",
-				lpc_ich_gpio_cell.name);
+				lpc_ich_cells[LPC_GPIO].name);
 	return ret;
 }
 
@@ -983,10 +980,6 @@ static int lpc_ich_init_wdt(struct pci_dev *dev)
 	u32 base_addr;
 	int ret;
 	struct resource *res;
-
-	/* If we have ACPI based watchdog use that instead */
-	if (acpi_has_watchdog())
-		return -ENODEV;
 
 	/* Setup power management base register */
 	pci_read_config_dword(dev, priv->abase, &base_addr_cfg);
@@ -1020,7 +1013,7 @@ static int lpc_ich_init_wdt(struct pci_dev *dev)
 	 */
 	if (lpc_chipset_info[priv->chipset].iTCO_version == 1) {
 		/* Don't register iomem for TCO ver 1 */
-		lpc_ich_wdt_cell.num_resources--;
+		lpc_ich_cells[LPC_WDT].num_resources--;
 	} else if (lpc_chipset_info[priv->chipset].iTCO_version == 2) {
 		pci_read_config_dword(dev, RCBABASE, &base_addr_cfg);
 		base_addr = base_addr_cfg & 0xffffc000;
@@ -1048,7 +1041,7 @@ static int lpc_ich_init_wdt(struct pci_dev *dev)
 		goto wdt_done;
 
 	ret = mfd_add_devices(&dev->dev, PLATFORM_DEVID_AUTO,
-			      &lpc_ich_wdt_cell, 1, NULL, 0, NULL);
+			      &lpc_ich_cells[LPC_WDT], 1, NULL, 0, NULL);
 
 wdt_done:
 	return ret;
@@ -1104,6 +1097,7 @@ static int lpc_ich_probe(struct pci_dev *dev,
 	if (!cell_added) {
 		dev_warn(&dev->dev, "No MFD cells added\n");
 		lpc_ich_restore_config_space(dev);
+		pci_set_drvdata(dev, NULL);
 		return -ENODEV;
 	}
 
@@ -1114,6 +1108,7 @@ static void lpc_ich_remove(struct pci_dev *dev)
 {
 	mfd_remove_devices(&dev->dev);
 	lpc_ich_restore_config_space(dev);
+	pci_set_drvdata(dev, NULL);
 }
 
 static struct pci_driver lpc_ich_driver = {
@@ -1123,7 +1118,18 @@ static struct pci_driver lpc_ich_driver = {
 	.remove		= lpc_ich_remove,
 };
 
-module_pci_driver(lpc_ich_driver);
+static int __init lpc_ich_init(void)
+{
+	return pci_register_driver(&lpc_ich_driver);
+}
+
+static void __exit lpc_ich_exit(void)
+{
+	pci_unregister_driver(&lpc_ich_driver);
+}
+
+module_init(lpc_ich_init);
+module_exit(lpc_ich_exit);
 
 MODULE_AUTHOR("Aaron Sierra <asierra@xes-inc.com>");
 MODULE_DESCRIPTION("LPC interface for Intel ICH");

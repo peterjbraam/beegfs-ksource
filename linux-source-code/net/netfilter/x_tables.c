@@ -26,7 +26,6 @@
 #include <linux/mm.h>
 #include <linux/slab.h>
 #include <linux/audit.h>
-#include <linux/user_namespace.h>
 #include <net/net_namespace.h>
 
 #include <linux/netfilter/x_tables.h>
@@ -39,6 +38,7 @@ MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Harald Welte <laforge@netfilter.org>");
 MODULE_DESCRIPTION("{ip,ip6,arp,eb}_tables backend module");
 
+#define SMP_ALIGN(x) (((x) + SMP_CACHE_BYTES-1) & ~(SMP_CACHE_BYTES-1))
 #define XT_PCPU_BLOCK_SIZE 4096
 
 struct compat_delta {
@@ -67,6 +67,9 @@ static const char *const xt_prefix[NFPROTO_NUMPROTO] = {
 	[NFPROTO_BRIDGE] = "eb",
 	[NFPROTO_IPV6]   = "ip6",
 };
+
+/* Allow this many total (re)entries. */
+static const unsigned int xt_jumpstack_multiplier = 2;
 
 /* Registration hooks for targets. */
 int xt_register_target(struct xt_target *target)
@@ -209,9 +212,6 @@ xt_request_find_match(uint8_t nfproto, const char *name, uint8_t revision)
 {
 	struct xt_match *match;
 
-	if (strnlen(name, XT_EXTENSION_MAXNAMELEN) == XT_EXTENSION_MAXNAMELEN)
-		return ERR_PTR(-EINVAL);
-
 	match = xt_find_match(nfproto, name, revision);
 	if (IS_ERR(match)) {
 		request_module("%st_%s", xt_prefix[nfproto], name);
@@ -253,9 +253,6 @@ EXPORT_SYMBOL(xt_find_target);
 struct xt_target *xt_request_find_target(u8 af, const char *name, u8 revision)
 {
 	struct xt_target *target;
-
-	if (strnlen(name, XT_EXTENSION_MAXNAMELEN) == XT_EXTENSION_MAXNAMELEN)
-		return ERR_PTR(-EINVAL);
 
 	target = xt_find_target(af, name, revision);
 	if (IS_ERR(target)) {
@@ -747,17 +744,8 @@ EXPORT_SYMBOL(xt_check_entry_offsets);
  */
 unsigned int *xt_alloc_entry_offsets(unsigned int size)
 {
-	unsigned int *off;
+	return kvmalloc_array(size, sizeof(unsigned int), GFP_KERNEL | __GFP_ZERO);
 
-	off = kcalloc(size, sizeof(unsigned int), GFP_KERNEL | __GFP_NOWARN);
-
-	if (off)
-		return off;
-
-	if (size < (SIZE_MAX / sizeof(unsigned int)))
-		off = vmalloc(size * sizeof(unsigned int));
-
-	return off;
 }
 EXPORT_SYMBOL(xt_alloc_entry_offsets);
 
@@ -988,7 +976,7 @@ struct xt_table_info *xt_alloc_table_info(unsigned int size)
 		return NULL;
 
 	/* Pedantry: prevent them from hitting BUG() in vmalloc.c --RR */
-	if ((size >> PAGE_SHIFT) + 2 > totalram_pages)
+	if ((SMP_ALIGN(size) >> PAGE_SHIFT) + 2 > totalram_pages)
 		return NULL;
 
 	if (sz <= (PAGE_SIZE << PAGE_ALLOC_COSTLY_ORDER))
@@ -1014,6 +1002,8 @@ void xt_free_table_info(struct xt_table_info *info)
 		kvfree(info->jumpstack);
 	}
 
+	free_percpu(info->stackptr);
+
 	kvfree(info);
 }
 EXPORT_SYMBOL(xt_free_table_info);
@@ -1022,47 +1012,12 @@ EXPORT_SYMBOL(xt_free_table_info);
 struct xt_table *xt_find_table_lock(struct net *net, u_int8_t af,
 				    const char *name)
 {
-	struct xt_table *t, *found = NULL;
+	struct xt_table *t;
 
 	mutex_lock(&xt[af].mutex);
 	list_for_each_entry(t, &net->xt.tables[af], list)
 		if (strcmp(t->name, name) == 0 && try_module_get(t->me))
 			return t;
-
-	if (net == &init_net)
-		goto out;
-
-	/* Table doesn't exist in this netns, re-try init */
-	list_for_each_entry(t, &init_net.xt.tables[af], list) {
-		if (strcmp(t->name, name))
-			continue;
-		if (!try_module_get(t->me)) {
-			mutex_unlock(&xt[af].mutex);
-			return NULL;
-		}
-
-		mutex_unlock(&xt[af].mutex);
-		if (t->table_init(net) != 0) {
-			module_put(t->me);
-			return NULL;
-		}
-
-		found = t;
-
-		mutex_lock(&xt[af].mutex);
-		break;
-	}
-
-	if (!found)
-		goto out;
-
-	/* and once again: */
-	list_for_each_entry(t, &net->xt.tables[af], list)
-		if (strcmp(t->name, name) == 0)
-			return t;
-
-	module_put(found->me);
- out:
 	mutex_unlock(&xt[af].mutex);
 	return NULL;
 }
@@ -1091,44 +1046,28 @@ EXPORT_SYMBOL_GPL(xt_compat_unlock);
 DEFINE_PER_CPU(seqcount_t, xt_recseq);
 EXPORT_PER_CPU_SYMBOL_GPL(xt_recseq);
 
-struct static_key xt_tee_enabled __read_mostly;
-EXPORT_SYMBOL_GPL(xt_tee_enabled);
-
 static int xt_jumpstack_alloc(struct xt_table_info *i)
 {
 	unsigned int size;
 	int cpu;
 
+	i->stackptr = alloc_percpu(unsigned int);
+	if (i->stackptr == NULL)
+		return -ENOMEM;
+
 	size = sizeof(void **) * nr_cpu_ids;
 	if (size > PAGE_SIZE)
-		i->jumpstack = vzalloc(size);
+		i->jumpstack = kvzalloc(size, GFP_KERNEL);
 	else
 		i->jumpstack = kzalloc(size, GFP_KERNEL);
 	if (i->jumpstack == NULL)
 		return -ENOMEM;
 
-	/* ruleset without jumps -- no stack needed */
-	if (i->stacksize == 0)
-		return 0;
-
-	/* Jumpstack needs to be able to record two full callchains, one
-	 * from the first rule set traversal, plus one table reentrancy
-	 * via -j TEE without clobbering the callchain that brought us to
-	 * TEE target.
-	 *
-	 * This is done by allocating two jumpstacks per cpu, on reentry
-	 * the upper half of the stack is used.
-	 *
-	 * see the jumpstack setup in ipt_do_table() for more details.
-	 */
-	size = sizeof(void *) * i->stacksize * 2u;
+	i->stacksize *= xt_jumpstack_multiplier;
+	size = sizeof(void *) * i->stacksize;
 	for_each_possible_cpu(cpu) {
-		if (size > PAGE_SIZE)
-			i->jumpstack[cpu] = vmalloc_node(size,
-				cpu_to_node(cpu));
-		else
-			i->jumpstack[cpu] = kmalloc_node(size,
-				GFP_KERNEL, cpu_to_node(cpu));
+		i->jumpstack[cpu] = kvmalloc_node(size, GFP_KERNEL,
+			cpu_to_node(cpu));
 		if (i->jumpstack[cpu] == NULL)
 			/*
 			 * Freeing will be done later on by the callers. The
@@ -1148,6 +1087,7 @@ xt_replace_table(struct xt_table *table,
 	      int *error)
 {
 	struct xt_table_info *private;
+	unsigned int cpu;
 	int ret;
 
 	ret = xt_jumpstack_alloc(newinfo);
@@ -1177,13 +1117,27 @@ xt_replace_table(struct xt_table *table,
 	smp_wmb();
 	table->private = newinfo;
 
+	/* make sure all cpus see new ->private value */
+	smp_wmb();
+
 	/*
 	 * Even though table entries have now been swapped, other CPU's
-	 * may still be using the old entries. This is okay, because
-	 * resynchronization happens because of the locking done
-	 * during the get_counters() routine.
+	 * may still be using the old entries...
 	 */
 	local_bh_enable();
+
+	/* ... so wait for even xt_recseq on all cpus */
+	for_each_possible_cpu(cpu) {
+		seqcount_t *s = &per_cpu(xt_recseq, cpu);
+		u32 seq = raw_read_seqcount(s);
+
+		if (seq & 1) {
+			do {
+				cond_resched();
+				cpu_relax();
+			} while (seq == raw_read_seqcount(s));
+		}
+	}
 
 #ifdef CONFIG_AUDIT
 	if (audit_enabled) {
@@ -1303,9 +1257,10 @@ static int xt_table_seq_show(struct seq_file *seq, void *v)
 {
 	struct xt_table *table = list_entry(v, struct xt_table, list);
 
-	if (*table->name)
-		seq_printf(seq, "%s\n", table->name);
-	return 0;
+	if (strlen(table->name))
+		return seq_printf(seq, "%s\n", table->name);
+	else
+		return 0;
 }
 
 static const struct seq_operations xt_table_seq_ops = {
@@ -1441,8 +1396,8 @@ static int xt_match_seq_show(struct seq_file *seq, void *v)
 		if (trav->curr == trav->head)
 			return 0;
 		match = list_entry(trav->curr, struct xt_match, list);
-		if (*match->name)
-			seq_printf(seq, "%s\n", match->name);
+		return (*match->name == '\0') ? 0 :
+		       seq_printf(seq, "%s\n", match->name);
 	}
 	return 0;
 }
@@ -1456,11 +1411,22 @@ static const struct seq_operations xt_match_seq_ops = {
 
 static int xt_match_open(struct inode *inode, struct file *file)
 {
+	struct seq_file *seq;
 	struct nf_mttg_trav *trav;
-	trav = __seq_open_private(file, &xt_match_seq_ops, sizeof(*trav));
-	if (!trav)
+	int ret;
+
+	trav = kmalloc(sizeof(*trav), GFP_KERNEL);
+	if (trav == NULL)
 		return -ENOMEM;
 
+	ret = seq_open(file, &xt_match_seq_ops);
+	if (ret < 0) {
+		kfree(trav);
+		return ret;
+	}
+
+	seq = file->private_data;
+	seq->private = trav;
 	trav->nfproto = (unsigned long)PDE_DATA(inode);
 	return 0;
 }
@@ -1494,8 +1460,8 @@ static int xt_target_seq_show(struct seq_file *seq, void *v)
 		if (trav->curr == trav->head)
 			return 0;
 		target = list_entry(trav->curr, struct xt_target, list);
-		if (*target->name)
-			seq_printf(seq, "%s\n", target->name);
+		return (*target->name == '\0') ? 0 :
+		       seq_printf(seq, "%s\n", target->name);
 	}
 	return 0;
 }
@@ -1509,11 +1475,22 @@ static const struct seq_operations xt_target_seq_ops = {
 
 static int xt_target_open(struct inode *inode, struct file *file)
 {
+	struct seq_file *seq;
 	struct nf_mttg_trav *trav;
-	trav = __seq_open_private(file, &xt_target_seq_ops, sizeof(*trav));
-	if (!trav)
+	int ret;
+
+	trav = kmalloc(sizeof(*trav), GFP_KERNEL);
+	if (trav == NULL)
 		return -ENOMEM;
 
+	ret = seq_open(file, &xt_target_seq_ops);
+	if (ret < 0) {
+		kfree(trav);
+		return ret;
+	}
+
+	seq = file->private_data;
+	seq->private = trav;
 	trav->nfproto = (unsigned long)PDE_DATA(inode);
 	return 0;
 }
@@ -1533,25 +1510,22 @@ static const struct file_operations xt_target_ops = {
 #endif /* CONFIG_PROC_FS */
 
 /**
- * xt_hook_ops_alloc - set up hooks for a new table
+ * xt_hook_link - set up hooks for a new table
  * @table:	table with metadata needed to set up hooks
  * @fn:		Hook function
  *
- * This function will create the nf_hook_ops that the x_table needs
- * to hand to xt_hook_link_net().
+ * This function will take care of creating and registering the necessary
+ * Netfilter hooks for XT tables.
  */
-struct nf_hook_ops *
-xt_hook_ops_alloc(const struct xt_table *table, nf_hookfn *fn)
+struct nf_hook_ops *xt_hook_link(const struct xt_table *table, nf_hookfn *fn)
 {
 	unsigned int hook_mask = table->valid_hooks;
 	uint8_t i, num_hooks = hweight32(hook_mask);
 	uint8_t hooknum;
 	struct nf_hook_ops *ops;
+	int ret;
 
-	if (!num_hooks)
-		return ERR_PTR(-EINVAL);
-
-	ops = kcalloc(num_hooks, sizeof(*ops), GFP_KERNEL);
+	ops = kmalloc(sizeof(*ops) * num_hooks, GFP_KERNEL);
 	if (ops == NULL)
 		return ERR_PTR(-ENOMEM);
 
@@ -1560,23 +1534,40 @@ xt_hook_ops_alloc(const struct xt_table *table, nf_hookfn *fn)
 		if (!(hook_mask & 1))
 			continue;
 		ops[i].hook     = fn;
+		ops[i].owner    = table->me;
 		ops[i].pf       = table->af;
 		ops[i].hooknum  = hooknum;
 		ops[i].priority = table->priority;
 		++i;
 	}
 
+	ret = nf_register_hooks(ops, num_hooks);
+	if (ret < 0) {
+		kfree(ops);
+		return ERR_PTR(ret);
+	}
+
 	return ops;
 }
-EXPORT_SYMBOL_GPL(xt_hook_ops_alloc);
+EXPORT_SYMBOL_GPL(xt_hook_link);
+
+/**
+ * xt_hook_unlink - remove hooks for a table
+ * @ops:	nf_hook_ops array as returned by nf_hook_link
+ * @hook_mask:	the very same mask that was passed to nf_hook_link
+ */
+void xt_hook_unlink(const struct xt_table *table, struct nf_hook_ops *ops)
+{
+	nf_unregister_hooks(ops, hweight32(table->valid_hooks));
+	kfree(ops);
+}
+EXPORT_SYMBOL_GPL(xt_hook_unlink);
 
 int xt_proto_init(struct net *net, u_int8_t af)
 {
 #ifdef CONFIG_PROC_FS
 	char buf[XT_FUNCTION_MAXNAMELEN];
 	struct proc_dir_entry *proc;
-	kuid_t root_uid;
-	kgid_t root_gid;
 #endif
 
 	if (af >= ARRAY_SIZE(xt_prefix))
@@ -1584,17 +1575,12 @@ int xt_proto_init(struct net *net, u_int8_t af)
 
 
 #ifdef CONFIG_PROC_FS
-	root_uid = make_kuid(net->user_ns, 0);
-	root_gid = make_kgid(net->user_ns, 0);
-
 	strlcpy(buf, xt_prefix[af], sizeof(buf));
 	strlcat(buf, FORMAT_TABLES, sizeof(buf));
 	proc = proc_create_data(buf, 0440, net->proc_net, &xt_table_ops,
 				(void *)(unsigned long)af);
 	if (!proc)
 		goto out;
-	if (uid_valid(root_uid) && gid_valid(root_gid))
-		proc_set_user(proc, root_uid, root_gid);
 
 	strlcpy(buf, xt_prefix[af], sizeof(buf));
 	strlcat(buf, FORMAT_MATCHES, sizeof(buf));
@@ -1602,8 +1588,6 @@ int xt_proto_init(struct net *net, u_int8_t af)
 				(void *)(unsigned long)af);
 	if (!proc)
 		goto out_remove_tables;
-	if (uid_valid(root_uid) && gid_valid(root_gid))
-		proc_set_user(proc, root_uid, root_gid);
 
 	strlcpy(buf, xt_prefix[af], sizeof(buf));
 	strlcat(buf, FORMAT_TARGETS, sizeof(buf));
@@ -1611,8 +1595,6 @@ int xt_proto_init(struct net *net, u_int8_t af)
 				(void *)(unsigned long)af);
 	if (!proc)
 		goto out_remove_matches;
-	if (uid_valid(root_uid) && gid_valid(root_gid))
-		proc_set_user(proc, root_uid, root_gid);
 #endif
 
 	return 0;
@@ -1728,7 +1710,7 @@ static int __init xt_init(void)
 		seqcount_init(&per_cpu(xt_recseq, i));
 	}
 
-	xt = kcalloc(NFPROTO_NUMPROTO, sizeof(struct xt_af), GFP_KERNEL);
+	xt = kmalloc(sizeof(struct xt_af) * NFPROTO_NUMPROTO, GFP_KERNEL);
 	if (!xt)
 		return -ENOMEM;
 

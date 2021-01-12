@@ -245,25 +245,28 @@ void nfs4_free_client(struct nfs_client *clp)
  */
 static int nfs4_init_callback(struct nfs_client *clp)
 {
-	struct rpc_xprt *xprt;
 	int error;
 
-	xprt = rcu_dereference_raw(clp->cl_rpcclient->cl_xprt);
+	if (clp->rpc_ops->version == 4) {
+		struct rpc_xprt *xprt;
 
-	if (nfs4_has_session(clp)) {
-		error = xprt_setup_backchannel(xprt, NFS41_BC_MIN_CALLBACKS);
-		if (error < 0)
+		xprt = rcu_dereference_raw(clp->cl_rpcclient->cl_xprt);
+
+		if (nfs4_has_session(clp)) {
+			error = xprt_setup_backchannel(xprt,
+						NFS41_BC_MIN_CALLBACKS);
+			if (error < 0)
+				return error;
+		}
+
+		error = nfs_callback_up(clp->cl_mvops->minor_version, xprt);
+		if (error < 0) {
+			dprintk("%s: failed to start callback. Error = %d\n",
+				__func__, error);
 			return error;
+		}
+		__set_bit(NFS_CS_CALLBACK, &clp->cl_res_state);
 	}
-
-	error = nfs_callback_up(clp->cl_mvops->minor_version, xprt);
-	if (error < 0) {
-		dprintk("%s: failed to start callback. Error = %d\n",
-			__func__, error);
-		return error;
-	}
-	__set_bit(NFS_CS_CALLBACK, &clp->cl_res_state);
-
 	return 0;
 }
 
@@ -406,15 +409,19 @@ struct nfs_client *nfs4_init_client(struct nfs_client *clp,
 	if (error < 0)
 		goto error;
 
-	if (!nfs4_has_session(clp))
-		nfs_mark_client_ready(clp, NFS_CS_READY);
-
 	error = nfs4_discover_server_trunking(clp, &old);
 	if (error < 0)
 		goto error;
 
-	if (clp != old)
+	if (clp != old) {
 		clp->cl_preserve_clid = true;
+		/*
+		 * Mark the client as having failed initialization so other
+		 * processes walking the nfs_client_list in nfs_match_client()
+		 * won't try to use it.
+		 */
+		nfs_mark_client_ready(clp, -EPERM);
+	}
 	nfs_put_client(clp);
 	return old;
 
@@ -464,6 +471,70 @@ static bool nfs4_match_client_owner_id(const struct nfs_client *clp1,
 	return strcmp(clp1->cl_owner_id, clp2->cl_owner_id) == 0;
 }
 
+static bool nfs4_same_verifier(nfs4_verifier *v1, nfs4_verifier *v2)
+{
+	return memcmp(v1->data, v2->data, sizeof(v1->data)) == 0;
+}
+
+/*
+ * Returns true if the client IDs match
+ */
+static bool nfs4_match_clientids(u64 a, u64 b)
+{
+	if (a != b) {
+		dprintk("NFS: --> %s client ID %llx does not match %llx\n",
+			__func__, a, b);
+		return false;
+	}
+	dprintk("NFS: --> %s client ID %llx matches %llx\n",
+		__func__, a, b);
+	return true;
+}
+
+static int nfs4_match_client(struct nfs_client  *pos,  struct nfs_client *new,
+			     struct nfs_client **prev, struct nfs_net *nn)
+{
+	int status;
+
+	if (pos->rpc_ops != new->rpc_ops)
+		return 1;
+
+	if (pos->cl_minorversion != new->cl_minorversion)
+		return 1;
+
+	/* If "pos" isn't marked ready, we can't trust the
+	 * remaining fields in "pos", especially the client
+	 * ID and serverowner fields.  Wait for CREATE_SESSION
+	 * to finish. */
+	if (pos->cl_cons_state > NFS_CS_READY) {
+		atomic_inc(&pos->cl_count);
+		spin_unlock(&nn->nfs_client_lock);
+
+		nfs_put_client(*prev);
+		*prev = pos;
+
+		status = nfs_wait_client_init_complete(pos);
+		spin_lock(&nn->nfs_client_lock);
+
+		if (status < 0)
+			return status;
+	}
+
+	if (pos->cl_cons_state != NFS_CS_READY)
+		return 1;
+
+	if (!nfs4_match_clientids(pos->cl_clientid, new->cl_clientid))
+		return 1;
+
+	/* NFSv4.1 always uses the uniform string, however someone
+	 * might switch the uniquifier string on us.
+	 */
+	if (!nfs4_match_client_owner_id(pos, new))
+		return 1;
+
+	return 0;
+}
+
 /**
  * nfs40_walk_client_list - Find server that recognizes a client ID
  *
@@ -492,36 +563,30 @@ int nfs40_walk_client_list(struct nfs_client *new,
 	spin_lock(&nn->nfs_client_lock);
 	list_for_each_entry(pos, &nn->nfs_client_list, cl_share_link) {
 
-		if (pos->rpc_ops != new->rpc_ops)
+		if (pos == new)
+			goto found;
+
+		status = nfs4_match_client(pos, new, &prev, nn);
+		if (status < 0)
+			goto out_unlock;
+		if (status != 0)
 			continue;
-
-		if (pos->cl_minorversion != new->cl_minorversion)
+		/*
+		 * We just sent a new SETCLIENTID, which should have
+		 * caused the server to return a new cl_confirm.  So if
+		 * cl_confirm is the same, then this is a different
+		 * server that just returned the same cl_confirm by
+		 * coincidence:
+		 */
+		if ((new != pos) && nfs4_same_verifier(&pos->cl_confirm,
+						       &new->cl_confirm))
 			continue;
-
-		/* If "pos" isn't marked ready, we can't trust the
-		 * remaining fields in "pos" */
-		if (pos->cl_cons_state > NFS_CS_READY) {
-			atomic_inc(&pos->cl_count);
-			spin_unlock(&nn->nfs_client_lock);
-
-			nfs_put_client(prev);
-			prev = pos;
-
-			status = nfs_wait_client_init_complete(pos);
-			if (status < 0)
-				goto out;
-			status = -NFS4ERR_STALE_CLIENTID;
-			spin_lock(&nn->nfs_client_lock);
-		}
-		if (pos->cl_cons_state != NFS_CS_READY)
-			continue;
-
-		if (pos->cl_clientid != new->cl_clientid)
-			continue;
-
-		if (!nfs4_match_client_owner_id(pos, new))
-			continue;
-
+		/*
+		 * But if the cl_confirm's are different, then the only
+		 * way that a SETCLIENTID_CONFIRM to pos can succeed is
+		 * if new and pos point to the same server:
+		 */
+found:
 		atomic_inc(&pos->cl_count);
 		spin_unlock(&nn->nfs_client_lock);
 
@@ -534,6 +599,8 @@ int nfs40_walk_client_list(struct nfs_client *new,
 			break;
 		case 0:
 			nfs4_swap_callback_idents(pos, new);
+			pos->cl_confirm = new->cl_confirm;
+			nfs_mark_client_ready(pos, NFS_CS_READY);
 
 			prev = NULL;
 			*result = pos;
@@ -552,6 +619,7 @@ int nfs40_walk_client_list(struct nfs_client *new,
 
 		spin_lock(&nn->nfs_client_lock);
 	}
+out_unlock:
 	spin_unlock(&nn->nfs_client_lock);
 
 	/* No match found. The server lost our clientid */
@@ -562,21 +630,6 @@ out:
 }
 
 #ifdef CONFIG_NFS_V4_1
-/*
- * Returns true if the client IDs match
- */
-static bool nfs4_match_clientids(u64 a, u64 b)
-{
-	if (a != b) {
-		dprintk("NFS: --> %s client ID %llx does not match %llx\n",
-			__func__, a, b);
-		return false;
-	}
-	dprintk("NFS: --> %s client ID %llx matches %llx\n",
-		__func__, a, b);
-	return true;
-}
-
 /*
  * Returns true if the server major ids match
  */
@@ -677,9 +730,6 @@ int nfs4_detect_session_trunking(struct nfs_client *clp,
 	if (!nfs4_check_server_scope(clp->cl_serverscope, res->server_scope))
 		goto out_err;
 
-	/* Session trunking passed, add the xprt */
-	rpc_clnt_xprt_switch_add_xprt(clp->cl_rpcclient, xprt);
-
 	pr_info("NFS:  %s: Session trunking succeeded for %s\n",
 		clp->cl_hostname,
 		xprt->address_strings[RPC_DISPLAY_ADDR]);
@@ -719,33 +769,10 @@ int nfs41_walk_client_list(struct nfs_client *new,
 		if (pos == new)
 			goto found;
 
-		if (pos->rpc_ops != new->rpc_ops)
-			continue;
-
-		if (pos->cl_minorversion != new->cl_minorversion)
-			continue;
-
-		/* If "pos" isn't marked ready, we can't trust the
-		 * remaining fields in "pos", especially the client
-		 * ID and serverowner fields.  Wait for CREATE_SESSION
-		 * to finish. */
-		if (pos->cl_cons_state > NFS_CS_READY) {
-			atomic_inc(&pos->cl_count);
-			spin_unlock(&nn->nfs_client_lock);
-
-			nfs_put_client(prev);
-			prev = pos;
-
-			status = nfs_wait_client_init_complete(pos);
-			spin_lock(&nn->nfs_client_lock);
-			if (status < 0)
-				break;
-			status = -NFS4ERR_STALE_CLIENTID;
-		}
-		if (pos->cl_cons_state != NFS_CS_READY)
-			continue;
-
-		if (!nfs4_match_clientids(pos->cl_clientid, new->cl_clientid))
+		status = nfs4_match_client(pos, new, &prev, nn);
+		if (status < 0)
+			goto out;
+		if (status != 0)
 			continue;
 
 		/*
@@ -757,23 +784,15 @@ int nfs41_walk_client_list(struct nfs_client *new,
 						     new->cl_serverowner))
 			continue;
 
-		/* Unlike NFSv4.0, we know that NFSv4.1 always uses the
-		 * uniform string, however someone might switch the
-		 * uniquifier string on us.
-		 */
-		if (!nfs4_match_client_owner_id(pos, new))
-			continue;
 found:
 		atomic_inc(&pos->cl_count);
 		*result = pos;
 		status = 0;
-		dprintk("NFS: <-- %s using nfs_client = %p ({%d})\n",
-			__func__, pos, atomic_read(&pos->cl_count));
 		break;
 	}
 
+out:
 	spin_unlock(&nn->nfs_client_lock);
-	dprintk("NFS: <-- %s status = %d\n", __func__, status);
 	nfs_put_client(prev);
 	return status;
 }
@@ -781,12 +800,9 @@ found:
 
 static void nfs4_destroy_server(struct nfs_server *server)
 {
-	LIST_HEAD(freeme);
-
 	nfs_server_return_all_delegations(server);
 	unset_pnfs_layoutdriver(server);
-	nfs4_purge_state_owners(server, &freeme);
-	nfs4_free_state_owners(&freeme);
+	nfs4_purge_state_owners(server);
 }
 
 /*
@@ -847,7 +863,7 @@ nfs4_find_client_sessionid(struct net *net, const struct sockaddr *addr,
 
 	spin_lock(&nn->nfs_client_lock);
 	list_for_each_entry(clp, &nn->nfs_client_list, cl_share_link) {
-		if (!nfs4_cb_match_client(addr, clp, minorversion))
+		if (nfs4_cb_match_client(addr, clp, minorversion) == false)
 			continue;
 
 		if (!nfs4_has_session(clp))
@@ -917,6 +933,7 @@ static int nfs4_set_client(struct nfs_server *server,
 	}
 
 	if (server->nfs_client == clp) {
+		nfs_put_client(clp);
 		error = -ELOOP;
 		goto error;
 	}
@@ -1240,7 +1257,7 @@ error:
  */
 static int nfs_probe_destination(struct nfs_server *server)
 {
-	struct inode *inode = d_inode(server->super->s_root);
+	struct inode *inode = server->super->s_root->d_inode;
 	struct nfs_fattr *fattr;
 	int error;
 
@@ -1319,13 +1336,13 @@ int nfs4_update_server(struct nfs_server *server, const char *hostname,
 				clp->cl_rpcclient->cl_auth->au_flavor,
 				clp->cl_proto, clnt->cl_timeout,
 				clp->cl_minorversion, net);
-	nfs_put_client(clp);
 	if (error != 0) {
 		nfs_server_insert_lists(server);
 		dprintk("<-- %s(): nfs4_set_client returned %d\n",
 			__func__, error);
 		goto out;
 	}
+	nfs_put_client(clp);
 
 	if (server->nfs_client->cl_hostname == NULL)
 		server->nfs_client->cl_hostname = kstrdup(hostname, GFP_KERNEL);

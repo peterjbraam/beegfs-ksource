@@ -762,6 +762,7 @@ static int ide_init_queue(ide_drive_t *drive)
 	q = blk_init_queue_node(do_ide_request, NULL, hwif_to_node(hwif));
 	if (!q)
 		return 1;
+	queue_flag_set_unlocked(QUEUE_FLAG_SCSI_PASSTHROUGH, q);
 
 	q->queuedata = drive;
 	blk_queue_segment_boundary(q, 0xffff);
@@ -853,9 +854,8 @@ static int init_irq (ide_hwif_t *hwif)
 	if (irq_handler == NULL)
 		irq_handler = ide_intr;
 
-	if (!host->get_lock)
-		if (request_irq(hwif->irq, irq_handler, sa, hwif->name, hwif))
-			goto out_up;
+	if (request_irq(hwif->irq, irq_handler, sa, hwif->name, hwif))
+		goto out_up;
 
 #if !defined(__mc68000__)
 	printk(KERN_INFO "%s at 0x%03lx-0x%03lx,0x%03lx on irq %d", hwif->name,
@@ -1534,8 +1534,7 @@ static void ide_unregister(ide_hwif_t *hwif)
 
 	ide_proc_unregister_port(hwif);
 
-	if (!hwif->host->get_lock)
-		free_irq(hwif->irq, hwif);
+	free_irq(hwif->irq, hwif);
 
 	device_unregister(hwif->portdev);
 	device_unregister(&hwif->gendev);

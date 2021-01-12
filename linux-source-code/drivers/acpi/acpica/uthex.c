@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2016, Intel Corp.
+ * Copyright (C) 2000 - 2014, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -48,7 +48,7 @@
 ACPI_MODULE_NAME("uthex")
 
 /* Hex to ASCII conversion table */
-static const char acpi_gbl_hex_to_ascii[] = {
+static char acpi_gbl_hex_to_ascii[] = {
 	'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D',
 	    'E', 'F'
 };
@@ -92,8 +92,7 @@ acpi_status acpi_ut_ascii_to_hex_byte(char *two_ascii_chars, u8 *return_byte)
 
 	/* Both ASCII characters must be valid hex digits */
 
-	if (!isxdigit((int)two_ascii_chars[0]) ||
-	    !isxdigit((int)two_ascii_chars[1])) {
+	if (!isxdigit(two_ascii_chars[0]) || !isxdigit(two_ascii_chars[1])) {
 		return (AE_BAD_HEX_CONSTANT);
 	}
 
@@ -106,7 +105,7 @@ acpi_status acpi_ut_ascii_to_hex_byte(char *two_ascii_chars, u8 *return_byte)
 
 /*******************************************************************************
  *
- * FUNCTION:    acpi_ut_ascii_char_to_hex
+ * FUNCTION:    acpi_ut_hex_char_to_value
  *
  * PARAMETERS:  hex_char                - Hex character in Ascii. Must be:
  *                                        0-9 or A-F or a-f

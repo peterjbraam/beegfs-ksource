@@ -427,8 +427,10 @@ static struct scx200_acb_iface *scx200_create_iface(const char *text,
 	struct i2c_adapter *adapter;
 
 	iface = kzalloc(sizeof(*iface), GFP_KERNEL);
-	if (!iface)
+	if (!iface) {
+		pr_err("can't allocate memory\n");
 		return NULL;
+	}
 
 	adapter = &iface->adapter;
 	i2c_set_adapdata(adapter, iface);
@@ -544,6 +546,7 @@ static int scx200_remove(struct platform_device *pdev)
 static struct platform_driver scx200_pci_driver = {
 	.driver = {
 		.name = "cs5535-smb",
+		.owner = THIS_MODULE,
 	},
 	.probe = scx200_probe,
 	.remove = scx200_remove,

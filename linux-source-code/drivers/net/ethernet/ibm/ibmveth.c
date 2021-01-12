@@ -12,7 +12,8 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; if not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  *
  * Copyright (C) IBM Corporation, 2003, 2010
  *
@@ -174,7 +175,7 @@ static int ibmveth_alloc_buffer_pool(struct ibmveth_buff_pool *pool)
 	if (!pool->free_map)
 		return -1;
 
-	pool->dma_addr = kcalloc(pool->size, sizeof(dma_addr_t), GFP_KERNEL);
+	pool->dma_addr = kmalloc(sizeof(dma_addr_t) * pool->size, GFP_KERNEL);
 	if (!pool->dma_addr) {
 		kfree(pool->free_map);
 		pool->free_map = NULL;
@@ -191,6 +192,8 @@ static int ibmveth_alloc_buffer_pool(struct ibmveth_buff_pool *pool)
 		pool->free_map = NULL;
 		return -1;
 	}
+
+	memset(pool->dma_addr, 0, sizeof(dma_addr_t) * pool->size);
 
 	for (i = 0; i < pool->size; ++i)
 		pool->free_map[i] = i;
@@ -1157,20 +1160,16 @@ retry_bounce:
 			       DMA_TO_DEVICE);
 
 out:
-	dev_consume_skb_any(skb);
+	dev_kfree_skb(skb);
 	return NETDEV_TX_OK;
 
 map_failed_frags:
 	last = i+1;
-	for (i = 1; i < last; i++)
+	for (i = 0; i < last; i++)
 		dma_unmap_page(&adapter->vdev->dev, descs[i].fields.address,
 			       descs[i].fields.flags_len & IBMVETH_BUF_LEN_MASK,
 			       DMA_TO_DEVICE);
 
-	dma_unmap_single(&adapter->vdev->dev,
-			 descs[0].fields.address,
-			 descs[0].fields.flags_len & IBMVETH_BUF_LEN_MASK,
-			 DMA_TO_DEVICE);
 map_failed:
 	if (!firmware_has_feature(FW_FEATURE_CMO))
 		netdev_err(netdev, "tx: unable to map xmit buffer\n");
@@ -1256,7 +1255,6 @@ static int ibmveth_poll(struct napi_struct *napi, int budget)
 			int offset = ibmveth_rxq_frame_offset(adapter);
 			int csum_good = ibmveth_rxq_csum_good(adapter);
 			int lrg_pkt = ibmveth_rxq_large_packet(adapter);
-			__sum16 iph_check = 0;
 
 			skb = ibmveth_rxq_get_buffer(adapter);
 
@@ -1308,17 +1306,7 @@ static int ibmveth_poll(struct napi_struct *napi, int budget)
 				}
 			}
 
-			/* PHYP without PLSO support places a -1 in the ip
-			 * checksum for large send frames.
-			 */
-			if (skb->protocol == cpu_to_be16(ETH_P_IP)) {
-				struct iphdr *iph = (struct iphdr *)skb->data;
-
-				iph_check = iph->check;
-			}
-
-			if ((length > netdev->mtu + ETH_HLEN) ||
-			    lrg_pkt || iph_check == 0xffff) {
+			if (length > netdev->mtu + ETH_HLEN) {
 				ibmveth_rx_mss_helper(skb, mss, lrg_pkt);
 				adapter->rx_large_packets++;
 			}
@@ -1552,7 +1540,7 @@ static const struct net_device_ops ibmveth_netdev_ops = {
 	.ndo_start_xmit		= ibmveth_start_xmit,
 	.ndo_set_rx_mode	= ibmveth_set_multicast_list,
 	.ndo_do_ioctl		= ibmveth_ioctl,
-	.ndo_change_mtu		= ibmveth_change_mtu,
+	.ndo_change_mtu_rh74	= ibmveth_change_mtu,
 	.ndo_fix_features	= ibmveth_fix_features,
 	.ndo_set_features	= ibmveth_set_features,
 	.ndo_validate_addr	= eth_validate_addr,
@@ -1568,7 +1556,7 @@ static int ibmveth_probe(struct vio_dev *dev, const struct vio_device_id *id)
 	struct net_device *netdev;
 	struct ibmveth_adapter *adapter;
 	unsigned char *mac_addr_p;
-	__be32 *mcastFilterSize_p;
+	unsigned int *mcastFilterSize_p;
 	long ret;
 	unsigned long ret_attr;
 
@@ -1590,9 +1578,8 @@ static int ibmveth_probe(struct vio_dev *dev, const struct vio_device_id *id)
 		return -EINVAL;
 	}
 
-	mcastFilterSize_p = (__be32 *)vio_get_attribute(dev,
-							VETH_MCAST_FILTER_SIZE,
-							NULL);
+	mcastFilterSize_p = (unsigned int *)vio_get_attribute(dev,
+						VETH_MCAST_FILTER_SIZE, NULL);
 	if (!mcastFilterSize_p) {
 		dev_err(&dev->dev, "Can't find VETH_MCAST_FILTER_SIZE "
 			"attribute\n");
@@ -1609,7 +1596,7 @@ static int ibmveth_probe(struct vio_dev *dev, const struct vio_device_id *id)
 
 	adapter->vdev = dev;
 	adapter->netdev = netdev;
-	adapter->mcastFilterSize = be32_to_cpu(*mcastFilterSize_p);
+	adapter->mcastFilterSize = *mcastFilterSize_p;
 	adapter->pool_config = 0;
 
 	netif_napi_add(netdev, &adapter->napi, ibmveth_poll, 16);

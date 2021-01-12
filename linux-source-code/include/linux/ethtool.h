@@ -15,6 +15,7 @@
 #include <linux/bitmap.h>
 #include <linux/compat.h>
 #include <uapi/linux/ethtool.h>
+#include <linux/rh_kabi.h>
 
 #ifdef CONFIG_COMPAT
 
@@ -60,6 +61,7 @@ enum ethtool_phys_id_state {
 enum {
 	ETH_RSS_HASH_TOP_BIT, /* Configurable RSS hash function - Toeplitz */
 	ETH_RSS_HASH_XOR_BIT, /* Configurable RSS hash function - Xor */
+	ETH_RSS_HASH_CRC32_BIT, /* Configurable RSS hash function - Crc32 */
 
 	/*
 	 * Add your fresh new hash function bits above and remember to update
@@ -73,6 +75,7 @@ enum {
 
 #define ETH_RSS_HASH_TOP	__ETH_RSS_HASH(TOP)
 #define ETH_RSS_HASH_XOR	__ETH_RSS_HASH(XOR)
+#define ETH_RSS_HASH_CRC32	__ETH_RSS_HASH(CRC32)
 
 #define ETH_RSS_HASH_UNKNOWN	0
 #define ETH_RSS_HASH_NO_CHANGE	0
@@ -135,6 +138,17 @@ struct ethtool_link_ksettings {
 	__set_bit(ETHTOOL_LINK_MODE_ ## mode ## _BIT, (ptr)->link_modes.name)
 
 /**
+ * ethtool_link_ksettings_del_link_mode - clear bit in link_ksettings
+ * link mode mask
+ *   @ptr : pointer to struct ethtool_link_ksettings
+ *   @name : one of supported/advertising/lp_advertising
+ *   @mode : one of the ETHTOOL_LINK_MODE_*_BIT
+ * (not atomic, no bound checking)
+ */
+#define ethtool_link_ksettings_del_link_mode(ptr, name, mode)		\
+	__clear_bit(ETHTOOL_LINK_MODE_ ## mode ## _BIT, (ptr)->link_modes.name)
+
+/**
  * ethtool_link_ksettings_test_link_mode - test bit in ksettings link mode mask
  *   @ptr : pointer to struct ethtool_link_ksettings
  *   @name : one of supported/advertising/lp_advertising
@@ -149,6 +163,16 @@ struct ethtool_link_ksettings {
 extern int
 __ethtool_get_link_ksettings(struct net_device *dev,
 			     struct ethtool_link_ksettings *link_ksettings);
+
+/**
+ * ethtool_intersect_link_masks - Given two link masks, AND them together
+ * @dst: first mask and where result is stored
+ * @src: second mask to intersect with
+ *
+ * Given two link mode masks, AND them together and save the result in dst.
+ */
+void ethtool_intersect_link_masks(struct ethtool_link_ksettings *dst,
+				  struct ethtool_link_ksettings *src);
 
 void ethtool_convert_legacy_u32_to_link_mode(unsigned long *dst,
 					     u32 legacy_u32);
@@ -240,9 +264,13 @@ bool ethtool_convert_link_mode_to_legacy_u32(u32 *legacy_u32,
  *	Returns zero if not supported for this specific device.
  * @get_rxfh_indir_size: Get the size of the RX flow hash indirection table.
  *	Returns zero if not supported for this specific device.
+ * @get_rxfh_indir: Get the contents of the RX flow hash indirection table.
+ *	Will not be called if @get_rxfh_indir_size returns zero.
  * @get_rxfh: Get the contents of the RX flow hash indirection table, hash key
  *	and/or hash function.
  *	Returns a negative error code or zero.
+ * @set_rxfh_indir: Set the contents of the RX flow hash indirection table.
+ *	Will not be called if @get_rxfh_indir_size returns zero.
  * @set_rxfh: Set the contents of the RX flow hash indirection table, hash
  *	key, and/or hash function.  Arguments which are set to %NULL or zero
  *	will remain unchanged.
@@ -341,12 +369,9 @@ struct ethtool_ops {
 	int	(*set_rxnfc)(struct net_device *, struct ethtool_rxnfc *);
 	int	(*flash_device)(struct net_device *, struct ethtool_flash *);
 	int	(*reset)(struct net_device *, u32 *);
-	u32	(*get_rxfh_key_size)(struct net_device *);
 	u32	(*get_rxfh_indir_size)(struct net_device *);
-	int	(*get_rxfh)(struct net_device *, u32 *indir, u8 *key,
-			    u8 *hfunc);
-	int	(*set_rxfh)(struct net_device *, const u32 *indir,
-			    const u8 *key, const u8 hfunc);
+	int	(*get_rxfh_indir)(struct net_device *, u32 *);
+	int	(*set_rxfh_indir)(struct net_device *, const u32 *);
 	void	(*get_channels)(struct net_device *, struct ethtool_channels *);
 	int	(*set_channels)(struct net_device *, struct ethtool_channels *);
 	int	(*get_dump_flag)(struct net_device *, struct ethtool_dump *);
@@ -360,17 +385,47 @@ struct ethtool_ops {
 				     struct ethtool_eeprom *, u8 *);
 	int	(*get_eee)(struct net_device *, struct ethtool_eee *);
 	int	(*set_eee)(struct net_device *, struct ethtool_eee *);
-	int	(*get_tunable)(struct net_device *,
-			       const struct ethtool_tunable *, void *);
-	int	(*set_tunable)(struct net_device *,
-			       const struct ethtool_tunable *, const void *);
-	int	(*get_per_queue_coalesce)(struct net_device *, u32,
-					  struct ethtool_coalesce *);
-	int	(*set_per_queue_coalesce)(struct net_device *, u32,
-					  struct ethtool_coalesce *);
-	int	(*get_link_ksettings)(struct net_device *,
-				      struct ethtool_link_ksettings *);
-	int	(*set_link_ksettings)(struct net_device *,
-				      const struct ethtool_link_ksettings *);
+
+	/* RHEL SPECIFIC
+	 *
+	 * The following padding has been inserted before ABI freeze to
+	 * allow extending the structure while preserve ABI. Feel free
+	 * to replace reserved slots with required structure field
+	 * additions of your backport.
+	 */
+	RH_KABI_USE_P(1, u32	(*get_rxfh_key_size)(struct net_device *))
+	RH_KABI_USE_P(2, int	(*get_rxfh)(struct net_device *, u32 *indir,
+					    u8 *key, u8 *hfunc))
+	RH_KABI_USE_P(3, int	(*set_rxfh)(struct net_device *,
+					    const u32 *indir, const u8 *key,
+					    const u8 hfunc))
+	RH_KABI_USE_P(4, int	(*get_tunable)(struct net_device *,
+					       const struct ethtool_tunable *,
+					       void *))
+	RH_KABI_USE_P(5, int	(*set_tunable)(struct net_device *,
+					       const struct ethtool_tunable *,
+					       const void *))
+	RH_KABI_USE_P(6, int	(*get_per_queue_coalesce)(struct net_device *,
+							  u32,
+							  struct ethtool_coalesce *))
+	RH_KABI_USE_P(7, int	(*set_per_queue_coalesce)(struct net_device *,
+							  u32,
+							  struct ethtool_coalesce *))
+	RH_KABI_USE_P(8, int	(*get_link_ksettings)(struct net_device *,
+					      struct ethtool_link_ksettings *))
+	RH_KABI_USE_P(9, int	(*set_link_ksettings)(struct net_device *,
+				      const struct ethtool_link_ksettings *))
+	RH_KABI_USE_P(10,int	(*get_fecparam)(struct net_device *,
+				      struct ethtool_fecparam *))
+	RH_KABI_USE_P(11,int	(*set_fecparam)(struct net_device *,
+				      struct ethtool_fecparam *))
+	RH_KABI_USE_P(12,int	(*get_rxfh_context)(struct net_device *, u32 *indir, u8 *key,
+				    u8 *hfunc, u32 rss_context))
+	RH_KABI_USE_P(13,int	(*set_rxfh_context)(struct net_device *, const u32 *indir,
+				    const u8 *key, const u8 hfunc,
+				    u32 *rss_context, bool delete))
+	RH_KABI_RESERVE_P(14)
+	RH_KABI_RESERVE_P(15)
+	RH_KABI_RESERVE_P(16)
 };
 #endif /* _LINUX_ETHTOOL_H */

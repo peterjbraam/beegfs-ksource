@@ -220,7 +220,7 @@ void rds_tcp_set_callbacks(struct socket *sock, struct rds_conn_path *cp)
 	write_unlock_bh(&sock->sk->sk_callback_lock);
 }
 
-static void rds_tcp_tc_info(struct socket *sock, unsigned int len,
+static void rds_tcp_tc_info(struct socket *rds_sock, unsigned int len,
 			    struct rds_info_iterator *iter,
 			    struct rds_info_lengths *lens)
 {
@@ -229,6 +229,7 @@ static void rds_tcp_tc_info(struct socket *sock, unsigned int len,
 	unsigned long flags;
 	struct sockaddr_in sin;
 	int sinlen;
+	struct socket *sock;
 
 	spin_lock_irqsave(&rds_tcp_tc_list_lock, flags);
 
@@ -237,12 +238,17 @@ static void rds_tcp_tc_info(struct socket *sock, unsigned int len,
 
 	list_for_each_entry(tc, &rds_tcp_tc_list, t_list_item) {
 
-		sock->ops->getname(sock, (struct sockaddr *)&sin, &sinlen, 0);
-		tsinfo.local_addr = sin.sin_addr.s_addr;
-		tsinfo.local_port = sin.sin_port;
-		sock->ops->getname(sock, (struct sockaddr *)&sin, &sinlen, 1);
-		tsinfo.peer_addr = sin.sin_addr.s_addr;
-		tsinfo.peer_port = sin.sin_port;
+		sock = tc->t_sock;
+		if (sock) {
+			sock->ops->getname(sock, (struct sockaddr *)&sin,
+					   &sinlen, 0);
+			tsinfo.local_addr = sin.sin_addr.s_addr;
+			tsinfo.local_port = sin.sin_port;
+			sock->ops->getname(sock, (struct sockaddr *)&sin,
+					   &sinlen, 1);
+			tsinfo.peer_addr = sin.sin_addr.s_addr;
+			tsinfo.peer_port = sin.sin_port;
+		}
 
 		tsinfo.hdr_rem = tc->t_tinc_hdr_rem;
 		tsinfo.data_rem = tc->t_tinc_data_rem;
@@ -303,8 +309,7 @@ static void rds_tcp_conn_free(void *arg)
 	rdsdebug("freeing tc %p\n", tc);
 
 	spin_lock_irqsave(&rds_tcp_conn_lock, flags);
-	if (!tc->t_tcp_node_detached)
-		list_del(&tc->t_tcp_node);
+	list_del(&tc->t_tcp_node);
 	spin_unlock_irqrestore(&rds_tcp_conn_lock, flags);
 
 	kmem_cache_free(rds_tcp_conn_slab, tc);
@@ -479,10 +484,9 @@ static void __net_exit rds_tcp_exit_net(struct net *net)
 	 * we do need to clean up the listen socket here.
 	 */
 	if (rtn->rds_tcp_listen_sock) {
-		struct socket *lsock = rtn->rds_tcp_listen_sock;
-
+		rds_tcp_listen_stop(rtn->rds_tcp_listen_sock);
 		rtn->rds_tcp_listen_sock = NULL;
-		rds_tcp_listen_stop(lsock, &rtn->rds_tcp_accept_w);
+		flush_work(&rtn->rds_tcp_accept_w);
 	}
 }
 
@@ -519,22 +523,18 @@ static void rds_tcp_kill_sock(struct net *net)
 	struct rds_tcp_connection *tc, *_tc;
 	LIST_HEAD(tmp_list);
 	struct rds_tcp_net *rtn = net_generic(net, rds_tcp_netid);
-	struct socket *lsock = rtn->rds_tcp_listen_sock;
 
+	rds_tcp_listen_stop(rtn->rds_tcp_listen_sock);
 	rtn->rds_tcp_listen_sock = NULL;
-	rds_tcp_listen_stop(lsock, &rtn->rds_tcp_accept_w);
+	flush_work(&rtn->rds_tcp_accept_w);
 	spin_lock_irq(&rds_tcp_conn_lock);
 	list_for_each_entry_safe(tc, _tc, &rds_tcp_conn_list, t_tcp_node) {
 		struct net *c_net = read_pnet(&tc->t_cpath->cp_conn->c_net);
 
-		if (net != c_net)
+		if (net != c_net || !tc->t_sock)
 			continue;
-		if (!list_has_conn(&tmp_list, tc->t_cpath->cp_conn)) {
+		if (!list_has_conn(&tmp_list, tc->t_cpath->cp_conn))
 			list_move_tail(&tc->t_tcp_node, &tmp_list);
-		} else {
-			list_del(&tc->t_tcp_node);
-			tc->t_tcp_node_detached = true;
-		}
 	}
 	spin_unlock_irq(&rds_tcp_conn_lock);
 	list_for_each_entry_safe(tc, _tc, &tmp_list, t_tcp_node) {
@@ -546,12 +546,8 @@ static void rds_tcp_kill_sock(struct net *net)
 void *rds_tcp_listen_sock_def_readable(struct net *net)
 {
 	struct rds_tcp_net *rtn = net_generic(net, rds_tcp_netid);
-	struct socket *lsock = rtn->rds_tcp_listen_sock;
 
-	if (!lsock)
-		return NULL;
-
-	return lsock->sk->sk_user_data;
+	return rtn->rds_tcp_listen_sock->sk->sk_user_data;
 }
 
 static int rds_tcp_dev_event(struct notifier_block *this,

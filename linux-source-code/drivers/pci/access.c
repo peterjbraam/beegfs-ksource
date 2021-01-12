@@ -67,93 +67,6 @@ EXPORT_SYMBOL(pci_bus_write_config_byte);
 EXPORT_SYMBOL(pci_bus_write_config_word);
 EXPORT_SYMBOL(pci_bus_write_config_dword);
 
-int pci_generic_config_read(struct pci_bus *bus, unsigned int devfn,
-			    int where, int size, u32 *val)
-{
-	void __iomem *addr;
-
-	addr = bus->ops->map_bus(bus, devfn, where);
-	if (!addr) {
-		*val = ~0;
-		return PCIBIOS_DEVICE_NOT_FOUND;
-	}
-
-	if (size == 1)
-		*val = readb(addr);
-	else if (size == 2)
-		*val = readw(addr);
-	else
-		*val = readl(addr);
-
-	return PCIBIOS_SUCCESSFUL;
-}
-EXPORT_SYMBOL_GPL(pci_generic_config_read);
-
-int pci_generic_config_write(struct pci_bus *bus, unsigned int devfn,
-			     int where, int size, u32 val)
-{
-	void __iomem *addr;
-
-	addr = bus->ops->map_bus(bus, devfn, where);
-	if (!addr)
-		return PCIBIOS_DEVICE_NOT_FOUND;
-
-	if (size == 1)
-		writeb(val, addr);
-	else if (size == 2)
-		writew(val, addr);
-	else
-		writel(val, addr);
-
-	return PCIBIOS_SUCCESSFUL;
-}
-EXPORT_SYMBOL_GPL(pci_generic_config_write);
-
-int pci_generic_config_read32(struct pci_bus *bus, unsigned int devfn,
-			      int where, int size, u32 *val)
-{
-	void __iomem *addr;
-
-	addr = bus->ops->map_bus(bus, devfn, where & ~0x3);
-	if (!addr) {
-		*val = ~0;
-		return PCIBIOS_DEVICE_NOT_FOUND;
-	}
-
-	*val = readl(addr);
-
-	if (size <= 2)
-		*val = (*val >> (8 * (where & 3))) & ((1 << (size * 8)) - 1);
-
-	return PCIBIOS_SUCCESSFUL;
-}
-EXPORT_SYMBOL_GPL(pci_generic_config_read32);
-
-int pci_generic_config_write32(struct pci_bus *bus, unsigned int devfn,
-			       int where, int size, u32 val)
-{
-	void __iomem *addr;
-	u32 mask, tmp;
-
-	addr = bus->ops->map_bus(bus, devfn, where & ~0x3);
-	if (!addr)
-		return PCIBIOS_DEVICE_NOT_FOUND;
-
-	if (size == 4) {
-		writel(val, addr);
-		return PCIBIOS_SUCCESSFUL;
-	} else {
-		mask = ~(((1 << (size * 8)) - 1) << ((where & 0x3) * 8));
-	}
-
-	tmp = readl(addr) & mask;
-	tmp |= val << ((where & 0x3) * 8);
-	writel(tmp, addr);
-
-	return PCIBIOS_SUCCESSFUL;
-}
-EXPORT_SYMBOL_GPL(pci_generic_config_write32);
-
 /**
  * pci_bus_set_ops - Set raw operations of pci bus
  * @bus:	pci bus struct
@@ -185,13 +98,17 @@ EXPORT_SYMBOL(pci_bus_set_ops);
 static DECLARE_WAIT_QUEUE_HEAD(pci_cfg_wait);
 
 static noinline void pci_wait_cfg(struct pci_dev *dev)
-	__must_hold(&pci_lock)
 {
+	DECLARE_WAITQUEUE(wait, current);
+
+	__add_wait_queue(&pci_cfg_wait, &wait);
 	do {
+		set_current_state(TASK_UNINTERRUPTIBLE);
 		raw_spin_unlock_irq(&pci_lock);
-		wait_event(pci_cfg_wait, !dev->block_cfg_access);
+		schedule();
 		raw_spin_lock_irq(&pci_lock);
 	} while (dev->block_cfg_access);
+	__remove_wait_queue(&pci_cfg_wait, &wait);
 }
 
 /* Returns 0 on success, negative values indicate error. */
@@ -351,7 +268,7 @@ static size_t pci_vpd_size(struct pci_dev *dev, size_t old_size)
 static int pci_vpd_wait(struct pci_dev *dev)
 {
 	struct pci_vpd *vpd = dev->vpd;
-	unsigned long timeout = jiffies + msecs_to_jiffies(50);
+	unsigned long timeout = jiffies + msecs_to_jiffies(125);
 	unsigned long max_sleep = 16;
 	u16 status;
 	int ret;
@@ -668,11 +585,49 @@ void pci_cfg_access_unlock(struct pci_dev *dev)
 	WARN_ON(!dev->block_cfg_access);
 
 	dev->block_cfg_access = 0;
-	raw_spin_unlock_irqrestore(&pci_lock, flags);
-
 	wake_up_all(&pci_cfg_wait);
+	raw_spin_unlock_irqrestore(&pci_lock, flags);
 }
 EXPORT_SYMBOL_GPL(pci_cfg_access_unlock);
+
+/**
+ * pci_pcie_type - get the PCIe device/port type
+ * @dev: PCI device
+ */
+int pci_pcie_type(const struct pci_dev *dev)
+{
+	return (pcie_caps_reg(dev) & PCI_EXP_FLAGS_TYPE) >> 4;
+}
+EXPORT_SYMBOL_GPL(pci_pcie_type);
+
+/**
+ * pci_pcie_cap - get the saved PCIe capability offset
+ * @dev: PCI device
+ *
+ * PCIe capability offset is calculated at PCI device initialization
+ * time and saved in the data structure. This function returns saved
+ * PCIe capability offset. Using this instead of pci_find_capability()
+ * reduces unnecessary search in the PCI configuration space. If you
+ * need to calculate PCIe capability offset from raw device for some
+ * reasons, please use pci_find_capability() instead.
+ */
+int pci_pcie_cap(struct pci_dev *dev)
+{
+	return dev->pcie_cap;
+}
+EXPORT_SYMBOL_GPL(pci_pcie_cap);
+
+/**
+ * pci_is_pcie - check if the PCI device is PCI Express capable
+ * @dev: PCI device
+ *
+ * Returns: true if the PCI device is PCI Express capable, false otherwise.
+ */
+bool pci_is_pcie(struct pci_dev *dev)
+{
+	return pci_pcie_cap(dev);
+}
+EXPORT_SYMBOL_GPL(pci_is_pcie);
 
 static inline int pcie_cap_version(const struct pci_dev *dev)
 {
@@ -840,6 +795,18 @@ int pcie_capability_write_dword(struct pci_dev *dev, int pos, u32 val)
 	return pci_write_config_dword(dev, pci_pcie_cap(dev) + pos, val);
 }
 EXPORT_SYMBOL(pcie_capability_write_dword);
+
+int pcie_capability_set_word(struct pci_dev *dev, int pos, u16 set)
+{
+	return pcie_capability_clear_and_set_word(dev, pos, 0, set);
+}
+EXPORT_SYMBOL(pcie_capability_set_word);
+
+int pcie_capability_clear_word(struct pci_dev *dev, int pos, u16 clear)
+{
+	return pcie_capability_clear_and_set_word(dev, pos, clear, 0);
+}
+EXPORT_SYMBOL(pcie_capability_clear_word);
 
 int pcie_capability_clear_and_set_word(struct pci_dev *dev, int pos,
 				       u16 clear, u16 set)

@@ -44,6 +44,7 @@
 #include <asm/ptrace.h>
 #include <asm/types.h>
 #include <asm/hw_breakpoint.h>
+#include <linux/rh_kabi.h>
 
 /* We do _not_ want to define new machine types at all, those must die
  * in favor of using the device-tree
@@ -87,6 +88,12 @@ extern int _chrp_type;
 struct task_struct;
 void start_thread(struct pt_regs *regs, unsigned long fdptr, unsigned long sp);
 void release_thread(struct task_struct *);
+
+/* Lazy FPU handling on uni-processor */
+extern struct task_struct *last_task_used_math;
+extern struct task_struct *last_task_used_altivec;
+extern struct task_struct *last_task_used_vsx;
+extern struct task_struct *last_task_used_spe;
 
 #ifdef CONFIG_PPC32
 
@@ -147,7 +154,7 @@ typedef struct {
 } mm_segment_t;
 
 #define TS_FPR(i) fp_state.fpr[i][TS_FPROFFSET]
-#define TS_CKFPR(i) ckfp_state.fpr[i][TS_FPROFFSET]
+#define TS_TRANS_FPR(i) transact_fp.fpr[i][TS_FPROFFSET]
 
 /* FP and VSX 0-31 register set */
 struct thread_fp_state {
@@ -161,16 +168,23 @@ struct thread_vr_state {
 	vector128	vscr __attribute__((aligned(16)));
 };
 
+#ifndef __GENKSYMS__
+/*
+ * RHEL:
+ * This struct is embedded in thread_struct and matches the identical
+ * pre-change layout, hence why GENKSYMS works here.  Modifying this struct
+ * WILL break kabi.
+ */
 struct debug_reg {
 #ifdef CONFIG_PPC_ADV_DEBUG_REGS
 	/*
 	 * The following help to manage the use of Debug Control Registers
 	 * om the BookE platforms.
 	 */
-	uint32_t	dbcr0;
-	uint32_t	dbcr1;
+	unsigned long	dbcr0;
+	unsigned long	dbcr1;
 #ifdef CONFIG_BOOKE
-	uint32_t	dbcr2;
+	unsigned long	dbcr2;
 #endif
 	/*
 	 * The stored value of the DBSR register will be the value at the
@@ -178,7 +192,7 @@ struct debug_reg {
 	 * user (will never be written to) and has value while helping to
 	 * describe the reason for the last debug trap.  Torez
 	 */
-	uint32_t	dbsr;
+	unsigned long	dbsr;
 	/*
 	 * The following will contain addresses used by debug applications
 	 * to help trace and trap on particular address locations.
@@ -199,6 +213,7 @@ struct debug_reg {
 #endif
 #endif
 };
+#endif /* __GENKSYMS__ */
 
 struct thread_struct {
 	unsigned long	ksp;		/* Kernel stack pointer */
@@ -216,15 +231,55 @@ struct thread_struct {
 	void		*pgdir;		/* root of page-table tree */
 	unsigned long	ksp_limit;	/* if ksp <= ksp_limit stack overflow */
 #endif
+#ifdef __GENKSYMS__
+#ifdef CONFIG_PPC_ADV_DEBUG_REGS
+	/*
+	 * The following help to manage the use of Debug Control Registers
+	 * om the BookE platforms.
+	 */
+	unsigned long	dbcr0;
+	unsigned long	dbcr1;
+#ifdef CONFIG_BOOKE
+	unsigned long	dbcr2;
+#endif
+	/*
+	 * The stored value of the DBSR register will be the value at the
+	 * last debug interrupt. This register can only be read from the
+	 * user (will never be written to) and has value while helping to
+	 * describe the reason for the last debug trap.  Torez
+	 */
+	unsigned long	dbsr;
+	/*
+	 * The following will contain addresses used by debug applications
+	 * to help trace and trap on particular address locations.
+	 * The bits in the Debug Control Registers above help define which
+	 * of the following registers will contain valid data and/or addresses.
+	 */
+	unsigned long	iac1;
+	unsigned long	iac2;
+#if CONFIG_PPC_ADV_DEBUG_IACS > 2
+	unsigned long	iac3;
+	unsigned long	iac4;
+#endif
+	unsigned long	dac1;
+	unsigned long	dac2;
+#if CONFIG_PPC_ADV_DEBUG_DVCS > 0
+	unsigned long	dvc1;
+	unsigned long	dvc2;
+#endif
+#endif
+#else /* __GENKSYMS__ */
 	/* Debug Registers */
 	struct debug_reg debug;
+#endif /* __GENKSYMS__ */
+
 	struct thread_fp_state	fp_state;
 	struct thread_fp_state	*fp_save_area;
 	int		fpexc_mode;	/* floating-point exception mode */
 	unsigned int	align_ctl;	/* alignment handling control */
 #ifdef CONFIG_PPC64
 	unsigned long	start_tb;	/* Start purr when proc switched in */
-	unsigned long	accum_tb;	/* Total accumulated purr for process */
+	unsigned long	accum_tb;	/* Total accumilated purr for process */
 #ifdef CONFIG_HAVE_HW_BREAKPOINT
 	struct perf_event *ptrace_bps[HBP_NUM];
 	/*
@@ -236,9 +291,7 @@ struct thread_struct {
 #endif
 	struct arch_hw_breakpoint hw_brk; /* info on the hardware breakpoint */
 	unsigned long	trap_nr;	/* last trap # on this thread */
-	u8 load_fp;
 #ifdef CONFIG_ALTIVEC
-	u8 load_vec;
 	struct thread_vr_state vr_state;
 	struct thread_vr_state *vr_save_area;
 	unsigned long	vrsave;
@@ -246,21 +299,19 @@ struct thread_struct {
 #endif /* CONFIG_ALTIVEC */
 #ifdef CONFIG_VSX
 	/* VSR status */
-	int		used_vsr;	/* set if process has used VSX */
+	int		used_vsr;	/* set if process has used altivec */
 #endif /* CONFIG_VSX */
 #ifdef CONFIG_SPE
 	unsigned long	evr[32];	/* upper 32-bits of SPE regs */
 	u64		acc;		/* Accumulator */
 	unsigned long	spefscr;	/* SPE & eFP status */
-	unsigned long	spefscr_last;	/* SPEFSCR value on last prctl
-					   call or trap return */
 	int		used_spe;	/* set if process has used spe */
 #endif /* CONFIG_SPE */
 #ifdef CONFIG_PPC_TRANSACTIONAL_MEM
-	u8	load_tm;
 	u64		tm_tfhar;	/* Transaction fail handler addr */
 	u64		tm_texasr;	/* Transaction exception & summary */
 	u64		tm_tfiar;	/* Transaction fail instr address reg */
+	RH_KABI_DEPRECATE(unsigned long, tm_orig_msr)	/* Thread's MSR on ctx switch */
 	struct pt_regs	ckpt_regs;	/* Checkpointed registers */
 
 	unsigned long	tm_tar;
@@ -268,17 +319,20 @@ struct thread_struct {
 	unsigned long	tm_dscr;
 
 	/*
-	 * Checkpointed FP and VSX 0-31 register set.
+	 * Transactional FP and VSX 0-31 register set.
+	 * NOTE: the sense of these is the opposite of the integer ckpt_regs!
 	 *
 	 * When a transaction is active/signalled/scheduled etc., *regs is the
 	 * most recent set of/speculated GPRs with ckpt_regs being the older
 	 * checkpointed regs to which we roll back if transaction aborts.
 	 *
-	 * These are analogous to how ckpt_regs and pt_regs work
+	 * However, fpr[] is the checkpointed 'base state' of FP regs, and
+	 * transact_fpr[] is the new set of transactional values.
+	 * VRs work the same way.
 	 */
-	struct thread_fp_state ckfp_state; /* Checkpointed FP state */
-	struct thread_vr_state ckvr_state; /* Checkpointed VR state */
-	unsigned long	ckvrsave; /* Checkpointed VRSAVE */
+	struct thread_fp_state transact_fp;
+	struct thread_vr_state transact_vr;
+	unsigned long	transact_vrsave;
 #endif /* CONFIG_PPC_TRANSACTIONAL_MEM */
 #ifdef CONFIG_KVM_BOOK3S_32_HANDLER
 	void*		kvm_shadow_vcpu; /* KVM internal data */
@@ -288,7 +342,6 @@ struct thread_struct {
 #endif
 #ifdef CONFIG_PPC64
 	unsigned long	dscr;
-	unsigned long	fscr;
 	/*
 	 * This member element dscr_inherit indicates that the process
 	 * has explicitly attempted and changed the DSCR register value
@@ -312,8 +365,7 @@ struct thread_struct {
 	unsigned long	mmcr2;
 	unsigned 	mmcr0;
 	unsigned 	used_ebb;
-	unsigned long	lmrr;
-	unsigned long	lmser;
+	unsigned long	mmcra;	/* retain for KABI compliance */
 #endif
 };
 
@@ -324,9 +376,7 @@ struct thread_struct {
 	(_ALIGN_UP(sizeof(init_thread_info), 16) + (unsigned long) &init_stack)
 
 #ifdef CONFIG_SPE
-#define SPEFSCR_INIT \
-	.spefscr = SPEFSCR_FINVE | SPEFSCR_FDBZE | SPEFSCR_FUNFE | SPEFSCR_FOVFE, \
-	.spefscr_last = SPEFSCR_FINVE | SPEFSCR_FDBZE | SPEFSCR_FUNFE | SPEFSCR_FOVFE,
+#define SPEFSCR_INIT .spefscr = SPEFSCR_FINVE | SPEFSCR_FDBZE | SPEFSCR_FUNFE | SPEFSCR_FOVFE,
 #else
 #define SPEFSCR_INIT
 #endif
@@ -347,7 +397,6 @@ struct thread_struct {
 	.fs = KERNEL_DS, \
 	.fpexc_mode = 0, \
 	.ppr = INIT_PPR, \
-	.fscr = FSCR_TAR | FSCR_EBB \
 }
 #endif
 
@@ -383,6 +432,8 @@ extern int set_endian(struct task_struct *tsk, unsigned int val);
 extern int get_unalign_ctl(struct task_struct *tsk, unsigned long adr);
 extern int set_unalign_ctl(struct task_struct *tsk, unsigned int val);
 
+extern void fp_enable(void);
+extern void vec_enable(void);
 extern void load_fp_state(struct thread_fp_state *fp);
 extern void store_fp_state(struct thread_fp_state *fp);
 extern void load_vr_state(struct thread_vr_state *vr);
@@ -403,8 +454,6 @@ static inline unsigned long __pack_fe01(unsigned int fpmode)
 #else
 #define cpu_relax()	barrier()
 #endif
-
-#define cpu_relax_lowlatency() cpu_relax()
 
 /* Check that a certain kernel stack pointer is valid in task_struct p */
 int validate_sp(unsigned long sp, struct task_struct *p,
@@ -435,7 +484,9 @@ static inline void prefetchw(const void *x)
 
 #define spin_lock_prefetch(x)	prefetchw(x)
 
+#ifdef CONFIG_PPC64
 #define HAVE_ARCH_PICK_MMAP_LAYOUT
+#endif
 
 #ifdef CONFIG_PPC64
 static inline unsigned long get_clean_sp(unsigned long sp, int is_32)
@@ -458,8 +509,6 @@ extern int powersave_nap;	/* set if nap mode can be used in idle loop */
 extern unsigned long power7_nap(int check_irq);
 extern unsigned long power7_sleep(void);
 extern unsigned long power7_winkle(void);
-extern unsigned long power9_idle_stop(unsigned long stop_level);
-
 extern void flush_instruction_cache(void);
 extern void hard_reset_now(void);
 extern void poweroff_now(void);

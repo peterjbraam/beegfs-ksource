@@ -161,8 +161,8 @@ static void dsm_label_utf16s_to_utf8s(union acpi_object *obj, char *buf)
 	buf[len] = '\n';
 }
 
-static int dsm_get_label(struct device *dev, char *buf,
-			 enum acpi_attr_enum attr)
+static int
+dsm_get_label(struct device *dev, char *buf, enum acpi_attr_enum attr)
 {
 	acpi_handle handle;
 	union acpi_object *obj, *tmp;
@@ -204,7 +204,8 @@ static int dsm_get_label(struct device *dev, char *buf,
 	return len;
 }
 
-static bool device_has_dsm(struct device *dev)
+static bool
+device_has_dsm(struct device *dev)
 {
 	acpi_handle handle;
 
@@ -229,14 +230,14 @@ static umode_t acpi_index_string_exist(struct kobject *kobj,
 	return 0;
 }
 
-static ssize_t acpilabel_show(struct device *dev,
-			      struct device_attribute *attr, char *buf)
+static ssize_t
+acpilabel_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	return dsm_get_label(dev, buf, ACPI_ATTR_LABEL_SHOW);
 }
 
-static ssize_t acpiindex_show(struct device *dev,
-			      struct device_attribute *attr, char *buf)
+static ssize_t
+acpiindex_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	return dsm_get_label(dev, buf, ACPI_ATTR_INDEX_SHOW);
 }

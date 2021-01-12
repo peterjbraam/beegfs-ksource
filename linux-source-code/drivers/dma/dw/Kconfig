@@ -3,16 +3,13 @@
 #
 
 config DW_DMAC_CORE
-	tristate
+	tristate "Synopsys DesignWare AHB DMA support"
+	depends on GENERIC_HARDIRQS
 	select DMA_ENGINE
-
-config DW_DMAC_BIG_ENDIAN_IO
-	bool
 
 config DW_DMAC
 	tristate "Synopsys DesignWare AHB DMA platform driver"
 	select DW_DMAC_CORE
-	select DW_DMAC_BIG_ENDIAN_IO if AVR32
 	default y if CPU_AT32AP7000
 	help
 	  Support the Synopsys DesignWare AHB DMA controller. This
@@ -26,3 +23,14 @@ config DW_DMAC_PCI
 	  Support the Synopsys DesignWare AHB DMA controller on the
 	  platfroms that enumerate it as a PCI device. For example,
 	  Intel Medfield has integrated this GPDMA controller.
+
+config DW_DMAC_BIG_ENDIAN_IO
+	bool "Use big endian I/O register access"
+	default y if AVR32
+	depends on DW_DMAC_CORE
+	help
+	  Say yes here to use big endian I/O access when reading and writing
+	  to the DMA controller registers. This is needed on some platforms,
+	  like the Atmel AVR32 architecture.
+
+	  If unsure, use the default setting.

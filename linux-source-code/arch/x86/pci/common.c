@@ -133,7 +133,7 @@ static void pcibios_fixup_device_resources(struct pci_dev *dev)
 	if (pci_probe & PCI_NOASSIGN_BARS) {
 		/*
 		* If the BIOS did not assign the BAR, zero out the
-		* resource so the kernel doesn't attempt to assign
+		* resource so the kernel doesn't attmept to assign
 		* it later on in pci_assign_unassigned_resources
 		*/
 		for (bar = 0; bar <= PCI_STD_RESOURCE_END; bar++) {
@@ -584,6 +584,7 @@ char *__init pcibios_setup(char *str)
 		pci_probe |= PCI_PROBE_NOEARLY;
 		return NULL;
 	}
+#ifndef CONFIG_X86_VISWS
 	else if (!strcmp(str, "usepirqmask")) {
 		pci_probe |= PCI_USE_PIRQ_MASK;
 		return NULL;
@@ -593,7 +594,9 @@ char *__init pcibios_setup(char *str)
 	} else if (!strncmp(str, "lastbus=", 8)) {
 		pcibios_last_bus = simple_strtol(str+8, NULL, 0);
 		return NULL;
-	} else if (!strcmp(str, "rom")) {
+	}
+#endif
+	else if (!strcmp(str, "rom")) {
 		pci_probe |= PCI_ASSIGN_ROMS;
 		return NULL;
 	} else if (!strcmp(str, "norom")) {
@@ -640,6 +643,12 @@ unsigned int pcibios_assign_all_busses(void)
 	return (pci_probe & PCI_ASSIGN_ALL_BUSSES) ? 1 : 0;
 }
 
+static void set_dev_domain_options(struct pci_dev *pdev)
+{
+	if (is_vmd(pdev->bus))
+		pdev->hotplug_user_indicators = 1;
+}
+
 #if defined(CONFIG_X86_DEV_DMA_OPS) && defined(CONFIG_PCI_DOMAINS)
 static LIST_HEAD(dma_domain_list);
 static DEFINE_SPINLOCK(dma_domain_list_lock);
@@ -667,7 +676,7 @@ static void set_dma_domain_ops(struct pci_dev *pdev)
 	spin_lock(&dma_domain_list_lock);
 	list_for_each_entry(domain, &dma_domain_list, node) {
 		if (pci_domain_nr(pdev->bus) == domain->domain_nr) {
-			pdev->dev.archdata.dma_ops = domain->dma_ops;
+			pdev->dev.device_rh->dma_ops = domain->dma_ops;
 			break;
 		}
 	}
@@ -677,12 +686,6 @@ static void set_dma_domain_ops(struct pci_dev *pdev)
 static void set_dma_domain_ops(struct pci_dev *pdev) {}
 #endif
 
-static void set_dev_domain_options(struct pci_dev *pdev)
-{
-	if (is_vmd(pdev->bus))
-		pdev->hotplug_user_indicators = 1;
-}
-
 int pcibios_add_device(struct pci_dev *dev)
 {
 	struct setup_data *data;
@@ -691,7 +694,7 @@ int pcibios_add_device(struct pci_dev *dev)
 
 	pa_data = boot_params.hdr.setup_data;
 	while (pa_data) {
-		data = ioremap(pa_data, sizeof(*rom));
+		data = memremap(pa_data, sizeof(*rom), MEMREMAP_WB);
 		if (!data)
 			return -ENOMEM;
 
@@ -710,7 +713,7 @@ int pcibios_add_device(struct pci_dev *dev)
 			}
 		}
 		pa_data = data->next;
-		iounmap(data);
+		memunmap(data);
 	}
 	set_dma_domain_ops(dev);
 	set_dev_domain_options(dev);

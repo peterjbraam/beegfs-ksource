@@ -45,6 +45,10 @@
 
 #define memblock_num_regions(memblock_type)	(memblock.memblock_type.cnt)
 
+#ifndef ELF_CORE_EFLAGS
+#define ELF_CORE_EFLAGS 0
+#endif
+
 /* Firmware provided dump sections */
 #define FADUMP_CPU_STATE_DATA	0x0001
 #define FADUMP_HPTE_REGION	0x0002
@@ -72,6 +76,8 @@
 		reg_entry++;						\
 	reg_entry++;							\
 })
+
+extern int crashing_cpu;
 
 /* Kernel Dump section info */
 struct fadump_section {
@@ -187,7 +193,7 @@ struct fadump_crash_info_header {
 	u64		elfcorehdr_addr;
 	u32		crashing_cpu;
 	struct pt_regs	regs;
-	struct cpumask	online_mask;
+	struct cpumask	cpu_online_mask;
 };
 
 struct fad_crash_memory_ranges {
@@ -195,15 +201,21 @@ struct fad_crash_memory_ranges {
 	unsigned long long	size;
 };
 
+extern int is_fadump_boot_memory_area(u64 addr, ulong size);
 extern int early_init_dt_scan_fw_dump(unsigned long node,
 		const char *uname, int depth, void *data);
 extern int fadump_reserve_mem(void);
 extern int setup_fadump(void);
+extern unsigned long long fadump_default_reserve_size(void);
+extern int is_fadump_enabled(void);
 extern int is_fadump_active(void);
 extern void crash_fadump(struct pt_regs *, const char *);
 extern void fadump_cleanup(void);
 
+extern void vmcore_cleanup(void);
 #else	/* CONFIG_FA_DUMP */
+static inline unsigned long long fadump_default_reserve_size(void) { return 0; }
+static inline int is_fadump_enabled(void) { return 0; }
 static inline int is_fadump_active(void) { return 0; }
 static inline void crash_fadump(struct pt_regs *regs, const char *str) { }
 #endif

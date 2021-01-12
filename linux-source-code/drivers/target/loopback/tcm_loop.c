@@ -51,19 +51,7 @@ static int tcm_loop_queue_status(struct se_cmd *se_cmd);
  */
 static int tcm_loop_check_stop_free(struct se_cmd *se_cmd)
 {
-	/*
-	 * Do not release struct se_cmd's containing a valid TMR
-	 * pointer.  These will be released directly in tcm_loop_device_reset()
-	 * with transport_generic_free_cmd().
-	 */
-	if (se_cmd->se_cmd_flags & SCF_SCSI_TMR_CDB)
-		return 0;
-	/*
-	 * Release the struct se_cmd, which will make a callback to release
-	 * struct tcm_loop_cmd * in tcm_loop_deallocate_core_cmd()
-	 */
-	transport_generic_free_cmd(se_cmd, 0);
-	return 1;
+	return transport_generic_free_cmd(se_cmd, 0);
 }
 
 static void tcm_loop_release_cmd(struct se_cmd *se_cmd)
@@ -104,6 +92,32 @@ static struct device_driver tcm_loop_driverfs = {
  * Used with root_device_register() in tcm_loop_alloc_core_bus() below
  */
 static struct device *tcm_loop_primary;
+
+/*
+ * Copied from drivers/scsi/libfc/fc_fcp.c:fc_change_queue_depth() and
+ * drivers/scsi/libiscsi.c:iscsi_change_queue_depth()
+ */
+static int tcm_loop_change_queue_depth(
+	struct scsi_device *sdev,
+	int depth,
+	int reason)
+{
+
+	switch (reason) {
+	case SCSI_QDEPTH_DEFAULT:
+		scsi_adjust_queue_depth(sdev, depth, reason);
+		break;
+	case SCSI_QDEPTH_QFULL:
+		scsi_track_queue_full(sdev, depth);
+		break;
+	case SCSI_QDEPTH_RAMP_UP:
+		scsi_adjust_queue_depth(sdev, depth, reason);
+		break;
+	default:
+		return -EOPNOTSUPP;
+	}
+	return sdev->queue_depth;
+}
 
 static void tcm_loop_submission_work(struct work_struct *work)
 {
@@ -189,7 +203,7 @@ static int tcm_loop_queuecommand(struct Scsi_Host *sh, struct scsi_cmnd *sc)
 {
 	struct tcm_loop_cmd *tl_cmd;
 
-	pr_debug("tcm_loop_queuecommand() %d:%d:%d:%llu got CDB: 0x%02x"
+	pr_debug("tcm_loop_queuecommand() %d:%d:%d:%d got CDB: 0x%02x"
 		" scsi_buf_len: %u\n", sc->device->host->host_no,
 		sc->device->id, sc->device->channel, sc->device->lun,
 		sc->cmnd[0], scsi_bufflen(sc));
@@ -218,10 +232,8 @@ static int tcm_loop_issue_tmr(struct tcm_loop_tpg *tl_tpg,
 {
 	struct se_cmd *se_cmd = NULL;
 	struct se_session *se_sess;
-	struct se_portal_group *se_tpg;
 	struct tcm_loop_nexus *tl_nexus;
 	struct tcm_loop_cmd *tl_cmd = NULL;
-	struct tcm_loop_tmr *tl_tmr = NULL;
 	int ret = TMR_FUNCTION_FAILED, rc;
 
 	/*
@@ -240,55 +252,29 @@ static int tcm_loop_issue_tmr(struct tcm_loop_tpg *tl_tpg,
 		return ret;
 	}
 
-	tl_tmr = kzalloc(sizeof(struct tcm_loop_tmr), GFP_KERNEL);
-	if (!tl_tmr) {
-		pr_err("Unable to allocate memory for tl_tmr\n");
-		goto release;
-	}
-	init_waitqueue_head(&tl_tmr->tl_tmr_wait);
+	init_completion(&tl_cmd->tmr_done);
 
 	se_cmd = &tl_cmd->tl_se_cmd;
-	se_tpg = &tl_tpg->tl_se_tpg;
 	se_sess = tl_tpg->tl_nexus->se_sess;
-	/*
-	 * Initialize struct se_cmd descriptor from target_core_mod infrastructure
-	 */
-	transport_init_se_cmd(se_cmd, se_tpg->se_tpg_tfo, se_sess, 0,
-				DMA_NONE, TCM_SIMPLE_TAG,
-				&tl_cmd->tl_sense_buf[0]);
 
-	rc = core_tmr_alloc_req(se_cmd, tl_tmr, tmr, GFP_KERNEL);
+	rc = target_submit_tmr(se_cmd, se_sess, tl_cmd->tl_sense_buf, lun,
+			       NULL, tmr, GFP_KERNEL, task,
+			       TARGET_SCF_ACK_KREF);
 	if (rc < 0)
 		goto release;
-
-	if (tmr == TMR_ABORT_TASK)
-		se_cmd->se_tmr_req->ref_task_tag = task;
-
-	/*
-	 * Locate the underlying TCM struct se_lun
-	 */
-	if (transport_lookup_tmr_lun(se_cmd, lun) < 0) {
-		ret = TMR_LUN_DOES_NOT_EXIST;
-		goto release;
-	}
-	/*
-	 * Queue the TMR to TCM Core and sleep waiting for
-	 * tcm_loop_queue_tm_rsp() to wake us up.
-	 */
-	transport_generic_handle_tmr(se_cmd);
-	wait_event(tl_tmr->tl_tmr_wait, atomic_read(&tl_tmr->tmr_complete));
-	/*
-	 * The TMR LUN_RESET has completed, check the response status and
-	 * then release allocations.
-	 */
+	wait_for_completion(&tl_cmd->tmr_done);
 	ret = se_cmd->se_tmr_req->response;
+	target_put_sess_cmd(se_cmd);
+
+out:
+	return ret;
+
 release:
 	if (se_cmd)
-		transport_generic_free_cmd(se_cmd, 1);
+		transport_generic_free_cmd(se_cmd, 0);
 	else
 		kmem_cache_free(tcm_loop_cmd_cache, tl_cmd);
-	kfree(tl_tmr);
-	return ret;
+	goto out;
 }
 
 static int tcm_loop_abort_task(struct scsi_cmnd *sc)
@@ -359,12 +345,26 @@ static int tcm_loop_slave_alloc(struct scsi_device *sd)
 	return 0;
 }
 
+static int tcm_loop_slave_configure(struct scsi_device *sd)
+{
+	if (sd->tagged_supported) {
+		scsi_activate_tcq(sd, sd->queue_depth);
+		scsi_adjust_queue_depth(sd, MSG_SIMPLE_TAG,
+					sd->host->cmd_per_lun);
+	} else {
+		scsi_adjust_queue_depth(sd, 0,
+					sd->host->cmd_per_lun);
+	}
+
+	return 0;
+}
+
 static struct scsi_host_template tcm_loop_driver_template = {
 	.show_info		= tcm_loop_show_info,
 	.proc_name		= "tcm_loopback",
 	.name			= "TCM_Loopback",
 	.queuecommand		= tcm_loop_queuecommand,
-	.change_queue_depth	= scsi_change_queue_depth,
+	.change_queue_depth	= tcm_loop_change_queue_depth,
 	.eh_abort_handler = tcm_loop_abort_task,
 	.eh_device_reset_handler = tcm_loop_device_reset,
 	.eh_target_reset_handler = tcm_loop_target_reset,
@@ -375,8 +375,8 @@ static struct scsi_host_template tcm_loop_driver_template = {
 	.max_sectors		= 0xFFFF,
 	.use_clustering		= DISABLE_CLUSTERING,
 	.slave_alloc		= tcm_loop_slave_alloc,
+	.slave_configure	= tcm_loop_slave_configure,
 	.module			= THIS_MODULE,
-	.track_queue_depth	= 1,
 };
 
 static int tcm_loop_driver_probe(struct device *dev)
@@ -509,11 +509,6 @@ static void tcm_loop_release_core_bus(void)
 	root_device_unregister(tcm_loop_primary);
 
 	pr_debug("Releasing TCM Loop Core BUS\n");
-}
-
-static char *tcm_loop_get_fabric_name(void)
-{
-	return "loopback";
 }
 
 static inline struct tcm_loop_tpg *tl_tpg(struct se_portal_group *se_tpg)
@@ -669,14 +664,11 @@ static int tcm_loop_queue_status(struct se_cmd *se_cmd)
 
 static void tcm_loop_queue_tm_rsp(struct se_cmd *se_cmd)
 {
-	struct se_tmr_req *se_tmr = se_cmd->se_tmr_req;
-	struct tcm_loop_tmr *tl_tmr = se_tmr->fabric_tmr_ptr;
-	/*
-	 * The SCSI EH thread will be sleeping on se_tmr->tl_tmr_wait, go ahead
-	 * and wake up the wait_queue_head_t in tcm_loop_device_reset()
-	 */
-	atomic_set(&tl_tmr->tmr_complete, 1);
-	wake_up(&tl_tmr->tl_tmr_wait);
+	struct tcm_loop_cmd *tl_cmd = container_of(se_cmd,
+				struct tcm_loop_cmd, tl_se_cmd);
+
+	/* Wake up tcm_loop_issue_tmr(). */
+	complete(&tl_cmd->tmr_done);
 }
 
 static void tcm_loop_aborted_task(struct se_cmd *se_cmd)
@@ -821,7 +813,7 @@ static int tcm_loop_make_nexus(
 		return -ENOMEM;
 	}
 
-	tl_nexus->se_sess = target_alloc_session(&tl_tpg->tl_se_tpg, 0, 0,
+	tl_nexus->se_sess = target_setup_session(&tl_tpg->tl_se_tpg, 0, 0,
 					TARGET_PROT_DIN_PASS | TARGET_PROT_DOUT_PASS,
 					name, tl_nexus, tcm_loop_alloc_sess_cb);
 	if (IS_ERR(tl_nexus->se_sess)) {
@@ -863,7 +855,7 @@ static int tcm_loop_drop_nexus(
 	/*
 	 * Release the SCSI I_T Nexus to the emulated Target Port
 	 */
-	transport_deregister_session(tl_nexus->se_sess);
+	target_remove_session(se_sess);
 	tpg->tl_nexus = NULL;
 	kfree(tl_nexus);
 	return 0;
@@ -1219,8 +1211,7 @@ static struct configfs_attribute *tcm_loop_wwn_attrs[] = {
 
 static const struct target_core_fabric_ops loop_ops = {
 	.module				= THIS_MODULE,
-	.name				= "loopback",
-	.get_fabric_name		= tcm_loop_get_fabric_name,
+	.fabric_name			= "loopback",
 	.tpg_get_wwn			= tcm_loop_get_endpoint_wwn,
 	.tpg_get_tag			= tcm_loop_get_tag,
 	.tpg_check_demo_mode		= tcm_loop_check_demo_mode,

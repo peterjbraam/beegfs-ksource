@@ -11,36 +11,37 @@
 #include <linux/gfp.h>
 #include <linux/smp.h>
 #include <linux/suspend.h>
-#include <linux/cpu.h>
 
 #include <asm/init.h>
 #include <asm/proto.h>
 #include <asm/page.h>
 #include <asm/pgtable.h>
 #include <asm/mtrr.h>
-#include <asm/sections.h>
 #include <asm/suspend.h>
 #include <asm/tlbflush.h>
 
+/* References to section boundaries */
+extern const void __nosave_begin, __nosave_end;
+
 /* Defined in hibernate_asm_64.S */
-extern asmlinkage __visible int restore_image(void);
+extern int restore_image(void);
 
 /*
  * Address to jump to in the last phase of restore in order to get to the image
  * kernel's text (this value is passed in the image header).
  */
-unsigned long restore_jump_address __visible;
+unsigned long restore_jump_address;
 unsigned long jump_address_phys;
 
 /*
  * Value of the cr3 register from before the hibernation (this value is passed
  * in the image header).
  */
-unsigned long restore_cr3 __visible;
+unsigned long restore_cr3;
 
-unsigned long temp_level4_pgt __visible;
+unsigned long temp_level4_pgt;
 
-unsigned long relocated_restore_code __visible;
+unsigned long relocated_restore_code;
 
 static int set_up_temporary_text_mapping(pgd_t *pgd)
 {
@@ -87,7 +88,7 @@ static int set_up_temporary_mappings(void)
 {
 	struct x86_mapping_info info = {
 		.alloc_pgt_page	= alloc_pgt_page,
-		.pmd_flag	= __PAGE_KERNEL_LARGE_EXEC,
+		.page_flag      = __PAGE_KERNEL_LARGE_EXEC,
 		.offset		= __PAGE_OFFSET,
 	};
 	unsigned long mstart, mend;
@@ -127,10 +128,11 @@ static int relocate_restore_code(void)
 	if (!relocated_restore_code)
 		return -ENOMEM;
 
-	memcpy((void *)relocated_restore_code, core_restore_code, PAGE_SIZE);
+	memcpy((void *)relocated_restore_code, &core_restore_code, PAGE_SIZE);
 
 	/* Make the page containing the relocated code executable */
-	pgd = (pgd_t *)__va(read_cr3()) + pgd_index(relocated_restore_code);
+	pgd = (pgd_t *)__va(read_cr3_pa()) +
+		pgd_index(relocated_restore_code);
 	pud = pud_offset(pgd, relocated_restore_code);
 	if (pud_large(*pud)) {
 		set_pud(pud, __pud(pud_val(*pud) & ~_PAGE_NX));
@@ -150,7 +152,7 @@ static int relocate_restore_code(void)
 	return 0;
 }
 
-asmlinkage int swsusp_arch_resume(void)
+int swsusp_arch_resume(void)
 {
 	int error;
 
@@ -198,8 +200,8 @@ int arch_hibernation_header_save(void *addr, unsigned int max_size)
 
 	if (max_size < sizeof(struct restore_data_record))
 		return -EOVERFLOW;
-	rdr->jump_address = (unsigned long)restore_registers;
-	rdr->jump_address_phys = __pa_symbol(restore_registers);
+	rdr->jump_address = (unsigned long)&restore_registers;
+	rdr->jump_address_phys = __pa_symbol(&restore_registers);
 	rdr->cr3 = restore_cr3;
 	rdr->magic = RESTORE_MAGIC;
 	return 0;
@@ -218,36 +220,4 @@ int arch_hibernation_header_restore(void *addr)
 	jump_address_phys = rdr->jump_address_phys;
 	restore_cr3 = rdr->cr3;
 	return (rdr->magic == RESTORE_MAGIC) ? 0 : -EINVAL;
-}
-
-int arch_resume_nosmt(void)
-{
-	int ret = 0;
-	/*
-	 * We reached this while coming out of hibernation. This means
-	 * that SMT siblings are sleeping in hlt, as mwait is not safe
-	 * against control transition during resume (see comment in
-	 * hibernate_resume_nonboot_cpu_disable()).
-	 *
-	 * If the resumed kernel has SMT disabled, we have to take all the
-	 * SMT siblings out of hlt, and offline them again so that they
-	 * end up in mwait proper.
-	 *
-	 * Called with hotplug disabled.
-	 */
-	cpu_hotplug_enable();
-	if (cpu_smt_control == CPU_SMT_DISABLED ||
-			cpu_smt_control == CPU_SMT_FORCE_DISABLED) {
-		enum cpuhp_smt_control old = cpu_smt_control;
-
-		ret = cpuhp_smt_enable();
-		if (ret)
-			goto out;
-		ret = cpuhp_smt_disable(old);
-		if (ret)
-			goto out;
-	}
-out:
-	cpu_hotplug_disable();
-	return ret;
 }

@@ -16,7 +16,7 @@
 #define DM_MSG_PREFIX "flakey"
 
 #define all_corrupt_bio_flags_match(bio, fc)	\
-	(((bio)->bi_opf & (fc)->corrupt_bio_flags) == (fc)->corrupt_bio_flags)
+	(((bio)->bi_rw & (fc)->corrupt_bio_flags) == (fc)->corrupt_bio_flags)
 
 /*
  * Flakey: Used for testing only, simulates intermittent,
@@ -36,7 +36,8 @@ struct flakey_c {
 };
 
 enum feature_flag_bits {
-	DROP_WRITES
+	DROP_WRITES,
+	ERROR_WRITES
 };
 
 struct per_bio_data {
@@ -50,7 +51,7 @@ static int parse_features(struct dm_arg_set *as, struct flakey_c *fc,
 	unsigned argc;
 	const char *arg_name;
 
-	static struct dm_arg _args[] = {
+	static const struct dm_arg _args[] = {
 		{0, 6, "Invalid number of feature args"},
 		{1, UINT_MAX, "Invalid corrupt bio byte"},
 		{0, 255, "Invalid corrupt value to write into bio byte (0-255)"},
@@ -69,17 +70,31 @@ static int parse_features(struct dm_arg_set *as, struct flakey_c *fc,
 		arg_name = dm_shift_arg(as);
 		argc--;
 
-		if (!arg_name) {
-			ti->error = "Insufficient feature arguments";
-			return -EINVAL;
-		}
-
 		/*
 		 * drop_writes
 		 */
 		if (!strcasecmp(arg_name, "drop_writes")) {
 			if (test_and_set_bit(DROP_WRITES, &fc->flags)) {
 				ti->error = "Feature drop_writes duplicated";
+				return -EINVAL;
+			} else if (test_bit(ERROR_WRITES, &fc->flags)) {
+				ti->error = "Feature drop_writes conflicts with feature error_writes";
+				return -EINVAL;
+			}
+
+			continue;
+		}
+
+		/*
+		 * error_writes
+		 */
+		if (!strcasecmp(arg_name, "error_writes")) {
+			if (test_and_set_bit(ERROR_WRITES, &fc->flags)) {
+				ti->error = "Feature error_writes duplicated";
+				return -EINVAL;
+
+			} else if (test_bit(DROP_WRITES, &fc->flags)) {
+				ti->error = "Feature error_writes conflicts with feature drop_writes";
 				return -EINVAL;
 			}
 
@@ -140,6 +155,10 @@ static int parse_features(struct dm_arg_set *as, struct flakey_c *fc,
 	if (test_bit(DROP_WRITES, &fc->flags) && (fc->corrupt_bio_rw == WRITE)) {
 		ti->error = "drop_writes is incompatible with corrupt_bio_byte with the WRITE flag set";
 		return -EINVAL;
+
+	} else if (test_bit(ERROR_WRITES, &fc->flags) && (fc->corrupt_bio_rw == WRITE)) {
+		ti->error = "error_writes is incompatible with corrupt_bio_byte with the WRITE flag set";
+		return -EINVAL;
 	}
 
 	return 0;
@@ -159,7 +178,7 @@ static int parse_features(struct dm_arg_set *as, struct flakey_c *fc,
  */
 static int flakey_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 {
-	static struct dm_arg _args[] = {
+	static const struct dm_arg _args[] = {
 		{0, UINT_MAX, "Invalid up interval"},
 		{0, UINT_MAX, "Invalid down interval"},
 	};
@@ -257,37 +276,25 @@ static void flakey_map_bio(struct dm_target *ti, struct bio *bio)
 
 	bio->bi_bdev = fc->dev->bdev;
 	if (bio_sectors(bio))
-		bio->bi_iter.bi_sector =
-			flakey_map_sector(ti, bio->bi_iter.bi_sector);
+		bio->bi_sector = flakey_map_sector(ti, bio->bi_sector);
 }
 
 static void corrupt_bio_data(struct bio *bio, struct flakey_c *fc)
 {
-	unsigned int corrupt_bio_byte = fc->corrupt_bio_byte - 1;
-
-	struct bvec_iter iter;
-	struct bio_vec bvec;
-
-	if (!bio_has_data(bio))
-		return;
+	unsigned bio_bytes = bio_cur_bytes(bio);
+	char *data = bio_data(bio);
 
 	/*
-	 * Overwrite the Nth byte of the bio's data, on whichever page
-	 * it falls.
+	 * Overwrite the Nth byte of the data returned.
 	 */
-	bio_for_each_segment(bvec, bio, iter) {
-		if (bio_iter_len(bio, iter) > corrupt_bio_byte) {
-			char *segment = (page_address(bio_iter_page(bio, iter))
-					 + bio_iter_offset(bio, iter));
-			segment[corrupt_bio_byte] = fc->corrupt_bio_value;
-			DMDEBUG("Corrupting data bio=%p by writing %u to byte %u "
-				"(rw=%c bi_opf=%u bi_sector=%llu size=%u)\n",
-				bio, fc->corrupt_bio_value, fc->corrupt_bio_byte,
-				(bio_data_dir(bio) == WRITE) ? 'w' : 'r', bio->bi_opf,
-				(unsigned long long)bio->bi_iter.bi_sector, bio->bi_iter.bi_size);
-			break;
-		}
-		corrupt_bio_byte -= bio_iter_len(bio, iter);
+	if (data && bio_bytes >= fc->corrupt_bio_byte) {
+		data[fc->corrupt_bio_byte - 1] = fc->corrupt_bio_value;
+
+		DMDEBUG("Corrupting data bio=%p by writing %u to byte %u "
+			"(rw=%c bi_rw=%lu bi_sector=%llu cur_bytes=%u)\n",
+			bio, fc->corrupt_bio_value, fc->corrupt_bio_byte,
+			(bio_data_dir(bio) == WRITE) ? 'w' : 'r',
+			bio->bi_rw, (unsigned long long)bio->bi_sector, bio_bytes);
 	}
 }
 
@@ -307,20 +314,25 @@ static int flakey_map(struct dm_target *ti, struct bio *bio)
 		pb->bio_submitted = true;
 
 		/*
-		 * Error reads if neither corrupt_bio_byte or drop_writes are set.
+		 * Error reads if neither corrupt_bio_byte or drop_writes or error_writes are set.
 		 * Otherwise, flakey_end_io() will decide if the reads should be modified.
 		 */
 		if (bio_data_dir(bio) == READ) {
-			if (!fc->corrupt_bio_byte && !test_bit(DROP_WRITES, &fc->flags))
+			if (!fc->corrupt_bio_byte && !test_bit(DROP_WRITES, &fc->flags) &&
+			    !test_bit(ERROR_WRITES, &fc->flags))
 				return -EIO;
 			goto map_bio;
 		}
 
 		/*
-		 * Drop writes?
+		 * Drop or error writes?
 		 */
 		if (test_bit(DROP_WRITES, &fc->flags)) {
-			bio_endio(bio);
+			bio_endio(bio, 0);
+			return DM_MAPIO_SUBMITTED;
+		}
+		else if (test_bit(ERROR_WRITES, &fc->flags)) {
+			bio_endio(bio, -EIO);
 			return DM_MAPIO_SUBMITTED;
 		}
 
@@ -358,10 +370,11 @@ static int flakey_end_io(struct dm_target *ti, struct bio *bio, int error)
 			 */
 			corrupt_bio_data(bio, fc);
 
-		} else if (!test_bit(DROP_WRITES, &fc->flags)) {
+		} else if (!test_bit(DROP_WRITES, &fc->flags) &&
+			   !test_bit(ERROR_WRITES, &fc->flags)) {
 			/*
 			 * Error read during the down_interval if drop_writes
-			 * wasn't configured.
+			 * and error_writes were not configured.
 			 */
 			return -EIO;
 		}
@@ -375,7 +388,7 @@ static void flakey_status(struct dm_target *ti, status_type_t type,
 {
 	unsigned sz = 0;
 	struct flakey_c *fc = ti->private;
-	unsigned drop_writes;
+	unsigned drop_writes, error_writes;
 
 	switch (type) {
 	case STATUSTYPE_INFO:
@@ -388,10 +401,13 @@ static void flakey_status(struct dm_target *ti, status_type_t type,
 		       fc->down_interval);
 
 		drop_writes = test_bit(DROP_WRITES, &fc->flags);
-		DMEMIT("%u ", drop_writes + (fc->corrupt_bio_byte > 0) * 5);
+		error_writes = test_bit(ERROR_WRITES, &fc->flags);
+		DMEMIT("%u ", drop_writes + error_writes + (fc->corrupt_bio_byte > 0) * 5);
 
 		if (drop_writes)
 			DMEMIT("drop_writes ");
+		else if (error_writes)
+			DMEMIT("error_writes ");
 
 		if (fc->corrupt_bio_byte)
 			DMEMIT("corrupt_bio_byte %u %c %u %u ",
@@ -403,8 +419,7 @@ static void flakey_status(struct dm_target *ti, status_type_t type,
 	}
 }
 
-static int flakey_prepare_ioctl(struct dm_target *ti,
-		struct block_device **bdev, fmode_t *mode)
+static int flakey_prepare_ioctl(struct dm_target *ti, struct block_device **bdev)
 {
 	struct flakey_c *fc = ti->private;
 
@@ -419,6 +434,21 @@ static int flakey_prepare_ioctl(struct dm_target *ti,
 	return 0;
 }
 
+static int flakey_merge(struct dm_target *ti, struct bvec_merge_data *bvm,
+			struct bio_vec *biovec, int max_size)
+{
+	struct flakey_c *fc = ti->private;
+	struct request_queue *q = bdev_get_queue(fc->dev->bdev);
+
+	if (!q->merge_bvec_fn)
+		return max_size;
+
+	bvm->bi_bdev = fc->dev->bdev;
+	bvm->bi_sector = flakey_map_sector(ti, bvm->bi_sector);
+
+	return min(max_size, q->merge_bvec_fn(q, bvm, biovec));
+}
+
 static int flakey_iterate_devices(struct dm_target *ti, iterate_devices_callout_fn fn, void *data)
 {
 	struct flakey_c *fc = ti->private;
@@ -428,7 +458,7 @@ static int flakey_iterate_devices(struct dm_target *ti, iterate_devices_callout_
 
 static struct target_type flakey_target = {
 	.name   = "flakey",
-	.version = {1, 3, 1},
+	.version = {1, 4, 0},
 	.module = THIS_MODULE,
 	.ctr    = flakey_ctr,
 	.dtr    = flakey_dtr,
@@ -436,6 +466,7 @@ static struct target_type flakey_target = {
 	.end_io = flakey_end_io,
 	.status = flakey_status,
 	.prepare_ioctl = flakey_prepare_ioctl,
+	.merge	= flakey_merge,
 	.iterate_devices = flakey_iterate_devices,
 };
 

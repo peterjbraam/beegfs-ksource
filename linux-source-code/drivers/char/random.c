@@ -258,10 +258,12 @@
 #include <linux/ptrace.h>
 #include <linux/kmemcheck.h>
 #include <linux/workqueue.h>
-#include <linux/irq.h>
-#include <linux/ratelimit.h>
 #include <linux/syscalls.h>
 #include <linux/completion.h>
+
+#ifdef CONFIG_GENERIC_HARDIRQS
+# include <linux/irq.h>
+#endif
 #include <linux/uuid.h>
 #include <crypto/chacha20.h>
 
@@ -420,6 +422,8 @@ struct crng_state {
 	__u32		state[16];
 	unsigned long	init_time;
 	spinlock_t	lock;
+	unsigned int last_data_init:1;
+	__u8 last_data[CHACHA20_BLOCK_SIZE];
 };
 
 struct crng_state primary_crng = {
@@ -435,25 +439,14 @@ struct crng_state primary_crng = {
  * its value (from 0->1->2).
  */
 static int crng_init = 0;
-#define crng_ready() (likely(crng_init > 1))
+#define crng_ready() (likely(crng_init > 0))
 static int crng_init_cnt = 0;
-static unsigned long crng_global_init_time = 0;
 #define CRNG_INIT_CNT_THRESH (2*CHACHA20_KEY_SIZE)
 static void _extract_crng(struct crng_state *crng,
 			  __u8 out[CHACHA20_BLOCK_SIZE]);
 static void _crng_backtrack_protect(struct crng_state *crng,
 				    __u8 tmp[CHACHA20_BLOCK_SIZE], int used);
 static void process_random_ready_list(void);
-
-static struct ratelimit_state unseeded_warning =
-	RATELIMIT_STATE_INIT("warn_unseeded_randomness", HZ, 3);
-static struct ratelimit_state urandom_warning =
-	RATELIMIT_STATE_INIT("warn_urandom_randomness", HZ, 3);
-
-static int ratelimit_disable __read_mostly;
-
-module_param_named(ratelimit_disable, ratelimit_disable, int, 0644);
-MODULE_PARM_DESC(ratelimit_disable, "Disable random ratelimit suppression");
 
 /**********************************************************************
  *
@@ -487,12 +480,12 @@ struct entropy_store {
 static ssize_t extract_entropy(struct entropy_store *r, void *buf,
 			       size_t nbytes, int min, int rsvd);
 static ssize_t _extract_entropy(struct entropy_store *r, void *buf,
-				size_t nbytes, int fips);
+				size_t nbytes);
 
 static void crng_reseed(struct crng_state *crng, struct entropy_store *r);
 static void push_to_pool(struct work_struct *work);
-static __u32 input_pool_data[INPUT_POOL_WORDS] __latent_entropy;
-static __u32 blocking_pool_data[OUTPUT_POOL_WORDS] __latent_entropy;
+static __u32 input_pool_data[INPUT_POOL_WORDS];
+static __u32 blocking_pool_data[OUTPUT_POOL_WORDS];
 
 static struct entropy_store input_pool = {
 	.poolinfo = &poolinfo_table[0],
@@ -712,9 +705,11 @@ retry:
 		goto retry;
 
 	r->entropy_total += nbits;
-	if (!r->initialized && r->entropy_total > 128) {
-		r->initialized = 1;
-		r->entropy_total = 0;
+	if (!r->initialized && nbits > 0) {
+		if (r->entropy_total > 128) {
+			r->initialized = 1;
+			r->entropy_total = 0;
+		}
 	}
 
 	trace_credit_entropy_bits(r->name, nbits,
@@ -753,7 +748,7 @@ retry:
 
 static int credit_entropy_bits_safe(struct entropy_store *r, int nbits)
 {
-	const int nbits_max = r->poolinfo->poolwords * 32;
+	const int nbits_max = (int)(~0U >> (ENTROPY_SHIFT + 1));
 
 	if (nbits < 0)
 		return -EINVAL;
@@ -793,7 +788,7 @@ static void crng_initialize(struct crng_state *crng)
 	memcpy(&crng->state[0], "expand 32-byte k", 16);
 	if (crng == &primary_crng)
 		_extract_entropy(&input_pool, &crng->state[4],
-				 sizeof(__u32) * 12, 0);
+				 sizeof(__u32) * 12);
 	else
 		get_random_bytes(&crng->state[4], sizeof(__u32) * 12);
 	for (i = 4; i < 16; i++) {
@@ -812,7 +807,7 @@ static int crng_fast_load(const char *cp, size_t len)
 
 	if (!spin_trylock_irqsave(&primary_crng.lock, flags))
 		return 0;
-	if (crng_init != 0) {
+	if (crng_ready()) {
 		spin_unlock_irqrestore(&primary_crng.lock, flags);
 		return 0;
 	}
@@ -829,39 +824,6 @@ static int crng_fast_load(const char *cp, size_t len)
 	spin_unlock_irqrestore(&primary_crng.lock, flags);
 	return 1;
 }
-
-#ifdef CONFIG_NUMA
-static void do_numa_crng_init(struct work_struct *work)
-{
-	int i;
-	struct crng_state *crng;
-	struct crng_state **pool;
-
-	pool = kcalloc(nr_node_ids, sizeof(*pool), GFP_KERNEL|__GFP_NOFAIL);
-	for_each_online_node(i) {
-		crng = kmalloc_node(sizeof(struct crng_state),
-				    GFP_KERNEL | __GFP_NOFAIL, i);
-		spin_lock_init(&crng->lock);
-		crng_initialize(crng);
-		pool[i] = crng;
-	}
-	mb();
-	if (cmpxchg(&crng_node_pool, NULL, pool)) {
-		for_each_node(i)
-			kfree(pool[i]);
-		kfree(pool);
-	}
-}
-
-static DECLARE_WORK(numa_crng_init_work, do_numa_crng_init);
-
-static void numa_crng_init(void)
-{
-	schedule_work(&numa_crng_init_work);
-}
-#else
-static void numa_crng_init(void) {}
-#endif
 
 static void crng_reseed(struct crng_state *crng, struct entropy_store *r)
 {
@@ -881,7 +843,7 @@ static void crng_reseed(struct crng_state *crng, struct entropy_store *r)
 		_crng_backtrack_protect(&primary_crng, buf.block,
 					CHACHA20_KEY_SIZE);
 	}
-	spin_lock_irqsave(&crng->lock, flags);
+	spin_lock_irqsave(&primary_crng.lock, flags);
 	for (i = 0; i < 8; i++) {
 		unsigned long	rv;
 		if (!arch_get_random_seed_long(&rv) &&
@@ -892,25 +854,12 @@ static void crng_reseed(struct crng_state *crng, struct entropy_store *r)
 	memzero_explicit(&buf, sizeof(buf));
 	crng->init_time = jiffies;
 	if (crng == &primary_crng && crng_init < 2) {
-		numa_crng_init();
 		crng_init = 2;
 		process_random_ready_list();
 		wake_up_interruptible(&crng_init_wait);
 		pr_notice("random: crng init done\n");
-		if (unseeded_warning.missed) {
-			pr_notice("random: %d get_random_xx warning(s) missed "
-				  "due to ratelimiting\n",
-				  unseeded_warning.missed);
-			unseeded_warning.missed = 0;
-		}
-		if (urandom_warning.missed) {
-			pr_notice("random: %d urandom warning(s) missed "
-				  "due to ratelimiting\n",
-				  urandom_warning.missed);
-			urandom_warning.missed = 0;
-		}
 	}
-	spin_unlock_irqrestore(&crng->lock, flags);
+	spin_unlock_irqrestore(&primary_crng.lock, flags);
 }
 
 static inline void maybe_reseed_primary_crng(void)
@@ -930,16 +879,29 @@ static void _extract_crng(struct crng_state *crng,
 {
 	unsigned long v, flags;
 
-	if (crng_ready() &&
-	    (time_after(crng_global_init_time, crng->init_time) ||
-	     time_after(jiffies, crng->init_time + CRNG_RESEED_INTERVAL)))
+	if (crng_init > 1 &&
+	    time_after(jiffies, crng->init_time + CRNG_RESEED_INTERVAL))
 		crng_reseed(crng, crng == &primary_crng ? &input_pool : NULL);
 	spin_lock_irqsave(&crng->lock, flags);
+
+	if (fips_enabled && !crng->last_data_init) {
+		crng->last_data_init = 1;
+		chacha20_block(&crng->state[0], out);
+		memcpy(crng->last_data, out, CHACHA20_BLOCK_SIZE);
+	}
+
 	if (arch_get_random_long(&v))
 		crng->state[14] ^= v;
 	chacha20_block(&crng->state[0], out);
 	if (crng->state[12] == 0)
 		crng->state[13]++;
+
+	if (fips_enabled) {
+		if (!memcmp(out, crng->last_data, CHACHA20_BLOCK_SIZE))
+			panic("ChaCha20 RNG duplicated output!\n");
+		memcpy(crng->last_data, out, CHACHA20_BLOCK_SIZE);
+	}
+
 	spin_unlock_irqrestore(&crng->lock, flags);
 }
 
@@ -1174,22 +1136,18 @@ static void add_interrupt_bench(cycles_t start)
 static __u32 get_reg(struct fast_pool *f, struct pt_regs *regs)
 {
 	__u32 *ptr = (__u32 *) regs;
-	unsigned int idx;
 
 	if (regs == NULL)
 		return 0;
-	idx = READ_ONCE(f->reg_idx);
-	if (idx >= sizeof(struct pt_regs) / sizeof(__u32))
-		idx = 0;
-	ptr += idx++;
-	WRITE_ONCE(f->reg_idx, idx);
-	return *ptr;
+	if (f->reg_idx >= sizeof(struct pt_regs) / sizeof(__u32))
+		f->reg_idx = 0;
+	return *(ptr + f->reg_idx++);
 }
 
 void add_interrupt_randomness(int irq, int irq_flags)
 {
 	struct entropy_store	*r;
-	struct fast_pool	*fast_pool = this_cpu_ptr(&irq_randomness);
+	struct fast_pool	*fast_pool = &__get_cpu_var(irq_randomness);
 	struct pt_regs		*regs = get_irq_regs();
 	unsigned long		now = jiffies;
 	cycles_t		cycles = random_get_entropy();
@@ -1212,7 +1170,7 @@ void add_interrupt_randomness(int irq, int irq_flags)
 	fast_mix(fast_pool);
 	add_interrupt_bench(cycles);
 
-	if (unlikely(crng_init == 0)) {
+	if (!crng_ready()) {
 		if ((fast_pool->count >= 64) &&
 		    crng_fast_load((char *) fast_pool->pool,
 				   sizeof(fast_pool->pool))) {
@@ -1445,22 +1403,14 @@ static void extract_buf(struct entropy_store *r, __u8 *out)
 }
 
 static ssize_t _extract_entropy(struct entropy_store *r, void *buf,
-				size_t nbytes, int fips)
+				size_t nbytes)
 {
 	ssize_t ret = 0, i;
 	__u8 tmp[EXTRACT_SIZE];
-	unsigned long flags;
 
 	while (nbytes) {
 		extract_buf(r, tmp);
 
-		if (fips) {
-			spin_lock_irqsave(&r->lock, flags);
-			if (!memcmp(tmp, r->last_data, EXTRACT_SIZE))
-				panic("Hardware RNG duplicated output!\n");
-			memcpy(r->last_data, tmp, EXTRACT_SIZE);
-			spin_unlock_irqrestore(&r->lock, flags);
-		}
 		i = min_t(int, nbytes, EXTRACT_SIZE);
 		memcpy(buf, tmp, i);
 		nbytes -= i;
@@ -1486,7 +1436,22 @@ static ssize_t _extract_entropy(struct entropy_store *r, void *buf,
 static ssize_t extract_entropy(struct entropy_store *r, void *buf,
 				 size_t nbytes, int min, int reserved)
 {
+	trace_extract_entropy(r->name, nbytes, ENTROPY_BITS(r), _RET_IP_);
+	nbytes = account(r, nbytes, min, reserved);
+
+	return _extract_entropy(r, buf, nbytes);
+}
+
+/*
+ * This function extracts randomness from the "entropy pool", and
+ * returns it in a userspace buffer.
+ */
+static ssize_t extract_entropy_user(struct entropy_store *r, void __user *buf,
+				    size_t nbytes)
+{
+	ssize_t ret = 0, i;
 	__u8 tmp[EXTRACT_SIZE];
+	int large_request = (nbytes > 256);
 	unsigned long flags;
 
 	/* if last_data isn't primed, we need EXTRACT_SIZE extra bytes */
@@ -1505,24 +1470,6 @@ static ssize_t extract_entropy(struct entropy_store *r, void *buf,
 		spin_unlock_irqrestore(&r->lock, flags);
 	}
 
-	trace_extract_entropy(r->name, nbytes, ENTROPY_BITS(r), _RET_IP_);
-	xfer_secondary_pool(r, nbytes);
-	nbytes = account(r, nbytes, min, reserved);
-
-	return _extract_entropy(r, buf, nbytes, fips_enabled);
-}
-
-/*
- * This function extracts randomness from the "entropy pool", and
- * returns it in a userspace buffer.
- */
-static ssize_t extract_entropy_user(struct entropy_store *r, void __user *buf,
-				    size_t nbytes)
-{
-	ssize_t ret = 0, i;
-	__u8 tmp[EXTRACT_SIZE];
-	int large_request = (nbytes > 256);
-
 	trace_extract_entropy_user(r->name, nbytes, ENTROPY_BITS(r), _RET_IP_);
 	xfer_secondary_pool(r, nbytes);
 	nbytes = account(r, nbytes, 0, 0);
@@ -1538,6 +1485,15 @@ static ssize_t extract_entropy_user(struct entropy_store *r, void __user *buf,
 		}
 
 		extract_buf(r, tmp);
+
+		if (fips_enabled) {
+			spin_lock_irqsave(&r->lock, flags);
+			if (!memcmp(tmp, r->last_data, EXTRACT_SIZE))
+				panic("Hardware RNG duplicated output!\n");
+			memcpy(r->last_data, tmp, EXTRACT_SIZE);
+			spin_unlock_irqrestore(&r->lock, flags);
+		}
+
 		i = min_t(int, nbytes, EXTRACT_SIZE);
 		if (copy_to_user(buf, tmp, i)) {
 			ret = -EFAULT;
@@ -1718,14 +1674,28 @@ static void init_std_data(struct entropy_store *r)
  */
 static int rand_initialize(void)
 {
+#ifdef CONFIG_NUMA
+	int i;
+	struct crng_state *crng;
+	struct crng_state **pool;
+#endif
+
 	init_std_data(&input_pool);
 	init_std_data(&blocking_pool);
 	crng_initialize(&primary_crng);
-	crng_global_init_time = jiffies;
-	if (ratelimit_disable) {
-		urandom_warning.interval = 0;
-		unseeded_warning.interval = 0;
+
+#ifdef CONFIG_NUMA
+	pool = kcalloc(nr_node_ids, sizeof(*pool), GFP_KERNEL|__GFP_NOFAIL);
+	for_each_online_node(i) {
+		crng = kmalloc_node(sizeof(struct crng_state),
+				    GFP_KERNEL | __GFP_NOFAIL, i);
+		spin_lock_init(&crng->lock);
+		crng_initialize(crng);
+		pool[i] = crng;
 	}
+	mb();
+	crng_node_pool = pool;
+#endif
 	return 0;
 }
 early_initcall(rand_initialize);
@@ -1793,10 +1763,9 @@ urandom_read(struct file *file, char __user *buf, size_t nbytes, loff_t *ppos)
 
 	if (!crng_ready() && maxwarn > 0) {
 		maxwarn--;
-		if (__ratelimit(&urandom_warning))
-			printk(KERN_NOTICE "random: %s: uninitialized "
-			       "urandom read (%zd bytes read)\n",
-			       current->comm, nbytes);
+		printk(KERN_NOTICE "random: %s: uninitialized urandom read "
+		       "(%zd bytes read)\n",
+		       current->comm, nbytes);
 		spin_lock_irqsave(&primary_crng.lock, flags);
 		crng_init_cnt = 0;
 		spin_unlock_irqrestore(&primary_crng.lock, flags);
@@ -1826,21 +1795,13 @@ static int
 write_pool(struct entropy_store *r, const char __user *buffer, size_t count)
 {
 	size_t bytes;
-	__u32 t, buf[16];
+	__u32 buf[16];
 	const char __user *p = buffer;
 
 	while (count > 0) {
-		int b, i = 0;
-
 		bytes = min(count, sizeof(buf));
 		if (copy_from_user(&buf, p, bytes))
 			return -EFAULT;
-
-		for (b = bytes ; b > 0 ; b -= sizeof(__u32), i++) {
-			if (!arch_get_random_int(&t))
-				break;
-			buf[i] ^= t;
-		}
 
 		count -= bytes;
 		p += bytes;
@@ -1907,14 +1868,10 @@ static long random_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 			return -EPERM;
 		input_pool.entropy_count = 0;
 		blocking_pool.entropy_count = 0;
-		return 0;
-	case RNDRESEEDCRNG:
-		if (!capable(CAP_SYS_ADMIN))
-			return -EPERM;
-		if (crng_init < 2)
-			return -ENODATA;
-		crng_reseed(&primary_crng, NULL);
-		crng_global_init_time = jiffies - 1;
+		if (random_write_wakeup_bits) {
+			wake_up_interruptible(&random_write_wait);
+			kill_fasync(&fasync, SIGIO, POLL_OUT);
+		}
 		return 0;
 	default:
 		return -EINVAL;
@@ -1989,10 +1946,10 @@ static char sysctl_bootid[16];
  * returned as an ASCII string in the standard UUID format; if via the
  * sysctl system call, as 16 bytes of binary data.
  */
-static int proc_do_uuid(struct ctl_table *table, int write,
+static int proc_do_uuid(ctl_table *table, int write,
 			void __user *buffer, size_t *lenp, loff_t *ppos)
 {
-	struct ctl_table fake_table;
+	ctl_table fake_table;
 	unsigned char buf[64], tmp_uuid[16], *uuid;
 
 	uuid = table->data;
@@ -2019,10 +1976,10 @@ static int proc_do_uuid(struct ctl_table *table, int write,
 /*
  * Return entropy available scaled to integral bits
  */
-static int proc_do_entropy(struct ctl_table *table, int write,
+static int proc_do_entropy(ctl_table *table, int write,
 			   void __user *buffer, size_t *lenp, loff_t *ppos)
 {
-	struct ctl_table fake_table;
+	ctl_table fake_table;
 	int entropy_count;
 
 	entropy_count = *(int *)table->data >> ENTROPY_SHIFT;
@@ -2034,8 +1991,8 @@ static int proc_do_entropy(struct ctl_table *table, int write,
 }
 
 static int sysctl_poolsize = INPUT_POOL_WORDS * 32;
-extern struct ctl_table random_table[];
-struct ctl_table random_table[] = {
+extern ctl_table random_table[];
+ctl_table random_table[] = {
 	{
 		.procname	= "poolsize",
 		.data		= &sysctl_poolsize,
@@ -2108,59 +2065,82 @@ struct ctl_table random_table[] = {
 };
 #endif 	/* CONFIG_SYSCTL */
 
-struct batched_entropy {
-	union {
-		unsigned long entropy_long[CHACHA20_BLOCK_SIZE / sizeof(unsigned long)];
-		unsigned int entropy_int[CHACHA20_BLOCK_SIZE / sizeof(unsigned int)];
-	};
-	unsigned int position;
-};
+static u32 random_int_secret[MD5_MESSAGE_BYTES / 4] ____cacheline_aligned;
+
+int random_int_secret_init(void)
+{
+	get_random_bytes(random_int_secret, sizeof(random_int_secret));
+	return 0;
+}
+
+static DEFINE_PER_CPU(__u32 [MD5_DIGEST_WORDS], get_random_int_hash)
+		__aligned(sizeof(unsigned long));
 
 /*
- * Get a random word for internal kernel use only. The quality of the random
- * number is good as /dev/urandom, but there is no backtrack protection, with
- * the goal of being quite fast and not depleting entropy.
+ * Get a random word for internal kernel use only. Similar to urandom but
+ * with the goal of minimal entropy pool depletion. As a result, the random
+ * value is not cryptographically secure but for several uses the cost of
+ * depleting entropy is too high
  */
-static DEFINE_PER_CPU(struct batched_entropy, batched_entropy_long);
+unsigned int get_random_int(void)
+{
+	__u32 *hash;
+	unsigned int ret;
+
+	if (arch_get_random_int(&ret))
+		return ret;
+
+	hash = get_cpu_var(get_random_int_hash);
+
+	hash[0] += current->pid + jiffies + random_get_entropy();
+	md5_transform(hash, random_int_secret);
+	ret = hash[0];
+	put_cpu_var(get_random_int_hash);
+
+	return ret;
+}
+EXPORT_SYMBOL(get_random_int);
+
+/*
+ * Same as get_random_int(), but returns unsigned long.
+ */
 unsigned long get_random_long(void)
 {
+	__u32 *hash;
 	unsigned long ret;
-	struct batched_entropy *batch;
 
-	batch = &get_cpu_var(batched_entropy_long);
-	if (batch->position % ARRAY_SIZE(batch->entropy_long) == 0) {
-		extract_crng((u8 *)batch->entropy_long);
-		batch->position = 0;
-	}
-	ret = batch->entropy_long[batch->position++];
-	put_cpu_var(batched_entropy_long);
+	if (arch_get_random_long(&ret))
+		return ret;
+
+	hash = get_cpu_var(get_random_int_hash);
+
+	hash[0] += current->pid + jiffies + random_get_entropy();
+	md5_transform(hash, random_int_secret);
+	ret = *(unsigned long *)hash;
+	put_cpu_var(get_random_int_hash);
+
 	return ret;
 }
 EXPORT_SYMBOL(get_random_long);
 
-#if BITS_PER_LONG == 32
-unsigned int get_random_int(void)
+/*
+ * randomize_range() returns a start address such that
+ *
+ *    [...... <range> .....]
+ *  start                  end
+ *
+ * a <range> with size "len" starting at the return value is inside in the
+ * area defined by [start, end], but is otherwise randomized.
+ */
+unsigned long
+randomize_range(unsigned long start, unsigned long end, unsigned long len)
 {
-	return get_random_long();
-}
-#else
-static DEFINE_PER_CPU(struct batched_entropy, batched_entropy_int);
-unsigned int get_random_int(void)
-{
-	unsigned int ret;
-	struct batched_entropy *batch;
+	unsigned long range = end - len - start;
 
-	batch = &get_cpu_var(batched_entropy_int);
-	if (batch->position % ARRAY_SIZE(batch->entropy_int) == 0) {
-		extract_crng((u8 *)batch->entropy_int);
-		batch->position = 0;
-	}
-	ret = batch->entropy_int[batch->position++];
-	put_cpu_var(batched_entropy_int);
-	return ret;
+	if (end <= start + len)
+		return 0;
+	return PAGE_ALIGN(get_random_int() % range + start);
 }
-#endif
-EXPORT_SYMBOL(get_random_int);
 
 /**
  * randomize_page - Generate a random, page aligned address
@@ -2204,7 +2184,7 @@ void add_hwgenerator_randomness(const char *buffer, size_t count,
 {
 	struct entropy_store *poolp = &input_pool;
 
-	if (unlikely(crng_init == 0)) {
+	if (!crng_ready()) {
 		crng_fast_load(buffer, count);
 		return;
 	}

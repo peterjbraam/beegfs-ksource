@@ -1,5 +1,5 @@
 /*
- * include/uapi/linux/tipc_config.h: Header for TIPC configuration interface
+ * include/linux/tipc_config.h: Include file for TIPC configuration interface
  *
  * Copyright (c) 2003-2006, Ericsson AB
  * Copyright (c) 2005-2007, 2010-2011, Wind River Systems
@@ -39,7 +39,6 @@
 
 #include <linux/types.h>
 #include <linux/string.h>
-#include <linux/tipc.h>
 #include <asm/byteorder.h>
 
 #ifndef __KERNEL__
@@ -156,6 +155,15 @@
 #define TIPC_TLV_PORT_REF	26	/* 32-bit port reference */
 
 /*
+ * Maximum sizes of TIPC bearer-related names (including terminating NUL)
+ */
+
+#define TIPC_MAX_MEDIA_NAME	16	/* format = media */
+#define TIPC_MAX_IF_NAME	16	/* format = interface */
+#define TIPC_MAX_BEARER_NAME	32	/* format = media:interface */
+#define TIPC_MAX_LINK_NAME	60	/* format = Z.C.N:interface-Z.C.N:interface */
+
+/*
  * Link priority limits (min, default, max, media default)
  */
 
@@ -182,7 +190,7 @@
 
 #define TIPC_MIN_LINK_WIN 16
 #define TIPC_DEF_LINK_WIN 50
-#define TIPC_MAX_LINK_WIN 8191
+#define TIPC_MAX_LINK_WIN 150
 
 
 struct tipc_node_info {
@@ -272,26 +280,6 @@ static inline int TLV_CHECK(const void *tlv, __u16 space, __u16 exp_type)
 		(ntohs(((struct tlv_desc *)tlv)->tlv_type) == exp_type);
 }
 
-static inline int TLV_GET_LEN(struct tlv_desc *tlv)
-{
-	return ntohs(tlv->tlv_len);
-}
-
-static inline void TLV_SET_LEN(struct tlv_desc *tlv, __u16 len)
-{
-	tlv->tlv_len = htons(len);
-}
-
-static inline int TLV_CHECK_TYPE(struct tlv_desc *tlv,  __u16 type)
-{
-	return (ntohs(tlv->tlv_type) == type);
-}
-
-static inline void TLV_SET_TYPE(struct tlv_desc *tlv, __u16 type)
-{
-	tlv->tlv_type = htons(type);
-}
-
 static inline int TLV_SET(void *tlv, __u16 type, void *data, __u16 len)
 {
 	struct tlv_desc *tlv_ptr;
@@ -301,10 +289,8 @@ static inline int TLV_SET(void *tlv, __u16 type, void *data, __u16 len)
 	tlv_ptr = (struct tlv_desc *)tlv;
 	tlv_ptr->tlv_type = htons(type);
 	tlv_ptr->tlv_len  = htons(tlv_len);
-	if (len && data) {
-		memcpy(TLV_DATA(tlv_ptr), data, len);
-		memset(TLV_DATA(tlv_ptr) + len, 0, TLV_SPACE(len) - tlv_len);
-	}
+	if (len && data)
+		memcpy(TLV_DATA(tlv_ptr), data, tlv_len);
 	return TLV_SPACE(len);
 }
 
@@ -401,10 +387,8 @@ static inline int TCM_SET(void *msg, __u16 cmd, __u16 flags,
 	tcm_hdr->tcm_len   = htonl(msg_len);
 	tcm_hdr->tcm_type  = htons(cmd);
 	tcm_hdr->tcm_flags = htons(flags);
-	if (data_len && data) {
+	if (data_len && data)
 		memcpy(TCM_DATA(msg), data, data_len);
-		memset(TCM_DATA(msg) + data_len, 0, TCM_SPACE(data_len) - msg_len);
-	}
 	return TCM_SPACE(data_len);
 }
 

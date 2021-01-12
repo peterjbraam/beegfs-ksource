@@ -15,7 +15,6 @@
 #include <asm/vio.h>
 #include <asm/bug.h>
 #include <asm/machdep.h>
-#include <asm/swiotlb.h>
 #include <asm/iommu.h>
 
 /*
@@ -27,18 +26,6 @@
  * default the offset is PCI_DRAM_OFFSET.
  */
 
-static u64 __maybe_unused get_pfn_limit(struct device *dev)
-{
-	u64 pfn = (dev->coherent_dma_mask >> PAGE_SHIFT) + 1;
-	struct dev_archdata __maybe_unused *sd = &dev->archdata;
-
-#ifdef CONFIG_SWIOTLB
-	if (sd->max_direct_dma_addr && sd->dma_ops == &swiotlb_dma_ops)
-		pfn = min_t(u64, pfn, sd->max_direct_dma_addr >> PAGE_SHIFT);
-#endif
-
-	return pfn;
-}
 
 static int dma_direct_dma_supported(struct device *dev, u64 mask)
 {
@@ -64,7 +51,7 @@ static int dma_direct_dma_supported(struct device *dev, u64 mask)
 
 void *__dma_direct_alloc_coherent(struct device *dev, size_t size,
 				  dma_addr_t *dma_handle, gfp_t flag,
-				  unsigned long attrs)
+				  struct dma_attrs *attrs)
 {
 	void *ret;
 #ifdef CONFIG_NOT_COHERENT_CACHE
@@ -76,34 +63,6 @@ void *__dma_direct_alloc_coherent(struct device *dev, size_t size,
 #else
 	struct page *page;
 	int node = dev_to_node(dev);
-#ifdef CONFIG_FSL_SOC
-	u64 pfn = get_pfn_limit(dev);
-	int zone;
-
-	/*
-	 * This code should be OK on other platforms, but we have drivers that
-	 * don't set coherent_dma_mask. As a workaround we just ifdef it. This
-	 * whole routine needs some serious cleanup.
-	 */
-
-	zone = dma_pfn_limit_to_zone(pfn);
-	if (zone < 0) {
-		dev_err(dev, "%s: No suitable zone for pfn %#llx\n",
-			__func__, pfn);
-		return NULL;
-	}
-
-	switch (zone) {
-	case ZONE_DMA:
-		flag |= GFP_DMA;
-		break;
-#ifdef CONFIG_ZONE_DMA32
-	case ZONE_DMA32:
-		flag |= GFP_DMA32;
-		break;
-#endif
-	};
-#endif /* CONFIG_FSL_SOC */
 
 	/* ignore region specifiers */
 	flag  &= ~(__GFP_HIGHMEM);
@@ -121,7 +80,7 @@ void *__dma_direct_alloc_coherent(struct device *dev, size_t size,
 
 void __dma_direct_free_coherent(struct device *dev, size_t size,
 				void *vaddr, dma_addr_t dma_handle,
-				unsigned long attrs)
+				struct dma_attrs *attrs)
 {
 #ifdef CONFIG_NOT_COHERENT_CACHE
 	__dma_free_coherent(size, vaddr);
@@ -132,7 +91,7 @@ void __dma_direct_free_coherent(struct device *dev, size_t size,
 
 static void *dma_direct_alloc_coherent(struct device *dev, size_t size,
 				       dma_addr_t *dma_handle, gfp_t flag,
-				       unsigned long attrs)
+				       struct dma_attrs *attrs)
 {
 	struct iommu_table *iommu;
 
@@ -156,7 +115,7 @@ static void *dma_direct_alloc_coherent(struct device *dev, size_t size,
 
 static void dma_direct_free_coherent(struct device *dev, size_t size,
 				     void *vaddr, dma_addr_t dma_handle,
-				     unsigned long attrs)
+				     struct dma_attrs *attrs)
 {
 	struct iommu_table *iommu;
 
@@ -177,7 +136,7 @@ static void dma_direct_free_coherent(struct device *dev, size_t size,
 
 int dma_direct_mmap_coherent(struct device *dev, struct vm_area_struct *vma,
 			     void *cpu_addr, dma_addr_t handle, size_t size,
-			     unsigned long attrs)
+			     struct dma_attrs *attrs)
 {
 	unsigned long pfn;
 
@@ -195,7 +154,7 @@ int dma_direct_mmap_coherent(struct device *dev, struct vm_area_struct *vma,
 
 static int dma_direct_map_sg(struct device *dev, struct scatterlist *sgl,
 			     int nents, enum dma_data_direction direction,
-			     unsigned long attrs)
+			     struct dma_attrs *attrs)
 {
 	struct scatterlist *sg;
 	int i;
@@ -211,7 +170,7 @@ static int dma_direct_map_sg(struct device *dev, struct scatterlist *sgl,
 
 static void dma_direct_unmap_sg(struct device *dev, struct scatterlist *sg,
 				int nents, enum dma_data_direction direction,
-				unsigned long attrs)
+				struct dma_attrs *attrs)
 {
 }
 
@@ -232,7 +191,7 @@ static inline dma_addr_t dma_direct_map_page(struct device *dev,
 					     unsigned long offset,
 					     size_t size,
 					     enum dma_data_direction dir,
-					     unsigned long attrs)
+					     struct dma_attrs *attrs)
 {
 	BUG_ON(dir == DMA_NONE);
 	__dma_sync_page(page, offset, size, dir);
@@ -243,7 +202,7 @@ static inline void dma_direct_unmap_page(struct device *dev,
 					 dma_addr_t dma_address,
 					 size_t size,
 					 enum dma_data_direction direction,
-					 unsigned long attrs)
+					 struct dma_attrs *attrs)
 {
 }
 
@@ -353,16 +312,35 @@ u64 dma_get_required_mask(struct device *dev)
 	if (ppc_md.dma_get_required_mask)
 		return ppc_md.dma_get_required_mask(dev);
 
-	if (dev_is_pci(dev)) {
-		struct pci_dev *pdev = to_pci_dev(dev);
-		struct pci_controller *phb = pci_bus_to_host(pdev->bus);
-		if (phb->controller_ops.dma_get_required_mask)
-			return phb->controller_ops.dma_get_required_mask(pdev);
-	}
-
 	return __dma_get_required_mask(dev);
 }
 EXPORT_SYMBOL_GPL(dma_get_required_mask);
+
+int arch_dma_init(struct device *dev)
+{
+	if (!dev->archdata.hybrid_dma_data)
+		dev->archdata.hybrid_dma_data =
+			kzalloc(sizeof(struct dev_arch_dmadata), GFP_KERNEL);
+
+	if (!dev->archdata.hybrid_dma_data)
+		return -ENOMEM;
+	return 0;
+}
+
+int arch_dma_exit(struct device *dev)
+{
+	kfree(dev->archdata.hybrid_dma_data);
+	return 0;
+}
+
+static int __init arch_platform_init(void)
+{
+	platform_notify = arch_dma_init;
+	platform_notify_remove = arch_dma_exit;
+	return 0;
+}
+
+arch_initcall(arch_platform_init);
 
 static int __init dma_init(void)
 {

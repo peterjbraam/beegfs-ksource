@@ -46,13 +46,12 @@
 
 static unsigned int init_timeout = IBMVFC_INIT_TIMEOUT;
 static unsigned int default_timeout = IBMVFC_DEFAULT_TIMEOUT;
-static u64 max_lun = IBMVFC_MAX_LUN;
+static unsigned int max_lun = IBMVFC_MAX_LUN;
 static unsigned int max_targets = IBMVFC_MAX_TARGETS;
 static unsigned int max_requests = IBMVFC_MAX_REQUESTS_DEFAULT;
 static unsigned int disc_threads = IBMVFC_MAX_DISC_THREADS;
 static unsigned int ibmvfc_debug = IBMVFC_DEBUG;
 static unsigned int log_level = IBMVFC_DEFAULT_LOG_LEVEL;
-static unsigned int cls3_error = IBMVFC_CLS3_ERROR;
 static LIST_HEAD(ibmvfc_head);
 static DEFINE_SPINLOCK(ibmvfc_driver_lock);
 static struct scsi_transport_template *ibmvfc_transport_template;
@@ -72,7 +71,7 @@ MODULE_PARM_DESC(default_timeout,
 module_param_named(max_requests, max_requests, uint, S_IRUGO);
 MODULE_PARM_DESC(max_requests, "Maximum requests for this adapter. "
 		 "[Default=" __stringify(IBMVFC_MAX_REQUESTS_DEFAULT) "]");
-module_param_named(max_lun, max_lun, ullong, S_IRUGO);
+module_param_named(max_lun, max_lun, uint, S_IRUGO);
 MODULE_PARM_DESC(max_lun, "Maximum allowed LUN. "
 		 "[Default=" __stringify(IBMVFC_MAX_LUN) "]");
 module_param_named(max_targets, max_targets, uint, S_IRUGO);
@@ -87,9 +86,6 @@ MODULE_PARM_DESC(debug, "Enable driver debug information. "
 module_param_named(log_level, log_level, uint, 0);
 MODULE_PARM_DESC(log_level, "Set to 0 - 4 for increasing verbosity of device driver. "
 		 "[Default=" __stringify(IBMVFC_DEFAULT_LOG_LEVEL) "]");
-module_param_named(cls3_error, cls3_error, uint, 0);
-MODULE_PARM_DESC(cls3_error, "Enable FC Class 3 Error Recovery. "
-		 "[Default=" __stringify(IBMVFC_CLS3_ERROR) "]");
 
 static const struct {
 	u16 status;
@@ -1338,9 +1334,6 @@ static int ibmvfc_map_sg_data(struct scsi_cmnd *scmd,
 	struct srp_direct_buf *data = &vfc_cmd->ioba;
 	struct ibmvfc_host *vhost = dev_get_drvdata(dev);
 
-	if (cls3_error)
-		vfc_cmd->flags |= cpu_to_be16(IBMVFC_CLASS_3_ERR);
-
 	sg_mapped = scsi_dma_map(scmd);
 	if (!sg_mapped) {
 		vfc_cmd->flags |= cpu_to_be16(IBMVFC_NO_MEM_DESC);
@@ -1621,6 +1614,7 @@ static int ibmvfc_queuecommand_lck(struct scsi_cmnd *cmnd,
 	struct fc_rport *rport = starget_to_rport(scsi_target(cmnd->device));
 	struct ibmvfc_cmd *vfc_cmd;
 	struct ibmvfc_event *evt;
+	u8 tag[2];
 	int rc;
 
 	if (unlikely((rc = fc_remote_port_chkready(rport))) ||
@@ -1648,9 +1642,19 @@ static int ibmvfc_queuecommand_lck(struct scsi_cmnd *cmnd,
 	int_to_scsilun(cmnd->device->lun, &vfc_cmd->iu.lun);
 	memcpy(vfc_cmd->iu.cdb, cmnd->cmnd, cmnd->cmd_len);
 
-	if (cmnd->flags & SCMD_TAGGED) {
-		vfc_cmd->task_tag = cpu_to_be64(cmnd->tag);
-		vfc_cmd->iu.pri_task_attr = IBMVFC_SIMPLE_TASK;
+	if (scsi_populate_tag_msg(cmnd, tag)) {
+		vfc_cmd->task_tag = cpu_to_be64(tag[1]);
+		switch (tag[0]) {
+		case MSG_SIMPLE_TAG:
+			vfc_cmd->iu.pri_task_attr = IBMVFC_SIMPLE_TASK;
+			break;
+		case MSG_HEAD_TAG:
+			vfc_cmd->iu.pri_task_attr = IBMVFC_HEAD_OF_QUEUE;
+			break;
+		case MSG_ORDERED_TAG:
+			vfc_cmd->iu.pri_task_attr = IBMVFC_ORDERED_TASK;
+			break;
+		};
 	}
 
 	if (likely(!(rc = ibmvfc_map_sg_data(cmnd, evt, vfc_cmd, vhost->dev))))
@@ -2893,6 +2897,12 @@ static int ibmvfc_slave_configure(struct scsi_device *sdev)
 	spin_lock_irqsave(shost->host_lock, flags);
 	if (sdev->type == TYPE_DISK)
 		sdev->allow_restart = 1;
+
+	if (sdev->tagged_supported) {
+		scsi_set_tag_type(sdev, MSG_SIMPLE_TAG);
+		scsi_activate_tcq(sdev, sdev->queue_depth);
+	} else
+		scsi_deactivate_tcq(sdev, sdev->queue_depth);
 	spin_unlock_irqrestore(shost->host_lock, flags);
 	return 0;
 }
@@ -2906,12 +2916,40 @@ static int ibmvfc_slave_configure(struct scsi_device *sdev)
  * Return value:
  * 	actual depth set
  **/
-static int ibmvfc_change_queue_depth(struct scsi_device *sdev, int qdepth)
+static int ibmvfc_change_queue_depth(struct scsi_device *sdev, int qdepth,
+				     int reason)
 {
+	if (reason != SCSI_QDEPTH_DEFAULT)
+		return -EOPNOTSUPP;
+
 	if (qdepth > IBMVFC_MAX_CMDS_PER_LUN)
 		qdepth = IBMVFC_MAX_CMDS_PER_LUN;
 
-	return scsi_change_queue_depth(sdev, qdepth);
+	scsi_adjust_queue_depth(sdev, 0, qdepth);
+	return sdev->queue_depth;
+}
+
+/**
+ * ibmvfc_change_queue_type - Change the device's queue type
+ * @sdev:		scsi device struct
+ * @tag_type:	type of tags to use
+ *
+ * Return value:
+ * 	actual queue type set
+ **/
+static int ibmvfc_change_queue_type(struct scsi_device *sdev, int tag_type)
+{
+	if (sdev->tagged_supported) {
+		scsi_set_tag_type(sdev, tag_type);
+
+		if (tag_type)
+			scsi_activate_tcq(sdev, sdev->queue_depth);
+		else
+			scsi_deactivate_tcq(sdev, sdev->queue_depth);
+	} else
+		tag_type = 0;
+
+	return tag_type;
 }
 
 static ssize_t ibmvfc_show_host_partition_name(struct device *dev,
@@ -3095,6 +3133,7 @@ static struct scsi_host_template driver_template = {
 	.target_alloc = ibmvfc_target_alloc,
 	.scan_finished = ibmvfc_scan_finished,
 	.change_queue_depth = ibmvfc_change_queue_depth,
+	.change_queue_type = ibmvfc_change_queue_type,
 	.cmd_per_lun = 16,
 	.can_queue = IBMVFC_MAX_REQUESTS_DEFAULT,
 	.this_id = -1,
@@ -3102,7 +3141,6 @@ static struct scsi_host_template driver_template = {
 	.max_sectors = IBMVFC_MAX_SECTORS,
 	.use_clustering = ENABLE_CLUSTERING,
 	.shost_attrs = ibmvfc_attrs,
-	.track_queue_depth = 1,
 };
 
 /**
@@ -3387,10 +3425,6 @@ static void ibmvfc_tgt_send_prli(struct ibmvfc_target *tgt)
 	prli->parms.type = IBMVFC_SCSI_FCP_TYPE;
 	prli->parms.flags = cpu_to_be16(IBMVFC_PRLI_EST_IMG_PAIR);
 	prli->parms.service_parms = cpu_to_be32(IBMVFC_PRLI_INITIATOR_FUNC);
-	prli->parms.service_parms |= cpu_to_be32(IBMVFC_PRLI_READ_FCP_XFER_RDY_DISABLED);
-
-	if (cls3_error)
-		prli->parms.service_parms |= cpu_to_be32(IBMVFC_PRLI_RETRY);
 
 	ibmvfc_set_tgt_action(tgt, IBMVFC_TGT_ACTION_INIT_WAIT);
 	if (ibmvfc_send_event(evt, vhost, default_timeout)) {
@@ -3579,11 +3613,9 @@ static void ibmvfc_tgt_implicit_logout(struct ibmvfc_target *tgt)
 static int ibmvfc_adisc_needs_plogi(struct ibmvfc_passthru_mad *mad,
 				    struct ibmvfc_target *tgt)
 {
-	if (memcmp(&mad->fc_iu.response[2], &tgt->ids.port_name,
-		   sizeof(tgt->ids.port_name)))
+	if (wwn_to_u64((u8 *)&mad->fc_iu.response[2]) != tgt->ids.port_name)
 		return 1;
-	if (memcmp(&mad->fc_iu.response[4], &tgt->ids.node_name,
-		   sizeof(tgt->ids.node_name)))
+	if (wwn_to_u64((u8 *)&mad->fc_iu.response[4]) != tgt->ids.node_name)
 		return 1;
 	if (be32_to_cpu(mad->fc_iu.response[6]) != tgt->scsi_id)
 		return 1;
@@ -4488,7 +4520,7 @@ static int ibmvfc_work(void *data)
 	struct ibmvfc_host *vhost = data;
 	int rc;
 
-	set_user_nice(current, MIN_NICE);
+	set_user_nice(current, -20);
 
 	while (1) {
 		rc = wait_event_interruptible(vhost->work_wait_q,
@@ -4732,8 +4764,6 @@ static void ibmvfc_rport_add_thread(struct work_struct *work)
 					tgt_dbg(tgt, "Setting rport roles\n");
 					fc_remote_port_rolechg(rport, tgt->ids.roles);
 					put_device(&rport->dev);
-				} else {
-					spin_unlock_irqrestore(vhost->host->host_lock, flags);
 				}
 
 				kref_put(&tgt->kref, ibmvfc_release_tgt);
@@ -4804,7 +4834,6 @@ static int ibmvfc_probe(struct vio_dev *vdev, const struct vio_device_id *id)
 	if (IS_ERR(vhost->work_thread)) {
 		dev_err(dev, "Couldn't create kernel thread: %ld\n",
 			PTR_ERR(vhost->work_thread));
-		rc = PTR_ERR(vhost->work_thread);
 		goto free_host_mem;
 	}
 
@@ -4884,8 +4913,8 @@ static int ibmvfc_remove(struct vio_dev *vdev)
 
 	spin_lock_irqsave(vhost->host->host_lock, flags);
 	ibmvfc_purge_requests(vhost, DID_ERROR);
-	spin_unlock_irqrestore(vhost->host->host_lock, flags);
 	ibmvfc_free_event_pool(vhost);
+	spin_unlock_irqrestore(vhost->host->host_lock, flags);
 
 	ibmvfc_free_mem(vhost);
 	spin_lock(&ibmvfc_driver_lock);

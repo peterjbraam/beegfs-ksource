@@ -508,8 +508,8 @@ static int restore_r2(u32 *instruction, struct module *me)
 		return 1;
 
 	if (*instruction != PPC_INST_NOP) {
-		pr_err("%s: Expect noop after relocate, got %08x\n",
-		       me->name, *instruction);
+		pr_err("%s: Expected nop after call, got %08x at %pS\n",
+			me->name, *instruction, instruction);
 		return 0;
 	}
 	/* ld r2,R2_STACK_OFFSET(r1) */
@@ -631,7 +631,8 @@ int apply_relocate_add(Elf64_Shdr *sechdrs,
 
 		case R_PPC_REL24:
 			/* FIXME: Handle weak symbols here --RR */
-			if (sym->st_shndx == SHN_UNDEF) {
+			if (sym->st_shndx == SHN_UNDEF ||
+			    sym->st_shndx == SHN_LIVEPATCH) {
 				/* External: go via stub */
 				value = stub_for_addr(sechdrs, value, me);
 				if (!value)
@@ -668,33 +669,6 @@ int apply_relocate_add(Elf64_Shdr *sechdrs,
 			 * That would only save us one instruction, so ignore
 			 * it.
 			 */
-			break;
-
-		case R_PPC64_ENTRY:
-			/*
-			 * Optimize ELFv2 large code model entry point if
-			 * the TOC is within 2GB range of current location.
-			 */
-			value = my_r2(sechdrs, me) - (unsigned long)location;
-			if (value + 0x80008000 > 0xffffffff)
-				break;
-			/*
-			 * Check for the large code model prolog sequence:
-		         *	ld r2, ...(r12)
-			 *	add r2, r2, r12
-			 */
-			if ((((uint32_t *)location)[0] & ~0xfffc)
-			    != 0xe84c0000)
-				break;
-			if (((uint32_t *)location)[1] != 0x7c426214)
-				break;
-			/*
-			 * If found, replace it with:
-			 *	addis r2, r12, (.TOC.-func)@ha
-			 *	addi r2, r12, (.TOC.-func)@l
-			 */
-			((uint32_t *)location)[0] = 0x3c4c0000 + PPC_HA(value);
-			((uint32_t *)location)[1] = 0x38420000 + PPC_LO(value);
 			break;
 
 		case R_PPC64_REL16_HA:
@@ -794,10 +768,16 @@ static unsigned long create_ftrace_stub(const Elf64_Shdr *sechdrs, struct module
 
 int module_finalize_ftrace(struct module *mod, const Elf_Shdr *sechdrs)
 {
-	mod->arch.toc = my_r2(sechdrs, mod);
-	mod->arch.tramp = create_ftrace_stub(sechdrs, mod);
+	struct module_ext *mod_ext;
 
-	if (!mod->arch.tramp)
+	mutex_lock(&module_ext_mutex);
+	mod_ext = find_module_ext(mod);
+	mutex_unlock(&module_ext_mutex);
+
+	mod_ext->toc = my_r2(sechdrs, mod);
+	mod_ext->tramp = create_ftrace_stub(sechdrs, mod);
+
+	if (!mod_ext->tramp)
 		return -ENOENT;
 
 	return 0;

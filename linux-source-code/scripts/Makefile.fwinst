@@ -2,7 +2,7 @@
 # Installing firmware
 #
 # We don't include the .config, so all firmware files are in $(fw-shipped-)
-# rather than in $(fw-shipped-y) or $(fw-shipped-m).
+# rather than in $(fw-shipped-y) or $(fw-shipped-n).
 # ==========================================================================
 
 INSTALL := install
@@ -13,12 +13,12 @@ src := $(obj)
 -include $(objtree)/.config
 
 include scripts/Kbuild.include
-include $(src)/Makefile
+include $(srctree)/$(obj)/Makefile
 
 include scripts/Makefile.host
 
 mod-fw := $(fw-shipped-m)
-# If CONFIG_FIRMWARE_IN_KERNEL isn't set, then install the
+# If CONFIG_FIRMWARE_IN_KERNEL isn't set, then install the 
 # firmware for in-kernel drivers too.
 ifndef CONFIG_FIRMWARE_IN_KERNEL
 mod-fw += $(fw-shipped-y)

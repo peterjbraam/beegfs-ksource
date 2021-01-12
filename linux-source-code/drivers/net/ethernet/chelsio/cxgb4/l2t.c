@@ -146,7 +146,7 @@ static int write_l2e(struct adapter *adap, struct l2t_entry *e, int sync)
 	if (!skb)
 		return -ENOMEM;
 
-	req = (struct cpl_l2t_write_req *)__skb_put(skb, sizeof(*req));
+	req = __skb_put(skb, sizeof(*req));
 	INIT_TP_WR(req, 0);
 
 	OPCODE_TID(req) = htonl(MK_OPCODE_TID(CPL_L2T_WRITE_REQ,
@@ -231,6 +231,7 @@ again:
 		if (e->state == L2T_STATE_STALE)
 			e->state = L2T_STATE_VALID;
 		spin_unlock_bh(&e->lock);
+		/* fall through */
 	case L2T_STATE_VALID:     /* fast-path, send the packet on */
 		return t4_ofld_send(adap, skb);
 	case L2T_STATE_RESOLVING:
@@ -432,10 +433,12 @@ struct l2t_entry *cxgb4_l2t_get(struct l2t_data *d, struct neighbour *neigh,
 	else
 		lport = netdev2pinfo(physdev)->lport;
 
-	if (neigh->dev->priv_flags & IFF_802_1Q_VLAN)
+	if (is_vlan_dev(neigh->dev)) {
 		vlan = vlan_dev_vlan_id(neigh->dev);
-	else
+		vlan |= vlan_dev_get_egress_qos_mask(neigh->dev, priority);
+	} else {
 		vlan = VLAN_NONE;
+	}
 
 	write_lock_bh(&d->lock);
 	for (e = d->l2tab[hash].first; e; e = e->next)
@@ -491,15 +494,12 @@ u64 cxgb4_select_ntuple(struct net_device *dev,
 	if (tp->protocol_shift >= 0)
 		ntuple |= (u64)IPPROTO_TCP << tp->protocol_shift;
 
-	if (tp->vnic_shift >= 0) {
-		u32 viid = cxgb4_port_viid(dev);
-		u32 vf = FW_VIID_VIN_G(viid);
-		u32 pf = FW_VIID_PFN_G(viid);
-		u32 vld = FW_VIID_VIVLD_G(viid);
+	if (tp->vnic_shift >= 0 && (tp->ingress_config & VNIC_F)) {
+		struct port_info *pi = (struct port_info *)netdev_priv(dev);
 
-		ntuple |= (u64)(FT_VNID_ID_VF_V(vf) |
-				FT_VNID_ID_PF_V(pf) |
-				FT_VNID_ID_VLD_V(vld)) << tp->vnic_shift;
+		ntuple |= (u64)(FT_VNID_ID_VF_V(pi->vin) |
+				FT_VNID_ID_PF_V(adap->pf) |
+				FT_VNID_ID_VLD_V(pi->vivld)) << tp->vnic_shift;
 	}
 
 	return ntuple;
@@ -646,7 +646,7 @@ struct l2t_data *t4_init_l2t(unsigned int l2t_start, unsigned int l2t_end)
 	if (l2t_size < L2T_MIN_HASH_BUCKETS)
 		return NULL;
 
-	d = t4_alloc_mem(sizeof(*d) + l2t_size * sizeof(struct l2t_entry));
+	d = kvzalloc(struct_size(d, l2tab, l2t_size), GFP_KERNEL);
 	if (!d)
 		return NULL;
 
@@ -682,7 +682,8 @@ static void *l2t_seq_start(struct seq_file *seq, loff_t *pos)
 static void *l2t_seq_next(struct seq_file *seq, void *v, loff_t *pos)
 {
 	v = l2t_get_idx(seq, *pos);
-	++(*pos);
+	if (v)
+		++*pos;
 	return v;
 }
 

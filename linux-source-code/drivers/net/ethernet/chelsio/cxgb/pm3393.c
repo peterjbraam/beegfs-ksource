@@ -12,7 +12,8 @@
  * published by the Free Software Foundation.                                *
  *                                                                           *
  * You should have received a copy of the GNU General Public License along   *
- * with this program; if not, see <http://www.gnu.org/licenses/>.            *
+ * with this program; if not, write to the Free Software Foundation, Inc.,   *
+ * 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.                 *
  *                                                                           *
  * THIS SOFTWARE IS PROVIDED ``AS IS'' AND WITHOUT ANY EXPRESS OR IMPLIED    *
  * WARRANTIES, INCLUDING, WITHOUT LIMITATION, THE IMPLIED WARRANTIES OF      *
@@ -570,7 +571,7 @@ static void pm3393_destroy(struct cmac *cmac)
 	kfree(cmac);
 }
 
-static const struct cmac_ops pm3393_ops = {
+static struct cmac_ops pm3393_ops = {
 	.destroy                 = pm3393_destroy,
 	.reset                   = pm3393_reset,
 	.interrupt_enable        = pm3393_interrupt_enable,

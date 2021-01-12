@@ -119,7 +119,7 @@ exit:
 	return ret;
 }
 
-static const struct kernel_param_ops duration_ops = {
+static struct kernel_param_ops duration_ops = {
 	.set = duration_set,
 	.get = param_get_int,
 };
@@ -167,7 +167,7 @@ exit_win:
 	return ret;
 }
 
-static const struct kernel_param_ops window_size_ops = {
+static struct kernel_param_ops window_size_ops = {
 	.set = window_size_set,
 	.get = param_get_int,
 };
@@ -533,7 +533,7 @@ static int start_power_clamp(void)
 		thread = kthread_create_on_node(clamp_thread,
 						(void *) cpu,
 						cpu_to_node(cpu),
-						"kidle_inject/%ld", cpu);
+						"kidle_inj/%ld", cpu);
 		/* bind to cpu here */
 		if (likely(!IS_ERR(thread))) {
 			kthread_bind(thread, cpu);
@@ -584,7 +584,7 @@ static int powerclamp_cpu_callback(struct notifier_block *nfb,
 		thread = kthread_create_on_node(clamp_thread,
 						(void *) cpu,
 						cpu_to_node(cpu),
-						"kidle_inject/%lu", cpu);
+						"kidle_inj/%lu", cpu);
 		if (likely(!IS_ERR(thread))) {
 			kthread_bind(thread, cpu);
 			wake_up_process(thread);

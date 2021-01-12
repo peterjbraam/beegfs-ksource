@@ -13,7 +13,6 @@
 #include <linux/kmsg_dump.h>
 #include <linux/kallsyms.h>
 #include <linux/notifier.h>
-#include <linux/vt_kern.h>
 #include <linux/module.h>
 #include <linux/random.h>
 #include <linux/ftrace.h>
@@ -24,7 +23,6 @@
 #include <linux/sysrq.h>
 #include <linux/init.h>
 #include <linux/nmi.h>
-#include <linux/console.h>
 #include <linux/bug.h>
 
 #define PANIC_TIMER_STEP 100
@@ -144,7 +142,6 @@ void panic(const char *fmt, ...)
 	 * after setting panic_cpu) from invoking panic() again.
 	 */
 	local_irq_disable();
-	preempt_disable_notrace();
 
 	/*
 	 * It's possible to come here directly from a panic-assertion and
@@ -172,7 +169,7 @@ void panic(const char *fmt, ...)
 	va_start(args, fmt);
 	vsnprintf(buf, sizeof(buf), fmt, args);
 	va_end(args);
-	pr_emerg("Kernel panic - not syncing: %s\n", buf);
+	printk(KERN_EMERG "Kernel panic - not syncing: %s\n",buf);
 #ifdef CONFIG_DEBUG_BUGVERBOSE
 	/*
 	 * Avoid nested stack-dumping if a panic occurs during oops processing
@@ -190,7 +187,6 @@ void panic(const char *fmt, ...)
 	 * Bypass the panic_cpu check and call __crash_kexec directly.
 	 */
 	if (!_crash_kexec_post_notifiers) {
-		printk_nmi_flush_on_panic();
 		__crash_kexec(NULL);
 
 		/*
@@ -214,8 +210,6 @@ void panic(const char *fmt, ...)
 	 */
 	atomic_notifier_call_chain(&panic_notifier_list, 0, buf);
 
-	/* Call flush even twice. It tries harder with a single online CPU */
-	printk_nmi_flush_on_panic();
 	kmsg_dump(KMSG_DUMP_PANIC);
 
 	/*
@@ -230,21 +224,7 @@ void panic(const char *fmt, ...)
 	if (_crash_kexec_post_notifiers)
 		__crash_kexec(NULL);
 
-#ifdef CONFIG_VT
-	unblank_screen();
-#endif
-	console_unblank();
-
-	/*
-	 * We may have ended up stopping the CPU holding the lock (in
-	 * smp_send_stop()) while still having some valuable data in the console
-	 * buffer.  Try to acquire the lock then release it regardless of the
-	 * result.  The release will also print the buffers out.  Locks debug
-	 * should be disabled to avoid reporting bad unlock balance when
-	 * panic() is not being callled from OOPS.
-	 */
-	debug_locks_off();
-	console_flush_on_panic();
+	bust_spinlocks(0);
 
 	if (!panic_blink)
 		panic_blink = no_blink;
@@ -254,7 +234,7 @@ void panic(const char *fmt, ...)
 		 * Delay timeout seconds before rebooting the machine.
 		 * We can't use the "normal" timers since we just panicked.
 		 */
-		pr_emerg("Rebooting in %d seconds..\n", panic_timeout);
+		printk(KERN_EMERG "Rebooting in %d seconds..", panic_timeout);
 
 		for (i = 0; i < panic_timeout * 1000; i += PANIC_TIMER_STEP) {
 			touch_nmi_watchdog();
@@ -278,7 +258,7 @@ void panic(const char *fmt, ...)
 		extern int stop_a_enabled;
 		/* Make sure the user can actually press Stop-A (L1-A) */
 		stop_a_enabled = 1;
-		pr_emerg("Press Stop-A (L1-A) to return to the boot prom\n");
+		printk(KERN_EMERG "Press Stop-A (L1-A) to return to the boot prom\n");
 	}
 #endif
 #if defined(CONFIG_S390)
@@ -289,7 +269,6 @@ void panic(const char *fmt, ...)
 		disabled_wait(caller);
 	}
 #endif
-	pr_emerg("---[ end Kernel panic - not syncing: %s\n", buf);
 	local_irq_enable();
 	for (i = 0; ; i += PANIC_TIMER_STEP) {
 		touch_softlockup_watchdog();
@@ -303,30 +282,41 @@ void panic(const char *fmt, ...)
 
 EXPORT_SYMBOL(panic);
 
-
-struct tnt {
-	u8	bit;
-	char	true;
-	char	false;
-};
-
-static const struct tnt tnts[] = {
-	{ TAINT_PROPRIETARY_MODULE,	'P', 'G' },
-	{ TAINT_FORCED_MODULE,		'F', ' ' },
-	{ TAINT_CPU_OUT_OF_SPEC,	'S', ' ' },
-	{ TAINT_FORCED_RMMOD,		'R', ' ' },
-	{ TAINT_MACHINE_CHECK,		'M', ' ' },
-	{ TAINT_BAD_PAGE,		'B', ' ' },
-	{ TAINT_USER,			'U', ' ' },
-	{ TAINT_DIE,			'D', ' ' },
-	{ TAINT_OVERRIDDEN_ACPI_TABLE,	'A', ' ' },
-	{ TAINT_WARN,			'W', ' ' },
-	{ TAINT_CRAP,			'C', ' ' },
-	{ TAINT_FIRMWARE_WORKAROUND,	'I', ' ' },
-	{ TAINT_OOT_MODULE,		'O', ' ' },
-	{ TAINT_UNSIGNED_MODULE,	'E', ' ' },
-	{ TAINT_SOFTLOCKUP,		'L', ' ' },
-	{ TAINT_LIVEPATCH,		'K', ' ' },
+/*
+ * TAINT_FORCED_RMMOD could be a per-module flag but the module
+ * is being removed anyway.
+ */
+const struct taint_flag taint_flags[TAINT_FLAGS_COUNT] = {
+	{ 'P', 'G', true },	/* TAINT_PROPRIETARY_MODULE */
+	{ 'F', ' ', true },	/* TAINT_FORCED_MODULE */
+	{ 'S', ' ', false },	/* TAINT_UNSAFE_SMP */
+	{ 'R', ' ', false },	/* TAINT_FORCED_RMMOD */
+	{ 'M', ' ', false },	/* TAINT_MACHINE_CHECK */
+	{ 'B', ' ', false },	/* TAINT_BAD_PAGE */
+	{ 'U', ' ', false },	/* TAINT_USER */
+	{ 'D', ' ', false },	/* TAINT_DIE */
+	{ 'A', ' ', false },	/* TAINT_OVERRIDDEN_ACPI_TABLE */
+	{ 'W', ' ', false },	/* TAINT_WARN */
+	{ 'C', ' ', true },	/* TAINT_CRAP */
+	{ 'I', ' ', false },	/* TAINT_FIRMWARE_WORKAROUND */
+	{ 'O', ' ', true },	/* TAINT_OOT_MODULE */
+	{ 'E', ' ', true },	/* TAINT_UNSIGNED_MODULE */
+	{ 'L', ' ', false },	/* TAINT_SOFTLOCKUP */
+	{ 'K', ' ', true },	/* TAINT_LIVEPATCH */
+	{ '?', '-', false },	/* TAINT_16 */
+	{ '?', '-', false },	/* TAINT_17 */
+	{ '?', '-', false },	/* TAINT_18 */
+	{ '?', '-', false },	/* TAINT_19 */
+	{ '?', '-', false },	/* TAINT_20 */
+	{ '?', '-', false },	/* TAINT_21 */
+	{ '?', '-', false },	/* TAINT_22 */
+	{ '?', '-', false },	/* TAINT_23 */
+	{ '?', '-', false },	/* TAINT_24 */
+	{ '?', '-', false },	/* TAINT_25 */
+	{ '?', '-', false },	/* TAINT_26 */
+	{ '?', '-', false },	/* TAINT_27 */
+	{ 'H', ' ', false },	/* TAINT_HARDWARE_UNSUPPORTED */
+	{ 'T', ' ', true },	/* TAINT_TECH_PREVIEW */
 };
 
 /**
@@ -353,17 +343,17 @@ static const struct tnt tnts[] = {
  */
 const char *print_tainted(void)
 {
-	static char buf[ARRAY_SIZE(tnts) + sizeof("Tainted: ")];
+	static char buf[TAINT_FLAGS_COUNT + sizeof("Tainted: ")];
 
 	if (tainted_mask) {
 		char *s;
 		int i;
 
 		s = buf + sprintf(buf, "Tainted: ");
-		for (i = 0; i < ARRAY_SIZE(tnts); i++) {
-			const struct tnt *t = &tnts[i];
-			*s++ = test_bit(t->bit, &tainted_mask) ?
-					t->true : t->false;
+		for (i = 0; i < TAINT_FLAGS_COUNT; i++) {
+			const struct taint_flag *t = &taint_flags[i];
+			*s++ = test_bit(i, &tainted_mask) ?
+					t->c_true : t->c_false;
 		}
 		*s = 0;
 	} else
@@ -394,7 +384,8 @@ unsigned long get_taint(void)
 void add_taint(unsigned flag, enum lockdep_ok lockdep_ok)
 {
 	if (lockdep_ok == LOCKDEP_NOW_UNRELIABLE && __debug_locks_off())
-		pr_warn("Disabling lock debugging due to kernel taint\n");
+		printk(KERN_WARNING
+		       "Disabling lock debugging due to kernel taint\n");
 
 	set_bit(flag, &tainted_mask);
 }
@@ -499,7 +490,8 @@ late_initcall(init_oops_id);
 void print_oops_end_marker(void)
 {
 	init_oops_id();
-	pr_warn("---[ end trace %016llx ]---\n", (unsigned long long)oops_id);
+	printk(KERN_WARNING "---[ end trace %016llx ]---\n",
+		(unsigned long long)oops_id);
 }
 
 /*
@@ -523,7 +515,7 @@ void __warn(const char *file, int line, void *caller, unsigned taint,
 {
 	disable_trace_on_warning();
 
-	pr_warn("------------[ cut here ]------------\n");
+	pr_warn(CUT_HERE);
 
 	if (file)
 		pr_warn("WARNING: CPU: %d PID: %d at %s:%d %pS\n",
@@ -598,7 +590,7 @@ EXPORT_SYMBOL(warn_slowpath_null);
  * Called when gcc's -fstack-protector feature is used, and
  * gcc detects corruption of the on-stack canary value
  */
-__visible void __stack_chk_fail(void)
+void __stack_chk_fail(void)
 {
 	panic("stack-protector: Kernel stack is corrupted in: %p\n",
 		__builtin_return_address(0));

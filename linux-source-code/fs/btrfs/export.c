@@ -55,9 +55,9 @@ static int btrfs_encode_fh(struct inode *inode, u32 *fh, int *max_len,
 	return type;
 }
 
-struct dentry *btrfs_get_dentry(struct super_block *sb, u64 objectid,
-				u64 root_objectid, u32 generation,
-				int check_generation)
+static struct dentry *btrfs_get_dentry(struct super_block *sb, u64 objectid,
+				       u64 root_objectid, u32 generation,
+				       int check_generation)
 {
 	struct btrfs_fs_info *fs_info = btrfs_sb(sb);
 	struct btrfs_root *root;
@@ -150,9 +150,9 @@ static struct dentry *btrfs_fh_to_dentry(struct super_block *sb, struct fid *fh,
 	return btrfs_get_dentry(sb, objectid, root_objectid, generation, 1);
 }
 
-struct dentry *btrfs_get_parent(struct dentry *child)
+static struct dentry *btrfs_get_parent(struct dentry *child)
 {
-	struct inode *dir = d_inode(child);
+	struct inode *dir = child->d_inode;
 	struct btrfs_root *root = BTRFS_I(dir)->root;
 	struct btrfs_path *path;
 	struct extent_buffer *leaf;
@@ -220,8 +220,8 @@ fail:
 static int btrfs_get_name(struct dentry *parent, char *name,
 			  struct dentry *child)
 {
-	struct inode *inode = d_inode(child);
-	struct inode *dir = d_inode(parent);
+	struct inode *inode = child->d_inode;
+	struct inode *dir = parent->d_inode;
 	struct btrfs_path *path;
 	struct btrfs_root *root = BTRFS_I(dir)->root;
 	struct btrfs_inode_ref *iref;

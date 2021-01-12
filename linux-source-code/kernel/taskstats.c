@@ -41,12 +41,7 @@ static DEFINE_PER_CPU(__u32, taskstats_seqnum);
 static int family_registered;
 struct kmem_cache *taskstats_cache;
 
-static struct genl_family family = {
-	.id		= GENL_ID_GENERATE,
-	.name		= TASKSTATS_GENL_NAME,
-	.version	= TASKSTATS_GENL_VERSION,
-	.maxattr	= TASKSTATS_CMD_ATTR_MAX,
-};
+static struct genl_family family;
 
 static const struct nla_policy taskstats_cmd_get_policy[TASKSTATS_CMD_ATTR_MAX+1] = {
 	[TASKSTATS_CMD_ATTR_PID]  = { .type = NLA_U32 },
@@ -54,11 +49,7 @@ static const struct nla_policy taskstats_cmd_get_policy[TASKSTATS_CMD_ATTR_MAX+1
 	[TASKSTATS_CMD_ATTR_REGISTER_CPUMASK] = { .type = NLA_STRING },
 	[TASKSTATS_CMD_ATTR_DEREGISTER_CPUMASK] = { .type = NLA_STRING },};
 
-/*
- * We have to use TASKSTATS_CMD_ATTR_MAX here, it is the maxattr in the family.
- * Make sure they are always aligned.
- */
-static const struct nla_policy cgroupstats_cmd_get_policy[TASKSTATS_CMD_ATTR_MAX+1] = {
+static const struct nla_policy cgroupstats_cmd_get_policy[CGROUPSTATS_CMD_ATTR_MAX+1] = {
 	[CGROUPSTATS_CMD_ATTR_FD] = { .type = NLA_U32 },
 };
 
@@ -285,7 +276,6 @@ static int add_del_listener(pid_t pid, const struct cpumask *mask, int isadd)
 	struct listener_list *listeners;
 	struct listener *s, *tmp, *s2;
 	unsigned int cpu;
-	int ret = 0;
 
 	if (!cpumask_subset(mask, cpu_possible_mask))
 		return -EINVAL;
@@ -300,10 +290,9 @@ static int add_del_listener(pid_t pid, const struct cpumask *mask, int isadd)
 		for_each_cpu(cpu, mask) {
 			s = kmalloc_node(sizeof(struct listener),
 					GFP_KERNEL, cpu_to_node(cpu));
-			if (!s) {
-				ret = -ENOMEM;
+			if (!s)
 				goto cleanup;
-			}
+
 			s->pid = pid;
 			s->valid = 1;
 
@@ -336,7 +325,7 @@ cleanup:
 		}
 		up_write(&listeners->sem);
 	}
-	return ret;
+	return 0;
 }
 
 static int parse(struct nlattr *na, struct cpumask *mask)
@@ -428,7 +417,7 @@ static int cgroupstats_user_cmd(struct sk_buff *skb, struct genl_info *info)
 	stats = nla_data(na);
 	memset(stats, 0, sizeof(*stats));
 
-	rc = cgroupstats_build(stats, f.file->f_path.dentry);
+	rc = cgroupstats_build(stats, f.file->f_dentry);
 	if (rc < 0) {
 		nlmsg_free(rep_skb);
 		goto err;
@@ -559,33 +548,25 @@ static int taskstats_user_cmd(struct sk_buff *skb, struct genl_info *info)
 static struct taskstats *taskstats_tgid_alloc(struct task_struct *tsk)
 {
 	struct signal_struct *sig = tsk->signal;
-	struct taskstats *stats_new, *stats;
+	struct taskstats *stats;
 
-	/* Pairs with smp_store_release() below. */
-	stats = smp_load_acquire(&sig->stats);
-	if (stats || thread_group_empty(tsk))
-		return stats;
+	if (sig->stats || thread_group_empty(tsk))
+		goto ret;
 
 	/* No problem if kmem_cache_zalloc() fails */
-	stats_new = kmem_cache_zalloc(taskstats_cache, GFP_KERNEL);
+	stats = kmem_cache_zalloc(taskstats_cache, GFP_KERNEL);
 
 	spin_lock_irq(&tsk->sighand->siglock);
-	stats = sig->stats;
-	if (!stats) {
-		/*
-		 * Pairs with smp_store_release() above and order the
-		 * kmem_cache_zalloc().
-		 */
-		smp_store_release(&sig->stats, stats_new);
-		stats = stats_new;
-		stats_new = NULL;
+	if (!sig->stats) {
+		sig->stats = stats;
+		stats = NULL;
 	}
 	spin_unlock_irq(&tsk->sighand->siglock);
 
-	if (stats_new)
-		kmem_cache_free(taskstats_cache, stats_new);
-
-	return stats;
+	if (stats)
+		kmem_cache_free(taskstats_cache, stats);
+ret:
+	return sig->stats;
 }
 
 /* Send pid data out on exit */
@@ -614,7 +595,7 @@ void taskstats_exit(struct task_struct *tsk, int group_dead)
 		fill_tgid_exit(tsk);
 	}
 
-	listeners = raw_cpu_ptr(&listener_array);
+	listeners = __this_cpu_ptr(&listener_array);
 	if (list_empty(&listeners->list))
 		return;
 
@@ -663,6 +644,15 @@ static const struct genl_ops taskstats_ops[] = {
 	},
 };
 
+static struct genl_family family = {
+	.name		= TASKSTATS_GENL_NAME,
+	.version	= TASKSTATS_GENL_VERSION,
+	.maxattr	= TASKSTATS_CMD_ATTR_MAX,
+	.module		= THIS_MODULE,
+	.ops		= taskstats_ops,
+	.n_ops		= ARRAY_SIZE(taskstats_ops),
+};
+
 /* Needed early in initialization */
 void __init taskstats_init_early(void)
 {
@@ -679,7 +669,7 @@ static int __init taskstats_init(void)
 {
 	int rc;
 
-	rc = genl_register_family_with_ops(&family, taskstats_ops);
+	rc = genl_register_family(&family);
 	if (rc)
 		return rc;
 

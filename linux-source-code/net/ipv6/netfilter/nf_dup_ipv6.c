@@ -57,10 +57,8 @@ void nf_dup_ipv6(struct net *net, struct sk_buff *skb, unsigned int hooknum,
 		return;
 
 #if IS_ENABLED(CONFIG_NF_CONNTRACK)
-	nf_conntrack_put(skb->nfct);
-	skb->nfct     = &nf_ct_untracked_get()->ct_general;
-	skb->nfctinfo = IP_CT_NEW;
-	nf_conntrack_get(skb->nfct);
+	nf_reset(skb);
+	nf_ct_set(skb, NULL, IP_CT_UNTRACKED);
 #endif
 	if (hooknum == NF_INET_PRE_ROUTING ||
 	    hooknum == NF_INET_LOCAL_IN) {
@@ -69,7 +67,7 @@ void nf_dup_ipv6(struct net *net, struct sk_buff *skb, unsigned int hooknum,
 	}
 	if (nf_dup_ipv6_route(net, skb, gw, oif)) {
 		__this_cpu_write(nf_skb_duplicated, true);
-		ip6_local_out(net, skb->sk, skb);
+		ip6_local_out(skb);
 		__this_cpu_write(nf_skb_duplicated, false);
 	} else {
 		kfree_skb(skb);

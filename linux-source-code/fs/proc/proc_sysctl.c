@@ -353,7 +353,7 @@ lookup_header_set(struct ctl_table_root *root)
 {
 	struct ctl_table_set *set = &root->default_set;
 	if (root->lookup)
-		set = root->lookup(root);
+		set = root->lookup(root, current->nsproxy);
 	return set;
 }
 
@@ -460,7 +460,6 @@ static int sysctl_perm(struct ctl_table_header *head, struct ctl_table *table, i
 static struct inode *proc_sys_make_inode(struct super_block *sb,
 		struct ctl_table_header *head, struct ctl_table *table)
 {
-	struct ctl_table_root *root = head->root;
 	struct inode *inode;
 	struct proc_inode *ei;
 
@@ -484,7 +483,7 @@ static struct inode *proc_sys_make_inode(struct super_block *sb,
 	head->count++;
 	spin_unlock(&sysctl_lock);
 
-	inode->i_mtime = inode->i_atime = inode->i_ctime = current_time(inode);
+	inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME;
 	inode->i_mode = table->mode;
 	if (!S_ISDIR(table->mode)) {
 		inode->i_mode |= S_IFREG;
@@ -498,12 +497,8 @@ static struct inode *proc_sys_make_inode(struct super_block *sb,
 			make_empty_dir_inode(inode);
 	}
 
-	if (root->set_ownership)
-		root->set_ownership(head, table, &inode->i_uid, &inode->i_gid);
-	else {
-		inode->i_uid = GLOBAL_ROOT_UID;
-		inode->i_gid = GLOBAL_ROOT_GID;
-	}
+	inode->i_uid = GLOBAL_ROOT_UID;
+	inode->i_gid = GLOBAL_ROOT_GID;
 
 	return inode;
 }
@@ -530,7 +525,7 @@ static struct dentry *proc_sys_lookup(struct inode *dir, struct dentry *dentry,
 {
 	struct ctl_table_header *head = grab_header(dir);
 	struct ctl_table_header *h = NULL;
-	const struct qstr *name = &dentry->d_name;
+	struct qstr *name = &dentry->d_name;
 	struct ctl_table *p;
 	struct inode *inode;
 	struct dentry *err = ERR_PTR(-ENOENT);
@@ -667,12 +662,12 @@ out:
 	return ret;
 }
 
-static bool proc_sys_fill_cache(struct file *file,
-				struct dir_context *ctx,
+static int proc_sys_fill_cache(struct file *filp, void *dirent,
+				filldir_t filldir,
 				struct ctl_table_header *head,
 				struct ctl_table *table)
 {
-	struct dentry *child, *dir = file->f_path.dentry;
+	struct dentry *child, *dir = filp->f_path.dentry;
 	struct inode *inode;
 	struct qstr qname;
 	ino_t ino = 0;
@@ -680,42 +675,38 @@ static bool proc_sys_fill_cache(struct file *file,
 
 	qname.name = table->procname;
 	qname.len  = strlen(table->procname);
-	qname.hash = full_name_hash(dir, qname.name, qname.len);
+	qname.hash = full_name_hash(qname.name, qname.len);
 
 	child = d_lookup(dir, &qname);
 	if (!child) {
-		DECLARE_WAIT_QUEUE_HEAD_ONSTACK(wq);
-		child = d_alloc_parallel(dir, &qname, &wq);
-		if (IS_ERR(child))
-			return false;
-		if (d_in_lookup(child)) {
+		child = d_alloc(dir, &qname);
+		if (child) {
 			inode = proc_sys_make_inode(dir->d_sb, head, table);
 			if (IS_ERR(inode)) {
-				d_lookup_done(child);
 				dput(child);
-				return false;
+				return -ENOMEM;
+			} else {
+				d_set_d_op(child, &proc_sys_dentry_operations);
+				d_add(child, inode);
 			}
-			d_set_d_op(child, &proc_sys_dentry_operations);
-			d_add(child, inode);
+		} else {
+			return -ENOMEM;
 		}
 	}
-	inode = d_inode(child);
+	inode = child->d_inode;
 	ino  = inode->i_ino;
 	type = inode->i_mode >> 12;
 	dput(child);
-	return dir_emit(ctx, qname.name, qname.len, ino, type);
+	return !!filldir(dirent, qname.name, qname.len, filp->f_pos, ino, type);
 }
 
-static bool proc_sys_link_fill_cache(struct file *file,
-				    struct dir_context *ctx,
+static int proc_sys_link_fill_cache(struct file *filp, void *dirent,
+				    filldir_t filldir,
 				    struct ctl_table_header *head,
 				    struct ctl_table *table)
 {
-	bool ret = true;
-
+	int ret = 0;
 	head = sysctl_head_grab(head);
-	if (IS_ERR(head))
-		return false;
 
 	if (S_ISLNK(table->mode)) {
 		/* It is not an error if we can not follow the link ignore it */
@@ -724,59 +715,75 @@ static bool proc_sys_link_fill_cache(struct file *file,
 			goto out;
 	}
 
-	ret = proc_sys_fill_cache(file, ctx, head, table);
+	ret = proc_sys_fill_cache(filp, dirent, filldir, head, table);
 out:
 	sysctl_head_finish(head);
 	return ret;
 }
 
-static int scan(struct ctl_table_header *head, struct ctl_table *table,
+static int scan(struct ctl_table_header *head, ctl_table *table,
 		unsigned long *pos, struct file *file,
-		struct dir_context *ctx)
+		void *dirent, filldir_t filldir)
 {
-	bool res;
+	int res;
 
-	if ((*pos)++ < ctx->pos)
-		return true;
+	if ((*pos)++ < file->f_pos)
+		return 0;
 
 	if (unlikely(S_ISLNK(table->mode)))
-		res = proc_sys_link_fill_cache(file, ctx, head, table);
+		res = proc_sys_link_fill_cache(file, dirent, filldir, head, table);
 	else
-		res = proc_sys_fill_cache(file, ctx, head, table);
+		res = proc_sys_fill_cache(file, dirent, filldir, head, table);
 
-	if (res)
-		ctx->pos = *pos;
+	if (res == 0)
+		file->f_pos = *pos;
 
 	return res;
 }
 
-static int proc_sys_readdir(struct file *file, struct dir_context *ctx)
+static int proc_sys_readdir(struct file *filp, void *dirent, filldir_t filldir)
 {
-	struct ctl_table_header *head = grab_header(file_inode(file));
+	struct dentry *dentry = filp->f_path.dentry;
+	struct inode *inode = dentry->d_inode;
+	struct ctl_table_header *head = grab_header(inode);
 	struct ctl_table_header *h = NULL;
 	struct ctl_table *entry;
 	struct ctl_dir *ctl_dir;
 	unsigned long pos;
+	int ret = -EINVAL;
 
 	if (IS_ERR(head))
 		return PTR_ERR(head);
 
 	ctl_dir = container_of(head, struct ctl_dir, header);
 
-	if (!dir_emit_dots(file, ctx))
-		goto out;
-
+	ret = 0;
+	/* Avoid a switch here: arm builds fail with missing __cmpdi2 */
+	if (filp->f_pos == 0) {
+		if (filldir(dirent, ".", 1, filp->f_pos,
+				inode->i_ino, DT_DIR) < 0)
+			goto out;
+		filp->f_pos++;
+	}
+	if (filp->f_pos == 1) {
+		if (filldir(dirent, "..", 2, filp->f_pos,
+				parent_ino(dentry), DT_DIR) < 0)
+			goto out;
+		filp->f_pos++;
+	}
 	pos = 2;
 
 	for (first_entry(ctl_dir, &h, &entry); h; next_entry(&h, &entry)) {
-		if (!scan(h, entry, &pos, file, ctx)) {
+		ret = scan(h, entry, &pos, filp, dirent, filldir);
+		if (ret) {
 			sysctl_head_finish(h);
 			break;
 		}
 	}
+	ret = 1;
 out:
 	sysctl_head_finish(head);
-	return 0;
+	return ret;
 }
 
 static int proc_sys_permission(struct inode *inode, int mask)
@@ -809,13 +816,13 @@ static int proc_sys_permission(struct inode *inode, int mask)
 
 static int proc_sys_setattr(struct dentry *dentry, struct iattr *attr)
 {
-	struct inode *inode = d_inode(dentry);
+	struct inode *inode = dentry->d_inode;
 	int error;
 
 	if (attr->ia_valid & (ATTR_MODE | ATTR_UID | ATTR_GID))
 		return -EPERM;
 
-	error = setattr_prepare(dentry, attr);
+	error = inode_change_ok(inode, attr);
 	if (error)
 		return error;
 
@@ -826,7 +833,7 @@ static int proc_sys_setattr(struct dentry *dentry, struct iattr *attr)
 
 static int proc_sys_getattr(struct vfsmount *mnt, struct dentry *dentry, struct kstat *stat)
 {
-	struct inode *inode = d_inode(dentry);
+	struct inode *inode = dentry->d_inode;
 	struct ctl_table_header *head = grab_header(inode);
 	struct ctl_table *table = PROC_I(inode)->sysctl_entry;
 
@@ -851,7 +858,7 @@ static const struct file_operations proc_sys_file_operations = {
 
 static const struct file_operations proc_sys_dir_file_operations = {
 	.read		= generic_read_dir,
-	.iterate_shared	= proc_sys_readdir,
+	.readdir	= proc_sys_readdir,
 	.llseek		= generic_file_llseek,
 };
 
@@ -872,12 +879,12 @@ static int proc_sys_revalidate(struct dentry *dentry, unsigned int flags)
 {
 	if (flags & LOOKUP_RCU)
 		return -ECHILD;
-	return !PROC_I(d_inode(dentry))->sysctl->unregistering;
+	return !PROC_I(dentry->d_inode)->sysctl->unregistering;
 }
 
 static int proc_sys_delete(const struct dentry *dentry)
 {
-	return !!PROC_I(d_inode(dentry))->sysctl->unregistering;
+	return !!PROC_I(dentry->d_inode)->sysctl->unregistering;
 }
 
 static int sysctl_is_seen(struct ctl_table_header *p)
@@ -895,7 +902,7 @@ static int sysctl_is_seen(struct ctl_table_header *p)
 	return res;
 }
 
-static int proc_sys_compare(const struct dentry *dentry,
+static int proc_sys_compare(const struct dentry *parent, const struct dentry *dentry,
 		unsigned int len, const char *str, const struct qstr *name)
 {
 	struct ctl_table_header *head;
@@ -904,7 +911,7 @@ static int proc_sys_compare(const struct dentry *dentry,
 	/* Although proc doesn't have negative dentries, rcu-walk means
 	 * that inode here can be NULL */
 	/* AV: can it, indeed? */
-	inode = d_inode_rcu(dentry);
+	inode = ACCESS_ONCE(dentry->d_inode);
 	if (!inode)
 		return 1;
 	if (name->len != len)
@@ -1086,15 +1093,30 @@ static int sysctl_err(const char *path, struct ctl_table *table, char *fmt, ...)
 	return -EINVAL;
 }
 
+static int sysctl_check_table_array(const char *path, struct ctl_table *table)
+{
+	int err = 0;
+
+	if ((table->proc_handler == proc_douintvec) ||
+	    (table->proc_handler == proc_douintvec_minmax)) {
+		if (table->maxlen != sizeof(unsigned int))
+			err |= sysctl_err(path, table, "array now allowed");
+	}
+
+	return err;
+}
+
 static int sysctl_check_table(const char *path, struct ctl_table *table)
 {
 	int err = 0;
 	for (; table->procname; table++) {
 		if (table->child)
-			err = sysctl_err(path, table, "Not a file");
+			err |= sysctl_err(path, table, "Not a file");
 
 		if ((table->proc_handler == proc_dostring) ||
 		    (table->proc_handler == proc_dointvec) ||
+		    (table->proc_handler == proc_douintvec) ||
+		    (table->proc_handler == proc_douintvec_minmax) ||
 		    (table->proc_handler == proc_dointvec_minmax) ||
 		    (table->proc_handler == proc_dointvec_jiffies) ||
 		    (table->proc_handler == proc_dointvec_userhz_jiffies) ||
@@ -1102,15 +1124,17 @@ static int sysctl_check_table(const char *path, struct ctl_table *table)
 		    (table->proc_handler == proc_doulongvec_minmax) ||
 		    (table->proc_handler == proc_doulongvec_ms_jiffies_minmax)) {
 			if (!table->data)
-				err = sysctl_err(path, table, "No data");
+				err |= sysctl_err(path, table, "No data");
 			if (!table->maxlen)
-				err = sysctl_err(path, table, "No maxlen");
+				err |= sysctl_err(path, table, "No maxlen");
+			else
+				err |= sysctl_check_table_array(path, table);
 		}
 		if (!table->proc_handler)
-			err = sysctl_err(path, table, "No proc_handler");
+			err |= sysctl_err(path, table, "No proc_handler");
 
 		if ((table->mode & (S_IRUGO|S_IWUGO)) != table->mode)
-			err = sysctl_err(path, table, "bogus .mode 0%o",
+			err |= sysctl_err(path, table, "bogus .mode 0%o",
 				table->mode);
 	}
 	return err;
@@ -1608,11 +1632,8 @@ static void drop_sysctl_table(struct ctl_table_header *header)
 	if (--header->nreg)
 		return;
 
-	if (parent) {
-		put_links(header);
-		start_unregistering(header);
-	}
-
+	put_links(header);
+	start_unregistering(header);
 	if (!--header->count)
 		kfree_rcu(header, rcu);
 

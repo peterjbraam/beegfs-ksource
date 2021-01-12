@@ -229,7 +229,7 @@ void hci_send_to_sock(struct hci_dev *hdev, struct sk_buff *skb)
 
 		if (!skb_copy) {
 			/* Create a private copy with headroom */
-			skb_copy = __pskb_copy_fclone(skb, 1, GFP_ATOMIC, true);
+			skb_copy = __pskb_copy(skb, 1, GFP_ATOMIC);
 			if (!skb_copy)
 				continue;
 
@@ -327,7 +327,7 @@ void hci_send_to_monitor(struct hci_dev *hdev, struct sk_buff *skb)
 	}
 
 	/* Create a private copy with headroom */
-	skb_copy = __pskb_copy_fclone(skb, HCI_MON_HDR_SIZE, GFP_ATOMIC, true);
+	skb_copy = __pskb_copy(skb, HCI_MON_HDR_SIZE, GFP_ATOMIC);
 	if (!skb_copy)
 		return;
 
@@ -517,7 +517,7 @@ static struct sk_buff *create_monitor_ctrl_open(struct sock *sk)
 	put_unaligned_le16(format, skb_put(skb, 2));
 	memcpy(skb_put(skb, sizeof(ver)), ver, sizeof(ver));
 	put_unaligned_le32(flags, skb_put(skb, 4));
-	*skb_put(skb, 1) = TASK_COMM_LEN;
+	*(u8 *)skb_put(skb, 1) = TASK_COMM_LEN;
 	memcpy(skb_put(skb, TASK_COMM_LEN), hci_pi(sk)->comm, TASK_COMM_LEN);
 
 	__net_timestamp(skb);
@@ -616,7 +616,7 @@ send_monitor_note(struct sock *sk, const char *fmt, ...)
 
 	va_start(args, fmt);
 	vsprintf(skb_put(skb, len), fmt, args);
-	*skb_put(skb, 1) = 0;
+	*(u8 *)skb_put(skb, 1) = 0;
 	va_end(args);
 
 	__net_timestamp(skb);
@@ -826,7 +826,7 @@ static int hci_sock_release(struct socket *sock)
 	if (!sk)
 		return 0;
 
-	lock_sock(sk);
+	hdev = hci_pi(sk)->hdev;
 
 	switch (hci_pi(sk)->channel) {
 	case HCI_CHANNEL_MONITOR:
@@ -849,10 +849,9 @@ static int hci_sock_release(struct socket *sock)
 
 	bt_sock_unlink(&hci_sk_list, sk);
 
-	hdev = hci_pi(sk)->hdev;
 	if (hdev) {
 		if (hci_pi(sk)->channel == HCI_CHANNEL_USER) {
-			/* When releasing an user channel exclusive access,
+			/* When releasing a user channel exclusive access,
 			 * call hci_dev_do_close directly instead of calling
 			 * hci_dev_close to ensure the exclusive access will
 			 * be released and the controller brought back down.
@@ -875,7 +874,6 @@ static int hci_sock_release(struct socket *sock)
 	skb_queue_purge(&sk->sk_receive_queue);
 	skb_queue_purge(&sk->sk_write_queue);
 
-	release_sock(sk);
 	sock_put(sk);
 	return 0;
 }
@@ -1174,7 +1172,7 @@ static int hci_sock_bind(struct socket *sock, struct sockaddr *addr,
 				/* In case the transport is already up and
 				 * running, clear the error here.
 				 *
-				 * This can happen when opening an user
+				 * This can happen when opening a user
 				 * channel and HCI_AUTO_OFF grace period
 				 * is still active.
 				 */
@@ -1192,7 +1190,7 @@ static int hci_sock_bind(struct socket *sock, struct sockaddr *addr,
 		if (!hci_sock_gen_cookie(sk)) {
 			/* In the case when a cookie has already been assigned,
 			 * this socket will transition from a raw socket into
-			 * an user channel socket. For a clean transition, send
+			 * a user channel socket. For a clean transition, send
 			 * the close notification first.
 			 */
 			skb = create_monitor_ctrl_close(sk);
@@ -1404,8 +1402,8 @@ static void hci_sock_cmsg(struct sock *sk, struct msghdr *msg,
 	}
 }
 
-static int hci_sock_recvmsg(struct socket *sock, struct msghdr *msg,
-			    size_t len, int flags)
+static int hci_sock_recvmsg(struct kiocb *iocb, struct socket *sock,
+			    struct msghdr *msg, size_t len, int flags)
 {
 	int noblock = flags & MSG_DONTWAIT;
 	struct sock *sk = sock->sk;
@@ -1481,7 +1479,7 @@ static int hci_mgmt_cmd(struct hci_mgmt_chan *chan, struct sock *sk,
 	if (!buf)
 		return -ENOMEM;
 
-	if (memcpy_from_msg(buf, msg, msglen)) {
+	if (memcpy_fromiovec(buf, msg->msg_iov, msglen)) {
 		err = -EFAULT;
 		goto done;
 	}
@@ -1603,7 +1601,7 @@ static int hci_logging_frame(struct sock *sk, struct msghdr *msg, int len)
 	if (!skb)
 		return err;
 
-	if (memcpy_from_msg(skb_put(skb, len), msg, len)) {
+	if (memcpy_fromiovec(skb_put(skb, len), msg->msg_iov, len)) {
 		err = -EFAULT;
 		goto drop;
 	}
@@ -1668,8 +1666,8 @@ drop:
 	return err;
 }
 
-static int hci_sock_sendmsg(struct socket *sock, struct msghdr *msg,
-			    size_t len)
+static int hci_sock_sendmsg(struct kiocb *iocb, struct socket *sock,
+			    struct msghdr *msg, size_t len)
 {
 	struct sock *sk = sock->sk;
 	struct hci_mgmt_chan *chan;
@@ -1682,8 +1680,7 @@ static int hci_sock_sendmsg(struct socket *sock, struct msghdr *msg,
 	if (msg->msg_flags & MSG_OOB)
 		return -EOPNOTSUPP;
 
-	if (msg->msg_flags & ~(MSG_DONTWAIT|MSG_NOSIGNAL|MSG_ERRQUEUE|
-			       MSG_CMSG_COMPAT))
+	if (msg->msg_flags & ~(MSG_DONTWAIT|MSG_NOSIGNAL|MSG_ERRQUEUE))
 		return -EINVAL;
 
 	if (len < 4 || len > HCI_MAX_FRAME_SIZE)
@@ -2001,7 +1998,7 @@ static int hci_sock_create(struct net *net, struct socket *sock, int protocol,
 
 	sock->ops = &hci_sock_ops;
 
-	sk = sk_alloc(net, PF_BLUETOOTH, GFP_ATOMIC, &hci_sk_proto, kern);
+	sk = sk_alloc(net, PF_BLUETOOTH, GFP_ATOMIC, &hci_sk_proto);
 	if (!sk)
 		return -ENOMEM;
 

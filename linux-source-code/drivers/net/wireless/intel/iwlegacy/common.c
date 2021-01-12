@@ -717,7 +717,7 @@ il_eeprom_init(struct il_priv *il)
 	u32 gp = _il_rd(il, CSR_EEPROM_GP);
 	int sz;
 	int ret;
-	int addr;
+	u16 addr;
 
 	/* allocate eeprom */
 	sz = il->cfg->eeprom_size;
@@ -4302,8 +4302,8 @@ il_apm_init(struct il_priv *il)
 	 *    power savings, even without L1.
 	 */
 	if (il->cfg->set_l0s) {
-		ret = pcie_capability_read_word(il->pci_dev, PCI_EXP_LNKCTL, &lctl);
-		if (!ret && (lctl & PCI_EXP_LNKCTL_ASPM_L1)) {
+		pcie_capability_read_word(il->pci_dev, PCI_EXP_LNKCTL, &lctl);
+		if (lctl & PCI_EXP_LNKCTL_ASPM_L1) {
 			/* L1-ASPM enabled; disable(!) L0S  */
 			il_set_bit(il, CSR_GIO_REG,
 				   CSR_GIO_REG_VAL_L0S_ENABLED);
@@ -5147,6 +5147,8 @@ set_ch_out:
 
 	if (changed & (IEEE80211_CONF_CHANGE_PS | IEEE80211_CONF_CHANGE_IDLE)) {
 		il->power_data.ps_disabled = !(conf->flags & IEEE80211_CONF_PS);
+		if (!il->power_data.ps_disabled)
+			IL_WARN_ONCE("Enabling power save might cause firmware crashes\n");
 		ret = il_power_update_mode(il, false);
 		if (ret)
 			D_MAC80211("Error setting sleep level\n");

@@ -205,10 +205,7 @@ static unsigned int sas_ata_qc_issue(struct ata_queued_cmd *qc)
 	task->task_done = sas_ata_task_done;
 
 	if (qc->tf.command == ATA_CMD_FPDMA_WRITE ||
-	    qc->tf.command == ATA_CMD_FPDMA_READ ||
-	    qc->tf.command == ATA_CMD_FPDMA_RECV ||
-	    qc->tf.command == ATA_CMD_FPDMA_SEND ||
-	    qc->tf.command == ATA_CMD_NCQ_NON_DATA) {
+	    qc->tf.command == ATA_CMD_FPDMA_READ) {
 		/* Need to zero out the tag libata assigned us */
 		qc->tf.nsect = 0;
 	}
@@ -221,23 +218,27 @@ static unsigned int sas_ata_qc_issue(struct ata_queued_cmd *qc)
 		task->num_scatter = qc->n_elem;
 	} else {
 		for_each_sg(qc->sg, sg, qc->n_elem, si)
-			xfer += sg_dma_len(sg);
+			xfer += sg->length;
 
 		task->total_xfer_len = xfer;
 		task->num_scatter = si;
 	}
 
-	if (qc->tf.protocol == ATA_PROT_NODATA)
-		task->data_dir = DMA_NONE;
-	else
-		task->data_dir = qc->dma_dir;
+	task->data_dir = qc->dma_dir;
 	task->scatter = qc->sg;
 	task->ata_task.retry_count = 1;
 	task->task_state_flags = SAS_TASK_STATE_PENDING;
 	qc->lldd_task = task;
 
-	task->ata_task.use_ncq = ata_is_ncq(qc->tf.protocol);
-	task->ata_task.dma_xfer = ata_is_dma(qc->tf.protocol);
+	switch (qc->tf.protocol) {
+	case ATA_PROT_NCQ:
+		task->ata_task.use_ncq = 1;
+		/* fall through */
+	case ATAPI_PROT_DMA:
+	case ATA_PROT_DMA:
+		task->ata_task.dma_xfer = 1;
+		break;
+	}
 
 	if (qc->scsicmd)
 		ASSIGN_SAS_TASK(qc->scsicmd, task);
@@ -249,7 +250,6 @@ static unsigned int sas_ata_qc_issue(struct ata_queued_cmd *qc)
 		if (qc->scsicmd)
 			ASSIGN_SAS_TASK(qc->scsicmd, NULL);
 		sas_free_task(task);
-		qc->lldd_task = NULL;
 		ret = AC_ERR_SYSTEM;
 	}
 
@@ -548,7 +548,7 @@ static struct ata_port_operations sas_sata_ops = {
 
 static struct ata_port_info sata_port_info = {
 	.flags = ATA_FLAG_SATA | ATA_FLAG_PIO_DMA | ATA_FLAG_NCQ |
-		 ATA_FLAG_SAS_HOST | ATA_FLAG_FPDMA_AUX,
+		 ATA_FLAG_SAS_HOST,
 	.pio_mask = ATA_PIO4,
 	.mwdma_mask = ATA_MWDMA2,
 	.udma_mask = ATA_UDMA6,
@@ -732,7 +732,6 @@ int sas_discover_sata(struct domain_device *dev)
 	if (res)
 		return res;
 
-	sas_discover_event(dev->port, DISCE_PROBE);
 	return 0;
 }
 

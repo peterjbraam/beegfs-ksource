@@ -77,10 +77,11 @@ static ssize_t broken_parity_status_store(struct device *dev,
 }
 static DEVICE_ATTR_RW(broken_parity_status);
 
-static ssize_t pci_dev_show_local_cpu(struct device *dev, bool list,
+static ssize_t pci_dev_show_local_cpu(struct device *dev, int type,
 				      struct device_attribute *attr, char *buf)
 {
 	const struct cpumask *mask;
+	int len;
 
 #ifdef CONFIG_NUMA
 	mask = (dev_to_node(dev) == -1) ? cpu_online_mask :
@@ -88,41 +89,59 @@ static ssize_t pci_dev_show_local_cpu(struct device *dev, bool list,
 #else
 	mask = cpumask_of_pcibus(to_pci_dev(dev)->bus);
 #endif
-	return cpumap_print_to_pagebuf(list, buf, mask);
+	len = type ?
+		cpumask_scnprintf(buf, PAGE_SIZE-2, mask) :
+		cpulist_scnprintf(buf, PAGE_SIZE-2, mask);
+
+	buf[len++] = '\n';
+	buf[len] = '\0';
+	return len;
 }
 
 static ssize_t local_cpus_show(struct device *dev,
 			       struct device_attribute *attr, char *buf)
 {
-	return pci_dev_show_local_cpu(dev, false, attr, buf);
+	return pci_dev_show_local_cpu(dev, 1, attr, buf);
 }
 static DEVICE_ATTR_RO(local_cpus);
 
 static ssize_t local_cpulist_show(struct device *dev,
 				  struct device_attribute *attr, char *buf)
 {
-	return pci_dev_show_local_cpu(dev, true, attr, buf);
+	return pci_dev_show_local_cpu(dev, 0, attr, buf);
 }
 static DEVICE_ATTR_RO(local_cpulist);
 
 /*
  * PCI Bus Class Devices
  */
+static ssize_t pci_bus_show_cpuaffinity(struct device *dev, int type,
+					struct device_attribute *attr,
+					char *buf)
+{
+	int ret;
+	const struct cpumask *cpumask;
+
+	cpumask = cpumask_of_pcibus(to_pci_bus(dev));
+	ret = type ?
+		cpulist_scnprintf(buf, PAGE_SIZE-2, cpumask) :
+		cpumask_scnprintf(buf, PAGE_SIZE-2, cpumask);
+	buf[ret++] = '\n';
+	buf[ret] = '\0';
+	return ret;
+}
+
 static ssize_t cpuaffinity_show(struct device *dev,
 				struct device_attribute *attr, char *buf)
 {
-	const struct cpumask *cpumask = cpumask_of_pcibus(to_pci_bus(dev));
-
-	return cpumap_print_to_pagebuf(false, buf, cpumask);
+	return pci_bus_show_cpuaffinity(dev, 0, attr, buf);
 }
 static DEVICE_ATTR_RO(cpuaffinity);
 
 static ssize_t cpulistaffinity_show(struct device *dev,
 				    struct device_attribute *attr, char *buf)
 {
-	const struct cpumask *cpumask = cpumask_of_pcibus(to_pci_bus(dev));
-
-	return cpumap_print_to_pagebuf(true, buf, cpumask);
+	return pci_bus_show_cpuaffinity(dev, 1, attr, buf);
 }
 static DEVICE_ATTR_RO(cpulistaffinity);
 
@@ -153,6 +172,105 @@ static ssize_t resource_show(struct device *dev, struct device_attribute *attr,
 }
 static DEVICE_ATTR_RO(resource);
 
+static ssize_t max_link_speed_show(struct device *dev,
+				   struct device_attribute *attr, char *buf)
+{
+	struct pci_dev *pdev = to_pci_dev(dev);
+
+	return sprintf(buf, "%s\n", PCIE_SPEED2STR(pcie_get_speed_cap(pdev)));
+}
+static DEVICE_ATTR_RO(max_link_speed);
+
+static ssize_t max_link_width_show(struct device *dev,
+				   struct device_attribute *attr, char *buf)
+{
+	struct pci_dev *pdev = to_pci_dev(dev);
+
+	return sprintf(buf, "%u\n", pcie_get_width_cap(pdev));
+}
+static DEVICE_ATTR_RO(max_link_width);
+
+static ssize_t current_link_speed_show(struct device *dev,
+				       struct device_attribute *attr, char *buf)
+{
+	struct pci_dev *pci_dev = to_pci_dev(dev);
+	u16 linkstat;
+	int err;
+	const char *speed;
+
+	err = pcie_capability_read_word(pci_dev, PCI_EXP_LNKSTA, &linkstat);
+	if (err)
+		return -EINVAL;
+
+	switch (linkstat & PCI_EXP_LNKSTA_CLS) {
+	case PCI_EXP_LNKSTA_CLS_16_0GB:
+		speed = "16 GT/s";
+		break;
+	case PCI_EXP_LNKSTA_CLS_8_0GB:
+		speed = "8 GT/s";
+		break;
+	case PCI_EXP_LNKSTA_CLS_5_0GB:
+		speed = "5 GT/s";
+		break;
+	case PCI_EXP_LNKSTA_CLS_2_5GB:
+		speed = "2.5 GT/s";
+		break;
+	default:
+		speed = "Unknown speed";
+	}
+
+	return sprintf(buf, "%s\n", speed);
+}
+static DEVICE_ATTR_RO(current_link_speed);
+
+static ssize_t current_link_width_show(struct device *dev,
+				       struct device_attribute *attr, char *buf)
+{
+	struct pci_dev *pci_dev = to_pci_dev(dev);
+	u16 linkstat;
+	int err;
+
+	err = pcie_capability_read_word(pci_dev, PCI_EXP_LNKSTA, &linkstat);
+	if (err)
+		return -EINVAL;
+
+	return sprintf(buf, "%u\n",
+		(linkstat & PCI_EXP_LNKSTA_NLW) >> PCI_EXP_LNKSTA_NLW_SHIFT);
+}
+static DEVICE_ATTR_RO(current_link_width);
+
+static ssize_t secondary_bus_number_show(struct device *dev,
+					 struct device_attribute *attr,
+					 char *buf)
+{
+	struct pci_dev *pci_dev = to_pci_dev(dev);
+	u8 sec_bus;
+	int err;
+
+	err = pci_read_config_byte(pci_dev, PCI_SECONDARY_BUS, &sec_bus);
+	if (err)
+		return -EINVAL;
+
+	return sprintf(buf, "%u\n", sec_bus);
+}
+static DEVICE_ATTR_RO(secondary_bus_number);
+
+static ssize_t subordinate_bus_number_show(struct device *dev,
+					   struct device_attribute *attr,
+					   char *buf)
+{
+	struct pci_dev *pci_dev = to_pci_dev(dev);
+	u8 sub_bus;
+	int err;
+
+	err = pci_read_config_byte(pci_dev, PCI_SUBORDINATE_BUS, &sub_bus);
+	if (err)
+		return -EINVAL;
+
+	return sprintf(buf, "%u\n", sub_bus);
+}
+static DEVICE_ATTR_RO(subordinate_bus_number);
+
 static ssize_t modalias_show(struct device *dev, struct device_attribute *attr,
 			     char *buf)
 {
@@ -180,16 +298,13 @@ static ssize_t enable_store(struct device *dev, struct device_attribute *attr,
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
-	device_lock(dev);
-	if (dev->driver)
-		result = -EBUSY;
-	else if (val)
+	if (!val) {
+		if (pci_is_enabled(pdev))
+			pci_disable_device(pdev);
+		else
+			result = -EIO;
+	} else
 		result = pci_enable_device(pdev);
-	else if (pci_is_enabled(pdev))
-		pci_disable_device(pdev);
-	else
-		result = -EIO;
-	device_unlock(dev);
 
 	return result < 0 ? result : count;
 }
@@ -262,45 +377,46 @@ static ssize_t msi_bus_show(struct device *dev, struct device_attribute *attr,
 			    char *buf)
 {
 	struct pci_dev *pdev = to_pci_dev(dev);
-	struct pci_bus *subordinate = pdev->subordinate;
 
-	return sprintf(buf, "%u\n", subordinate ?
-		       !(subordinate->bus_flags & PCI_BUS_FLAGS_NO_MSI)
-			   : !pdev->no_msi);
+	if (!pdev->subordinate)
+		return 0;
+
+	return sprintf(buf, "%u\n",
+		       !(pdev->subordinate->bus_flags & PCI_BUS_FLAGS_NO_MSI));
 }
 
 static ssize_t msi_bus_store(struct device *dev, struct device_attribute *attr,
 			     const char *buf, size_t count)
 {
 	struct pci_dev *pdev = to_pci_dev(dev);
-	struct pci_bus *subordinate = pdev->subordinate;
 	unsigned long val;
 
 	if (kstrtoul(buf, 0, &val) < 0)
 		return -EINVAL;
 
+	/*
+	 * Bad things may happen if the no_msi flag is changed
+	 * while drivers are loaded.
+	 */
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
 	/*
-	 * "no_msi" and "bus_flags" only affect what happens when a driver
-	 * requests MSI or MSI-X.  They don't affect any drivers that have
-	 * already requested MSI or MSI-X.
+	 * Maybe devices without subordinate buses shouldn't have this
+	 * attribute in the first place?
 	 */
-	if (!subordinate) {
-		pdev->no_msi = !val;
-		dev_info(&pdev->dev, "MSI/MSI-X %s for future drivers\n",
-			 val ? "allowed" : "disallowed");
+	if (!pdev->subordinate)
 		return count;
+
+	/* Is the flag going to change, or keep the value it already had? */
+	if (!(pdev->subordinate->bus_flags & PCI_BUS_FLAGS_NO_MSI) ^
+	    !!val) {
+		pdev->subordinate->bus_flags ^= PCI_BUS_FLAGS_NO_MSI;
+
+		dev_warn(&pdev->dev, "forced subordinate bus to%s support MSI, bad things could happen\n",
+			 val ? "" : " not");
 	}
 
-	if (val)
-		subordinate->bus_flags &= ~PCI_BUS_FLAGS_NO_MSI;
-	else
-		subordinate->bus_flags |= PCI_BUS_FLAGS_NO_MSI;
-
-	dev_info(&subordinate->dev, "MSI/MSI-X %s for future drivers of devices on this bus\n",
-		 val ? "allowed" : "disallowed");
 	return count;
 }
 static DEVICE_ATTR_RW(msi_bus);
@@ -359,19 +475,30 @@ static struct device_attribute dev_rescan_attr = __ATTR(rescan,
 							(S_IWUSR|S_IWGRP),
 							NULL, dev_rescan_store);
 
-static ssize_t remove_store(struct device *dev, struct device_attribute *attr,
+static void remove_callback(struct device *dev)
+{
+	pci_stop_and_remove_bus_device_locked(to_pci_dev(dev));
+}
+
+static ssize_t remove_store(struct device *dev, struct device_attribute *dummy,
 			    const char *buf, size_t count)
 {
+	int ret = 0;
 	unsigned long val;
 
 	if (kstrtoul(buf, 0, &val) < 0)
 		return -EINVAL;
 
-	if (val && device_remove_file_self(dev, attr))
-		pci_stop_and_remove_bus_device_locked(to_pci_dev(dev));
+	/* An attribute cannot be unregistered by one of its own methods,
+	 * so we have to use this roundabout approach.
+	 */
+	if (val)
+		ret = device_schedule_callback(dev, remove_callback);
+	if (ret)
+		count = ret;
 	return count;
 }
-static struct device_attribute dev_remove_attr = __ATTR_IGNORE_LOCKDEP(remove,
+static struct device_attribute dev_remove_attr = __ATTR(remove,
 							(S_IWUSR|S_IWGRP),
 							NULL, remove_store);
 
@@ -397,7 +524,7 @@ static ssize_t dev_bus_rescan_store(struct device *dev,
 }
 static DEVICE_ATTR(rescan, (S_IWUSR|S_IWGRP), NULL, dev_bus_rescan_store);
 
-#if defined(CONFIG_PM) && defined(CONFIG_ACPI)
+#if defined(CONFIG_PM_RUNTIME) && defined(CONFIG_ACPI)
 static ssize_t d3cold_allowed_store(struct device *dev,
 				    struct device_attribute *attr,
 				    const char *buf, size_t count)
@@ -474,6 +601,7 @@ static ssize_t sriov_numvfs_store(struct device *dev,
 				  const char *buf, size_t count)
 {
 	struct pci_dev *pdev = to_pci_dev(dev);
+	struct pci_sriov *iov = pdev->sriov;
 	int ret;
 	u16 num_vfs;
 
@@ -484,37 +612,45 @@ static ssize_t sriov_numvfs_store(struct device *dev,
 	if (num_vfs > pci_sriov_get_totalvfs(pdev))
 		return -ERANGE;
 
+	mutex_lock(&iov->dev->sriov->lock);
+
 	if (num_vfs == pdev->sriov->num_VFs)
-		return count;		/* no change */
+		goto exit;
 
 	/* is PF driver loaded w/callback */
 	if (!pdev->driver || !pdev->driver->sriov_configure) {
 		dev_info(&pdev->dev, "Driver doesn't support SRIOV configuration via sysfs\n");
-		return -ENOSYS;
+		ret = -ENOENT;
+		goto exit;
 	}
 
 	if (num_vfs == 0) {
 		/* disable VFs */
 		ret = pdev->driver->sriov_configure(pdev, 0);
-		if (ret < 0)
-			return ret;
-		return count;
+		goto exit;
 	}
 
 	/* enable VFs */
 	if (pdev->sriov->num_VFs) {
 		dev_warn(&pdev->dev, "%d VFs already enabled. Disable before enabling %d VFs\n",
 			 pdev->sriov->num_VFs, num_vfs);
-		return -EBUSY;
+		ret = -EBUSY;
+		goto exit;
 	}
 
 	ret = pdev->driver->sriov_configure(pdev, num_vfs);
 	if (ret < 0)
-		return ret;
+		goto exit;
 
 	if (ret != num_vfs)
 		dev_warn(&pdev->dev, "%d VFs requested; only %d enabled\n",
 			 num_vfs, ret);
+
+exit:
+	mutex_unlock(&iov->dev->sriov->lock);
+
+	if (ret < 0)
+		return ret;
 
 	return count;
 }
@@ -530,7 +666,7 @@ static ssize_t driver_override_store(struct device *dev,
 				     const char *buf, size_t count)
 {
 	struct pci_dev *pdev = to_pci_dev(dev);
-	char *driver_override, *old, *cp;
+	char *driver_override, *old = pdev->pci_dev_rh->driver_override, *cp;
 
 	/* We need to keep extra room for a newline */
 	if (count >= (PAGE_SIZE - 1))
@@ -544,15 +680,12 @@ static ssize_t driver_override_store(struct device *dev,
 	if (cp)
 		*cp = '\0';
 
-	device_lock(dev);
-	old = pdev->driver_override;
 	if (strlen(driver_override)) {
-		pdev->driver_override = driver_override;
+		pdev->pci_dev_rh->driver_override = driver_override;
 	} else {
 		kfree(driver_override);
-		pdev->driver_override = NULL;
+		pdev->pci_dev_rh->driver_override = NULL;
 	}
-	device_unlock(dev);
 
 	kfree(old);
 
@@ -563,12 +696,8 @@ static ssize_t driver_override_show(struct device *dev,
 				    struct device_attribute *attr, char *buf)
 {
 	struct pci_dev *pdev = to_pci_dev(dev);
-	ssize_t len;
 
-	device_lock(dev);
-	len = snprintf(buf, PAGE_SIZE, "%s\n", pdev->driver_override);
-	device_unlock(dev);
-	return len;
+	return snprintf(buf, PAGE_SIZE, "%s\n", pdev->pci_dev_rh->driver_override);
 }
 static DEVICE_ATTR_RW(driver_override);
 
@@ -591,7 +720,7 @@ static struct attribute *pci_dev_attrs[] = {
 	&dev_attr_enable.attr,
 	&dev_attr_broken_parity_status.attr,
 	&dev_attr_msi_bus.attr,
-#if defined(CONFIG_PM) && defined(CONFIG_ACPI)
+#if defined(CONFIG_PM_RUNTIME) && defined(CONFIG_ACPI)
 	&dev_attr_d3cold_allowed.attr,
 #endif
 #ifdef CONFIG_OF
@@ -601,12 +730,17 @@ static struct attribute *pci_dev_attrs[] = {
 	NULL,
 };
 
-static const struct attribute_group pci_dev_group = {
-	.attrs = pci_dev_attrs,
+static struct attribute *pci_bridge_attrs[] = {
+	&dev_attr_subordinate_bus_number.attr,
+	&dev_attr_secondary_bus_number.attr,
+	NULL,
 };
 
-const struct attribute_group *pci_dev_groups[] = {
-	&pci_dev_group,
+static struct attribute *pcie_dev_attrs[] = {
+	&dev_attr_current_link_speed.attr,
+	&dev_attr_current_link_width.attr,
+	&dev_attr_max_link_width.attr,
+	&dev_attr_max_link_speed.attr,
 	NULL,
 };
 
@@ -651,7 +785,7 @@ static ssize_t pci_read_config(struct file *filp, struct kobject *kobj,
 	u8 *data = (u8 *) buf;
 
 	/* Several chips lock up trying to read undefined config space */
-	if (file_ns_capable(filp, &init_user_ns, CAP_SYS_ADMIN))
+	if (security_capable(filp->f_cred, &init_user_ns, CAP_SYS_ADMIN) == 0)
 		size = dev->cfg_size;
 	else if (dev->hdr_type == PCI_HEADER_TYPE_CARDBUS)
 		size = 128;
@@ -725,6 +859,9 @@ static ssize_t pci_write_config(struct file *filp, struct kobject *kobj,
 	unsigned int size = count;
 	loff_t init_off = off;
 	u8 *data = (u8 *) buf;
+
+	if (get_securelevel() > 0)
+		return -EPERM;
 
 	if (off > dev->cfg_size)
 		return 0;
@@ -984,19 +1121,15 @@ void pci_remove_legacy_files(struct pci_bus *b)
 int pci_mmap_fits(struct pci_dev *pdev, int resno, struct vm_area_struct *vma,
 		  enum pci_mmap_api mmap_api)
 {
-	unsigned long nr, start, size;
-	resource_size_t pci_start = 0, pci_end;
+	unsigned long nr, start, size, pci_start;
 
 	if (pci_resource_len(pdev, resno) == 0)
 		return 0;
 	nr = vma_pages(vma);
 	start = vma->vm_pgoff;
 	size = ((pci_resource_len(pdev, resno) - 1) >> PAGE_SHIFT) + 1;
-	if (mmap_api == PCI_MMAP_PROCFS) {
-		pci_resource_to_user(pdev, resno, &pdev->resource[resno],
-				     &pci_start, &pci_end);
-		pci_start >>= PAGE_SHIFT;
-	}
+	pci_start = (mmap_api == PCI_MMAP_PROCFS) ?
+			pci_resource_start(pdev, resno) >> PAGE_SHIFT : 0;
 	if (start >= pci_start && start < pci_start + size &&
 			start + nr <= pci_start + size)
 		return 1;
@@ -1020,6 +1153,9 @@ static int pci_mmap_resource(struct kobject *kobj, struct bin_attribute *attr,
 	enum pci_mmap_state mmap_type;
 	resource_size_t start, end;
 	int i;
+
+	if (get_securelevel() > 0)
+		return -EPERM;
 
 	for (i = 0; i < PCI_ROM_RESOURCE; i++)
 		if (res == &pdev->resource[i])
@@ -1120,6 +1256,9 @@ static ssize_t pci_write_resource_io(struct file *filp, struct kobject *kobj,
 				     struct bin_attribute *attr, char *buf,
 				     loff_t off, size_t count)
 {
+	if (get_securelevel() > 0)
+		return -EPERM;
+
 	return pci_resource_io(filp, kobj, attr, buf, off, count, true);
 }
 
@@ -1360,11 +1499,10 @@ static int pci_create_capabilities_sysfs(struct pci_dev *dev)
 	/* Active State Power Management */
 	pcie_aspm_create_sysfs_dev_files(dev);
 
-	if (!pci_probe_reset_function(dev)) {
+	if (dev->reset_fn) {
 		retval = device_create_file(&dev->dev, &reset_attr);
 		if (retval)
 			goto error;
-		dev->reset_fn = 1;
 	}
 	return 0;
 
@@ -1381,7 +1519,7 @@ error:
 int __must_check pci_create_sysfs_dev_files(struct pci_dev *pdev)
 {
 	int retval;
-	int rom_size;
+	int rom_size = 0;
 	struct bin_attribute *attr;
 
 	if (!sysfs_initialized)
@@ -1398,8 +1536,12 @@ int __must_check pci_create_sysfs_dev_files(struct pci_dev *pdev)
 	if (retval)
 		goto err_config_file;
 
+	if (pci_resource_len(pdev, PCI_ROM_RESOURCE))
+		rom_size = pci_resource_len(pdev, PCI_ROM_RESOURCE);
+	else if (pdev->resource[PCI_ROM_RESOURCE].flags & IORESOURCE_ROM_SHADOW)
+		rom_size = 0x20000;
+
 	/* If the device has a ROM, try to expose it in sysfs. */
-	rom_size = pci_resource_len(pdev, PCI_ROM_RESOURCE);
 	if (rom_size) {
 		attr = kzalloc(sizeof(*attr), GFP_ATOMIC);
 		if (!attr) {
@@ -1430,7 +1572,7 @@ int __must_check pci_create_sysfs_dev_files(struct pci_dev *pdev)
 	return 0;
 
 err_rom_file:
-	if (pdev->rom_attr) {
+	if (rom_size) {
 		sysfs_remove_bin_file(&pdev->dev.kobj, pdev->rom_attr);
 		kfree(pdev->rom_attr);
 		pdev->rom_attr = NULL;
@@ -1468,6 +1610,8 @@ static void pci_remove_capabilities_sysfs(struct pci_dev *dev)
  */
 void pci_remove_sysfs_dev_files(struct pci_dev *pdev)
 {
+	int rom_size = 0;
+
 	if (!sysfs_initialized)
 		return;
 
@@ -1480,13 +1624,18 @@ void pci_remove_sysfs_dev_files(struct pci_dev *pdev)
 
 	pci_remove_resource_files(pdev);
 
-	if (pdev->rom_attr) {
+	if (pci_resource_len(pdev, PCI_ROM_RESOURCE))
+		rom_size = pci_resource_len(pdev, PCI_ROM_RESOURCE);
+	else if (pdev->resource[PCI_ROM_RESOURCE].flags & IORESOURCE_ROM_SHADOW)
+		rom_size = 0x20000;
+
+	if (rom_size && pdev->rom_attr) {
 		sysfs_remove_bin_file(&pdev->dev.kobj, pdev->rom_attr);
 		kfree(pdev->rom_attr);
-		pdev->rom_attr = NULL;
 	}
 
 	pci_remove_firmware_label_files(pdev);
+
 }
 
 static int __init pci_sysfs_init(void)
@@ -1543,6 +1692,57 @@ static umode_t pci_dev_hp_attrs_are_visible(struct kobject *kobj,
 	return a->mode;
 }
 
+static umode_t pci_bridge_attrs_are_visible(struct kobject *kobj,
+					    struct attribute *a, int n)
+{
+	struct device *dev = kobj_to_dev(kobj);
+	struct pci_dev *pdev = to_pci_dev(dev);
+
+	if (pci_is_bridge(pdev))
+		return a->mode;
+
+	return 0;
+}
+
+static umode_t pcie_dev_attrs_are_visible(struct kobject *kobj,
+					  struct attribute *a, int n)
+{
+	struct device *dev = kobj_to_dev(kobj);
+	struct pci_dev *pdev = to_pci_dev(dev);
+
+	if (pci_is_pcie(pdev))
+		return a->mode;
+
+	return 0;
+}
+
+static const struct attribute_group pci_dev_group = {
+	.attrs = pci_dev_attrs,
+};
+
+const struct attribute_group *pci_dev_groups[] = {
+	&pci_dev_group,
+	NULL,
+};
+
+static const struct attribute_group pci_bridge_group = {
+	.attrs = pci_bridge_attrs,
+};
+
+const struct attribute_group *pci_bridge_groups[] = {
+	&pci_bridge_group,
+	NULL,
+};
+
+static const struct attribute_group pcie_dev_group = {
+	.attrs = pcie_dev_attrs,
+};
+
+const struct attribute_group *pcie_dev_groups[] = {
+	&pcie_dev_group,
+	NULL,
+};
+
 static struct attribute_group pci_dev_hp_attr_group = {
 	.attrs = pci_dev_hp_attrs,
 	.is_visible = pci_dev_hp_attrs_are_visible,
@@ -1577,12 +1777,24 @@ static struct attribute_group pci_dev_attr_group = {
 	.is_visible = pci_dev_attrs_are_visible,
 };
 
+static struct attribute_group pci_bridge_attr_group = {
+	.attrs = pci_bridge_attrs,
+	.is_visible = pci_bridge_attrs_are_visible,
+};
+
+static struct attribute_group pcie_dev_attr_group = {
+	.attrs = pcie_dev_attrs,
+	.is_visible = pcie_dev_attrs_are_visible,
+};
+
 static const struct attribute_group *pci_dev_attr_groups[] = {
 	&pci_dev_attr_group,
 	&pci_dev_hp_attr_group,
 #ifdef CONFIG_PCI_IOV
 	&sriov_dev_attr_group,
 #endif
+	&pci_bridge_attr_group,
+	&pcie_dev_attr_group,
 	NULL,
 };
 

@@ -42,7 +42,7 @@
 
 static const char hvc_opal_name[] = "hvc_opal";
 
-static const struct of_device_id hvc_opal_match[] = {
+static struct of_device_id hvc_opal_match[] = {
 	{ .name = "serial", .compatible = "ibm,opal-console-raw" },
 	{ .name = "serial", .compatible = "ibm,opal-console-hvsi" },
 	{ },
@@ -214,13 +214,7 @@ static int hvc_opal_probe(struct platform_device *dev)
 		dev->dev.of_node->full_name,
 		boot ? " (boot console)" : "");
 
-	irq = irq_of_parse_and_map(dev->dev.of_node, 0);
-	if (!irq) {
-		pr_info("hvc%d: No interrupts property, using OPAL event\n",
-				termno);
-		irq = opal_event_request(ilog2(OPAL_EVENT_CONSOLE_INPUT));
-	}
-
+	irq = opal_event_request(ilog2(OPAL_EVENT_CONSOLE_INPUT));
 	if (!irq) {
 		pr_err("hvc_opal: Unable to map interrupt for device %s\n",
 			dev->dev.of_node->full_name);
@@ -230,9 +224,6 @@ static int hvc_opal_probe(struct platform_device *dev)
 	hp = hvc_alloc(termno, irq, ops, MAX_VIO_PUT_CHARS);
 	if (IS_ERR(hp))
 		return PTR_ERR(hp);
-
-	/* hvc consoles on powernv may need to share a single irq */
-	hp->flags = IRQF_SHARED;
 	dev_set_drvdata(&dev->dev, hp);
 
 	return 0;
@@ -258,6 +249,7 @@ static struct platform_driver hvc_opal_driver = {
 	.remove		= hvc_opal_remove,
 	.driver		= {
 		.name	= hvc_opal_name,
+		.owner	= THIS_MODULE,
 		.of_match_table	= hvc_opal_match,
 	}
 };
@@ -270,7 +262,13 @@ static int __init hvc_opal_init(void)
 	/* Register as a vio device to receive callbacks */
 	return platform_driver_register(&hvc_opal_driver);
 }
-device_initcall(hvc_opal_init);
+module_init(hvc_opal_init);
+
+static void __exit hvc_opal_exit(void)
+{
+	platform_driver_unregister(&hvc_opal_driver);
+}
+module_exit(hvc_opal_exit);
 
 static void udbg_opal_putc(char c)
 {
@@ -332,17 +330,27 @@ static void udbg_init_opal_common(void)
 	udbg_putc = udbg_opal_putc;
 	udbg_getc = udbg_opal_getc;
 	udbg_getc_poll = udbg_opal_getc_poll;
+	tb_ticks_per_usec = 0x200; /* Make udelay not suck */
 }
 
 void __init hvc_opal_init_early(void)
 {
-	struct device_node *stdout_node = of_node_get(of_stdout);
+	struct device_node *stdout_node = NULL;
 	const __be32 *termno;
+	const char *name = NULL;
 	const struct hv_ops *ops;
 	u32 index;
 
-	/* If the console wasn't in /chosen, try /ibm,opal */
-	if (!stdout_node) {
+	/* find the boot console from /chosen/stdout */
+	if (of_chosen)
+		name = of_get_property(of_chosen, "linux,stdout-path", NULL);
+	if (name) {
+		stdout_node = of_find_node_by_path(name);
+		if (!stdout_node) {
+			pr_err("hvc_opal: Failed to locate default console!\n");
+			return;
+		}
+	} else {
 		struct device_node *opal, *np;
 
 		/* Current OPAL takeover doesn't provide the stdout

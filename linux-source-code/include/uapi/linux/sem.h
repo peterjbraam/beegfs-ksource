@@ -18,6 +18,7 @@
 /* ipcs ctl cmds */
 #define SEM_STAT 18
 #define SEM_INFO 19
+#define SEM_STAT_ANY 20
 
 /* Obsolete, used only for backwards compatibility and libc5 compiles */
 struct semid_ds {
@@ -63,22 +64,10 @@ struct  seminfo {
 	int semaem;
 };
 
-/*
- * SEMMNI, SEMMSL and SEMMNS are default values which can be
- * modified by sysctl.
- * The values has been chosen to be larger than necessary for any
- * known configuration.
- *
- * SEMOPM should not be increased beyond 1000, otherwise there is the
- * risk that semop()/semtimedop() fails due to kernel memory fragmentation when
- * allocating the sop array.
- */
-
-
-#define SEMMNI  32000           /* <= IPCMNI  max # of semaphore identifiers */
-#define SEMMSL  32000           /* <= INT_MAX max num of semaphores per id */
+#define SEMMNI  128             /* <= IPCMNI  max # of semaphore identifiers */
+#define SEMMSL  250             /* <= 8 000 max num of semaphores per id */
 #define SEMMNS  (SEMMNI*SEMMSL) /* <= INT_MAX max # of semaphores in system */
-#define SEMOPM  500	        /* <= 1 000 max num of ops per semop call */
+#define SEMOPM  32	        /* <= 1 000 max num of ops per semop call */
 #define SEMVMX  32767           /* <= 32767 semaphore maximum value */
 #define SEMAEM  SEMVMX          /* adjust on exit max value */
 

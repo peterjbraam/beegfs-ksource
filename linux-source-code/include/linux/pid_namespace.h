@@ -8,7 +8,6 @@
 #include <linux/threads.h>
 #include <linux/nsproxy.h>
 #include <linux/kref.h>
-#include <linux/ns_common.h>
 
 struct pidmap {
        atomic_t nr_free;
@@ -24,7 +23,6 @@ struct fs_pin;
 struct pid_namespace {
 	struct kref kref;
 	struct pidmap pidmap[PIDMAP_ENTRIES];
-	struct rcu_head rcu;
 	int last_pid;
 	unsigned int nr_hashed;
 	struct task_struct *child_reaper;
@@ -34,18 +32,19 @@ struct pid_namespace {
 #ifdef CONFIG_PROC_FS
 	struct vfsmount *proc_mnt;
 	struct dentry *proc_self;
-	struct dentry *proc_thread_self;
 #endif
 #ifdef CONFIG_BSD_PROCESS_ACCT
-	struct fs_pin *bacct;
+	RH_KABI_REPLACE(struct bsd_acct_struct *bacct,
+			struct fs_pin *bacct)
 #endif
 	struct user_namespace *user_ns;
-	struct ucounts *ucounts;
 	struct work_struct proc_work;
 	kgid_t pid_gid;
 	int hide_pid;
 	int reboot;	/* group exit code if this pidns was rebooted */
-	struct ns_common ns;
+	unsigned int proc_inum;
+	RH_KABI_EXTEND(struct rcu_head rcu)
+	RH_KABI_EXTEND(struct ucounts *ucounts)
 };
 
 extern struct pid_namespace init_pid_ns;

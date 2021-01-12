@@ -2,7 +2,7 @@
  * The file intends to implement the platform dependent EEH operations on pseries.
  * Actually, the pseries platform is built based on RTAS heavily. That means the
  * pseries platform dependent EEH operations will be built on RTAS calls. The functions
- * are derived from arch/powerpc/platforms/pseries/eeh.c and necessary cleanup has
+ * are devired from arch/powerpc/platforms/pseries/eeh.c and necessary cleanup has
  * been done.
  *
  * Copyright Benjamin Herrenschmidt & Gavin Shan, IBM Corporation 2011.
@@ -438,34 +438,42 @@ static int pseries_eeh_get_state(struct eeh_pe *pe, int *state)
 		return ret;
 
 	/* Parse the result out */
-	if (!rets[1])
-		return EEH_STATE_NOT_SUPPORT;
-
-	switch(rets[0]) {
-	case 0:
-		result = EEH_STATE_MMIO_ACTIVE |
-			 EEH_STATE_DMA_ACTIVE;
-		break;
-	case 1:
-		result = EEH_STATE_RESET_ACTIVE |
-			 EEH_STATE_MMIO_ACTIVE  |
-			 EEH_STATE_DMA_ACTIVE;
-		break;
-	case 2:
-		result = 0;
-		break;
-	case 4:
-		result = EEH_STATE_MMIO_ENABLED;
-		break;
-	case 5:
-		if (rets[2]) {
-			if (state) *state = rets[2];
-			result = EEH_STATE_UNAVAILABLE;
-		} else {
+	result = 0;
+	if (rets[1]) {
+		switch(rets[0]) {
+		case 0:
+			result &= ~EEH_STATE_RESET_ACTIVE;
+			result |= EEH_STATE_MMIO_ACTIVE;
+			result |= EEH_STATE_DMA_ACTIVE;
+			break;
+		case 1:
+			result |= EEH_STATE_RESET_ACTIVE;
+			result |= EEH_STATE_MMIO_ACTIVE;
+			result |= EEH_STATE_DMA_ACTIVE;
+			break;
+		case 2:
+			result &= ~EEH_STATE_RESET_ACTIVE;
+			result &= ~EEH_STATE_MMIO_ACTIVE;
+			result &= ~EEH_STATE_DMA_ACTIVE;
+			break;
+		case 4:
+			result &= ~EEH_STATE_RESET_ACTIVE;
+			result &= ~EEH_STATE_MMIO_ACTIVE;
+			result &= ~EEH_STATE_DMA_ACTIVE;
+			result |= EEH_STATE_MMIO_ENABLED;
+			break;
+		case 5:
+			if (rets[2]) {
+				if (state) *state = rets[2];
+				result = EEH_STATE_UNAVAILABLE;
+			} else {
+				result = EEH_STATE_NOT_SUPPORT;
+			}
+			break;
+		default:
 			result = EEH_STATE_NOT_SUPPORT;
 		}
-		break;
-	default:
+	} else {
 		result = EEH_STATE_NOT_SUPPORT;
 	}
 
@@ -712,7 +720,10 @@ static struct eeh_ops pseries_eeh_ops = {
  */
 static int __init eeh_pseries_init(void)
 {
-	int ret;
+	int ret = -EINVAL;
+
+	if (!machine_is(pseries))
+		return ret;
 
 	ret = eeh_ops_register(&pseries_eeh_ops);
 	if (!ret)
@@ -723,4 +734,5 @@ static int __init eeh_pseries_init(void)
 
 	return ret;
 }
-machine_early_initcall(pseries, eeh_pseries_init);
+
+early_initcall(eeh_pseries_init);

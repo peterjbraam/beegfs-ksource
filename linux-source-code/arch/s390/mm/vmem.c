@@ -10,7 +10,6 @@
 #include <linux/list.h>
 #include <linux/hugetlb.h>
 #include <linux/slab.h>
-#include <linux/memblock.h>
 #include <asm/cacheflush.h>
 #include <asm/pgalloc.h>
 #include <asm/pgtable.h>
@@ -41,33 +40,36 @@ static inline pud_t *vmem_pud_alloc(void)
 {
 	pud_t *pud = NULL;
 
+#ifdef CONFIG_64BIT
 	pud = vmem_alloc_pages(2);
 	if (!pud)
 		return NULL;
 	clear_table((unsigned long *) pud, _REGION3_ENTRY_EMPTY, PAGE_SIZE * 4);
+#endif
 	return pud;
 }
 
-pmd_t *vmem_pmd_alloc(void)
+pmd_t *vmem_pmd_alloc(unsigned long address)
 {
 	pmd_t *pmd = NULL;
 
+#ifdef CONFIG_64BIT
 	pmd = vmem_alloc_pages(2);
 	if (!pmd)
 		return NULL;
 	clear_table((unsigned long *) pmd, _SEGMENT_ENTRY_EMPTY, PAGE_SIZE * 4);
+#endif
 	return pmd;
 }
 
-pte_t __ref *vmem_pte_alloc(void)
+pte_t __ref *vmem_pte_alloc(unsigned long address)
 {
 	pte_t *pte;
 
 	if (slab_is_available())
-		pte = (pte_t *) page_table_alloc(&init_mm);
+		pte = (pte_t *) page_table_alloc(&init_mm, address);
 	else
-		pte = alloc_bootmem_align(PTRS_PER_PTE * sizeof(pte_t),
-					  PTRS_PER_PTE * sizeof(pte_t));
+		pte = alloc_bootmem(PTRS_PER_PTE * sizeof(pte_t));
 	if (!pte)
 		return NULL;
 	clear_table((unsigned long *) pte, _PAGE_INVALID,
@@ -80,7 +82,7 @@ pte_t __ref *vmem_pte_alloc(void)
  */
 static int vmem_add_mem(unsigned long start, unsigned long size)
 {
-	unsigned long pages4k, pages1m, pages2g;
+	unsigned long pgt_prot, sgt_prot, r3_prot;
 	unsigned long end = start + size;
 	unsigned long address = start;
 	pgd_t *pg_dir;
@@ -89,7 +91,14 @@ static int vmem_add_mem(unsigned long start, unsigned long size)
 	pte_t *pt_dir;
 	int ret = -ENOMEM;
 
-	pages4k = pages1m = pages2g = 0;
+	pgt_prot = pgprot_val(PAGE_KERNEL);
+	sgt_prot = pgprot_val(SEGMENT_KERNEL);
+	r3_prot = pgprot_val(REGION3_KERNEL);
+	if (!MACHINE_HAS_NX) {
+		pgt_prot &= ~_PAGE_NOEXEC;
+		sgt_prot &= ~_SEGMENT_ENTRY_NOEXEC;
+		r3_prot &= ~_REGION_ENTRY_NOEXEC;
+	}
 	while (address < end) {
 		pg_dir = pgd_offset_k(address);
 		if (pgd_none(*pg_dir)) {
@@ -99,46 +108,45 @@ static int vmem_add_mem(unsigned long start, unsigned long size)
 			pgd_populate(&init_mm, pg_dir, pu_dir);
 		}
 		pu_dir = pud_offset(pg_dir, address);
+#ifdef CONFIG_64BIT
 		if (MACHINE_HAS_EDAT2 && pud_none(*pu_dir) && address &&
 		    !(address & ~PUD_MASK) && (address + PUD_SIZE <= end) &&
-		     !debug_pagealloc_enabled()) {
-			pud_val(*pu_dir) = address | pgprot_val(REGION3_KERNEL);
+		    !debug_pagealloc_enabled()) {
+			pud_val(*pu_dir) = address | r3_prot;
 			address += PUD_SIZE;
-			pages2g++;
 			continue;
 		}
+#endif
 		if (pud_none(*pu_dir)) {
-			pm_dir = vmem_pmd_alloc();
+			pm_dir = vmem_pmd_alloc(address);
 			if (!pm_dir)
 				goto out;
 			pud_populate(&init_mm, pu_dir, pm_dir);
 		}
 		pm_dir = pmd_offset(pu_dir, address);
+#ifdef CONFIG_64BIT
 		if (MACHINE_HAS_EDAT1 && pmd_none(*pm_dir) && address &&
 		    !(address & ~PMD_MASK) && (address + PMD_SIZE <= end) &&
 		    !debug_pagealloc_enabled()) {
-			pmd_val(*pm_dir) = address | pgprot_val(SEGMENT_KERNEL);
+			pmd_val(*pm_dir) = address | sgt_prot;
 			address += PMD_SIZE;
-			pages1m++;
 			continue;
 		}
+#endif
 		if (pmd_none(*pm_dir)) {
-			pt_dir = vmem_pte_alloc();
+			pt_dir = vmem_pte_alloc(address);
 			if (!pt_dir)
 				goto out;
 			pmd_populate(&init_mm, pm_dir, pt_dir);
 		}
 
 		pt_dir = pte_offset_kernel(pm_dir, address);
-		pte_val(*pt_dir) = address |  pgprot_val(PAGE_KERNEL);
+		pte_val(*pt_dir) = address | pgt_prot;
 		address += PAGE_SIZE;
-		pages4k++;
 	}
 	ret = 0;
 out:
-	update_page_count(PG_DIRECT_MAP_4K, pages4k);
-	update_page_count(PG_DIRECT_MAP_1M, pages1m);
-	update_page_count(PG_DIRECT_MAP_2G, pages2g);
+	flush_tlb_kernel_range(start, end);
 	return ret;
 }
 
@@ -148,15 +156,15 @@ out:
  */
 static void vmem_remove_range(unsigned long start, unsigned long size)
 {
-	unsigned long pages4k, pages1m, pages2g;
 	unsigned long end = start + size;
 	unsigned long address = start;
 	pgd_t *pg_dir;
 	pud_t *pu_dir;
 	pmd_t *pm_dir;
 	pte_t *pt_dir;
+	pte_t  pte;
 
-	pages4k = pages1m = pages2g = 0;
+	pte_val(pte) = _PAGE_INVALID;
 	while (address < end) {
 		pg_dir = pgd_offset_k(address);
 		if (pgd_none(*pg_dir)) {
@@ -171,7 +179,6 @@ static void vmem_remove_range(unsigned long start, unsigned long size)
 		if (pud_large(*pu_dir)) {
 			pud_clear(pu_dir);
 			address += PUD_SIZE;
-			pages2g++;
 			continue;
 		}
 		pm_dir = pmd_offset(pu_dir, address);
@@ -182,25 +189,22 @@ static void vmem_remove_range(unsigned long start, unsigned long size)
 		if (pmd_large(*pm_dir)) {
 			pmd_clear(pm_dir);
 			address += PMD_SIZE;
-			pages1m++;
 			continue;
 		}
 		pt_dir = pte_offset_kernel(pm_dir, address);
-		pte_clear(&init_mm, address, pt_dir);
+		*pt_dir = pte;
 		address += PAGE_SIZE;
-		pages4k++;
 	}
 	flush_tlb_kernel_range(start, end);
-	update_page_count(PG_DIRECT_MAP_4K, -pages4k);
-	update_page_count(PG_DIRECT_MAP_1M, -pages1m);
-	update_page_count(PG_DIRECT_MAP_2G, -pages2g);
 }
 
 /*
  * Add a backed mem_map array to the virtual mem_map array.
  */
-int __meminit vmemmap_populate(unsigned long start, unsigned long end, int node)
+int __meminit vmemmap_populate(unsigned long start, unsigned long end, int node,
+		struct vmem_altmap *altmap)
 {
+	unsigned long pgt_prot, sgt_prot;
 	unsigned long address = start;
 	pgd_t *pg_dir;
 	pud_t *pu_dir;
@@ -208,6 +212,12 @@ int __meminit vmemmap_populate(unsigned long start, unsigned long end, int node)
 	pte_t *pt_dir;
 	int ret = -ENOMEM;
 
+	pgt_prot = pgprot_val(PAGE_KERNEL);
+	sgt_prot = pgprot_val(SEGMENT_KERNEL);
+	if (!MACHINE_HAS_NX) {
+		pgt_prot &= ~_PAGE_NOEXEC;
+		sgt_prot &= ~_SEGMENT_ENTRY_NOEXEC;
+	}
 	for (address = start; address < end;) {
 		pg_dir = pgd_offset_k(address);
 		if (pgd_none(*pg_dir)) {
@@ -219,7 +229,7 @@ int __meminit vmemmap_populate(unsigned long start, unsigned long end, int node)
 
 		pu_dir = pud_offset(pg_dir, address);
 		if (pud_none(*pu_dir)) {
-			pm_dir = vmem_pmd_alloc();
+			pm_dir = vmem_pmd_alloc(address);
 			if (!pm_dir)
 				goto out;
 			pud_populate(&init_mm, pu_dir, pm_dir);
@@ -227,6 +237,7 @@ int __meminit vmemmap_populate(unsigned long start, unsigned long end, int node)
 
 		pm_dir = pmd_offset(pu_dir, address);
 		if (pmd_none(*pm_dir)) {
+#ifdef CONFIG_64BIT
 			/* Use 1MB frames for vmemmap if available. We always
 			 * use large frames even if they are only partially
 			 * used.
@@ -239,12 +250,12 @@ int __meminit vmemmap_populate(unsigned long start, unsigned long end, int node)
 				new_page = vmemmap_alloc_block(PMD_SIZE, node);
 				if (!new_page)
 					goto out;
-				pmd_val(*pm_dir) = __pa(new_page) |
-					_SEGMENT_ENTRY | _SEGMENT_ENTRY_LARGE;
+				pmd_val(*pm_dir) = __pa(new_page) | sgt_prot;
 				address = (address + PMD_SIZE) & PMD_MASK;
 				continue;
 			}
-			pt_dir = vmem_pte_alloc();
+#endif
+			pt_dir = vmem_pte_alloc(address);
 			if (!pt_dir)
 				goto out;
 			pmd_populate(&init_mm, pm_dir, pt_dir);
@@ -255,22 +266,24 @@ int __meminit vmemmap_populate(unsigned long start, unsigned long end, int node)
 
 		pt_dir = pte_offset_kernel(pm_dir, address);
 		if (pte_none(*pt_dir)) {
-			void *new_page;
+			unsigned long new_page;
 
-			new_page = vmemmap_alloc_block(PAGE_SIZE, node);
+			new_page =__pa(vmem_alloc_pages(0));
 			if (!new_page)
 				goto out;
-			pte_val(*pt_dir) =
-				__pa(new_page) | pgprot_val(PAGE_KERNEL);
+			pte_val(*pt_dir) = __pa(new_page) | pgt_prot;
 		}
 		address += PAGE_SIZE;
 	}
+	memset((void *)start, 0, end - start);
 	ret = 0;
 out:
+	flush_tlb_kernel_range(start, end);
 	return ret;
 }
 
-void vmemmap_free(unsigned long start, unsigned long end)
+void vmemmap_free(unsigned long start, unsigned long end,
+		struct vmem_altmap *altmap)
 {
 }
 
@@ -373,31 +386,44 @@ out:
  */
 void __init vmem_map_init(void)
 {
-	unsigned long size = _eshared - _stext;
-	struct memblock_region *reg;
+	int i;
 
-	for_each_memblock(memory, reg)
-		vmem_add_mem(reg->base, reg->size);
-	set_memory_ro((unsigned long)_stext, size >> PAGE_SHIFT);
-	pr_info("Write protected kernel read-only data: %luk\n", size >> 10);
+	for (i = 0; i < MEMORY_CHUNKS; i++) {
+		if (!memory_chunk[i].size)
+			continue;
+		vmem_add_mem(memory_chunk[i].addr, memory_chunk[i].size);
+	}
+	__set_memory((unsigned long) _stext,
+		     (_etext - _stext) >> PAGE_SHIFT,
+		     SET_MEMORY_RO | SET_MEMORY_X);
+	__set_memory((unsigned long) _etext,
+		     (_eshared - _etext) >> PAGE_SHIFT,
+		     SET_MEMORY_RO);
+	__set_memory((unsigned long) _sinittext,
+		     (_einittext - _sinittext) >> PAGE_SHIFT,
+		     SET_MEMORY_RO | SET_MEMORY_X);
+	pr_info("Write protected kernel read-only data: %luk\n",
+		(_eshared - _stext) >> 10);
 }
 
 /*
- * Convert memblock.memory  to a memory segment list so there is a single
- * list that contains all memory segments.
+ * Convert memory chunk array to a memory segment list so there is a single
+ * list that contains both r/w memory and shared memory segments.
  */
 static int __init vmem_convert_memory_chunk(void)
 {
-	struct memblock_region *reg;
 	struct memory_segment *seg;
+	int i;
 
 	mutex_lock(&vmem_mutex);
-	for_each_memblock(memory, reg) {
+	for (i = 0; i < MEMORY_CHUNKS; i++) {
+		if (!memory_chunk[i].size)
+			continue;
 		seg = kzalloc(sizeof(*seg), GFP_KERNEL);
 		if (!seg)
 			panic("Out of memory...\n");
-		seg->start = reg->base;
-		seg->size = reg->size;
+		seg->start = memory_chunk[i].addr;
+		seg->size = memory_chunk[i].size;
 		insert_memory_segment(seg);
 	}
 	mutex_unlock(&vmem_mutex);

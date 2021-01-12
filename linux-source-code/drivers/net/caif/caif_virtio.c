@@ -659,7 +659,7 @@ static int cfv_probe(struct virtio_device *vdev)
 	int err = -EINVAL;
 
 	netdev = alloc_netdev(sizeof(struct cfv_info), cfv_netdev_name,
-			      NET_NAME_UNKNOWN, cfv_netdev_setup);
+			      cfv_netdev_setup);
 	if (!netdev)
 		return -ENOMEM;
 

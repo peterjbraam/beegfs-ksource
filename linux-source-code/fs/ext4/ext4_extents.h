@@ -11,7 +11,7 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License
+ * You should have received a copy of the GNU General Public Licens
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-
  */
@@ -124,7 +124,6 @@ find_ext4_extent_tail(struct ext4_extent_header *eh)
 struct ext4_ext_path {
 	ext4_fsblk_t			p_block;
 	__u16				p_depth;
-	__u16				p_maxdepth;
 	struct ext4_extent		*p_ext;
 	struct ext4_extent_idx		*p_idx;
 	struct ext4_extent_header	*p_hdr;
@@ -169,13 +168,10 @@ struct ext4_ext_path {
 	(EXT_FIRST_EXTENT((__hdr__)) + le16_to_cpu((__hdr__)->eh_entries) - 1)
 #define EXT_LAST_INDEX(__hdr__) \
 	(EXT_FIRST_INDEX((__hdr__)) + le16_to_cpu((__hdr__)->eh_entries) - 1)
-#define EXT_MAX_EXTENT(__hdr__)	\
-	((le16_to_cpu((__hdr__)->eh_max)) ? \
-	((EXT_FIRST_EXTENT((__hdr__)) + le16_to_cpu((__hdr__)->eh_max) - 1)) \
-					: 0)
+#define EXT_MAX_EXTENT(__hdr__) \
+	(EXT_FIRST_EXTENT((__hdr__)) + le16_to_cpu((__hdr__)->eh_max) - 1)
 #define EXT_MAX_INDEX(__hdr__) \
-	((le16_to_cpu((__hdr__)->eh_max)) ? \
-	((EXT_FIRST_INDEX((__hdr__)) + le16_to_cpu((__hdr__)->eh_max) - 1)) : 0)
+	(EXT_FIRST_INDEX((__hdr__)) + le16_to_cpu((__hdr__)->eh_max) - 1)
 
 static inline struct ext4_extent_header *ext_inode_hdr(struct inode *inode)
 {

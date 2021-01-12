@@ -67,7 +67,6 @@ BTRFS_WORK_HELPER_PROTO(scrubwrc_helper);
 BTRFS_WORK_HELPER_PROTO(scrubnc_helper);
 BTRFS_WORK_HELPER_PROTO(scrubparity_helper);
 
-
 struct btrfs_workqueue *btrfs_alloc_workqueue(struct btrfs_fs_info *fs_info,
 					      const char *name,
 					      unsigned int flags,
@@ -85,6 +84,4 @@ void btrfs_set_work_high_priority(struct btrfs_work *work);
 struct btrfs_fs_info *btrfs_work_owner(struct btrfs_work *work);
 struct btrfs_fs_info *btrfs_workqueue_owner(struct __btrfs_workqueue *wq);
 bool btrfs_workqueue_normal_congested(struct btrfs_workqueue *wq);
-void btrfs_flush_workqueue(struct btrfs_workqueue *wq);
-
 #endif

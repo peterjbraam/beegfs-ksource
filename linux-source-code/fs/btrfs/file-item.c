@@ -32,7 +32,7 @@
 				  size) - 1))
 
 #define MAX_CSUM_ITEMS(r, size) (min_t(u32, __MAX_CSUM_ITEMS(r, size), \
-				       PAGE_SIZE))
+				       PAGE_CACHE_SIZE))
 
 #define MAX_ORDERED_SUM_BYTES(r) ((PAGE_SIZE - \
 				   sizeof(struct btrfs_ordered_sum)) / \
@@ -173,7 +173,6 @@ static int __btrfs_lookup_bio_sums(struct btrfs_root *root,
 	u64 item_start_offset = 0;
 	u64 item_last_offset = 0;
 	u64 disk_bytenr;
-	u64 page_bytes_left;
 	u32 diff;
 	int nblocks;
 	int bio_index = 0;
@@ -184,7 +183,7 @@ static int __btrfs_lookup_bio_sums(struct btrfs_root *root,
 	if (!path)
 		return -ENOMEM;
 
-	nblocks = bio->bi_iter.bi_size >> inode->i_sb->s_blocksize_bits;
+	nblocks = bio->bi_size >> inode->i_sb->s_blocksize_bits;
 	if (!dst) {
 		if (nblocks * csum_size > BTRFS_BIO_INLINE_CSUM_SIZE) {
 			btrfs_bio->csum_allocated = kmalloc_array(nblocks,
@@ -203,7 +202,7 @@ static int __btrfs_lookup_bio_sums(struct btrfs_root *root,
 		csum = (u8 *)dst;
 	}
 
-	if (bio->bi_iter.bi_size > PAGE_SIZE * 8)
+	if (bio->bi_size > PAGE_CACHE_SIZE * 8)
 		path->reada = READA_FORWARD;
 
 	WARN_ON(bio->bi_vcnt <= 0);
@@ -219,11 +218,9 @@ static int __btrfs_lookup_bio_sums(struct btrfs_root *root,
 		path->skip_locking = 1;
 	}
 
-	disk_bytenr = (u64)bio->bi_iter.bi_sector << 9;
+	disk_bytenr = (u64)bio->bi_sector << 9;
 	if (dio)
 		offset = logical_offset;
-
-	page_bytes_left = bvec->bv_len;
 	while (bio_index < bio->bi_vcnt) {
 		if (!dio)
 			offset = page_offset(bvec->bv_page) + bvec->bv_offset;
@@ -247,10 +244,10 @@ static int __btrfs_lookup_bio_sums(struct btrfs_root *root,
 				if (BTRFS_I(inode)->root->root_key.objectid ==
 				    BTRFS_DATA_RELOC_TREE_OBJECTID) {
 					set_extent_bits(io_tree, offset,
-						offset + root->sectorsize - 1,
+						offset + bvec->bv_len - 1,
 						EXTENT_NODATASUM);
 				} else {
-					btrfs_info_rl(BTRFS_I(inode)->root->fs_info,
+					btrfs_info(BTRFS_I(inode)->root->fs_info,
 						   "no csum found for inode %llu start %llu",
 					       btrfs_ino(inode), offset);
 				}
@@ -285,29 +282,13 @@ static int __btrfs_lookup_bio_sums(struct btrfs_root *root,
 found:
 		csum += count * csum_size;
 		nblocks -= count;
-
+		bio_index += count;
 		while (count--) {
-			disk_bytenr += root->sectorsize;
-			offset += root->sectorsize;
-			page_bytes_left -= root->sectorsize;
-			if (!page_bytes_left) {
-				bio_index++;
-				/*
-				 * make sure we're still inside the
-				 * bio before we update page_bytes_left
-				 */
-				if (bio_index >= bio->bi_vcnt) {
-					WARN_ON_ONCE(count);
-					goto done;
-				}
-				bvec++;
-				page_bytes_left = bvec->bv_len;
-			}
-
+			disk_bytenr += bvec->bv_len;
+			offset += bvec->bv_len;
+			bvec++;
 		}
 	}
-
-done:
 	btrfs_free_path(path);
 	return 0;
 }
@@ -452,19 +433,16 @@ int btrfs_csum_one_bio(struct btrfs_root *root, struct inode *inode,
 	struct bio_vec *bvec = bio->bi_io_vec;
 	int bio_index = 0;
 	int index;
-	int nr_sectors;
-	int i;
 	unsigned long total_bytes = 0;
 	unsigned long this_sum_bytes = 0;
 	u64 offset;
 
 	WARN_ON(bio->bi_vcnt <= 0);
-	sums = kzalloc(btrfs_ordered_sum_size(root, bio->bi_iter.bi_size),
-		       GFP_NOFS);
+	sums = kzalloc(btrfs_ordered_sum_size(root, bio->bi_size), GFP_NOFS);
 	if (!sums)
 		return -ENOMEM;
 
-	sums->len = bio->bi_iter.bi_size;
+	sums->len = bio->bi_size;
 	INIT_LIST_HEAD(&sums->list);
 
 	if (contig)
@@ -474,63 +452,48 @@ int btrfs_csum_one_bio(struct btrfs_root *root, struct inode *inode,
 
 	ordered = btrfs_lookup_ordered_extent(inode, offset);
 	BUG_ON(!ordered); /* Logic error */
-	sums->bytenr = (u64)bio->bi_iter.bi_sector << 9;
+	sums->bytenr = (u64)bio->bi_sector << 9;
 	index = 0;
 
 	while (bio_index < bio->bi_vcnt) {
 		if (!contig)
 			offset = page_offset(bvec->bv_page) + bvec->bv_offset;
 
-		data = kmap_atomic(bvec->bv_page);
+		if (offset >= ordered->file_offset + ordered->len ||
+		    offset < ordered->file_offset) {
+			unsigned long bytes_left;
+			sums->len = this_sum_bytes;
+			this_sum_bytes = 0;
+			btrfs_add_ordered_sum(inode, ordered, sums);
+			btrfs_put_ordered_extent(ordered);
 
-		nr_sectors = BTRFS_BYTES_TO_BLKS(root->fs_info,
-						bvec->bv_len + root->sectorsize
-						- 1);
+			bytes_left = bio->bi_size - total_bytes;
 
-		for (i = 0; i < nr_sectors; i++) {
-			if (offset >= ordered->file_offset + ordered->len ||
-				offset < ordered->file_offset) {
-				unsigned long bytes_left;
-
-				kunmap_atomic(data);
-				sums->len = this_sum_bytes;
-				this_sum_bytes = 0;
-				btrfs_add_ordered_sum(inode, ordered, sums);
-				btrfs_put_ordered_extent(ordered);
-
-				bytes_left = bio->bi_iter.bi_size - total_bytes;
-
-				sums = kzalloc(btrfs_ordered_sum_size(root, bytes_left),
-					GFP_NOFS);
-				BUG_ON(!sums); /* -ENOMEM */
-				sums->len = bytes_left;
-				ordered = btrfs_lookup_ordered_extent(inode,
-								offset);
-				ASSERT(ordered); /* Logic error */
-				sums->bytenr = ((u64)bio->bi_iter.bi_sector << 9)
-					+ total_bytes;
-				index = 0;
-
-				data = kmap_atomic(bvec->bv_page);
-			}
-
-			sums->sums[index] = ~(u32)0;
-			sums->sums[index]
-				= btrfs_csum_data(data + bvec->bv_offset
-						+ (i * root->sectorsize),
-						sums->sums[index],
-						root->sectorsize);
-			btrfs_csum_final(sums->sums[index],
-					(char *)(sums->sums + index));
-			index++;
-			offset += root->sectorsize;
-			this_sum_bytes += root->sectorsize;
-			total_bytes += root->sectorsize;
+			sums = kzalloc(btrfs_ordered_sum_size(root, bytes_left),
+				       GFP_NOFS);
+			BUG_ON(!sums); /* -ENOMEM */
+			sums->len = bytes_left;
+			ordered = btrfs_lookup_ordered_extent(inode, offset);
+			BUG_ON(!ordered); /* Logic error */
+			sums->bytenr = ((u64)bio->bi_sector << 9) +
+				       total_bytes;
+			index = 0;
 		}
 
+		data = kmap_atomic(bvec->bv_page);
+		sums->sums[index] = ~(u32)0;
+		sums->sums[index] = btrfs_csum_data(data + bvec->bv_offset,
+						    sums->sums[index],
+						    bvec->bv_len);
 		kunmap_atomic(data);
+		btrfs_csum_final(sums->sums[index],
+				 (char *)(sums->sums + index));
 
 		bio_index++;
+		index++;
+		total_bytes += bvec->bv_len;
+		this_sum_bytes += bvec->bv_len;
+		offset += bvec->bv_len;
 		bvec++;
 	}
 	this_sum_bytes = 0;
@@ -699,7 +662,7 @@ int btrfs_del_csums(struct btrfs_trans_handle *trans,
 			 */
 			ret = btrfs_split_item(trans, root, path, &key, offset);
 			if (ret && ret != -EAGAIN) {
-				btrfs_abort_transaction(trans, ret);
+				btrfs_abort_transaction(trans, root, ret);
 				goto out;
 			}
 
@@ -779,12 +742,10 @@ again:
 		nritems = btrfs_header_nritems(path->nodes[0]);
 		if (!nritems || (path->slots[0] >= nritems - 1)) {
 			ret = btrfs_next_leaf(root, path);
-			if (ret < 0) {
-				goto out;
-			} else if (ret > 0) {
+			if (ret == 1)
 				found_next = 1;
+			if (ret != 0)
 				goto insert;
-			}
 			slot = path->slots[0];
 		}
 		btrfs_item_key_to_cpu(path->nodes[0], &found_key, slot);

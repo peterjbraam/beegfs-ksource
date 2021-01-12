@@ -36,7 +36,6 @@ TOOL_OBJS = \
 	utglobal.o\
 	uthex.o\
 	utmath.o\
-	utnonansi.o\
 	utprint.o\
 	utstring.o\
 	utstrtoul64.o\

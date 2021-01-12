@@ -17,7 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
  *
- * Maintained by: Jim Gill <jgill@vmware.com>
+ * Maintained by: Arvind Kumar <arvindkumar@vmware.com>
  *
  */
 
@@ -523,11 +523,33 @@ static void pvscsi_setup_all_rings(const struct pvscsi_adapter *adapter)
 	}
 }
 
-static int pvscsi_change_queue_depth(struct scsi_device *sdev, int qdepth)
+static int pvscsi_change_queue_depth(struct scsi_device *sdev,
+				     int qdepth,
+				     int reason)
 {
+	int max_depth;
+	struct Scsi_Host *shost = sdev->host;
+
+	if (reason != SCSI_QDEPTH_DEFAULT)
+		/*
+		 * We support only changing default.
+		 */
+		return -EOPNOTSUPP;
+
+	max_depth = shost->can_queue;
 	if (!sdev->tagged_supported)
-		qdepth = 1;
-	return scsi_change_queue_depth(sdev, qdepth);
+		max_depth = 1;
+	if (qdepth > max_depth)
+		qdepth = max_depth;
+	scsi_adjust_queue_depth(sdev, scsi_get_tag_type(sdev), qdepth);
+
+	if (sdev->inquiry_len > 7)
+		sdev_printk(KERN_INFO, sdev,
+			    "qdepth(%d), tagged(%d), simple(%d), ordered(%d), scsi_level(%d), cmd_que(%d)\n",
+			    sdev->queue_depth, sdev->tagged_supported,
+			    sdev->simple_tags, sdev->ordered_tags,
+			    sdev->scsi_level, (sdev->inquiry[7] & 2) >> 1);
+	return sdev->queue_depth;
 }
 
 /*
@@ -617,7 +639,7 @@ static void pvscsi_complete_request(struct pvscsi_adapter *adapter,
 			break;
 
 		case BTSTAT_ABORTQUEUE:
-			cmd->result = (DID_ABORT << 16);
+			cmd->result = (DID_BUS_BUSY << 16);
 			break;
 
 		case BTSTAT_SCSIPARITY:
@@ -731,6 +753,10 @@ static int pvscsi_queue_ring(struct pvscsi_adapter *adapter,
 	memcpy(e->cdb, cmd->cmnd, e->cdbLen);
 
 	e->tag = SIMPLE_QUEUE_TAG;
+	if (sdev->tagged_supported &&
+	    (cmd->tag == HEAD_OF_QUEUE_TAG ||
+	     cmd->tag == ORDERED_QUEUE_TAG))
+		e->tag = cmd->tag;
 
 	if (cmd->sc_data_direction == DMA_FROM_DEVICE)
 		e->flags = PVSCSI_FLAG_CMD_DIR_TOHOST;
@@ -1149,13 +1175,13 @@ static bool pvscsi_setup_req_threshold(struct pvscsi_adapter *adapter,
 			 PVSCSI_CMD_SETUP_REQCALLTHRESHOLD);
 	val = pvscsi_reg_read(adapter, PVSCSI_REG_OFFSET_COMMAND_STATUS);
 	if (val == -1) {
-		printk(KERN_INFO "vmw_pvscsi: device does not support req_threshold\n");
+		printk(KERN_INFO "pvscsi: device does not support req_threshold\n");
 		return false;
 	} else {
 		struct PVSCSICmdDescSetupReqCall cmd_msg = { 0 };
 		cmd_msg.enable = enable;
 		printk(KERN_INFO
-		       "vmw_pvscsi: %sabling reqCallThreshold\n",
+		       "pvscsi: %sabling reqCallThreshold\n",
 			enable ? "en" : "dis");
 		pvscsi_write_cmd_desc(adapter,
 				      PVSCSI_CMD_SETUP_REQCALLTHRESHOLD,
@@ -1209,7 +1235,7 @@ static int pvscsi_setup_msix(const struct pvscsi_adapter *adapter,
 	struct msix_entry entry = { 0, PVSCSI_VECTOR_COMPLETION };
 	int ret;
 
-	ret = pci_enable_msix_exact(adapter->dev, &entry, 1);
+	ret = pci_enable_msix(adapter->dev, &entry, 1);
 	if (ret)
 		return ret;
 
@@ -1235,6 +1261,8 @@ static void pvscsi_shutdown_intr(struct pvscsi_adapter *adapter)
 
 static void pvscsi_release_resources(struct pvscsi_adapter *adapter)
 {
+	pvscsi_shutdown_intr(adapter);
+
 	if (adapter->workqueue)
 		destroy_workqueue(adapter->workqueue);
 
@@ -1532,7 +1560,7 @@ static int pvscsi_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	}
 
 	adapter->use_req_threshold = pvscsi_setup_req_threshold(adapter, true);
-	printk(KERN_DEBUG "vmw_pvscsi: driver-based request coalescing %sabled\n",
+	printk(KERN_DEBUG "pvscsi: driver-based request coalescing %sabled\n",
 	       adapter->use_req_threshold ? "en" : "dis");
 
 	error = request_irq(adapter->irq, pvscsi_isr, flags,
@@ -1563,16 +1591,15 @@ static int pvscsi_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 out_reset_adapter:
 	ll_adapter_reset(adapter);
 out_release_resources:
-	pvscsi_shutdown_intr(adapter);
 	pvscsi_release_resources(adapter);
 	scsi_host_put(host);
 out_disable_device:
+	pci_set_drvdata(pdev, NULL);
 	pci_disable_device(pdev);
 
 	return error;
 
 out_release_resources_and_disable:
-	pvscsi_shutdown_intr(adapter);
 	pvscsi_release_resources(adapter);
 	goto out_disable_device;
 }
@@ -1611,6 +1638,7 @@ static void pvscsi_remove(struct pci_dev *pdev)
 
 	scsi_host_put(host);
 
+	pci_set_drvdata(pdev, NULL);
 	pci_disable_device(pdev);
 }
 

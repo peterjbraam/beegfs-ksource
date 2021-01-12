@@ -4,6 +4,7 @@ config INFINIBAND_HFI1
 	select MMU_NOTIFIER
 	select CRC32
 	select I2C_ALGOBIT
+	default m
 	---help---
 	This is a low-level driver for Intel OPA Gen1 adapter.
 config HFI1_DEBUG_SDMA_ORDER
@@ -13,13 +14,6 @@ config HFI1_DEBUG_SDMA_ORDER
 	---help---
 	This is a debug flag to test for out of order
 	sdma completions for unit testing
-config HFI1_VERBS_31BIT_PSN
-	bool "HFI1 enable 31 bit PSN"
-	depends on INFINIBAND_HFI1
-	default y
-	---help---
-	Setting this enables 31 BIT PSN
-	For verbs RC/UC
 config SDMA_VERBOSITY
 	bool "Config SDMA Verbosity"
 	depends on INFINIBAND_HFI1

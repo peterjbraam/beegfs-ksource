@@ -897,11 +897,10 @@ static void ecc_point_mult(struct ecc_point *result,
 static inline void ecc_swap_digits(const u64 *in, u64 *out,
 				   unsigned int ndigits)
 {
-	const __be64 *src = (__force __be64 *)in;
 	int i;
 
 	for (i = 0; i < ndigits; i++)
-		out[i] = be64_to_cpu(src[ndigits - 1 - i]);
+		out[i] = __swab64(in[ndigits - 1 - i]);
 }
 
 int ecc_is_key_valid(unsigned int curve_id, unsigned int ndigits,
@@ -967,7 +966,7 @@ out:
 	return ret;
 }
 
-int crypto_ecdh_shared_secret(unsigned int curve_id, unsigned int ndigits,
+int ecdh_shared_secret(unsigned int curve_id, unsigned int ndigits,
 		       const u8 *private_key, unsigned int private_key_len,
 		       const u8 *public_key, unsigned int public_key_len,
 		       u8 *secret, unsigned int secret_len)

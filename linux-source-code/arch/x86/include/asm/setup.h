@@ -5,9 +5,6 @@
 
 #define COMMAND_LINE_SIZE 2048
 
-#include <linux/linkage.h>
-#include <asm/page_types.h>
-
 #ifdef __i386__
 
 #include <linux/pfn.h>
@@ -40,6 +37,12 @@ static inline void vsmp_init(void) { }
 
 void setup_bios_corruption_check(void);
 
+#ifdef CONFIG_X86_VISWS
+extern void visws_early_detect(void);
+#else
+static inline void visws_early_detect(void) { }
+#endif
+
 extern unsigned long saved_video_mode;
 
 extern void reserve_standard_io_resources(void);
@@ -47,9 +50,9 @@ extern void i386_reserve_resources(void);
 extern void setup_default_timer_irq(void);
 
 #ifdef CONFIG_X86_INTEL_MID
-extern void x86_intel_mid_early_setup(void);
+extern void x86_mrst_early_setup(void);
 #else
-static inline void x86_intel_mid_early_setup(void) { }
+static inline void x86_mrst_early_setup(void) { }
 #endif
 
 #ifdef CONFIG_X86_INTEL_CE
@@ -60,7 +63,6 @@ static inline void x86_ce4100_early_setup(void) { }
 
 #ifndef _SETUP
 
-#include <asm/espfix.h>
 #include <linux/kernel.h>
 
 /*
@@ -120,11 +122,11 @@ void *extend_brk(size_t size, size_t align);
 extern void probe_roms(void);
 #ifdef __i386__
 
-asmlinkage void __init i386_start_kernel(void);
+void __init i386_start_kernel(void);
 
 #else
-asmlinkage void __init x86_64_start_kernel(char *real_mode);
-asmlinkage void __init x86_64_start_reservations(char *real_mode_data);
+void __init x86_64_start_kernel(char *real_mode);
+void __init x86_64_start_reservations(char *real_mode_data);
 
 #endif /* __i386__ */
 #endif /* _SETUP */

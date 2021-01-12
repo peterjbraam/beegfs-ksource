@@ -144,21 +144,6 @@ __ftrace_make_nop(struct module *mod,
 		return -EINVAL;
 	}
 
-#ifdef CC_USING_MPROFILE_KERNEL
-	/* When using -mkernel_profile there is no load to jump over */
-	pop = PPC_INST_NOP;
-
-	if (probe_kernel_read(&op, (void *)(ip - 4), 4)) {
-		pr_err("Fetching instruction at %lx failed.\n", ip - 4);
-		return -EFAULT;
-	}
-
-	/* We expect either a mflr r0, or a std r0, LRSAVE(r1) */
-	if (op != PPC_INST_MFLR && op != PPC_INST_STD_LR) {
-		pr_err("Unexpected instruction %08x around bl _mcount\n", op);
-		return -EINVAL;
-	}
-#else
 	/*
 	 * Our original call site looks like:
 	 *
@@ -185,10 +170,24 @@ __ftrace_make_nop(struct module *mod,
 	}
 
 	if (op != PPC_INST_LD_TOC) {
-		pr_err("Expected %08x found %08x\n", PPC_INST_LD_TOC, op);
-		return -EINVAL;
+		unsigned int inst;
+
+		if (probe_kernel_read(&inst, (void *)(ip - 4), 4)) {
+			pr_err("Fetching instruction at %lx failed.\n", ip - 4);
+			return -EFAULT;
+		}
+
+		/* We expect either a mlfr r0, or a std r0, LRSAVE(r1) */
+		if (inst != PPC_INST_MFLR && inst != PPC_INST_STD_LR) {
+			pr_err("Unexpected instructions around bl _mcount\n"
+			       "when enabling dynamic ftrace!\t"
+			       "(%08x,bl,%08x)\n", inst, op);
+			return -EINVAL;
+		}
+
+		/* When using -mkernel_profile there is no load to jump over */
+		pop = PPC_INST_NOP;
 	}
-#endif /* CC_USING_MPROFILE_KERNEL */
 
 	if (patch_instruction((unsigned int *)ip, pop)) {
 		pr_err("Patching NOP failed.\n");
@@ -357,6 +356,7 @@ __ftrace_make_call(struct dyn_ftrace *rec, unsigned long addr)
 {
 	unsigned int op[2];
 	void *ip = (void *)rec->ip;
+	struct module_ext *mod_ext;
 
 	/* read where this goes */
 	if (probe_kernel_read(op, ip, sizeof(op)))
@@ -368,19 +368,23 @@ __ftrace_make_call(struct dyn_ftrace *rec, unsigned long addr)
 		return -EINVAL;
 	}
 
+	mutex_lock(&module_ext_mutex);
+	mod_ext = find_module_ext(rec->arch.mod);
+	mutex_unlock(&module_ext_mutex);
+
 	/* If we never set up a trampoline to ftrace_caller, then bail */
-	if (!rec->arch.mod->arch.tramp) {
+	if (!mod_ext->tramp) {
 		pr_err("No ftrace trampoline\n");
 		return -EINVAL;
 	}
 
 	/* Ensure branch is within 24 bits */
-	if (!create_branch(ip, rec->arch.mod->arch.tramp, BRANCH_SET_LINK)) {
+	if (!create_branch(ip, mod_ext->tramp, BRANCH_SET_LINK)) {
 		pr_err("Branch out of range\n");
 		return -EINVAL;
 	}
 
-	if (patch_branch(ip, rec->arch.mod->arch.tramp, BRANCH_SET_LINK)) {
+	if (patch_branch(ip, mod_ext->tramp, BRANCH_SET_LINK)) {
 		pr_err("REL24 out of range!\n");
 		return -EINVAL;
 	}
@@ -515,7 +519,7 @@ void ftrace_replace_code(int enable)
 		rec = ftrace_rec_iter_record(iter);
 		ret = __ftrace_replace_code(rec, enable);
 		if (ret) {
-			ftrace_bug(ret, rec);
+			ftrace_bug(ret, rec->ip);
 			return;
 		}
 	}
@@ -530,8 +534,13 @@ void arch_ftrace_update_code(int command)
 	ftrace_modify_all_code(command);
 }
 
-int __init ftrace_dyn_arch_init(void)
+int __init ftrace_dyn_arch_init(void *data)
 {
+	/* caller expects data to be zero */
+	unsigned long *p = data;
+
+	*p = 0;
+
 	return 0;
 }
 #endif /* CONFIG_DYNAMIC_FTRACE */
@@ -569,6 +578,10 @@ int ftrace_disable_ftrace_graph_caller(void)
 }
 #endif /* CONFIG_DYNAMIC_FTRACE */
 
+#ifdef CONFIG_PPC64
+extern void mod_return_to_handler(void);
+#endif
+
 /*
  * Hook the return address and push it in the stack of return addrs
  * in current thread info. Return the address we want to divert to.
@@ -576,7 +589,7 @@ int ftrace_disable_ftrace_graph_caller(void)
 unsigned long prepare_ftrace_return(unsigned long parent, unsigned long ip)
 {
 	struct ftrace_graph_ent trace;
-	unsigned long return_hooker;
+	unsigned long return_hooker = (unsigned long)&return_to_handler;
 
 	if (unlikely(ftrace_graph_is_dead()))
 		goto out;
@@ -584,7 +597,13 @@ unsigned long prepare_ftrace_return(unsigned long parent, unsigned long ip)
 	if (unlikely(atomic_read(&current->tracing_graph_pause)))
 		goto out;
 
-	return_hooker = ppc_function_entry(return_to_handler);
+#ifdef CONFIG_PPC64
+	/* non core kernel code needs to save and restore the TOC */
+	if (REGION_ID(self_addr) != KERNEL_REGION_ID)
+		return_hooker = (unsigned long)&mod_return_to_handler;
+#endif
+
+	return_hooker = ppc_function_entry((void *)return_hooker);
 
 	trace.func = ip;
 	trace.depth = current->curr_ret_stack + 1;

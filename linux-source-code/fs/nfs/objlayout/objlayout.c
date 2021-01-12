@@ -5,7 +5,7 @@
  *  All rights reserved.
  *
  *  Benny Halevy <bhalevy@panasas.com>
- *  Boaz Harrosh <ooo@electrozaur.com>
+ *  Boaz Harrosh <bharrosh@panasas.com>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License version 2
@@ -504,10 +504,10 @@ encode_accumulated_error(struct objlayout *objlay, __be32 *p)
 }
 
 void
-objlayout_encode_layoutreturn(struct pnfs_layout_hdr *pnfslay,
-			      struct xdr_stream *xdr,
+objlayout_encode_layoutreturn(struct xdr_stream *xdr,
 			      const struct nfs4_layoutreturn_args *args)
 {
+	struct pnfs_layout_hdr *pnfslay = args->layout;
 	struct objlayout *objlay = OBJLAYOUT(pnfslay);
 	struct objlayout_io_res *oir, *tmp;
 	__be32 *start;

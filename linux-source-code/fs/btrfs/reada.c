@@ -226,7 +226,7 @@ int btree_readahead_hook(struct btrfs_fs_info *fs_info,
 	/* find extent */
 	spin_lock(&fs_info->reada_lock);
 	re = radix_tree_lookup(&fs_info->reada_tree,
-			       start >> PAGE_SHIFT);
+			       start >> PAGE_CACHE_SHIFT);
 	if (re)
 		re->refcnt++;
 	spin_unlock(&fs_info->reada_lock);
@@ -257,7 +257,7 @@ static struct reada_zone *reada_find_zone(struct btrfs_fs_info *fs_info,
 	zone = NULL;
 	spin_lock(&fs_info->reada_lock);
 	ret = radix_tree_gang_lookup(&dev->reada_zones, (void **)&zone,
-				     logical >> PAGE_SHIFT, 1);
+				     logical >> PAGE_CACHE_SHIFT, 1);
 	if (ret == 1 && logical >= zone->start && logical <= zone->end) {
 		kref_get(&zone->refcnt);
 		spin_unlock(&fs_info->reada_lock);
@@ -294,13 +294,13 @@ static struct reada_zone *reada_find_zone(struct btrfs_fs_info *fs_info,
 
 	spin_lock(&fs_info->reada_lock);
 	ret = radix_tree_insert(&dev->reada_zones,
-				(unsigned long)(zone->end >> PAGE_SHIFT),
+				(unsigned long)(zone->end >> PAGE_CACHE_SHIFT),
 				zone);
 
 	if (ret == -EEXIST) {
 		kfree(zone);
 		ret = radix_tree_gang_lookup(&dev->reada_zones, (void **)&zone,
-					     logical >> PAGE_SHIFT, 1);
+					     logical >> PAGE_CACHE_SHIFT, 1);
 		if (ret == 1 && logical >= zone->start && logical <= zone->end)
 			kref_get(&zone->refcnt);
 		else
@@ -326,7 +326,7 @@ static struct reada_extent *reada_find_extent(struct btrfs_root *root,
 	u64 length;
 	int real_stripes;
 	int nzones = 0;
-	unsigned long index = logical >> PAGE_SHIFT;
+	unsigned long index = logical >> PAGE_CACHE_SHIFT;
 	int dev_replace_is_ongoing;
 	int have_zone = 0;
 
@@ -456,8 +456,6 @@ static struct reada_extent *reada_find_extent(struct btrfs_root *root,
 		}
 		have_zone = 1;
 	}
-	if (!have_zone)
-		radix_tree_delete(&fs_info->reada_tree, index);
 	spin_unlock(&fs_info->reada_lock);
 	btrfs_dev_replace_unlock(&fs_info->dev_replace, 0);
 
@@ -497,7 +495,7 @@ static void reada_extent_put(struct btrfs_fs_info *fs_info,
 			     struct reada_extent *re)
 {
 	int i;
-	unsigned long index = re->logical >> PAGE_SHIFT;
+	unsigned long index = re->logical >> PAGE_CACHE_SHIFT;
 
 	spin_lock(&fs_info->reada_lock);
 	if (--re->refcnt) {
@@ -540,7 +538,7 @@ static void reada_zone_release(struct kref *kref)
 	struct reada_zone *zone = container_of(kref, struct reada_zone, refcnt);
 
 	radix_tree_delete(&zone->device->reada_zones,
-			  zone->end >> PAGE_SHIFT);
+			  zone->end >> PAGE_CACHE_SHIFT);
 
 	kfree(zone);
 }
@@ -589,7 +587,7 @@ static int reada_add_block(struct reada_control *rc, u64 logical,
 static void reada_peer_zones_set_lock(struct reada_zone *zone, int lock)
 {
 	int i;
-	unsigned long index = zone->end >> PAGE_SHIFT;
+	unsigned long index = zone->end >> PAGE_CACHE_SHIFT;
 
 	for (i = 0; i < zone->ndevs; ++i) {
 		struct reada_zone *peer;
@@ -624,7 +622,7 @@ static int reada_pick_zone(struct btrfs_device *dev)
 					     (void **)&zone, index, 1);
 		if (ret == 0)
 			break;
-		index = (zone->end >> PAGE_SHIFT) + 1;
+		index = (zone->end >> PAGE_CACHE_SHIFT) + 1;
 		if (zone->locked) {
 			if (zone->elems > top_locked_elems) {
 				top_locked_elems = zone->elems;
@@ -675,7 +673,7 @@ static int reada_start_machine_dev(struct btrfs_fs_info *fs_info,
 	 * plugging to speed things up
 	 */
 	ret = radix_tree_gang_lookup(&dev->reada_extents, (void **)&re,
-				     dev->reada_next >> PAGE_SHIFT, 1);
+				     dev->reada_next >> PAGE_CACHE_SHIFT, 1);
 	if (ret == 0 || re->logical > dev->reada_curr_zone->end) {
 		ret = reada_pick_zone(dev);
 		if (!ret) {
@@ -684,7 +682,7 @@ static int reada_start_machine_dev(struct btrfs_fs_info *fs_info,
 		}
 		re = NULL;
 		ret = radix_tree_gang_lookup(&dev->reada_extents, (void **)&re,
-					dev->reada_next >> PAGE_SHIFT, 1);
+					dev->reada_next >> PAGE_CACHE_SHIFT, 1);
 	}
 	if (ret == 0) {
 		spin_unlock(&fs_info->reada_lock);
@@ -736,19 +734,21 @@ static int reada_start_machine_dev(struct btrfs_fs_info *fs_info,
 static void reada_start_machine_worker(struct btrfs_work *work)
 {
 	struct reada_machine_work *rmw;
+	struct btrfs_fs_info *fs_info;
 	int old_ioprio;
 
 	rmw = container_of(work, struct reada_machine_work, work);
+	fs_info = rmw->fs_info;
+
+	kfree(rmw);
 
 	old_ioprio = IOPRIO_PRIO_VALUE(task_nice_ioclass(current),
 				       task_nice_ioprio(current));
 	set_task_ioprio(current, BTRFS_IOPRIO_READA);
-	__reada_start_machine(rmw->fs_info);
+	__reada_start_machine(fs_info);
 	set_task_ioprio(current, old_ioprio);
 
-	atomic_dec(&rmw->fs_info->reada_works_cnt);
-
-	kfree(rmw);
+	atomic_dec(&fs_info->reada_works_cnt);
 }
 
 static void __reada_start_machine(struct btrfs_fs_info *fs_info)
@@ -759,7 +759,6 @@ static void __reada_start_machine(struct btrfs_fs_info *fs_info)
 	u64 total = 0;
 	int i;
 
-again:
 	do {
 		enqueued = 0;
 		mutex_lock(&fs_devices->device_list_mutex);
@@ -772,10 +771,6 @@ again:
 		mutex_unlock(&fs_devices->device_list_mutex);
 		total += enqueued;
 	} while (enqueued && total < 10000);
-	if (fs_devices->seed) {
-		fs_devices = fs_devices->seed;
-		goto again;
-	}
 
 	if (enqueued == 0)
 		return;
@@ -825,7 +820,7 @@ static void dump_devs(struct btrfs_fs_info *fs_info, int all)
 
 	spin_lock(&fs_info->reada_lock);
 	list_for_each_entry(device, &fs_devices->devices, dev_list) {
-		btrfs_debug(fs_info, "dev %lld has %d in flight", device->devid,
+		printk(KERN_DEBUG "dev %lld has %d in flight\n", device->devid,
 			atomic_read(&device->reada_in_flight));
 		index = 0;
 		while (1) {
@@ -834,18 +829,18 @@ static void dump_devs(struct btrfs_fs_info *fs_info, int all)
 						     (void **)&zone, index, 1);
 			if (ret == 0)
 				break;
-			pr_debug("  zone %llu-%llu elems %llu locked %d devs",
-				    zone->start, zone->end, zone->elems,
-				    zone->locked);
+			printk(KERN_DEBUG "  zone %llu-%llu elems %llu locked %d devs",
+			       zone->start, zone->end, zone->elems,
+			       zone->locked);
 			for (j = 0; j < zone->ndevs; ++j) {
-				pr_cont(" %lld",
+				printk(KERN_CONT " %lld",
 					zone->devs[j]->devid);
 			}
 			if (device->reada_curr_zone == zone)
-				pr_cont(" curr off %llu",
+				printk(KERN_CONT " curr off %llu",
 					device->reada_next - zone->start);
-			pr_cont("\n");
-			index = (zone->end >> PAGE_SHIFT) + 1;
+			printk(KERN_CONT "\n");
+			index = (zone->end >> PAGE_CACHE_SHIFT) + 1;
 		}
 		cnt = 0;
 		index = 0;
@@ -856,21 +851,22 @@ static void dump_devs(struct btrfs_fs_info *fs_info, int all)
 						     (void **)&re, index, 1);
 			if (ret == 0)
 				break;
-			pr_debug("  re: logical %llu size %u empty %d scheduled %d",
+			printk(KERN_DEBUG
+				"  re: logical %llu size %u empty %d scheduled %d",
 				re->logical, fs_info->tree_root->nodesize,
 				list_empty(&re->extctl), re->scheduled);
 
 			for (i = 0; i < re->nzones; ++i) {
-				pr_cont(" zone %llu-%llu devs",
+				printk(KERN_CONT " zone %llu-%llu devs",
 					re->zones[i]->start,
 					re->zones[i]->end);
 				for (j = 0; j < re->zones[i]->ndevs; ++j) {
-					pr_cont(" %lld",
+					printk(KERN_CONT " %lld",
 						re->zones[i]->devs[j]->devid);
 				}
 			}
-			pr_cont("\n");
-			index = (re->logical >> PAGE_SHIFT) + 1;
+			printk(KERN_CONT "\n");
+			index = (re->logical >> PAGE_CACHE_SHIFT) + 1;
 			if (++cnt > 15)
 				break;
 		}
@@ -886,23 +882,24 @@ static void dump_devs(struct btrfs_fs_info *fs_info, int all)
 		if (ret == 0)
 			break;
 		if (!re->scheduled) {
-			index = (re->logical >> PAGE_SHIFT) + 1;
+			index = (re->logical >> PAGE_CACHE_SHIFT) + 1;
 			continue;
 		}
-		pr_debug("re: logical %llu size %u list empty %d scheduled %d",
+		printk(KERN_DEBUG
+			"re: logical %llu size %u list empty %d scheduled %d",
 			re->logical, fs_info->tree_root->nodesize,
 			list_empty(&re->extctl), re->scheduled);
 		for (i = 0; i < re->nzones; ++i) {
-			pr_cont(" zone %llu-%llu devs",
+			printk(KERN_CONT " zone %llu-%llu devs",
 				re->zones[i]->start,
 				re->zones[i]->end);
 			for (j = 0; j < re->zones[i]->ndevs; ++j) {
-				pr_cont(" %lld",
+				printk(KERN_CONT " %lld",
 				       re->zones[i]->devs[j]->devid);
 			}
 		}
-		pr_cont("\n");
-		index = (re->logical >> PAGE_SHIFT) + 1;
+		printk(KERN_CONT "\n");
+		index = (re->logical >> PAGE_CACHE_SHIFT) + 1;
 	}
 	spin_unlock(&fs_info->reada_lock);
 }

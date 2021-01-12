@@ -207,10 +207,8 @@ int usb_hcd_msp_probe(const struct hc_driver *driver,
 
 
 	retval = usb_add_hcd(hcd, res->start, IRQF_SHARED);
-	if (retval == 0) {
-		device_wakeup_enable(hcd->self.controller);
+	if (retval == 0)
 		return 0;
-	}
 
 	usb_remove_hcd(hcd);
 err3:
@@ -325,5 +323,6 @@ static struct platform_driver ehci_hcd_msp_driver = {
 	.remove		= ehci_hcd_msp_drv_remove,
 	.driver		= {
 		.name	= "pmcmsp-ehci",
+		.owner	= THIS_MODULE,
 	},
 };

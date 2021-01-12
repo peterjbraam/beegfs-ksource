@@ -28,7 +28,7 @@
 #include <asm/asm-offsets.h>
 #include <asm/exception-64s.h>
 #include <asm/kvm_book3s_asm.h>
-#include <asm/book3s/64/mmu-hash.h>
+#include <asm/mmu-hash64.h>
 #include <asm/tm.h>
 #include <asm/opal.h>
 
@@ -37,13 +37,6 @@
 /* Values in HSTATE_NAPPING(r13) */
 #define NAPPING_CEDE	1
 #define NAPPING_NOVCPU	2
-
-/* Stack frame offsets for kvmppc_hv_entry */
-#define SFS			112
-#define STACK_SLOT_TRAP		(SFS-4)
-#define STACK_SLOT_CIABR	(SFS-16)
-#define STACK_SLOT_DAWR		(SFS-24)
-#define STACK_SLOT_DAWRX	(SFS-32)
 
 /*
  * Call kvmppc_hv_entry in real mode.
@@ -83,8 +76,8 @@ BEGIN_FTR_SECTION
 END_FTR_SECTION_IFCLR(CPU_FTR_ARCH_207S)
 
 	/* Restore SPRG3 */
-	ld	r3,PACA_SPRG_VDSO(r13)
-	mtspr	SPRN_SPRG_VDSO_WRITE,r3
+	ld	r3,PACA_SPRG3(r13)
+	mtspr	SPRN_SPRG3,r3
 
 	/* Reload the host's PMU registers */
 	ld	r3, PACALPPACAPTR(r13)	/* is the host using the PMU? */
@@ -297,9 +290,10 @@ kvm_novcpu_exit:
 	bl	kvmhv_accumulate_time
 #endif
 13:	mr	r3, r12
-	stw	r12, STACK_SLOT_TRAP(r1)
+	stw	r12, 112-4(r1)
 	bl	kvmhv_commence_exit
 	nop
+	lwz	r12, 112-4(r1)
 	b	kvmhv_switch_to_host
 
 /*
@@ -431,7 +425,7 @@ kvm_no_guest:
 	cmpwi	r3, 0
 	bne	54f
 /*
- * We jump to pnv_wakeup_loss, which will return to the caller
+ * We jump to power7_wakeup_loss, which will return to the caller
  * of power7_nap in the powernv cpu offline loop.  The value we
  * put in r3 becomes the return value for power7_nap.
  */
@@ -440,7 +434,7 @@ kvm_no_guest:
 	rlwimi	r4, r3, 0, LPCR_PECE0 | LPCR_PECE1
 	mtspr	SPRN_LPCR, r4
 	li	r3, 0
-	b	pnv_wakeup_loss
+	b	power7_wakeup_loss
 
 53:	HMT_LOW
 	ld	r5, HSTATE_KVM_VCORE(r13)
@@ -544,7 +538,7 @@ kvmppc_hv_entry:
 	 */
 	mflr	r0
 	std	r0, PPC_LR_STKOFF(r1)
-	stdu	r1, -SFS(r1)
+	stdu	r1, -112(r1)
 
 	/* Save R1 in the PACA */
 	std	r1, HSTATE_HOST_R1(r13)
@@ -632,6 +626,7 @@ ALT_FTR_SECTION_END_IFSET(CPU_FTR_ARCH_207S)
 22:	ld	r8,VCORE_TB_OFFSET(r5)
 	cmpdi	r8,0
 	beq	37f
+	std	r8, VCORE_TB_OFFSET_APPL(r5)
 	mftb	r6		/* current host timebase */
 	add	r8,r8,r6
 	mtspr	SPRN_TBU40,r8	/* update upper 40 bits */
@@ -704,16 +699,6 @@ kvmppc_got_guest:
 	ld	r8,VCPU_SPURR(r4)
 	mtspr	SPRN_PURR,r7
 	mtspr	SPRN_SPURR,r8
-
-	/* Save host values of some registers */
-BEGIN_FTR_SECTION
-	mfspr	r5, SPRN_CIABR
-	mfspr	r6, SPRN_DAWR
-	mfspr	r7, SPRN_DAWRX
-	std	r5, STACK_SLOT_CIABR(r1)
-	std	r6, STACK_SLOT_DAWR(r1)
-	std	r7, STACK_SLOT_DAWRX(r1)
-END_FTR_SECTION_IFSET(CPU_FTR_ARCH_207S)
 
 BEGIN_FTR_SECTION
 	/* Set partition DABR */
@@ -846,19 +831,6 @@ END_FTR_SECTION_IFCLR(CPU_FTR_ARCH_207S)
 	mtspr	SPRN_WORT, r8
 8:
 
-	/*
-	 * Set the decrementer to the guest decrementer.
-	 */
-	ld	r8,VCPU_DEC_EXPIRES(r4)
-	/* r8 is a host timebase value here, convert to guest TB */
-	ld	r5,HSTATE_KVM_VCORE(r13)
-	ld	r6,VCORE_TB_OFFSET(r5)
-	add	r8,r8,r6
-	mftb	r7
-	subf	r3,r7,r8
-	mtspr	SPRN_DEC,r3
-	stw	r3,VCPU_DEC(r4)
-
 	ld	r5, VCPU_SPRG0(r4)
 	ld	r6, VCPU_SPRG1(r4)
 	ld	r7, VCPU_SPRG2(r4)
@@ -911,6 +883,18 @@ END_FTR_SECTION_IFCLR(CPU_FTR_ARCH_207S)
 	ld	r8,VCORE_LPCR(r5)
 	mtspr	SPRN_LPCR,r8
 	isync
+
+	/*
+	 * Set the decrementer to the guest decrementer.
+	 */
+	ld	r8,VCPU_DEC_EXPIRES(r4)
+	/* r8 is a host timebase value here, convert to guest TB */
+	ld	r5,HSTATE_KVM_VCORE(r13)
+	ld	r6,VCORE_TB_OFFSET_APPL(r5)
+	add	r8,r8,r6
+	mftb	r7
+	subf	r3,r7,r8
+	mtspr	SPRN_DEC,r3
 
 	/* Check if HDEC expires soon */
 	mfspr	r3, SPRN_HDEC
@@ -1023,7 +1007,6 @@ END_FTR_SECTION_IFSET(CPU_FTR_HAS_PPR)
 
 secondary_too_late:
 	li	r12, 0
-	stw	r12, STACK_SLOT_TRAP(r1)
 	cmpdi	r4, 0
 	beq	11f
 	stw	r12, VCPU_TRAP(r4)
@@ -1206,11 +1189,6 @@ END_FTR_SECTION_IFSET(CPU_FTR_HAS_PPR)
 	 *   1 An interrupt is pending that needs to be handled by the host
 	 *     Exit guest and return to host by branching to guest_exit_cont
 	 *
-	 *   2 Passthrough that needs completion in the host
-	 *     Exit guest and return to host by branching to guest_exit_cont
-	 *     However, we also set r12 to BOOK3S_INTERRUPT_HV_RM_HARD
-	 *     to indicate to the host to complete handling the interrupt
-	 *
 	 * Before returning to guest, we check if any CPU is heading out
 	 * to the host and if so, we head out also. If no CPUs are heading
 	 * check return values <= 0.
@@ -1226,15 +1204,6 @@ END_FTR_SECTION_IFSET(CPU_FTR_HAS_PPR)
 	 *    Return to guest to deliver any pending guest interrupts.
 	 */
 
-	cmpdi	r3, 1
-	ble	1f
-
-	/* Return code = 2 */
-	li	r12, BOOK3S_INTERRUPT_HV_RM_HARD
-	stw	r12, VCPU_TRAP(r9)
-	b	guest_exit_cont
-
-1:	/* Return code <= 1 */
 	cmpdi	r3, 0
 	bgt	guest_exit_cont
 
@@ -1267,16 +1236,31 @@ mc_cont:
 	bl	kvmhv_accumulate_time
 #endif
 
-	/* Possibly flush the link stack here. */
+	/*
+	 * Possibly flush the link stack here, before we do a blr in
+	 * guest_exit_short_path.
+	 */
 1:	nop
 	patch_site 1b patch__call_kvm_flush_link_stack
+	
+	/* Save DEC */
+	/* Do this before kvmhv_commence_exit so we know TB is guest TB */
+	mfspr	r5,SPRN_DEC
+	mftb	r6
+	extsw	r5,r5
+	add	r5,r5,r6
+	/* r5 is a guest timebase value here, convert to host TB */
+	ld	r3,HSTATE_KVM_VCORE(r13)
+	ld	r4,VCORE_TB_OFFSET_APPL(r3)
+	subf	r5,r4,r5
+	std	r5,VCPU_DEC_EXPIRES(r9)
 
-	stw	r12, STACK_SLOT_TRAP(r1)
-	mr 	r3, r12
 	/* Increment exit count, poke other threads to exit */
+	mr 	r3, r12
 	bl	kvmhv_commence_exit
 	nop
 	ld	r9, HSTATE_KVM_VCPU(r13)
+	lwz	r12, VCPU_TRAP(r9)
 
 	/* Stop others sending VCPU interrupts to this physical CPU */
 	li	r0, -1
@@ -1333,17 +1317,6 @@ mc_cont:
 	mtspr	SPRN_PURR,r3
 	mtspr	SPRN_SPURR,r4
 
-	/* Save DEC */
-	mfspr	r5,SPRN_DEC
-	mftb	r6
-	extsw	r5,r5
-	add	r5,r5,r6
-	/* r5 is a guest timebase value here, convert to host TB */
-	ld	r3,HSTATE_KVM_VCORE(r13)
-	ld	r4,VCORE_TB_OFFSET(r3)
-	subf	r5,r4,r5
-	std	r5,VCPU_DEC_EXPIRES(r9)
-
 BEGIN_FTR_SECTION
 	b	8f
 END_FTR_SECTION_IFCLR(CPU_FTR_ARCH_207S)
@@ -1382,7 +1355,8 @@ END_FTR_SECTION_IFCLR(CPU_FTR_ARCH_207S)
 	 */
 	li	r0, 0
 	mtspr	SPRN_IAMR, r0
-	mtspr	SPRN_PSPB, r0
+	mtspr	SPRN_CIABR, r0
+	mtspr	SPRN_DAWRX, r0
 	mtspr	SPRN_TCSCR, r0
 	mtspr	SPRN_WORT, r0
 	/* Set MMCRS to 1<<31 to freeze and disable the SPMC counters */
@@ -1398,7 +1372,6 @@ END_FTR_SECTION_IFCLR(CPU_FTR_ARCH_207S)
 	std	r6,VCPU_UAMOR(r9)
 	li	r6,0
 	mtspr	SPRN_AMR,r6
-	mtspr	SPRN_UAMOR, r6
 
 	/* Switch DSCR back to host value */
 	mfspr	r8, SPRN_DSCR
@@ -1540,21 +1513,10 @@ END_FTR_SECTION_IFSET(CPU_FTR_ARCH_207S)
 	slbia
 	ptesync
 
-	/* Restore host values of some registers */
-BEGIN_FTR_SECTION
-	ld	r5, STACK_SLOT_CIABR(r1)
-	ld	r6, STACK_SLOT_DAWR(r1)
-	ld	r7, STACK_SLOT_DAWRX(r1)
-	mtspr	SPRN_CIABR, r5
-	mtspr	SPRN_DAWR, r6
-	mtspr	SPRN_DAWRX, r7
-END_FTR_SECTION_IFSET(CPU_FTR_ARCH_207S)
-
 	/*
 	 * POWER7/POWER8 guest -> host partition switch code.
 	 * We don't have to lock against tlbies but we do
 	 * have to coordinate the hardware threads.
-	 * Here STACK_SLOT_TRAP(r1) contains the trap number.
 	 */
 kvmhv_switch_to_host:
 	/* Secondary threads wait for primary to do partition switch */
@@ -1605,11 +1567,11 @@ BEGIN_FTR_SECTION
 END_FTR_SECTION_IFSET(CPU_FTR_ARCH_207S)
 
 	/* If HMI, call kvmppc_realmode_hmi_handler() */
-	lwz	r12, STACK_SLOT_TRAP(r1)
 	cmpwi	r12, BOOK3S_INTERRUPT_HMI
 	bne	27f
 	bl	kvmppc_realmode_hmi_handler
 	nop
+	li	r12, BOOK3S_INTERRUPT_HMI
 	/*
 	 * At this point kvmppc_realmode_hmi_handler would have resync-ed
 	 * the TB. Hence it is not required to subtract guest timebase
@@ -1622,9 +1584,11 @@ END_FTR_SECTION_IFSET(CPU_FTR_ARCH_207S)
 
 27:
 	/* Subtract timebase offset from timebase */
-	ld	r8,VCORE_TB_OFFSET(r5)
+	ld	r8, VCORE_TB_OFFSET_APPL(r5)
 	cmpdi	r8,0
 	beq	17f
+	li	r0, 0
+	std	r0, VCORE_TB_OFFSET_APPL(r5)
 	mftb	r6			/* current guest timebase */
 	subf	r8,r8,r6
 	mtspr	SPRN_TBU40,r8		/* update upper 40 bits */
@@ -1684,9 +1648,8 @@ END_FTR_SECTION_IFSET(CPU_FTR_ARCH_207S)
 	li	r0, KVM_GUEST_MODE_NONE
 	stb	r0, HSTATE_IN_GUEST(r13)
 
-	lwz	r12, STACK_SLOT_TRAP(r1)	/* return trap # in r12 */
-	ld	r0, SFS+PPC_LR_STKOFF(r1)
-	addi	r1, r1, SFS
+	ld	r0, 112+PPC_LR_STKOFF(r1)
+	addi	r1, r1, 112
 	mtlr	r0
 	blr
 
@@ -1908,7 +1871,7 @@ hcall_real_table:
 	.long	DOTSYM(kvmppc_h_clear_ref) - hcall_real_table
 	.long	DOTSYM(kvmppc_h_protect) - hcall_real_table
 	.long	DOTSYM(kvmppc_h_get_tce) - hcall_real_table
-	.long	DOTSYM(kvmppc_rm_h_put_tce) - hcall_real_table
+	.long	DOTSYM(kvmppc_h_put_tce) - hcall_real_table
 	.long	0		/* 0x24 - H_SET_SPRG0 */
 	.long	DOTSYM(kvmppc_h_set_dabr) - hcall_real_table
 	.long	0		/* 0x2c */
@@ -1986,121 +1949,8 @@ hcall_real_table:
 	.long	0		/* 0x12c */
 	.long	0		/* 0x130 */
 	.long	DOTSYM(kvmppc_h_set_xdabr) - hcall_real_table
-	.long	DOTSYM(kvmppc_rm_h_stuff_tce) - hcall_real_table
+	.long	DOTSYM(kvmppc_h_stuff_tce) - hcall_real_table
 	.long	DOTSYM(kvmppc_rm_h_put_tce_indirect) - hcall_real_table
-	.long	0		/* 0x140 */
-	.long	0		/* 0x144 */
-	.long	0		/* 0x148 */
-	.long	0		/* 0x14c */
-	.long	0		/* 0x150 */
-	.long	0		/* 0x154 */
-	.long	0		/* 0x158 */
-	.long	0		/* 0x15c */
-	.long	0		/* 0x160 */
-	.long	0		/* 0x164 */
-	.long	0		/* 0x168 */
-	.long	0		/* 0x16c */
-	.long	0		/* 0x170 */
-	.long	0		/* 0x174 */
-	.long	0		/* 0x178 */
-	.long	0		/* 0x17c */
-	.long	0		/* 0x180 */
-	.long	0		/* 0x184 */
-	.long	0		/* 0x188 */
-	.long	0		/* 0x18c */
-	.long	0		/* 0x190 */
-	.long	0		/* 0x194 */
-	.long	0		/* 0x198 */
-	.long	0		/* 0x19c */
-	.long	0		/* 0x1a0 */
-	.long	0		/* 0x1a4 */
-	.long	0		/* 0x1a8 */
-	.long	0		/* 0x1ac */
-	.long	0		/* 0x1b0 */
-	.long	0		/* 0x1b4 */
-	.long	0		/* 0x1b8 */
-	.long	0		/* 0x1bc */
-	.long	0		/* 0x1c0 */
-	.long	0		/* 0x1c4 */
-	.long	0		/* 0x1c8 */
-	.long	0		/* 0x1cc */
-	.long	0		/* 0x1d0 */
-	.long	0		/* 0x1d4 */
-	.long	0		/* 0x1d8 */
-	.long	0		/* 0x1dc */
-	.long	0		/* 0x1e0 */
-	.long	0		/* 0x1e4 */
-	.long	0		/* 0x1e8 */
-	.long	0		/* 0x1ec */
-	.long	0		/* 0x1f0 */
-	.long	0		/* 0x1f4 */
-	.long	0		/* 0x1f8 */
-	.long	0		/* 0x1fc */
-	.long	0		/* 0x200 */
-	.long	0		/* 0x204 */
-	.long	0		/* 0x208 */
-	.long	0		/* 0x20c */
-	.long	0		/* 0x210 */
-	.long	0		/* 0x214 */
-	.long	0		/* 0x218 */
-	.long	0		/* 0x21c */
-	.long	0		/* 0x220 */
-	.long	0		/* 0x224 */
-	.long	0		/* 0x228 */
-	.long	0		/* 0x22c */
-	.long	0		/* 0x230 */
-	.long	0		/* 0x234 */
-	.long	0		/* 0x238 */
-	.long	0		/* 0x23c */
-	.long	0		/* 0x240 */
-	.long	0		/* 0x244 */
-	.long	0		/* 0x248 */
-	.long	0		/* 0x24c */
-	.long	0		/* 0x250 */
-	.long	0		/* 0x254 */
-	.long	0		/* 0x258 */
-	.long	0		/* 0x25c */
-	.long	0		/* 0x260 */
-	.long	0		/* 0x264 */
-	.long	0		/* 0x268 */
-	.long	0		/* 0x26c */
-	.long	0		/* 0x270 */
-	.long	0		/* 0x274 */
-	.long	0		/* 0x278 */
-	.long	0		/* 0x27c */
-	.long	0		/* 0x280 */
-	.long	0		/* 0x284 */
-	.long	0		/* 0x288 */
-	.long	0		/* 0x28c */
-	.long	0		/* 0x290 */
-	.long	0		/* 0x294 */
-	.long	0		/* 0x298 */
-	.long	0		/* 0x29c */
-	.long	0		/* 0x2a0 */
-	.long	0		/* 0x2a4 */
-	.long	0		/* 0x2a8 */
-	.long	0		/* 0x2ac */
-	.long	0		/* 0x2b0 */
-	.long	0		/* 0x2b4 */
-	.long	0		/* 0x2b8 */
-	.long	0		/* 0x2bc */
-	.long	0		/* 0x2c0 */
-	.long	0		/* 0x2c4 */
-	.long	0		/* 0x2c8 */
-	.long	0		/* 0x2cc */
-	.long	0		/* 0x2d0 */
-	.long	0		/* 0x2d4 */
-	.long	0		/* 0x2d8 */
-	.long	0		/* 0x2dc */
-	.long	0		/* 0x2e0 */
-	.long	0		/* 0x2e4 */
-	.long	0		/* 0x2e8 */
-	.long	0		/* 0x2ec */
-	.long	0		/* 0x2f0 */
-	.long	0		/* 0x2f4 */
-	.long	0		/* 0x2f8 */
-	.long	0		/* 0x2fc */
-	.long	DOTSYM(kvmppc_h_random) - hcall_real_table
 	.globl	hcall_real_table_end
 hcall_real_table_end:
 
@@ -2235,7 +2085,7 @@ END_FTR_SECTION_IFSET(CPU_FTR_TM)
 	add	r3, r3, r5
 	ld	r4, HSTATE_KVM_VCPU(r13)
 	ld	r5, HSTATE_KVM_VCORE(r13)
-	ld	r6, VCORE_TB_OFFSET(r5)
+	ld	r6, VCORE_TB_OFFSET_APPL(r5)
 	subf	r3, r6, r3	/* convert to host TB value */
 	std	r3, VCPU_DEC_EXPIRES(r4)
 
@@ -2306,7 +2156,7 @@ END_FTR_SECTION_IFSET(CPU_FTR_TM)
 	/* Restore guest decrementer */
 	ld	r3, VCPU_DEC_EXPIRES(r4)
 	ld	r5, HSTATE_KVM_VCORE(r13)
-	ld	r6, VCORE_TB_OFFSET(r5)
+	ld	r6, VCORE_TB_OFFSET_APPL(r5)
 	add	r3, r3, r6	/* convert host TB to guest TB value */
 	mftb	r7
 	subf	r3, r7, r3
@@ -2488,17 +2338,6 @@ END_FTR_SECTION_IFSET(CPU_FTR_ARCH_207S)
 	bl	kvmppc_read_intr
 	nop
 	li	r12, BOOK3S_INTERRUPT_EXTERNAL
-	cmpdi	r3, 1
-	ble	1f
-
-	/*
-	 * Return code of 2 means PCI passthrough interrupt, but
-	 * we need to return back to host to complete handling the
-	 * interrupt. Trap reason is expected in r12 by guest
-	 * exit code.
-	 */
-	li	r12, BOOK3S_INTERRUPT_HV_RM_HARD
-1:
 	ld	r0, PPC_MIN_STKFRM+PPC_LR_STKOFF(r1)
 	addi	r1, r1, PPC_MIN_STKFRM
 	mtlr	r0
@@ -2655,13 +2494,11 @@ kvmppc_save_tm:
 	mfctr	r7
 	mfspr	r8, SPRN_AMR
 	mfspr	r10, SPRN_TAR
-	mfxer	r11
 	std	r5, VCPU_LR_TM(r9)
 	stw	r6, VCPU_CR_TM(r9)
 	std	r7, VCPU_CTR_TM(r9)
 	std	r8, VCPU_AMR_TM(r9)
 	std	r10, VCPU_TAR_TM(r9)
-	std	r11, VCPU_XER_TM(r9)
 
 	/* Restore r12 as trap number. */
 	lwz	r12, VCPU_TRAP(r9)
@@ -2754,13 +2591,11 @@ kvmppc_restore_tm:
 	ld	r7, VCPU_CTR_TM(r4)
 	ld	r8, VCPU_AMR_TM(r4)
 	ld	r9, VCPU_TAR_TM(r4)
-	ld	r10, VCPU_XER_TM(r4)
 	mtlr	r5
 	mtcr	r6
 	mtctr	r7
 	mtspr	SPRN_AMR, r8
 	mtspr	SPRN_TAR, r9
-	mtxer	r10
 
 	/*
 	 * Load up PPR and DSCR values but don't put them in the actual SPRs
@@ -2862,12 +2697,9 @@ kvmppc_fix_pmao:
  */
 kvmhv_start_timing:
 	ld	r5, HSTATE_KVM_VCORE(r13)
-	lbz	r6, VCORE_IN_GUEST(r5)
-	cmpwi	r6, 0
-	beq	5f				/* if in guest, need to */
-	ld	r6, VCORE_TB_OFFSET(r5)		/* subtract timebase offset */
-5:	mftb	r5
-	subf	r5, r6, r5
+	ld	r6, VCORE_TB_OFFSET_APPL(r5)
+	mftb	r5
+	subf	r5, r6, r5	/* subtract current timebase offset */
 	std	r3, VCPU_CUR_ACTIVITY(r4)
 	std	r5, VCPU_ACTIVITY_START(r4)
 	blr
@@ -2878,15 +2710,12 @@ kvmhv_start_timing:
  */
 kvmhv_accumulate_time:
 	ld	r5, HSTATE_KVM_VCORE(r13)
-	lbz	r8, VCORE_IN_GUEST(r5)
-	cmpwi	r8, 0
-	beq	4f				/* if in guest, need to */
-	ld	r8, VCORE_TB_OFFSET(r5)		/* subtract timebase offset */
-4:	ld	r5, VCPU_CUR_ACTIVITY(r4)
+	ld	r8, VCORE_TB_OFFSET_APPL(r5)
+	ld	r5, VCPU_CUR_ACTIVITY(r4)
 	ld	r6, VCPU_ACTIVITY_START(r4)
 	std	r3, VCPU_CUR_ACTIVITY(r4)
 	mftb	r7
-	subf	r7, r8, r7
+	subf	r7, r8, r7	/* subtract current timebase offset */
 	std	r7, VCPU_ACTIVITY_START(r4)
 	cmpdi	r5, 0
 	beqlr

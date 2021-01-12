@@ -24,20 +24,26 @@ struct netpoll {
 	struct net_device *dev;
 	char dev_name[IFNAMSIZ];
 	const char *name;
+	void (*rx_hook)(struct netpoll *, int, char *, int);
 
 	union inet_addr local_ip, remote_ip;
 	bool ipv6;
 	u16 local_port, remote_port;
 	u8 remote_mac[ETH_ALEN];
 
+	struct list_head rx; /* rx_np list element */
 	struct work_struct cleanup_work;
 };
 
 struct netpoll_info {
 	atomic_t refcnt;
 
+	unsigned long rx_flags;
+	spinlock_t rx_lock;
 	struct semaphore dev_lock;
+	struct list_head rx_np; /* netpolls that registered an rx_hook */
 
+	struct sk_buff_head neigh_tx; /* list of neigh requests to reply to */
 	struct sk_buff_head txq;
 
 	struct delayed_work tx_work;
@@ -47,8 +53,9 @@ struct netpoll_info {
 };
 
 #ifdef CONFIG_NETPOLL
-extern void netpoll_poll_disable(struct net_device *dev);
-extern void netpoll_poll_enable(struct net_device *dev);
+void netpoll_poll_dev(struct net_device *dev);
+void netpoll_poll_disable(struct net_device *dev);
+void netpoll_poll_enable(struct net_device *dev);
 #else
 static inline void netpoll_poll_disable(struct net_device *dev) { return; }
 static inline void netpoll_poll_enable(struct net_device *dev) { return; }
@@ -78,8 +85,11 @@ static inline void *netpoll_poll_lock(struct napi_struct *napi)
 	struct net_device *dev = napi->dev;
 
 	if (dev && dev->npinfo) {
-		spin_lock(&napi->poll_lock);
-		napi->poll_owner = smp_processor_id();
+		int owner = smp_processor_id();
+
+		while (cmpxchg(&napi->poll_owner, -1, owner) != -1)
+			cpu_relax();
+
 		return napi;
 	}
 	return NULL;
@@ -89,10 +99,8 @@ static inline void netpoll_poll_unlock(void *have)
 {
 	struct napi_struct *napi = have;
 
-	if (napi) {
-		napi->poll_owner = -1;
-		spin_unlock(&napi->poll_lock);
-	}
+	if (napi)
+		smp_store_release(&napi->poll_owner, -1);
 }
 
 static inline bool netpoll_tx_running(struct net_device *dev)

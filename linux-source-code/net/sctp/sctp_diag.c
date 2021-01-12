@@ -109,8 +109,7 @@ static int inet_sctp_diag_fill(struct sock *sk, struct sctp_association *asoc,
 			       const struct inet_diag_req_v2 *req,
 			       struct user_namespace *user_ns,
 			       int portid, u32 seq, u16 nlmsg_flags,
-			       const struct nlmsghdr *unlh,
-			       bool net_admin)
+			       const struct nlmsghdr *unlh)
 {
 	struct sctp_endpoint *ep = sctp_sk(sk)->ep;
 	struct list_head *addr_list;
@@ -137,7 +136,7 @@ static int inet_sctp_diag_fill(struct sock *sk, struct sctp_association *asoc,
 		r->idiag_retrans = 0;
 	}
 
-	if (inet_diag_msg_attrs_fill(sk, skb, r, ext, user_ns, net_admin))
+	if (inet_diag_msg_attrs_fill(sk, skb, r, ext, user_ns))
 		goto errout;
 
 	if (ext & (1 << (INET_DIAG_SKMEMINFO - 1))) {
@@ -207,7 +206,6 @@ struct sctp_comm_param {
 	struct netlink_callback *cb;
 	const struct inet_diag_req_v2 *r;
 	const struct nlmsghdr *nlh;
-	bool net_admin;
 };
 
 static size_t inet_assoc_attr_size(struct sctp_association *asoc)
@@ -224,7 +222,6 @@ static size_t inet_assoc_attr_size(struct sctp_association *asoc)
 		+ nla_total_size(1) /* INET_DIAG_SHUTDOWN */
 		+ nla_total_size(1) /* INET_DIAG_TOS */
 		+ nla_total_size(1) /* INET_DIAG_TCLASS */
-		+ nla_total_size(4) /* INET_DIAG_MARK */
 		+ nla_total_size(addrlen * asoc->peer.transport_count)
 		+ nla_total_size(addrlen * addrcnt)
 		+ nla_total_size(sizeof(struct inet_diag_meminfo))
@@ -262,8 +259,7 @@ static int sctp_tsp_dump_one(struct sctp_transport *tsp, void *p)
 	err = inet_sctp_diag_fill(sk, assoc, rep, req,
 				  sk_user_ns(NETLINK_CB(in_skb).sk),
 				  NETLINK_CB(in_skb).portid,
-				  nlh->nlmsg_seq, 0, nlh,
-				  commp->net_admin);
+				  nlh->nlmsg_seq, 0, nlh);
 	release_sock(sk);
 	if (err < 0) {
 		WARN_ON(err == -EMSGSIZE);
@@ -279,10 +275,11 @@ out:
 	return err;
 }
 
-static int sctp_sock_dump(struct sock *sk, void *p)
+static int sctp_sock_dump(struct sctp_transport *tsp, void *p)
 {
-	struct sctp_endpoint *ep = sctp_sk(sk)->ep;
+	struct sctp_endpoint *ep = tsp->asoc->ep;
 	struct sctp_comm_param *commp = p;
+	struct sock *sk = ep->base.sk;
 	struct sk_buff *skb = commp->skb;
 	struct netlink_callback *cb = commp->cb;
 	const struct inet_diag_req_v2 *r = commp->r;
@@ -306,9 +303,7 @@ static int sctp_sock_dump(struct sock *sk, void *p)
 					sk_user_ns(NETLINK_CB(cb->skb).sk),
 					NETLINK_CB(cb->skb).portid,
 					cb->nlh->nlmsg_seq,
-					NLM_F_MULTI, cb->nlh,
-					commp->net_admin) < 0) {
-			cb->args[3] = 1;
+					NLM_F_MULTI, cb->nlh) < 0) {
 			err = 1;
 			goto release;
 		}
@@ -317,8 +312,7 @@ static int sctp_sock_dump(struct sock *sk, void *p)
 		if (inet_sctp_diag_fill(sk, assoc, skb, r,
 					sk_user_ns(NETLINK_CB(cb->skb).sk),
 					NETLINK_CB(cb->skb).portid,
-					cb->nlh->nlmsg_seq, 0, cb->nlh,
-					commp->net_admin) < 0) {
+					cb->nlh->nlmsg_seq, 0, cb->nlh) < 0) {
 			err = 1;
 			goto release;
 		}
@@ -326,40 +320,30 @@ next:
 		cb->args[4]++;
 	}
 	cb->args[1] = 0;
-	cb->args[2]++;
 	cb->args[3] = 0;
 	cb->args[4] = 0;
 release:
 	release_sock(sk);
-	sock_put(sk);
 	return err;
 }
 
-static int sctp_get_sock(struct sctp_transport *tsp, void *p)
+static int sctp_sock_filter(struct sctp_transport *tsp, void *p)
 {
 	struct sctp_endpoint *ep = tsp->asoc->ep;
 	struct sctp_comm_param *commp = p;
 	struct sock *sk = ep->base.sk;
-	struct netlink_callback *cb = commp->cb;
 	const struct inet_diag_req_v2 *r = commp->r;
 	struct sctp_association *assoc =
 		list_entry(ep->asocs.next, struct sctp_association, asocs);
 
 	/* find the ep only once through the transports by this condition */
 	if (tsp->asoc != assoc)
-		goto out;
+		return 0;
 
 	if (r->sdiag_family != AF_UNSPEC && sk->sk_family != r->sdiag_family)
-		goto out;
-
-	sock_hold(sk);
-	cb->args[5] = (long)sk;
+		return 0;
 
 	return 1;
-
-out:
-	cb->args[2]++;
-	return 0;
 }
 
 static int sctp_ep_dump(struct sctp_endpoint *ep, void *p)
@@ -398,7 +382,7 @@ static int sctp_ep_dump(struct sctp_endpoint *ep, void *p)
 				sk_user_ns(NETLINK_CB(cb->skb).sk),
 				NETLINK_CB(cb->skb).portid,
 				cb->nlh->nlmsg_seq, NLM_F_MULTI,
-				cb->nlh, commp->net_admin) < 0) {
+				cb->nlh) < 0) {
 		err = 2;
 		goto out;
 	}
@@ -435,7 +419,6 @@ static int sctp_diag_dump_one(struct sk_buff *in_skb,
 		.skb = in_skb,
 		.r = req,
 		.nlh = nlh,
-		.net_admin = netlink_net_capable(in_skb, CAP_NET_ADMIN),
 	};
 
 	if (req->sdiag_family == AF_INET) {
@@ -471,8 +454,8 @@ static void sctp_diag_dump(struct sk_buff *skb, struct netlink_callback *cb,
 		.skb = skb,
 		.cb = cb,
 		.r = r,
-		.net_admin = netlink_net_capable(cb->skb, CAP_NET_ADMIN),
 	};
+	int pos = cb->args[2];
 
 	/* eps hashtable dumps
 	 * args:
@@ -502,12 +485,9 @@ skip:
 	if (!(idiag_states & ~(TCPF_LISTEN | TCPF_CLOSE)))
 		goto done;
 
-next:
-	cb->args[5] = 0;
-	sctp_for_each_transport(sctp_get_sock, net, cb->args[2], &commp);
-
-	if (cb->args[5] && !sctp_sock_dump((struct sock *)cb->args[5], &commp))
-		goto next;
+	sctp_for_each_transport(sctp_sock_filter, sctp_sock_dump,
+				net, &pos, &commp);
+	cb->args[2] = pos;
 
 done:
 	cb->args[1] = cb->args[4];

@@ -25,10 +25,12 @@
 
 #include <linux/list.h>
 #include <linux/kvm_host.h>
-#include <linux/moduleparam.h>
+#include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/stat.h>
+#include <linux/dmar.h>
 #include <linux/iommu.h>
+#include <linux/intel-iommu.h>
 #include "assigned-dev.h"
 
 static bool allow_unsafe_assigned_interrupts;
@@ -137,7 +139,7 @@ int kvm_iommu_map_pages(struct kvm *kvm, struct kvm_memory_slot *slot)
 
 		gfn += page_size >> PAGE_SHIFT;
 
-		cond_resched();
+
 	}
 
 	return 0;
@@ -252,7 +254,7 @@ int kvm_iommu_map_guest(struct kvm *kvm)
 	    !iommu_capable(&pci_bus_type, IOMMU_CAP_INTR_REMAP)) {
 		printk(KERN_WARNING "%s: No interrupt remapping support,"
 		       " disallowing device assignment."
-		       " Re-enable with \"allow_unsafe_assigned_interrupts=1\""
+		       " Re-enble with \"allow_unsafe_assigned_interrupts=1\""
 		       " module option.\n", __func__);
 		iommu_domain_free(kvm->arch.iommu_domain);
 		kvm->arch.iommu_domain = NULL;
@@ -307,8 +309,6 @@ static void kvm_iommu_put_pages(struct kvm *kvm,
 		kvm_unpin_pages(kvm, pfn, unmap_pages);
 
 		gfn += unmap_pages;
-
-		cond_resched();
 	}
 }
 

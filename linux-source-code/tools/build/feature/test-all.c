@@ -33,6 +33,10 @@
 # include "test-libelf-mmap.c"
 #undef main
 
+#define main main_test_get_current_dir_name
+# include "test-get_current_dir_name.c"
+#undef main
+
 #define main main_test_glibc
 # include "test-glibc.c"
 #undef main
@@ -59,6 +63,10 @@
 
 #define main main_test_libunwind
 # include "test-libunwind.c"
+#undef main
+
+#define main main_test_libunwind_debug_frame
+# include "test-libunwind-debug-frame.c"
 #undef main
 
 #define main main_test_libaudit
@@ -117,6 +125,14 @@
 # include "test-pthread-attr-setaffinity-np.c"
 #undef main
 
+#define main main_test_pthread_barrier
+# include "test-pthread-barrier.c"
+#undef main
+
+#define main main_test_sched_getcpu
+# include "test-sched_getcpu.c"
+#undef main
+
 # if 0
 /*
  * Disable libbabeltrace check for test-all, because the requested
@@ -137,16 +153,16 @@
 # include "test-get_cpuid.c"
 #undef main
 
-#define main main_test_bpf
-# include "test-bpf.c"
-#undef main
-
 #define main main_test_libcrypto
 # include "test-libcrypto.c"
 #undef main
 
 #define main main_test_sdt
 # include "test-sdt.c"
+#undef main
+
+#define main main_test_setns
+# include "test-setns.c"
 #undef main
 
 int main(int argc, char *argv[])
@@ -157,6 +173,7 @@ int main(int argc, char *argv[])
 	main_test_hello();
 	main_test_libelf();
 	main_test_libelf_mmap();
+	main_test_get_current_dir_name();
 	main_test_glibc();
 	main_test_dwarf();
 	main_test_dwarf_getlocations();
@@ -178,11 +195,13 @@ int main(int argc, char *argv[])
 	main_test_sync_compare_and_swap(argc, argv);
 	main_test_zlib();
 	main_test_pthread_attr_setaffinity_np();
+	main_test_pthread_barrier();
 	main_test_lzma();
 	main_test_get_cpuid();
-	main_test_bpf();
 	main_test_libcrypto();
+	main_test_sched_getcpu();
 	main_test_sdt();
+	main_test_setns();
 
 	return 0;
 }

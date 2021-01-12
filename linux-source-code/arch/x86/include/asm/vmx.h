@@ -60,6 +60,7 @@
  */
 #define SECONDARY_EXEC_VIRTUALIZE_APIC_ACCESSES 0x00000001
 #define SECONDARY_EXEC_ENABLE_EPT               0x00000002
+#define SECONDARY_EXEC_DESC			0x00000004
 #define SECONDARY_EXEC_RDTSCP			0x00000008
 #define SECONDARY_EXEC_VIRTUALIZE_X2APIC_MODE   0x00000010
 #define SECONDARY_EXEC_ENABLE_VPID              0x00000020
@@ -68,8 +69,10 @@
 #define SECONDARY_EXEC_APIC_REGISTER_VIRT       0x00000100
 #define SECONDARY_EXEC_VIRTUAL_INTR_DELIVERY    0x00000200
 #define SECONDARY_EXEC_PAUSE_LOOP_EXITING	0x00000400
+#define SECONDARY_EXEC_RDRAND			0x00000800
 #define SECONDARY_EXEC_ENABLE_INVPCID		0x00001000
 #define SECONDARY_EXEC_SHADOW_VMCS              0x00004000
+#define SECONDARY_EXEC_RDSEED			0x00010000
 #define SECONDARY_EXEC_ENABLE_PML               0x00020000
 #define SECONDARY_EXEC_XSAVES			0x00100000
 #define SECONDARY_EXEC_TSC_SCALING              0x02000000
@@ -109,6 +112,7 @@
 #define VMX_MISC_PREEMPTION_TIMER_RATE_MASK	0x0000001f
 #define VMX_MISC_SAVE_EFER_LMA			0x00000020
 #define VMX_MISC_ACTIVITY_HLT			0x00000040
+#define VMX_MISC_ZERO_LEN_INS			0x40000000
 
 /* VMCS Encodings */
 enum vmcs_field {
@@ -165,8 +169,6 @@ enum vmcs_field {
 	EOI_EXIT_BITMAP3_HIGH           = 0x00002023,
 	VMREAD_BITMAP                   = 0x00002026,
 	VMWRITE_BITMAP                  = 0x00002028,
-	XSS_EXIT_BITMAP                 = 0x0000202C,
-	XSS_EXIT_BITMAP_HIGH            = 0x0000202D,
 	TSC_MULTIPLIER                  = 0x00002032,
 	TSC_MULTIPLIER_HIGH             = 0x00002033,
 	GUEST_PHYSICAL_ADDRESS          = 0x00002400,
@@ -306,11 +308,13 @@ enum vmcs_field {
 #define VECTORING_INFO_VALID_MASK       	INTR_INFO_VALID_MASK
 
 #define INTR_TYPE_EXT_INTR              (0 << 8) /* external interrupt */
+#define INTR_TYPE_RESERVED              (1 << 8) /* reserved */
 #define INTR_TYPE_NMI_INTR		(2 << 8) /* NMI */
 #define INTR_TYPE_HARD_EXCEPTION	(3 << 8) /* processor exception */
 #define INTR_TYPE_SOFT_INTR             (4 << 8) /* software interrupt */
 #define INTR_TYPE_PRIV_SW_EXCEPTION	(5 << 8) /* ICE breakpoint - undocumented */
 #define INTR_TYPE_SOFT_EXCEPTION	(6 << 8) /* software exception */
+#define INTR_TYPE_OTHER_EVENT           (7 << 8) /* other event */
 
 /* GUEST_INTERRUPTIBILITY_INFO flags. */
 #define GUEST_INTR_STATE_STI		0x00000001
@@ -436,8 +440,16 @@ enum vmcs_field {
 #define VMX_EPT_WRITABLE_MASK			0x2ull
 #define VMX_EPT_EXECUTABLE_MASK			0x4ull
 #define VMX_EPT_IPAT_BIT    			(1ull << 6)
-#define VMX_EPT_ACCESS_BIT				(1ull << 8)
-#define VMX_EPT_DIRTY_BIT				(1ull << 9)
+#define VMX_EPT_ACCESS_BIT			(1ull << 8)
+#define VMX_EPT_DIRTY_BIT			(1ull << 9)
+#define VMX_EPT_RWX_MASK                        (VMX_EPT_READABLE_MASK |       \
+						 VMX_EPT_WRITABLE_MASK |       \
+						 VMX_EPT_EXECUTABLE_MASK)
+#define VMX_EPT_MT_MASK				(7ull << VMX_EPT_MT_EPTE_SHIFT)
+
+/* The mask to use to trigger an EPT Misconfiguration in order to track MMIO */
+#define VMX_EPT_MISCONFIG_WX_VALUE		(VMX_EPT_WRITABLE_MASK |       \
+						 VMX_EPT_EXECUTABLE_MASK)
 
 #define VMX_EPT_IDENTITY_PAGETABLE_ADDR		0xfffbc000ul
 
@@ -467,6 +479,24 @@ struct vmx_msr_entry {
 #define ENTRY_FAIL_PDPTE		2
 #define ENTRY_FAIL_NMI			3
 #define ENTRY_FAIL_VMCS_LINK_PTR	4
+
+/*
+ * Exit Qualifications for EPT Violations
+ */
+#define EPT_VIOLATION_ACC_READ_BIT	0
+#define EPT_VIOLATION_ACC_WRITE_BIT	1
+#define EPT_VIOLATION_ACC_INSTR_BIT	2
+#define EPT_VIOLATION_READABLE_BIT	3
+#define EPT_VIOLATION_WRITABLE_BIT	4
+#define EPT_VIOLATION_EXECUTABLE_BIT	5
+#define EPT_VIOLATION_GVA_TRANSLATED_BIT 8
+#define EPT_VIOLATION_ACC_READ		(1 << EPT_VIOLATION_ACC_READ_BIT)
+#define EPT_VIOLATION_ACC_WRITE		(1 << EPT_VIOLATION_ACC_WRITE_BIT)
+#define EPT_VIOLATION_ACC_INSTR		(1 << EPT_VIOLATION_ACC_INSTR_BIT)
+#define EPT_VIOLATION_READABLE		(1 << EPT_VIOLATION_READABLE_BIT)
+#define EPT_VIOLATION_WRITABLE		(1 << EPT_VIOLATION_WRITABLE_BIT)
+#define EPT_VIOLATION_EXECUTABLE	(1 << EPT_VIOLATION_EXECUTABLE_BIT)
+#define EPT_VIOLATION_GVA_TRANSLATED	(1 << EPT_VIOLATION_GVA_TRANSLATED_BIT)
 
 /*
  * VM-instruction error numbers

@@ -406,7 +406,6 @@ static void tce_iommu_release(void *iommu_data)
 {
 	struct tce_container *container = iommu_data;
 	struct tce_iommu_group *tcegrp;
-	struct tce_iommu_prereg *tcemem, *tmtmp;
 	long i;
 
 	while (tce_groups_attached(container)) {
@@ -429,8 +428,13 @@ static void tce_iommu_release(void *iommu_data)
 		tce_iommu_free_table(container, tbl);
 	}
 
-	list_for_each_entry_safe(tcemem, tmtmp, &container->prereg_list, next)
-		WARN_ON(tce_iommu_prereg_free(container, tcemem));
+	while (!list_empty(&container->prereg_list)) {
+		struct tce_iommu_prereg *tcemem;
+
+		tcemem = list_first_entry(&container->prereg_list,
+				struct tce_iommu_prereg, next);
+		WARN_ON_ONCE(tce_iommu_prereg_free(container, tcemem));
+	}
 
 	tce_iommu_disable(container);
 	if (container->mm)
@@ -1292,10 +1296,6 @@ static int tce_iommu_attach_group(void *iommu_data,
 	/* pr_debug("tce_vfio: Attaching group #%u to iommu %p\n",
 			iommu_group_id(iommu_group), iommu_group); */
 	table_group = iommu_group_get_iommudata(iommu_group);
-	if (!table_group) {
-		ret = -ENODEV;
-		goto unlock_exit;
-	}
 
 	if (tce_groups_attached(container) && (!table_group->ops ||
 			!table_group->ops->take_ownership ||
@@ -1315,8 +1315,7 @@ static int tce_iommu_attach_group(void *iommu_data,
 			goto unlock_exit;
 		}
 		table_group_tmp = iommu_group_get_iommudata(tcegrp->grp);
-		if (table_group_tmp->ops->create_table !=
-				table_group->ops->create_table) {
+		if (table_group_tmp->ops != table_group->ops) {
 			pr_warn("tce_vfio: Group %d is incompatible with group %d\n",
 					iommu_group_id(iommu_group),
 					iommu_group_id(tcegrp->grp));
@@ -1333,16 +1332,8 @@ static int tce_iommu_attach_group(void *iommu_data,
 
 	if (!table_group->ops || !table_group->ops->take_ownership ||
 			!table_group->ops->release_ownership) {
-		if (container->v2) {
-			ret = -EPERM;
-			goto unlock_exit;
-		}
 		ret = tce_iommu_take_ownership(container, table_group);
 	} else {
-		if (!container->v2) {
-			ret = -EPERM;
-			goto unlock_exit;
-		}
 		ret = tce_iommu_take_ownership_ddw(container, table_group);
 		if (!tce_groups_attached(container) && !container->tables[0])
 			container->def_window_pending = true;

@@ -50,7 +50,6 @@
 #include <linux/stringify.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
-#include <linux/nospec.h>
 #include <asm/uaccess.h>
 
 #include "common.h"
@@ -1490,7 +1489,7 @@ static struct net_device_stats *cxgb_get_stats(struct net_device *dev)
 {
 	struct port_info *pi = netdev_priv(dev);
 	struct adapter *adapter = pi->adapter;
-	struct net_device_stats *ns = &pi->netstats;
+	struct net_device_stats *ns = &dev->stats;
 	const struct mac_stats *pstats;
 
 	spin_lock(&adapter->stats_lock);
@@ -1541,7 +1540,7 @@ static void set_msglevel(struct net_device *dev, u32 val)
 	adapter->msg_enable = val;
 }
 
-static const char stats_strings[][ETH_GSTRING_LEN] = {
+static char stats_strings[][ETH_GSTRING_LEN] = {
 	"TxOctetsOK         ",
 	"TxFramesOK         ",
 	"TxMulticastFramesOK",
@@ -1802,27 +1801,31 @@ static int set_phys_id(struct net_device *dev,
 	return 0;
 }
 
-static int get_settings(struct net_device *dev, struct ethtool_cmd *cmd)
+static int get_link_ksettings(struct net_device *dev,
+			      struct ethtool_link_ksettings *cmd)
 {
 	struct port_info *p = netdev_priv(dev);
+	u32 supported;
 
-	cmd->supported = p->link_config.supported;
-	cmd->advertising = p->link_config.advertising;
+	ethtool_convert_legacy_u32_to_link_mode(cmd->link_modes.supported,
+						p->link_config.supported);
+	ethtool_convert_legacy_u32_to_link_mode(cmd->link_modes.advertising,
+						p->link_config.advertising);
 
 	if (netif_carrier_ok(dev)) {
-		ethtool_cmd_speed_set(cmd, p->link_config.speed);
-		cmd->duplex = p->link_config.duplex;
+		cmd->base.speed = p->link_config.speed;
+		cmd->base.duplex = p->link_config.duplex;
 	} else {
-		ethtool_cmd_speed_set(cmd, SPEED_UNKNOWN);
-		cmd->duplex = DUPLEX_UNKNOWN;
+		cmd->base.speed = SPEED_UNKNOWN;
+		cmd->base.duplex = DUPLEX_UNKNOWN;
 	}
 
-	cmd->port = (cmd->supported & SUPPORTED_TP) ? PORT_TP : PORT_FIBRE;
-	cmd->phy_address = p->phy.mdio.prtad;
-	cmd->transceiver = XCVR_EXTERNAL;
-	cmd->autoneg = p->link_config.autoneg;
-	cmd->maxtxpkt = 0;
-	cmd->maxrxpkt = 0;
+	ethtool_convert_link_mode_to_legacy_u32(&supported,
+						cmd->link_modes.supported);
+
+	cmd->base.port = (supported & SUPPORTED_TP) ? PORT_TP : PORT_FIBRE;
+	cmd->base.phy_address = p->phy.mdio.prtad;
+	cmd->base.autoneg = p->link_config.autoneg;
 	return 0;
 }
 
@@ -1861,44 +1864,49 @@ static int speed_duplex_to_caps(int speed, int duplex)
 		      ADVERTISED_1000baseT_Half | ADVERTISED_1000baseT_Full | \
 		      ADVERTISED_10000baseT_Full)
 
-static int set_settings(struct net_device *dev, struct ethtool_cmd *cmd)
+static int set_link_ksettings(struct net_device *dev,
+			      const struct ethtool_link_ksettings *cmd)
 {
 	struct port_info *p = netdev_priv(dev);
 	struct link_config *lc = &p->link_config;
+	u32 advertising;
+
+	ethtool_convert_link_mode_to_legacy_u32(&advertising,
+						cmd->link_modes.advertising);
 
 	if (!(lc->supported & SUPPORTED_Autoneg)) {
 		/*
 		 * PHY offers a single speed/duplex.  See if that's what's
 		 * being requested.
 		 */
-		if (cmd->autoneg == AUTONEG_DISABLE) {
-			u32 speed = ethtool_cmd_speed(cmd);
-			int cap = speed_duplex_to_caps(speed, cmd->duplex);
+		if (cmd->base.autoneg == AUTONEG_DISABLE) {
+			u32 speed = cmd->base.speed;
+			int cap = speed_duplex_to_caps(speed, cmd->base.duplex);
 			if (lc->supported & cap)
 				return 0;
 		}
 		return -EINVAL;
 	}
 
-	if (cmd->autoneg == AUTONEG_DISABLE) {
-		u32 speed = ethtool_cmd_speed(cmd);
-		int cap = speed_duplex_to_caps(speed, cmd->duplex);
+	if (cmd->base.autoneg == AUTONEG_DISABLE) {
+		u32 speed = cmd->base.speed;
+		int cap = speed_duplex_to_caps(speed, cmd->base.duplex);
 
 		if (!(lc->supported & cap) || (speed == SPEED_1000))
 			return -EINVAL;
 		lc->requested_speed = speed;
-		lc->requested_duplex = cmd->duplex;
+		lc->requested_duplex = cmd->base.duplex;
 		lc->advertising = 0;
 	} else {
-		cmd->advertising &= ADVERTISED_MASK;
-		cmd->advertising &= lc->supported;
-		if (!cmd->advertising)
+		advertising &= ADVERTISED_MASK;
+		advertising &= lc->supported;
+		if (!advertising)
 			return -EINVAL;
 		lc->requested_speed = SPEED_INVALID;
 		lc->requested_duplex = DUPLEX_INVALID;
-		lc->advertising = cmd->advertising | ADVERTISED_Autoneg;
+		lc->advertising = advertising | ADVERTISED_Autoneg;
 	}
-	lc->autoneg = cmd->autoneg;
+	lc->autoneg = cmd->base.autoneg;
 	if (netif_running(dev))
 		t3_link_start(&p->phy, &p->mac, lc);
 	return 0;
@@ -2098,8 +2106,6 @@ static void get_wol(struct net_device *dev, struct ethtool_wolinfo *wol)
 }
 
 static const struct ethtool_ops cxgb_ethtool_ops = {
-	.get_settings = get_settings,
-	.set_settings = set_settings,
 	.get_drvinfo = get_drvinfo,
 	.get_msglevel = get_msglevel,
 	.set_msglevel = set_msglevel,
@@ -2121,6 +2127,8 @@ static const struct ethtool_ops cxgb_ethtool_ops = {
 	.get_regs_len = get_regs_len,
 	.get_regs = get_regs,
 	.get_wol = get_wol,
+	.get_link_ksettings = get_link_ksettings,
+	.set_link_ksettings = set_link_ksettings,
 };
 
 static int in_range(int val, int lo, int hi)
@@ -2150,8 +2158,6 @@ static int cxgb_extension_ioctl(struct net_device *dev, void __user *useraddr)
 			return -EPERM;
 		if (copy_from_user(&t, useraddr, sizeof(t)))
 			return -EFAULT;
-		if (t.cmd != CHELSIO_SET_QSET_PARAMS)
-			return -EINVAL;
 		if (t.qset_idx >= SGE_QSETS)
 			return -EINVAL;
 		if (!in_range(t.intr_lat, 0, M_NEWTIMER) ||
@@ -2251,9 +2257,6 @@ static int cxgb_extension_ioctl(struct net_device *dev, void __user *useraddr)
 		if (copy_from_user(&t, useraddr, sizeof(t)))
 			return -EFAULT;
 
-		if (t.cmd != CHELSIO_GET_QSET_PARAMS)
-			return -EINVAL;
-
 		/* Display qsets for all ports when offload enabled */
 		if (test_bit(OFFLOAD_DEVMAP_BIT, &adapter->open_device_map)) {
 			q1 = 0;
@@ -2265,7 +2268,6 @@ static int cxgb_extension_ioctl(struct net_device *dev, void __user *useraddr)
 
 		if (t.qset_idx >= nqsets)
 			return -EINVAL;
-		t.qset_idx = array_index_nospec(t.qset_idx, nqsets);
 
 		q = &adapter->params.sge.qset[q1 + t.qset_idx];
 		t.rspq_size = q->rspq_size;
@@ -2299,8 +2301,6 @@ static int cxgb_extension_ioctl(struct net_device *dev, void __user *useraddr)
 			return -EBUSY;
 		if (copy_from_user(&edata, useraddr, sizeof(edata)))
 			return -EFAULT;
-		if (edata.cmd != CHELSIO_SET_QSET_NUM)
-			return -EINVAL;
 		if (edata.val < 1 ||
 			(edata.val > 1 && !(adapter->flags & USING_MSIX)))
 			return -EINVAL;
@@ -2341,8 +2341,6 @@ static int cxgb_extension_ioctl(struct net_device *dev, void __user *useraddr)
 			return -EPERM;
 		if (copy_from_user(&t, useraddr, sizeof(t)))
 			return -EFAULT;
-		if (t.cmd != CHELSIO_LOAD_FW)
-			return -EINVAL;
 		/* Check t.len sanity ? */
 		fw_data = memdup_user(useraddr + sizeof(t), t.len);
 		if (IS_ERR(fw_data))
@@ -2366,8 +2364,6 @@ static int cxgb_extension_ioctl(struct net_device *dev, void __user *useraddr)
 			return -EBUSY;
 		if (copy_from_user(&m, useraddr, sizeof(m)))
 			return -EFAULT;
-		if (m.cmd != CHELSIO_SETMTUTAB)
-			return -EINVAL;
 		if (m.nmtus != NMTUS)
 			return -EINVAL;
 		if (m.mtus[0] < 81)	/* accommodate SACK */
@@ -2409,8 +2405,6 @@ static int cxgb_extension_ioctl(struct net_device *dev, void __user *useraddr)
 			return -EBUSY;
 		if (copy_from_user(&m, useraddr, sizeof(m)))
 			return -EFAULT;
-		if (m.cmd != CHELSIO_SET_PM)
-			return -EINVAL;
 		if (!is_power_of_2(m.rx_pg_sz) ||
 			!is_power_of_2(m.tx_pg_sz))
 			return -EINVAL;	/* not power of 2 */
@@ -2440,14 +2434,10 @@ static int cxgb_extension_ioctl(struct net_device *dev, void __user *useraddr)
 
 		if (!is_offload(adapter))
 			return -EOPNOTSUPP;
-		if (!capable(CAP_NET_ADMIN))
-			return -EPERM;
 		if (!(adapter->flags & FULL_INIT_DONE))
 			return -EIO;	/* need the memory controllers */
 		if (copy_from_user(&t, useraddr, sizeof(t)))
 			return -EFAULT;
-		if (t.cmd != CHELSIO_GET_MEM)
-			return -EINVAL;
 		if ((t.addr & 7) || (t.len & 7))
 			return -EINVAL;
 		if (t.mem_id == MEM_CM)
@@ -2500,8 +2490,6 @@ static int cxgb_extension_ioctl(struct net_device *dev, void __user *useraddr)
 			return -EAGAIN;
 		if (copy_from_user(&t, useraddr, sizeof(t)))
 			return -EFAULT;
-		if (t.cmd != CHELSIO_SET_TRACE_FILTER)
-			return -EINVAL;
 
 		tp = (const struct trace_params *)&t.sip;
 		if (t.config_tx)
@@ -3112,22 +3100,30 @@ static int cxgb_enable_msix(struct adapter *adap)
 {
 	struct msix_entry entries[SGE_QSETS + 1];
 	int vectors;
-	int i;
+	int i, err;
 
 	vectors = ARRAY_SIZE(entries);
 	for (i = 0; i < vectors; ++i)
 		entries[i].entry = i;
 
-	vectors = pci_enable_msix_range(adap->pdev, entries,
-					adap->params.nports + 1, vectors);
-	if (vectors < 0)
-		return vectors;
+	while ((err = pci_enable_msix(adap->pdev, entries, vectors)) > 0)
+		vectors = err;
 
-	for (i = 0; i < vectors; ++i)
-		adap->msix_info[i].vec = entries[i].vector;
-	adap->msix_nvectors = vectors;
+	if (err < 0)
+		pci_disable_msix(adap->pdev);
 
-	return 0;
+	if (!err && vectors < (adap->params.nports + 1)) {
+		pci_disable_msix(adap->pdev);
+		err = -1;
+	}
+
+	if (!err) {
+		for (i = 0; i < vectors; ++i)
+			adap->msix_info[i].vec = entries[i].vector;
+		adap->msix_nvectors = vectors;
+	}
+
+	return err;
 }
 
 static void print_port_info(struct adapter *adap, const struct adapter_info *ai)
@@ -3176,7 +3172,7 @@ static const struct net_device_ops cxgb_netdev_ops = {
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_set_rx_mode	= cxgb_set_rxmode,
 	.ndo_do_ioctl		= cxgb_ioctl,
-	.ndo_change_mtu		= cxgb_change_mtu,
+	.ndo_change_mtu_rh74	= cxgb_change_mtu,
 	.ndo_set_mac_address	= cxgb_set_mac_addr,
 	.ndo_fix_features	= cxgb_fix_features,
 	.ndo_set_features	= cxgb_set_features,
@@ -3265,7 +3261,7 @@ static int init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	if (!adapter->regs) {
 		dev_err(&pdev->dev, "cannot map device registers\n");
 		err = -ENOMEM;
-		goto out_free_adapter_nofail;
+		goto out_free_adapter;
 	}
 
 	adapter->pdev = pdev;
@@ -3315,7 +3311,8 @@ static int init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 			netdev->features |= NETIF_F_HIGHDMA;
 
 		netdev->netdev_ops = &cxgb_netdev_ops;
-		netdev->ethtool_ops = &cxgb_ethtool_ops;
+		SET_ETHTOOL_OPS(netdev, &cxgb_ethtool_ops);
+		netdev->dev_port = pi->port_id;
 	}
 
 	pci_set_drvdata(pdev, adapter);
@@ -3382,9 +3379,6 @@ out_free_dev:
 	for (i = ai->nports0 + ai->nports1 - 1; i >= 0; --i)
 		if (adapter->port[i])
 			free_netdev(adapter->port[i]);
-
-out_free_adapter_nofail:
-	kfree_skb(adapter->nofail_skb);
 
 out_free_adapter:
 	kfree(adapter);

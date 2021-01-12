@@ -438,11 +438,6 @@ static void reg_r(struct gspca_dev *gspca_dev,
 	if (ret < 0) {
 		pr_err("reg_r %04x failed %d\n", value, ret);
 		gspca_dev->usb_err = ret;
-		/*
-		 * Make sure the buffer is zeroed to avoid uninitialized
-		 * values.
-		 */
-		memset(gspca_dev->usb_buf, 0, USB_BUF_SZ);
 	}
 }
 
@@ -911,8 +906,7 @@ static int sd_isoc_init(struct gspca_dev *gspca_dev)
 
 	gspca_dev->cam.bulk_nurbs = 1;	/* there must be one URB only */
 	sd->do_ctrl = 0;
-	gspca_dev->cam.bulk_size = gspca_dev->pixfmt.width *
-			gspca_dev->pixfmt.height + 8;
+	gspca_dev->cam.bulk_size = gspca_dev->width * gspca_dev->height + 8;
 	return 0;
 }
 

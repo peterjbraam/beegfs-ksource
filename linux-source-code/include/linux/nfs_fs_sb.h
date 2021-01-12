@@ -102,7 +102,6 @@ struct nfs_client {
 #define NFS_SP4_MACH_CRED_STATEID  4	/* TEST_STATEID and FREE_STATEID */
 #define NFS_SP4_MACH_CRED_WRITE    5	/* WRITE */
 #define NFS_SP4_MACH_CRED_COMMIT   6	/* COMMIT */
-#define NFS_SP4_MACH_CRED_PNFS_CLEANUP  7 /* LAYOUTRETURN */
 #if IS_ENABLED(CONFIG_NFS_V4_1)
 	wait_queue_head_t	cl_lock_waitq;
 #endif /* CONFIG_NFS_V4_1 */
@@ -222,6 +221,7 @@ struct nfs_server {
 	u32			mountd_version;
 	unsigned short		mountd_port;
 	unsigned short		mountd_protocol;
+	struct rpc_wait_queue	uoc_rpcwaitq;
 };
 
 /* Server capabilities */

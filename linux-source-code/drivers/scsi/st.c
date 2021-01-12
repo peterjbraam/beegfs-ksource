@@ -200,9 +200,9 @@ static int st_probe(struct device *);
 static int st_remove(struct device *);
 
 static struct scsi_driver st_template = {
+	.owner			= THIS_MODULE,
 	.gendrv = {
 		.name		= "st",
-		.owner		= THIS_MODULE,
 		.probe		= st_probe,
 		.remove		= st_remove,
 		.groups		= st_drv_groups,
@@ -827,10 +827,7 @@ static int st_flush_write_buffer(struct scsi_tape * STp)
 static int flush_buffer(struct scsi_tape *STp, int seek_next)
 {
 	int backspace, result;
-	struct st_buffer *STbuffer;
 	struct st_partstat *STps;
-
-	STbuffer = STp->buffer;
 
 	/*
 	 * If there was a bus reset, block further access
@@ -3527,10 +3524,11 @@ static long st_ioctl(struct file *file, unsigned int cmd_in, unsigned long arg)
 	 * may try and take the device offline, in which case all further
 	 * access to the device is prohibited.
 	 */
-	retval = scsi_ioctl_block_when_processing_errors(STp->device, cmd_in,
-			file->f_flags & O_NDELAY);
-	if (retval)
+	retval = scsi_nonblockable_ioctl(STp->device, cmd_in, p,
+					file->f_flags & O_NDELAY);
+	if (!scsi_block_when_processing_errors(STp->device) || retval != -ENODEV)
 		goto out;
+	retval = 0;
 
 	cmd_type = _IOC_TYPE(cmd_in);
 	cmd_nr = _IOC_NR(cmd_in);
@@ -4298,11 +4296,11 @@ static int st_probe(struct device *dev)
 	kref_init(&tpnt->kref);
 	tpnt->disk = disk;
 	disk->private_data = &tpnt->driver;
-	disk->queue = SDp->request_queue;
 	/* SCSI tape doesn't register this gendisk via add_disk().  Manually
 	 * take queue reference that release_disk() expects. */
-	if (!blk_get_queue(disk->queue))
+	if (!blk_get_queue(SDp->request_queue))
 		goto out_put_disk;
+	disk->queue = SDp->request_queue;
 	tpnt->driver = &st_template;
 
 	tpnt->device = SDp;
@@ -4556,41 +4554,11 @@ static ssize_t version_show(struct device_driver *ddd, char *buf)
 }
 static DRIVER_ATTR_RO(version);
 
-#if DEBUG
-static ssize_t debug_flag_store(struct device_driver *ddp,
-	const char *buf, size_t count)
-{
-/* We only care what the first byte of the data is the rest is unused.
- * if it's a '1' we turn on debug and if it's a '0' we disable it. All
- * other values have -EINVAL returned if they are passed in.
- */
-	if (count > 0) {
-		if (buf[0] == '0') {
-			debugging = NO_DEBUG;
-			return count;
-		} else if (buf[0] == '1') {
-			debugging = 1;
-			return count;
-		}
-	}
-	return -EINVAL;
-}
-
-static ssize_t debug_flag_show(struct device_driver *ddp, char *buf)
-{
-	return scnprintf(buf, PAGE_SIZE, "%d\n", debugging);
-}
-static DRIVER_ATTR_RW(debug_flag);
-#endif
-
 static struct attribute *st_drv_attrs[] = {
 	&driver_attr_try_direct_io.attr,
 	&driver_attr_fixed_buffer_size.attr,
 	&driver_attr_max_sg_segs.attr,
 	&driver_attr_version.attr,
-#if DEBUG
-	&driver_attr_debug_flag.attr,
-#endif
 	NULL,
 };
 ATTRIBUTE_GROUPS(st_drv);
@@ -4711,7 +4679,7 @@ static ssize_t read_byte_cnt_show(struct device *dev,
 static DEVICE_ATTR_RO(read_byte_cnt);
 
 /**
- * read_us_show - return read us - overall time spent waiting on reads in ns.
+ * read_ns_show - return read ns - overall time spent waiting on reads in ns.
  * @dev: struct device
  * @attr: attribute structure
  * @buf: buffer to return formatted data in
@@ -4920,10 +4888,13 @@ static int sgl_map_user_pages(struct st_buffer *STbp,
         /* Try to fault in all of the necessary pages */
         /* rw==READ means read from drive, write into memory area */
 	res = get_user_pages_unlocked(
+		current,
+		current->mm,
 		uaddr,
 		nr_pages,
-		pages,
-		rw == READ ? FOLL_WRITE : 0); /* don't force */
+		rw == READ,
+		0, /* don't force */
+		pages);
 
 	/* Errors and no page mapped should return here */
 	if (res < nr_pages)
@@ -4943,7 +4914,7 @@ static int sgl_map_user_pages(struct st_buffer *STbp,
  out_unmap:
 	if (res > 0) {
 		for (j=0; j < res; j++)
-			put_page(pages[j]);
+			page_cache_release(pages[j]);
 		res = 0;
 	}
 	kfree(pages);
@@ -4965,7 +4936,7 @@ static int sgl_unmap_user_pages(struct st_buffer *STbp,
 		/* FIXME: cache flush missing for rw==READ
 		 * FIXME: call the correct reference counting function
 		 */
-		put_page(page);
+		page_cache_release(page);
 	}
 	kfree(STbp->mapped_pages);
 	STbp->mapped_pages = NULL;

@@ -21,6 +21,7 @@
 #include <linux/bitops.h>
 #include <linux/list.h>
 #include <linux/spinlock.h>
+#include <asm/mm_track.h>
 
 struct mm_struct;
 struct vm_area_struct;
@@ -31,6 +32,9 @@ extern pgd_t initial_page_table[1024];
 static inline void pgtable_cache_init(void) { }
 static inline void check_pgt_cache(void) { }
 void paging_init(void);
+
+extern void set_pmd_pfn(unsigned long, unsigned long, pgprot_t);
+
 
 /*
  * Define this if things work differently on an i386 and an i486:

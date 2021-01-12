@@ -33,10 +33,6 @@ MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Harald Welte <laforge@netfilter.org>");
 MODULE_ALIAS_NET_PF_PROTO(PF_NETLINK, NETLINK_NETFILTER);
 
-#define nfnl_dereference_protected(id) \
-	rcu_dereference_protected(table[(id)].subsys, \
-				  lockdep_nfnl_is_held((id)))
-
 static char __initdata nfversion[] = "0.30";
 
 static struct {
@@ -69,7 +65,7 @@ void nfnl_unlock(__u8 subsys_id)
 EXPORT_SYMBOL_GPL(nfnl_unlock);
 
 #ifdef CONFIG_PROVE_LOCKING
-bool lockdep_nfnl_is_held(u8 subsys_id)
+int lockdep_nfnl_is_held(u8 subsys_id)
 {
 	return lockdep_is_held(&table[subsys_id].mutex);
 }
@@ -199,18 +195,19 @@ replay:
 		}
 
 		if (nc->call_rcu) {
-			err = nc->call_rcu(net, net->nfnl, skb, nlh,
+			err = nc->call_rcu(net->nfnl, skb, nlh,
 					   (const struct nlattr **)cda);
 			rcu_read_unlock();
 		} else {
 			rcu_read_unlock();
 			nfnl_lock(subsys_id);
-			if (nfnl_dereference_protected(subsys_id) != ss ||
+			if (rcu_dereference_protected(table[subsys_id].subsys,
+				lockdep_is_held(&table[subsys_id].mutex)) != ss ||
 			    nfnetlink_find_client(type, ss) != nc)
 				err = -EAGAIN;
 			else if (nc->call)
-				err = nc->call(net, net->nfnl, skb, nlh,
-					       (const struct nlattr **)cda);
+				err = nc->call(net->nfnl, skb, nlh,
+						   (const struct nlattr **)cda);
 			else
 				err = -EINVAL;
 			nfnl_unlock(subsys_id);
@@ -275,7 +272,7 @@ enum {
 static void nfnetlink_rcv_batch(struct sk_buff *skb, struct nlmsghdr *nlh,
 				u_int16_t subsys_id)
 {
-	struct sk_buff *oskb = skb;
+	struct sk_buff *nskb, *oskb = skb;
 	struct net *net = sock_net(skb->sk);
 	const struct nfnetlink_subsystem *ss;
 	const struct nfnl_callback *nc;
@@ -288,28 +285,38 @@ static void nfnetlink_rcv_batch(struct sk_buff *skb, struct nlmsghdr *nlh,
 replay:
 	status = 0;
 
-	skb = netlink_skb_clone(oskb, GFP_KERNEL);
-	if (!skb)
+	nskb = netlink_skb_clone(oskb, GFP_KERNEL);
+	if (!nskb)
 		return netlink_ack(oskb, nlh, -ENOMEM);
 
+	skb = nskb;
+
 	nfnl_lock(subsys_id);
-	ss = nfnl_dereference_protected(subsys_id);
+	ss = rcu_dereference_protected(table[subsys_id].subsys,
+				       lockdep_is_held(&table[subsys_id].mutex));
 	if (!ss) {
 #ifdef CONFIG_MODULES
 		nfnl_unlock(subsys_id);
 		request_module("nfnetlink-subsys-%d", subsys_id);
 		nfnl_lock(subsys_id);
-		ss = nfnl_dereference_protected(subsys_id);
+		ss = rcu_dereference_protected(table[subsys_id].subsys,
+					       lockdep_is_held(&table[subsys_id].mutex));
 		if (!ss)
 #endif
 		{
 			nfnl_unlock(subsys_id);
 			netlink_ack(oskb, nlh, -EOPNOTSUPP);
-			return kfree_skb(skb);
+			return kfree_skb(nskb);
 		}
 	}
 
 	if (!ss->commit || !ss->abort) {
+		nfnl_unlock(subsys_id);
+		netlink_ack(oskb, nlh, -EOPNOTSUPP);
+		return kfree_skb(skb);
+	}
+
+	if (!try_module_get(ss->owner)) {
 		nfnl_unlock(subsys_id);
 		netlink_ack(oskb, nlh, -EOPNOTSUPP);
 		return kfree_skb(skb);
@@ -321,12 +328,9 @@ replay:
 		nlh = nlmsg_hdr(skb);
 		err = 0;
 
-		if (nlh->nlmsg_len < NLMSG_HDRLEN ||
-		    skb->len < nlh->nlmsg_len ||
-		    nlmsg_len(nlh) < sizeof(struct nfgenmsg)) {
-			nfnl_err_reset(&err_list);
-			status |= NFNL_BATCH_FAILURE;
-			goto done;
+		if (nlh->nlmsg_len < NLMSG_HDRLEN) {
+			err = -EINVAL;
+			goto ack;
 		}
 
 		/* Only requests are handled by the kernel */
@@ -386,7 +390,7 @@ replay:
 			 */
 			if (err == -EAGAIN) {
 				status |= NFNL_BATCH_REPLAY;
-				goto next;
+				goto done;
 			}
 		}
 ack:
@@ -412,7 +416,7 @@ ack:
 			if (err)
 				status |= NFNL_BATCH_FAILURE;
 		}
-next:
+
 		msglen = NLMSG_ALIGN(nlh->nlmsg_len);
 		if (msglen > skb->len)
 			msglen = skb->len;
@@ -420,20 +424,27 @@ next:
 	}
 done:
 	if (status & NFNL_BATCH_REPLAY) {
-		ss->abort(net, oskb);
+		const struct nfnetlink_subsystem *ss2;
+
+		ss2 = rcu_dereference_protected(table[subsys_id].subsys,
+			lockdep_is_held(&table[subsys_id].mutex));
+		if (ss2 == ss)
+			ss->abort(oskb);
 		nfnl_err_reset(&err_list);
 		nfnl_unlock(subsys_id);
 		kfree_skb(skb);
+		module_put(ss->owner);
 		goto replay;
 	} else if (status == NFNL_BATCH_DONE) {
-		ss->commit(net, oskb);
+		ss->commit(oskb);
 	} else {
-		ss->abort(net, oskb);
+		ss->abort(oskb);
 	}
 
 	nfnl_err_deliver(&err_list, oskb);
 	nfnl_unlock(subsys_id);
-	kfree_skb(skb);
+	kfree_skb(nskb);
+	module_put(ss->owner);
 }
 
 static void nfnetlink_rcv(struct sk_buff *skb)
@@ -476,7 +487,7 @@ static void nfnetlink_rcv(struct sk_buff *skb)
 }
 
 #ifdef CONFIG_MODULES
-static int nfnetlink_bind(struct net *net, int group)
+static int nfnetlink_bind(int group)
 {
 	const struct nfnetlink_subsystem *ss;
 	int type;
@@ -490,7 +501,7 @@ static int nfnetlink_bind(struct net *net, int group)
 	ss = nfnetlink_get_subsys(type << 8);
 	rcu_read_unlock();
 	if (!ss)
-		request_module_nowait("nfnetlink-subsys-%d", type);
+		request_module("nfnetlink-subsys-%d", type);
 	return 0;
 }
 #endif

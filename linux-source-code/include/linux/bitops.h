@@ -1,10 +1,29 @@
 #ifndef _LINUX_BITOPS_H
 #define _LINUX_BITOPS_H
 #include <asm/types.h>
-#include <linux/bits.h>
 
-#define BITS_PER_TYPE(type) (sizeof(type) * BITS_PER_BYTE)
-#define BITS_TO_LONGS(nr)	DIV_ROUND_UP(nr, BITS_PER_TYPE(long))
+#ifdef	__KERNEL__
+#define BIT(nr)			(1UL << (nr))
+#define BIT_ULL(nr)		(1ULL << (nr))
+#define BIT_MASK(nr)		(1UL << ((nr) % BITS_PER_LONG))
+#define BIT_WORD(nr)		((nr) / BITS_PER_LONG)
+#define BIT_ULL_MASK(nr)	(1ULL << ((nr) % BITS_PER_LONG_LONG))
+#define BIT_ULL_WORD(nr)	((nr) / BITS_PER_LONG_LONG)
+#define BITS_PER_BYTE		8
+#define BITS_PER_TYPE(type)	(sizeof(type) * BITS_PER_BYTE)
+#define BITS_TO_LONGS(nr)	DIV_ROUND_UP(nr, BITS_PER_BYTE * sizeof(long))
+#endif
+
+/*
+ * Create a contiguous bitmask starting at bit position @l and ending at
+ * position @h. For example
+ * GENMASK_ULL(39, 21) gives us the 64bit vector 0x000000ffffe00000.
+ */
+#define GENMASK(h, l) \
+	(((~0UL) << (l)) & (~0UL >> (BITS_PER_LONG - 1 - (h))))
+
+#define GENMASK_ULL(h, l) \
+	(((~0ULL) << (l)) & (~0ULL >> (BITS_PER_LONG_LONG - 1 - (h))))
 
 extern unsigned int __sw_hweight8(unsigned int w);
 extern unsigned int __sw_hweight16(unsigned int w);
@@ -16,6 +35,26 @@ extern unsigned long __sw_hweight64(__u64 w);
  * scope
  */
 #include <asm/bitops.h>
+
+/*
+ * Provide __deprecated wrappers for the new interface, avoid flag day changes.
+ * We need the ugly external functions to break header recursion hell.
+ */
+#ifndef smp_mb__before_clear_bit
+static inline void __deprecated smp_mb__before_clear_bit(void)
+{
+	extern void __smp_mb__before_atomic(void);
+	__smp_mb__before_atomic();
+}
+#endif
+
+#ifndef smp_mb__after_clear_bit
+static inline void __deprecated smp_mb__after_clear_bit(void)
+{
+	extern void __smp_mb__after_atomic(void);
+	__smp_mb__after_atomic();
+}
+#endif
 
 #define for_each_set_bit(bit, addr, size) \
 	for ((bit) = find_first_bit((addr), (size));		\
@@ -39,7 +78,7 @@ extern unsigned long __sw_hweight64(__u64 w);
 	     (bit) < (size);					\
 	     (bit) = find_next_zero_bit((addr), (size), (bit) + 1))
 
-static inline int get_bitmask_order(unsigned int count)
+static __inline__ int get_bitmask_order(unsigned int count)
 {
 	int order;
 
@@ -47,9 +86,19 @@ static inline int get_bitmask_order(unsigned int count)
 	return order;	/* We could be slightly more clever with -1 here... */
 }
 
-static __always_inline unsigned long hweight_long(unsigned long w)
+static __inline__ int get_count_order(unsigned int count)
 {
-	return sizeof(w) == 4 ? hweight32(w) : hweight64((__u64)w);
+	int order;
+
+	order = fls(count) - 1;
+	if (count & (count - 1))
+		order++;
+	return order;
+}
+
+static inline unsigned long hweight_long(unsigned long w)
+{
+	return sizeof(w) == 4 ? hweight32(w) : hweight64(w);
 }
 
 /**
@@ -59,7 +108,7 @@ static __always_inline unsigned long hweight_long(unsigned long w)
  */
 static inline __u64 rol64(__u64 word, unsigned int shift)
 {
-	return (word << (shift & 63)) | (word >> ((-shift) & 63));
+	return (word << shift) | (word >> (64 - shift));
 }
 
 /**
@@ -69,7 +118,7 @@ static inline __u64 rol64(__u64 word, unsigned int shift)
  */
 static inline __u64 ror64(__u64 word, unsigned int shift)
 {
-	return (word >> (shift & 63)) | (word << ((-shift) & 63));
+	return (word >> shift) | (word << (64 - shift));
 }
 
 /**
@@ -79,7 +128,7 @@ static inline __u64 ror64(__u64 word, unsigned int shift)
  */
 static inline __u32 rol32(__u32 word, unsigned int shift)
 {
-	return (word << (shift & 31)) | (word >> ((-shift) & 31));
+	return (word << shift) | (word >> (32 - shift));
 }
 
 /**
@@ -89,7 +138,7 @@ static inline __u32 rol32(__u32 word, unsigned int shift)
  */
 static inline __u32 ror32(__u32 word, unsigned int shift)
 {
-	return (word >> (shift & 31)) | (word << ((-shift) & 31));
+	return (word >> shift) | (word << (32 - shift));
 }
 
 /**
@@ -99,7 +148,7 @@ static inline __u32 ror32(__u32 word, unsigned int shift)
  */
 static inline __u16 rol16(__u16 word, unsigned int shift)
 {
-	return (word << (shift & 15)) | (word >> ((-shift) & 15));
+	return (word << shift) | (word >> (16 - shift));
 }
 
 /**
@@ -109,7 +158,7 @@ static inline __u16 rol16(__u16 word, unsigned int shift)
  */
 static inline __u16 ror16(__u16 word, unsigned int shift)
 {
-	return (word >> (shift & 15)) | (word << ((-shift) & 15));
+	return (word >> shift) | (word << (16 - shift));
 }
 
 /**
@@ -119,7 +168,7 @@ static inline __u16 ror16(__u16 word, unsigned int shift)
  */
 static inline __u8 rol8(__u8 word, unsigned int shift)
 {
-	return (word << (shift & 7)) | (word >> ((-shift) & 7));
+	return (word << shift) | (word >> (8 - shift));
 }
 
 /**
@@ -129,15 +178,13 @@ static inline __u8 rol8(__u8 word, unsigned int shift)
  */
 static inline __u8 ror8(__u8 word, unsigned int shift)
 {
-	return (word >> (shift & 7)) | (word << ((-shift) & 7));
+	return (word >> shift) | (word << (8 - shift));
 }
 
 /**
  * sign_extend32 - sign extend a 32-bit value using specified bit as sign-bit
  * @value: value to sign extend
  * @index: 0 based bit index (0<=index<32) to sign bit
- *
- * This is safe to use for 16- and 8-bit types as well.
  */
 static inline __s32 sign_extend32(__u32 value, int index)
 {
@@ -163,32 +210,6 @@ static inline unsigned fls_long(unsigned long l)
 	return fls64(l);
 }
 
-static inline int get_count_order(unsigned int count)
-{
-	int order;
-
-	order = fls(count) - 1;
-	if (count & (count - 1))
-		order++;
-	return order;
-}
-
-/**
- * get_count_order_long - get order after rounding @l up to power of 2
- * @l: parameter
- *
- * it is same as get_count_order() but with long type parameter
- */
-static inline int get_count_order_long(unsigned long l)
-{
-	if (l == 0UL)
-		return -1;
-	else if (l & (l - 1UL))
-		return (int)fls_long(l);
-	else
-		return (int)fls_long(l) - 1;
-}
-
 /**
  * __ffs64 - find first set bit in a 64 bit word
  * @word: The 64 bit word
@@ -206,6 +227,32 @@ static inline unsigned long __ffs64(u64 word)
 #error BITS_PER_LONG not 32 or 64
 #endif
 	return __ffs((unsigned long)word);
+}
+
+/*
+ * clear_bit32 - Clear a bit in memory for u32 array
+ * @nr: Bit to clear
+ * @addr: u32 * address of bitmap
+ *
+ * Same as clear_bit, but avoids needing casts for u32 arrays.
+ */
+
+static __always_inline void clear_bit32(long nr, volatile u32 *addr)
+{
+	clear_bit(nr, (volatile unsigned long *)addr);
+}
+
+/*
+ * set_bit32 - Set a bit in memory for u32 array
+ * @nr: Bit to clear
+ * @addr: u32 * address of bitmap
+ *
+ * Same as set_bit, but avoids needing casts for u32 arrays.
+ */
+
+static __always_inline void set_bit32(long nr, volatile u32 *addr)
+{
+	set_bit(nr, (volatile unsigned long *)addr);
 }
 
 #ifdef __KERNEL__
@@ -245,9 +292,9 @@ static inline unsigned long __ffs64(u64 word)
 /**
  * find_last_bit - find the last set bit in a memory region
  * @addr: The address to start the search at
- * @size: The number of bits to search
+ * @size: The maximum size to search
  *
- * Returns the bit number of the last set bit, or size.
+ * Returns the bit number of the first set bit, or size.
  */
 extern unsigned long find_last_bit(const unsigned long *addr,
 				   unsigned long size);

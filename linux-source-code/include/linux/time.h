@@ -39,20 +39,9 @@ static inline int timeval_compare(const struct timeval *lhs, const struct timeva
 	return lhs->tv_usec - rhs->tv_usec;
 }
 
-extern time64_t mktime64(const unsigned int year, const unsigned int mon,
-			const unsigned int day, const unsigned int hour,
-			const unsigned int min, const unsigned int sec);
-
-/**
- * Deprecated. Use mktime64().
- */
-static inline unsigned long mktime(const unsigned int year,
-			const unsigned int mon, const unsigned int day,
-			const unsigned int hour, const unsigned int min,
-			const unsigned int sec)
-{
-	return mktime64(year, mon, day, hour, min, sec);
-}
+extern unsigned long mktime(const unsigned int year, const unsigned int mon,
+			    const unsigned int day, const unsigned int hour,
+			    const unsigned int min, const unsigned int sec);
 
 extern void set_normalized_timespec(struct timespec *ts, time_t sec, s64 nsec);
 
@@ -110,46 +99,7 @@ static inline bool timespec_valid_strict(const struct timespec *ts)
 	return true;
 }
 
-static inline bool timeval_valid(const struct timeval *tv)
-{
-	/* Dates before 1970 are bogus */
-	if (tv->tv_sec < 0)
-		return false;
-
-	/* Can't have more microseconds then a second */
-	if (tv->tv_usec < 0 || tv->tv_usec >= USEC_PER_SEC)
-		return false;
-
-	return true;
-}
-
 extern struct timespec timespec_trunc(struct timespec t, unsigned gran);
-
-/*
- * Validates if a timespec/timeval used to inject a time offset is valid.
- * Offsets can be postive or negative. The value of the timeval/timespec
- * is the sum of its fields, but *NOTE*: the field tv_usec/tv_nsec must
- * always be non-negative.
- */
-static inline bool timeval_inject_offset_valid(const struct timeval *tv)
-{
-	/* We don't check the tv_sec as it can be positive or negative */
-
-	/* Can't have more microseconds then a second */
-	if (tv->tv_usec < 0 || tv->tv_usec >= USEC_PER_SEC)
-		return false;
-	return true;
-}
-
-static inline bool timespec_inject_offset_valid(const struct timespec *ts)
-{
-	/* We don't check the tv_sec as it can be positive or negative */
-
-	/* Can't have more nanoseconds then a second */
-	if (ts->tv_nsec < 0 || ts->tv_nsec >= NSEC_PER_SEC)
-		return false;
-	return true;
-}
 
 #define CURRENT_TIME		(current_kernel_time())
 #define CURRENT_TIME_SEC	((struct timespec) { get_seconds(), 0 })
@@ -167,14 +117,18 @@ static inline bool timespec_inject_offset_valid(const struct timespec *ts)
 extern u32 (*arch_gettimeoffset)(void);
 #endif
 
+extern long do_utimes(int dfd, const char __user *filename, struct timespec *times, int flags);
 struct itimerval;
 extern int do_setitimer(int which, struct itimerval *value,
 			struct itimerval *ovalue);
+extern unsigned int alarm_setitimer(unsigned int seconds);
 extern int do_getitimer(int which, struct itimerval *value);
 
-extern unsigned int alarm_setitimer(unsigned int seconds);
+extern int __getnstimeofday64(struct timespec64 *tv);
+extern void getnstimeofday64(struct timespec64 *tv);
 
-extern long do_utimes(int dfd, const char __user *filename, struct timespec *times, int flags);
+extern void getnstime_raw_and_real(struct timespec *ts_raw,
+		struct timespec *ts_real);
 
 struct tms;
 extern void do_sys_times(struct tms *);
@@ -205,20 +159,7 @@ struct tm {
 	int tm_yday;
 };
 
-void time64_to_tm(time64_t totalsecs, int offset, struct tm *result);
-
-/**
- * time_to_tm - converts the calendar time to local broken-down time
- *
- * @totalsecs	the number of seconds elapsed since 00:00:00 on January 1, 1970,
- *		Coordinated Universal Time (UTC).
- * @offset	offset seconds adding to totalsecs.
- * @result	pointer to struct tm variable to receive broken-down time
- */
-static inline void time_to_tm(time_t totalsecs, int offset, struct tm *result)
-{
-	time64_to_tm(totalsecs, offset, result);
-}
+void time_to_tm(time_t totalsecs, int offset, struct tm *result);
 
 /**
  * timespec_to_ns - Convert timespec to nanoseconds
@@ -276,15 +217,18 @@ static __always_inline void timespec_add_ns(struct timespec *a, u64 ns)
 }
 
 /**
- * time_between32 - check if a 32-bit timestamp is within a given time range
- * @t:	the time which may be within [l,h]
- * @l:	the lower bound of the range
- * @h:	the higher bound of the range
+ * time_after32 - compare two 32-bit relative times
+ * @a:	the time which may be after @b
+ * @b:	the time which may be before @a
  *
- * time_before32(t, l, h) returns true if @l <= @t <= @h. All operands are
- * treated as 32-bit integers.
+ * time_after32(a, b) returns true if the time @a is after time @b.
+ * time_before32(b, a) returns true if the time @b is before time @a.
  *
- * Equivalent to !(time_before32(@t, @l) || time_after32(@t, @h)).
+ * Similar to time_after(), compare two 32-bit timestamps for relative
+ * times.  This is useful for comparing 32-bit seconds values that can't
+ * be converted to 64-bit values (e.g. due to disk format or wire protocol
+ * issues) when it is known that the times are less than 68 years apart.
  */
-#define time_between32(t, l, h) ((u32)(h) - (u32)(l) >= (u32)(t) - (u32)(l))
+#define time_after32(a, b)	((s32)((u32)(b) - (u32)(a)) < 0)
+#define time_before32(b, a)	time_after32(a, b)
 #endif

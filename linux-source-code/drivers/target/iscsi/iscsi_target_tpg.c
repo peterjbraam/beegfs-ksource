@@ -90,10 +90,10 @@ int iscsit_load_discovery_tpg(void)
 	 */
 	param = iscsi_find_param_from_key(AUTHMETHOD, tpg->param_list);
 	if (!param)
-		goto out;
+		goto free_pl_out;
 
 	if (iscsi_update_param_value(param, "CHAP,None") < 0)
-		goto out;
+		goto free_pl_out;
 
 	tpg->tpg_attrib.authentication = 0;
 
@@ -105,6 +105,8 @@ int iscsit_load_discovery_tpg(void)
 	pr_debug("CORE[0] - Allocated Discovery TPG\n");
 
 	return 0;
+free_pl_out:
+	iscsi_release_param_list(tpg->param_list);
 out:
 	if (tpg->sid == 1)
 		core_tpg_deregister(&tpg->tpg_se_tpg);
@@ -119,6 +121,7 @@ void iscsit_release_discovery_tpg(void)
 	if (!tpg)
 		return;
 
+	iscsi_release_param_list(tpg->param_list);
 	core_tpg_deregister(&tpg->tpg_se_tpg);
 
 	kfree(tpg);
@@ -312,11 +315,9 @@ int iscsit_tpg_enable_portal_group(struct iscsi_portal_group *tpg)
 	struct iscsi_tiqn *tiqn = tpg->tpg_tiqn;
 	int ret;
 
-	spin_lock(&tpg->tpg_state_lock);
 	if (tpg->tpg_state == TPG_STATE_ACTIVE) {
 		pr_err("iSCSI target portal group: %hu is already"
 			" active, ignoring request.\n", tpg->tpgt);
-		spin_unlock(&tpg->tpg_state_lock);
 		return -EINVAL;
 	}
 	/*
@@ -325,10 +326,8 @@ int iscsit_tpg_enable_portal_group(struct iscsi_portal_group *tpg)
 	 * is enforced (as per default), and remove the NONE option.
 	 */
 	param = iscsi_find_param_from_key(AUTHMETHOD, tpg->param_list);
-	if (!param) {
-		spin_unlock(&tpg->tpg_state_lock);
+	if (!param)
 		return -EINVAL;
-	}
 
 	if (tpg->tpg_attrib.authentication) {
 		if (!strcmp(param->value, NONE)) {
@@ -342,6 +341,7 @@ int iscsit_tpg_enable_portal_group(struct iscsi_portal_group *tpg)
 			goto err;
 	}
 
+	spin_lock(&tpg->tpg_state_lock);
 	tpg->tpg_state = TPG_STATE_ACTIVE;
 	spin_unlock(&tpg->tpg_state_lock);
 
@@ -354,7 +354,6 @@ int iscsit_tpg_enable_portal_group(struct iscsi_portal_group *tpg)
 	return 0;
 
 err:
-	spin_unlock(&tpg->tpg_state_lock);
 	return ret;
 }
 
@@ -637,7 +636,8 @@ int iscsit_ta_authentication(struct iscsi_portal_group *tpg, u32 authentication)
 		none = strstr(buf1, NONE);
 		if (none)
 			goto out;
-		strlcat(buf1, "," NONE, sizeof(buf1));
+		strncat(buf1, ",", strlen(","));
+		strncat(buf1, NONE, strlen(NONE));
 		if (iscsi_update_param_value(param, buf1) < 0)
 			return -EINVAL;
 	}
@@ -864,24 +864,6 @@ int iscsit_ta_t10_pi(
 	return 0;
 }
 
-int iscsit_ta_fabric_prot_type(
-	struct iscsi_portal_group *tpg,
-	u32 prot_type)
-{
-	struct iscsi_tpg_attrib *a = &tpg->tpg_attrib;
-
-	if ((prot_type != 0) && (prot_type != 1) && (prot_type != 3)) {
-		pr_err("Illegal value for fabric_prot_type: %u\n", prot_type);
-		return -EINVAL;
-	}
-
-	a->fabric_prot_type = prot_type;
-	pr_debug("iSCSI_TPG[%hu] - T10 Fabric Protection Type: %u\n",
-		 tpg->tpgt, prot_type);
-
-	return 0;
-}
-
 int iscsit_ta_tpg_enabled_sendtargets(
 	struct iscsi_portal_group *tpg,
 	u32 flag)
@@ -896,6 +878,24 @@ int iscsit_ta_tpg_enabled_sendtargets(
 	a->tpg_enabled_sendtargets = flag;
 	pr_debug("iSCSI_TPG[%hu] - TPG enabled bit required for SendTargets:"
 		" %s\n", tpg->tpgt, (a->tpg_enabled_sendtargets) ? "ON" : "OFF");
+
+	return 0;
+}
+
+int iscsit_ta_fabric_prot_type(
+	struct iscsi_portal_group *tpg,
+	u32 prot_type)
+{
+	struct iscsi_tpg_attrib *a = &tpg->tpg_attrib;
+
+	if ((prot_type != 0) && (prot_type != 1) && (prot_type != 3)) {
+		pr_err("Illegal value for fabric_prot_type: %u\n", prot_type);
+		return -EINVAL;
+	}
+
+	a->fabric_prot_type = prot_type;
+	pr_debug("iSCSI_TPG[%hu] - T10 Fabric Protection Type: %u\n",
+		 tpg->tpgt, prot_type);
 
 	return 0;
 }

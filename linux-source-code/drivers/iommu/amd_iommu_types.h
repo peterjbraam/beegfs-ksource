@@ -72,6 +72,12 @@
 #define MMIO_PPR_LOG_OFFSET	0x0038
 #define MMIO_GA_LOG_BASE_OFFSET	0x00e0
 #define MMIO_GA_LOG_TAIL_OFFSET	0x00e8
+#define MMIO_MSI_ADDR_LO_OFFSET	0x015C
+#define MMIO_MSI_ADDR_HI_OFFSET	0x0160
+#define MMIO_MSI_DATA_OFFSET	0x0164
+#define MMIO_INTCAPXT_EVT_OFFSET	0x0170
+#define MMIO_INTCAPXT_PPR_OFFSET	0x0178
+#define MMIO_INTCAPXT_GALOG_OFFSET	0x0180
 #define MMIO_CMD_HEAD_OFFSET	0x2000
 #define MMIO_CMD_TAIL_OFFSET	0x2008
 #define MMIO_EVT_HEAD_OFFSET	0x2010
@@ -159,6 +165,8 @@
 #define CONTROL_GAM_EN          0x19ULL
 #define CONTROL_GALOG_EN        0x1CULL
 #define CONTROL_GAINT_EN        0x1DULL
+#define CONTROL_XT_EN           0x32ULL
+#define CONTROL_INTCAPXT_EN     0x33ULL
 
 #define CTRL_INV_TO_MASK	(7 << CONTROL_INV_TIMEOUT)
 #define CTRL_INV_TO_NONE	0
@@ -250,6 +258,14 @@
 
 #define GA_GUEST_NR		0x1
 
+/* Bit value definition for dte irq remapping fields*/
+#define DTE_IRQ_PHYS_ADDR_MASK	(((1ULL << 45)-1) << 6)
+#define DTE_IRQ_REMAP_INTCTL_MASK	(0x3ULL << 60)
+#define DTE_IRQ_TABLE_LEN_MASK	(0xfULL << 1)
+#define DTE_IRQ_REMAP_INTCTL    (2ULL << 60)
+#define DTE_IRQ_TABLE_LEN       (8ULL << 1)
+#define DTE_IRQ_REMAP_ENABLE    1ULL
+
 #define PAGE_MODE_NONE    0x00
 #define PAGE_MODE_1_LEVEL 0x01
 #define PAGE_MODE_2_LEVEL 0x02
@@ -257,6 +273,7 @@
 #define PAGE_MODE_4_LEVEL 0x04
 #define PAGE_MODE_5_LEVEL 0x05
 #define PAGE_MODE_6_LEVEL 0x06
+#define PAGE_MODE_7_LEVEL 0x07
 
 #define PM_LEVEL_SHIFT(x)	(12 + ((x) * 9))
 #define PM_LEVEL_SIZE(x)	(((x) < 6) ? \
@@ -265,7 +282,7 @@
 #define PM_LEVEL_INDEX(x, a)	(((a) >> PM_LEVEL_SHIFT((x))) & 0x1ffULL)
 #define PM_LEVEL_ENC(x)		(((x) << 9) & 0xe00ULL)
 #define PM_LEVEL_PDE(x, a)	((a) | PM_LEVEL_ENC((x)) | \
-				 IOMMU_PTE_P | IOMMU_PTE_IR | IOMMU_PTE_IW)
+				 IOMMU_PTE_PR | IOMMU_PTE_IR | IOMMU_PTE_IW)
 #define PM_PTE_LEVEL(pte)	(((pte) >> 9) & 0x7ULL)
 
 #define PM_MAP_4k		0
@@ -314,22 +331,33 @@
 #define PTE_LEVEL_PAGE_SIZE(level)			\
 	(1ULL << (12 + (9 * (level))))
 
-#define IOMMU_PTE_P  (1ULL << 0)
-#define IOMMU_PTE_TV (1ULL << 1)
+/*
+ * Bit value definition for I/O PTE fields
+ */
+#define IOMMU_PTE_PR (1ULL << 0)
 #define IOMMU_PTE_U  (1ULL << 59)
 #define IOMMU_PTE_FC (1ULL << 60)
 #define IOMMU_PTE_IR (1ULL << 61)
 #define IOMMU_PTE_IW (1ULL << 62)
 
+/*
+ * Bit value definition for DTE fields
+ */
+#define DTE_FLAG_V  (1ULL << 0)
+#define DTE_FLAG_TV (1ULL << 1)
+#define DTE_FLAG_IR (1ULL << 61)
+#define DTE_FLAG_IW (1ULL << 62)
+
+#define DTE_FLAG_MASK	(0x3ffULL << 32)
 #define DTE_FLAG_IOTLB	(1ULL << 32)
 #define DTE_FLAG_GV	(1ULL << 55)
-#define DTE_FLAG_MASK	(0x3ffULL << 32)
 #define DTE_GLX_SHIFT	(56)
 #define DTE_GLX_MASK	(3)
+#define DEV_DOMID_MASK	0xffffULL
 
 #define DTE_GCR3_VAL_A(x)	(((x) >> 12) & 0x00007ULL)
 #define DTE_GCR3_VAL_B(x)	(((x) >> 15) & 0x0ffffULL)
-#define DTE_GCR3_VAL_C(x)	(((x) >> 31) & 0x1fffffULL)
+#define DTE_GCR3_VAL_C(x)	(((x) >> 31) & 0xfffffULL)
 
 #define DTE_GCR3_INDEX_A	0
 #define DTE_GCR3_INDEX_B	1
@@ -342,13 +370,15 @@
 #define GCR3_VALID		0x01ULL
 
 #define IOMMU_PAGE_MASK (((1ULL << 52) - 1) & ~0xfffULL)
-#define IOMMU_PTE_PRESENT(pte) ((pte) & IOMMU_PTE_P)
-#define IOMMU_PTE_PAGE(pte) (phys_to_virt((pte) & IOMMU_PAGE_MASK))
+#define IOMMU_PTE_PRESENT(pte) ((pte) & IOMMU_PTE_PR)
+#define IOMMU_PTE_PAGE(pte) (iommu_phys_to_virt((pte) & IOMMU_PAGE_MASK))
 #define IOMMU_PTE_MODE(pte) (((pte) >> 9) & 0x07)
 
 #define IOMMU_PROT_MASK 0x03
 #define IOMMU_PROT_IR 0x01
 #define IOMMU_PROT_IW 0x02
+
+#define IOMMU_UNITY_MAP_FLAG_EXCL_RANGE        (1 << 2)
 
 /* IOMMU capabilities */
 #define IOMMU_CAP_IOTLB   24
@@ -356,9 +386,11 @@
 #define IOMMU_CAP_EFR     27
 
 /* IOMMU Feature Reporting Field (for IVHD type 10h */
+#define IOMMU_FEAT_XTSUP_SHIFT	0
 #define IOMMU_FEAT_GASUP_SHIFT	6
 
 /* IOMMU Extended Feature Register (EFR) */
+#define IOMMU_EFR_XTSUP_SHIFT	2
 #define IOMMU_EFR_GASUP_SHIFT	7
 
 #define MAX_DOMAIN_ID 65536
@@ -383,11 +415,7 @@ extern bool amd_iommu_np_cache;
 /* Only true if all IOMMUs support device IOTLBs */
 extern bool amd_iommu_iotlb_sup;
 
-/*
- * AMD IOMMU hardware only support 512 IRTEs despite
- * the architectural limitation of 2048 entries.
- */
-#define MAX_IRQS_PER_TABLE	512
+#define MAX_IRQS_PER_TABLE	256
 #define IRQ_TABLE_ALIGNMENT	128
 
 struct irq_remap_table {
@@ -419,7 +447,6 @@ extern struct kmem_cache *amd_iommu_irq_cache;
 #define APERTURE_RANGE_INDEX(a)	((a) >> APERTURE_RANGE_SHIFT)
 #define APERTURE_PAGE_INDEX(a)	(((a) >> 21) & 0x3fULL)
 
-
 /*
  * This struct is used to pass information about
  * incoming PPR faults around.
@@ -435,8 +462,9 @@ struct amd_iommu_fault {
 
 
 struct iommu_domain;
-struct irq_domain;
 struct amd_irte_ops;
+
+#define AMD_IOMMU_FLAG_TRANS_PRE_ENABLED      (1 << 0)
 
 /*
  * This structure contains generic data for  IOMMU protection domains
@@ -520,6 +548,8 @@ struct amd_iommu {
 
 	/* command buffer virtual address */
 	u8 *cmd_buf;
+	u32 cmd_buf_head;
+	u32 cmd_buf_tail;
 
 	/* event buffer virtual address */
 	u8 *evt_buf;
@@ -563,14 +593,13 @@ struct amd_iommu {
 	/* The maximum PC banks and counters/bank (PCSup=1) */
 	u8 max_banks;
 	u8 max_counters;
-#ifdef CONFIG_IRQ_REMAP
-	struct irq_domain *ir_domain;
-	struct irq_domain *msi_domain;
+
+	u32 flags;
+	volatile u64 __aligned(8) cmd_sem;
 
 	struct amd_irte_ops *irte_ops;
-#endif
-
-	volatile u64 __aligned(8) cmd_sem;
+	/* IRQ notifier for IntCapXT interrupt */
+	struct irq_affinity_notify intcapxt_notify;
 };
 
 #define ACPIHID_UID_LEN 256
@@ -591,6 +620,28 @@ struct devid_map {
 	u8 id;
 	u16 devid;
 	bool cmd_line;
+};
+
+/*
+ * This struct contains device specific data for the IOMMU
+ */
+struct iommu_dev_data {
+	struct list_head list;		  /* For domain->dev_list */
+	struct list_head dev_data_list;	  /* For global dev_data_list */
+	struct protection_domain *domain; /* Domain the device is bound to */
+	u16 devid;			  /* PCI Device ID */
+	u16 alias;			  /* Alias Device ID */
+	bool iommu_v2;			  /* Device can make use of IOMMUv2 */
+	bool passthrough;		  /* Device is identity mapped */
+	struct {
+		bool enabled;
+		int qdep;
+	} ats;				  /* ATS state */
+	bool pri_tlp;			  /* PASID TLB required for
+					     PPR completions */
+	u32 errata;			  /* Bitmap for errata to apply */
+	bool use_vapic;			  /* Enable device to use vapic mode */
+	bool defer_attach;
 };
 
 /* Map HPET and IOAPIC ids to the devid used by the IOMMU */
@@ -686,7 +737,7 @@ extern unsigned long *amd_iommu_pd_alloc_bitmap;
  * If true, the addresses will be flushed on unmap time, not when
  * they are reused
  */
-extern bool amd_iommu_unmap_flush;
+extern u32 amd_iommu_unmap_flush;
 
 /* Smallest max PASID supported by any IOMMU in the system */
 extern u32 amd_iommu_max_pasid;
@@ -759,6 +810,9 @@ union irte {
 	} fields;
 };
 
+#define APICID_TO_IRTE_DEST_LO(x)    (x & 0xffffff)
+#define APICID_TO_IRTE_DEST_HI(x)    ((x >> 24) & 0xff)
+
 union irte_ga_lo {
 	u64 val;
 
@@ -772,8 +826,8 @@ union irte_ga_lo {
 		    dm		: 1,
 		    /* ------ */
 		    guest_mode	: 1,
-		    destination	: 8,
-		    rsvd	: 48;
+		    destination	: 24,
+		    ga_tag	: 32;
 	} fields_remap;
 
 	/* For guest vAPIC */
@@ -786,8 +840,7 @@ union irte_ga_lo {
 		    is_run	: 1,
 		    /* ------ */
 		    guest_mode	: 1,
-		    destination	: 8,
-		    rsvd2	: 16,
+		    destination	: 24,
 		    ga_tag	: 32;
 	} fields_vapic;
 };
@@ -798,7 +851,8 @@ union irte_ga_hi {
 		u64 vector	: 8,
 		    rsvd_1	: 4,
 		    ga_root_ptr	: 40,
-		    rsvd_2	: 12;
+		    rsvd_2	: 4,
+		    destination : 8;
 	} fields;
 };
 
@@ -807,21 +861,15 @@ struct irte_ga {
 	union irte_ga_hi hi;
 };
 
-struct irq_2_irte {
-	u16 devid; /* Device ID for IRTE table */
-	u16 index; /* Index into IRTE table*/
-};
-
 struct amd_ir_data {
 	u32 cached_ga_tag;
-	struct irq_2_irte irq_2_irte;
-	struct msi_msg msi_entry;
-	void *entry;    /* Pointer to union irte or struct irte_ga */
+	void *entry;	/* Pointer to union irte or struct irte_ga */
 	void *ref;      /* Pointer to the actual irte */
+	u16 pi_devid;	/* Keep track posted-interrupt devid */
 };
 
 struct amd_irte_ops {
-	void (*prepare)(void *, u32, u32, u8, u32, int);
+	void (*prepare)(void *, int, u32, u32, u8, u32, int);
 	void (*activate)(void *, u16, u16);
 	void (*deactivate)(void *, u16, u16);
 	void (*set_affinity)(void *, u16, u16, u8, u32);

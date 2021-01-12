@@ -29,9 +29,7 @@
 #include "smberr.h"
 #include "nterr.h"
 #include "cifs_unicode.h"
-#ifdef CONFIG_CIFS_SMB2
 #include "smb2pdu.h"
-#endif
 
 extern mempool_t *cifs_sm_req_poolp;
 extern mempool_t *cifs_req_poolp;
@@ -99,11 +97,14 @@ sesInfoFree(struct cifs_ses *buf_to_free)
 	kfree(buf_to_free->serverOS);
 	kfree(buf_to_free->serverDomain);
 	kfree(buf_to_free->serverNOS);
-	kzfree(buf_to_free->password);
+	if (buf_to_free->password) {
+		memset(buf_to_free->password, 0, strlen(buf_to_free->password));
+		kfree(buf_to_free->password);
+	}
 	kfree(buf_to_free->user_name);
 	kfree(buf_to_free->domainName);
-	kzfree(buf_to_free->auth_key.response);
-	kzfree(buf_to_free);
+	kfree(buf_to_free->auth_key.response);
+	kfree(buf_to_free);
 }
 
 struct cifs_tcon *
@@ -134,7 +135,10 @@ tconInfoFree(struct cifs_tcon *buf_to_free)
 	}
 	atomic_dec(&tconInfoAllocCount);
 	kfree(buf_to_free->nativeFileSystem);
-	kzfree(buf_to_free->password);
+	if (buf_to_free->password) {
+		memset(buf_to_free->password, 0, strlen(buf_to_free->password));
+		kfree(buf_to_free->password);
+	}
 	kfree(buf_to_free);
 }
 
@@ -142,15 +146,12 @@ struct smb_hdr *
 cifs_buf_get(void)
 {
 	struct smb_hdr *ret_buf = NULL;
-	size_t buf_size = sizeof(struct smb_hdr);
-
-#ifdef CONFIG_CIFS_SMB2
 	/*
 	 * SMB2 header is bigger than CIFS one - no problems to clean some
 	 * more bytes for CIFS.
 	 */
-	buf_size = sizeof(struct smb2_hdr);
-#endif
+	size_t buf_size = sizeof(struct smb2_hdr);
+
 	/*
 	 * We could use negotiated size instead of max_msgsize -
 	 * but it may be more efficient to always alloc same size
@@ -161,13 +162,11 @@ cifs_buf_get(void)
 
 	/* clear the first few header bytes */
 	/* for most paths, more is cleared in header_assemble */
-	if (ret_buf) {
-		memset(ret_buf, 0, buf_size + 3);
-		atomic_inc(&bufAllocCount);
+	memset(ret_buf, 0, buf_size + 3);
+	atomic_inc(&bufAllocCount);
 #ifdef CONFIG_CIFS_STATS2
-		atomic_inc(&totBufAllocCount);
+	atomic_inc(&totBufAllocCount);
 #endif /* CONFIG_CIFS_STATS2 */
-	}
 
 	return ret_buf;
 }
@@ -195,15 +194,13 @@ cifs_small_buf_get(void)
    albeit slightly larger than necessary and maxbuffersize
    defaults to this and can not be bigger */
 	ret_buf = mempool_alloc(cifs_sm_req_poolp, GFP_NOFS);
-	if (ret_buf) {
 	/* No need to clear memory here, cleared in header assemble */
 	/*	memset(ret_buf, 0, sizeof(struct smb_hdr) + 27);*/
-		atomic_inc(&smBufAllocCount);
+	atomic_inc(&smBufAllocCount);
 #ifdef CONFIG_CIFS_STATS2
-		atomic_inc(&totSmBufAllocCount);
+	atomic_inc(&totSmBufAllocCount);
 #endif /* CONFIG_CIFS_STATS2 */
 
-	}
 	return ret_buf;
 }
 
@@ -406,17 +403,9 @@ is_valid_oplock_break(char *buffer, struct TCP_Server_Info *srv)
 			(struct smb_com_transaction_change_notify_rsp *)buf;
 		struct file_notify_information *pnotify;
 		__u32 data_offset = 0;
-		size_t len = srv->total_read - sizeof(pSMBr->hdr.smb_buf_length);
-
 		if (get_bcc(buf) > sizeof(struct file_notify_information)) {
 			data_offset = le32_to_cpu(pSMBr->DataOffset);
 
-			if (data_offset >
-			    len - sizeof(struct file_notify_information)) {
-				cifs_dbg(FYI, "invalid data_offset %u\n",
-					 data_offset);
-				return true;
-			}
 			pnotify = (struct file_notify_information *)
 				((char *)&pSMBr->hdr.Protocol + data_offset);
 			cifs_dbg(FYI, "dnotify on %s Action: 0x%x\n",
@@ -481,10 +470,21 @@ is_valid_oplock_break(char *buffer, struct TCP_Server_Info *srv)
 				set_bit(CIFS_INODE_PENDING_OPLOCK_BREAK,
 					&pCifsInode->flags);
 
-				netfile->oplock_epoch = 0;
-				netfile->oplock_level = pSMB->OplockLevel;
-				netfile->oplock_break_cancelled = false;
+				/*
+				 * Set flag if the server downgrades the oplock
+				 * to L2 else clear.
+				 */
+				if (pSMB->OplockLevel)
+					set_bit(
+					   CIFS_INODE_DOWNGRADE_OPLOCK_TO_L2,
+					   &pCifsInode->flags);
+				else
+					clear_bit(
+					   CIFS_INODE_DOWNGRADE_OPLOCK_TO_L2,
+					   &pCifsInode->flags);
+
 				cifs_queue_oplock_break(netfile);
+				netfile->oplock_break_cancelled = false;
 
 				spin_unlock(&tcon->open_file_lock);
 				spin_unlock(&cifs_tcp_ses_lock);
@@ -635,9 +635,7 @@ void
 cifs_add_pending_open_locked(struct cifs_fid *fid, struct tcon_link *tlink,
 			     struct cifs_pending_open *open)
 {
-#ifdef CONFIG_CIFS_SMB2
 	memcpy(open->lease_key, fid->lease_key, SMB2_LEASE_KEY_SIZE);
-#endif
 	open->oplock = CIFS_OPLOCK_NO_CHANGE;
 	open->tlink = tlink;
 	fid->pending_open = open;
@@ -651,4 +649,109 @@ cifs_add_pending_open(struct cifs_fid *fid, struct tcon_link *tlink,
 	spin_lock(&tlink_tcon(tlink)->open_file_lock);
 	cifs_add_pending_open_locked(fid, tlink, open);
 	spin_unlock(&tlink_tcon(open->tlink)->open_file_lock);
+}
+
+/* parses DFS refferal V3 structure
+ * caller is responsible for freeing target_nodes
+ * returns:
+ * - on success - 0
+ * - on failure - errno
+ */
+int
+parse_dfs_referrals(struct get_dfs_referral_rsp *rsp, u32 rsp_size,
+		    unsigned int *num_of_nodes,
+		    struct dfs_info3_param **target_nodes,
+		    const struct nls_table *nls_codepage, int remap,
+		    const char *searchName, bool is_unicode)
+{
+	int i, rc = 0;
+	char *data_end;
+	struct dfs_referral_level_3 *ref;
+
+	*num_of_nodes = le16_to_cpu(rsp->NumberOfReferrals);
+
+	if (*num_of_nodes < 1) {
+		cifs_dbg(VFS, "num_referrals: must be at least > 0, but we get num_referrals = %d\n",
+			 *num_of_nodes);
+		rc = -EINVAL;
+		goto parse_DFS_referrals_exit;
+	}
+
+	ref = (struct dfs_referral_level_3 *) &(rsp->referrals);
+	if (ref->VersionNumber != cpu_to_le16(3)) {
+		cifs_dbg(VFS, "Referrals of V%d version are not supported, should be V3\n",
+			 le16_to_cpu(ref->VersionNumber));
+		rc = -EINVAL;
+		goto parse_DFS_referrals_exit;
+	}
+
+	/* get the upper boundary of the resp buffer */
+	data_end = (char *)rsp + rsp_size;
+
+	cifs_dbg(FYI, "num_referrals: %d dfs flags: 0x%x ...\n",
+		 *num_of_nodes, le32_to_cpu(rsp->DFSFlags));
+
+	*target_nodes = kcalloc(*num_of_nodes, sizeof(struct dfs_info3_param),
+				GFP_KERNEL);
+	if (*target_nodes == NULL) {
+		rc = -ENOMEM;
+		goto parse_DFS_referrals_exit;
+	}
+
+	/* collect necessary data from referrals */
+	for (i = 0; i < *num_of_nodes; i++) {
+		char *temp;
+		int max_len;
+		struct dfs_info3_param *node = (*target_nodes)+i;
+
+		node->flags = le32_to_cpu(rsp->DFSFlags);
+		if (is_unicode) {
+			__le16 *tmp = kmalloc(strlen(searchName)*2 + 2,
+						GFP_KERNEL);
+			if (tmp == NULL) {
+				rc = -ENOMEM;
+				goto parse_DFS_referrals_exit;
+			}
+			cifsConvertToUTF16((__le16 *) tmp, searchName,
+					   PATH_MAX, nls_codepage, remap);
+			node->path_consumed = cifs_utf16_bytes(tmp,
+					le16_to_cpu(rsp->PathConsumed),
+					nls_codepage);
+			kfree(tmp);
+		} else
+			node->path_consumed = le16_to_cpu(rsp->PathConsumed);
+
+		node->server_type = le16_to_cpu(ref->ServerType);
+		node->ref_flag = le16_to_cpu(ref->ReferralEntryFlags);
+
+		/* copy DfsPath */
+		temp = (char *)ref + le16_to_cpu(ref->DfsPathOffset);
+		max_len = data_end - temp;
+		node->path_name = cifs_strndup_from_utf16(temp, max_len,
+						is_unicode, nls_codepage);
+		if (!node->path_name) {
+			rc = -ENOMEM;
+			goto parse_DFS_referrals_exit;
+		}
+
+		/* copy link target UNC */
+		temp = (char *)ref + le16_to_cpu(ref->NetworkAddressOffset);
+		max_len = data_end - temp;
+		node->node_name = cifs_strndup_from_utf16(temp, max_len,
+						is_unicode, nls_codepage);
+		if (!node->node_name) {
+			rc = -ENOMEM;
+			goto parse_DFS_referrals_exit;
+		}
+
+		ref++;
+	}
+
+parse_DFS_referrals_exit:
+	if (rc) {
+		free_dfs_info_array(*target_nodes, *num_of_nodes);
+		*target_nodes = NULL;
+		*num_of_nodes = 0;
+	}
+	return rc;
 }

@@ -1493,6 +1493,8 @@ static int ofdpa_port_ipv4_nh(struct ofdpa_port *ofdpa_port,
 	spin_lock_irqsave(&ofdpa->neigh_tbl_lock, lock_flags);
 
 	found = ofdpa_neigh_tbl_find(ofdpa, ip_addr);
+	if (found)
+		*index = found->index;
 
 	updating = found && adding;
 	removing = found && !adding;
@@ -1505,12 +1507,10 @@ static int ofdpa_port_ipv4_nh(struct ofdpa_port *ofdpa_port,
 		*index = entry->index;
 		resolved = false;
 	} else if (removing) {
-		*index = found->index;
 		ofdpa_neigh_del(trans, found);
 	} else if (updating) {
 		ofdpa_neigh_update(found, trans, NULL, false);
 		resolved = !is_zero_ether_addr(found->eth_dst);
-		*index = found->index;
 	} else {
 		err = -ENOENT;
 	}
@@ -1939,10 +1939,10 @@ static void ofdpa_port_fdb_learn_work(struct work_struct *work)
 
 	rtnl_lock();
 	if (learned && removing)
-		call_switchdev_notifiers(SWITCHDEV_FDB_DEL,
+		call_switchdev_notifiers(SWITCHDEV_FDB_DEL_TO_BRIDGE,
 					 lw->ofdpa_port->dev, &info.info);
 	else if (learned && !removing)
-		call_switchdev_notifiers(SWITCHDEV_FDB_ADD,
+		call_switchdev_notifiers(SWITCHDEV_FDB_ADD_TO_BRIDGE,
 					 lw->ofdpa_port->dev, &info.info);
 	rtnl_unlock();
 
@@ -2516,6 +2516,7 @@ static void ofdpa_fini(struct rocker *rocker)
 	int bkt;
 
 	del_timer_sync(&ofdpa->fdb_cleanup_timer);
+	flush_workqueue(rocker->rocker_owq);
 
 	spin_lock_irqsave(&ofdpa->flow_tbl_lock, flags);
 	hash_for_each_safe(ofdpa->flow_tbl, bkt, tmp, flow_entry, entry)

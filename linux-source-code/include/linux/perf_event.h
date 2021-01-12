@@ -15,6 +15,7 @@
 #define _LINUX_PERF_EVENT_H
 
 #include <uapi/linux/perf_event.h>
+#include <uapi/linux/bpf_perf_event.h>
 
 /*
  * Kernel-internal data types and definitions:
@@ -53,20 +54,16 @@ struct perf_guest_info_callbacks {
 #include <linux/sysfs.h>
 #include <linux/perf_regs.h>
 #include <linux/workqueue.h>
+#ifndef __GENKSYMS__
 #include <linux/cgroup.h>
+#endif
 #include <asm/local.h>
+
+#include <linux/rh_kabi.h>
 
 struct perf_callchain_entry {
 	__u64				nr;
-	__u64				ip[0]; /* /proc/sys/kernel/perf_event_max_stack */
-};
-
-struct perf_callchain_entry_ctx {
-	struct perf_callchain_entry *entry;
-	u32			    max_stack;
-	u32			    nr;
-	short			    contexts;
-	bool			    contexts_maxed;
+	__u64				ip[PERF_MAX_STACK_DEPTH];
 };
 
 typedef unsigned long (*perf_copy_f)(void *dst, const void *src,
@@ -83,8 +80,9 @@ struct perf_raw_frag {
 } __packed;
 
 struct perf_raw_record {
-	struct perf_raw_frag		frag;
-	u32				size;
+	u32					size;
+	RH_KABI_DEPRECATE(void *,		data)
+	RH_KABI_EXTEND(struct perf_raw_frag	frag)
 };
 
 /*
@@ -113,6 +111,8 @@ struct hw_perf_event_extra {
 	int		idx;	/* index in shared_regs->regs[] */
 };
 
+struct event_constraint;
+
 /**
  * struct hw_perf_event - performance event hardware details:
  */
@@ -136,23 +136,9 @@ struct hw_perf_event {
 			struct hrtimer	hrtimer;
 		};
 		struct { /* tracepoint */
+			RH_KABI_DEPRECATE(struct task_struct*, tp_target)
 			/* for tp_event->class */
 			struct list_head	tp_list;
-		};
-		struct { /* intel_cqm */
-			int			cqm_state;
-			u32			cqm_rmid;
-			int			is_group_event;
-			struct list_head	cqm_events_entry;
-			struct list_head	cqm_groups_entry;
-			struct list_head	cqm_group_entry;
-		};
-		struct { /* itrace */
-			int			itrace_started;
-		};
-		struct { /* amd_power */
-			u64	pwr_acc;
-			u64	ptsc;
 		};
 #ifdef CONFIG_HAVE_HW_BREAKPOINT
 		struct { /* breakpoint */
@@ -161,73 +147,43 @@ struct hw_perf_event {
 			 * problem hw_breakpoint has with context
 			 * creation and event initalization.
 			 */
+			RH_KABI_DEPRECATE(struct task_struct*, bp_target)
 			struct arch_hw_breakpoint	info;
 			struct list_head		bp_list;
 		};
 #endif
 	};
-	/*
-	 * If the event is a per task event, this will point to the task in
-	 * question. See the comment in perf_event_alloc().
-	 */
-	struct task_struct		*target;
+	int				state;
+	local64_t			prev_count;
+	u64				sample_period;
+	u64				last_period;
+	local64_t			period_left;
+	u64                             interrupts_seq;
+	u64				interrupts;
+
+	u64				freq_time_stamp;
+	u64				freq_count_stamp;
+
+	RH_KABI_EXTEND(struct event_constraint *constraint)
+	RH_KABI_EXTEND(struct task_struct	*target)
 
 	/*
 	 * PMU would store hardware filter configuration
 	 * here.
 	 */
-	void				*addr_filters;
+	RH_KABI_EXTEND(void			*addr_filters)
 
 	/* Last sync'ed generation of filters */
-	unsigned long			addr_filters_gen;
+	RH_KABI_EXTEND(unsigned long		addr_filters_gen)
+#endif
+};
 
 /*
- * hw_perf_event::state flags; used to track the PERF_EF_* state.
+ * hw_perf_event::state flags
  */
 #define PERF_HES_STOPPED	0x01 /* the counter is stopped */
 #define PERF_HES_UPTODATE	0x02 /* event->count up-to-date */
 #define PERF_HES_ARCH		0x04
-
-	int				state;
-
-	/*
-	 * The last observed hardware counter value, updated with a
-	 * local64_cmpxchg() such that pmu::read() can be called nested.
-	 */
-	local64_t			prev_count;
-
-	/*
-	 * The period to start the next sample with.
-	 */
-	u64				sample_period;
-
-	/*
-	 * The period we started this sample with.
-	 */
-	u64				last_period;
-
-	/*
-	 * However much is left of the current period; note that this is
-	 * a full 64bit value and allows for generation of periods longer
-	 * than hardware might allow.
-	 */
-	local64_t			period_left;
-
-	/*
-	 * State for throttling the event, see __perf_event_overflow() and
-	 * perf_adjust_freq_unthr_context().
-	 */
-	u64                             interrupts_seq;
-	u64				interrupts;
-
-	/*
-	 * State for freq target events, see __perf_event_overflow() and
-	 * perf_adjust_freq_unthr_context().
-	 */
-	u64				freq_time_stamp;
-	u64				freq_count_stamp;
-#endif
-};
 
 struct perf_event;
 
@@ -246,7 +202,6 @@ struct perf_event;
 #define PERF_PMU_CAP_AUX_SW_DOUBLEBUF		0x08
 #define PERF_PMU_CAP_EXCLUSIVE			0x10
 #define PERF_PMU_CAP_ITRACE			0x20
-#define PERF_PMU_CAP_HETEROGENEOUS_CPUS		0x40
 
 /**
  * struct pmu - generic performance monitoring unit
@@ -254,25 +209,15 @@ struct perf_event;
 struct pmu {
 	struct list_head		entry;
 
-	struct module			*module;
 	struct device			*dev;
 	const struct attribute_group	**attr_groups;
 	const char			*name;
 	int				type;
 
-	/*
-	 * various common per-pmu feature flags
-	 */
-	int				capabilities;
-
 	int * __percpu			pmu_disable_count;
 	struct perf_cpu_context * __percpu pmu_cpu_context;
-	atomic_t			exclusive_cnt; /* < 0: cpu; > 0: tsk */
 	int				task_ctx_nr;
 	int				hrtimer_interval_ms;
-
-	/* number of address filters this PMU can do */
-	unsigned int			nr_addr_filters;
 
 	/*
 	 * Fully disable/enable this PMU, can be used to protect from the PMI
@@ -283,84 +228,31 @@ struct pmu {
 
 	/*
 	 * Try and initialize the event for this PMU.
-	 *
-	 * Returns:
-	 *  -ENOENT	-- @event is not for this PMU
-	 *
-	 *  -ENODEV	-- @event is for this PMU but PMU not present
-	 *  -EBUSY	-- @event is for this PMU but PMU temporarily unavailable
-	 *  -EINVAL	-- @event is for this PMU but @event is not valid
-	 *  -EOPNOTSUPP -- @event is for this PMU, @event is valid, but not supported
-	 *  -EACCESS	-- @event is for this PMU, @event is valid, but no privilidges
-	 *
-	 *  0		-- @event is for this PMU and valid
-	 *
-	 * Other error return values are allowed.
+	 * Should return -ENOENT when the @event doesn't match this PMU.
 	 */
 	int (*event_init)		(struct perf_event *event);
 
-	/*
-	 * Notification that the event was mapped or unmapped.  Called
-	 * in the context of the mapping task.
-	 */
-	void (*event_mapped)		(struct perf_event *event); /*optional*/
-	void (*event_unmapped)		(struct perf_event *event); /*optional*/
-
-	/*
-	 * Flags for ->add()/->del()/ ->start()/->stop(). There are
-	 * matching hw_perf_event::state flags.
-	 */
 #define PERF_EF_START	0x01		/* start the counter when adding    */
 #define PERF_EF_RELOAD	0x02		/* reload the counter when starting */
 #define PERF_EF_UPDATE	0x04		/* update the counter when stopping */
 
 	/*
-	 * Adds/Removes a counter to/from the PMU, can be done inside a
-	 * transaction, see the ->*_txn() methods.
-	 *
-	 * The add/del callbacks will reserve all hardware resources required
-	 * to service the event, this includes any counter constraint
-	 * scheduling etc.
-	 *
-	 * Called with IRQs disabled and the PMU disabled on the CPU the event
-	 * is on.
-	 *
-	 * ->add() called without PERF_EF_START should result in the same state
-	 *  as ->add() followed by ->stop().
-	 *
-	 * ->del() must always PERF_EF_UPDATE stop an event. If it calls
-	 *  ->stop() that must deal with already being stopped without
-	 *  PERF_EF_UPDATE.
+	 * Adds/Removes a counter to/from the PMU, can be done inside
+	 * a transaction, see the ->*_txn() methods.
 	 */
 	int  (*add)			(struct perf_event *event, int flags);
 	void (*del)			(struct perf_event *event, int flags);
 
 	/*
-	 * Starts/Stops a counter present on the PMU.
-	 *
-	 * The PMI handler should stop the counter when perf_event_overflow()
-	 * returns !0. ->start() will be used to continue.
-	 *
-	 * Also used to change the sample period.
-	 *
-	 * Called with IRQs disabled and the PMU disabled on the CPU the event
-	 * is on -- will be called from NMI context with the PMU generates
-	 * NMIs.
-	 *
-	 * ->stop() with PERF_EF_UPDATE will read the counter and update
-	 *  period/count values like ->read() would.
-	 *
-	 * ->start() with PERF_EF_RELOAD will reprogram the the counter
-	 *  value, must be preceded by a ->stop() with PERF_EF_UPDATE.
+	 * Starts/Stops a counter present on the PMU. The PMI handler
+	 * should stop the counter when perf_event_overflow() returns
+	 * !0. ->start() will be used to continue.
 	 */
 	void (*start)			(struct perf_event *event, int flags);
 	void (*stop)			(struct perf_event *event, int flags);
 
 	/*
 	 * Updates the counter value of the event.
-	 *
-	 * For sampling capable PMUs this will also update the software period
-	 * hw_perf_event::period_left field.
 	 */
 	void (*read)			(struct perf_event *event);
 
@@ -374,7 +266,9 @@ struct pmu {
 	 *
 	 * Optional.
 	 */
-	void (*start_txn)		(struct pmu *pmu, unsigned int txn_flags);
+	RH_KABI_REPLACE(void (*start_txn)(struct pmu *pmu),
+			void (*start_txn)(struct pmu *pmu, unsigned int txn_flags))
+
 	/*
 	 * If ->start_txn() disabled the ->add() schedulability test
 	 * then ->commit_txn() is required to perform one. On success
@@ -399,32 +293,45 @@ struct pmu {
 	int (*event_idx)		(struct perf_event *event); /*optional */
 
 	/*
+	 * flush branch stack on context-switches (needed in cpu-wide mode)
+	 */
+#ifdef __GENKSYMS__
+	void (*flush_branch_stack)	(void);
+#else
+	/* KABI this pointer is deprecated */
+	void (*rh_reserved_flush_branch_stack)	(void);
+#endif
+
+	RH_KABI_EXTEND(struct module *module)
+
+	/*
+	 * various common per-pmu feature flags
+	 */
+	RH_KABI_EXTEND(int	capabilities)
+
+	/*
 	 * context-switches callback
 	 */
-	void (*sched_task)		(struct perf_event_context *ctx,
-					bool sched_in);
+	RH_KABI_EXTEND(void (*sched_task) (struct perf_event_context *ctx, bool sched_in))
+
 	/*
 	 * PMU specific data size
 	 */
-	size_t				task_ctx_size;
-
-
-	/*
-	 * Return the count value for a counter.
-	 */
-	u64 (*count)			(struct perf_event *event); /*optional*/
+	RH_KABI_EXTEND(size_t task_ctx_size)
 
 	/*
 	 * Set up pmu-private data structures for an AUX area
 	 */
-	void *(*setup_aux)		(int cpu, void **pages,
-					 int nr_pages, bool overwrite);
+	RH_KABI_EXTEND(void *(*setup_aux)		(int cpu, void **pages,
+					 int nr_pages, bool overwrite))
 					/* optional */
 
 	/*
 	 * Free pmu-private AUX data structures
 	 */
-	void (*free_aux)		(void *aux); /* optional */
+	RH_KABI_EXTEND(void (*free_aux)		(void *aux)) /* optional */
+	RH_KABI_EXTEND(atomic_t			exclusive_cnt) /* < 0: cpu; > 0: tsk */
+
 
 	/*
 	 * Validate address range filters: make sure the HW supports the
@@ -434,8 +341,7 @@ struct pmu {
 	 * Runs in the context of the ioctl()ing process and is not serialized
 	 * with the rest of the PMU callbacks.
 	 */
-	int (*addr_filters_validate)	(struct list_head *filters);
-					/* optional */
+	RH_KABI_EXTEND(int (*addr_filters_validate)	(struct list_head *filters))
 
 	/*
 	 * Synchronize address range filter configuration:
@@ -448,18 +354,11 @@ struct pmu {
 	 * May (and should) traverse event::addr_filters::list, for which its
 	 * caller provides necessary serialization.
 	 */
-	void (*addr_filters_sync)	(struct perf_event *event);
+	RH_KABI_EXTEND(void (*addr_filters_sync)	(struct perf_event *event))
 					/* optional */
 
-	/*
-	 * Filter events for PMU-specific reasons.
-	 */
-	int (*filter_match)		(struct perf_event *event); /* optional */
-
-	/*
-	 * Check period value for PERF_EVENT_IOC_PERIOD ioctl.
-	 */
-	int (*check_period)		(struct perf_event *event, u64 value); /* optional */
+	/* number of address filters this PMU can do */
+	RH_KABI_EXTEND(unsigned int			nr_addr_filters)
 };
 
 /**
@@ -475,7 +374,7 @@ struct pmu {
  */
 struct perf_addr_filter {
 	struct list_head	entry;
-	struct path		path;
+	struct inode		*inode;
 	unsigned long		offset;
 	unsigned long		size;
 	unsigned int		range	: 1,
@@ -487,6 +386,7 @@ struct perf_addr_filter {
  * @list:	list of filters for this event
  * @lock:	spinlock that serializes accesses to the @list and event's
  *		(and its children's) filter generations.
+ * @nr_file_filters:	number of file-based filters
  *
  * A child event will use parent's @list (and therefore @lock), so they are
  * bundled together; see perf_event_addr_filters().
@@ -494,14 +394,17 @@ struct perf_addr_filter {
 struct perf_addr_filters_head {
 	struct list_head	list;
 	raw_spinlock_t		lock;
+	unsigned int		nr_file_filters;
 };
 
 /**
- * enum perf_event_active_state - the states of a event
+ * enum perf_event_active_state - the states of an event
  */
 enum perf_event_active_state {
+#ifndef __GENKSYMS__
 	PERF_EVENT_STATE_DEAD		= -4,
 	PERF_EVENT_STATE_EXIT		= -3,
+#endif
 	PERF_EVENT_STATE_ERROR		= -2,
 	PERF_EVENT_STATE_OFF		= -1,
 	PERF_EVENT_STATE_INACTIVE	=  0,
@@ -537,6 +440,7 @@ struct swevent_hlist {
 #define PERF_ATTACH_GROUP	0x02
 #define PERF_ATTACH_TASK	0x04
 #define PERF_ATTACH_TASK_DATA	0x08
+#define PERF_ATTACH_ITRACE	0x10
 
 struct perf_cgroup;
 struct ring_buffer;
@@ -552,13 +456,6 @@ struct pmu_event_list {
 struct perf_event {
 #ifdef CONFIG_PERF_EVENTS
 	/*
-	 * entry onto perf_event_context::event_list;
-	 *   modifications require ctx->lock
-	 *   RCU safe iterations.
-	 */
-	struct list_head		event_entry;
-
-	/*
 	 * XXX: group_entry and sibling_list should be mutually exclusive;
 	 * either you're a sibling on a group, or you're the group leader.
 	 * Rework the code to always use the same list element.
@@ -567,27 +464,21 @@ struct perf_event {
 	 * either sufficies for read.
 	 */
 	struct list_head		group_entry;
-	struct list_head		sibling_list;
-
 	/*
-	 * We need storage to track the entries in perf_pmu_migrate_context; we
-	 * cannot use the event_entry because of RCU and we want to keep the
-	 * group in tact which avoids us using the other two entries.
+	 * entry onto perf_event_context::event_list;
+	 *   modifications require ctx->lock
+	 *   RCU safe iterations.
 	 */
-	struct list_head		migrate_entry;
-
+	struct list_head		event_entry;
+	struct list_head		sibling_list;
 	struct hlist_node		hlist_entry;
-	struct list_head		active_entry;
 	int				nr_siblings;
 
 	/* Not serialized. Only written during event initialization. */
-	int				event_caps;
-	/* The cumulative AND of all event_caps for events in this group. */
-	int				group_caps;
+	RH_KABI_RENAME(int group_flags, int event_caps);
 
 	struct perf_event		*group_leader;
 	struct pmu			*pmu;
-	void				*pmu_private;
 
 	enum perf_event_active_state	state;
 	unsigned int			attach_state;
@@ -599,26 +490,13 @@ struct perf_event {
 	 * has been enabled (i.e. eligible to run, and the task has
 	 * been scheduled in, if this is a per-task event)
 	 * and running (scheduled onto the CPU), respectively.
-	 *
-	 * They are computed from tstamp_enabled, tstamp_running and
-	 * tstamp_stopped when the event is in INACTIVE or ACTIVE state.
 	 */
 	u64				total_time_enabled;
 	u64				total_time_running;
-
-	/*
-	 * These are timestamps used for computing total_time_enabled
-	 * and total_time_running when the event is in INACTIVE or
-	 * ACTIVE state, measured in nanoseconds from an arbitrary point
-	 * in time.
-	 * tstamp_enabled: the notional time when the event was enabled
-	 * tstamp_running: the notional time when the event was scheduled on
-	 * tstamp_stopped: in INACTIVE state, the notional time when the
-	 *	event was scheduled off.
-	 */
-	u64				tstamp_enabled;
-	u64				tstamp_running;
-	u64				tstamp_stopped;
+	RH_KABI_DEPRECATE(u64,		tstamp_enabled)
+	RH_KABI_DEPRECATE(u64,		tstamp_running)
+	RH_KABI_REPLACE(u64		tstamp_stopped,
+			u64		tstamp)
 
 	/*
 	 * timestamp shadows the actual context timing but it can
@@ -665,8 +543,6 @@ struct perf_event {
 
 	struct ring_buffer		*rb;
 	struct list_head		rb_entry;
-	unsigned long			rcu_batches;
-	int				rcu_pending;
 
 	/* poll related */
 	wait_queue_head_t		waitq;
@@ -680,41 +556,72 @@ struct perf_event {
 
 	atomic_t			event_limit;
 
-	/* address range filters */
-	struct perf_addr_filters_head	addr_filters;
-	/* vma address array for file-based filders */
-	unsigned long			*addr_filters_offs;
-	unsigned long			addr_filters_gen;
-
 	void (*destroy)(struct perf_event *);
 	struct rcu_head			rcu_head;
 
 	struct pid_namespace		*ns;
 	u64				id;
 
-	u64				(*clock)(void);
 	perf_overflow_handler_t		overflow_handler;
 	void				*overflow_handler_context;
-#ifdef CONFIG_BPF_SYSCALL
-	perf_overflow_handler_t		orig_overflow_handler;
-	struct bpf_prog			*prog;
-#endif
 
 #ifdef CONFIG_EVENT_TRACING
-	struct trace_event_call		*tp_event;
+	struct ftrace_event_call	*tp_event;
 	struct event_filter		*filter;
-#ifdef CONFIG_FUNCTION_TRACER
+#if defined(CONFIG_FUNCTION_TRACER) && defined(CONFIG_X86_64)
 	struct ftrace_ops               ftrace_ops;
 #endif
 #endif
 
 #ifdef CONFIG_CGROUP_PERF
 	struct perf_cgroup		*cgrp; /* cgroup event is attach to */
-	int				cgrp_defer_enabled;
+	RH_KABI_DEPRECATE(int,		 cgrp_defer_enabled)
 #endif
 
-	struct list_head		sb_list;
+	/*
+	 * We need storage to track the entries in perf_pmu_migrate_context; we
+	 * cannot use the event_entry because of RCU and we want to keep the
+	 * group in tact which avoids us using the other two entries.
+	 */
+	RH_KABI_EXTEND(struct list_head		migrate_entry)
+	RH_KABI_EXTEND(struct list_head		active_entry)
+	RH_KABI_EXTEND(void			*pmu_private)
+#if defined(CONFIG_FUNCTION_TRACER) && !defined(CONFIG_X86_64)
+	RH_KABI_EXTEND(struct ftrace_ops	 ftrace_ops)
+#endif
+	/* address range filters */
+	RH_KABI_EXTEND(struct perf_addr_filters_head	 addr_filters)
+	/* vma address array for file-based filders */
+	RH_KABI_EXTEND(unsigned long			*addr_filters_offs)
+	RH_KABI_EXTEND(unsigned long			 addr_filters_gen)
+	RH_KABI_EXTEND(struct list_head			 sb_list)
+	RH_KABI_EXTEND(u64				(*clock)(void))
+	/* The cumulative AND of all event_caps for events in this group. */
+	RH_KABI_EXTEND(int				group_caps)
+	/*
+	 * Node on the pinned or flexible tree located at the event context;
+	 */
+	RH_KABI_EXTEND(struct rb_node			group_node)
+	RH_KABI_EXTEND(u64				group_index)
+	RH_KABI_EXTEND(struct list_head			active_list)
+
+#ifdef CONFIG_BPF_SYSCALL
+	RH_KABI_EXTEND(perf_overflow_handler_t		orig_overflow_handler)
+	RH_KABI_EXTEND(struct bpf_prog			*prog)
+#endif
+	RH_KABI_EXTEND(unsigned long			rcu_batches)
+	RH_KABI_EXTEND(int				rcu_pending)
 #endif /* CONFIG_PERF_EVENTS */
+};
+
+enum perf_event_context_type {
+	task_context,
+	cpu_context,
+};
+
+struct perf_event_groups {
+	struct rb_root	tree;
+	u64		index;
 };
 
 /**
@@ -724,6 +631,7 @@ struct perf_event {
  */
 struct perf_event_context {
 	struct pmu			*pmu;
+	RH_KABI_DEPRECATE(enum perf_event_context_type, type)
 	/*
 	 * Protect the states of the events in the list,
 	 * nr_active, and the list:
@@ -736,10 +644,10 @@ struct perf_event_context {
 	 */
 	struct mutex			mutex;
 
-	struct list_head		active_ctx_list;
-	struct list_head		pinned_groups;
-	struct list_head		flexible_groups;
+	RH_KABI_DEPRECATE(struct list_head, pinned_groups)
+	RH_KABI_DEPRECATE(struct list_head, flexible_groups)
 	struct list_head		event_list;
+
 	int				nr_events;
 	int				nr_active;
 	int				is_active;
@@ -763,11 +671,15 @@ struct perf_event_context {
 	u64				parent_gen;
 	u64				generation;
 	int				pin_count;
-#ifdef CONFIG_CGROUP_PERF
 	int				nr_cgroups;	 /* cgroup evts */
-#endif
-	void				*task_ctx_data; /* pmu specific data */
+	RH_KABI_DEPRECATE(int, nr_branch_stack)
 	struct rcu_head			rcu_head;
+	RH_KABI_EXTEND(struct list_head		active_ctx_list)
+	RH_KABI_EXTEND(void			*task_ctx_data) /* pmu specific data */
+	RH_KABI_EXTEND(struct perf_event_groups	pinned_groups)
+	RH_KABI_EXTEND(struct perf_event_groups	flexible_groups)
+	RH_KABI_EXTEND(struct list_head		pinned_active)
+	RH_KABI_EXTEND(struct list_head		flexible_active)
 };
 
 /*
@@ -784,19 +696,16 @@ struct perf_cpu_context {
 	struct perf_event_context	*task_ctx;
 	int				active_oncpu;
 	int				exclusive;
-
-	raw_spinlock_t			hrtimer_lock;
 	struct hrtimer			hrtimer;
 	ktime_t				hrtimer_interval;
-	unsigned int			hrtimer_active;
+
+	RH_KABI_DEPRECATE(struct list_head,	rotation_list)
 
 	struct pmu			*unique_pmu;
-#ifdef CONFIG_CGROUP_PERF
 	struct perf_cgroup		*cgrp;
-#endif
 
-	struct list_head		sched_cb_entry;
-	int				sched_cb_usage;
+	RH_KABI_EXTEND(raw_spinlock_t	hrtimer_lock)
+	RH_KABI_EXTEND(unsigned int	hrtimer_active)
 };
 
 struct perf_output_handle {
@@ -804,6 +713,7 @@ struct perf_output_handle {
 	struct ring_buffer		*rb;
 	unsigned long			wakeup;
 	unsigned long			size;
+	u64				aux_flags;
 	union {
 		void			*addr;
 		unsigned long		head;
@@ -812,12 +722,14 @@ struct perf_output_handle {
 };
 
 struct bpf_perf_event_data_kern {
-	struct pt_regs *regs;
+	bpf_user_pt_regs_t *regs;
 	struct perf_sample_data *data;
+	struct perf_event *event;
 };
 
 #ifdef CONFIG_CGROUP_PERF
 
+#ifndef __GENKSYMS__
 /*
  * perf_cgroup_info keeps track of time_enabled for a cgroup.
  * This is a per-cpu dynamically allocated data structure.
@@ -831,6 +743,7 @@ struct perf_cgroup {
 	struct cgroup_subsys_state	css;
 	struct perf_cgroup_info	__percpu *info;
 };
+#endif /* __GENKSYMS__ */
 
 /*
  * Must ensure cgroup is pinned (css_get) before calling
@@ -838,11 +751,9 @@ struct perf_cgroup {
  * if there is no cgroup event for the current CPU context.
  */
 static inline struct perf_cgroup *
-perf_cgroup_from_task(struct task_struct *task, struct perf_event_context *ctx)
+perf_cgroup_from_task(struct task_struct *task)
 {
-	return container_of(task_css_check(task, perf_event_cgrp_id,
-					   ctx ? lockdep_is_held(&ctx->lock)
-					       : true),
+	return container_of(task_subsys_state(task, perf_subsys_id),
 			    struct perf_cgroup, css);
 }
 #endif /* CONFIG_CGROUP_PERF */
@@ -852,10 +763,12 @@ perf_cgroup_from_task(struct task_struct *task, struct perf_event_context *ctx)
 extern void *perf_aux_output_begin(struct perf_output_handle *handle,
 				   struct perf_event *event);
 extern void perf_aux_output_end(struct perf_output_handle *handle,
-				unsigned long size, bool truncated);
+				unsigned long size);
 extern int perf_aux_output_skip(struct perf_output_handle *handle,
 				unsigned long size);
 extern void *perf_get_aux(struct perf_output_handle *handle);
+extern void perf_aux_output_flag(struct perf_output_handle *handle, u64 flags);
+extern void perf_event_itrace_started(struct perf_event *event);
 
 extern int perf_pmu_register(struct pmu *pmu, const char *name, int type);
 extern void perf_pmu_unregister(struct pmu *pmu);
@@ -871,6 +784,7 @@ extern void perf_event_exit_task(struct task_struct *child);
 extern void perf_event_free_task(struct task_struct *task);
 extern void perf_event_delayed_put(struct task_struct *task);
 extern struct file *perf_event_get(unsigned int fd);
+extern const struct perf_event *perf_get_event(struct file *file);
 extern const struct perf_event_attr *perf_event_attrs(struct perf_event *event);
 extern void perf_event_print_debug(void);
 extern void perf_pmu_disable(struct pmu *pmu);
@@ -890,52 +804,58 @@ perf_event_create_kernel_counter(struct perf_event_attr *attr,
 				void *context);
 extern void perf_pmu_migrate_context(struct pmu *pmu,
 				int src_cpu, int dst_cpu);
-extern u64 perf_event_read_local(struct perf_event *event);
+int perf_event_read_local(struct perf_event *event, u64 *value,
+			  u64 *enabled, u64 *running);
 extern u64 perf_event_read_value(struct perf_event *event,
 				 u64 *enabled, u64 *running);
 
+struct perf_regs_user {
+	__u64		abi;
+	struct pt_regs	*regs;
+};
 
 struct perf_sample_data {
-	/*
-	 * Fields set by perf_sample_data_init(), group so as to
-	 * minimize the cachelines touched.
-	 */
-	u64				addr;
-	struct perf_raw_record		*raw;
-	struct perf_branch_stack	*br_stack;
-	u64				period;
-	u64				weight;
-	u64				txn;
-	union  perf_mem_data_src	data_src;
-
-	/*
-	 * The other fields, optionally {set,used} by
-	 * perf_{prepare,output}_sample().
-	 */
 	u64				type;
+
 	u64				ip;
 	struct {
 		u32	pid;
 		u32	tid;
 	}				tid_entry;
 	u64				time;
+	u64				addr;
 	u64				id;
 	u64				stream_id;
 	struct {
 		u32	cpu;
 		u32	reserved;
 	}				cpu_entry;
+	u64				period;
+	union  perf_mem_data_src	data_src;
 	struct perf_callchain_entry	*callchain;
+	struct perf_raw_record		*raw;
+	struct perf_branch_stack	*br_stack;
+
+	RH_KABI_REPLACE(struct perf_regs_user       regs_user,
+			    struct perf_regs            regs_user)
+
+	u64				stack_user_size;
+	u64				weight;
+
+	/*
+	 * Transaction flags for abort events:
+	 */
+	RH_KABI_EXTEND(u64				txn)
+	RH_KABI_EXTEND(struct perf_regs                 regs_intr)
 
 	/*
 	 * regs_user may point to task_pt_regs or to regs_user_copy, depending
 	 * on arch details.
 	 */
-	struct perf_regs		regs_user;
-	struct pt_regs			regs_user_copy;
+	RH_KABI_EXTEND(struct pt_regs			regs_user_copy)
 
-	struct perf_regs		regs_intr;
-	u64				stack_user_size;
+	RH_KABI_EXTEND(u64				phys_addr)
+
 } ____cacheline_aligned;
 
 /* default value for data source */
@@ -1016,6 +936,14 @@ static inline int is_software_event(struct perf_event *event)
 	return event->event_caps & PERF_EV_CAP_SOFTWARE;
 }
 
+/*
+ * Return 1 for event in sw context, 0 for event in hw context
+ */
+static inline int in_software_context(struct perf_event *event)
+{
+	return event->ctx->pmu->task_ctx_nr == perf_sw_context;
+}
+
 extern struct static_key perf_swevent_enabled[PERF_COUNT_SW_MAX];
 
 extern void ___perf_sw_event(u32, u64, struct pt_regs *, u64);
@@ -1063,35 +991,13 @@ perf_sw_event_sched(u32 event_id, u64 nr, u64 addr)
 	}
 }
 
-extern struct static_key_false perf_sched_events;
-
-static __always_inline bool
-perf_sw_migrate_enabled(void)
-{
-	if (static_key_false(&perf_swevent_enabled[PERF_COUNT_SW_CPU_MIGRATIONS]))
-		return true;
-	return false;
-}
-
-static inline void perf_event_task_migrate(struct task_struct *task)
-{
-	if (perf_sw_migrate_enabled())
-		task->sched_migrated = 1;
-}
+extern struct static_key_deferred perf_sched_events;
 
 static inline void perf_event_task_sched_in(struct task_struct *prev,
 					    struct task_struct *task)
 {
-	if (static_branch_unlikely(&perf_sched_events))
+	if (static_key_false(&perf_sched_events.key))
 		__perf_event_task_sched_in(prev, task);
-
-	if (perf_sw_migrate_enabled() && task->sched_migrated) {
-		struct pt_regs *regs = this_cpu_ptr(&__perf_regs[0]);
-
-		perf_fetch_caller_regs(regs);
-		___perf_sw_event(PERF_COUNT_SW_CPU_MIGRATIONS, 1, regs, 0);
-		task->sched_migrated = 0;
-	}
 }
 
 static inline void perf_event_task_sched_out(struct task_struct *prev,
@@ -1099,13 +1005,8 @@ static inline void perf_event_task_sched_out(struct task_struct *prev,
 {
 	perf_sw_event_sched(PERF_COUNT_SW_CONTEXT_SWITCHES, 1, 0);
 
-	if (static_branch_unlikely(&perf_sched_events))
+	if (static_key_false(&perf_sched_events.key))
 		__perf_event_task_sched_out(prev, next);
-}
-
-static inline u64 __perf_event_count(struct perf_event *event)
-{
-	return local64_read(&event->count) + atomic64_read(&event->child_count);
 }
 
 extern void perf_event_mmap(struct vm_area_struct *vma);
@@ -1120,36 +1021,19 @@ extern void perf_event_fork(struct task_struct *tsk);
 /* Callchains */
 DECLARE_PER_CPU(struct perf_callchain_entry, perf_callchain_entry);
 
-extern void perf_callchain_user(struct perf_callchain_entry_ctx *entry, struct pt_regs *regs);
-extern void perf_callchain_kernel(struct perf_callchain_entry_ctx *entry, struct pt_regs *regs);
+extern void perf_callchain_user(struct perf_callchain_entry *entry, struct pt_regs *regs);
+extern void perf_callchain_kernel(struct perf_callchain_entry *entry, struct pt_regs *regs);
 extern struct perf_callchain_entry *
 get_perf_callchain(struct pt_regs *regs, u32 init_nr, bool kernel, bool user,
-		   u32 max_stack, bool crosstask, bool add_mark);
-extern int get_callchain_buffers(int max_stack);
+		   bool crosstask, bool add_mark);
+extern struct perf_callchain_entry *perf_callchain(struct perf_event *event, struct pt_regs *regs);
+extern int get_callchain_buffers(void);
 extern void put_callchain_buffers(void);
 
-extern int sysctl_perf_event_max_stack;
-extern int sysctl_perf_event_max_contexts_per_stack;
-
-static inline int perf_callchain_store_context(struct perf_callchain_entry_ctx *ctx, u64 ip)
+static inline int perf_callchain_store(struct perf_callchain_entry *entry, u64 ip)
 {
-	if (ctx->contexts < sysctl_perf_event_max_contexts_per_stack) {
-		struct perf_callchain_entry *entry = ctx->entry;
+	if (entry->nr < PERF_MAX_STACK_DEPTH) {
 		entry->ip[entry->nr++] = ip;
-		++ctx->contexts;
-		return 0;
-	} else {
-		ctx->contexts_maxed = true;
-		return -1; /* no more room, stop walking the stack */
-	}
-}
-
-static inline int perf_callchain_store(struct perf_callchain_entry_ctx *ctx, u64 ip)
-{
-	if (ctx->nr < ctx->max_stack && !ctx->contexts_maxed) {
-		struct perf_callchain_entry *entry = ctx->entry;
-		entry->ip[entry->nr++] = ip;
-		++ctx->nr;
 		return 0;
 	} else {
 		return -1; /* no more room, stop walking the stack */
@@ -1170,8 +1054,6 @@ extern int perf_cpu_time_max_percent_handler(struct ctl_table *table, int write,
 		void __user *buffer, size_t *lenp,
 		loff_t *ppos);
 
-int perf_event_max_stack_handler(struct ctl_table *table, int write,
-				 void __user *buffer, size_t *lenp, loff_t *ppos);
 
 static inline bool perf_paranoid_tracepoint_raw(void)
 {
@@ -1189,7 +1071,7 @@ static inline bool perf_paranoid_kernel(void)
 }
 
 extern void perf_event_init(void);
-extern void perf_tp_event(u16 event_type, u64 count, void *record,
+extern void perf_tp_event(u64 addr, u64 count, void *record,
 			  int entry_size, struct pt_regs *regs,
 			  struct hlist_head *head, int rctx,
 			  struct task_struct *task);
@@ -1199,6 +1081,9 @@ extern void perf_bp_event(struct perf_event *event, void *data);
 # define perf_misc_flags(regs) \
 		(user_mode(regs) ? PERF_RECORD_MISC_USER : PERF_RECORD_MISC_KERNEL)
 # define perf_instruction_pointer(regs)	instruction_pointer(regs)
+#endif
+#ifndef perf_arch_bpf_user_pt_regs
+# define perf_arch_bpf_user_pt_regs(regs) regs
 #endif
 
 static inline bool has_branch_stack(struct perf_event *event)
@@ -1270,15 +1155,13 @@ static inline void *
 perf_aux_output_begin(struct perf_output_handle *handle,
 		      struct perf_event *event)				{ return NULL; }
 static inline void
-perf_aux_output_end(struct perf_output_handle *handle, unsigned long size,
-		    bool truncated)					{ }
+perf_aux_output_end(struct perf_output_handle *handle, unsigned long size)
+									{ }
 static inline int
 perf_aux_output_skip(struct perf_output_handle *handle,
 		     unsigned long size)				{ return -EINVAL; }
 static inline void *
 perf_get_aux(struct perf_output_handle *handle)				{ return NULL; }
-static inline void
-perf_event_task_migrate(struct task_struct *task)			{ }
 static inline void
 perf_event_task_sched_in(struct task_struct *prev,
 			 struct task_struct *task)			{ }
@@ -1290,11 +1173,19 @@ static inline void perf_event_exit_task(struct task_struct *child)	{ }
 static inline void perf_event_free_task(struct task_struct *task)	{ }
 static inline void perf_event_delayed_put(struct task_struct *task)	{ }
 static inline struct file *perf_event_get(unsigned int fd)	{ return ERR_PTR(-EINVAL); }
+static inline const struct perf_event *perf_get_event(struct file *file)
+{
+	return ERR_PTR(-EINVAL);
+}
 static inline const struct perf_event_attr *perf_event_attrs(struct perf_event *event)
 {
 	return ERR_PTR(-EINVAL);
 }
-static inline u64 perf_event_read_local(struct perf_event *event)	{ return -EINVAL; }
+static inline int perf_event_read_local(struct perf_event *event, u64 *value,
+					u64 *enabled, u64 *running)
+{
+	return -EINVAL;
+}
 static inline void perf_event_print_debug(void)				{ }
 static inline int perf_event_task_disable(void)				{ return -EINVAL; }
 static inline int perf_event_task_enable(void)				{ return -EINVAL; }
@@ -1330,6 +1221,12 @@ static inline void perf_event_task_tick(void)				{ }
 static inline int perf_event_release_kernel(struct perf_event *event)	{ return 0; }
 #endif
 
+#if defined(CONFIG_PERF_EVENTS) && defined(CONFIG_NO_HZ_FULL)
+extern bool perf_event_can_stop_tick(void);
+#else
+static inline bool perf_event_can_stop_tick(void)			{ return true; }
+#endif
+
 #if defined(CONFIG_PERF_EVENTS) && defined(CONFIG_CPU_SUP_INTEL)
 extern void perf_restore_debug_store(void);
 #else
@@ -1343,17 +1240,45 @@ static __always_inline bool perf_raw_frag_last(const struct perf_raw_frag *frag)
 
 #define perf_output_put(handle, x) perf_output_copy((handle), &(x), sizeof(x))
 
+/*
+ * This has to have a higher priority than migration_notifier in sched.c.
+ */
+#define perf_cpu_notifier(fn)						\
+do {									\
+	static struct notifier_block fn##_nb =				\
+		{ .notifier_call = fn, .priority = CPU_PRI_PERF };	\
+	unsigned long cpu = smp_processor_id();				\
+	unsigned long flags;						\
+									\
+	cpu_notifier_register_begin();					\
+	fn(&fn##_nb, (unsigned long)CPU_UP_PREPARE,			\
+		(void *)(unsigned long)cpu);				\
+	local_irq_save(flags);						\
+	fn(&fn##_nb, (unsigned long)CPU_STARTING,			\
+		(void *)(unsigned long)cpu);				\
+	local_irq_restore(flags);					\
+	fn(&fn##_nb, (unsigned long)CPU_ONLINE,				\
+		(void *)(unsigned long)cpu);				\
+	__register_cpu_notifier(&fn##_nb);				\
+	cpu_notifier_register_done();					\
+} while (0)
+
+/*
+ * Bare-bones version of perf_cpu_notifier(), which doesn't invoke the
+ * callback for already online CPUs.
+ */
+#define __perf_cpu_notifier(fn)						\
+do {									\
+	static struct notifier_block fn##_nb =				\
+		{ .notifier_call = fn, .priority = CPU_PRI_PERF };	\
+									\
+	__register_cpu_notifier(&fn##_nb);				\
+} while (0)
+
 struct perf_pmu_events_attr {
 	struct device_attribute attr;
 	u64 id;
 	const char *event_str;
-};
-
-struct perf_pmu_events_ht_attr {
-	struct device_attribute			attr;
-	u64					id;
-	const char				*event_str_ht;
-	const char				*event_str_noht;
 };
 
 ssize_t perf_event_sysfs_show(struct device *dev, struct device_attribute *attr,
@@ -1383,14 +1308,5 @@ _name##_show(struct device *dev,					\
 }									\
 									\
 static struct device_attribute format_attr_##_name = __ATTR_RO(_name)
-
-/* Performance counter hotplug functions */
-#ifdef CONFIG_PERF_EVENTS
-int perf_event_init_cpu(unsigned int cpu);
-int perf_event_exit_cpu(unsigned int cpu);
-#else
-#define perf_event_init_cpu	NULL
-#define perf_event_exit_cpu	NULL
-#endif
 
 #endif /* _LINUX_PERF_EVENT_H */

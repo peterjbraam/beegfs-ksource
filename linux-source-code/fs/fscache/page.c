@@ -58,7 +58,7 @@ bool release_page_wait_timeout(struct fscache_cookie *cookie, struct page *page)
 
 /*
  * decide whether a page can be released, possibly by cancelling a store to it
- * - we're allowed to sleep if __GFP_DIRECT_RECLAIM is flagged
+ * - we're allowed to sleep if __GFP_WAIT is flagged
  */
 bool __fscache_maybe_release_page(struct fscache_cookie *cookie,
 				  struct page *page,
@@ -113,7 +113,7 @@ try_again:
 
 	wake_up_bit(&cookie->flags, 0);
 	if (xpage)
-		put_page(xpage);
+		page_cache_release(xpage);
 	__fscache_uncache_page(cookie, page);
 	return true;
 
@@ -122,7 +122,7 @@ page_busy:
 	 * allocator as the work threads writing to the cache may all end up
 	 * sleeping on memory allocation, so we may need to impose a timeout
 	 * too. */
-	if (!(gfp & __GFP_DIRECT_RECLAIM) || !(gfp & __GFP_FS)) {
+	if (!(gfp & __GFP_WAIT) || !(gfp & __GFP_FS)) {
 		fscache_stat(&fscache_n_store_vmscan_busy);
 		return false;
 	}
@@ -132,7 +132,7 @@ page_busy:
 		_debug("fscache writeout timeout page: %p{%lx}",
 			page, page->index);
 
-	gfp &= ~__GFP_DIRECT_RECLAIM;
+	gfp &= ~__GFP_WAIT;
 	goto try_again;
 }
 EXPORT_SYMBOL(__fscache_maybe_release_page);
@@ -164,7 +164,7 @@ static void fscache_end_page_write(struct fscache_object *object,
 	}
 	spin_unlock(&object->lock);
 	if (xpage)
-		put_page(xpage);
+		page_cache_release(xpage);
 }
 
 /*
@@ -776,7 +776,6 @@ static void fscache_write_op(struct fscache_operation *_op)
 
 	_enter("{OP%x,%d}", op->op.debug_id, atomic_read(&op->op.usage));
 
-again:
 	spin_lock(&object->lock);
 	cookie = object->cookie;
 
@@ -817,6 +816,10 @@ again:
 		goto superseded;
 	page = results[0];
 	_debug("gang %d [%lx]", n, page->index);
+	if (page->index >= op->store_limit) {
+		fscache_stat(&fscache_n_store_pages_over_limit);
+		goto superseded;
+	}
 
 	radix_tree_tag_set(&cookie->stores, page->index,
 			   FSCACHE_COOKIE_STORING_TAG);
@@ -825,9 +828,6 @@ again:
 
 	spin_unlock(&cookie->stores_lock);
 	spin_unlock(&object->lock);
-
-	if (page->index >= op->store_limit)
-		goto discard_page;
 
 	fscache_stat(&fscache_n_store_pages);
 	fscache_stat(&fscache_n_cop_write_page);
@@ -843,11 +843,6 @@ again:
 
 	_leave("");
 	return;
-
-discard_page:
-	fscache_stat(&fscache_n_store_pages_over_limit);
-	fscache_end_page_write(object, page);
-	goto again;
 
 superseded:
 	/* this writer is going away and there aren't any more things to
@@ -889,10 +884,8 @@ void fscache_invalidate_writes(struct fscache_cookie *cookie)
 		spin_unlock(&cookie->stores_lock);
 
 		for (i = n - 1; i >= 0; i--)
-			put_page(results[i]);
+			page_cache_release(results[i]);
 	}
-
-	wake_up_bit(&cookie->flags, 0);
 
 	_leave("");
 }
@@ -989,7 +982,7 @@ int __fscache_write_page(struct fscache_cookie *cookie,
 
 	radix_tree_tag_set(&cookie->stores, page->index,
 			   FSCACHE_COOKIE_PENDING_TAG);
-	get_page(page);
+	page_cache_get(page);
 
 	/* we only want one writer at a time, but we do need to queue new
 	 * writers after exclusive ops */
@@ -1033,7 +1026,7 @@ submit_failed:
 	radix_tree_delete(&cookie->stores, page->index);
 	spin_unlock(&cookie->stores_lock);
 	wake_cookie = __fscache_unuse_cookie(cookie);
-	put_page(page);
+	page_cache_release(page);
 	ret = -ENOBUFS;
 	goto nobufs;
 

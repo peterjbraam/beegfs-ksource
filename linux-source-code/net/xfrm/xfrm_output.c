@@ -19,7 +19,7 @@
 #include <net/dst.h>
 #include <net/xfrm.h>
 
-static int xfrm_output2(struct net *net, struct sock *sk, struct sk_buff *skb);
+static int xfrm_output2(struct sock *sk, struct sk_buff *skb);
 
 static int xfrm_skb_check_space(struct sk_buff *skb)
 {
@@ -36,18 +36,6 @@ static int xfrm_skb_check_space(struct sk_buff *skb)
 		ntail = 0;
 
 	return pskb_expand_head(skb, nhead, ntail, GFP_ATOMIC);
-}
-
-/* Children define the path of the packet through the
- * Linux networking.  Thus, destinations are stackable.
- */
-
-static struct dst_entry *skb_dst_pop(struct sk_buff *skb)
-{
-	struct dst_entry *child = dst_clone(skb_dst(skb)->child);
-
-	skb_dst_drop(skb);
-	return child;
 }
 
 static int xfrm_output_one(struct sk_buff *skb, int err)
@@ -104,7 +92,7 @@ static int xfrm_output_one(struct sk_buff *skb, int err)
 
 		err = x->type->output(x, skb);
 		if (err == -EINPROGRESS)
-			goto out;
+			goto out_exit;
 
 resume:
 		if (err) {
@@ -122,32 +110,31 @@ resume:
 		x = dst->xfrm;
 	} while (x && !(x->outer_mode->flags & XFRM_MODE_FLAG_TUNNEL));
 
-	return 0;
+	err = 0;
 
+out_exit:
+	return err;
 error:
 	spin_unlock_bh(&x->lock);
 error_nolock:
 	kfree_skb(skb);
-out:
-	return err;
+	goto out_exit;
 }
 
 int xfrm_output_resume(struct sk_buff *skb, int err)
 {
-	struct net *net = xs_net(skb_dst(skb)->xfrm);
-
 	while (likely((err = xfrm_output_one(skb, err)) == 0)) {
 		nf_reset(skb);
 
-		err = skb_dst(skb)->ops->local_out(net, skb->sk, skb);
+		err = skb_dst(skb)->ops->local_out(skb);
 		if (unlikely(err != 1))
 			goto out;
 
 		if (!skb_dst(skb)->xfrm)
-			return dst_output(net, skb->sk, skb);
+			return dst_output(skb);
 
 		err = nf_hook(skb_dst(skb)->ops->family,
-			      NF_INET_POST_ROUTING, net, skb->sk, skb,
+			      NF_INET_POST_ROUTING, skb->sk, skb,
 			      NULL, skb_dst(skb)->dev, xfrm_output2);
 		if (unlikely(err != 1))
 			goto out;
@@ -161,12 +148,12 @@ out:
 }
 EXPORT_SYMBOL_GPL(xfrm_output_resume);
 
-static int xfrm_output2(struct net *net, struct sock *sk, struct sk_buff *skb)
+static int xfrm_output2(struct sock *sk, struct sk_buff *skb)
 {
 	return xfrm_output_resume(skb, 1);
 }
 
-static int xfrm_output_gso(struct net *net, struct sock *sk, struct sk_buff *skb)
+static int xfrm_output_gso(struct sock *sk, struct sk_buff *skb)
 {
 	struct sk_buff *segs;
 
@@ -184,10 +171,14 @@ static int xfrm_output_gso(struct net *net, struct sock *sk, struct sk_buff *skb
 		int err;
 
 		segs->next = NULL;
-		err = xfrm_output2(net, sk, segs);
+		err = xfrm_output2(sk, segs);
 
 		if (unlikely(err)) {
-			kfree_skb_list(nskb);
+			while ((segs = nskb)) {
+				nskb = segs->next;
+				segs->next = NULL;
+				kfree_skb(segs);
+			}
 			return err;
 		}
 
@@ -203,7 +194,7 @@ int xfrm_output(struct sock *sk, struct sk_buff *skb)
 	int err;
 
 	if (skb_is_gso(skb))
-		return xfrm_output_gso(net, sk, skb);
+		return xfrm_output_gso(sk, skb);
 
 	if (skb->ip_summed == CHECKSUM_PARTIAL) {
 		err = skb_checksum_help(skb);
@@ -214,9 +205,8 @@ int xfrm_output(struct sock *sk, struct sk_buff *skb)
 		}
 	}
 
-	return xfrm_output2(net, sk, skb);
+	return xfrm_output2(sk, skb);
 }
-EXPORT_SYMBOL_GPL(xfrm_output);
 
 int xfrm_inner_extract_output(struct xfrm_state *x, struct sk_buff *skb)
 {
@@ -231,26 +221,19 @@ int xfrm_inner_extract_output(struct xfrm_state *x, struct sk_buff *skb)
 		return -EAFNOSUPPORT;
 	return inner_mode->afinfo->extract_output(x, skb);
 }
-EXPORT_SYMBOL_GPL(xfrm_inner_extract_output);
 
 void xfrm_local_error(struct sk_buff *skb, int mtu)
 {
-	unsigned int proto;
 	struct xfrm_state_afinfo *afinfo;
 
-	if (skb->protocol == htons(ETH_P_IP))
-		proto = AF_INET;
-	else if (skb->protocol == htons(ETH_P_IPV6) &&
-		 skb->sk->sk_family == AF_INET6)
-		proto = AF_INET6;
-	else
-		return;
-
-	afinfo = xfrm_state_get_afinfo(proto);
+	afinfo = xfrm_state_get_afinfo(skb->sk->sk_family);
 	if (!afinfo)
 		return;
 
 	afinfo->local_error(skb, mtu);
 	xfrm_state_put_afinfo(afinfo);
 }
+
+EXPORT_SYMBOL_GPL(xfrm_output);
+EXPORT_SYMBOL_GPL(xfrm_inner_extract_output);
 EXPORT_SYMBOL_GPL(xfrm_local_error);

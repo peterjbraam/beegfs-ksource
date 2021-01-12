@@ -7,7 +7,14 @@
 #include <asm/processor.h>
 #include <asm/cpufeature.h>
 #include <asm/special_insns.h>
-#include <asm/smp.h>
+
+#ifdef CONFIG_PARAVIRT
+#include <asm/paravirt.h>
+#else
+#define __flush_tlb() __native_flush_tlb()
+#define __flush_tlb_global() __native_flush_tlb_global()
+#define __flush_tlb_single(addr) __native_flush_tlb_single(addr)
+#endif
 
 static inline void __invpcid(unsigned long pcid, unsigned long addr,
 			     unsigned long type)
@@ -57,150 +64,123 @@ static inline void invpcid_flush_all_nonglobals(void)
 	__invpcid(0, 0, INVPCID_TYPE_ALL_NON_GLOBAL);
 }
 
-#ifdef CONFIG_PARAVIRT
-#include <asm/paravirt.h>
-#else
-#define __flush_tlb() __native_flush_tlb()
-#define __flush_tlb_global() __native_flush_tlb_global()
-#define __flush_tlb_single(addr) __native_flush_tlb_single(addr)
-#endif
-
-struct tlb_state {
-	struct mm_struct *active_mm;
-	int state;
-
-	/* Last user mm for optimizing IBPB */
-	union {
-		struct mm_struct	*last_user_mm;
-		unsigned long		last_user_mm_ibpb;
-	};
-
-	/*
-	 * Access to this CR4 shadow and to H/W CR4 is protected by
-	 * disabling interrupts when modifying either one.
-	 */
-	unsigned long cr4;
-};
-DECLARE_PER_CPU_SHARED_ALIGNED(struct tlb_state, cpu_tlbstate);
-
-/* Initialize cr4 shadow for this CPU. */
-static inline void cr4_init_shadow(void)
-{
-	this_cpu_write(cpu_tlbstate.cr4, __read_cr4());
-}
-
-/* Set in this cpu's CR4. */
-static inline void cr4_set_bits(unsigned long mask)
-{
-	unsigned long cr4;
-
-	cr4 = this_cpu_read(cpu_tlbstate.cr4);
-	if ((cr4 | mask) != cr4) {
-		cr4 |= mask;
-		this_cpu_write(cpu_tlbstate.cr4, cr4);
-		__write_cr4(cr4);
-	}
-}
-
-/* Clear in this cpu's CR4. */
-static inline void cr4_clear_bits(unsigned long mask)
-{
-	unsigned long cr4;
-
-	cr4 = this_cpu_read(cpu_tlbstate.cr4);
-	if ((cr4 & ~mask) != cr4) {
-		cr4 &= ~mask;
-		this_cpu_write(cpu_tlbstate.cr4, cr4);
-		__write_cr4(cr4);
-	}
-}
-
-static inline void cr4_toggle_bits(unsigned long mask)
-{
-	unsigned long cr4;
-
-	cr4 = this_cpu_read(cpu_tlbstate.cr4);
-	cr4 ^= mask;
-	this_cpu_write(cpu_tlbstate.cr4, cr4);
-	__write_cr4(cr4);
-}
-
-/* Read the CR4 shadow. */
-static inline unsigned long cr4_read_shadow(void)
-{
-	return this_cpu_read(cpu_tlbstate.cr4);
-}
-
-/*
- * Save some of cr4 feature set we're using (e.g.  Pentium 4MB
- * enable and PPro Global page enable), so that any CPU's that boot
- * up after us can get the correct flags.  This should only be used
- * during boot on the boot cpu.
- */
-extern unsigned long mmu_cr4_features;
-extern u32 *trampoline_cr4_features;
-
-static inline void cr4_set_bits_and_update_boot(unsigned long mask)
-{
-	mmu_cr4_features |= mask;
-	if (trampoline_cr4_features)
-		*trampoline_cr4_features = mmu_cr4_features;
-	cr4_set_bits(mask);
-}
-
-/*
- * Declare a couple of kaiser interfaces here for convenience,
- * to avoid the need for asm/kaiser.h in unexpected places.
- */
 #ifdef CONFIG_PAGE_TABLE_ISOLATION
-extern int kaiser_enabled;
-extern void kaiser_setup_pcid(void);
-extern void kaiser_flush_tlb_on_return_to_user(void);
-#else
-#define kaiser_enabled 0
-static inline void kaiser_setup_pcid(void)
+
+/*
+ * RHEL7 Only
+ */
+#ifdef CONFIG_EFI
+/*
+ * Test whether this is the EFI pgd_t CR3 value used for EFI runtime services
+ */
+static inline bool is_efi_pgd_cr3(unsigned long cr3)
 {
+	extern unsigned long efi_pgd_cr3;
+	return cr3 == efi_pgd_cr3;
 }
-static inline void kaiser_flush_tlb_on_return_to_user(void)
+#else
+
+static inline bool is_efi_pgd_cr3(unsigned long cr3)
 {
+	return false;
 }
 #endif
+
+static __always_inline void __load_cr3(unsigned long cr3)
+{
+	if (static_cpu_has(X86_FEATURE_PCID) && kaiser_active()) {
+		unsigned long shadow_cr3;
+		VM_WARN_ON(cr3 & KAISER_SHADOW_PCID_ASID);
+		VM_WARN_ON(cr3 & (1<<KAISER_PGTABLE_SWITCH_BIT));
+		VM_WARN_ON(cr3 & X86_CR3_PCID_NOFLUSH);
+
+		if (this_cpu_has(X86_FEATURE_INVPCID_SINGLE)) {
+			invpcid_flush_single_context(KAISER_SHADOW_PCID_ASID);
+			write_cr3(cr3);
+			return;
+		}
+
+		/*
+		 * RHEL7 Only
+		 * The EFI pgd, which maps UEFI runtime services code and data
+		 * in addition to kernel space but no userspace, does not have
+		 * a shadow pgd. This exclusion is "RHEL7 Only" because the
+		 * subsequent performance optimization for processors with the
+		 * PCID feature but without INVPCID_SINGLE is also RHEL7 only.
+		 */
+		if (is_efi_pgd_cr3(cr3)) {
+			write_cr3(cr3);
+			return;
+		}
+
+		shadow_cr3 = cr3 | (1<<KAISER_PGTABLE_SWITCH_BIT) |
+			KAISER_SHADOW_PCID_ASID;
+		asm volatile("\tjmp 1f\n\t"
+			     "2:\n\t"
+			     ".section .entry.text, \"ax\"\n\t"
+			     "1:\n\t"
+			     "pushf\n\t"
+			     "cli\n\t"
+			     "movq %0, %%cr3\n\t"
+			     "movq %1, %%cr3\n\t"
+			     "popf\n\t"
+			     "jmp 2b\n\t"
+			     ".previous" : :
+			     "r" (shadow_cr3), "r" (cr3) :
+			     "memory");
+	} else
+		write_cr3(cr3);
+}
+#else /* CONFIG_PAGE_TABLE_ISOLATION */
+static __always_inline void __load_cr3(unsigned long cr3)
+{
+	write_cr3(cr3);
+}
+#endif /* CONFIG_PAGE_TABLE_ISOLATION */
 
 static inline void __native_flush_tlb(void)
 {
+	if (!static_cpu_has(X86_FEATURE_INVPCID)) {
+		__load_cr3(native_read_cr3());
+		return;
+	}
 	/*
-	 * If current->mm == NULL then we borrow a mm which may change during a
-	 * task switch and therefore we must not be preempted while we write CR3
-	 * back:
+	 * Note, this works with CR4.PCIDE=0 or 1.
 	 */
-	preempt_disable();
-	if (kaiser_enabled)
-		kaiser_flush_tlb_on_return_to_user();
-	native_write_cr3(native_read_cr3());
-	preempt_enable();
+	invpcid_flush_all_nonglobals();
 }
 
 static inline void __native_flush_tlb_global_irq_disabled(void)
 {
 	unsigned long cr4;
 
-	cr4 = this_cpu_read(cpu_tlbstate.cr4);
-	if (cr4 & X86_CR4_PGE) {
-		/* clear PGE and flush TLB of all entries */
-		native_write_cr4(cr4 & ~X86_CR4_PGE);
-		/* restore PGE as it was before */
-		native_write_cr4(cr4);
-	} else {
-		/* do it with cr3, letting kaiser flush user PCID */
-		__native_flush_tlb();
-	}
+	cr4 = native_read_cr4();
+	/*
+	 * This function is only called on systems that support X86_CR4_PGE
+	 * and where we expect X86_CR4_PGE to be set.  Warn if we are called
+	 * without PGE set.
+	 */
+	WARN_ON_ONCE(!(cr4 & X86_CR4_PGE));
+
+	/*
+	 * Architecturally, any _change_ to X86_CR4_PGE will fully flush
+	 * all entries.  Make sure that we _change_ the bit, regardless of
+	 * whether we had X86_CR4_PGE set in the first place.
+	 *
+	 * Note that just toggling PGE *also* flushes all entries from all
+	 * PCIDs, regardless of the state of X86_CR4_PCIDE.
+	 */
+	native_write_cr4(cr4 ^ X86_CR4_PGE);
+
+	/* Put original CR4 value back: */
+	native_write_cr4(cr4);
 }
 
 static inline void __native_flush_tlb_global(void)
 {
 	unsigned long flags;
 
-	if (this_cpu_has(X86_FEATURE_INVPCID)) {
+	if (static_cpu_has(X86_FEATURE_INVPCID)) {
 		/*
 		 * Using INVPCID is considerably faster than a pair of writes
 		 * to CR4 sandwiched inside an IRQ flag save/restore.
@@ -217,27 +197,17 @@ static inline void __native_flush_tlb_global(void)
 	 * be called from deep inside debugging code.)
 	 */
 	raw_local_irq_save(flags);
+
 	__native_flush_tlb_global_irq_disabled();
+
 	raw_local_irq_restore(flags);
 }
 
 static inline void __native_flush_tlb_single(unsigned long addr)
 {
-	/*
-	 * SIMICS #GP's if you run INVPCID with type 2/3
-	 * and X86_CR4_PCIDE clear.  Shame!
-	 *
-	 * The ASIDs used below are hard-coded.  But, we must not
-	 * call invpcid(type=1/2) before CR4.PCIDE=1.  Just call
-	 * invlpg in the case we are called early.
-	 */
+#ifdef CONFIG_PAGE_TABLE_ISOLATION
+	unsigned long cr3, shadow_cr3;
 
-	if (!this_cpu_has(X86_FEATURE_INVPCID_SINGLE)) {
-		if (kaiser_enabled)
-			kaiser_flush_tlb_on_return_to_user();
-		asm volatile("invlpg (%0)" ::"r" (addr) : "memory");
-		return;
-	}
 	/* Flush the address out of both PCIDs. */
 	/*
 	 * An optimization here might be to determine addresses
@@ -248,27 +218,56 @@ static inline void __native_flush_tlb_single(unsigned long addr)
 	 * Make sure to do only a single invpcid when KAISER is
 	 * disabled and we have only a single ASID.
 	 */
-	if (kaiser_enabled)
-		invpcid_flush_one(X86_CR3_PCID_ASID_USER, addr);
-	invpcid_flush_one(X86_CR3_PCID_ASID_KERN, addr);
+	if (static_cpu_has(X86_FEATURE_PCID) && kaiser_active()) {
+		/*
+		 * Some platforms #GP if we call invpcid(type=1/2) before
+		 * CR4.PCIDE=1.  Just call invpcid in the case we are called
+		 * early.
+		 */
+		if (this_cpu_has(X86_FEATURE_INVPCID_SINGLE)) {
+			invpcid_flush_one(KAISER_SHADOW_PCID_ASID, addr);
+			invpcid_flush_one(0, addr);
+			return;
+		}
+
+		cr3 = native_read_cr3();
+		VM_WARN_ON(cr3 & KAISER_SHADOW_PCID_ASID);
+		VM_WARN_ON(cr3 & (1<<KAISER_PGTABLE_SWITCH_BIT));
+		VM_WARN_ON(cr3 & X86_CR3_PCID_NOFLUSH);
+		cr3 |= X86_CR3_PCID_NOFLUSH;
+		shadow_cr3 = cr3 | (1<<KAISER_PGTABLE_SWITCH_BIT) |
+			KAISER_SHADOW_PCID_ASID;
+		asm volatile("\tjmp 1f\n\t"
+			     "2:\n\t"
+			     ".section .entry.text, \"ax\"\n\t"
+			     "1:\n\t"
+			     "pushf\n\t"
+			     "cli\n\t"
+			     "movq %0, %%cr3\n\t"
+			     "invlpg (%2)\n\t"
+			     "movq %1, %%cr3\n\t"
+			     "popf\n\t"
+			     "invlpg (%2)\n\t"
+			     "jmp 2b\n\t"
+			     ".previous" : :
+			     "r" (shadow_cr3), "r" (cr3), "r" (addr) :
+			     "memory");
+	} else
+#endif
+		asm volatile("invlpg (%0)" ::"r" (addr) : "memory");
 }
 
 static inline void __flush_tlb_all(void)
 {
-	__flush_tlb_global();
-	/*
-	 * Note: if we somehow had PCID but not PGE, then this wouldn't work --
-	 * we'd end up flushing kernel translations for the current ASID but
-	 * we might fail to flush kernel translations for other cached ASIDs.
-	 *
-	 * To avoid this issue, we force PCID off if PGE is off.
-	 */
+	if (cpu_has_pge)
+		__flush_tlb_global();
+	else
+		__flush_tlb();
 }
 
 static inline void __flush_tlb_one(unsigned long addr)
 {
-	count_vm_tlb_event(NR_TLB_LOCAL_FLUSH_ONE);
-	__flush_tlb_single(addr);
+		__flush_tlb_single(addr);
 }
 
 #define TLB_FLUSH_ALL	-1UL
@@ -287,6 +286,60 @@ static inline void __flush_tlb_one(unsigned long addr)
  * and page-granular flushes are available only on i486 and up.
  */
 
+#ifndef CONFIG_SMP
+
+#define flush_tlb() __flush_tlb()
+#define flush_tlb_all() __flush_tlb_all()
+#define local_flush_tlb() __flush_tlb()
+
+static inline void flush_tlb_mm(struct mm_struct *mm)
+{
+	if (mm == current->active_mm)
+		__flush_tlb();
+}
+
+static inline void flush_tlb_page(struct vm_area_struct *vma,
+				  unsigned long addr)
+{
+	if (vma->vm_mm == current->active_mm)
+		__flush_tlb_one(addr);
+}
+
+static inline void flush_tlb_range(struct vm_area_struct *vma,
+				   unsigned long start, unsigned long end)
+{
+	if (vma->vm_mm == current->active_mm)
+		__flush_tlb();
+}
+
+static inline void flush_tlb_mm_range(struct mm_struct *mm,
+	   unsigned long start, unsigned long end, unsigned long vmflag)
+{
+	if (mm == current->active_mm)
+		__flush_tlb();
+}
+
+static inline void native_flush_tlb_others(const struct cpumask *cpumask,
+					   struct mm_struct *mm,
+					   unsigned long start,
+					   unsigned long end)
+{
+}
+
+static inline void reset_lazy_tlbstate(void)
+{
+}
+
+static inline void flush_tlb_kernel_range(unsigned long start,
+					  unsigned long end)
+{
+	flush_tlb_all();
+}
+
+#else  /* SMP */
+
+#include <asm/smp.h>
+
 #define local_flush_tlb() __flush_tlb()
 
 #define flush_tlb_mm(mm)	flush_tlb_mm_range(mm, 0UL, TLB_FLUSH_ALL, 0UL)
@@ -295,14 +348,10 @@ static inline void __flush_tlb_one(unsigned long addr)
 		flush_tlb_mm_range(vma->vm_mm, start, end, vma->vm_flags)
 
 extern void flush_tlb_all(void);
+extern void flush_tlb_page(struct vm_area_struct *, unsigned long);
 extern void flush_tlb_mm_range(struct mm_struct *mm, unsigned long start,
 				unsigned long end, unsigned long vmflag);
 extern void flush_tlb_kernel_range(unsigned long start, unsigned long end);
-
-static inline void flush_tlb_page(struct vm_area_struct *vma, unsigned long a)
-{
-	flush_tlb_mm_range(vma->vm_mm, a, a + PAGE_SIZE, VM_NONE);
-}
 
 void native_flush_tlb_others(const struct cpumask *cpumask,
 				struct mm_struct *mm,
@@ -311,10 +360,24 @@ void native_flush_tlb_others(const struct cpumask *cpumask,
 #define TLBSTATE_OK	1
 #define TLBSTATE_LAZY	2
 
+struct tlb_state {
+	struct mm_struct *active_mm;
+	int state;
+};
+DECLARE_PER_CPU_SHARED_ALIGNED(struct tlb_state, cpu_tlbstate);
+
 static inline void reset_lazy_tlbstate(void)
 {
 	this_cpu_write(cpu_tlbstate.state, 0);
 	this_cpu_write(cpu_tlbstate.active_mm, &init_mm);
+}
+
+#endif	/* SMP */
+
+/* Not inlined due to inc_irq_stat not being defined yet */
+#define flush_tlb_local() {		\
+	inc_irq_stat(irq_tlb_count);	\
+	local_flush_tlb();		\
 }
 
 #ifndef CONFIG_PARAVIRT

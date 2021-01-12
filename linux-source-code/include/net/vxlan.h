@@ -4,7 +4,7 @@
 #include <linux/if_vlan.h>
 #include <net/udp_tunnel.h>
 #include <net/dst_metadata.h>
-#include <net/udp_tunnel.h>
+#include <net/rtnetlink.h>
 
 /* VXLAN protocol (RFC 7348) header:
  * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -168,12 +168,6 @@ reserved_flags2:2;
 #define VXLAN_GPE_USED_BITS (VXLAN_HF_VER | VXLAN_HF_NP | VXLAN_HF_OAM | \
 			     cpu_to_be32(0xff))
 
-/* VXLAN-GPE header Next Protocol. */
-#define VXLAN_GPE_NP_IPV4      0x01
-#define VXLAN_GPE_NP_IPV6      0x02
-#define VXLAN_GPE_NP_ETHERNET  0x03
-#define VXLAN_GPE_NP_NSH       0x04
-
 struct vxlan_metadata {
 	u32		gbp;
 };
@@ -240,7 +234,6 @@ struct vxlan_dev {
 	struct net_device *dev;
 	struct net	  *net;		/* netns for packet i/o */
 	struct vxlan_rdst default_dst;	/* default destination */
-	u32		  flags;	/* VXLAN_F_* in vxlan.h */
 
 	struct timer_list age_timer;
 	spinlock_t	  hash_lock;
@@ -267,6 +260,8 @@ struct vxlan_dev {
 #define VXLAN_F_REMCSUM_NOPARTIAL	0x1000
 #define VXLAN_F_COLLECT_METADATA	0x2000
 #define VXLAN_F_GPE			0x4000
+#define VXLAN_F_IPV6_LINKLOCAL		0x8000
+#define VXLAN_F_TTL_INHERIT		0x10000
 
 /* Flags that are used in the receive path. These flags must match in
  * order for a socket to be shareable
@@ -281,23 +276,14 @@ struct vxlan_dev {
 /* Flags that can be set together with VXLAN_F_GPE. */
 #define VXLAN_F_ALLOWED_GPE		(VXLAN_F_GPE |			\
 					 VXLAN_F_IPV6 |			\
+					 VXLAN_F_IPV6_LINKLOCAL |	\
 					 VXLAN_F_UDP_ZERO_CSUM_TX |	\
 					 VXLAN_F_UDP_ZERO_CSUM6_TX |	\
 					 VXLAN_F_UDP_ZERO_CSUM6_RX |	\
 					 VXLAN_F_COLLECT_METADATA)
 
 struct net_device *vxlan_dev_create(struct net *net, const char *name,
-				    u8 name_assign_type, struct vxlan_config *conf);
-
-static inline __be16 vxlan_dev_dst_port(struct vxlan_dev *vxlan,
-					unsigned short family)
-{
-#if IS_ENABLED(CONFIG_IPV6)
-	if (family == AF_INET6)
-		return inet_sk(vxlan->vn6_sock->sock->sk)->inet_sport;
-#endif
-	return inet_sk(vxlan->vn4_sock->sock->sk)->inet_sport;
-}
+				    struct vxlan_config *conf);
 
 static inline netdev_features_t vxlan_features_check(struct sk_buff *skb,
 						     netdev_features_t features)
@@ -382,6 +368,44 @@ static inline __be32 vxlan_compute_rco(unsigned int start, unsigned int offset)
 static inline unsigned short vxlan_get_sk_family(struct vxlan_sock *vs)
 {
 	return vs->sock->sk->sk_family;
+}
+
+#if IS_ENABLED(CONFIG_IPV6)
+
+static inline bool vxlan_addr_any(const union vxlan_addr *ipa)
+{
+	if (ipa->sa.sa_family == AF_INET6)
+		return ipv6_addr_any(&ipa->sin6.sin6_addr);
+	else
+		return ipa->sin.sin_addr.s_addr == htonl(INADDR_ANY);
+}
+
+static inline bool vxlan_addr_multicast(const union vxlan_addr *ipa)
+{
+	if (ipa->sa.sa_family == AF_INET6)
+		return ipv6_addr_is_multicast(&ipa->sin6.sin6_addr);
+	else
+		return IN_MULTICAST(ntohl(ipa->sin.sin_addr.s_addr));
+}
+
+#else /* !IS_ENABLED(CONFIG_IPV6) */
+
+static inline bool vxlan_addr_any(const union vxlan_addr *ipa)
+{
+	return ipa->sin.sin_addr.s_addr == htonl(INADDR_ANY);
+}
+
+static inline bool vxlan_addr_multicast(const union vxlan_addr *ipa)
+{
+	return IN_MULTICAST(ntohl(ipa->sin.sin_addr.s_addr));
+}
+
+#endif /* IS_ENABLED(CONFIG_IPV6) */
+
+static inline bool netif_is_vxlan(const struct net_device *dev)
+{
+	return dev->rtnl_link_ops &&
+	       !strcmp(dev->rtnl_link_ops->kind, "vxlan");
 }
 
 #endif

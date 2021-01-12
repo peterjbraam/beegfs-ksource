@@ -25,36 +25,58 @@
 #include "xfs_trans.h"
 #include "xfs_trans_priv.h"
 #include "xfs_trace.h"
+#include "xfs_errortag.h"
 #include "xfs_error.h"
 #include "xfs_log.h"
 
 #ifdef DEBUG
 /*
  * Check that the list is sorted as it should be.
+ *
+ * Called with the ail lock held, but we don't want to assert fail with it
+ * held otherwise we'll lock everything up and won't be able to debug the
+ * cause. Hence we sample and check the state under the AIL lock and return if
+ * everything is fine, otherwise we drop the lock and run the ASSERT checks.
+ * Asserts may not be fatal, so pick the lock back up and continue onwards.
  */
 STATIC void
 xfs_ail_check(
-	struct xfs_ail	*ailp,
-	xfs_log_item_t	*lip)
+	struct xfs_ail		*ailp,
+	struct xfs_log_item	*lip)
 {
-	xfs_log_item_t	*prev_lip;
+	struct xfs_log_item	*prev_lip;
+	struct xfs_log_item	*next_lip;
+	xfs_lsn_t		prev_lsn = NULLCOMMITLSN;
+	xfs_lsn_t		next_lsn = NULLCOMMITLSN;
+	xfs_lsn_t		lsn;
+	bool			in_ail;
+
 
 	if (list_empty(&ailp->xa_ail))
 		return;
 
 	/*
-	 * Check the next and previous entries are valid.
+	 * Sample then check the next and previous entries are valid.
 	 */
-	ASSERT((lip->li_flags & XFS_LI_IN_AIL) != 0);
-	prev_lip = list_entry(lip->li_ail.prev, xfs_log_item_t, li_ail);
+	in_ail = test_bit(XFS_LI_IN_AIL, &lip->li_flags);
+	prev_lip = list_entry(lip->li_ail.prev, struct xfs_log_item, li_ail);
 	if (&prev_lip->li_ail != &ailp->xa_ail)
-		ASSERT(XFS_LSN_CMP(prev_lip->li_lsn, lip->li_lsn) <= 0);
+		prev_lsn = prev_lip->li_lsn;
+	next_lip = list_entry(lip->li_ail.next, struct xfs_log_item, li_ail);
+	if (&next_lip->li_ail != &ailp->xa_ail)
+		next_lsn = next_lip->li_lsn;
+	lsn = lip->li_lsn;
 
-	prev_lip = list_entry(lip->li_ail.next, xfs_log_item_t, li_ail);
-	if (&prev_lip->li_ail != &ailp->xa_ail)
-		ASSERT(XFS_LSN_CMP(prev_lip->li_lsn, lip->li_lsn) >= 0);
+	if (in_ail &&
+	    (prev_lsn == NULLCOMMITLSN || XFS_LSN_CMP(prev_lsn, lsn) <= 0) &&
+	    (next_lsn == NULLCOMMITLSN || XFS_LSN_CMP(next_lsn, lsn) >= 0))
+		return;
 
-
+	spin_unlock(&ailp->xa_lock);
+	ASSERT(in_ail);
+	ASSERT(prev_lsn == NULLCOMMITLSN || XFS_LSN_CMP(prev_lsn, lsn) <= 0);
+	ASSERT(next_lsn == NULLCOMMITLSN || XFS_LSN_CMP(next_lsn, lsn) >= 0);
+	spin_lock(&ailp->xa_lock);
 }
 #else /* !DEBUG */
 #define	xfs_ail_check(a,l)
@@ -325,6 +347,21 @@ xfs_ail_delete(
 	xfs_trans_ail_cursor_clear(ailp, lip);
 }
 
+static inline uint
+xfsaild_push_item(
+	struct xfs_ail		*ailp,
+	struct xfs_log_item	*lip)
+{
+	/*
+	 * If log item pinning is enabled, skip the push and track the item as
+	 * pinned. This can help induce head-behind-tail conditions.
+	 */
+	if (XFS_TEST_ERROR(false, ailp->xa_mount, XFS_ERRTAG_LOG_ITEM_PIN))
+		return XFS_ITEM_PINNED;
+
+	return lip->li_ops->iop_push(lip, &ailp->xa_buf_list);
+}
+
 static long
 xfsaild_push(
 	struct xfs_ail		*ailp)
@@ -382,7 +419,7 @@ xfsaild_push(
 		 * rely on the AIL cursor implementation to be able to deal with
 		 * the dropped lock.
 		 */
-		lock_result = lip->li_ops->iop_push(lip, &ailp->xa_buf_list);
+		lock_result = xfsaild_push_item(ailp, lip);
 		switch (lock_result) {
 		case XFS_ITEM_SUCCESS:
 			XFS_STATS_INC(mp, xs_push_ail_success);
@@ -499,11 +536,26 @@ xfsaild(
 	current->flags |= PF_MEMALLOC;
 	set_freezable();
 
-	while (!kthread_should_stop()) {
+	while (1) {
 		if (tout && tout <= 20)
-			__set_current_state(TASK_KILLABLE);
+			set_current_state(TASK_KILLABLE);
 		else
-			__set_current_state(TASK_INTERRUPTIBLE);
+			set_current_state(TASK_INTERRUPTIBLE);
+
+		/*
+		 * Check kthread_should_stop() after we set the task state
+		 * to guarantee that we either see the stop bit and exit or
+		 * the task state is reset to runnable such that it's not
+		 * scheduled out indefinitely and detects the stop bit at
+		 * next iteration.
+		 *
+		 * A memory barrier is included in above task state set to
+		 * serialize again kthread_stop().
+		 */
+		if (kthread_should_stop()) {
+			__set_current_state(TASK_RUNNING);
+			break;
+		}
 
 		spin_lock(&ailp->xa_lock);
 
@@ -653,7 +705,7 @@ xfs_trans_ail_update_bulk(
 
 	for (i = 0; i < nr_items; i++) {
 		struct xfs_log_item *lip = log_items[i];
-		if (lip->li_flags & XFS_LI_IN_AIL) {
+		if (test_and_set_bit(XFS_LI_IN_AIL, &lip->li_flags)) {
 			/* check if we really need to move the item */
 			if (XFS_LSN_CMP(lsn, lip->li_lsn) <= 0)
 				continue;
@@ -663,7 +715,6 @@ xfs_trans_ail_update_bulk(
 			if (mlip == lip)
 				mlip_changed = 1;
 		} else {
-			lip->li_flags |= XFS_LI_IN_AIL;
 			trace_xfs_ail_insert(lip, 0, lsn);
 		}
 		lip->li_lsn = lsn;
@@ -694,7 +745,7 @@ xfs_ail_delete_one(
 	trace_xfs_ail_delete(lip, mlip->li_lsn, lip->li_lsn);
 	xfs_ail_delete(ailp, lip);
 	xfs_clear_li_failed(lip);
-	lip->li_flags &= ~XFS_LI_IN_AIL;
+	clear_bit(XFS_LI_IN_AIL, &lip->li_flags);
 	lip->li_lsn = 0;
 
 	return mlip == lip;
@@ -730,7 +781,7 @@ xfs_trans_ail_delete(
 	struct xfs_mount	*mp = ailp->xa_mount;
 	bool			mlip_changed;
 
-	if (!(lip->li_flags & XFS_LI_IN_AIL)) {
+	if (!test_bit(XFS_LI_IN_AIL, &lip->li_flags)) {
 		spin_unlock(&ailp->xa_lock);
 		if (!XFS_FORCED_SHUTDOWN(mp)) {
 			xfs_alert_tag(mp, XFS_PTAG_AILDELETE,

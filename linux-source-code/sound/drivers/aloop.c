@@ -337,7 +337,7 @@ static int loopback_prepare(struct snd_pcm_substream *substream)
 
 	loopback_timer_stop_sync(dpcm);
 
-	salign = (snd_pcm_format_width(runtime->format) *
+	salign = (snd_pcm_format_physical_width(runtime->format) *
 						runtime->channels) / 8;
 	bps = salign * runtime->rate;
 	if (bps <= 0 || salign <= 0)
@@ -556,12 +556,14 @@ static snd_pcm_uframes_t loopback_pointer(struct snd_pcm_substream *substream)
 	return bytes_to_frames(runtime, pos);
 }
 
-static struct snd_pcm_hardware loopback_pcm_hardware =
+static const struct snd_pcm_hardware loopback_pcm_hardware =
 {
 	.info =		(SNDRV_PCM_INFO_INTERLEAVED | SNDRV_PCM_INFO_MMAP |
 			 SNDRV_PCM_INFO_MMAP_VALID | SNDRV_PCM_INFO_PAUSE |
 			 SNDRV_PCM_INFO_RESUME),
 	.formats =	(SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S16_BE |
+			 SNDRV_PCM_FMTBIT_S24_LE | SNDRV_PCM_FMTBIT_S24_BE |
+			 SNDRV_PCM_FMTBIT_S24_3LE | SNDRV_PCM_FMTBIT_S24_3BE |
 			 SNDRV_PCM_FMTBIT_S32_LE | SNDRV_PCM_FMTBIT_S32_BE |
 			 SNDRV_PCM_FMTBIT_FLOAT_LE | SNDRV_PCM_FMTBIT_FLOAT_BE),
 	.rates =	SNDRV_PCM_RATE_CONTINUOUS | SNDRV_PCM_RATE_8000_192000,
@@ -769,7 +771,7 @@ static int loopback_close(struct snd_pcm_substream *substream)
 	return 0;
 }
 
-static struct snd_pcm_ops loopback_playback_ops = {
+static const struct snd_pcm_ops loopback_pcm_ops = {
 	.open =		loopback_open,
 	.close =	loopback_close,
 	.ioctl =	snd_pcm_lib_ioctl,
@@ -779,20 +781,6 @@ static struct snd_pcm_ops loopback_playback_ops = {
 	.trigger =	loopback_trigger,
 	.pointer =	loopback_pointer,
 	.page =		snd_pcm_lib_get_vmalloc_page,
-	.mmap =		snd_pcm_lib_mmap_vmalloc,
-};
-
-static struct snd_pcm_ops loopback_capture_ops = {
-	.open =		loopback_open,
-	.close =	loopback_close,
-	.ioctl =	snd_pcm_lib_ioctl,
-	.hw_params =	loopback_hw_params,
-	.hw_free =	loopback_hw_free,
-	.prepare =	loopback_prepare,
-	.trigger =	loopback_trigger,
-	.pointer =	loopback_pointer,
-	.page =		snd_pcm_lib_get_vmalloc_page,
-	.mmap =		snd_pcm_lib_mmap_vmalloc,
 };
 
 static int loopback_pcm_new(struct loopback *loopback,
@@ -805,8 +793,8 @@ static int loopback_pcm_new(struct loopback *loopback,
 			  substreams, substreams, &pcm);
 	if (err < 0)
 		return err;
-	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &loopback_playback_ops);
-	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_CAPTURE, &loopback_capture_ops);
+	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &loopback_pcm_ops);
+	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_CAPTURE, &loopback_pcm_ops);
 
 	pcm->private_data = loopback;
 	pcm->info_flags = 0;
@@ -1148,16 +1136,10 @@ static void print_cable_info(struct snd_info_entry *entry,
 static int loopback_proc_new(struct loopback *loopback, int cidx)
 {
 	char name[32];
-	struct snd_info_entry *entry;
-	int err;
 
 	snprintf(name, sizeof(name), "cable#%d", cidx);
-	err = snd_card_proc_new(loopback->card, name, &entry);
-	if (err < 0)
-		return err;
-
-	snd_info_set_text_ops(entry, loopback, print_cable_info);
-	return 0;
+	return snd_card_ro_proc_new(loopback->card, name, loopback,
+				    print_cable_info);
 }
 
 static int loopback_probe(struct platform_device *devptr)

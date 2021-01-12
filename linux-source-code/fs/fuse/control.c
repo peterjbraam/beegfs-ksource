@@ -125,7 +125,12 @@ static ssize_t fuse_conn_max_background_write(struct file *file,
 	if (ret > 0) {
 		struct fuse_conn *fc = fuse_ctl_file_conn_get(file);
 		if (fc) {
+			spin_lock(&fc->lock);
 			fc->max_background = val;
+			fc->blocked = fc->num_background >= fc->max_background;
+			if (!fc->blocked)
+				wake_up(&fc->blocked_waitq);
+			spin_unlock(&fc->lock);
 			fuse_conn_put(fc);
 		}
 	}
@@ -155,18 +160,31 @@ static ssize_t fuse_conn_congestion_threshold_write(struct file *file,
 						    size_t count, loff_t *ppos)
 {
 	unsigned uninitialized_var(val);
+	struct fuse_conn *fc;
 	ssize_t ret;
 
 	ret = fuse_conn_limit_write(file, buf, count, ppos, &val,
 				    max_user_congthresh);
-	if (ret > 0) {
-		struct fuse_conn *fc = fuse_ctl_file_conn_get(file);
-		if (fc) {
-			fc->congestion_threshold = val;
-			fuse_conn_put(fc);
+	if (ret <= 0)
+		goto out;
+	fc = fuse_ctl_file_conn_get(file);
+	if (!fc)
+		goto out;
+
+	spin_lock(&fc->lock);
+	fc->congestion_threshold = val;
+	if (fc->sb) {
+		if (fc->num_background < fc->congestion_threshold) {
+			clear_bdi_congested(fc->sb->s_bdi, BLK_RW_SYNC);
+			clear_bdi_congested(fc->sb->s_bdi, BLK_RW_ASYNC);
+		} else {
+			set_bdi_congested(fc->sb->s_bdi, BLK_RW_SYNC);
+			set_bdi_congested(fc->sb->s_bdi, BLK_RW_ASYNC);
 		}
 	}
-
+	spin_unlock(&fc->lock);
+	fuse_conn_put(fc);
+out:
 	return ret;
 }
 
@@ -221,7 +239,7 @@ static struct dentry *fuse_ctl_add_dentry(struct dentry *parent,
 	inode->i_mode = mode;
 	inode->i_uid = fc->user_id;
 	inode->i_gid = fc->group_id;
-	inode->i_atime = inode->i_mtime = inode->i_ctime = current_time(inode);
+	inode->i_atime = inode->i_mtime = inode->i_ctime = CURRENT_TIME;
 	/* setting ->i_op to NULL is not allowed */
 	if (iop)
 		inode->i_op = iop;
@@ -248,7 +266,7 @@ int fuse_ctl_add_conn(struct fuse_conn *fc)
 		return 0;
 
 	parent = fuse_control_sb->s_root;
-	inc_nlink(d_inode(parent));
+	inc_nlink(parent->d_inode);
 	sprintf(name, "%u", fc->dev);
 	parent = fuse_ctl_add_dentry(parent, fc, name, S_IFDIR | 0500, 2,
 				     &simple_dir_inode_operations,
@@ -287,14 +305,14 @@ void fuse_ctl_remove_conn(struct fuse_conn *fc)
 
 	for (i = fc->ctl_ndents - 1; i >= 0; i--) {
 		struct dentry *dentry = fc->ctl_dentry[i];
-		d_inode(dentry)->i_private = NULL;
+		dentry->d_inode->i_private = NULL;
 		if (!i) {
 			/* Get rid of submounts: */
 			d_invalidate(dentry);
 		}
 		dput(dentry);
 	}
-	drop_nlink(d_inode(fuse_control_sb->s_root));
+	drop_nlink(fuse_control_sb->s_root->d_inode);
 }
 
 static int fuse_ctl_fill_super(struct super_block *sb, void *data, int silent)

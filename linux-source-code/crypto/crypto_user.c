@@ -25,8 +25,8 @@
 #include <net/netlink.h>
 #include <linux/security.h>
 #include <net/net_namespace.h>
+#include <crypto/internal/aead.h>
 #include <crypto/internal/skcipher.h>
-#include <crypto/internal/rng.h>
 #include <crypto/akcipher.h>
 #include <crypto/kpp.h>
 
@@ -67,14 +67,10 @@ static struct crypto_alg *crypto_alg_match(struct crypto_user_alg *p, int exact)
 		else if (!exact)
 			match = !strcmp(q->cra_name, p->cru_name);
 
-		if (!match)
-			continue;
-
-		if (unlikely(!crypto_mod_get(q)))
-			continue;
-
-		alg = q;
-		break;
+		if (match) {
+			alg = q;
+			break;
+		}
 	}
 
 	up_read(&crypto_alg_sem);
@@ -108,6 +104,21 @@ static int crypto_report_comp(struct sk_buff *skb, struct crypto_alg *alg)
 	strncpy(rcomp.type, "compression", sizeof(rcomp.type));
 	if (nla_put(skb, CRYPTOCFGA_REPORT_COMPRESS,
 		    sizeof(struct crypto_report_comp), &rcomp))
+		goto nla_put_failure;
+	return 0;
+
+nla_put_failure:
+	return -EMSGSIZE;
+}
+
+static int crypto_report_acomp(struct sk_buff *skb, struct crypto_alg *alg)
+{
+	struct crypto_report_acomp racomp;
+
+	strncpy(racomp.type, "acomp", sizeof(racomp.type));
+
+	if (nla_put(skb, CRYPTOCFGA_REPORT_ACOMP,
+		    sizeof(struct crypto_report_acomp), &racomp))
 		goto nla_put_failure;
 	return 0;
 
@@ -189,7 +200,11 @@ static int crypto_report_one(struct crypto_alg *alg,
 			goto nla_put_failure;
 
 		break;
+	case CRYPTO_ALG_TYPE_ACOMPRESS:
+		if (crypto_report_acomp(skb, alg))
+			goto nla_put_failure;
 
+		break;
 	case CRYPTO_ALG_TYPE_AKCIPHER:
 		if (crypto_report_akcipher(skb, alg))
 			goto nla_put_failure;
@@ -250,14 +265,16 @@ static int crypto_report(struct sk_buff *in_skb, struct nlmsghdr *in_nlh,
 	if (!null_terminated(p->cru_name) || !null_terminated(p->cru_driver_name))
 		return -EINVAL;
 
-	alg = crypto_alg_match(p, 0);
+	if (!p->cru_driver_name[0])
+		return -EINVAL;
+
+	alg = crypto_alg_match(p, 1);
 	if (!alg)
 		return -ENOENT;
 
-	err = -ENOMEM;
 	skb = nlmsg_new(NLMSG_DEFAULT_SIZE, GFP_ATOMIC);
 	if (!skb)
-		goto drop_alg;
+		return -ENOMEM;
 
 	info.in_skb = in_skb;
 	info.out_skb = skb;
@@ -265,47 +282,38 @@ static int crypto_report(struct sk_buff *in_skb, struct nlmsghdr *in_nlh,
 	info.nlmsg_flags = 0;
 
 	err = crypto_report_alg(alg, &info);
-
-drop_alg:
-	crypto_mod_put(alg);
-
-	if (err) {
-		kfree_skb(skb);
+	if (err)
 		return err;
-	}
 
 	return nlmsg_unicast(crypto_nlsk, skb, NETLINK_CB(in_skb).portid);
 }
 
 static int crypto_dump_report(struct sk_buff *skb, struct netlink_callback *cb)
 {
-	const size_t start_pos = cb->args[0];
-	size_t pos = 0;
-	struct crypto_dump_info info;
 	struct crypto_alg *alg;
-	int res;
+	struct crypto_dump_info info;
+	int err;
+
+	if (cb->args[0])
+		goto out;
+
+	cb->args[0] = 1;
 
 	info.in_skb = cb->skb;
 	info.out_skb = skb;
 	info.nlmsg_seq = cb->nlh->nlmsg_seq;
 	info.nlmsg_flags = NLM_F_MULTI;
 
-	down_read(&crypto_alg_sem);
 	list_for_each_entry(alg, &crypto_alg_list, cra_list) {
-		if (pos >= start_pos) {
-			res = crypto_report_alg(alg, &info);
-			if (res == -EMSGSIZE)
-				break;
-			if (res)
-				goto out;
-		}
-		pos++;
+		err = crypto_report_alg(alg, &info);
+		if (err)
+			goto out_err;
 	}
-	cb->args[0] = pos;
-	res = skb->len;
+
 out:
-	up_read(&crypto_alg_sem);
-	return res;
+	return skb->len;
+out_err:
+	return err;
 }
 
 static int crypto_dump_report_done(struct netlink_callback *cb)
@@ -320,9 +328,6 @@ static int crypto_update_alg(struct sk_buff *skb, struct nlmsghdr *nlh,
 	struct crypto_user_alg *p = nlmsg_data(nlh);
 	struct nlattr *priority = attrs[CRYPTOCFGA_PRIORITY_VAL];
 	LIST_HEAD(list);
-
-	if (!netlink_capable(skb, CAP_NET_ADMIN))
-		return -EPERM;
 
 	if (!null_terminated(p->cru_name) || !null_terminated(p->cru_driver_name))
 		return -EINVAL;
@@ -343,7 +348,6 @@ static int crypto_update_alg(struct sk_buff *skb, struct nlmsghdr *nlh,
 
 	up_write(&crypto_alg_sem);
 
-	crypto_mod_put(alg);
 	crypto_remove_final(&list);
 
 	return 0;
@@ -354,10 +358,6 @@ static int crypto_del_alg(struct sk_buff *skb, struct nlmsghdr *nlh,
 {
 	struct crypto_alg *alg;
 	struct crypto_user_alg *p = nlmsg_data(nlh);
-	int err;
-
-	if (!netlink_capable(skb, CAP_NET_ADMIN))
-		return -EPERM;
 
 	if (!null_terminated(p->cru_name) || !null_terminated(p->cru_driver_name))
 		return -EINVAL;
@@ -371,19 +371,67 @@ static int crypto_del_alg(struct sk_buff *skb, struct nlmsghdr *nlh,
 	 * if we try to unregister. Unregistering such an algorithm without
 	 * removing the module is not possible, so we restrict to crypto
 	 * instances that are build from templates. */
-	err = -EINVAL;
 	if (!(alg->cra_flags & CRYPTO_ALG_INSTANCE))
-		goto drop_alg;
+		return -EINVAL;
 
-	err = -EBUSY;
-	if (atomic_read(&alg->cra_refcnt) > 2)
-		goto drop_alg;
+	if (atomic_read(&alg->cra_refcnt) != 1)
+		return -EBUSY;
 
-	err = crypto_unregister_instance((struct crypto_instance *)alg);
+	return crypto_unregister_instance((struct crypto_instance *)alg);
+}
 
-drop_alg:
-	crypto_mod_put(alg);
-	return err;
+static struct crypto_alg *crypto_user_skcipher_alg(const char *name, u32 type,
+						   u32 mask)
+{
+	int err;
+	struct crypto_alg *alg;
+
+	type = crypto_skcipher_type(type);
+	mask = crypto_skcipher_mask(mask);
+
+	for (;;) {
+		alg = crypto_lookup_skcipher(name,  type, mask);
+		if (!IS_ERR(alg))
+			return alg;
+
+		err = PTR_ERR(alg);
+		if (err != -EAGAIN)
+			break;
+		if (fatal_signal_pending(current)) {
+			err = -EINTR;
+			break;
+		}
+	}
+
+	return ERR_PTR(err);
+}
+
+static struct crypto_alg *crypto_user_aead_alg(const char *name, u32 type,
+					       u32 mask)
+{
+	int err;
+	struct crypto_alg *alg;
+
+	type &= ~(CRYPTO_ALG_TYPE_MASK | CRYPTO_ALG_GENIV);
+	type |= CRYPTO_ALG_TYPE_AEAD;
+	mask &= ~(CRYPTO_ALG_TYPE_MASK | CRYPTO_ALG_GENIV);
+	mask |= CRYPTO_ALG_TYPE_MASK;
+
+	for (;;) {
+		alg = crypto_lookup_aead(name,  type, mask);
+		if (!IS_ERR(alg))
+			return alg;
+
+		err = PTR_ERR(alg);
+		if (err != -EAGAIN)
+			break;
+		if (signal_pending(current)) {
+			err = -EINTR;
+			break;
+		}
+	}
+
+	return ERR_PTR(err);
 }
 
 static int crypto_add_alg(struct sk_buff *skb, struct nlmsghdr *nlh,
@@ -395,9 +443,6 @@ static int crypto_add_alg(struct sk_buff *skb, struct nlmsghdr *nlh,
 	struct crypto_user_alg *p = nlmsg_data(nlh);
 	struct nlattr *priority = attrs[CRYPTOCFGA_PRIORITY_VAL];
 
-	if (!netlink_capable(skb, CAP_NET_ADMIN))
-		return -EPERM;
-
 	if (!null_terminated(p->cru_name) || !null_terminated(p->cru_driver_name))
 		return -EINVAL;
 
@@ -408,17 +453,27 @@ static int crypto_add_alg(struct sk_buff *skb, struct nlmsghdr *nlh,
 		return -EINVAL;
 
 	alg = crypto_alg_match(p, exact);
-	if (alg) {
-		crypto_mod_put(alg);
+	if (alg)
 		return -EEXIST;
-	}
 
 	if (strlen(p->cru_driver_name))
 		name = p->cru_driver_name;
 	else
 		name = p->cru_name;
 
-	alg = crypto_alg_mod_lookup(name, p->cru_type, p->cru_mask);
+	switch (p->cru_type & p->cru_mask & CRYPTO_ALG_TYPE_MASK) {
+	case CRYPTO_ALG_TYPE_AEAD:
+		alg = crypto_user_aead_alg(name, p->cru_type, p->cru_mask);
+		break;
+	case CRYPTO_ALG_TYPE_GIVCIPHER:
+	case CRYPTO_ALG_TYPE_BLKCIPHER:
+	case CRYPTO_ALG_TYPE_ABLKCIPHER:
+		alg = crypto_user_skcipher_alg(name, p->cru_type, p->cru_mask);
+		break;
+	default:
+		alg = crypto_alg_mod_lookup(name, p->cru_type, p->cru_mask);
+	}
+
 	if (IS_ERR(alg))
 		return PTR_ERR(alg);
 
@@ -434,14 +489,6 @@ static int crypto_add_alg(struct sk_buff *skb, struct nlmsghdr *nlh,
 	return 0;
 }
 
-static int crypto_del_rng(struct sk_buff *skb, struct nlmsghdr *nlh,
-			  struct nlattr **attrs)
-{
-	if (!netlink_capable(skb, CAP_NET_ADMIN))
-		return -EPERM;
-	return crypto_del_default_rng();
-}
-
 #define MSGSIZE(type) sizeof(struct type)
 
 static const int crypto_msg_min[CRYPTO_NR_MSGTYPES] = {
@@ -449,7 +496,6 @@ static const int crypto_msg_min[CRYPTO_NR_MSGTYPES] = {
 	[CRYPTO_MSG_DELALG	- CRYPTO_MSG_BASE] = MSGSIZE(crypto_user_alg),
 	[CRYPTO_MSG_UPDATEALG	- CRYPTO_MSG_BASE] = MSGSIZE(crypto_user_alg),
 	[CRYPTO_MSG_GETALG	- CRYPTO_MSG_BASE] = MSGSIZE(crypto_user_alg),
-	[CRYPTO_MSG_DELRNG	- CRYPTO_MSG_BASE] = 0,
 };
 
 static const struct nla_policy crypto_policy[CRYPTOCFGA_MAX+1] = {
@@ -469,7 +515,6 @@ static const struct crypto_link {
 	[CRYPTO_MSG_GETALG	- CRYPTO_MSG_BASE] = { .doit = crypto_report,
 						       .dump = crypto_dump_report,
 						       .done = crypto_dump_report_done},
-	[CRYPTO_MSG_DELRNG	- CRYPTO_MSG_BASE] = { .doit = crypto_del_rng },
 };
 
 static int crypto_user_rcv_msg(struct sk_buff *skb, struct nlmsghdr *nlh)
@@ -485,29 +530,28 @@ static int crypto_user_rcv_msg(struct sk_buff *skb, struct nlmsghdr *nlh)
 	type -= CRYPTO_MSG_BASE;
 	link = &crypto_dispatch[type];
 
+	if (!netlink_capable(skb, CAP_NET_ADMIN))
+		return -EPERM;
+
 	if ((type == (CRYPTO_MSG_GETALG - CRYPTO_MSG_BASE) &&
 	    (nlh->nlmsg_flags & NLM_F_DUMP))) {
 		struct crypto_alg *alg;
-		unsigned long dump_alloc = 0;
+		u16 dump_alloc = 0;
 
 		if (link->dump == NULL)
 			return -EINVAL;
 
-		down_read(&crypto_alg_sem);
 		list_for_each_entry(alg, &crypto_alg_list, cra_list)
 			dump_alloc += CRYPTO_REPORT_MAXSIZE;
-		up_read(&crypto_alg_sem);
 
 		{
 			struct netlink_dump_control c = {
 				.dump = link->dump,
 				.done = link->done,
-				.min_dump_alloc = min(dump_alloc, 65535UL),
+				.min_dump_alloc = dump_alloc,
 			};
-			err = netlink_dump_start(crypto_nlsk, skb, nlh, &c);
+			return netlink_dump_start(crypto_nlsk, skb, nlh, &c);
 		}
-
-		return err;
 	}
 
 	err = nlmsg_parse(nlh, crypto_msg_min[type], attrs, CRYPTOCFGA_MAX,
@@ -551,4 +595,3 @@ module_exit(crypto_user_exit);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Steffen Klassert <steffen.klassert@secunet.com>");
 MODULE_DESCRIPTION("Crypto userspace configuration API");
-MODULE_ALIAS("net-pf-16-proto-21");

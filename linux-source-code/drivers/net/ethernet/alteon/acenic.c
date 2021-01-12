@@ -61,6 +61,7 @@
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
+#include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/mm.h>
 #include <linux/highmem.h>
@@ -476,7 +477,7 @@ static int acenic_probe_one(struct pci_dev *pdev,
 	dev->watchdog_timeo = 5*HZ;
 
 	dev->netdev_ops = &ace_netdev_ops;
-	dev->ethtool_ops = &ace_ethtool_ops;
+	SET_ETHTOOL_OPS(dev, &ace_ethtool_ops);
 
 	/* we only display this string ONCE */
 	if (!boards_found)
@@ -700,6 +701,19 @@ static struct pci_driver acenic_pci_driver = {
 	.probe		= acenic_probe_one,
 	.remove		= acenic_remove_one,
 };
+
+static int __init acenic_init(void)
+{
+	return pci_register_driver(&acenic_pci_driver);
+}
+
+static void __exit acenic_exit(void)
+{
+	pci_unregister_driver(&acenic_pci_driver);
+}
+
+module_init(acenic_init);
+module_exit(acenic_exit);
 
 static void ace_free_descriptors(struct net_device *dev)
 {
@@ -3185,5 +3199,3 @@ static int read_eeprom_byte(struct net_device *dev, unsigned long offset)
 	       ap->name, offset);
 	goto out;
 }
-
-module_pci_driver(acenic_pci_driver);

@@ -356,11 +356,14 @@ struct mbox_chan *mbox_request_channel(struct mbox_client *cl, int index)
 
 	spin_unlock_irqrestore(&chan->lock, flags);
 
-	ret = chan->mbox->ops->startup(chan);
-	if (ret) {
-		dev_err(dev, "Unable to startup the chan (%d)\n", ret);
-		mbox_free_channel(chan);
-		chan = ERR_PTR(ret);
+	if (chan->mbox->ops->startup) {
+		ret = chan->mbox->ops->startup(chan);
+
+		if (ret) {
+			dev_err(dev, "Unable to startup the chan (%d)\n", ret);
+			mbox_free_channel(chan);
+			chan = ERR_PTR(ret);
+		}
 	}
 
 	mutex_unlock(&con_mutex);
@@ -389,13 +392,11 @@ struct mbox_chan *mbox_request_channel_byname(struct mbox_client *cl,
 
 	of_property_for_each_string(np, "mbox-names", prop, mbox_name) {
 		if (!strncmp(name, mbox_name, strlen(name)))
-			return mbox_request_channel(cl, index);
+			break;
 		index++;
 	}
 
-	dev_err(cl->dev, "%s() could not locate channel named \"%s\"\n",
-		__func__, name);
-	return ERR_PTR(-EINVAL);
+	return mbox_request_channel(cl, index);
 }
 EXPORT_SYMBOL_GPL(mbox_request_channel_byname);
 
@@ -411,7 +412,8 @@ void mbox_free_channel(struct mbox_chan *chan)
 	if (!chan || !chan->cl)
 		return;
 
-	chan->mbox->ops->shutdown(chan);
+	if (chan->mbox->ops->shutdown)
+		chan->mbox->ops->shutdown(chan);
 
 	/* The queued TX requests are simply aborted, no callbacks are made */
 	spin_lock_irqsave(&chan->lock, flags);
@@ -459,6 +461,12 @@ int mbox_controller_register(struct mbox_controller *mbox)
 		txdone = TXDONE_BY_ACK;
 
 	if (txdone == TXDONE_BY_POLL) {
+
+		if (!mbox->ops->last_tx_done) {
+			dev_err(mbox->dev, "last_tx_done method is absent\n");
+			return -EINVAL;
+		}
+
 		hrtimer_init(&mbox->poll_hrt, CLOCK_MONOTONIC,
 			     HRTIMER_MODE_REL);
 		mbox->poll_hrt.function = txdone_hrtimer;

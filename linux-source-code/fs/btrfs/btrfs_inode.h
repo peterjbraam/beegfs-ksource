@@ -181,10 +181,6 @@ struct btrfs_inode {
 	/* File creation time. */
 	struct timespec i_otime;
 
-	/* Hook into fs_info->delayed_iputs */
-	struct list_head delayed_iput;
-	long delayed_iput_count;
-
 	/*
 	 * To avoid races between lockless (i_mutex not held) direct IO writes
 	 * and concurrent fsync requests. Direct IO writes must acquire read
@@ -302,7 +298,7 @@ struct btrfs_dio_private {
 	struct bio *dio_bio;
 
 	/*
-	 * The original bio may be split to several sub-bios, this is
+	 * The original bio may be splited to several sub-bios, this is
 	 * done during endio of sub-bios
 	 */
 	int (*subio_endio)(struct inode *, struct btrfs_io_bio *, int);
@@ -321,7 +317,7 @@ static inline void btrfs_inode_block_unlocked_dio(struct inode *inode)
 
 static inline void btrfs_inode_resume_unlocked_dio(struct inode *inode)
 {
-	smp_mb__before_atomic();
+	smp_mb__before_clear_bit();
 	clear_bit(BTRFS_INODE_READDIO_NEED_LOCK,
 		  &BTRFS_I(inode)->runtime_flags);
 }

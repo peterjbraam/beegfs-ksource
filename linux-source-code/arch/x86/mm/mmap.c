@@ -31,7 +31,7 @@
 #include <linux/sched.h>
 #include <asm/elf.h>
 
-struct va_alignment __read_mostly va_align = {
+struct __read_mostly va_alignment va_align = {
 	.flags = -1,
 };
 
@@ -109,17 +109,12 @@ void arch_pick_mmap_layout(struct mm_struct *mm)
 	if (mmap_is_legacy()) {
 		mm->mmap_base = mm->mmap_legacy_base;
 		mm->get_unmapped_area = arch_get_unmapped_area;
+		mm->unmap_area = arch_unmap_area;
 	} else {
 		mm->mmap_base = mmap_base(random_factor);
 		mm->get_unmapped_area = arch_get_unmapped_area_topdown;
+		mm->unmap_area = arch_unmap_area_topdown;
 	}
-}
-
-const char *arch_vma_name(struct vm_area_struct *vma)
-{
-	if (vma->vm_flags & VM_MPX)
-		return "[mpx]";
-	return NULL;
 }
 
 /*
@@ -138,7 +133,7 @@ bool pfn_modify_allowed(unsigned long pfn, pgprot_t prot)
 	/* If it's real memory always allow */
 	if (pfn_valid(pfn))
 		return true;
-	if (pfn >= l1tf_pfn_limit() && !capable(CAP_SYS_ADMIN))
+	if (pfn > l1tf_pfn_limit() && !capable(CAP_SYS_ADMIN))
 		return false;
 	return true;
 }

@@ -519,7 +519,7 @@ static const struct net_device_ops xpnet_netdev_ops = {
 	.ndo_open		= xpnet_dev_open,
 	.ndo_stop		= xpnet_dev_stop,
 	.ndo_start_xmit		= xpnet_dev_hard_start_xmit,
-	.ndo_change_mtu		= xpnet_dev_change_mtu,
+	.ndo_change_mtu_rh74	= xpnet_dev_change_mtu,
 	.ndo_tx_timeout		= xpnet_dev_tx_timeout,
 	.ndo_set_mac_address 	= eth_mac_addr,
 	.ndo_validate_addr	= eth_validate_addr,
@@ -544,8 +544,7 @@ xpnet_init(void)
 	 * use ether_setup() to init the majority of our device
 	 * structure and then override the necessary pieces.
 	 */
-	xpnet_device = alloc_netdev(0, XPNET_DEVICE_NAME, NET_NAME_UNKNOWN,
-				    ether_setup);
+	xpnet_device = alloc_netdev(0, XPNET_DEVICE_NAME, ether_setup);
 	if (xpnet_device == NULL) {
 		kfree(xpnet_broadcast_partitions);
 		return -ENOMEM;

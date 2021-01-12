@@ -30,15 +30,10 @@
 #include <linux/bitops.h>
 #include <asm/uaccess.h>
 #include <asm/page.h>
+#include <asm/edac.h>
 #include "edac_core.h"
 #include "edac_module.h"
 #include <ras/ras_event.h>
-
-#ifdef CONFIG_EDAC_ATOMIC_SCRUB
-#include <asm/edac.h>
-#else
-#define edac_atomic_scrub(va, size) do { } while (0)
-#endif
 
 /* lock to memory controller's control array */
 static DEFINE_MUTEX(mem_ctls_mutex);
@@ -49,8 +44,6 @@ static LIST_HEAD(mc_devices);
  *	apei/ghes and i7core_edac to be used at the same time.
  */
 static void const *edac_mc_owner;
-
-static struct bus_type mc_bus[EDAC_MAX_MCS];
 
 unsigned edac_dimm_info_location(struct dimm_info *dimm, char *buf,
 			         unsigned len)
@@ -130,27 +123,28 @@ static void edac_mc_dump_mci(struct mem_ctl_info *mci)
 
 #endif				/* CONFIG_EDAC_DEBUG */
 
-const char * const edac_mem_types[] = {
-	[MEM_EMPTY]	= "Empty csrow",
-	[MEM_RESERVED]	= "Reserved csrow type",
-	[MEM_UNKNOWN]	= "Unknown csrow type",
-	[MEM_FPM]	= "Fast page mode RAM",
-	[MEM_EDO]	= "Extended data out RAM",
-	[MEM_BEDO]	= "Burst Extended data out RAM",
-	[MEM_SDR]	= "Single data rate SDRAM",
-	[MEM_RDR]	= "Registered single data rate SDRAM",
-	[MEM_DDR]	= "Double data rate SDRAM",
-	[MEM_RDDR]	= "Registered Double data rate SDRAM",
-	[MEM_RMBS]	= "Rambus DRAM",
-	[MEM_DDR2]	= "Unbuffered DDR2 RAM",
-	[MEM_FB_DDR2]	= "Fully buffered DDR2",
-	[MEM_RDDR2]	= "Registered DDR2 RAM",
-	[MEM_XDR]	= "Rambus XDR",
-	[MEM_DDR3]	= "Unbuffered DDR3 RAM",
-	[MEM_RDDR3]	= "Registered DDR3 RAM",
-	[MEM_LRDDR3]	= "Load-Reduced DDR3 RAM",
-	[MEM_DDR4]	= "Unbuffered DDR4 RAM",
-	[MEM_RDDR4]	= "Registered DDR4 RAM",
+const char *edac_mem_types[] = {
+	[MEM_EMPTY]	= "Empty",
+	[MEM_RESERVED]	= "Reserved",
+	[MEM_UNKNOWN]	= "Unknown",
+	[MEM_FPM]	= "FPM",
+	[MEM_EDO]	= "EDO",
+	[MEM_BEDO]	= "BEDO",
+	[MEM_SDR]	= "Unbuffered-SDR",
+	[MEM_RDR]	= "Registered-SDR",
+	[MEM_DDR]	= "Unbuffered-DDR",
+	[MEM_RDDR]	= "Registered-DDR",
+	[MEM_RMBS]	= "RMBS",
+	[MEM_DDR2]	= "Unbuffered-DDR2",
+	[MEM_FB_DDR2]	= "FullyBuffered-DDR2",
+	[MEM_RDDR2]	= "Registered-DDR2",
+	[MEM_XDR]	= "XDR",
+	[MEM_DDR3]	= "Unbuffered-DDR3",
+	[MEM_RDDR3]	= "Registered-DDR3",
+	[MEM_LRDDR3]	= "Load-Reduced-DDR3-RAM",
+	[MEM_DDR4]	= "Unbuffered-DDR4",
+	[MEM_RDDR4]	= "Registered-DDR4",
+	[MEM_NVDIMM]	= "Non-volatile-RAM",
 };
 EXPORT_SYMBOL_GPL(edac_mem_types);
 
@@ -238,6 +232,20 @@ static void _edac_mc_free(struct mem_ctl_info *mci)
 	}
 	kfree(mci);
 }
+
+bool edac_has_mcs(void)
+{
+	bool ret;
+
+	mutex_lock(&mem_ctls_mutex);
+
+	ret = list_empty(&mc_devices);
+
+	mutex_unlock(&mem_ctls_mutex);
+
+	return !ret;
+}
+EXPORT_SYMBOL_GPL(edac_has_mcs);
 
 /**
  * edac_mc_alloc: Allocate and partially fill a struct mem_ctl_info structure
@@ -535,18 +543,69 @@ static void edac_mc_workq_function(struct work_struct *work_req)
 
 	mutex_lock(&mem_ctls_mutex);
 
-	if (mci->op_state != OP_RUNNING_POLL) {
+	/* if this control struct has movd to offline state, we are done */
+	if (mci->op_state == OP_OFFLINE) {
 		mutex_unlock(&mem_ctls_mutex);
 		return;
 	}
 
-	if (edac_mc_assert_error_check_and_clear())
+	/* Only poll controllers that are running polled and have a check */
+	if (edac_mc_assert_error_check_and_clear() && (mci->edac_check != NULL))
 		mci->edac_check(mci);
 
 	mutex_unlock(&mem_ctls_mutex);
 
-	/* Queue ourselves again. */
-	edac_queue_work(&mci->work, msecs_to_jiffies(edac_mc_get_poll_msec()));
+	/* Reschedule */
+	queue_delayed_work(edac_workqueue, &mci->work,
+			msecs_to_jiffies(edac_mc_get_poll_msec()));
+}
+
+/*
+ * edac_mc_workq_setup
+ *	initialize a workq item for this mci
+ *	passing in the new delay period in msec
+ *
+ *	locking model:
+ *
+ *		called with the mem_ctls_mutex held
+ */
+static void edac_mc_workq_setup(struct mem_ctl_info *mci, unsigned msec,
+				bool init)
+{
+	edac_dbg(0, "\n");
+
+	/* if this instance is not in the POLL state, then simply return */
+	if (mci->op_state != OP_RUNNING_POLL)
+		return;
+
+	if (init)
+		INIT_DELAYED_WORK(&mci->work, edac_mc_workq_function);
+
+	mod_delayed_work(edac_workqueue, &mci->work, msecs_to_jiffies(msec));
+}
+
+/*
+ * edac_mc_workq_teardown
+ *	stop the workq processing on this mci
+ *
+ *	locking model:
+ *
+ *		called WITHOUT lock held
+ */
+static void edac_mc_workq_teardown(struct mem_ctl_info *mci)
+{
+	int status;
+
+	if (mci->op_state != OP_RUNNING_POLL)
+		return;
+
+	status = cancel_delayed_work(&mci->work);
+	if (status == 0) {
+		edac_dbg(0, "not canceled, flush the queue\n");
+
+		/* workq instance might be running, wait for it */
+		flush_workqueue(edac_workqueue);
+	}
 }
 
 /*
@@ -565,9 +624,9 @@ void edac_mc_reset_delay_period(unsigned long value)
 	list_for_each(item, &mc_devices) {
 		mci = list_entry(item, struct mem_ctl_info, link);
 
-		if (mci->op_state == OP_RUNNING_POLL)
-			edac_mod_work(&mci->work, value);
+		edac_mc_workq_setup(mci, value, false);
 	}
+
 	mutex_unlock(&mem_ctls_mutex);
 }
 
@@ -681,11 +740,6 @@ int edac_mc_add_mc_with_groups(struct mem_ctl_info *mci,
 	int ret = -EINVAL;
 	edac_dbg(0, "\n");
 
-	if (mci->mc_idx >= EDAC_MAX_MCS) {
-		pr_warn_once("Too many memory controllers: %d\n", mci->mc_idx);
-		return -ENODEV;
-	}
-
 #ifdef CONFIG_EDAC_DEBUG
 	if (edac_debug_level >= 3)
 		edac_mc_dump_mci(mci);
@@ -725,7 +779,7 @@ int edac_mc_add_mc_with_groups(struct mem_ctl_info *mci,
 	/* set load time so that error rate can be tracked */
 	mci->start_time = jiffies;
 
-	mci->bus = &mc_bus[mci->mc_idx];
+	mci->bus = edac_get_sysfs_subsys();
 
 	if (edac_create_sysfs_mci_device(mci, groups)) {
 		edac_mc_printk(mci, KERN_WARNING,
@@ -733,21 +787,19 @@ int edac_mc_add_mc_with_groups(struct mem_ctl_info *mci,
 		goto fail1;
 	}
 
-	if (mci->edac_check) {
+	/* If there IS a check routine, then we are running POLLED */
+	if (mci->edac_check != NULL) {
+		/* This instance is NOW RUNNING */
 		mci->op_state = OP_RUNNING_POLL;
 
-		INIT_DELAYED_WORK(&mci->work, edac_mc_workq_function);
-		edac_queue_work(&mci->work, msecs_to_jiffies(edac_mc_get_poll_msec()));
-
+		edac_mc_workq_setup(mci, edac_mc_get_poll_msec(), true);
 	} else {
 		mci->op_state = OP_RUNNING_INTERRUPT;
 	}
 
 	/* Report action taken */
-	edac_mc_printk(mci, KERN_INFO,
-		"Giving out device to module %s controller %s: DEV %s (%s)\n",
-		mci->mod_name, mci->ctl_name, mci->dev_name,
-		edac_op_state_to_string(mci->op_state));
+	edac_mc_printk(mci, KERN_INFO, "Giving out device to '%s' '%s':"
+		" DEV %s\n", mci->mod_name, mci->ctl_name, edac_dev_name(mci));
 
 	edac_mc_owner = mci->mod_name;
 
@@ -785,16 +837,15 @@ struct mem_ctl_info *edac_mc_del_mc(struct device *dev)
 		return NULL;
 	}
 
-	/* mark MCI offline: */
-	mci->op_state = OP_OFFLINE;
-
 	if (!del_mc_from_global_list(mci))
 		edac_mc_owner = NULL;
-
 	mutex_unlock(&mem_ctls_mutex);
 
-	if (mci->edac_check)
-		edac_stop_work(&mci->work);
+	/* flush workq processes */
+	edac_mc_workq_teardown(mci);
+
+	/* marking MCI offline */
+	mci->op_state = OP_OFFLINE;
 
 	/* remove from sysfs */
 	edac_remove_sysfs_mci_device(mci);
@@ -829,7 +880,7 @@ static void edac_mc_scrub_block(unsigned long page, unsigned long offset,
 	virt_addr = kmap_atomic(pg);
 
 	/* Perform architecture specific atomic scrub operation */
-	edac_atomic_scrub(virt_addr + offset, size);
+	atomic_scrub(virt_addr + offset, size);
 
 	/* Unmap and complete */
 	kunmap_atomic(virt_addr);
@@ -972,7 +1023,7 @@ static void edac_ce_error(struct mem_ctl_info *mci,
 	}
 	edac_inc_ce_error(mci, enable_per_layer_report, pos, error_count);
 
-	if (mci->scrub_mode == SCRUB_SW_SRC) {
+	if (mci->scrub_mode & SCRUB_SW_SRC) {
 		/*
 			* Some memory controllers (called MCs below) can remap
 			* memory so that it is still available at a different

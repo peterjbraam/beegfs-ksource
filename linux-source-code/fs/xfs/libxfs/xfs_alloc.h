@@ -29,9 +29,7 @@ extern struct workqueue_struct *xfs_alloc_wq;
 /*
  * Freespace allocation types.  Argument to xfs_alloc_[v]extent.
  */
-#define XFS_ALLOCTYPE_ANY_AG	0x01	/* allocate anywhere, use rotor */
 #define XFS_ALLOCTYPE_FIRST_AG	0x02	/* ... start at ag 0 */
-#define XFS_ALLOCTYPE_START_AG	0x04	/* anywhere, start in this a.g. */
 #define XFS_ALLOCTYPE_THIS_AG	0x08	/* anywhere in this a.g. */
 #define XFS_ALLOCTYPE_START_BNO	0x10	/* near this block else anywhere */
 #define XFS_ALLOCTYPE_NEAR_BNO	0x20	/* in this a.g. and near this block */
@@ -41,9 +39,7 @@ extern struct workqueue_struct *xfs_alloc_wq;
 typedef unsigned int xfs_alloctype_t;
 
 #define XFS_ALLOC_TYPES \
-	{ XFS_ALLOCTYPE_ANY_AG,		"ANY_AG" }, \
 	{ XFS_ALLOCTYPE_FIRST_AG,	"FIRST_AG" }, \
-	{ XFS_ALLOCTYPE_START_AG,	"START_AG" }, \
 	{ XFS_ALLOCTYPE_THIS_AG,	"THIS_AG" }, \
 	{ XFS_ALLOCTYPE_START_BNO,	"START_BNO" }, \
 	{ XFS_ALLOCTYPE_NEAR_BNO,	"NEAR_BNO" }, \
@@ -54,8 +50,6 @@ typedef unsigned int xfs_alloctype_t;
  */
 #define	XFS_ALLOC_FLAG_TRYLOCK	0x00000001  /* use trylock for buffer locking */
 #define	XFS_ALLOC_FLAG_FREEING	0x00000002  /* indicate caller is freeing extents*/
-#define	XFS_ALLOC_FLAG_NORMAP	0x00000004  /* don't modify the rmapbt */
-#define	XFS_ALLOC_FLAG_NOSHRINK	0x00000008  /* don't shrink the freelist */
 #define	XFS_ALLOC_FLAG_CHECK	0x00000010  /* test only, don't modify args */
 
 /*
@@ -88,9 +82,8 @@ typedef struct xfs_alloc_arg {
 	int		datatype;	/* mask defining data type treatment */
 	char		wasdel;		/* set if allocation was prev delayed */
 	char		wasfromfl;	/* set if allocation is from freelist */
+	char		isfl;		/* set if is freelist blocks - !acctg */
 	xfs_fsblock_t	firstblock;	/* io first block allocated */
-	struct xfs_owner_info	oinfo;	/* owner of blocks being allocated */
-	enum xfs_ag_resv_type	resv;	/* block reservation to use */
 } xfs_alloc_arg_t;
 
 /*
@@ -119,8 +112,7 @@ unsigned int xfs_alloc_set_aside(struct xfs_mount *mp);
 unsigned int xfs_alloc_ag_max_usable(struct xfs_mount *mp);
 
 xfs_extlen_t xfs_alloc_longest_free_extent(struct xfs_mount *mp,
-		struct xfs_perag *pag, xfs_extlen_t need,
-		xfs_extlen_t reserved);
+		struct xfs_perag *pag, xfs_extlen_t need);
 unsigned int xfs_alloc_min_freelist(struct xfs_mount *mp,
 		struct xfs_perag *pag);
 
@@ -195,11 +187,9 @@ xfs_alloc_vextent(
  */
 int				/* error */
 xfs_free_extent(
-	struct xfs_trans	*tp,	/* transaction pointer */
-	xfs_fsblock_t		bno,	/* starting block number of extent */
-	xfs_extlen_t		len,	/* length of extent */
-	struct xfs_owner_info	*oinfo,	/* extent owner */
-	enum xfs_ag_resv_type	type);	/* block reservation type */
+	struct xfs_trans *tp,	/* transaction pointer */
+	xfs_fsblock_t	bno,	/* starting block number of extent */
+	xfs_extlen_t	len);	/* length of extent */
 
 int				/* error */
 xfs_alloc_lookup_ge(
@@ -217,10 +207,14 @@ xfs_alloc_get_rec(
 
 int xfs_read_agf(struct xfs_mount *mp, struct xfs_trans *tp,
 			xfs_agnumber_t agno, int flags, struct xfs_buf **bpp);
+int xfs_alloc_read_agfl(struct xfs_mount *mp, struct xfs_trans *tp,
+			xfs_agnumber_t agno, struct xfs_buf **bpp);
 int xfs_alloc_fix_freelist(struct xfs_alloc_arg *args, int flags);
 int xfs_free_extent_fix_freelist(struct xfs_trans *tp, xfs_agnumber_t agno,
 		struct xfs_buf **agbp);
-
-xfs_extlen_t xfs_prealloc_blocks(struct xfs_mount *mp);
+xfs_agblock_t xfs_ag_block_count(struct xfs_mount *mp, xfs_agnumber_t agno);
+bool xfs_verify_agbno(struct xfs_mount *mp, xfs_agnumber_t agno,
+		xfs_agblock_t agbno);
+bool xfs_verify_fsbno(struct xfs_mount *mp, xfs_fsblock_t fsbno);
 
 #endif	/* __XFS_ALLOC_H__ */

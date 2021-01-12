@@ -20,16 +20,14 @@
 #include <linux/delay.h>
 #include <linux/elf.h>
 #include <linux/elfcore.h>
-#include <linux/export.h>
+#include <linux/module.h>
 #include <linux/slab.h>
-#include <linux/vmalloc.h>
 
 #include <asm/processor.h>
 #include <asm/hardirq.h>
 #include <asm/nmi.h>
 #include <asm/hw_irq.h>
 #include <asm/apic.h>
-#include <asm/io_apic.h>
 #include <asm/hpet.h>
 #include <linux/kdebug.h>
 #include <asm/cpu.h>
@@ -75,6 +73,8 @@ struct crash_memmap_data {
 	unsigned int type;
 };
 
+int in_crash_kexec;
+
 /*
  * This is used to VMCLEAR all VMCSs loaded on the
  * processor. And when loading kvm_intel module, the
@@ -103,8 +103,10 @@ static void kdump_nmi_callback(int cpu, struct pt_regs *regs)
 {
 #ifdef CONFIG_X86_32
 	struct pt_regs fixed_regs;
+#endif
 
-	if (!user_mode(regs)) {
+#ifdef CONFIG_X86_32
+	if (!user_mode_vm(regs)) {
 		crash_fixup_ss_esp(&fixed_regs, regs);
 		regs = &fixed_regs;
 	}
@@ -135,6 +137,7 @@ static void kdump_nmi_callback(int cpu, struct pt_regs *regs)
 
 void kdump_nmi_shootdown_cpus(void)
 {
+	in_crash_kexec = 1;
 	nmi_shootdown_cpus(kdump_nmi_callback);
 
 	disable_local_APIC();
@@ -198,9 +201,10 @@ void native_machine_crash_shutdown(struct pt_regs *regs)
 #ifdef CONFIG_X86_IO_APIC
 	/* Prevent crash_kexec() from deadlocking on ioapic_lock. */
 	ioapic_zap_locks();
-	disable_IO_APIC();
+	clear_IO_APIC();
 #endif
 	lapic_shutdown();
+	restore_boot_irq_mode();
 #ifdef CONFIG_HPET_TIMER
 	hpet_disable();
 #endif
@@ -208,14 +212,13 @@ void native_machine_crash_shutdown(struct pt_regs *regs)
 }
 
 #ifdef CONFIG_KEXEC_FILE
-static int get_nr_ram_ranges_callback(u64 start, u64 end, void *arg)
+static int get_nr_ram_ranges_callback(struct resource *res, void *arg)
 {
 	unsigned int *nr_ranges = arg;
 
 	(*nr_ranges)++;
 	return 0;
 }
-
 
 /* Gather all the required information to prepare elf headers for ram regions */
 static void fill_up_crash_elf_data(struct crash_elf_data *ced,
@@ -234,7 +237,7 @@ static void fill_up_crash_elf_data(struct crash_elf_data *ced,
 	ced->max_nr_ranges++;
 
 	/* If crashk_low_res is not 0, another range split possible */
-	if (crashk_low_res.end)
+	if (crashk_low_res.end != 0)
 		ced->max_nr_ranges++;
 }
 
@@ -332,16 +335,14 @@ static int elf_header_exclude_ranges(struct crash_elf_data *ced,
 	if (ret)
 		return ret;
 
-	if (crashk_low_res.end) {
-		ret = exclude_mem_range(cmem, crashk_low_res.start, crashk_low_res.end);
-		if (ret)
-			return ret;
-	}
+	ret = exclude_mem_range(cmem, crashk_low_res.start, crashk_low_res.end);
+	if (ret)
+		return ret;
 
 	return ret;
 }
 
-static int prepare_elf64_ram_headers_callback(u64 start, u64 end, void *arg)
+static int prepare_elf64_ram_headers_callback(struct resource *res, void *arg)
 {
 	struct crash_elf_data *ced = arg;
 	Elf64_Ehdr *ehdr;
@@ -354,7 +355,7 @@ static int prepare_elf64_ram_headers_callback(u64 start, u64 end, void *arg)
 	ehdr = ced->ehdr;
 
 	/* Exclude unwanted mem ranges */
-	ret = elf_header_exclude_ranges(ced, start, end);
+	ret = elf_header_exclude_ranges(ced, res->start, res->end);
 	if (ret)
 		return ret;
 
@@ -517,14 +518,14 @@ static int add_e820_entry(struct boot_params *params, struct e820entry *entry)
 	return 0;
 }
 
-static int memmap_entry_callback(u64 start, u64 end, void *arg)
+static int memmap_entry_callback(struct resource *res, void *arg)
 {
 	struct crash_memmap_data *cmd = arg;
 	struct boot_params *params = cmd->params;
 	struct e820entry ei;
 
-	ei.addr = start;
-	ei.size = end - start + 1;
+	ei.addr = res->start;
+	ei.size = resource_size(res);
 	ei.type = cmd->type;
 	add_e820_entry(params, &ei);
 
@@ -580,12 +581,12 @@ int crash_setup_memmap_entries(struct kimage *image, struct boot_params *params)
 	/* Add ACPI tables */
 	cmd.type = E820_ACPI;
 	flags = IORESOURCE_MEM | IORESOURCE_BUSY;
-	walk_iomem_res_desc(IORES_DESC_ACPI_TABLES, flags, 0, -1, &cmd,
+	walk_iomem_res("ACPI Tables", flags, 0, -1, &cmd,
 		       memmap_entry_callback);
 
 	/* Add ACPI Non-volatile Storage */
 	cmd.type = E820_NVS;
-	walk_iomem_res_desc(IORES_DESC_ACPI_NV_STORAGE, flags, 0, -1, &cmd,
+	walk_iomem_res("ACPI Non-volatile Storage", flags, 0, -1, &cmd,
 			memmap_entry_callback);
 
 	/* Add crashk_low_res region */
@@ -618,12 +619,12 @@ out:
 	return ret;
 }
 
-static int determine_backup_region(u64 start, u64 end, void *arg)
+static int determine_backup_region(struct resource *res, void *arg)
 {
 	struct kimage *image = arg;
 
-	image->arch.backup_src_start = start;
-	image->arch.backup_src_sz = end - start + 1;
+	image->arch.backup_src_start = res->start;
+	image->arch.backup_src_sz = resource_size(res);
 
 	/* Expecting only one range for backup region */
 	return 1;

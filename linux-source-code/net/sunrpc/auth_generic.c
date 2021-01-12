@@ -184,8 +184,8 @@ generic_match(struct auth_cred *acred, struct rpc_cred *cred, int flags)
 	if (gcred->acred.group_info->ngroups != acred->group_info->ngroups)
 		goto out_nomatch;
 	for (i = 0; i < gcred->acred.group_info->ngroups; i++) {
-		if (!gid_eq(gcred->acred.group_info->gid[i],
-				acred->group_info->gid[i]))
+		if (!gid_eq(GROUP_AT(gcred->acred.group_info, i),
+				GROUP_AT(acred->group_info, i)))
 			goto out_nomatch;
 	}
 out_match:
@@ -281,7 +281,13 @@ static bool generic_key_to_expire(struct rpc_cred *cred)
 {
 	struct auth_cred *acred = &container_of(cred, struct generic_cred,
 						gc_base)->acred;
-	return test_bit(RPC_CRED_KEY_EXPIRE_SOON, &acred->ac_flags);
+	bool ret;
+
+	get_rpccred(cred);
+	ret = test_bit(RPC_CRED_KEY_EXPIRE_SOON, &acred->ac_flags);
+	put_rpccred(cred);
+
+	return ret;
 }
 
 static const struct rpc_credops generic_credops = {

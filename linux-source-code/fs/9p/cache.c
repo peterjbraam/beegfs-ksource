@@ -239,18 +239,19 @@ void v9fs_cache_inode_flush_cookie(struct inode *inode)
 void v9fs_cache_inode_set_cookie(struct inode *inode, struct file *filp)
 {
 	struct v9fs_inode *v9inode = V9FS_I(inode);
+	struct p9_fid *fid;
 
 	if (!v9inode->fscache)
 		return;
 
-	mutex_lock(&v9inode->fscache_lock);
-
+	spin_lock(&v9inode->fscache_lock);
+	fid = filp->private_data;
 	if ((filp->f_flags & O_ACCMODE) != O_RDONLY)
 		v9fs_cache_inode_flush_cookie(inode);
 	else
 		v9fs_cache_inode_get_cookie(inode);
 
-	mutex_unlock(&v9inode->fscache_lock);
+	spin_unlock(&v9inode->fscache_lock);
 }
 
 void v9fs_cache_inode_reset_cookie(struct inode *inode)
@@ -264,7 +265,7 @@ void v9fs_cache_inode_reset_cookie(struct inode *inode)
 
 	old = v9inode->fscache;
 
-	mutex_lock(&v9inode->fscache_lock);
+	spin_lock(&v9inode->fscache_lock);
 	fscache_relinquish_cookie(v9inode->fscache, 1);
 
 	v9ses = v9fs_inode2v9ses(inode);
@@ -274,7 +275,7 @@ void v9fs_cache_inode_reset_cookie(struct inode *inode)
 	p9_debug(P9_DEBUG_FSC, "inode %p revalidating cookie old %p new %p\n",
 		 inode, old, v9inode->fscache);
 
-	mutex_unlock(&v9inode->fscache_lock);
+	spin_unlock(&v9inode->fscache_lock);
 }
 
 int __v9fs_fscache_release_page(struct page *page, gfp_t gfp)

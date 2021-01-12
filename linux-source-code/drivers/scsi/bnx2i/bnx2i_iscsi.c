@@ -599,7 +599,7 @@ void bnx2i_drop_session(struct iscsi_cls_session *cls_session)
 /**
  * bnx2i_ep_destroy_list_add - add an entry to EP destroy list
  * @hba:	pointer to adapter instance
- * @ep:		pointer to endpoint (transport identifier) structure
+ * @ep:		pointer to endpoint (transport indentifier) structure
  *
  * EP destroy queue manager
  */
@@ -616,7 +616,7 @@ static int bnx2i_ep_destroy_list_add(struct bnx2i_hba *hba,
  * bnx2i_ep_destroy_list_del - add an entry to EP destroy list
  *
  * @hba: 		pointer to adapter instance
- * @ep: 		pointer to endpoint (transport identifier) structure
+ * @ep: 		pointer to endpoint (transport indentifier) structure
  *
  * EP destroy queue manager
  */
@@ -633,7 +633,7 @@ static int bnx2i_ep_destroy_list_del(struct bnx2i_hba *hba,
 /**
  * bnx2i_ep_ofld_list_add - add an entry to ep offload pending list
  * @hba:	pointer to adapter instance
- * @ep:		pointer to endpoint (transport identifier) structure
+ * @ep:		pointer to endpoint (transport indentifier) structure
  *
  * pending conn offload completion queue manager
  */
@@ -649,7 +649,7 @@ static int bnx2i_ep_ofld_list_add(struct bnx2i_hba *hba,
 /**
  * bnx2i_ep_ofld_list_del - add an entry to ep offload pending list
  * @hba: 		pointer to adapter instance
- * @ep: 		pointer to endpoint (transport identifier) structure
+ * @ep: 		pointer to endpoint (transport indentifier) structure
  *
  * pending conn offload completion queue manager
  */
@@ -724,7 +724,7 @@ bnx2i_find_ep_in_destroy_list(struct bnx2i_hba *hba, u32 iscsi_cid)
 /**
  * bnx2i_ep_active_list_add - add an entry to ep active list
  * @hba:	pointer to adapter instance
- * @ep:		pointer to endpoint (transport identifier) structure
+ * @ep:		pointer to endpoint (transport indentifier) structure
  *
  * current active conn queue manager
  */
@@ -740,7 +740,7 @@ static void bnx2i_ep_active_list_add(struct bnx2i_hba *hba,
 /**
  * bnx2i_ep_active_list_del - deletes an entry to ep active list
  * @hba:	pointer to adapter instance
- * @ep:		pointer to endpoint (transport identifier) structure
+ * @ep:		pointer to endpoint (transport indentifier) structure
  *
  * current active conn queue manager
  */
@@ -915,12 +915,12 @@ void bnx2i_free_hba(struct bnx2i_hba *hba)
 	INIT_LIST_HEAD(&hba->ep_ofld_list);
 	INIT_LIST_HEAD(&hba->ep_active_list);
 	INIT_LIST_HEAD(&hba->ep_destroy_list);
+	pci_dev_put(hba->pcidev);
 
 	if (hba->regview) {
 		pci_iounmap(hba->pcidev, hba->regview);
 		hba->regview = NULL;
 	}
-	pci_dev_put(hba->pcidev);
 	bnx2i_free_mp_bdt(hba);
 	bnx2i_release_free_cid_que(hba);
 	iscsi_host_free(shost);
@@ -1172,12 +1172,10 @@ static void bnx2i_cleanup_task(struct iscsi_task *task)
 	if (task->state == ISCSI_TASK_ABRT_TMF) {
 		bnx2i_send_cmd_cleanup_req(hba, task->dd_data);
 
-		spin_unlock_bh(&conn->session->back_lock);
-		spin_unlock_bh(&conn->session->frwd_lock);
+		spin_unlock_bh(&conn->session->lock);
 		wait_for_completion_timeout(&bnx2i_conn->cmd_cleanup_cmpl,
 				msecs_to_jiffies(ISCSI_CMD_CLEANUP_TIMEOUT));
-		spin_lock_bh(&conn->session->frwd_lock);
-		spin_lock_bh(&conn->session->back_lock);
+		spin_lock_bh(&conn->session->lock);
 	}
 	bnx2i_iscsi_unmap_sg_list(task->dd_data);
 }
@@ -1699,7 +1697,7 @@ no_nx2_route:
 /**
  * bnx2i_tear_down_conn - tear down iscsi/tcp connection and free resources
  * @hba:	pointer to adapter instance
- * @ep:		endpoint (transport identifier) structure
+ * @ep:		endpoint (transport indentifier) structure
  *
  * destroys cm_sock structure and on chip iscsi context
  */
@@ -1909,7 +1907,8 @@ static struct iscsi_endpoint *bnx2i_ep_connect(struct Scsi_Host *shost,
 
 	bnx2i_ep_active_list_add(hba, bnx2i_ep);
 
-	if (bnx2i_map_ep_dbell_regs(bnx2i_ep))
+	rc = bnx2i_map_ep_dbell_regs(bnx2i_ep);
+	if (rc)
 		goto del_active_ep;
 
 	mutex_unlock(&hba->net_dev_lock);
@@ -2063,7 +2062,7 @@ int bnx2i_hw_ep_disconnect(struct bnx2i_endpoint *bnx2i_ep)
 		goto out;
 
 	if (session) {
-		spin_lock_bh(&session->frwd_lock);
+		spin_lock_bh(&session->lock);
 		if (bnx2i_ep->state != EP_STATE_TCP_FIN_RCVD) {
 			if (session->state == ISCSI_STATE_LOGGING_OUT) {
 				if (bnx2i_ep->state == EP_STATE_LOGOUT_SENT) {
@@ -2079,7 +2078,7 @@ int bnx2i_hw_ep_disconnect(struct bnx2i_endpoint *bnx2i_ep)
 		} else
 			close = 1;
 
-		spin_unlock_bh(&session->frwd_lock);
+		spin_unlock_bh(&session->lock);
 	}
 
 	bnx2i_ep->state = EP_STATE_DISCONN_START;
@@ -2262,7 +2261,7 @@ static struct scsi_host_template bnx2i_host_template = {
 	.eh_abort_handler	= iscsi_eh_abort,
 	.eh_device_reset_handler = iscsi_eh_device_reset,
 	.eh_target_reset_handler = iscsi_eh_recover_target,
-	.change_queue_depth	= scsi_change_queue_depth,
+	.change_queue_depth	= iscsi_change_queue_depth,
 	.target_alloc		= iscsi_target_alloc,
 	.can_queue		= 2048,
 	.max_sectors		= 127,
@@ -2271,7 +2270,6 @@ static struct scsi_host_template bnx2i_host_template = {
 	.use_clustering		= ENABLE_CLUSTERING,
 	.sg_tablesize		= ISCSI_MAX_BDS_PER_CMD,
 	.shost_attrs		= bnx2i_dev_attributes,
-	.track_queue_depth	= 1,
 };
 
 struct iscsi_transport bnx2i_iscsi_transport = {

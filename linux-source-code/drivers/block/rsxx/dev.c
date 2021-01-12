@@ -112,16 +112,37 @@ static const struct block_device_operations rsxx_fops = {
 
 static void disk_stats_start(struct rsxx_cardinfo *card, struct bio *bio)
 {
-	generic_start_io_acct(bio_data_dir(bio), bio_sectors(bio),
-			     &card->gendisk->part0);
+	struct hd_struct *part0 = &card->gendisk->part0;
+	int rw = bio_data_dir(bio);
+	int cpu;
+
+	cpu = part_stat_lock();
+
+	part_round_stats(card->queue, cpu, part0);
+	part_inc_in_flight(card->queue, part0, rw);
+
+	part_stat_unlock();
 }
 
 static void disk_stats_complete(struct rsxx_cardinfo *card,
 				struct bio *bio,
 				unsigned long start_time)
 {
-	generic_end_io_acct(bio_data_dir(bio), &card->gendisk->part0,
-			   start_time);
+	struct hd_struct *part0 = &card->gendisk->part0;
+	unsigned long duration = jiffies - start_time;
+	int rw = bio_data_dir(bio);
+	int cpu;
+
+	cpu = part_stat_lock();
+
+	part_stat_add(cpu, part0, sectors[rw], bio_sectors(bio));
+	part_stat_inc(cpu, part0, ios[rw]);
+	part_stat_add(cpu, part0, ticks[rw], duration);
+
+	part_round_stats(card->queue, cpu, part0);
+	part_dec_in_flight(card->queue, part0, rw);
+
+	part_stat_unlock();
 }
 
 static void bio_dma_done_cb(struct rsxx_cardinfo *card,
@@ -137,28 +158,23 @@ static void bio_dma_done_cb(struct rsxx_cardinfo *card,
 		if (!card->eeh_state && card->gendisk)
 			disk_stats_complete(card, meta->bio, meta->start_time);
 
-		if (atomic_read(&meta->error))
-			bio_io_error(meta->bio);
-		else
-			bio_endio(meta->bio);
+		bio_endio(meta->bio, atomic_read(&meta->error) ? -EIO : 0);
 		kmem_cache_free(bio_meta_pool, meta);
 	}
 }
 
-static blk_qc_t rsxx_make_request(struct request_queue *q, struct bio *bio)
+static void rsxx_make_request(struct request_queue *q, struct bio *bio)
 {
 	struct rsxx_cardinfo *card = q->queuedata;
 	struct rsxx_bio_meta *bio_meta;
 	int st = -EINVAL;
-
-	blk_queue_split(q, &bio, q->bio_split);
 
 	might_sleep();
 
 	if (!card)
 		goto req_err;
 
-	if (bio_end_sector(bio) > get_capacity(card->gendisk))
+	if (bio->bi_sector + (bio->bi_size >> 9) > get_capacity(card->gendisk))
 		goto req_err;
 
 	if (unlikely(card->halt)) {
@@ -171,7 +187,7 @@ static blk_qc_t rsxx_make_request(struct request_queue *q, struct bio *bio)
 		goto req_err;
 	}
 
-	if (bio->bi_iter.bi_size == 0) {
+	if (bio->bi_size == 0) {
 		dev_err(CARD_TO_DEV(card), "size zero BIO!\n");
 		goto req_err;
 	}
@@ -192,22 +208,19 @@ static blk_qc_t rsxx_make_request(struct request_queue *q, struct bio *bio)
 
 	dev_dbg(CARD_TO_DEV(card), "BIO[%c]: meta: %p addr8: x%llx size: %d\n",
 		 bio_data_dir(bio) ? 'W' : 'R', bio_meta,
-		 (u64)bio->bi_iter.bi_sector << 9, bio->bi_iter.bi_size);
+		 (u64)bio->bi_sector << 9, bio->bi_size);
 
 	st = rsxx_dma_queue_bio(card, bio, &bio_meta->pending_dmas,
 				    bio_dma_done_cb, bio_meta);
 	if (st)
 		goto queue_err;
 
-	return BLK_QC_T_NONE;
+	return;
 
 queue_err:
 	kmem_cache_free(bio_meta_pool, bio_meta);
 req_err:
-	if (st)
-		bio->bi_error = st;
-	bio_endio(bio);
-	return BLK_QC_T_NONE;
+	bio_endio(bio, st);
 }
 
 /*----------------- Device Setup -------------------*/
@@ -230,7 +243,8 @@ int rsxx_attach_dev(struct rsxx_cardinfo *card)
 			set_capacity(card->gendisk, card->size8 >> 9);
 		else
 			set_capacity(card->gendisk, 0);
-		device_add_disk(CARD_TO_DEV(card), card->gendisk);
+		add_disk(card->gendisk);
+
 		card->bdev_attached = 1;
 	}
 
@@ -307,6 +321,7 @@ int rsxx_setup_dev(struct rsxx_cardinfo *card)
 
 	snprintf(card->gendisk->disk_name, sizeof(card->gendisk->disk_name),
 		 "rsxx%d", card->disk_id);
+	card->gendisk->driverfs_dev = &card->dev->dev;
 	card->gendisk->major = card->major;
 	card->gendisk->first_minor = 0;
 	card->gendisk->fops = &rsxx_fops;

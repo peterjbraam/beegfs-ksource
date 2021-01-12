@@ -3,16 +3,12 @@
  * Licensed under GPLv2.
  */
 
-#define _GNU_SOURCE	/* For CPU_ZERO etc. */
-
 #include <elf.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <link.h>
-#include <sched.h>
 #include <stdio.h>
 #include <sys/stat.h>
-#include <sys/sysinfo.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -59,42 +55,4 @@ void *get_auxv_entry(int type)
 out:
 	close(fd);
 	return result;
-}
-
-int pick_online_cpu(void)
-{
-	int ncpus, cpu = -1;
-	cpu_set_t *mask;
-	size_t size;
-
-	ncpus = get_nprocs_conf();
-	size = CPU_ALLOC_SIZE(ncpus);
-	mask = CPU_ALLOC(ncpus);
-	if (!mask) {
-		perror("malloc");
-		return -1;
-	}
-
-	CPU_ZERO_S(size, mask);
-
-	if (sched_getaffinity(0, size, mask)) {
-		perror("sched_getaffinity");
-		goto done;
-	}
-
-	/* We prefer a primary thread, but skip 0 */
-	for (cpu = 8; cpu < ncpus; cpu += 8)
-		if (CPU_ISSET_S(cpu, size, mask))
-			goto done;
-
-	/* Search for anything, but in reverse */
-	for (cpu = ncpus - 1; cpu >= 0; cpu--)
-		if (CPU_ISSET_S(cpu, size, mask))
-			goto done;
-
-	printf("No cpus in affinity mask?!\n");
-
-done:
-	CPU_FREE(mask);
-	return cpu;
 }

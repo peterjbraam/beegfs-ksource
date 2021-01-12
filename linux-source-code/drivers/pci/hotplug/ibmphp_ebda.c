@@ -1121,7 +1121,7 @@ void ibmphp_free_bus_info_queue(void)
 
 	list_for_each_entry_safe(bus_info, next, &bus_info_head,
 				 bus_info_list) {
-		kfree (bus_info);
+		kfree(bus_info);
 	}
 }
 
@@ -1148,7 +1148,7 @@ void ibmphp_free_ebda_pci_rsrc_queue(void)
 
 	list_for_each_entry_safe(resource, next, &ibmphp_ebda_pci_rsrc_head,
 				 ebda_pci_rsrc_list) {
-		kfree (resource);
+		kfree(resource);
 		resource = NULL;
 	}
 }

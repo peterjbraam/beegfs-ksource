@@ -39,6 +39,7 @@
 #include <scsi/scsi_netlink_fc.h>
 #include <scsi/scsi_bsg_fc.h>
 #include "scsi_priv.h"
+#include "scsi_transport_fc_internal.h"
 
 static int fc_queue_work(struct Scsi_Host *, struct work_struct *);
 static void fc_vport_sched_delete(struct work_struct *work);
@@ -266,6 +267,8 @@ static const struct {
 	{ FC_PORTSPEED_50GBIT,		"50 Gbit" },
 	{ FC_PORTSPEED_100GBIT,		"100 Gbit" },
 	{ FC_PORTSPEED_25GBIT,		"25 Gbit" },
+	{ FC_PORTSPEED_64GBIT,		"64 Gbit" },
+	{ FC_PORTSPEED_128GBIT,		"128 Gbit" },
 	{ FC_PORTSPEED_NOT_NEGOTIATED,	"Not Negotiated" },
 };
 fc_bitfield_name_search(port_speed, fc_port_speed_names)
@@ -288,9 +291,13 @@ static const struct {
 	u32 			value;
 	char			*name;
 } fc_port_role_names[] = {
-	{ FC_PORT_ROLE_FCP_TARGET,	"FCP Target" },
-	{ FC_PORT_ROLE_FCP_INITIATOR,	"FCP Initiator" },
-	{ FC_PORT_ROLE_IP_PORT,		"IP Port" },
+	{ FC_PORT_ROLE_FCP_TARGET,		"FCP Target" },
+	{ FC_PORT_ROLE_FCP_INITIATOR,		"FCP Initiator" },
+	{ FC_PORT_ROLE_IP_PORT,			"IP Port" },
+	{ FC_PORT_ROLE_FCP_DUMMY_INITIATOR,	"FCP Dummy Initiator" },
+	{ FC_PORT_ROLE_NVME_INITIATOR,		"NVMe Initiator" },
+	{ FC_PORT_ROLE_NVME_TARGET,		"NVMe Target" },
+	{ FC_PORT_ROLE_NVME_DISCOVERY,		"NVMe Discovery" },
 };
 fc_bitfield_name_search(port_roles, fc_port_role_names)
 
@@ -1284,7 +1291,7 @@ store_fc_vport_delete(struct device *dev, struct device_attribute *attr,
 	unsigned long flags;
 
 	spin_lock_irqsave(shost->host_lock, flags);
-	if (vport->flags & (FC_VPORT_DEL | FC_VPORT_CREATING)) {
+	if (vport->flags & (FC_VPORT_DEL | FC_VPORT_CREATING | FC_VPORT_DELETING)) {
 		spin_unlock_irqrestore(shost->host_lock, flags);
 		return -EBUSY;
 	}
@@ -2027,10 +2034,11 @@ static void fc_vport_dev_release(struct device *dev)
 	kfree(vport);
 }
 
-static int scsi_is_fc_vport(const struct device *dev)
+int scsi_is_fc_vport(const struct device *dev)
 {
 	return dev->release == fc_vport_dev_release;
 }
+EXPORT_SYMBOL(scsi_is_fc_vport);
 
 static int fc_vport_match(struct attribute_container *cont,
 			    struct device *dev)
@@ -2092,7 +2100,7 @@ fc_timed_out(struct scsi_cmnd *scmd)
  * on the rport.
  */
 static void
-fc_user_scan_tgt(struct Scsi_Host *shost, uint channel, uint id, u64 lun)
+fc_user_scan_tgt(struct Scsi_Host *shost, uint channel, uint id, uint lun)
 {
 	struct fc_rport *rport;
 	unsigned long flags;
@@ -2125,7 +2133,7 @@ fc_user_scan_tgt(struct Scsi_Host *shost, uint channel, uint id, u64 lun)
  * object as the parent.
  */
 static int
-fc_user_scan(struct Scsi_Host *shost, uint channel, uint id, u64 lun)
+fc_user_scan(struct Scsi_Host *shost, uint channel, uint id, uint lun)
 {
 	uint chlo, chhi;
 	uint tgtlo, tgthi;
@@ -2446,8 +2454,10 @@ fc_remove_host(struct Scsi_Host *shost)
 	spin_lock_irqsave(shost->host_lock, flags);
 
 	/* Remove any vports */
-	list_for_each_entry_safe(vport, next_vport, &fc_host->vports, peers)
+	list_for_each_entry_safe(vport, next_vport, &fc_host->vports, peers) {
+		vport->flags |= FC_VPORT_DELETING;
 		fc_queue_work(shost, &vport->vport_delete_work);
+	}
 
 	/* Remove any remote ports */
 	list_for_each_entry_safe(rport, next_rport,
@@ -2645,7 +2655,8 @@ fc_rport_create(struct Scsi_Host *shost, int channel,
 	spin_lock_irqsave(shost->host_lock, flags);
 
 	rport->number = fc_host->next_rport_number++;
-	if (rport->roles & FC_PORT_ROLE_FCP_TARGET)
+	if ((rport->roles & FC_PORT_ROLE_FCP_TARGET) ||
+	    (rport->roles & FC_PORT_ROLE_FCP_DUMMY_INITIATOR))
 		rport->scsi_target_id = fc_host->next_target_id++;
 	else
 		rport->scsi_target_id = -1;
@@ -2752,7 +2763,8 @@ fc_remote_port_add(struct Scsi_Host *shost, int channel,
 
 	list_for_each_entry(rport, &fc_host->rports, peers) {
 
-		if ((rport->port_state == FC_PORTSTATE_BLOCKED) &&
+		if ((rport->port_state == FC_PORTSTATE_BLOCKED ||
+		     rport->port_state == FC_PORTSTATE_NOTPRESENT) &&
 			(rport->channel == channel)) {
 
 			switch (fc_host->tgtid_bind_type) {
@@ -2889,7 +2901,6 @@ fc_remote_port_add(struct Scsi_Host *shost, int channel,
 			memcpy(&rport->port_name, &ids->port_name,
 				sizeof(rport->port_name));
 			rport->port_id = ids->port_id;
-			rport->roles = ids->roles;
 			rport->port_state = FC_PORTSTATE_ONLINE;
 			rport->flags &= ~FC_RPORT_FAST_FAIL_TIMEDOUT;
 
@@ -2898,15 +2909,7 @@ fc_remote_port_add(struct Scsi_Host *shost, int channel,
 						fci->f->dd_fcrport_size);
 			spin_unlock_irqrestore(shost->host_lock, flags);
 
-			if (ids->roles & FC_PORT_ROLE_FCP_TARGET) {
-				scsi_target_unblock(&rport->dev, SDEV_RUNNING);
-
-				/* initiate a scan of the target */
-				spin_lock_irqsave(shost->host_lock, flags);
-				rport->flags |= FC_RPORT_SCAN_PENDING;
-				scsi_queue_work(shost, &rport->scan_work);
-				spin_unlock_irqrestore(shost->host_lock, flags);
-			}
+			fc_remote_port_rolechg(rport, ids->roles);
 			return rport;
 		}
 	}
@@ -3012,6 +3015,10 @@ fc_remote_port_delete(struct fc_rport  *rport)
 
 	spin_unlock_irqrestore(shost->host_lock, flags);
 
+	if (rport->roles & FC_PORT_ROLE_FCP_INITIATOR &&
+	    shost->active_mode & MODE_TARGET)
+		fc_tgt_it_nexus_destroy(shost, (unsigned long)rport);
+
 	scsi_target_block(&rport->dev);
 
 	/* see if we need to kill io faster than waiting for device loss */
@@ -3052,6 +3059,7 @@ fc_remote_port_rolechg(struct fc_rport  *rport, u32 roles)
 	struct fc_host_attrs *fc_host = shost_to_fc_host(shost);
 	unsigned long flags;
 	int create = 0;
+	int ret;
 
 	spin_lock_irqsave(shost->host_lock, flags);
 	if (roles & FC_PORT_ROLE_FCP_TARGET) {
@@ -3060,6 +3068,12 @@ fc_remote_port_rolechg(struct fc_rport  *rport, u32 roles)
 			create = 1;
 		} else if (!(rport->roles & FC_PORT_ROLE_FCP_TARGET))
 			create = 1;
+	} else if (shost->active_mode & MODE_TARGET) {
+		ret = fc_tgt_it_nexus_create(shost, (unsigned long)rport,
+					     (char *)&rport->node_name);
+		if (ret)
+			printk(KERN_ERR "FC Remore Port tgt nexus failed %d\n",
+			       ret);
 	}
 
 	rport->roles = roles;

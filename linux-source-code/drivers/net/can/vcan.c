@@ -46,9 +46,11 @@
 #include <linux/if_ether.h>
 #include <linux/can.h>
 #include <linux/can/dev.h>
-#include <linux/can/skb.h>
 #include <linux/slab.h>
 #include <net/rtnetlink.h>
+
+static __initconst const char banner[] =
+	KERN_INFO "vcan: Virtual CAN interface driver\n";
 
 MODULE_DESCRIPTION("virtual CAN interface");
 MODULE_LICENSE("Dual BSD/GPL");
@@ -107,23 +109,25 @@ static netdev_tx_t vcan_tx(struct sk_buff *skb, struct net_device *dev)
 			stats->rx_packets++;
 			stats->rx_bytes += cfd->len;
 		}
-		consume_skb(skb);
+		kfree_skb(skb);
 		return NETDEV_TX_OK;
 	}
 
 	/* perform standard echo handling for CAN network interfaces */
 
 	if (loop) {
+		struct sock *srcsk = skb->sk;
 
-		skb = can_create_echo_skb(skb);
+		skb = skb_share_check(skb, GFP_ATOMIC);
 		if (!skb)
 			return NETDEV_TX_OK;
 
 		/* receive with packet counting */
+		skb->sk = srcsk;
 		vcan_rx(skb, dev);
 	} else {
 		/* no looped packets => no counting */
-		consume_skb(skb);
+		kfree_skb(skb);
 	}
 	return NETDEV_TX_OK;
 }
@@ -143,7 +147,7 @@ static int vcan_change_mtu(struct net_device *dev, int new_mtu)
 
 static const struct net_device_ops vcan_netdev_ops = {
 	.ndo_start_xmit = vcan_tx,
-	.ndo_change_mtu = vcan_change_mtu,
+	.ndo_change_mtu_rh74 = vcan_change_mtu,
 };
 
 static void vcan_setup(struct net_device *dev)
@@ -160,7 +164,7 @@ static void vcan_setup(struct net_device *dev)
 		dev->flags |= IFF_ECHO;
 
 	dev->netdev_ops		= &vcan_netdev_ops;
-	dev->destructor		= free_netdev;
+	dev->extended->needs_free_netdev	= true;
 }
 
 static struct rtnl_link_ops vcan_link_ops __read_mostly = {
@@ -170,7 +174,7 @@ static struct rtnl_link_ops vcan_link_ops __read_mostly = {
 
 static __init int vcan_init_module(void)
 {
-	pr_info("vcan: Virtual CAN interface driver\n");
+	printk(banner);
 
 	if (echo)
 		printk(KERN_INFO "vcan: enabled echo on driver level.\n");

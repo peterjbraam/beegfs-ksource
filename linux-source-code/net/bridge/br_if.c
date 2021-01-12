@@ -137,7 +137,7 @@ void br_manage_promisc(struct net_bridge *br)
 	/* If vlan filtering is disabled or bridge interface is placed
 	 * into promiscuous mode, place all ports in promiscuous mode.
 	 */
-	if ((br->dev->flags & IFF_PROMISC) || !br_vlan_enabled(br))
+	if ((br->dev->flags & IFF_PROMISC) || !br_vlan_enabled(br->dev))
 		set_all = true;
 
 	list_for_each_entry(p, &br->port_list, list) {
@@ -311,9 +311,7 @@ void br_dev_delete(struct net_device *dev, struct list_head *head)
 
 	br_fdb_delete_by_port(br, NULL, 0, 1);
 
-	br_vlan_flush(br);
-	br_multicast_dev_del(br);
-	del_timer_sync(&br->gc_timer);
+	cancel_delayed_work_sync(&br->gc_work);
 
 	br_sysfs_delbr(br->dev);
 	unregister_netdevice_queue(br->dev, head);
@@ -362,7 +360,7 @@ static struct net_bridge_port *new_nbp(struct net_bridge *br,
 	p->path_cost = port_cost(dev);
 	p->priority = 0x8000 >> BR_PORT_BITS;
 	p->port_no = index;
-	p->flags = BR_LEARNING | BR_FLOOD | BR_MCAST_FLOOD;
+	p->flags = BR_LEARNING | BR_FLOOD | BR_MCAST_FLOOD | BR_BCAST_FLOOD;
 	br_init_port(p);
 	br_set_state(p, BR_STATE_DISABLED);
 	br_stp_port_timer_init(p);
@@ -381,7 +379,7 @@ int br_add_bridge(struct net *net, const char *name)
 	struct net_device *dev;
 	int res;
 
-	dev = alloc_netdev(sizeof(struct net_bridge), name, NET_NAME_UNKNOWN,
+	dev = alloc_netdev(sizeof(struct net_bridge), name,
 			   br_dev_setup);
 
 	if (!dev)
@@ -504,8 +502,8 @@ int br_add_if(struct net_bridge *br, struct net_device *dev)
 	if (dev->netdev_ops->ndo_start_xmit == br_dev_xmit)
 		return -ELOOP;
 
-	/* Device has master upper dev */
-	if (netdev_master_upper_dev_get(dev))
+	/* Device is already being bridged */
+	if (br_port_exists(dev))
 		return -EBUSY;
 
 	/* No bridging devices that dislike that (e.g. wireless) */
@@ -519,15 +517,13 @@ int br_add_if(struct net_bridge *br, struct net_device *dev)
 	call_netdevice_notifiers(NETDEV_JOIN, dev);
 
 	err = dev_set_allmulti(dev, 1);
-	if (err) {
-		kfree(p);	/* kobject not yet init'd, manually free */
-		goto err1;
-	}
+	if (err)
+		goto put_back;
 
 	err = kobject_init_and_add(&p->kobj, &brport_ktype, &(dev->dev.kobj),
 				   SYSFS_BRIDGE_PORT_ATTR);
 	if (err)
-		goto err2;
+		goto err1;
 
 	err = br_sysfs_addif(p);
 	if (err)
@@ -610,9 +606,12 @@ err3:
 	sysfs_remove_link(br->ifobj, p->dev->name);
 err2:
 	kobject_put(&p->kobj);
-	dev_set_allmulti(dev, -1);
+	p = NULL; /* kobject_put frees */
 err1:
+	dev_set_allmulti(dev, -1);
+put_back:
 	dev_put(dev);
+	kfree(p);
 	return err;
 }
 

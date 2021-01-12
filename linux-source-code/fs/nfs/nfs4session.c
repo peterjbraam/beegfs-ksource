@@ -110,6 +110,8 @@ static struct nfs4_slot *nfs4_new_slot(struct nfs4_slot_table  *tbl,
 		slot->table = tbl;
 		slot->slot_nr = slotid;
 		slot->seq_nr = seq_init;
+		slot->seq_nr_highest_sent = seq_init;
+		slot->seq_nr_last_acked = seq_init - 1;
 	}
 	return slot;
 }
@@ -169,7 +171,7 @@ bool nfs4_try_to_lock_slot(struct nfs4_slot_table *tbl, struct nfs4_slot *slot)
 struct nfs4_slot *nfs4_lookup_slot(struct nfs4_slot_table *tbl, u32 slotid)
 {
 	if (slotid <= tbl->max_slotid)
-		return nfs4_find_or_create_slot(tbl, slotid, 1, GFP_NOWAIT);
+		return nfs4_find_or_create_slot(tbl, slotid, 0, GFP_NOWAIT);
 	return ERR_PTR(-E2BIG);
 }
 
@@ -276,7 +278,8 @@ static void nfs4_reset_slot_table(struct nfs4_slot_table *tbl,
 	p = &tbl->slots;
 	while (*p) {
 		(*p)->seq_nr = ivalue;
-		(*p)->interrupted = 0;
+		(*p)->seq_nr_highest_sent = ivalue;
+		(*p)->seq_nr_last_acked = ivalue - 1;
 		p = &(*p)->next;
 	}
 	tbl->highest_used_slotid = NFS4_NO_SLOT;

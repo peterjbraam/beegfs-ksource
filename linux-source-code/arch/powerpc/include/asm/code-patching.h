@@ -22,12 +22,14 @@
 #define BRANCH_SET_LINK	0x1
 #define BRANCH_ABSOLUTE	0x2
 
+bool is_offset_in_branch_range(long offset);
 unsigned int create_branch(const unsigned int *addr,
 			   unsigned long target, int flags);
 unsigned int create_cond_branch(const unsigned int *addr,
 				unsigned long target, int flags);
 int patch_branch(unsigned int *addr, unsigned long target, int flags);
 int patch_instruction(unsigned int *addr, unsigned int instr);
+int raw_patch_instruction(unsigned int *addr, unsigned int instr);
 int patch_instruction_site(s32 *addr, unsigned int instr);
 int patch_branch_site(s32 *site, unsigned long target, int flags);
 
@@ -37,13 +39,6 @@ int instr_is_branch_to_addr(const unsigned int *instr, unsigned long addr);
 unsigned long branch_target(const unsigned int *instr);
 unsigned int translate_branch(const unsigned int *dest,
 			      const unsigned int *src);
-#ifdef CONFIG_PPC_BOOK3E_64
-void __patch_exception(int exc, unsigned long addr);
-#define patch_exception(exc, name) do { \
-	extern unsigned int name; \
-	__patch_exception((exc), (unsigned long)&name); \
-} while (0)
-#endif
 
 #define OP_RT_RA_MASK	0xffff0000UL
 #define LIS_R2		0x3c020000UL

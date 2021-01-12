@@ -57,6 +57,9 @@ static struct task_struct	*nlmsvc_task;
 static struct svc_rqst		*nlmsvc_rqst;
 unsigned long			nlmsvc_timeout;
 
+atomic_t nlm_ntf_refcnt = ATOMIC_INIT(0);
+DECLARE_WAIT_QUEUE_HEAD(nlm_ntf_wq);
+
 int lockd_net_id;
 
 /*
@@ -94,7 +97,8 @@ static unsigned long get_lockd_grace_period(void)
 
 static void grace_ender(struct work_struct *grace)
 {
-	struct delayed_work *dwork = to_delayed_work(grace);
+	struct delayed_work *dwork = container_of(grace, struct delayed_work,
+						  work);
 	struct lockd_net *ln = container_of(dwork, struct lockd_net,
 					    grace_period_end);
 
@@ -292,7 +296,8 @@ static int lockd_inetaddr_event(struct notifier_block *this,
 	struct in_ifaddr *ifa = (struct in_ifaddr *)ptr;
 	struct sockaddr_in sin;
 
-	if (event != NETDEV_DOWN)
+	if ((event != NETDEV_DOWN) ||
+	    !atomic_inc_not_zero(&nlm_ntf_refcnt))
 		goto out;
 
 	if (nlmsvc_rqst) {
@@ -303,6 +308,8 @@ static int lockd_inetaddr_event(struct notifier_block *this,
 		svc_age_temp_xprts_now(nlmsvc_rqst->rq_server,
 			(struct sockaddr *)&sin);
 	}
+	atomic_dec(&nlm_ntf_refcnt);
+	wake_up(&nlm_ntf_wq);
 
 out:
 	return NOTIFY_DONE;
@@ -319,7 +326,8 @@ static int lockd_inet6addr_event(struct notifier_block *this,
 	struct inet6_ifaddr *ifa = (struct inet6_ifaddr *)ptr;
 	struct sockaddr_in6 sin6;
 
-	if (event != NETDEV_DOWN)
+	if ((event != NETDEV_DOWN) ||
+	    !atomic_inc_not_zero(&nlm_ntf_refcnt))
 		goto out;
 
 	if (nlmsvc_rqst) {
@@ -329,6 +337,8 @@ static int lockd_inet6addr_event(struct notifier_block *this,
 		svc_age_temp_xprts_now(nlmsvc_rqst->rq_server,
 			(struct sockaddr *)&sin6);
 	}
+	atomic_dec(&nlm_ntf_refcnt);
+	wake_up(&nlm_ntf_wq);
 
 out:
 	return NOTIFY_DONE;
@@ -345,10 +355,12 @@ static void lockd_unregister_notifiers(void)
 #if IS_ENABLED(CONFIG_IPV6)
 	unregister_inet6addr_notifier(&lockd_inet6addr_notifier);
 #endif
+	wait_event(nlm_ntf_wq, atomic_read(&nlm_ntf_refcnt) == 0);
 }
 
 static void lockd_svc_exit_thread(void)
 {
+	atomic_dec(&nlm_ntf_refcnt);
 	lockd_unregister_notifiers();
 	svc_exit_thread(nlmsvc_rqst);
 }
@@ -373,6 +385,7 @@ static int lockd_start_svc(struct svc_serv *serv)
 		goto out_rqst;
 	}
 
+	atomic_inc(&nlm_ntf_refcnt);
 	svc_sock_update_bufs(serv);
 	serv->sv_maxconn = nlm_max_connections;
 
@@ -521,7 +534,7 @@ EXPORT_SYMBOL_GPL(lockd_down);
  * Sysctl parameters (same as module parameters, different interface).
  */
 
-static struct ctl_table nlm_sysctls[] = {
+static ctl_table nlm_sysctls[] = {
 	{
 		.procname	= "nlm_grace_period",
 		.data		= &nlm_grace_period,
@@ -575,7 +588,7 @@ static struct ctl_table nlm_sysctls[] = {
 	{ }
 };
 
-static struct ctl_table nlm_sysctl_dir[] = {
+static ctl_table nlm_sysctl_dir[] = {
 	{
 		.procname	= "nfs",
 		.mode		= 0555,
@@ -584,7 +597,7 @@ static struct ctl_table nlm_sysctl_dir[] = {
 	{ }
 };
 
-static struct ctl_table nlm_sysctl_root[] = {
+static ctl_table nlm_sysctl_root[] = {
 	{
 		.procname	= "fs",
 		.mode		= 0555,
@@ -670,6 +683,7 @@ static int lockd_init_net(struct net *net)
 	INIT_DELAYED_WORK(&ln->grace_period_end, grace_ender);
 	INIT_LIST_HEAD(&ln->lockd_manager.list);
 	ln->lockd_manager.block_opens = false;
+	spin_lock_init(&ln->nsm_clnt_lock);
 	INIT_LIST_HEAD(&ln->nsm_handles);
 	return 0;
 }
@@ -715,8 +729,8 @@ err_procfs:
 err_pernet:
 #ifdef CONFIG_SYSCTL
 	unregister_sysctl_table(nlm_sysctl_table);
-err_sysctl:
 #endif
+err_sysctl:
 	return err;
 }
 

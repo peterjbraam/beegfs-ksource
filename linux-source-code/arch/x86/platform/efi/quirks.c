@@ -13,7 +13,7 @@
 #include <linux/dmi.h>
 #include <asm/efi.h>
 #include <asm/uv/uv.h>
-#include <asm/sections.h>
+#include <asm/reboot.h>
 
 #define EFI_MIN_RESERVE 5120
 
@@ -50,11 +50,11 @@ early_param("efi_no_storage_paranoia", setup_storage_paranoia);
 */
 void efi_delete_dummy_variable(void)
 {
-	efi.set_variable(efi_dummy_name, &EFI_DUMMY_GUID,
-			 EFI_VARIABLE_NON_VOLATILE |
-			 EFI_VARIABLE_BOOTSERVICE_ACCESS |
-			 EFI_VARIABLE_RUNTIME_ACCESS,
-			 0, NULL);
+	efi.set_variable_nonblocking((efi_char16_t *)efi_dummy_name,
+				     &EFI_DUMMY_GUID,
+				     EFI_VARIABLE_NON_VOLATILE |
+				     EFI_VARIABLE_BOOTSERVICE_ACCESS |
+				     EFI_VARIABLE_RUNTIME_ACCESS, 0, NULL);
 }
 
 /*
@@ -165,79 +165,6 @@ efi_status_t efi_query_variable_store(u32 attributes, unsigned long size,
 EXPORT_SYMBOL_GPL(efi_query_variable_store);
 
 /*
- * The UEFI specification makes it clear that the operating system is
- * free to do whatever it wants with boot services code after
- * ExitBootServices() has been called. Ignoring this recommendation a
- * significant bunch of EFI implementations continue calling into boot
- * services code (SetVirtualAddressMap). In order to work around such
- * buggy implementations we reserve boot services region during EFI
- * init and make sure it stays executable. Then, after
- * SetVirtualAddressMap(), it is discarded.
- *
- * However, some boot services regions contain data that is required
- * by drivers, so we need to track which memory ranges can never be
- * freed. This is done by tagging those regions with the
- * EFI_MEMORY_RUNTIME attribute.
- *
- * Any driver that wants to mark a region as reserved must use
- * efi_mem_reserve() which will insert a new EFI memory descriptor
- * into efi.memmap (splitting existing regions if necessary) and tag
- * it with EFI_MEMORY_RUNTIME.
- */
-void __init efi_arch_mem_reserve(phys_addr_t addr, u64 size)
-{
-	phys_addr_t new_phys, new_size;
-	struct efi_mem_range mr;
-	efi_memory_desc_t md;
-	int num_entries;
-	void *new;
-
-	if (efi_mem_desc_lookup(addr, &md)) {
-		pr_err("Failed to lookup EFI memory descriptor for %pa\n", &addr);
-		return;
-	}
-
-	if (addr + size > md.phys_addr + (md.num_pages << EFI_PAGE_SHIFT)) {
-		pr_err("Region spans EFI memory descriptors, %pa\n", &addr);
-		return;
-	}
-
-	/* No need to reserve regions that will never be freed. */
-	if (md.attribute & EFI_MEMORY_RUNTIME)
-		return;
-
-	size += addr % EFI_PAGE_SIZE;
-	size = round_up(size, EFI_PAGE_SIZE);
-	addr = round_down(addr, EFI_PAGE_SIZE);
-
-	mr.range.start = addr;
-	mr.range.end = addr + size - 1;
-	mr.attribute = md.attribute | EFI_MEMORY_RUNTIME;
-
-	num_entries = efi_memmap_split_count(&md, &mr.range);
-	num_entries += efi.memmap.nr_map;
-
-	new_size = efi.memmap.desc_size * num_entries;
-
-	new_phys = efi_memmap_alloc(num_entries);
-	if (!new_phys) {
-		pr_err("Could not allocate boot services memmap\n");
-		return;
-	}
-
-	new = early_memremap(new_phys, new_size);
-	if (!new) {
-		pr_err("Failed to map new boot services memmap\n");
-		return;
-	}
-
-	efi_memmap_insert(&efi.memmap, new, &mr);
-	early_memunmap(new, new_size);
-
-	efi_memmap_install(new_phys, num_entries);
-}
-
-/*
  * Helper function for efi_reserve_boot_services() to figure out if we
  * can free regions in efi_free_boot_services().
  *
@@ -258,11 +185,21 @@ static bool can_free_region(u64 start, u64 size)
 	return true;
 }
 
+/*
+ * The UEFI specification makes it clear that the operating system is free to do
+ * whatever it wants with boot services code after ExitBootServices() has been
+ * called. Ignoring this recommendation a significant bunch of EFI implementations
+ * continue calling into boot services code (SetVirtualAddressMap). In order to
+ * work around such buggy implementations we reserve boot services region during
+ * EFI init and make sure it stays executable. Then, after SetVirtualAddressMap(), it
+* is discarded.
+*/
 void __init efi_reserve_boot_services(void)
 {
-	efi_memory_desc_t *md;
+	void *p;
 
-	for_each_efi_memory_desc(md) {
+	for (p = memmap.map; p < memmap.map_end; p += memmap.desc_size) {
+		efi_memory_desc_t *md = p;
 		u64 start = md->phys_addr;
 		u64 size = md->num_pages << EFI_PAGE_SHIFT;
 		bool already_reserved;
@@ -314,89 +251,27 @@ void __init efi_reserve_boot_services(void)
 
 void __init efi_free_boot_services(void)
 {
-	phys_addr_t new_phys, new_size;
-	efi_memory_desc_t *md;
-	int num_entries = 0;
-	void *new, *new_md;
+	void *p;
 
-	for_each_efi_memory_desc(md) {
+	for (p = memmap.map; p < memmap.map_end; p += memmap.desc_size) {
+		efi_memory_desc_t *md = p;
 		unsigned long long start = md->phys_addr;
 		unsigned long long size = md->num_pages << EFI_PAGE_SHIFT;
-		size_t rm_size;
 
 		if (md->type != EFI_BOOT_SERVICES_CODE &&
-		    md->type != EFI_BOOT_SERVICES_DATA) {
-			num_entries++;
+		    md->type != EFI_BOOT_SERVICES_DATA)
 			continue;
-		}
+
+		set_memory_encrypted((unsigned long)__va(start), md->num_pages);
 
 		/* Do not free, someone else owns it: */
-		if (md->attribute & EFI_MEMORY_RUNTIME) {
-			num_entries++;
+		if (md->attribute & EFI_MEMORY_RUNTIME)
 			continue;
-		}
-
-		/*
-		 * Nasty quirk: if all sub-1MB memory is used for boot
-		 * services, we can get here without having allocated the
-		 * real mode trampoline.  It's too late to hand boot services
-		 * memory back to the memblock allocator, so instead
-		 * try to manually allocate the trampoline if needed.
-		 *
-		 * I've seen this on a Dell XPS 13 9350 with firmware
-		 * 1.4.4 with SGX enabled booting Linux via Fedora 24's
-		 * grub2-efi on a hard disk.  (And no, I don't know why
-		 * this happened, but Linux should still try to boot rather
-		 * panicing early.)
-		 */
-		rm_size = real_mode_size_needed();
-		if (rm_size && (start + rm_size) < (1<<20) && size >= rm_size) {
-			set_real_mode_mem(start, rm_size);
-			start += rm_size;
-			size -= rm_size;
-		}
 
 		free_bootmem_late(start, size);
 	}
 
-	if (!num_entries)
-		return;
-
-	new_size = efi.memmap.desc_size * num_entries;
-	new_phys = efi_memmap_alloc(num_entries);
-	if (!new_phys) {
-		pr_err("Failed to allocate new EFI memmap\n");
-		return;
-	}
-
-	new = memremap(new_phys, new_size, MEMREMAP_WB);
-	if (!new) {
-		pr_err("Failed to map new EFI memmap\n");
-		return;
-	}
-
-	/*
-	 * Build a new EFI memmap that excludes any boot services
-	 * regions that are not tagged EFI_MEMORY_RUNTIME, since those
-	 * regions have now been freed.
-	 */
-	new_md = new;
-	for_each_efi_memory_desc(md) {
-		if (!(md->attribute & EFI_MEMORY_RUNTIME) &&
-		    (md->type == EFI_BOOT_SERVICES_CODE ||
-		     md->type == EFI_BOOT_SERVICES_DATA))
-			continue;
-
-		memcpy(new_md, md, efi.memmap.desc_size);
-		new_md += efi.memmap.desc_size;
-	}
-
-	memunmap(new);
-
-	if (efi_memmap_install(new_phys, num_entries)) {
-		pr_err("Could not install new EFI memmap\n");
-		return;
-	}
+	efi_unmap_memmap();
 }
 
 /*
@@ -474,7 +349,7 @@ void __init efi_apply_memmap_quirks(void)
 	 */
 	if (!efi_runtime_supported()) {
 		pr_info("Setup done, disabling due to 32/64-bit mismatch\n");
-		efi_memmap_unmap();
+		efi_unmap_memmap();
 	}
 
 	/* UV2+ BIOS has a fix for this issue.  UV1 still needs the quirk. */
@@ -483,23 +358,81 @@ void __init efi_apply_memmap_quirks(void)
 }
 
 /*
- * For most modern platforms the preferred method of powering off is via
- * ACPI. However, there are some that are known to require the use of
- * EFI runtime services and for which ACPI does not work at all.
+ * If any access by any efi runtime service causes a page fault, then,
+ * 1. If it's efi_reset_system(), reboot through BIOS.
+ * 2. If any other efi runtime service, then
+ *    a. Return error status to the efi caller process.
+ *    b. Disable EFI Runtime Services forever and
+ *    c. Freeze efi_rts_wq and schedule new process.
  *
- * Using EFI is a last resort, to be used only if no other option
- * exists.
+ * @return: Returns, if the page fault is not handled. This function
+ * will never return if the page fault is handled successfully.
  */
-bool efi_reboot_required(void)
+void efi_recover_from_page_fault(unsigned long phys_addr)
 {
-	if (!acpi_gbl_reduced_hardware)
-		return false;
+	bool ibrs_on;
 
-	efi_reboot_quirk_mode = EFI_RESET_WARM;
-	return true;
-}
+	if (!IS_ENABLED(CONFIG_X86_64))
+		return;
 
-bool efi_poweroff_required(void)
-{
-	return acpi_gbl_reduced_hardware || acpi_no_s5;
+	/*
+	 * Make sure that an efi runtime service caused the page fault.
+	 * "efi_mm" cannot be used to check if the page fault had occurred
+	 * in the firmware context because efi=old_map doesn't use efi_pgd.
+	 */
+	if (efi_rts_work.efi_rts_id == NONE)
+		return;
+
+	/*
+	 * Address range 0x0000 - 0x0fff is always mapped in the efi_pgd, so
+	 * page faulting on these addresses isn't expected.
+	 */
+	if (phys_addr >= 0x0000 && phys_addr <= 0x0fff)
+		return;
+
+	/*
+	 * Print stack trace as it might be useful to know which EFI Runtime
+	 * Service is buggy.
+	 */
+	WARN(1, FW_BUG "Page fault caused by firmware at PA: 0x%lx\n",
+	     phys_addr);
+
+	/*
+	 * Buggy efi_reset_system() is handled differently from other EFI
+	 * Runtime Services as it doesn't use efi_rts_wq. Although,
+	 * native_machine_emergency_restart() says that machine_real_restart()
+	 * could fail, it's better not to compilcate this fault handler
+	 * because this case occurs *very* rarely and hence could be improved
+	 * on a need by basis.
+	 */
+	if (efi_rts_work.efi_rts_id == RESET_SYSTEM) {
+		pr_info("efi_reset_system() buggy! Reboot through BIOS\n");
+		machine_real_restart(MRR_BIOS);
+		return;
+	}
+
+	/*
+	 * Before calling EFI Runtime Service, the kernel has switched the
+	 * calling process to efi_mm. Hence, switch back to task_mm.
+	 */
+	ibrs_on = arch_efi_call_virt_setup();
+	arch_efi_call_virt_teardown(ibrs_on);
+
+	/* Signal error status to the efi caller process */
+	efi_rts_work.status = EFI_ABORTED;
+	complete(&efi_rts_work.efi_rts_comp);
+
+	clear_bit(EFI_RUNTIME_SERVICES, &efi.flags);
+	pr_info("Froze efi_rts_wq and disabled EFI Runtime Services\n");
+
+	/*
+	 * Call schedule() in an infinite loop, so that any spurious wake ups
+	 * will never run efi_rts_wq again.
+	 */
+	for (;;) {
+		set_current_state(TASK_UNINTERRUPTIBLE);
+		schedule();
+	}
+
+	return;
 }

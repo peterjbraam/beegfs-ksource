@@ -35,7 +35,8 @@
 #include <linux/genhd.h>
 #include <linux/file.h>
 #include <linux/module.h>
-#include <scsi/scsi_proto.h>
+#include <scsi/scsi.h>
+#include <scsi/scsi_host.h>
 #include <asm/unaligned.h>
 
 #include <target/target_core_base.h>
@@ -138,17 +139,17 @@ static int iblock_configure_device(struct se_device *dev)
 	if (bi) {
 		struct bio_set *bs = ib_dev->ibd_bio_set;
 
-		if (!strcmp(bi->profile->name, "T10-DIF-TYPE3-IP") ||
-		    !strcmp(bi->profile->name, "T10-DIF-TYPE1-IP")) {
+		if (!strcmp(bi->name, "T10-DIF-TYPE3-IP") ||
+		    !strcmp(bi->name, "T10-DIF-TYPE1-IP")) {
 			pr_err("IBLOCK export of blk_integrity: %s not"
-			       " supported\n", bi->profile->name);
+			       " supported\n", bi->name);
 			ret = -ENOSYS;
 			goto out_blkdev_put;
 		}
 
-		if (!strcmp(bi->profile->name, "T10-DIF-TYPE3-CRC")) {
+		if (!strcmp(bi->name, "T10-DIF-TYPE3-CRC")) {
 			dev->dev_attrib.pi_prot_type = TARGET_DIF_TYPE3_PROT;
-		} else if (!strcmp(bi->profile->name, "T10-DIF-TYPE1-CRC")) {
+		} else if (!strcmp(bi->name, "T10-DIF-TYPE1-CRC")) {
 			dev->dev_attrib.pi_prot_type = TARGET_DIF_TYPE1_PROT;
 		}
 
@@ -279,7 +280,7 @@ static void iblock_complete_cmd(struct se_cmd *cmd)
 	struct iblock_req *ibr = cmd->priv;
 	u8 status;
 
-	if (!atomic_dec_and_test(&ibr->pending))
+	if (!refcount_dec_and_test(&ibr->pending))
 		return;
 
 	if (atomic_read(&ibr->ib_bio_err_cnt))
@@ -291,13 +292,20 @@ static void iblock_complete_cmd(struct se_cmd *cmd)
 	kfree(ibr);
 }
 
-static void iblock_bio_done(struct bio *bio)
+static void iblock_bio_done(struct bio *bio, int err)
 {
 	struct se_cmd *cmd = bio->bi_private;
 	struct iblock_req *ibr = cmd->priv;
 
-	if (bio->bi_error) {
-		pr_err("bio error: %p,  err: %d\n", bio, bio->bi_error);
+	/*
+	 * Set -EIO if !BIO_UPTODATE and the passed is still err=0
+	 */
+	if (!test_bit(BIO_UPTODATE, &bio->bi_flags) && !err)
+		err = -EIO;
+
+	if (err != 0) {
+		pr_err("test_bit(BIO_UPTODATE) failed for bio: %p,"
+			" err: %d\n", bio, err);
 		/*
 		 * Bump the ib_bio_err_cnt and release bio.
 		 */
@@ -311,8 +319,7 @@ static void iblock_bio_done(struct bio *bio)
 }
 
 static struct bio *
-iblock_get_bio(struct se_cmd *cmd, sector_t lba, u32 sg_num, int op,
-	       int op_flags)
+iblock_get_bio(struct se_cmd *cmd, sector_t lba, u32 sg_num)
 {
 	struct iblock_dev *ib_dev = IBLOCK_DEV(cmd->se_dev);
 	struct bio *bio;
@@ -333,32 +340,31 @@ iblock_get_bio(struct se_cmd *cmd, sector_t lba, u32 sg_num, int op,
 	bio->bi_bdev = ib_dev->ibd_bd;
 	bio->bi_private = cmd;
 	bio->bi_end_io = &iblock_bio_done;
-	bio->bi_iter.bi_sector = lba;
-	bio_set_op_attrs(bio, op, op_flags);
+	bio->bi_sector = lba;
 
 	return bio;
 }
 
-static void iblock_submit_bios(struct bio_list *list)
+static void iblock_submit_bios(struct bio_list *list, int rw)
 {
 	struct blk_plug plug;
 	struct bio *bio;
 
 	blk_start_plug(&plug);
 	while ((bio = bio_list_pop(list)))
-		submit_bio(bio);
+		submit_bio(rw, bio);
 	blk_finish_plug(&plug);
 }
 
-static void iblock_end_io_flush(struct bio *bio)
+static void iblock_end_io_flush(struct bio *bio, int err)
 {
 	struct se_cmd *cmd = bio->bi_private;
 
-	if (bio->bi_error)
-		pr_err("IBLOCK: cache flush failed: %d\n", bio->bi_error);
+	if (err)
+		pr_err("IBLOCK: cache flush failed: %d\n", err);
 
 	if (cmd) {
-		if (bio->bi_error)
+		if (err)
 			target_complete_cmd(cmd, SAM_STAT_CHECK_CONDITION);
 		else
 			target_complete_cmd(cmd, SAM_STAT_GOOD);
@@ -388,10 +394,9 @@ iblock_execute_sync_cache(struct se_cmd *cmd)
 	bio = bio_alloc(GFP_KERNEL, 0);
 	bio->bi_end_io = iblock_end_io_flush;
 	bio->bi_bdev = ib_dev->ibd_bd;
-	bio_set_op_attrs(bio, REQ_OP_WRITE, WRITE_FLUSH);
 	if (!immed)
 		bio->bi_private = cmd;
-	submit_bio(bio);
+	submit_bio(WRITE_FLUSH, bio);
 	return 0;
 }
 
@@ -480,34 +485,33 @@ iblock_execute_write_same(struct se_cmd *cmd)
 		goto fail;
 	cmd->priv = ibr;
 
-	bio = iblock_get_bio(cmd, block_lba, 1, REQ_OP_WRITE, 0);
+	bio = iblock_get_bio(cmd, block_lba, 1);
 	if (!bio)
 		goto fail_free_ibr;
 
 	bio_list_init(&list);
 	bio_list_add(&list, bio);
 
-	atomic_set(&ibr->pending, 1);
+	refcount_set(&ibr->pending, 1);
 
 	while (sectors) {
 		while (bio_add_page(bio, sg_page(sg), sg->length, sg->offset)
 				!= sg->length) {
 
-			bio = iblock_get_bio(cmd, block_lba, 1, REQ_OP_WRITE,
-					     0);
+			bio = iblock_get_bio(cmd, block_lba, 1);
 			if (!bio)
 				goto fail_put_bios;
 
-			atomic_inc(&ibr->pending);
+			refcount_inc(&ibr->pending);
 			bio_list_add(&list, bio);
 		}
 
 		/* Always in 512 byte units for Linux/Block */
 		block_lba += sg->length >> IBLOCK_LBA_SHIFT;
-		sectors -= 1;
+		sectors -= sg->length >> IBLOCK_LBA_SHIFT;
 	}
 
-	iblock_submit_bios(&list);
+	iblock_submit_bios(&list, WRITE);
 	return 0;
 
 fail_put_bios:
@@ -640,17 +644,17 @@ iblock_alloc_bip(struct se_cmd *cmd, struct bio *bio)
 	}
 
 	bip = bio_integrity_alloc(bio, GFP_NOIO, cmd->t_prot_nents);
-	if (IS_ERR(bip)) {
+	if (!bip) {
 		pr_err("Unable to allocate bio_integrity_payload\n");
-		return PTR_ERR(bip);
+		return -ENOMEM;
 	}
 
-	bip->bip_iter.bi_size = (cmd->data_length / dev->dev_attrib.block_size) *
+	bip->bip_size = (cmd->data_length / dev->dev_attrib.block_size) *
 			 dev->prot_length;
-	bip->bip_iter.bi_sector = bio->bi_iter.bi_sector;
+	bip->bip_sector = bio->bi_sector;
 
-	pr_debug("IBLOCK BIP Size: %u Sector: %llu\n", bip->bip_iter.bi_size,
-		 (unsigned long long)bip->bip_iter.bi_sector);
+	pr_debug("IBLOCK BIP Size: %u Sector: %llu\n", bip->bip_size,
+		 (unsigned long long)bip->bip_sector);
 
 	for_each_sg(cmd->t_prot_sg, sg, cmd->t_prot_nents, i) {
 
@@ -680,7 +684,8 @@ iblock_execute_rw(struct se_cmd *cmd, struct scatterlist *sgl, u32 sgl_nents,
 	struct scatterlist *sg;
 	u32 sg_num = sgl_nents;
 	unsigned bio_cnt;
-	int i, op, op_flags = 0;
+	int rw = 0;
+	int i;
 
 	if (data_direction == DMA_TO_DEVICE) {
 		struct iblock_dev *ib_dev = IBLOCK_DEV(dev);
@@ -689,15 +694,18 @@ iblock_execute_rw(struct se_cmd *cmd, struct scatterlist *sgl, u32 sgl_nents,
 		 * Force writethrough using WRITE_FUA if a volatile write cache
 		 * is not enabled, or if initiator set the Force Unit Access bit.
 		 */
-		op = REQ_OP_WRITE;
-		if (test_bit(QUEUE_FLAG_FUA, &q->queue_flags)) {
+		if (q->flush_flags & REQ_FUA) {
 			if (cmd->se_cmd_flags & SCF_FUA)
-				op_flags = WRITE_FUA;
-			else if (!test_bit(QUEUE_FLAG_WC, &q->queue_flags))
-				op_flags = WRITE_FUA;
+				rw = WRITE_FUA;
+			else if (!(q->flush_flags & REQ_FLUSH))
+				rw = WRITE_FUA;
+			else
+				rw = WRITE;
+		} else {
+			rw = WRITE;
 		}
 	} else {
-		op = REQ_OP_READ;
+		rw = READ;
 	}
 
 	ibr = kzalloc(sizeof(struct iblock_req), GFP_KERNEL);
@@ -706,12 +714,12 @@ iblock_execute_rw(struct se_cmd *cmd, struct scatterlist *sgl, u32 sgl_nents,
 	cmd->priv = ibr;
 
 	if (!sgl_nents) {
-		atomic_set(&ibr->pending, 1);
+		refcount_set(&ibr->pending, 1);
 		iblock_complete_cmd(cmd);
 		return 0;
 	}
 
-	bio = iblock_get_bio(cmd, block_lba, sgl_nents, op, op_flags);
+	bio = iblock_get_bio(cmd, block_lba, sgl_nents);
 	if (!bio)
 		goto fail_free_ibr;
 
@@ -719,7 +727,7 @@ iblock_execute_rw(struct se_cmd *cmd, struct scatterlist *sgl, u32 sgl_nents,
 	bio_list_init(&list);
 	bio_list_add(&list, bio);
 
-	atomic_set(&ibr->pending, 2);
+	refcount_set(&ibr->pending, 2);
 	bio_cnt = 1;
 
 	for_each_sg(sgl, sg, sgl_nents, i) {
@@ -731,16 +739,15 @@ iblock_execute_rw(struct se_cmd *cmd, struct scatterlist *sgl, u32 sgl_nents,
 		while (bio_add_page(bio, sg_page(sg), sg->length, sg->offset)
 				!= sg->length) {
 			if (bio_cnt >= IBLOCK_MAX_BIO_PER_TASK) {
-				iblock_submit_bios(&list);
+				iblock_submit_bios(&list, rw);
 				bio_cnt = 0;
 			}
 
-			bio = iblock_get_bio(cmd, block_lba, sg_num, op,
-					     op_flags);
+			bio = iblock_get_bio(cmd, block_lba, sg_num);
 			if (!bio)
 				goto fail_put_bios;
 
-			atomic_inc(&ibr->pending);
+			refcount_inc(&ibr->pending);
 			bio_list_add(&list, bio);
 			bio_cnt++;
 		}
@@ -756,7 +763,7 @@ iblock_execute_rw(struct se_cmd *cmd, struct scatterlist *sgl, u32 sgl_nents,
 			goto fail_put_bios;
 	}
 
-	iblock_submit_bios(&list);
+	iblock_submit_bios(&list, rw);
 	iblock_complete_cmd(cmd);
 	return 0;
 
@@ -836,7 +843,7 @@ static bool iblock_get_write_cache(struct se_device *dev)
 	struct block_device *bd = ib_dev->ibd_bd;
 	struct request_queue *q = bdev_get_queue(bd);
 
-	return test_bit(QUEUE_FLAG_WC, &q->queue_flags);
+	return q->flush_flags & REQ_FLUSH;
 }
 
 static const struct target_backend_ops iblock_ops = {

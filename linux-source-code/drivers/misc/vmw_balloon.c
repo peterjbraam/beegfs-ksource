@@ -1,7 +1,7 @@
 /*
  * VMware Balloon driver.
  *
- * Copyright (C) 2000-2014, VMware, Inc. All Rights Reserved.
+ * Copyright (C) 2000-2013, VMware, Inc. All Rights Reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
@@ -17,8 +17,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
  *
- * Maintained by:	Xavier Deguillard <xdeguillard@vmware.com>
- *			Philip Moltmann <moltmann@vmware.com>
+ * Maintained by: Dmitry Torokhov <dtor@vmware.com>
  */
 
 /*
@@ -43,14 +42,11 @@
 #include <linux/workqueue.h>
 #include <linux/debugfs.h>
 #include <linux/seq_file.h>
-#include <linux/vmw_vmci_defs.h>
-#include <linux/vmw_vmci_api.h>
-#include <linux/io.h>
 #include <asm/hypervisor.h>
 
 MODULE_AUTHOR("VMware, Inc.");
 MODULE_DESCRIPTION("VMware Memory Control (Balloon) Driver");
-MODULE_VERSION("1.5.0.0-k");
+MODULE_VERSION("1.4.1.0-k");
 MODULE_ALIAS("dmi:*:svnVMware*:*");
 MODULE_ALIAS("vmware_vmmemctl");
 MODULE_LICENSE("GPL");
@@ -76,7 +72,7 @@ MODULE_LICENSE("GPL");
 
 /*
  * Use __GFP_HIGHMEM to allow pages from HIGHMEM zone. We don't
- * allow wait (__GFP_RECLAIM) for NOSLEEP page allocations. Use
+ * allow wait (__GFP_WAIT) for NOSLEEP page allocations. Use
  * __GFP_NOWARN, to suppress page allocation failure warnings.
  */
 #define VMW_PAGE_ALLOC_NOSLEEP		(__GFP_HIGHMEM|__GFP_NOWARN)
@@ -104,16 +100,14 @@ enum vmwballoon_capabilities {
 	/*
 	 * Bit 0 is reserved and not associated to any capability.
 	 */
-	VMW_BALLOON_BASIC_CMDS			= (1 << 1),
-	VMW_BALLOON_BATCHED_CMDS		= (1 << 2),
-	VMW_BALLOON_BATCHED_2M_CMDS		= (1 << 3),
-	VMW_BALLOON_SIGNALLED_WAKEUP_CMD	= (1 << 4),
+	VMW_BALLOON_BASIC_CMDS		= (1 << 1),
+	VMW_BALLOON_BATCHED_CMDS	= (1 << 2),
+	VMW_BALLOON_BATCHED_2M_CMDS     = (1 << 3),
 };
 
 #define VMW_BALLOON_CAPABILITIES	(VMW_BALLOON_BASIC_CMDS \
 					| VMW_BALLOON_BATCHED_CMDS \
-					| VMW_BALLOON_BATCHED_2M_CMDS \
-					| VMW_BALLOON_SIGNALLED_WAKEUP_CMD)
+					| VMW_BALLOON_BATCHED_2M_CMDS)
 
 #define VMW_BALLOON_2M_SHIFT		(9)
 #define VMW_BALLOON_NUM_PAGE_SIZES	(2)
@@ -128,9 +122,7 @@ enum vmwballoon_capabilities {
  * VMW_BALLOON_BATCHED_CMDS:
  *	BATCHED_LOCK and BATCHED_UNLOCK commands.
  * VMW BALLOON_BATCHED_2M_CMDS:
- *	BATCHED_2M_LOCK and BATCHED_2M_UNLOCK commands,
- * VMW VMW_BALLOON_SIGNALLED_WAKEUP_CMD:
- *	VMW_BALLOON_CMD_VMCI_DOORBELL_SET command.
+ *	BATCHED_2M_LOCK and BATCHED_2M_UNLOCK commands.
  */
 #define VMW_BALLOON_CMD_START			0
 #define VMW_BALLOON_CMD_GET_TARGET		1
@@ -141,7 +133,6 @@ enum vmwballoon_capabilities {
 #define VMW_BALLOON_CMD_BATCHED_UNLOCK		7
 #define VMW_BALLOON_CMD_BATCHED_2M_LOCK		8
 #define VMW_BALLOON_CMD_BATCHED_2M_UNLOCK	9
-#define VMW_BALLOON_CMD_VMCI_DOORBELL_SET	10
 
 
 /* error codes */
@@ -222,7 +213,6 @@ static void vmballoon_batch_set_pa(struct vmballoon_batch_page *batch, int idx,
 #ifdef CONFIG_DEBUG_FS
 struct vmballoon_stats {
 	unsigned int timer;
-	unsigned int doorbell;
 
 	/* allocation statistics */
 	unsigned int alloc[VMW_BALLOON_NUM_PAGE_SIZES];
@@ -244,8 +234,6 @@ struct vmballoon_stats {
 	unsigned int start_fail;
 	unsigned int guest_type;
 	unsigned int guest_type_fail;
-	unsigned int doorbell_set;
-	unsigned int doorbell_unset;
 };
 
 #define STATS_INC(stat) (stat)++
@@ -310,8 +298,6 @@ struct vmballoon {
 	struct sysinfo sysinfo;
 
 	struct delayed_work dwork;
-
-	struct vmci_handle vmci_doorbell;
 };
 
 static struct vmballoon balloon;
@@ -342,13 +328,7 @@ static bool vmballoon_send_start(struct vmballoon *b, unsigned long req_caps)
 		success = false;
 	}
 
-	/*
-	 * 2MB pages are only supported with batching. If batching is for some
-	 * reason disabled, do not use 2MB pages, since otherwise the legacy
-	 * mechanism is used with 2MB pages, causing a failure.
-	 */
-	if ((b->capabilities & VMW_BALLOON_BATCHED_2M_CMDS) &&
-	    (b->capabilities & VMW_BALLOON_BATCHED_CMDS))
+	if (b->capabilities & VMW_BALLOON_BATCHED_2M_CMDS)
 		b->supported_page_sizes = 2;
 	else
 		b->supported_page_sizes = 1;
@@ -457,7 +437,7 @@ static int vmballoon_send_lock_page(struct vmballoon *b, unsigned long pfn,
 
 	pfn32 = (u32)pfn;
 	if (pfn32 != pfn)
-		return -EINVAL;
+		return -1;
 
 	STATS_INC(b->stats.lock[false]);
 
@@ -467,14 +447,14 @@ static int vmballoon_send_lock_page(struct vmballoon *b, unsigned long pfn,
 
 	pr_debug("%s - ppn %lx, hv returns %ld\n", __func__, pfn, status);
 	STATS_INC(b->stats.lock_fail[false]);
-	return -EIO;
+	return 1;
 }
 
 static int vmballoon_send_batched_lock(struct vmballoon *b,
 		unsigned int num_pages, bool is_2m_pages, unsigned int *target)
 {
 	unsigned long status;
-	unsigned long pfn = PHYS_PFN(virt_to_phys(b->batch_page));
+	unsigned long pfn = page_to_pfn(b->page);
 
 	STATS_INC(b->stats.lock[is_2m_pages]);
 
@@ -522,7 +502,7 @@ static bool vmballoon_send_batched_unlock(struct vmballoon *b,
 		unsigned int num_pages, bool is_2m_pages, unsigned int *target)
 {
 	unsigned long status;
-	unsigned long pfn = PHYS_PFN(virt_to_phys(b->batch_page));
+	unsigned long pfn = page_to_pfn(b->page);
 
 	STATS_INC(b->stats.unlock[is_2m_pages]);
 
@@ -583,9 +563,15 @@ static void vmballoon_pop(struct vmballoon *b)
 		}
 	}
 
-	/* Clearing the batch_page unconditionally has no adverse effect */
-	free_page((unsigned long)b->batch_page);
-	b->batch_page = NULL;
+	if (b->batch_page) {
+		vunmap(b->batch_page);
+		b->batch_page = NULL;
+	}
+
+	if (b->page) {
+		__free_page(b->page);
+		b->page = NULL;
+	}
 }
 
 /*
@@ -604,12 +590,11 @@ static int vmballoon_lock_page(struct vmballoon *b, unsigned int num_pages,
 
 	locked = vmballoon_send_lock_page(b, page_to_pfn(page), &hv_status,
 								target);
-	if (locked) {
+	if (locked > 0) {
 		STATS_INC(b->stats.refused_alloc[false]);
 
-		if (locked == -EIO &&
-		    (hv_status == VMW_BALLOON_ERROR_RESET ||
-		     hv_status == VMW_BALLOON_ERROR_PPN_NOTNEEDED)) {
+		if (hv_status == VMW_BALLOON_ERROR_RESET ||
+				hv_status == VMW_BALLOON_ERROR_PPN_NOTNEEDED) {
 			vmballoon_free_page(page, false);
 			return -EIO;
 		}
@@ -625,7 +610,7 @@ static int vmballoon_lock_page(struct vmballoon *b, unsigned int num_pages,
 		} else {
 			vmballoon_free_page(page, false);
 		}
-		return locked;
+		return -EIO;
 	}
 
 	/* track allocated page */
@@ -993,74 +978,17 @@ static const struct vmballoon_ops vmballoon_batched_ops = {
 
 static bool vmballoon_init_batching(struct vmballoon *b)
 {
-	struct page *page;
-
-	page = alloc_page(GFP_KERNEL | __GFP_ZERO);
-	if (!page)
+	b->page = alloc_page(VMW_PAGE_ALLOC_NOSLEEP);
+	if (!b->page)
 		return false;
 
-	b->batch_page = page_address(page);
-	return true;
-}
-
-/*
- * Receive notification and resize balloon
- */
-static void vmballoon_doorbell(void *client_data)
-{
-	struct vmballoon *b = client_data;
-
-	STATS_INC(b->stats.doorbell);
-
-	mod_delayed_work(system_freezable_wq, &b->dwork, 0);
-}
-
-/*
- * Clean up vmci doorbell
- */
-static void vmballoon_vmci_cleanup(struct vmballoon *b)
-{
-	int error;
-
-	VMWARE_BALLOON_CMD(VMCI_DOORBELL_SET, VMCI_INVALID_ID,
-			VMCI_INVALID_ID, error);
-	STATS_INC(b->stats.doorbell_unset);
-
-	if (!vmci_handle_is_invalid(b->vmci_doorbell)) {
-		vmci_doorbell_destroy(b->vmci_doorbell);
-		b->vmci_doorbell = VMCI_INVALID_HANDLE;
+	b->batch_page = vmap(&b->page, 1, VM_MAP, PAGE_KERNEL);
+	if (!b->batch_page) {
+		__free_page(b->page);
+		return false;
 	}
-}
 
-/*
- * Initialize vmci doorbell, to get notified as soon as balloon changes
- */
-static int vmballoon_vmci_init(struct vmballoon *b)
-{
-	unsigned long error, dummy;
-
-	if ((b->capabilities & VMW_BALLOON_SIGNALLED_WAKEUP_CMD) == 0)
-		return 0;
-
-	error = vmci_doorbell_create(&b->vmci_doorbell, VMCI_FLAG_DELAYED_CB,
-				     VMCI_PRIVILEGE_FLAG_RESTRICTED,
-				     vmballoon_doorbell, b);
-
-	if (error != VMCI_SUCCESS)
-		goto fail;
-
-	error = VMWARE_BALLOON_CMD(VMCI_DOORBELL_SET, b->vmci_doorbell.context,
-				   b->vmci_doorbell.resource, dummy);
-
-	STATS_INC(b->stats.doorbell_set);
-
-	if (error != VMW_BALLOON_SUCCESS)
-		goto fail;
-
-	return 0;
-fail:
-	vmballoon_vmci_cleanup(b);
-	return -EIO;
+	return true;
 }
 
 /*
@@ -1070,10 +998,6 @@ fail:
  */
 static void vmballoon_reset(struct vmballoon *b)
 {
-	int error;
-
-	vmballoon_vmci_cleanup(b);
-
 	/* free all pages, skipping monitor unlock */
 	vmballoon_pop(b);
 
@@ -1099,11 +1023,6 @@ static void vmballoon_reset(struct vmballoon *b)
 	}
 
 	b->reset_required = false;
-
-	error = vmballoon_vmci_init(b);
-	if (error)
-		pr_err("failed to initialize vmci doorbell\n");
-
 	if (!vmballoon_send_guest_id(b))
 		pr_err("failed to send guest ID to the host\n");
 }
@@ -1177,7 +1096,6 @@ static int vmballoon_debug_show(struct seq_file *f, void *offset)
 	seq_printf(f,
 		   "\n"
 		   "timer:              %8u\n"
-		   "doorbell:           %8u\n"
 		   "start:              %8u (%4u failed)\n"
 		   "guestType:          %8u (%4u failed)\n"
 		   "2m-lock:            %8u (%4u failed)\n"
@@ -1193,11 +1111,8 @@ static int vmballoon_debug_show(struct seq_file *f, void *offset)
 		   "err2mAlloc:         %8u\n"
 		   "errAlloc:           %8u\n"
 		   "err2mFree:          %8u\n"
-		   "errFree:            %8u\n"
-		   "doorbellSet:        %8u\n"
-		   "doorbellUnset:      %8u\n",
+		   "errFree:            %8u\n",
 		   stats->timer,
-		   stats->doorbell,
 		   stats->start, stats->start_fail,
 		   stats->guest_type, stats->guest_type_fail,
 		   stats->lock[true],  stats->lock_fail[true],
@@ -1211,8 +1126,7 @@ static int vmballoon_debug_show(struct seq_file *f, void *offset)
 		   stats->free[true],
 		   stats->free[false],
 		   stats->refused_alloc[true], stats->refused_alloc[false],
-		   stats->refused_free[true], stats->refused_free[false],
-		   stats->doorbell_set, stats->doorbell_unset);
+		   stats->refused_free[true], stats->refused_free[false]);
 
 	return 0;
 }
@@ -1289,7 +1203,6 @@ static int __init vmballoon_init(void)
 	if (error)
 		return error;
 
-	balloon.vmci_doorbell = VMCI_INVALID_HANDLE;
 	balloon.batch_page = NULL;
 	balloon.page = NULL;
 	balloon.reset_required = true;
@@ -1298,18 +1211,10 @@ static int __init vmballoon_init(void)
 
 	return 0;
 }
-
-/*
- * Using late_initcall() instead of module_init() allows the balloon to use the
- * VMCI doorbell even when the balloon is built into the kernel. Otherwise the
- * VMCI is probed only after the balloon is initialized. If the balloon is used
- * as a module, late_initcall() is equivalent to module_init().
- */
-late_initcall(vmballoon_init);
+module_init(vmballoon_init);
 
 static void __exit vmballoon_exit(void)
 {
-	vmballoon_vmci_cleanup(&balloon);
 	cancel_delayed_work_sync(&balloon.dwork);
 
 	vmballoon_debugfs_exit(&balloon);

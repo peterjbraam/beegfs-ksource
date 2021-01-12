@@ -30,7 +30,7 @@
 #include <sound/initval.h>
 
 #ifdef CONFIG_SND_FM801_TEA575X_BOOL
-#include <media/drv-intf/tea575x.h>
+#include <sound/tea575x-tuner.h>
 #endif
 
 MODULE_AUTHOR("Jaroslav Kysela <perex@perex.cz>");
@@ -334,23 +334,23 @@ static unsigned short snd_fm801_codec_read(struct snd_ac97 *ac97, unsigned short
 	return fm801_readw(chip, AC97_DATA);
 }
 
-static unsigned int rates[] = {
+static const unsigned int rates[] = {
   5500,  8000,  9600, 11025,
   16000, 19200, 22050, 32000,
   38400, 44100, 48000
 };
 
-static struct snd_pcm_hw_constraint_list hw_constraints_rates = {
+static const struct snd_pcm_hw_constraint_list hw_constraints_rates = {
 	.count = ARRAY_SIZE(rates),
 	.list = rates,
 	.mask = 0,
 };
 
-static unsigned int channels[] = {
+static const unsigned int channels[] = {
   2, 4, 6
 };
 
-static struct snd_pcm_hw_constraint_list hw_constraints_channels = {
+static const struct snd_pcm_hw_constraint_list hw_constraints_channels = {
 	.count = ARRAY_SIZE(channels),
 	.list = channels,
 	.mask = 0,
@@ -599,7 +599,7 @@ static irqreturn_t snd_fm801_interrupt(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
-static struct snd_pcm_hardware snd_fm801_playback =
+static const struct snd_pcm_hardware snd_fm801_playback =
 {
 	.info =			(SNDRV_PCM_INFO_MMAP | SNDRV_PCM_INFO_INTERLEAVED |
 				 SNDRV_PCM_INFO_BLOCK_TRANSFER |
@@ -619,7 +619,7 @@ static struct snd_pcm_hardware snd_fm801_playback =
 	.fifo_size =		0,
 };
 
-static struct snd_pcm_hardware snd_fm801_capture =
+static const struct snd_pcm_hardware snd_fm801_capture =
 {
 	.info =			(SNDRV_PCM_INFO_MMAP | SNDRV_PCM_INFO_INTERLEAVED |
 				 SNDRV_PCM_INFO_BLOCK_TRANSFER |
@@ -831,7 +831,7 @@ static void snd_fm801_tea575x_set_direction(struct snd_tea575x *tea, bool output
 	fm801_writew(chip, GPIO_CTRL, reg);
 }
 
-static const struct snd_tea575x_ops snd_fm801_tea_ops = {
+static struct snd_tea575x_ops snd_fm801_tea_ops = {
 	.set_pins = snd_fm801_tea575x_set_pins,
 	.get_pins = snd_fm801_tea575x_get_pins,
 	.set_direction = snd_fm801_tea575x_set_direction,

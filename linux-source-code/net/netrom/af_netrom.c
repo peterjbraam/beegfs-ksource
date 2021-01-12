@@ -30,7 +30,7 @@
 #include <linux/skbuff.h>
 #include <net/net_namespace.h>
 #include <net/sock.h>
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
 #include <linux/fcntl.h>
 #include <linux/termios.h>	/* For TIOCINQ/OUTQ */
 #include <linux/mm.h>
@@ -153,7 +153,7 @@ static struct sock *nr_find_listener(ax25_address *addr)
 	sk_for_each(s, &nr_list)
 		if (!ax25cmp(&nr_sk(s)->source_addr, addr) &&
 		    s->sk_state == TCP_LISTEN) {
-			sock_hold(s);
+			bh_lock_sock(s);
 			goto found;
 		}
 	s = NULL;
@@ -174,7 +174,7 @@ static struct sock *nr_find_socket(unsigned char index, unsigned char id)
 		struct nr_sock *nr = nr_sk(s);
 
 		if (nr->my_index == index && nr->my_id == id) {
-			sock_hold(s);
+			bh_lock_sock(s);
 			goto found;
 		}
 	}
@@ -198,7 +198,7 @@ static struct sock *nr_find_peer(unsigned char index, unsigned char id,
 
 		if (nr->your_index == index && nr->your_id == id &&
 		    !ax25cmp(&nr->dest_addr, dest)) {
-			sock_hold(s);
+			bh_lock_sock(s);
 			goto found;
 		}
 	}
@@ -224,7 +224,7 @@ static unsigned short nr_find_next_circuit(void)
 		if (i != 0 && j != 0) {
 			if ((sk=nr_find_socket(i, j)) == NULL)
 				break;
-			sock_put(sk);
+			bh_unlock_sock(sk);
 		}
 
 		id++;
@@ -433,7 +433,7 @@ static int nr_create(struct net *net, struct socket *sock, int protocol,
 	if (sock->type != SOCK_SEQPACKET || protocol != 0)
 		return -ESOCKTNOSUPPORT;
 
-	sk = sk_alloc(net, PF_NETROM, GFP_ATOMIC, &nr_proto, kern);
+	sk = sk_alloc(net, PF_NETROM, GFP_ATOMIC, &nr_proto);
 	if (sk  == NULL)
 		return -ENOMEM;
 
@@ -476,7 +476,7 @@ static struct sock *nr_make_new(struct sock *osk)
 	if (osk->sk_type != SOCK_SEQPACKET)
 		return NULL;
 
-	sk = sk_alloc(sock_net(osk), PF_NETROM, GFP_ATOMIC, osk->sk_prot, 0);
+	sk = sk_alloc(sock_net(osk), PF_NETROM, GFP_ATOMIC, osk->sk_prot);
 	if (sk == NULL)
 		return NULL;
 
@@ -870,7 +870,7 @@ int nr_rx_frame(struct sk_buff *skb, struct net_device *dev)
 	unsigned short frametype, flags, window, timeout;
 	int ret;
 
-	skb_orphan(skb);
+	skb->sk = NULL;		/* Initially we don't know who it's for */
 
 	/*
 	 *	skb->data points to the netrom frame start
@@ -918,7 +918,6 @@ int nr_rx_frame(struct sk_buff *skb, struct net_device *dev)
 	}
 
 	if (sk != NULL) {
-		bh_lock_sock(sk);
 		skb_reset_transport_header(skb);
 
 		if (frametype == NR_CONNACK && skb->len == 22)
@@ -928,7 +927,6 @@ int nr_rx_frame(struct sk_buff *skb, struct net_device *dev)
 
 		ret = nr_process_rx_frame(sk, skb);
 		bh_unlock_sock(sk);
-		sock_put(sk);
 		return ret;
 	}
 
@@ -960,17 +958,13 @@ int nr_rx_frame(struct sk_buff *skb, struct net_device *dev)
 	    (make = nr_make_new(sk)) == NULL) {
 		nr_transmit_refusal(skb, 0);
 		if (sk)
-			sock_put(sk);
+			bh_unlock_sock(sk);
 		return 0;
 	}
 
-	bh_lock_sock(sk);
-
 	window = skb->data[20];
 
-	sock_hold(make);
 	skb->sk             = make;
-	skb->destructor     = sock_efree;
 	make->sk_state	    = TCP_ESTABLISHED;
 
 	/* Fill in his circuit details */
@@ -1017,10 +1011,9 @@ int nr_rx_frame(struct sk_buff *skb, struct net_device *dev)
 	skb_queue_head(&sk->sk_receive_queue, skb);
 
 	if (!sock_flag(sk, SOCK_DEAD))
-		sk->sk_data_ready(sk);
+		sk->sk_data_ready(sk, skb->len);
 
 	bh_unlock_sock(sk);
-	sock_put(sk);
 
 	nr_insert_socket(make);
 
@@ -1030,11 +1023,12 @@ int nr_rx_frame(struct sk_buff *skb, struct net_device *dev)
 	return 1;
 }
 
-static int nr_sendmsg(struct socket *sock, struct msghdr *msg, size_t len)
+static int nr_sendmsg(struct kiocb *iocb, struct socket *sock,
+		      struct msghdr *msg, size_t len)
 {
 	struct sock *sk = sock->sk;
 	struct nr_sock *nr = nr_sk(sk);
-	DECLARE_SOCKADDR(struct sockaddr_ax25 *, usax, msg->msg_name);
+	struct sockaddr_ax25 *usax = (struct sockaddr_ax25 *)msg->msg_name;
 	int err;
 	struct sockaddr_ax25 sax;
 	struct sk_buff *skb;
@@ -1139,11 +1133,11 @@ out:
 	return err;
 }
 
-static int nr_recvmsg(struct socket *sock, struct msghdr *msg, size_t size,
-		      int flags)
+static int nr_recvmsg(struct kiocb *iocb, struct socket *sock,
+		      struct msghdr *msg, size_t size, int flags)
 {
 	struct sock *sk = sock->sk;
-	DECLARE_SOCKADDR(struct sockaddr_ax25 *, sax, msg->msg_name);
+	struct sockaddr_ax25 *sax = (struct sockaddr_ax25 *)msg->msg_name;
 	size_t copied;
 	struct sk_buff *skb;
 	int er;
@@ -1173,7 +1167,7 @@ static int nr_recvmsg(struct socket *sock, struct msghdr *msg, size_t size,
 		msg->msg_flags |= MSG_TRUNC;
 	}
 
-	er = skb_copy_datagram_msg(skb, 0, msg, copied);
+	er = skb_copy_datagram_iovec(skb, 0, msg->msg_iov, copied);
 	if (er < 0) {
 		skb_free_datagram(sk, skb);
 		release_sock(sk);
@@ -1424,7 +1418,7 @@ static int __init nr_proto_init(void)
 		struct net_device *dev;
 
 		sprintf(name, "nr%d", i);
-		dev = alloc_netdev(0, name, NET_NAME_UNKNOWN, nr_setup);
+		dev = alloc_netdev(0, name, nr_setup);
 		if (!dev) {
 			printk(KERN_ERR "NET/ROM: nr_proto_init - unable to allocate device structure\n");
 			goto fail;
@@ -1445,7 +1439,7 @@ static int __init nr_proto_init(void)
 		goto fail;
 	}
 
-	register_netdevice_notifier(&nr_dev_notifier);
+	register_netdevice_notifier_rh(&nr_dev_notifier);
 
 	ax25_register_pid(&nr_pid);
 	ax25_linkfail_register(&nr_linkfail_notifier);
@@ -1500,7 +1494,7 @@ static void __exit nr_exit(void)
 	ax25_linkfail_release(&nr_linkfail_notifier);
 	ax25_protocol_release(AX25_P_NETROM);
 
-	unregister_netdevice_notifier(&nr_dev_notifier);
+	unregister_netdevice_notifier_rh(&nr_dev_notifier);
 
 	sock_unregister(PF_NETROM);
 

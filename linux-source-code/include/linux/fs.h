@@ -1,6 +1,7 @@
 #ifndef _LINUX_FS_H
 #define _LINUX_FS_H
 
+
 #include <linux/linkage.h>
 #include <linux/wait.h>
 #include <linux/kdev_t.h>
@@ -9,16 +10,12 @@
 #include <linux/stat.h>
 #include <linux/cache.h>
 #include <linux/list.h>
-#include <linux/list_lru.h>
-#include <linux/llist.h>
 #include <linux/radix-tree.h>
 #include <linux/rbtree.h>
 #include <linux/init.h>
 #include <linux/pid.h>
 #include <linux/bug.h>
 #include <linux/mutex.h>
-#include <linux/rwsem.h>
-#include <linux/mm_types.h>
 #include <linux/capability.h>
 #include <linux/semaphore.h>
 #include <linux/fiemap.h>
@@ -30,18 +27,19 @@
 #include <linux/lockdep.h>
 #include <linux/percpu-rwsem.h>
 #include <linux/blk_types.h>
-#include <linux/workqueue.h>
-#include <linux/percpu-rwsem.h>
-#include <linux/delayed_call.h>
 
 #include <asm/byteorder.h>
 #include <uapi/linux/fs.h>
+#include <linux/rh_kabi.h>
 
-struct backing_dev_info;
-struct bdi_writeback;
+#ifndef __GENKSYMS__
+#include <linux/mm_types.h>
+#endif
+
 struct export_operations;
 struct hd_geometry;
 struct iovec;
+struct nameidata;
 struct kiocb;
 struct kobject;
 struct pipe_inode_info;
@@ -53,9 +51,6 @@ struct cred;
 struct swap_info_struct;
 struct seq_file;
 struct workqueue_struct;
-struct iov_iter;
-struct fscrypt_info;
-struct fscrypt_operations;
 
 extern void __init inode_init(void);
 extern void __init inode_init_early(void);
@@ -64,19 +59,18 @@ extern void __init files_maxfiles_init(void);
 
 extern struct files_stat_struct files_stat;
 extern unsigned long get_max_files(void);
-extern unsigned int sysctl_nr_open;
+extern int sysctl_nr_open;
 extern struct inodes_stat_t inodes_stat;
 extern int leases_enable, lease_break_time;
 extern int sysctl_protected_symlinks;
 extern int sysctl_protected_hardlinks;
-extern int sysctl_protected_fifos;
-extern int sysctl_protected_regular;
 
 struct buffer_head;
 typedef int (get_block_t)(struct inode *inode, sector_t iblock,
 			struct buffer_head *bh_result, int create);
-typedef int (dio_iodone_t)(struct kiocb *iocb, loff_t offset,
-			ssize_t bytes, void *private);
+typedef void (dio_iodone_t)(struct kiocb *iocb, loff_t offset,
+			ssize_t bytes, void *private, int ret,
+			bool is_async);
 
 #define MAY_EXEC		0x00000001
 #define MAY_WRITE		0x00000002
@@ -138,16 +132,12 @@ typedef int (dio_iodone_t)(struct kiocb *iocb, loff_t offset,
 #define FMODE_ATOMIC_POS	((__force fmode_t)0x8000)
 /* Write access to underlying fs */
 #define FMODE_WRITER		((__force fmode_t)0x10000)
-/* Has read method(s) */
-#define FMODE_CAN_READ          ((__force fmode_t)0x20000)
-/* Has write method(s) */
-#define FMODE_CAN_WRITE         ((__force fmode_t)0x40000)
-
-/* File is stream-like */
-#define FMODE_STREAM		((__force fmode_t)0x200000)
 
 /* File was opened by fanotify and shouldn't generate fanotify events */
-#define FMODE_NONOTIFY		((__force fmode_t)0x4000000)
+#define FMODE_NONOTIFY		((__force fmode_t)0x1000000)
+
+/* The extended KABI iterate method in struct file_operations is present */
+#define FMODE_KABI_ITERATE	((__force fmode_t)0x80000000)
 
 /*
  * Flag for rw_copy_check_uvector and compat_rw_copy_check_uvector
@@ -158,10 +148,9 @@ typedef int (dio_iodone_t)(struct kiocb *iocb, loff_t offset,
 #define CHECK_IOVEC_ONLY -1
 
 /*
- * The below are the various read and write flags that we support. Some of
+ * The below are the various read and write types that we support. Some of
  * them include behavioral modifiers that send information down to the
- * block layer and IO scheduler. They should be used along with a req_op.
- * Terminology:
+ * block layer and IO scheduler. Terminology:
  *
  *	The block layer uses device plugging to defer IO a little bit, in
  *	the hope that we will see more IO very shortly. This increases
@@ -184,6 +173,9 @@ typedef int (dio_iodone_t)(struct kiocb *iocb, loff_t offset,
  * READ_SYNC		A synchronous read. Device is not plugged, caller can
  *			immediately wait on this read without caring about
  *			unplugging.
+ * READA		Used for read-ahead operations. Lower priority, and the
+ *			block layer could (in theory) choose to ignore this
+ *			request if it runs into resource problems.
  * WRITE		A normal async write. Device will be plugged.
  * WRITE_SYNC		Synchronous write. Identical to WRITE, but passes down
  *			the hint that someone will be waiting on this IO
@@ -197,17 +189,21 @@ typedef int (dio_iodone_t)(struct kiocb *iocb, loff_t offset,
  *			non-volatile media on completion.
  *
  */
-#define RW_MASK			REQ_OP_WRITE
+#define RW_MASK			REQ_WRITE
+#define RWA_MASK		REQ_RAHEAD
 
-#define READ			REQ_OP_READ
-#define WRITE			REQ_OP_WRITE
+#define READ			0
+#define WRITE			RW_MASK
+#define READA			RWA_MASK
+#define KERNEL_READ		(READ|REQ_KERNEL)
+#define KERNEL_WRITE		(WRITE|REQ_KERNEL)
 
-#define READ_SYNC		REQ_SYNC
-#define WRITE_SYNC		(REQ_SYNC | REQ_NOIDLE)
-#define WRITE_ODIRECT		REQ_SYNC
-#define WRITE_FLUSH		(REQ_SYNC | REQ_NOIDLE | REQ_PREFLUSH)
-#define WRITE_FUA		(REQ_SYNC | REQ_NOIDLE | REQ_FUA)
-#define WRITE_FLUSH_FUA		(REQ_SYNC | REQ_NOIDLE | REQ_PREFLUSH | REQ_FUA)
+#define READ_SYNC		(READ | REQ_SYNC)
+#define WRITE_SYNC		(WRITE | REQ_SYNC | REQ_NOIDLE)
+#define WRITE_ODIRECT		(WRITE | REQ_SYNC)
+#define WRITE_FLUSH		(WRITE | REQ_SYNC | REQ_NOIDLE | REQ_FLUSH)
+#define WRITE_FUA		(WRITE | REQ_SYNC | REQ_NOIDLE | REQ_FUA)
+#define WRITE_FLUSH_FUA		(WRITE | REQ_SYNC | REQ_NOIDLE | REQ_FLUSH | REQ_FUA)
 
 /*
  * Attribute flags.  These should be or-ed together to figure out what
@@ -321,35 +317,46 @@ struct page;
 struct address_space;
 struct writeback_control;
 
-#define IOCB_EVENTFD		(1 << 0)
-#define IOCB_APPEND		(1 << 1)
-#define IOCB_DIRECT		(1 << 2)
-#define IOCB_HIPRI		(1 << 3)
-#define IOCB_DSYNC		(1 << 4)
-#define IOCB_SYNC		(1 << 5)
-#define IOCB_WRITE		(1 << 6)
-
-struct kiocb {
-	struct file		*ki_filp;
-	loff_t			ki_pos;
-	void (*ki_complete)(struct kiocb *iocb, long ret, long ret2);
-	void			*private;
-	int			ki_flags;
+struct iov_iter {
+	const struct iovec *iov;
+	unsigned long nr_segs;
+	size_t iov_offset;
+	size_t count;
 };
 
-static inline bool is_sync_kiocb(struct kiocb *kiocb)
+size_t iov_iter_copy_from_user_atomic(struct page *page,
+		struct iov_iter *i, unsigned long offset, size_t bytes);
+size_t iov_iter_copy_from_user(struct page *page,
+		struct iov_iter *i, unsigned long offset, size_t bytes);
+void iov_iter_advance(struct iov_iter *i, size_t bytes);
+int iov_iter_fault_in_readable(struct iov_iter *i, size_t bytes);
+size_t iov_iter_single_seg_count(const struct iov_iter *i);
+size_t copy_page_to_iter(struct page *page, size_t offset, size_t bytes,
+			 struct iov_iter *i);
+size_t copy_page_from_iter(struct page *page, size_t offset, size_t bytes,
+			struct iov_iter *i);
+
+static inline void iov_iter_init(struct iov_iter *i,
+			const struct iovec *iov, unsigned long nr_segs,
+			size_t count, size_t written)
 {
-	return kiocb->ki_complete == NULL;
+	i->iov = iov;
+	i->nr_segs = nr_segs;
+	i->iov_offset = 0;
+	i->count = count + written;
+
+	iov_iter_advance(i, written);
 }
 
-static inline int iocb_flags(struct file *file);
-
-static inline void init_sync_kiocb(struct kiocb *kiocb, struct file *filp)
+static inline size_t iov_iter_count(struct iov_iter *i)
 {
-	*kiocb = (struct kiocb) {
-		.ki_filp = filp,
-		.ki_flags = iocb_flags(filp),
-	};
+	return i->count;
+}
+
+static inline void iov_iter_truncate(struct iov_iter *i, size_t count)
+{
+	if (i->count > count)
+		i->count = count;
 }
 
 /*
@@ -396,20 +403,21 @@ struct address_space_operations {
 
 	/* Unfortunately this kludge is needed for FIBMAP. Don't use it */
 	sector_t (*bmap)(struct address_space *, sector_t);
-	void (*invalidatepage) (struct page *, unsigned int, unsigned int);
+	void (*invalidatepage) (struct page *, unsigned long);
 	int (*releasepage) (struct page *, gfp_t);
 	void (*freepage)(struct page *);
-	ssize_t (*direct_IO)(struct kiocb *, struct iov_iter *iter);
+	ssize_t (*direct_IO)(int, struct kiocb *, const struct iovec *iov,
+			loff_t offset, unsigned long nr_segs);
+	RH_KABI_DEPRECATE_FN(int, get_xip_mem, struct address_space *, pgoff_t,
+			int, void **, unsigned long *)
 	/*
-	 * migrate the contents of a page to the specified target. If
-	 * migrate_mode is MIGRATE_ASYNC, it must not block.
+	 * migrate the contents of a page to the specified target. If sync
+	 * is false, it must not block.
 	 */
 	int (*migratepage) (struct address_space *,
 			struct page *, struct page *, enum migrate_mode);
-	bool (*isolate_page)(struct page *, isolate_mode_t);
-	void (*putback_page)(struct page *);
 	int (*launder_page) (struct page *);
-	int (*is_partially_uptodate) (struct page *, unsigned long,
+	int (*is_partially_uptodate) (struct page *, read_descriptor_t *,
 					unsigned long);
 	void (*is_dirty_writeback) (struct page *, bool *, bool *);
 	int (*error_remove_page)(struct address_space *, struct page *);
@@ -418,6 +426,9 @@ struct address_space_operations {
 	int (*swap_activate)(struct swap_info_struct *sis, struct file *file,
 				sector_t *span);
 	void (*swap_deactivate)(struct file *file);
+#ifndef __GENKSYMS__
+	void (*invalidatepage_range) (struct page *, unsigned int, unsigned int);
+#endif
 };
 
 extern const struct address_space_operations empty_aops;
@@ -434,22 +445,26 @@ int pagecache_write_end(struct file *, struct address_space *mapping,
 				loff_t pos, unsigned len, unsigned copied,
 				struct page *page, void *fsdata);
 
+struct backing_dev_info;
 struct address_space {
 	struct inode		*host;		/* owner: inode, block_device */
 	struct radix_tree_root	page_tree;	/* radix tree of all pages */
 	spinlock_t		tree_lock;	/* and lock protecting it */
-	atomic_t		i_mmap_writable;/* count VM_SHARED mappings */
+	RH_KABI_REPLACE(unsigned int i_mmap_writable,
+			 atomic_t i_mmap_writable) /* count VM_SHARED mappings */
 	struct rb_root		i_mmap;		/* tree of private and shared mappings */
-	struct rw_semaphore	i_mmap_rwsem;	/* protect tree, count, list */
+	struct list_head	i_mmap_nonlinear;/*list VM_NONLINEAR mappings */
+	struct mutex		i_mmap_mutex;	/* protect tree, count, list */
 	/* Protected by tree_lock together with the radix tree */
 	unsigned long		nrpages;	/* number of total pages */
 	/* number of shadow or DAX exceptional entries */
-	unsigned long		nrexceptional;
+	RH_KABI_RENAME(unsigned long nrshadows,
+		       unsigned long nrexceptional);
 	pgoff_t			writeback_index;/* writeback starts here */
 	const struct address_space_operations *a_ops;	/* methods */
-	unsigned long		flags;		/* error bits */
+	unsigned long		flags;		/* error bits/gfp mask */
+	struct backing_dev_info *backing_dev_info; /* device readahead, etc */
 	spinlock_t		private_lock;	/* for use by the address_space */
-	gfp_t			gfp_mask;	/* implicit gfp mask for allocations */
 	struct list_head	private_list;	/* ditto */
 	void			*private_data;	/* ditto */
 } __attribute__((aligned(sizeof(long))));
@@ -466,6 +481,7 @@ struct block_device {
 	struct inode *		bd_inode;	/* will die */
 	struct super_block *	bd_super;
 	struct mutex		bd_mutex;	/* open/close mutex */
+	struct list_head	bd_inodes;
 	void *			bd_claiming;
 	void *			bd_holder;
 	int			bd_holders;
@@ -506,32 +522,13 @@ struct block_device {
 
 int mapping_tagged(struct address_space *mapping, int tag);
 
-static inline void i_mmap_lock_write(struct address_space *mapping)
-{
-	down_write(&mapping->i_mmap_rwsem);
-}
-
-static inline void i_mmap_unlock_write(struct address_space *mapping)
-{
-	up_write(&mapping->i_mmap_rwsem);
-}
-
-static inline void i_mmap_lock_read(struct address_space *mapping)
-{
-	down_read(&mapping->i_mmap_rwsem);
-}
-
-static inline void i_mmap_unlock_read(struct address_space *mapping)
-{
-	up_read(&mapping->i_mmap_rwsem);
-}
-
 /*
  * Might pages of this file be mapped into userspace?
  */
 static inline int mapping_mapped(struct address_space *mapping)
 {
-	return	!RB_EMPTY_ROOT(&mapping->i_mmap);
+	return	!RB_EMPTY_ROOT(&mapping->i_mmap) ||
+		!list_empty(&mapping->i_mmap_nonlinear);
 }
 
 /*
@@ -583,24 +580,12 @@ static inline void mapping_allow_writable(struct address_space *mapping)
 
 struct posix_acl;
 #define ACL_NOT_CACHED ((void *)(-1))
-#define ACL_DONT_CACHE ((void *)(-3))
-
-static inline struct posix_acl *
-uncached_acl_sentinel(struct task_struct *task)
-{
-	return (void *)task + 1;
-}
-
-static inline bool
-is_uncached_acl(struct posix_acl *acl)
-{
-	return (long)acl & 1;
-}
 
 #define IOP_FASTPERM	0x0001
 #define IOP_LOOKUP	0x0002
 #define IOP_NOFOLLOW	0x0004
-#define IOP_XATTR	0x0008
+
+struct fsnotify_mark_connector;
 
 /*
  * Keep mostly read-only and often accessed (especially for
@@ -648,6 +633,10 @@ struct inode {
 	spinlock_t		i_lock;	/* i_blocks, i_bytes, maybe i_size */
 	unsigned short          i_bytes;
 	unsigned int		i_blkbits;
+#if defined(CONFIG_IMA) && (defined(CONFIG_PPC64) || defined(CONFIG_S390))
+	/* 4 bytes hole available on both required architectures */
+	RH_KABI_FILL_HOLE(atomic_t		i_readcount)
+#endif
 	blkcnt_t		i_blocks;
 
 #ifdef __NEED_I_SIZE_ORDERED
@@ -656,66 +645,49 @@ struct inode {
 
 	/* Misc */
 	unsigned long		i_state;
-	struct rw_semaphore	i_rwsem;
+	struct mutex		i_mutex;
 
 	unsigned long		dirtied_when;	/* jiffies of first dirtying */
-	unsigned long		dirtied_time_when;
 
 	struct hlist_node	i_hash;
-	struct list_head	i_io_list;	/* backing dev IO list */
-#ifdef CONFIG_CGROUP_WRITEBACK
-	struct bdi_writeback	*i_wb;		/* the associated cgroup wb */
-
-	/* foreign inode detection, see wbc_detach_inode() */
-	int			i_wb_frn_winner;
-	u16			i_wb_frn_avg_time;
-	u16			i_wb_frn_history;
-#endif
+	RH_KABI_RENAME(struct list_head i_wb_list,
+		       struct list_head	i_io_list); /* backing dev IO list */
 	struct list_head	i_lru;		/* inode LRU list */
 	struct list_head	i_sb_list;
-	struct list_head	i_wb_list;	/* backing dev writeback list */
 	union {
 		struct hlist_head	i_dentry;
 		struct rcu_head		i_rcu;
 	};
 	u64			i_version;
-	atomic64_t		i_sequence; /* see futex */
 	atomic_t		i_count;
 	atomic_t		i_dio_count;
 	atomic_t		i_writecount;
-#ifdef CONFIG_IMA
-	atomic_t		i_readcount; /* struct files open RO */
-#endif
 	const struct file_operations	*i_fop;	/* former ->i_op->default_file_ops */
-	struct file_lock_context	*i_flctx;
+	struct file_lock	*i_flock;
 	struct address_space	i_data;
+#ifdef CONFIG_QUOTA
+	struct dquot		*i_dquot[MAXQUOTAS];
+#endif
 	struct list_head	i_devices;
 	union {
 		struct pipe_inode_info	*i_pipe;
 		struct block_device	*i_bdev;
 		struct cdev		*i_cdev;
-		char			*i_link;
-		unsigned		i_dir_seq;
 	};
 
 	__u32			i_generation;
 
 #ifdef CONFIG_FSNOTIFY
 	__u32			i_fsnotify_mask; /* all events this inode cares about */
-	struct hlist_head	i_fsnotify_marks;
+	RH_KABI_REPLACE(struct hlist_head i_fsnotify_marks,
+			struct fsnotify_mark_connector __rcu *i_fsnotify_marks)
 #endif
 
-#if IS_ENABLED(CONFIG_FS_ENCRYPTION)
-	struct fscrypt_info	*i_crypt_info;
+#if defined(CONFIG_IMA) && defined(CONFIG_X86_64)
+	atomic_t		i_readcount; /* struct files open RO */
 #endif
-
 	void			*i_private; /* fs or device private pointer */
 };
-
-static inline unsigned int i_blocksize(const struct inode *node)
-{
-	return (1 << node->i_blkbits);
-}
 
 static inline int inode_unhashed(struct inode *inode)
 {
@@ -750,42 +722,27 @@ enum inode_i_mutex_lock_class
 
 static inline void inode_lock(struct inode *inode)
 {
-	down_write(&inode->i_rwsem);
+	mutex_lock(&inode->i_mutex);
 }
 
 static inline void inode_unlock(struct inode *inode)
 {
-	up_write(&inode->i_rwsem);
-}
-
-static inline void inode_lock_shared(struct inode *inode)
-{
-	down_read(&inode->i_rwsem);
-}
-
-static inline void inode_unlock_shared(struct inode *inode)
-{
-	up_read(&inode->i_rwsem);
+	mutex_unlock(&inode->i_mutex);
 }
 
 static inline int inode_trylock(struct inode *inode)
 {
-	return down_write_trylock(&inode->i_rwsem);
-}
-
-static inline int inode_trylock_shared(struct inode *inode)
-{
-	return down_read_trylock(&inode->i_rwsem);
+	return mutex_trylock(&inode->i_mutex);
 }
 
 static inline int inode_is_locked(struct inode *inode)
 {
-	return rwsem_is_locked(&inode->i_rwsem);
+	return mutex_is_locked(&inode->i_mutex);
 }
 
 static inline void inode_lock_nested(struct inode *inode, unsigned subclass)
 {
-	down_write_nested(&inode->i_rwsem, subclass);
+	mutex_lock_nested(&inode->i_mutex, subclass);
 }
 
 void lock_two_nondirectories(struct inode *, struct inode*);
@@ -890,11 +847,16 @@ static inline int ra_has_index(struct file_ra_state *ra, pgoff_t index)
 }
 
 struct file {
+	/*
+	 * fu_list becomes invalid after file_free is called and queued via
+	 * fu_rcuhead for RCU freeing
+	 */
 	union {
-		struct llist_node	fu_llist;
+		struct list_head	fu_list;
 		struct rcu_head 	fu_rcuhead;
 	} f_u;
 	struct path		f_path;
+#define f_dentry	f_path.dentry
 	struct inode		*f_inode;	/* cached value */
 	const struct file_operations	*f_op;
 
@@ -903,10 +865,18 @@ struct file {
 	 * Must not be taken from IRQ context.
 	 */
 	spinlock_t		f_lock;
+#ifdef __GENKSYMS__
+#ifdef CONFIG_SMP
+	int			f_sb_list_cpu;
+#endif
+#else
+#ifdef CONFIG_SMP
+	int			f_sb_list_cpu_deprecated;
+#endif
+#endif
 	atomic_long_t		f_count;
 	unsigned int 		f_flags;
 	fmode_t			f_mode;
-	struct mutex		f_pos_lock;
 	loff_t			f_pos;
 	struct fown_struct	f_owner;
 	const struct cred	*f_cred;
@@ -925,13 +895,16 @@ struct file {
 	struct list_head	f_tfile_llink;
 #endif /* #ifdef CONFIG_EPOLL */
 	struct address_space	*f_mapping;
-} __attribute__((aligned(4)));	/* lest something weird decides that 2 is OK */
+#ifndef __GENKSYMS__
+	struct mutex		f_pos_lock;
+#endif
+};
 
 struct file_handle {
 	__u32 handle_bytes;
 	int handle_type;
 	/* file identifier */
-	unsigned char f_handle[];
+	unsigned char f_handle[0];
 };
 
 static inline struct file *get_file(struct file *f)
@@ -948,9 +921,9 @@ static inline struct file *get_file(struct file *f)
 /* Page cache limit. The filesystems should put that into their s_maxbytes 
    limits, otherwise bad things can happen in VM. */ 
 #if BITS_PER_LONG==32
-#define MAX_LFS_FILESIZE	((loff_t)ULONG_MAX << PAGE_SHIFT)
+#define MAX_LFS_FILESIZE	(((loff_t)PAGE_CACHE_SIZE << (BITS_PER_LONG-1))-1) 
 #elif BITS_PER_LONG==64
-#define MAX_LFS_FILESIZE 	((loff_t)LLONG_MAX)
+#define MAX_LFS_FILESIZE 	((loff_t)0x7fffffffffffffffLL)
 #endif
 
 #define FL_POSIX	1
@@ -965,6 +938,9 @@ static inline struct file *get_file(struct file *f)
 #define FL_UNLOCK_PENDING	512 /* Lease is being broken */
 #define FL_OFDLCK	1024	/* lock is "owned" by struct file */
 #define FL_LAYOUT	2048	/* outstanding pNFS layout */
+#define FL_LM_OPS_EXTEND	65536 /* safe to use lock_manager_operations_extend */
+
+#define FL_CLOSE_POSIX (FL_POSIX | FL_CLOSE)
 
 /*
  * Special return value from posix_lock_file() and vfs_lock_file() for
@@ -972,10 +948,14 @@ static inline struct file *get_file(struct file *f)
  */
 #define FILE_LOCK_DEFERRED 1
 
-/* legacy typedef, should eventually be removed */
-typedef void *fl_owner_t;
-
-struct file_lock;
+/*
+ * The POSIX file lock owner is determined by
+ * the "struct files_struct" in the thread group
+ * (or NULL for no owner - BSD locks).
+ *
+ * Lockd stuffs a "host" pointer into this.
+ */
+typedef struct files_struct *fl_owner_t;
 
 struct file_lock_operations {
 	void (*fl_copy_lock)(struct file_lock *, struct file_lock *);
@@ -985,14 +965,21 @@ struct file_lock_operations {
 struct lock_manager_operations {
 	int (*lm_compare_owner)(struct file_lock *, struct file_lock *);
 	unsigned long (*lm_owner_key)(struct file_lock *);
-	fl_owner_t (*lm_get_owner)(fl_owner_t);
-	void (*lm_put_owner)(fl_owner_t);
 	void (*lm_notify)(struct file_lock *);	/* unblock callback */
-	int (*lm_grant)(struct file_lock *, int);
-	bool (*lm_break)(struct file_lock *);
-	int (*lm_change)(struct file_lock *, int, struct list_head *);
-	void (*lm_setup)(struct file_lock *, void **);
+	int (*lm_grant)(struct file_lock *, struct file_lock *, int);
+	void (*lm_break)(struct file_lock *);
+	int (*lm_change)(struct file_lock **, int);
 };
+
+/* Can't use these without setting FL_LM_OPS_EXTEND */
+struct lock_manager_operations_extend {
+	struct lock_manager_operations kabi_lmops;
+	void (*lm_get_owner)(struct file_lock *, struct file_lock *);
+	void (*lm_put_owner)(struct file_lock *);
+};
+
+#define to_lm_ops_extend(fl_lmops)	\
+	container_of((fl_lmops), struct lock_manager_operations_extend, kabi_lmops)
 
 struct lock_manager {
 	struct list_head list;
@@ -1021,17 +1008,17 @@ int opens_in_grace(struct net *);
  * FIXME: should we create a separate "struct lock_request" to help distinguish
  * these two uses?
  *
- * The varous i_flctx lists are ordered by:
+ * The i_flock list is ordered by:
  *
- * 1) lock owner
- * 2) lock range start
- * 3) lock range end
+ * 1) lock type -- FL_LEASEs first, then FL_FLOCK, and finally FL_POSIX
+ * 2) lock owner
+ * 3) lock range start
+ * 4) lock range end
  *
  * Obviously, the last two criteria only matter for POSIX locks.
  */
 struct file_lock {
 	struct file_lock *fl_next;	/* singly linked list for this inode  */
-	struct list_head fl_list;	/* link into file_lock_context */
 	struct hlist_node fl_link;	/* node in global lists */
 	struct list_head fl_block;	/* circular list of blocked processes */
 	fl_owner_t fl_owner;
@@ -1062,12 +1049,13 @@ struct file_lock {
 	} fl_u;
 };
 
-struct file_lock_context {
-	spinlock_t		flc_lock;
-	struct list_head	flc_flock;
-	struct list_head	flc_posix;
-	struct list_head	flc_lease;
-};
+static inline struct lock_manager_operations_extend *
+get_lm_ops_extend(struct file_lock *fl)
+{
+	if (fl->fl_flags & FL_LM_OPS_EXTEND)
+		return to_lm_ops_extend(fl->fl_lmops);
+	return NULL;
+}
 
 /* The following constant reflects the upper bound of the file/locking space */
 #ifndef OFFSET_MAX
@@ -1093,41 +1081,45 @@ static inline struct inode *locks_inode(const struct file *f)
 }
 
 #ifdef CONFIG_FILE_LOCKING
-extern int fcntl_getlk(struct file *, unsigned int, struct flock __user *);
+extern int fcntl_getlk(struct file *, unsigned int, struct flock *);
 extern int fcntl_setlk(unsigned int, struct file *, unsigned int,
-			struct flock __user *);
+			struct flock *);
 
 #if BITS_PER_LONG == 32
-extern int fcntl_getlk64(struct file *, unsigned int, struct flock64 __user *);
+extern int fcntl_getlk64(struct file *, unsigned int, struct flock64 *);
 extern int fcntl_setlk64(unsigned int, struct file *, unsigned int,
-			struct flock64 __user *);
+			struct flock64 *);
 #endif
 
 extern int fcntl_setlease(unsigned int fd, struct file *filp, long arg);
 extern int fcntl_getlease(struct file *filp);
 
 /* fs/locks.c */
-void locks_free_lock_context(struct inode *inode);
 void locks_free_lock(struct file_lock *fl);
 extern void locks_init_lock(struct file_lock *);
 extern struct file_lock * locks_alloc_lock(void);
 extern void locks_copy_lock(struct file_lock *, struct file_lock *);
 extern void locks_copy_conflock(struct file_lock *, struct file_lock *);
+extern void __locks_copy_lock(struct file_lock *, const struct file_lock *);
 extern void locks_remove_posix(struct file *, fl_owner_t);
 extern void locks_remove_file(struct file *);
 extern void locks_release_private(struct file_lock *);
 extern void posix_test_lock(struct file *, struct file_lock *);
 extern int posix_lock_file(struct file *, struct file_lock *, struct file_lock *);
+extern int posix_lock_inode_wait(struct inode *, struct file_lock *);
 extern int posix_unblock_lock(struct file_lock *);
 extern int vfs_test_lock(struct file *, struct file_lock *);
 extern int vfs_lock_file(struct file *, unsigned int, struct file_lock *, struct file_lock *);
 extern int vfs_cancel_lock(struct file *filp, struct file_lock *fl);
+extern int flock_lock_inode_wait(struct inode *inode, struct file_lock *fl);
 extern int locks_lock_inode_wait(struct inode *inode, struct file_lock *fl);
 extern int __break_lease(struct inode *inode, unsigned int flags, unsigned int type);
 extern void lease_get_mtime(struct inode *, struct timespec *time);
 extern int generic_setlease(struct file *, long, struct file_lock **, void **priv);
 extern int vfs_setlease(struct file *, long, struct file_lock **, void **);
-extern int lease_modify(struct file_lock *, int, struct list_head *);
+extern int lease_modify(struct file_lock **, int);
+extern int lock_may_read(struct inode *, loff_t start, unsigned long count);
+extern int lock_may_write(struct inode *, loff_t start, unsigned long count);
 struct files_struct;
 extern void show_fd_locks(struct seq_file *f,
 			 struct file *filp, struct files_struct *files);
@@ -1159,17 +1151,12 @@ static inline int fcntl_setlk64(unsigned int fd, struct file *file,
 #endif
 static inline int fcntl_setlease(unsigned int fd, struct file *filp, long arg)
 {
-	return -EINVAL;
+	return 0;
 }
 
 static inline int fcntl_getlease(struct file *filp)
 {
-	return F_UNLCK;
-}
-
-static inline void
-locks_free_lock_context(struct inode *inode)
-{
+	return 0;
 }
 
 static inline void locks_init_lock(struct file_lock *fl)
@@ -1178,6 +1165,10 @@ static inline void locks_init_lock(struct file_lock *fl)
 }
 
 static inline void locks_copy_conflock(struct file_lock *new, struct file_lock *fl)
+{
+	return;
+}
+static inline void __locks_copy_lock(struct file_lock *new, struct file_lock *fl)
 {
 	return;
 }
@@ -1208,6 +1199,12 @@ static inline int posix_lock_file(struct file *filp, struct file_lock *fl,
 	return -ENOLCK;
 }
 
+static inline int posix_lock_inode_wait(struct inode *inode,
+					struct file_lock *fl)
+{
+	return -ENOLCK;
+}
+
 static inline int posix_unblock_lock(struct file_lock *waiter)
 {
 	return -ENOENT;
@@ -1227,6 +1224,12 @@ static inline int vfs_lock_file(struct file *filp, unsigned int cmd,
 static inline int vfs_cancel_lock(struct file *filp, struct file_lock *fl)
 {
 	return 0;
+}
+
+static inline int flock_lock_inode_wait(struct inode *inode,
+					struct file_lock *request)
+{
+	return -ENOLCK;
 }
 
 static inline int locks_lock_inode_wait(struct inode *inode, struct file_lock *fl)
@@ -1256,10 +1259,21 @@ static inline int vfs_setlease(struct file *filp, long arg,
 	return -EINVAL;
 }
 
-static inline int lease_modify(struct file_lock *fl, int arg,
-			       struct list_head *dispose)
+static inline int lease_modify(struct file_lock **before, int arg)
 {
 	return -EINVAL;
+}
+
+static inline int lock_may_read(struct inode *inode, loff_t start,
+				unsigned long len)
+{
+	return 1;
+}
+
+static inline int lock_may_write(struct inode *inode, loff_t start,
+				 unsigned long len)
+{
+	return 1;
 }
 
 struct files_struct;
@@ -1272,9 +1286,14 @@ static inline struct inode *file_inode(const struct file *f)
 	return f->f_inode;
 }
 
-static inline struct dentry *file_dentry(const struct file *file)
+static inline int posix_lock_file_wait(struct file *filp, struct file_lock *fl)
 {
-	return d_real(file->f_path.dentry, file_inode(file), 0);
+	return posix_lock_inode_wait(locks_inode(filp), fl);
+}
+
+static inline int flock_lock_file_wait(struct file *filp, struct file_lock *fl)
+{
+	return flock_lock_inode_wait(locks_inode(filp), fl);
 }
 
 static inline int locks_lock_file_wait(struct file *filp, struct file_lock *fl)
@@ -1303,8 +1322,8 @@ extern void fasync_free(struct fasync_struct *);
 /* can be called from interrupts */
 extern void kill_fasync(struct fasync_struct **, int, int);
 
-extern void __f_setown(struct file *filp, struct pid *, enum pid_type, int force);
-extern void f_setown(struct file *filp, unsigned long arg, int force);
+extern int __f_setown(struct file *filp, struct pid *, enum pid_type, int force);
+extern int f_setown(struct file *filp, unsigned long arg, int force);
 extern void f_delown(struct file *filp);
 extern pid_t f_getown(struct file *filp);
 extern int send_sigurg(struct fown_struct *fown);
@@ -1321,8 +1340,10 @@ struct mm_struct;
 #define UMOUNT_NOFOLLOW	0x00000008	/* Don't follow symlink on umount */
 #define UMOUNT_UNUSED	0x80000000	/* Flag guaranteed to be unused */
 
+extern struct list_head super_blocks;
+extern spinlock_t sb_lock;
+
 /* sb->s_iflags */
-#define SB_I_CGROUPWB	0x00000001	/* cgroup-aware writeback enabled */
 #define SB_I_NOEXEC	0x00000002	/* Ignore executables on this fs */
 #define SB_I_NODEV	0x00000004	/* Ignore devices on this fs */
 #define SB_I_MULTIROOT	0x00000008	/* Multiple roots to the dentry tree */
@@ -1343,9 +1364,16 @@ enum {
 #define SB_FREEZE_LEVELS (SB_FREEZE_COMPLETE - 1)
 
 struct sb_writers {
-	int				frozen;		/* Is sb frozen? */
-	wait_queue_head_t		wait_unfrozen;	/* for get_super_thawed() */
-	struct percpu_rw_semaphore	rw_sem[SB_FREEZE_LEVELS];
+	/* Counters for counting writers at each level */
+	struct percpu_counter	counter[SB_FREEZE_LEVELS];
+	wait_queue_head_t	wait;		/* queue for waiting for
+						   writers / faults to finish */
+	int			frozen;		/* Is sb frozen? */
+	wait_queue_head_t	wait_unfrozen;	/* queue for waiting for
+						   sb to be thawed */
+#ifdef CONFIG_DEBUG_LOCK_ALLOC
+	struct lockdep_map	lock_map[SB_FREEZE_LEVELS];
+#endif
 };
 
 struct super_block {
@@ -1360,7 +1388,6 @@ struct super_block {
 	const struct quotactl_ops	*s_qcop;
 	const struct export_operations *s_export_op;
 	unsigned long		s_flags;
-	unsigned long		s_iflags;	/* internal SB_I_* flags */
 	unsigned long		s_magic;
 	struct dentry		*s_root;
 	struct rw_semaphore	s_umount;
@@ -1371,15 +1398,39 @@ struct super_block {
 #endif
 	const struct xattr_handler **s_xattr;
 
-	const struct fscrypt_operations	*s_cop;
-
+	struct list_head	s_inodes;	/* all inodes */
 	struct hlist_bl_head	s_anon;		/* anonymous dentries for (nfs) exporting */
+#ifdef __GENKSYMS__
+#ifdef CONFIG_SMP
+	struct list_head __percpu *s_files;
+#else
+	struct list_head	s_files;
+#endif
+#else
+#ifdef CONFIG_SMP
+	struct list_head __percpu *s_files_deprecated;
+#else
+	struct list_head	s_files_deprecated;
+#endif
+#endif
 	struct list_head	s_mounts;	/* list of mounts; _not_ for fs use */
+	/* s_dentry_lru, s_nr_dentry_unused protected by dcache.c lru locks */
+	struct list_head	s_dentry_lru;	/* unused dentry lru */
+	RH_KABI_REPLACE_UNSAFE(
+			int	s_nr_dentry_unused,
+			long	s_nr_dentry_unused)	/* # of dentry on lru */
+
+	/* s_inode_lru_lock protects s_inode_lru and s_nr_inodes_unused */
+	spinlock_t		s_inode_lru_lock ____cacheline_aligned_in_smp;
+	struct list_head	s_inode_lru;		/* unused inode lru */
+	RH_KABI_REPLACE_UNSAFE(
+			int	s_nr_inodes_unused,
+			long	s_nr_inodes_unused)	/* # of inodes on lru */
+
 	struct block_device	*s_bdev;
 	struct backing_dev_info *s_bdi;
 	struct mtd_info		*s_mtd;
 	struct hlist_node	s_instances;
-	unsigned int		s_quota_types;	/* Bitmask of supported quota types */
 	struct quota_info	s_dquot;	/* Diskquota specific options */
 
 	struct sb_writers	s_writers;
@@ -1428,39 +1479,58 @@ struct super_block {
 	int s_readonly_remount;
 
 	/* AIO completions deferred from interrupt context */
-	struct workqueue_struct *s_dio_done_wq;
-	struct hlist_head s_pins;
+	RH_KABI_EXTEND(struct workqueue_struct *s_dio_done_wq)
+	RH_KABI_EXTEND(struct rcu_head rcu)
+	RH_KABI_EXTEND(struct hlist_head s_pins)
 
-	/*
-	 * Owning user namespace and default context in which to
-	 * interpret filesystem uids, gids, quotas, device nodes,
-	 * xattrs and security labels.
-	 */
-	struct user_namespace *s_user_ns;
+	/* s_inode_list_lock protects s_inodes */
+	RH_KABI_EXTEND(spinlock_t s_inode_list_lock)
 
-	/*
-	 * Keep the lru lists last in the structure so they always sit on their
-	 * own individual cachelines.
-	 */
-	struct list_lru		s_dentry_lru ____cacheline_aligned_in_smp;
-	struct list_lru		s_inode_lru ____cacheline_aligned_in_smp;
-	struct rcu_head		rcu;
-	struct work_struct	destroy_work;
+	RH_KABI_EXTEND(struct mutex s_sync_lock) /* sync serialisation lock */
 
-	struct mutex		s_sync_lock;	/* sync serialisation lock */
+	RH_KABI_EXTEND(spinlock_t s_inode_wblist_lock)
+	RH_KABI_EXTEND(struct list_head s_inodes_wb)	/* writeback inodes */
 
+	RH_KABI_EXTEND(unsigned long	s_iflags)
+	RH_KABI_EXTEND(struct user_namespace *s_user_ns)
+
+	/* Pending fsnotify inode refs */
+	RH_KABI_EXTEND(atomic_long_t s_fsnotify_inode_refs)
+};
+
+extern const unsigned super_block_wrapper_version;
+struct super_block_wrapper {
+	struct super_block sb;
+
+	/* -- Wrapper version 0 -- */
 	/*
 	 * Indicates how deep in a filesystem stack this SB is
 	 */
 	int s_stack_depth;
 
-	/* s_inode_list_lock protects s_inodes */
-	spinlock_t		s_inode_list_lock ____cacheline_aligned_in_smp;
-	struct list_head	s_inodes;	/* all inodes */
-
-	spinlock_t		s_inode_wblist_lock;
-	struct list_head	s_inodes_wb;	/* writeback inodes */
+	/* -- Wrapper version 1 -- */
 };
+
+static inline struct super_block_wrapper *get_sb_wrapper(struct super_block *sb,
+							 unsigned version)
+{
+	/* Make sure we get a link failure if this function is used against an
+	 * older kernel that doesn't have the superblock wrapper.
+	 */
+	if (super_block_wrapper_version < version)
+		return NULL;
+	return container_of(sb, struct super_block_wrapper, sb);
+}
+
+static inline int *get_s_stack_depth(struct super_block *sb)
+{
+	struct super_block_wrapper *wrapper = get_sb_wrapper(sb, 0);
+	return wrapper ? &wrapper->s_stack_depth : NULL;
+}
+
+/* superblock cache pruning functions */
+extern void prune_icache_sb(struct super_block *sb, int nr_to_scan);
+extern void prune_dcache_sb(struct super_block *sb, int nr_to_scan);
 
 /* Helper functions so that in most cases filesystems will
  * not need to deal directly with kuid_t and kgid_t and can
@@ -1488,7 +1558,6 @@ static inline void i_gid_write(struct inode *inode, gid_t gid)
 }
 
 extern struct timespec current_fs_time(struct super_block *sb);
-extern struct timespec current_time(struct inode *inode);
 
 /*
  * Snapshotting support.
@@ -1496,11 +1565,6 @@ extern struct timespec current_time(struct inode *inode);
 
 void __sb_end_write(struct super_block *sb, int level);
 int __sb_start_write(struct super_block *sb, int level, bool wait);
-
-#define __sb_writers_acquired(sb, lev)	\
-	percpu_rwsem_acquire(&(sb)->s_writers.rw_sem[(lev)-1], 1, _THIS_IP_)
-#define __sb_writers_release(sb, lev)	\
-	percpu_rwsem_release(&(sb)->s_writers.rw_sem[(lev)-1], 1, _THIS_IP_)
 
 /**
  * sb_end_write - drop write access to a superblock
@@ -1609,6 +1673,11 @@ static inline void sb_start_intwrite(struct super_block *sb)
 	__sb_start_write(sb, SB_FREEZE_FS, true);
 }
 
+static inline int sb_start_intwrite_trylock(struct super_block *sb)
+{
+	return __sb_start_write(sb, SB_FREEZE_FS, false);
+}
+
 
 extern bool inode_owner_or_capable(const struct inode *inode);
 
@@ -1624,6 +1693,18 @@ extern int vfs_rmdir(struct inode *, struct dentry *);
 extern int vfs_unlink(struct inode *, struct dentry *, struct inode **);
 extern int vfs_rename(struct inode *, struct dentry *, struct inode *, struct dentry *, struct inode **, unsigned int);
 extern int vfs_whiteout(struct inode *, struct dentry *);
+
+extern struct dentry *vfs_tmpfile(struct dentry *dentry, umode_t mode,
+				  int open_flag);
+
+/*
+ * VFS dentry helper functions.
+ */
+extern void dentry_unhash(struct dentry *dentry);
+
+int vfs_mkobj(struct dentry *, umode_t,
+		int (*f)(struct dentry *, umode_t, void *),
+		void *);
 
 /*
  * VFS file helper functions.
@@ -1667,12 +1748,9 @@ int fiemap_check_flags(struct fiemap_extent_info *fieinfo, u32 fs_flags);
  * This allows the kernel to read directories into kernel space or
  * to have different dirent layouts depending on the binary type.
  */
-struct dir_context;
-typedef int (*filldir_t)(struct dir_context *, const char *, int, loff_t, u64,
-			 unsigned);
-
+typedef int (*filldir_t)(void *, const char *, int, loff_t, u64, unsigned);
 struct dir_context {
-	const filldir_t actor;
+	filldir_t actor;
 	loff_t pos;
 };
 
@@ -1684,37 +1762,14 @@ struct block_device_operations;
 #define HAVE_COMPAT_IOCTL 1
 #define HAVE_UNLOCKED_IOCTL 1
 
-/*
- * These flags let !MMU mmap() govern direct device mapping vs immediate
- * copying more easily for MAP_PRIVATE, especially for ROM filesystems.
- *
- * NOMMU_MAP_COPY:	Copy can be mapped (MAP_PRIVATE)
- * NOMMU_MAP_DIRECT:	Can be mapped directly (MAP_SHARED)
- * NOMMU_MAP_READ:	Can be mapped for reading
- * NOMMU_MAP_WRITE:	Can be mapped for writing
- * NOMMU_MAP_EXEC:	Can be mapped for execution
- */
-#define NOMMU_MAP_COPY		0x00000001
-#define NOMMU_MAP_DIRECT	0x00000008
-#define NOMMU_MAP_READ		VM_MAYREAD
-#define NOMMU_MAP_WRITE		VM_MAYWRITE
-#define NOMMU_MAP_EXEC		VM_MAYEXEC
-
-#define NOMMU_VMFLAGS \
-	(NOMMU_MAP_READ | NOMMU_MAP_WRITE | NOMMU_MAP_EXEC)
-
-
-struct iov_iter;
-
 struct file_operations {
 	struct module *owner;
 	loff_t (*llseek) (struct file *, loff_t, int);
 	ssize_t (*read) (struct file *, char __user *, size_t, loff_t *);
 	ssize_t (*write) (struct file *, const char __user *, size_t, loff_t *);
-	ssize_t (*read_iter) (struct kiocb *, struct iov_iter *);
-	ssize_t (*write_iter) (struct kiocb *, struct iov_iter *);
-	int (*iterate) (struct file *, struct dir_context *);
-	int (*iterate_shared) (struct file *, struct dir_context *);
+	ssize_t (*aio_read) (struct kiocb *, const struct iovec *, unsigned long, loff_t);
+	ssize_t (*aio_write) (struct kiocb *, const struct iovec *, unsigned long, loff_t);
+	int (*readdir) (struct file *, void *, filldir_t);
 	unsigned int (*poll) (struct file *, struct poll_table_struct *);
 	long (*unlocked_ioctl) (struct file *, unsigned int, unsigned long);
 	long (*compat_ioctl) (struct file *, unsigned int, unsigned long);
@@ -1723,6 +1778,7 @@ struct file_operations {
 	int (*flush) (struct file *, fl_owner_t id);
 	int (*release) (struct inode *, struct file *);
 	int (*fsync) (struct file *, loff_t, loff_t, int datasync);
+	int (*aio_fsync) (struct kiocb *, int datasync);
 	int (*fasync) (int, struct file *, int);
 	int (*lock) (struct file *, int, struct file_lock *);
 	ssize_t (*sendpage) (struct file *, struct page *, int, size_t, loff_t *, int);
@@ -1731,28 +1787,30 @@ struct file_operations {
 	int (*flock) (struct file *, int, struct file_lock *);
 	ssize_t (*splice_write)(struct pipe_inode_info *, struct file *, loff_t *, size_t, unsigned int);
 	ssize_t (*splice_read)(struct file *, loff_t *, struct pipe_inode_info *, size_t, unsigned int);
-	int (*setlease)(struct file *, long, struct file_lock **, void **);
+	RH_KABI_REPLACE(int (*setlease)(struct file *, long, struct file_lock **), int (*setlease)(struct file *, long, struct file_lock **, void **))
 	long (*fallocate)(struct file *file, int mode, loff_t offset,
 			  loff_t len);
-	void (*show_fdinfo)(struct seq_file *m, struct file *f);
-#ifndef CONFIG_MMU
-	unsigned (*mmap_capabilities)(struct file *);
-#endif
-	ssize_t (*copy_file_range)(struct file *, loff_t, struct file *,
-			loff_t, size_t, unsigned int);
-	int (*clone_file_range)(struct file *, loff_t, struct file *, loff_t,
-			u64);
-	ssize_t (*dedupe_file_range)(struct file *, u64, u64, struct file *,
-			u64);
+	int (*show_fdinfo)(struct seq_file *m, struct file *f);
+	RH_KABI_EXTEND(int (*iterate) (struct file *, struct dir_context *))
+};
+
+/* RH usage only, not for external modules use */
+struct file_operations_extend {
+	struct file_operations kabi_fops;
+	void (*mremap)(struct file *, struct vm_area_struct *);
+	ssize_t (*copy_file_range)(struct file *, loff_t, struct file *, loff_t, size_t, unsigned int);
+	int (*clone_file_range)(struct file *, loff_t, struct file *, loff_t, u64);
+	unsigned long mmap_supported_flags;
 };
 
 struct inode_operations {
 	struct dentry * (*lookup) (struct inode *,struct dentry *, unsigned int);
-	const char * (*get_link) (struct dentry *, struct inode *, struct delayed_call *);
+	void * (*follow_link) (struct dentry *, struct nameidata *);
 	int (*permission) (struct inode *, int);
 	struct posix_acl * (*get_acl)(struct inode *, int);
 
 	int (*readlink) (struct dentry *, char __user *,int);
+	void (*put_link) (struct dentry *, struct nameidata *, void *);
 
 	int (*create) (struct inode *,struct dentry *, umode_t, bool);
 	int (*link) (struct dentry *,struct inode *,struct dentry *);
@@ -1762,18 +1820,43 @@ struct inode_operations {
 	int (*rmdir) (struct inode *,struct dentry *);
 	int (*mknod) (struct inode *,struct dentry *,umode_t,dev_t);
 	int (*rename) (struct inode *, struct dentry *,
-			struct inode *, struct dentry *, unsigned int);
+			struct inode *, struct dentry *);
 	int (*setattr) (struct dentry *, struct iattr *);
 	int (*getattr) (struct vfsmount *mnt, struct dentry *, struct kstat *);
+	int (*setxattr) (struct dentry *, const char *,const void *,size_t,int);
+	ssize_t (*getxattr) (struct dentry *, const char *, void *, size_t);
 	ssize_t (*listxattr) (struct dentry *, char *, size_t);
+	int (*removexattr) (struct dentry *, const char *);
 	int (*fiemap)(struct inode *, struct fiemap_extent_info *, u64 start,
 		      u64 len);
 	int (*update_time)(struct inode *, struct timespec *, int);
 	int (*atomic_open)(struct inode *, struct dentry *,
 			   struct file *, unsigned open_flag,
 			   umode_t create_mode, int *opened);
+} ____cacheline_aligned;
+
+
+/*
+ * RHEL inode struct wrapper - should only be used with get_*_iop() accessors.
+ */
+typedef int (*iop_rename2_t) (struct inode *, struct dentry *,
+			      struct inode *, struct dentry *, unsigned int);
+typedef int (*iop_tmpfile_t) (struct inode *, struct dentry *, umode_t);
+
+typedef int (*iop_dentry_open_t) (struct dentry *, struct file *, const struct cred *);
+
+struct inode_operations_wrapper {
+	struct inode_operations ops;
+	unsigned version;
+	/* -- Wrapper version 0 -- */
+	int (*rename2) (struct inode *, struct dentry *,
+			struct inode *, struct dentry *, unsigned int);
 	int (*tmpfile) (struct inode *, struct dentry *, umode_t);
-	int (*set_acl)(struct inode *, struct posix_acl *, int);
+
+	/* WARNING: probably going away soon, do not use! */
+	int (*dentry_open)(struct dentry *, struct file *, const struct cred *);
+
+	/* -- Wrapper version 1 -- */
 } ____cacheline_aligned;
 
 ssize_t rw_copy_check_uvector(int type, const struct iovec __user * uvector,
@@ -1781,20 +1864,16 @@ ssize_t rw_copy_check_uvector(int type, const struct iovec __user * uvector,
 			      struct iovec *fast_pointer,
 			      struct iovec **ret_pointer);
 
-extern ssize_t __vfs_read(struct file *, char __user *, size_t, loff_t *);
-extern ssize_t __vfs_write(struct file *, const char __user *, size_t, loff_t *);
 extern ssize_t vfs_read(struct file *, char __user *, size_t, loff_t *);
 extern ssize_t vfs_write(struct file *, const char __user *, size_t, loff_t *);
 extern ssize_t vfs_readv(struct file *, const struct iovec __user *,
-		unsigned long, loff_t *, int);
+		unsigned long, loff_t *);
 extern ssize_t vfs_writev(struct file *, const struct iovec __user *,
-		unsigned long, loff_t *, int);
+		unsigned long, loff_t *);
 extern ssize_t vfs_copy_file_range(struct file *, loff_t , struct file *,
 				   loff_t, size_t, unsigned int);
 extern int vfs_clone_file_range(struct file *file_in, loff_t pos_in,
 		struct file *file_out, loff_t pos_out, u64 len);
-extern int vfs_dedupe_file_range(struct file *file,
-				 struct file_dedupe_range *same);
 
 struct super_operations {
    	struct inode *(*alloc_inode)(struct super_block *sb);
@@ -1806,9 +1885,7 @@ struct super_operations {
 	void (*evict_inode) (struct inode *);
 	void (*put_super) (struct super_block *);
 	int (*sync_fs)(struct super_block *sb, int wait);
-	int (*freeze_super) (struct super_block *);
 	int (*freeze_fs) (struct super_block *);
-	int (*thaw_super) (struct super_block *);
 	int (*unfreeze_fs) (struct super_block *);
 	int (*statfs) (struct dentry *, struct kstatfs *);
 	int (*remount_fs) (struct super_block *, int *, char *);
@@ -1821,13 +1898,12 @@ struct super_operations {
 #ifdef CONFIG_QUOTA
 	ssize_t (*quota_read)(struct super_block *, int, char *, size_t, loff_t);
 	ssize_t (*quota_write)(struct super_block *, int, const char *, size_t, loff_t);
-	struct dquot **(*get_dquots)(struct inode *);
 #endif
 	int (*bdev_try_to_free_page)(struct super_block*, struct page*, gfp_t);
-	long (*nr_cached_objects)(struct super_block *,
-				  struct shrink_control *);
-	long (*free_cached_objects)(struct super_block *,
-				    struct shrink_control *);
+	int (*nr_cached_objects)(struct super_block *);
+	void (*free_cached_objects)(struct super_block *, int);
+	RH_KABI_EXTEND(struct list_head *(*inode_to_wblist)(struct inode *))
+	RH_KABI_EXTEND(struct inode *(*wblist_to_inode)(struct list_head *))
 };
 
 /*
@@ -1846,8 +1922,10 @@ struct super_operations {
 #define S_IMA		1024	/* Inode has an associated IMA struct */
 #define S_AUTOMOUNT	2048	/* Automount/referral quasi-directory */
 #define S_NOSEC		4096	/* no suid or xattr security attributes */
+#define S_IOPS_WRAPPER	8192	/* i_op points to struct inode_operations_wrapper */
+
 #ifdef CONFIG_FS_DAX
-#define S_DAX		8192	/* Direct Access, avoiding the page cache */
+#define S_DAX		16384	/* Direct Access, avoiding the page cache */
 #else
 #define S_DAX		0	/* Make all the DAX code disappear */
 #endif
@@ -1888,6 +1966,7 @@ struct super_operations {
 #define IS_IMA(inode)		((inode)->i_flags & S_IMA)
 #define IS_AUTOMOUNT(inode)	((inode)->i_flags & S_AUTOMOUNT)
 #define IS_NOSEC(inode)		((inode)->i_flags & S_NOSEC)
+#define IS_IOPS_WRAPPER(inode)	((inode)->i_flags & S_IOPS_WRAPPER)
 #define IS_DAX(inode)		((inode)->i_flags & S_DAX)
 
 #define IS_WHITEOUT(inode)	(S_ISCHR(inode->i_mode) && \
@@ -1949,14 +2028,10 @@ static inline bool HAS_UNMAPPED_ID(struct inode *inode)
  *
  * I_DIO_WAKEUP		Never set.  Only used as a key for wait_on_bit().
  *
- * I_WB_SWITCH		Cgroup bdi_writeback switching in progress.  Used to
- *			synchronize competing switching instances and to tell
- *			wb stat updates to grab mapping->tree_lock.  See
- *			inode_switch_wb_work_fn() for details.
+ * I_OVL_INUSE		Used by overlayfs to get exclusive ownership on upper
+ *			and work dirs among overlayfs mounts.
  *
- * I_SYNC_QUEUED	Inode is queued in b_io or b_more_io writeback lists.
- *			Used to detect that mark_inode_dirty() should not move
- * 			inode between dirty lists.
+ * I_CREATING		New object's inode in the middle of setting up.
  *
  * Q: What is the difference between I_WILL_FREE and I_FREEING?
  */
@@ -1972,15 +2047,12 @@ static inline bool HAS_UNMAPPED_ID(struct inode *inode)
 #define I_SYNC			(1 << __I_SYNC)
 #define I_REFERENCED		(1 << 8)
 #define __I_DIO_WAKEUP		9
-#define I_DIO_WAKEUP		(1 << __I_DIO_WAKEUP)
+#define I_DIO_WAKEUP		(1 << I_DIO_WAKEUP)
 #define I_LINKABLE		(1 << 10)
-#define I_DIRTY_TIME		(1 << 11)
-#define I_DIRTY_TIME_EXPIRED	(1 << 12)
-#define I_WB_SWITCH		(1 << 13)
-#define I_SYNC_QUEUED		(1 << 17)
+#define I_OVL_INUSE		(1 << 14)
+#define I_CREATING		(1 << 15)
 
 #define I_DIRTY (I_DIRTY_SYNC | I_DIRTY_DATASYNC | I_DIRTY_PAGES)
-#define I_DIRTY_ALL (I_DIRTY | I_DIRTY_TIME)
 
 extern void __mark_inode_dirty(struct inode *, int);
 static inline void mark_inode_dirty(struct inode *inode)
@@ -2032,7 +2104,7 @@ enum file_time_flags {
 	S_VERSION = 8,
 };
 
-extern void touch_atime(const struct path *);
+extern void touch_atime(struct path *);
 static inline void file_accessed(struct file *file)
 {
 	if (!(file->f_flags & O_NOATIME))
@@ -2049,7 +2121,14 @@ struct file_system_type {
 #define FS_BINARY_MOUNTDATA	2
 #define FS_HAS_SUBTYPE		4
 #define FS_USERNS_MOUNT		8	/* Can be mounted by userns root */
+#define FS_HAS_RM_XQUOTA	256	/* KABI: fs has the rm_xquota quota op */
+#define FS_HAS_INVALIDATE_RANGE	512	/* FS has new ->invalidatepage with length arg */
+#define FS_HAS_DIO_IODONE2	1024	/* KABI: fs supports new iodone */
+#define FS_HAS_NEXTDQBLK	2048	/* KABI: fs has the ->get_nextdqblk op */
+#define FS_HAS_DOPS_WRAPPER	4096	/* kabi: fs is using dentry_operations_wrapper. sb->s_d_op points to
+dentry_operations_wrapper */
 #define FS_RENAME_DOES_D_MOVE	32768	/* FS will handle d_move() during rename() internally. */
+#define FS_HAS_WBLIST		131072	/* KABI: fs has writeback list super ops */
 	struct dentry *(*mount) (struct file_system_type *, int,
 		       const char *, void *);
 	void (*kill_sb) (struct super_block *);
@@ -2066,6 +2145,84 @@ struct file_system_type {
 	struct lock_class_key i_mutex_key;
 	struct lock_class_key i_mutex_dir_key;
 };
+
+#define sb_has_rm_xquota(sb)	((sb)->s_type->fs_flags & FS_HAS_RM_XQUOTA)
+#define sb_has_nextdqblk(sb)	((sb)->s_type->fs_flags & FS_HAS_NEXTDQBLK)
+#define sb_has_dops_wrapper(sb)	((sb)->s_type->fs_flags & FS_HAS_DOPS_WRAPPER)
+#define sb_has_wblist(sb)	((sb)->s_type->fs_flags & FS_HAS_WBLIST)
+
+/*
+ * FIXME: These should be in include/linux/dcache.h but there
+ * sb_has_dops_wrapper() is not available and compilation fails. This happens
+ * as fs.h includes dcache.h and not other way around. So putting these
+ * operations here for now.
+ */
+static inline const struct dentry_operations_wrapper *get_dop_wrapper(struct dentry *dentry)
+{
+	if (!sb_has_dops_wrapper(dentry->d_sb))
+		return NULL;
+
+	return container_of(dentry->d_op, const struct dentry_operations_wrapper, ops);
+}
+
+static inline dop_real_t get_real_dop(struct dentry *dentry)
+{
+	const struct dentry_operations_wrapper *wrapper = get_dop_wrapper(dentry);
+	if (!wrapper)
+		return NULL;
+
+	return (offsetof(struct dentry_operations_wrapper, d_real) < wrapper->size) ? wrapper->d_real : NULL;
+}
+
+/**
+ * d_real - Return the real dentry
+ * @dentry: the dentry to query
+ * @inode: inode to select the dentry from multiple layers (can be NULL)
+ * @open_flags: open flags to control copy-up behavior
+ * @flags: flags to control what is returned by this function
+ *
+ * If dentry is on an union/overlay, then return the underlying, real dentry.
+ * Otherwise return the dentry itself.
+ *
+ * See also: Documentation/filesystems/vfs.txt
+ */
+static inline struct dentry *d_real(struct dentry *dentry,
+				    const struct inode *inode,
+				    unsigned int open_flags, unsigned int flags)
+{
+	if (unlikely(dentry->d_flags & DCACHE_OP_REAL)) {
+		dop_real_t d_real_op = get_real_dop(dentry);
+
+		return d_real_op(dentry, inode, open_flags, flags);
+	} else {
+		return dentry;
+	}
+}
+
+/**
+ * d_real_inode - Return the real inode
+ * @dentry: The dentry to query
+ *
+ * If dentry is on an union/overlay, then return the underlying, real inode.
+ * Otherwise return d_inode().
+ */
+static inline struct inode *d_real_inode(const struct dentry *dentry)
+{
+	/* This usage of d_real() results in const dentry */
+	return d_real((struct dentry *) dentry, NULL, 0, 0)->d_inode;
+}
+
+static inline struct dentry *file_dentry(const struct file *file)
+{
+	return d_real(file->f_path.dentry, file_inode(file), 0, 0);
+}
+
+/*
+ * the fs address space operations contain a new invalidatepage_rang () op
+ * which supports a length parameter
+ */
+#define inode_has_invalidate_range(inode) \
+	((inode)->i_sb->s_type->fs_flags & FS_HAS_INVALIDATE_RANGE)
 
 #define MODULE_ALIAS_FS(NAME) MODULE_ALIAS("fs-" NAME)
 
@@ -2100,19 +2257,10 @@ struct super_block *sget(struct file_system_type *type,
 			int (*test)(struct super_block *,void *),
 			int (*set)(struct super_block *,void *),
 			int flags, void *data);
-extern struct dentry *mount_pseudo_xattr(struct file_system_type *, char *,
-					 const struct super_operations *ops,
-					 const struct xattr_handler **xattr,
-					 const struct dentry_operations *dops,
-					 unsigned long);
-
-static inline struct dentry *
-mount_pseudo(struct file_system_type *fs_type, char *name,
-	     const struct super_operations *ops,
-	     const struct dentry_operations *dops, unsigned long magic)
-{
-	return mount_pseudo_xattr(fs_type, name, ops, NULL, dops, magic);
-}
+extern struct dentry *mount_pseudo(struct file_system_type *, char *,
+	const struct super_operations *ops,
+	const struct dentry_operations *dops,
+	unsigned long);
 
 /* Alas, no aliases. Too much hassle with bringing module.h everywhere */
 #define fops_get(fops) \
@@ -2133,6 +2281,17 @@ mount_pseudo(struct file_system_type *fs_type, char *name,
 
 extern int register_filesystem(struct file_system_type *);
 extern int unregister_filesystem(struct file_system_type *);
+/* Begin: Red Hat Internal Use Only */
+extern int register_fo_extend(const struct file_operations_extend *fop);
+extern void unregister_fo_extend(const struct file_operations_extend *fop);
+extern const struct file_operations_extend *lookup_fo_extend(
+	const struct file_operations *fops);
+static inline struct file_operations_extend *
+get_fo_extend(struct file *fp)
+{
+	return (struct file_operations_extend *)lookup_fo_extend(fp->f_op);
+}
+/* End: Red Hat Internal Use Only */
 extern struct vfsmount *kern_mount_data(struct file_system_type *, void *data);
 #define kern_mount(type) kern_mount_data(type, NULL)
 extern void kern_unmount(struct vfsmount *mnt);
@@ -2140,7 +2299,7 @@ extern int may_umount_tree(struct vfsmount *);
 extern int may_umount(struct vfsmount *);
 extern long do_mount(const char *, const char __user *,
 		     const char *, unsigned long, void *);
-extern struct vfsmount *collect_mounts(struct path *);
+extern struct vfsmount *collect_mounts(const struct path *);
 extern void drop_collected_mounts(struct vfsmount *);
 extern int iterate_mounts(int (*)(struct vfsmount *, void *), void *,
 			  struct vfsmount *);
@@ -2156,12 +2315,12 @@ extern int current_umask(void);
 
 extern void ihold(struct inode * inode);
 extern void iput(struct inode *);
-extern int generic_update_time(struct inode *, struct timespec *, int);
 
 /* /sys/fs */
 extern struct kobject *fs_kobj;
 
-#define MAX_RW_COUNT (INT_MAX & PAGE_MASK)
+#define MAX_RW_COUNT (INT_MAX & PAGE_CACHE_MASK)
+extern int rw_verify_area(int, struct file *, loff_t *, size_t);
 
 #ifdef CONFIG_MANDATORY_FILE_LOCKING
 extern int locks_mandatory_locked(struct file *);
@@ -2198,7 +2357,7 @@ static inline int locks_verify_truncate(struct inode *inode,
 				    struct file *f,
 				    loff_t size)
 {
-	if (!inode->i_flctx || !mandatory_lock(inode))
+	if (!inode->i_flock || !mandatory_lock(inode))
 		return 0;
 
 	if (size < inode->i_size) {
@@ -2217,8 +2376,9 @@ static inline int locks_mandatory_locked(struct file *file)
 	return 0;
 }
 
-static inline int locks_mandatory_area(struct inode *inode, struct file *filp,
-                                       loff_t start, loff_t end, unsigned char type)
+static inline int locks_mandatory_area(struct inode *inode,
+				       struct file *filp, loff_t start,
+				       loff_t end, unsigned char type)
 {
 	return 0;
 }
@@ -2239,7 +2399,7 @@ static inline int locks_verify_locked(struct file *file)
 }
 
 static inline int locks_verify_truncate(struct inode *inode, struct file *filp,
-					size_t size)
+					loff_t size)
 {
 	return 0;
 }
@@ -2252,26 +2412,18 @@ static inline int break_lease(struct inode *inode, unsigned int mode)
 {
 	/*
 	 * Since this check is lockless, we must ensure that any refcounts
-	 * taken are done before checking i_flctx->flc_lease. Otherwise, we
-	 * could end up racing with tasks trying to set a new lease on this
-	 * file.
+	 * taken are done before checking inode->i_flock. Otherwise, we could
+	 * end up racing with tasks trying to set a new lease on this file.
 	 */
 	smp_mb();
-	if (inode->i_flctx && !list_empty_careful(&inode->i_flctx->flc_lease))
+	if (inode->i_flock)
 		return __break_lease(inode, mode, FL_LEASE);
 	return 0;
 }
 
 static inline int break_deleg(struct inode *inode, unsigned int mode)
 {
-	/*
-	 * Since this check is lockless, we must ensure that any refcounts
-	 * taken are done before checking i_flctx->flc_lease. Otherwise, we
-	 * could end up racing with tasks trying to set a new lease on this
-	 * file.
-	 */
-	smp_mb();
-	if (inode->i_flctx && !list_empty_careful(&inode->i_flctx->flc_lease))
+	if (inode->i_flock)
 		return __break_lease(inode, mode, FL_DELEG);
 	return 0;
 }
@@ -2301,7 +2453,7 @@ static inline int break_deleg_wait(struct inode **delegated_inode)
 static inline int break_layout(struct inode *inode, bool wait)
 {
 	smp_mb();
-	if (inode->i_flctx && !list_empty_careful(&inode->i_flctx->flc_lease))
+	if (inode->i_flock)
 		return __break_lease(inode,
 				wait ? O_WRONLY : O_WRONLY | O_NONBLOCK,
 				FL_LAYOUT);
@@ -2343,11 +2495,13 @@ struct filename {
 	const char		*name;	/* pointer to actual string */
 	const __user char	*uptr;	/* original userland pointer */
 	struct audit_names	*aname;
+	bool			separate; /* should "name" be freed? */
+#ifndef __GENKSYMS__
 	int			refcnt;
-	const char		iname[];
+#endif
 };
 
-extern long vfs_truncate(const struct path *, loff_t);
+extern long vfs_truncate(struct path *, loff_t);
 extern int do_truncate(struct dentry *, loff_t start, unsigned int time_attrs,
 		       struct file *filp);
 extern int vfs_fallocate(struct file *file, int mode, loff_t offset,
@@ -2357,11 +2511,11 @@ extern long do_sys_open(int dfd, const char __user *filename, int flags,
 extern struct file *file_open_name(struct filename *, int, umode_t);
 extern struct file *filp_open(const char *, int, umode_t);
 extern struct file *file_open_root(struct dentry *, struct vfsmount *,
-				   const char *, int, umode_t);
+				   const char *, int);
+extern int vfs_open(const struct path *, struct file *, const struct cred *);
 extern struct file * dentry_open(const struct path *, int, const struct cred *);
 extern int filp_close(struct file *, fl_owner_t id);
 
-extern struct filename *getname_flags(const char __user *, int, int *);
 extern struct filename *getname(const char __user *);
 extern struct filename *getname_kernel(const char *);
 extern void putname(struct filename *name);
@@ -2402,15 +2556,10 @@ extern int sync_blockdev(struct block_device *bdev);
 extern void kill_bdev(struct block_device *);
 extern struct super_block *freeze_bdev(struct block_device *);
 extern void emergency_thaw_all(void);
+extern void emergency_thaw_bdev(struct super_block *sb);
 extern int thaw_bdev(struct block_device *bdev, struct super_block *sb);
 extern int fsync_bdev(struct block_device *);
-
-extern struct super_block *blockdev_superblock;
-
-static inline bool sb_is_blkdev_sb(struct super_block *sb)
-{
-	return sb == blockdev_superblock;
-}
+extern int sb_is_blkdev_sb(struct super_block *sb);
 #else
 static inline void bd_forget(struct inode *inode) {}
 static inline int sync_blockdev(struct block_device *bdev) { return 0; }
@@ -2431,9 +2580,9 @@ static inline void iterate_bdevs(void (*f)(struct block_device *, void *), void 
 {
 }
 
-static inline bool sb_is_blkdev_sb(struct super_block *sb)
+static inline int sb_is_blkdev_sb(struct super_block *sb)
 {
-	return false;
+	return 0;
 }
 #endif
 extern int sync_filesystem(struct super_block *);
@@ -2471,8 +2620,6 @@ static inline void bd_unlink_disk_holder(struct block_device *bdev,
 
 /* fs/char_dev.c */
 #define CHRDEV_MAJOR_HASH_SIZE	255
-/* Marks the bottom of the first segment of free char majors */
-#define CHRDEV_MAJOR_DYN_END 234
 extern int alloc_chrdev_region(dev_t *, unsigned, unsigned, const char *);
 extern int register_chrdev_region(dev_t, unsigned, const char *);
 extern int __register_chrdev(unsigned int major, unsigned int baseminor,
@@ -2513,12 +2660,31 @@ extern void init_special_inode(struct inode *, umode_t, dev_t);
 
 /* Invalid inode operations -- fs/bad_inode.c */
 extern void make_bad_inode(struct inode *);
-extern bool is_bad_inode(struct inode *);
+extern int is_bad_inode(struct inode *);
 
 #ifdef CONFIG_BLOCK
-static inline bool op_is_write(unsigned int op)
+/*
+ * tmp cpmpat. Users used to set the write bit for all non reads, but
+ * we will be dropping the bitmap use for ops. Support both until
+ * the end of the patchset.
+ */
+static inline bool op_is_write(unsigned long flags)
 {
-	return op == REQ_OP_READ ? false : true;
+	if (flags & (REQ_OP_WRITE | REQ_OP_WRITE_SAME | REQ_OP_DISCARD))
+		return true;
+	else
+		return false;
+}
+
+/*
+ * return READ, READA, or WRITE
+ */
+static inline int bio_rw(struct bio *bio)
+{
+	if (op_is_write(op_from_rq_bits(bio->bi_rw)))
+		return WRITE;
+
+	return bio->bi_rw & RWA_MASK;
 }
 
 /*
@@ -2526,7 +2692,7 @@ static inline bool op_is_write(unsigned int op)
  */
 static inline int bio_data_dir(struct bio *bio)
 {
-	return op_is_write(bio_op(bio)) ? WRITE : READ;
+	return op_is_write(op_from_rq_bits(bio->bi_rw)) ? WRITE : READ;
 }
 
 extern void check_disk_size_change(struct gendisk *disk,
@@ -2567,25 +2733,7 @@ extern int filemap_check_errors(struct address_space *mapping);
 extern int vfs_fsync_range(struct file *file, loff_t start, loff_t end,
 			   int datasync);
 extern int vfs_fsync(struct file *file, int datasync);
-
-/*
- * Sync the bytes written if this was a synchronous write.  Expect ki_pos
- * to already be updated for the write, and will return either the amount
- * of bytes passed in, or an error if syncing the file failed.
- */
-static inline ssize_t generic_write_sync(struct kiocb *iocb, ssize_t count)
-{
-	if (iocb->ki_flags & IOCB_DSYNC) {
-		int ret = vfs_fsync_range(iocb->ki_filp,
-				iocb->ki_pos - count, iocb->ki_pos - 1,
-				(iocb->ki_flags & IOCB_SYNC) ? 0 : 1);
-		if (ret)
-			return ret;
-	}
-
-	return count;
-}
-
+extern int generic_write_sync(struct file *file, loff_t pos, loff_t count);
 extern void emergency_sync(void);
 extern void emergency_remount(void);
 #ifdef CONFIG_BLOCK
@@ -2684,51 +2832,15 @@ static inline void i_readcount_inc(struct inode *inode)
 #endif
 extern int do_pipe_flags(int *, int);
 
-#define __kernel_read_file_id(id) \
-	id(UNKNOWN, unknown)		\
-	id(FIRMWARE, firmware)		\
-	id(FIRMWARE_PREALLOC_BUFFER, firmware)	\
-	id(MODULE, kernel-module)		\
-	id(KEXEC_IMAGE, kexec-image)		\
-	id(KEXEC_INITRAMFS, kexec-initramfs)	\
-	id(POLICY, security-policy)		\
-	id(MAX_ID, )
-
-#define __fid_enumify(ENUM, dummy) READING_ ## ENUM,
-#define __fid_stringify(dummy, str) #str,
-
-enum kernel_read_file_id {
-	__kernel_read_file_id(__fid_enumify)
-};
-
-static const char * const kernel_read_file_str[] = {
-	__kernel_read_file_id(__fid_stringify)
-};
-
-static inline const char *kernel_read_file_id_str(enum kernel_read_file_id id)
-{
-	if (id < 0 || id >= READING_MAX_ID)
-		return kernel_read_file_str[READING_UNKNOWN];
-
-	return kernel_read_file_str[id];
-}
-
 extern int kernel_read(struct file *, loff_t, char *, unsigned long);
-extern int kernel_read_file(struct file *, void **, loff_t *, loff_t,
-			    enum kernel_read_file_id);
-extern int kernel_read_file_from_path(char *, void **, loff_t *, loff_t,
-				      enum kernel_read_file_id);
-extern int kernel_read_file_from_fd(int, void **, loff_t *, loff_t,
-				    enum kernel_read_file_id);
 extern ssize_t kernel_write(struct file *, const char *, size_t, loff_t);
 extern ssize_t __kernel_write(struct file *, const char *, size_t, loff_t *);
 extern struct file * open_exec(const char *);
  
 /* fs/dcache.c -- generic fs support functions */
-extern bool is_subdir(struct dentry *, struct dentry *);
-extern bool path_is_under(struct path *, struct path *);
-
-extern char *file_path(struct file *, char *, int);
+extern int is_subdir(struct dentry *, struct dentry *);
+extern bool path_is_under(const struct path *, const struct path *);
+extern ino_t find_inode_number(struct dentry *, struct qstr *);
 
 #include <linux/err.h>
 
@@ -2756,13 +2868,12 @@ extern struct inode *ilookup5(struct super_block *sb, unsigned long hashval,
 		int (*test)(struct inode *, void *), void *data);
 extern struct inode *ilookup(struct super_block *sb, unsigned long ino);
 
+extern struct inode *inode_insert5(struct inode *inode, unsigned long hashval,
+		int (*test)(struct inode *, void *),
+		int (*set)(struct inode *, void *),
+		void *data);
 extern struct inode * iget5_locked(struct super_block *, unsigned long, int (*test)(struct inode *, void *), int (*set)(struct inode *, void *), void *);
 extern struct inode * iget_locked(struct super_block *, unsigned long);
-extern struct inode *find_inode_nowait(struct super_block *,
-				       unsigned long,
-				       int (*match)(struct inode *,
-						    unsigned long, void *),
-				       void *data);
 extern int insert_inode_locked4(struct inode *, unsigned long, int (*test)(struct inode *, void *), void *);
 extern int insert_inode_locked(struct inode *);
 #ifdef CONFIG_DEBUG_LOCK_ALLOC
@@ -2771,8 +2882,8 @@ extern void lockdep_annotate_inode_mutex_key(struct inode *inode);
 static inline void lockdep_annotate_inode_mutex_key(struct inode *inode) { };
 #endif
 extern void unlock_new_inode(struct inode *);
+extern void discard_new_inode(struct inode *);
 extern unsigned int get_next_ino(void);
-extern void evict_inodes(struct super_block *sb);
 
 extern void __iget(struct inode * inode);
 extern void iget_failed(struct inode *);
@@ -2783,6 +2894,11 @@ extern struct inode *new_inode(struct super_block *sb);
 extern void free_inode_nonrcu(struct inode *inode);
 extern int should_remove_suid(struct dentry *);
 extern int file_remove_privs(struct file *);
+extern int dentry_needs_remove_privs(struct dentry *dentry);
+static inline int file_needs_remove_privs(struct file *file)
+{
+	return dentry_needs_remove_privs(file->f_path.dentry);
+}
 
 extern void __insert_inode_hash(struct inode *, unsigned long hashval);
 static inline void insert_inode_hash(struct inode *inode)
@@ -2793,14 +2909,14 @@ static inline void insert_inode_hash(struct inode *inode)
 extern void __remove_inode_hash(struct inode *);
 static inline void remove_inode_hash(struct inode *inode)
 {
-	if (!inode_unhashed(inode) && !hlist_fake(&inode->i_hash))
+	if (!inode_unhashed(inode))
 		__remove_inode_hash(inode);
 }
 
 extern void inode_sb_list_add(struct inode *inode);
 
 #ifdef CONFIG_BLOCK
-extern blk_qc_t submit_bio(struct bio *);
+extern void submit_bio(int, struct bio *);
 extern int bdev_read_only(struct block_device *);
 #endif
 extern int set_blocksize(struct block_device *, int);
@@ -2809,19 +2925,28 @@ extern int sb_min_blocksize(struct super_block *, int);
 
 extern int generic_file_mmap(struct file *, struct vm_area_struct *);
 extern int generic_file_readonly_mmap(struct file *, struct vm_area_struct *);
-extern ssize_t generic_write_checks(struct kiocb *, struct iov_iter *);
-extern ssize_t generic_file_read_iter(struct kiocb *, struct iov_iter *);
-extern ssize_t __generic_file_write_iter(struct kiocb *, struct iov_iter *);
-extern ssize_t generic_file_write_iter(struct kiocb *, struct iov_iter *);
-extern ssize_t generic_file_direct_write(struct kiocb *, struct iov_iter *);
-extern ssize_t generic_perform_write(struct file *, struct iov_iter *, loff_t);
-
-ssize_t vfs_iter_read(struct file *file, struct iov_iter *iter, loff_t *ppos);
-ssize_t vfs_iter_write(struct file *file, struct iov_iter *iter, loff_t *ppos);
+extern int generic_file_remap_pages(struct vm_area_struct *, unsigned long addr,
+		unsigned long size, pgoff_t pgoff);
+extern int file_read_actor(read_descriptor_t * desc, struct page *page, unsigned long offset, unsigned long size);
+int generic_write_checks(struct file *file, loff_t *pos, size_t *count, int isblk);
+extern ssize_t generic_file_aio_read(struct kiocb *, const struct iovec *, unsigned long, loff_t);
+extern ssize_t __generic_file_aio_write(struct kiocb *, const struct iovec *, unsigned long,
+		loff_t *);
+extern ssize_t generic_file_aio_write(struct kiocb *, const struct iovec *, unsigned long, loff_t);
+extern ssize_t generic_file_direct_write(struct kiocb *, const struct iovec *,
+		unsigned long *, loff_t, loff_t *, size_t, size_t);
+extern ssize_t generic_file_buffered_write(struct kiocb *, const struct iovec *,
+		unsigned long, loff_t, loff_t *, size_t, ssize_t);
+extern ssize_t do_sync_read(struct file *filp, char __user *buf, size_t len, loff_t *ppos);
+extern ssize_t do_sync_write(struct file *filp, const char __user *buf, size_t len, loff_t *ppos);
+extern int generic_segment_checks(const struct iovec *iov,
+		unsigned long *nr_segs, size_t *count, int access_flags);
 
 /* fs/block_dev.c */
-extern ssize_t blkdev_read_iter(struct kiocb *iocb, struct iov_iter *to);
-extern ssize_t blkdev_write_iter(struct kiocb *iocb, struct iov_iter *from);
+extern ssize_t blkdev_aio_read(struct kiocb *, const struct iovec *,
+			       unsigned long, loff_t);
+extern ssize_t blkdev_aio_write(struct kiocb *iocb, const struct iovec *iov,
+				unsigned long nr_segs, loff_t pos);
 extern int blkdev_fsync(struct file *filp, loff_t start, loff_t end,
 			int datasync);
 extern void block_sync_page(struct page *page);
@@ -2829,8 +2954,12 @@ extern void block_sync_page(struct page *page);
 /* fs/splice.c */
 extern ssize_t generic_file_splice_read(struct file *, loff_t *,
 		struct pipe_inode_info *, size_t, unsigned int);
-extern ssize_t iter_file_splice_write(struct pipe_inode_info *,
+extern ssize_t default_file_splice_read(struct file *, loff_t *,
+		struct pipe_inode_info *, size_t, unsigned int);
+extern ssize_t generic_file_splice_write(struct pipe_inode_info *,
 		struct file *, loff_t *, size_t, unsigned int);
+extern ssize_t default_file_splice_write(struct pipe_inode_info *pipe,
+		struct file *out, loff_t *ppos, size_t len, unsigned int flags);
 extern ssize_t generic_splice_sendpage(struct pipe_inode_info *pipe,
 		struct file *out, loff_t *, size_t len, unsigned int flags);
 extern long do_splice_direct(struct file *in, loff_t *ppos, struct file *out,
@@ -2851,10 +2980,9 @@ extern loff_t no_seek_end_llseek_size(struct file *, loff_t, int, loff_t);
 extern loff_t no_seek_end_llseek(struct file *, loff_t, int);
 extern int generic_file_open(struct inode * inode, struct file * filp);
 extern int nonseekable_open(struct inode * inode, struct file * filp);
-extern int stream_open(struct inode * inode, struct file * filp);
 
 #ifdef CONFIG_BLOCK
-typedef void (dio_submit_t)(struct bio *bio, struct inode *inode,
+typedef void (dio_submit_t)(int rw, struct bio *bio, struct inode *inode,
 			    loff_t file_offset);
 
 enum {
@@ -2864,32 +2992,32 @@ enum {
 	/* filesystem does not support filling holes */
 	DIO_SKIP_HOLES	= 0x02,
 
-	/* filesystem can handle aio writes beyond i_size */
-	DIO_ASYNC_EXTEND = 0x04,
-
 	/* inode/fs/bdev does not need truncate protection */
-	DIO_SKIP_DIO_COUNT = 0x08,
+	DIO_SKIP_DIO_COUNT = 0x04,
+
+	/* filesystem can handle aio writes beyond i_size */
+	DIO_ASYNC_EXTEND = 0x08,
 };
 
 void dio_end_io(struct bio *bio, int error);
 
-ssize_t __blockdev_direct_IO(struct kiocb *iocb, struct inode *inode,
-			     struct block_device *bdev, struct iov_iter *iter,
-			     get_block_t get_block,
-			     dio_iodone_t end_io, dio_submit_t submit_io,
-			     int flags);
+ssize_t __blockdev_direct_IO(int rw, struct kiocb *iocb, struct inode *inode,
+	struct block_device *bdev, const struct iovec *iov, loff_t offset,
+	unsigned long nr_segs, get_block_t get_block, dio_iodone_t end_io,
+	dio_submit_t submit_io,	int flags);
 
-static inline ssize_t blockdev_direct_IO(struct kiocb *iocb,
-					 struct inode *inode,
-					 struct iov_iter *iter,
-					 get_block_t get_block)
+static inline ssize_t blockdev_direct_IO(int rw, struct kiocb *iocb,
+		struct inode *inode, const struct iovec *iov, loff_t offset,
+		unsigned long nr_segs, get_block_t get_block)
 {
-	return __blockdev_direct_IO(iocb, inode, inode->i_sb->s_bdev, iter,
-			get_block, NULL, NULL, DIO_LOCKING | DIO_SKIP_HOLES);
+	return __blockdev_direct_IO(rw, iocb, inode, inode->i_sb->s_bdev, iov,
+				    offset, nr_segs, get_block, NULL, NULL,
+				    DIO_LOCKING | DIO_SKIP_HOLES);
 }
 #endif
 
 void inode_dio_wait(struct inode *inode);
+void inode_dio_done(struct inode *inode);
 
 /*
  * inode_dio_begin - signal start of a direct I/O requests
@@ -2923,19 +3051,18 @@ extern const struct file_operations generic_ro_fops;
 
 #define special_file(m) (S_ISCHR(m)||S_ISBLK(m)||S_ISFIFO(m)||S_ISSOCK(m))
 
-extern int readlink_copy(char __user *, int, const char *);
+extern int vfs_readlink(struct dentry *, char __user *, int, const char *);
+extern int vfs_follow_link(struct nameidata *, const char *);
 extern int page_readlink(struct dentry *, char __user *, int);
-extern const char *page_get_link(struct dentry *, struct inode *,
-				 struct delayed_call *);
-extern void page_put_link(void *);
+extern void *page_follow_link_light(struct dentry *, struct nameidata *);
+extern void page_put_link(struct dentry *, struct nameidata *, void *);
 extern int __page_symlink(struct inode *inode, const char *symname, int len,
 		int nofs);
 extern int page_symlink(struct inode *inode, const char *symname, int len);
 extern const struct inode_operations page_symlink_inode_operations;
-extern void kfree_link(void *);
+extern void kfree_put_link(struct dentry *, struct nameidata *, void *);
 extern int generic_readlink(struct dentry *, char __user *, int);
 extern void generic_fillattr(struct inode *, struct kstat *);
-int vfs_getattr_nosec(struct path *path, struct kstat *stat);
 extern int vfs_getattr(struct path *, struct kstat *);
 void __inode_add_bytes(struct inode *inode, loff_t bytes);
 void inode_add_bytes(struct inode *inode, loff_t bytes);
@@ -2943,9 +3070,6 @@ void __inode_sub_bytes(struct inode *inode, loff_t bytes);
 void inode_sub_bytes(struct inode *inode, loff_t bytes);
 loff_t inode_get_bytes(struct inode *inode);
 void inode_set_bytes(struct inode *inode, loff_t bytes);
-const char *simple_get_link(struct dentry *, struct inode *,
-			    struct delayed_call *);
-extern const struct inode_operations simple_symlink_inode_operations;
 
 extern int iterate_dir(struct file *, struct dir_context *);
 
@@ -2953,8 +3077,9 @@ extern int vfs_stat(const char __user *, struct kstat *);
 extern int vfs_lstat(const char __user *, struct kstat *);
 extern int vfs_fstat(unsigned int, struct kstat *);
 extern int vfs_fstatat(int , const char __user *, struct kstat *, int);
-extern const char *vfs_get_link(struct dentry *, struct delayed_call *);
 
+extern int do_vfs_ioctl(struct file *filp, unsigned int fd, unsigned int cmd,
+		    unsigned long arg);
 extern int __generic_block_fiemap(struct inode *inode,
 				  struct fiemap_extent_info *fieinfo,
 				  loff_t start, loff_t len,
@@ -2977,7 +3102,7 @@ extern void iterate_supers_type(struct file_system_type *,
 extern int dcache_dir_open(struct inode *, struct file *);
 extern int dcache_dir_close(struct inode *, struct file *);
 extern loff_t dcache_dir_lseek(struct file *, loff_t, int);
-extern int dcache_readdir(struct file *, struct dir_context *);
+extern int dcache_readdir(struct file *, void *, filldir_t);
 extern int simple_setattr(struct dentry *, struct iattr *);
 extern int simple_getattr(struct vfsmount *, struct dentry *, struct kstat *);
 extern int simple_statfs(struct dentry *, struct kstatfs *);
@@ -2985,9 +3110,13 @@ extern int simple_open(struct inode *inode, struct file *file);
 extern int simple_link(struct dentry *, struct inode *, struct dentry *);
 extern int simple_unlink(struct inode *, struct dentry *);
 extern int simple_rmdir(struct inode *, struct dentry *);
-extern int simple_rename(struct inode *, struct dentry *,
-			 struct inode *, struct dentry *, unsigned int);
+extern int simple_rename(struct inode *, struct dentry *, struct inode *, struct dentry *);
 extern int noop_fsync(struct file *, loff_t, loff_t, int);
+extern int noop_set_page_dirty(struct page *page);
+extern void noop_invalidatepage_range(struct page *page, unsigned int offset,
+		unsigned int length);
+extern ssize_t noop_direct_IO(int rw, struct kiocb *kiocb,
+		const struct iovec *iov, loff_t offset, unsigned long nr_segs);
 extern int simple_empty(struct dentry *);
 extern int simple_readpage(struct file *file, struct page *page);
 extern int simple_write_begin(struct file *file, struct address_space *mapping,
@@ -2996,7 +3125,6 @@ extern int simple_write_begin(struct file *file, struct address_space *mapping,
 extern int simple_write_end(struct file *file, struct address_space *mapping,
 			loff_t pos, unsigned len, unsigned copied,
 			struct page *page, void *fsdata);
-extern int always_delete_dentry(const struct dentry *);
 extern struct inode *alloc_anon_inode(struct super_block *);
 extern int simple_nosetlease(struct file *, long, struct file_lock **, void **);
 extern const struct dentry_operations simple_dentry_operations;
@@ -3018,7 +3146,6 @@ extern ssize_t simple_read_from_buffer(void __user *to, size_t count,
 extern ssize_t simple_write_to_buffer(void *to, size_t available, loff_t *ppos,
 		const void __user *from, size_t count);
 
-extern int __generic_file_fsync(struct file *, loff_t, loff_t, int);
 extern int generic_file_fsync(struct file *, loff_t, loff_t, int);
 
 extern int generic_check_addressable(unsigned, u64);
@@ -3031,7 +3158,7 @@ extern int buffer_migrate_page(struct address_space *,
 #define buffer_migrate_page NULL
 #endif
 
-extern int setattr_prepare(struct dentry *, struct iattr *);
+extern int inode_change_ok(const struct inode *, struct iattr *);
 extern int inode_newsize_ok(const struct inode *, loff_t offset);
 extern void setattr_copy(struct inode *inode, const struct iattr *attr);
 
@@ -3063,20 +3190,6 @@ static inline bool vma_is_fsdax(struct vm_area_struct *vma)
 	if (S_ISCHR(inode->i_mode))
 		return false; /* device-dax */
 	return true;
-}
-
-static inline int iocb_flags(struct file *file)
-{
-	int res = 0;
-	if (file->f_flags & O_APPEND)
-		res |= IOCB_APPEND;
-	if (io_is_direct(file))
-		res |= IOCB_DIRECT;
-	if ((file->f_flags & O_DSYNC) || IS_SYNC(file->f_mapping->host))
-		res |= IOCB_DSYNC;
-	if (file->f_flags & __O_SYNC)
-		res |= IOCB_SYNC;
-	return res;
 }
 
 static inline ino_t parent_ino(struct dentry *dentry)
@@ -3143,7 +3256,7 @@ static const struct file_operations __fops = {				\
 	.read	 = simple_attr_read,					\
 	.write	 = simple_attr_write,					\
 	.llseek	 = generic_file_llseek,					\
-}
+};
 
 static inline __printf(1, 2)
 void __simple_attr_check_format(const char *fmt, ...)
@@ -3176,7 +3289,7 @@ int __init get_filesystem_list(char *buf);
 #define OPEN_FMODE(flag) ((__force fmode_t)(((flag + 1) & O_ACCMODE) | \
 					    (flag & __FMODE_NONOTIFY)))
 
-static inline bool is_sxid(umode_t mode)
+static inline int is_sxid(umode_t mode)
 {
 	return (mode & S_ISUID) || ((mode & S_ISGID) && (mode & S_IXGRP));
 }
@@ -3193,11 +3306,6 @@ static inline void inode_has_no_xattr(struct inode *inode)
 {
 	if (!is_sxid(inode->i_mode) && (inode->i_sb->s_flags & MS_NOSEC))
 		inode->i_flags |= S_NOSEC;
-}
-
-static inline bool is_root_inode(struct inode *inode)
-{
-	return inode == inode->i_sb->s_root->d_inode;
 }
 
 static inline bool dir_emit(struct dir_context *ctx,
@@ -3230,21 +3338,38 @@ static inline bool dir_emit_dots(struct file *file, struct dir_context *ctx)
 	}
 	return true;
 }
-static inline bool dir_relax(struct inode *inode)
+
+static inline const struct inode_operations_wrapper *get_iop_wrapper(struct inode *inode,
+								     unsigned version)
 {
-	inode_unlock(inode);
-	inode_lock(inode);
-	return !IS_DEADDIR(inode);
+	const struct inode_operations_wrapper *wrapper;
+
+	if (!IS_IOPS_WRAPPER(inode))
+		return NULL;
+	wrapper = container_of(inode->i_op, const struct inode_operations_wrapper, ops);
+	if (wrapper->version < version)
+		return NULL;
+	return wrapper;
 }
 
-static inline bool dir_relax_shared(struct inode *inode)
+static inline iop_rename2_t get_rename2_iop(struct inode *inode)
 {
-	inode_unlock_shared(inode);
-	inode_lock_shared(inode);
-	return !IS_DEADDIR(inode);
+	const struct inode_operations_wrapper *wrapper = get_iop_wrapper(inode, 0);
+	return wrapper ? wrapper->rename2 : NULL;
+}
+
+static inline iop_tmpfile_t get_tmpfile_iop(struct inode *inode)
+{
+	const struct inode_operations_wrapper *wrapper = get_iop_wrapper(inode, 0);
+	return wrapper ? wrapper->tmpfile : NULL;
+}
+
+static inline iop_dentry_open_t get_dentry_open_iop(struct inode *inode)
+{
+	const struct inode_operations_wrapper *wrapper = get_iop_wrapper(inode, 0);
+	return wrapper ? wrapper->dentry_open : NULL;
 }
 
 extern bool path_noexec(const struct path *path);
-extern void inode_nohighmem(struct inode *inode);
 
 #endif /* _LINUX_FS_H */

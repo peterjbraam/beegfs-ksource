@@ -59,14 +59,14 @@
 #define LDCW		ldcw,co
 #define BL		b,l
 # ifdef CONFIG_64BIT
-#  define PA_ASM_LEVEL	2.0w
+#  define LEVEL		2.0w
 # else
-#  define PA_ASM_LEVEL	2.0
+#  define LEVEL		2.0
 # endif
 #else
 #define LDCW		ldcw
 #define BL		bl
-#define PA_ASM_LEVEL	1.1
+#define LEVEL		1.1
 #endif
 
 #ifdef __ASSEMBLY__
@@ -514,18 +514,6 @@
 	nop	/* 6 */
 	nop	/* 7 */
 	.endm
-
-	/*
-	 * ASM_EXCEPTIONTABLE_ENTRY
-	 *
-	 * Creates an exception table entry.
-	 * Do not convert to a assembler macro. This won't work.
-	 */
-#define ASM_EXCEPTIONTABLE_ENTRY(fault_addr, except_addr)	\
-	.section __ex_table,"aw"			!	\
-	.word (fault_addr - .), (except_addr - .)	!	\
-	.previous
-
 
 #endif /* __ASSEMBLY__ */
 #endif

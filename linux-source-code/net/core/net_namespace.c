@@ -16,7 +16,9 @@
 #include <linux/export.h>
 #include <linux/user_namespace.h>
 #include <linux/net_namespace.h>
+#ifndef __GENKSYMS__
 #include <net/sock.h>
+#endif
 #include <net/netlink.h>
 #include <net/net_namespace.h>
 #include <net/netns/generic.h>
@@ -36,8 +38,6 @@ struct net init_net = {
 	.dev_base_head = LIST_HEAD_INIT(init_net.dev_base_head),
 };
 EXPORT_SYMBOL(init_net);
-
-static bool init_net_initialized;
 
 #define INITIAL_NET_GEN_PTRS	13 /* +1 for len +2 for rcu_head */
 
@@ -219,8 +219,6 @@ int peernet2id_alloc(struct net *net, struct net *peer)
 	bool alloc;
 	int id;
 
-	if (atomic_read(&net->count) == 0)
-		return NETNSA_NSID_NOT_ASSIGNED;
 	spin_lock_irqsave(&net->nsid_lock, flags);
 	alloc = atomic_read(&peer->count) == 0 ? false : true;
 	id = __peernet2id_alloc(net, peer, &alloc);
@@ -229,6 +227,7 @@ int peernet2id_alloc(struct net *net, struct net *peer)
 		rtnl_net_notifyid(net, RTM_NEWNSID, id);
 	return id;
 }
+EXPORT_SYMBOL_GPL(peernet2id_alloc);
 
 /* This function returns, if assigned, the id of a peer netns. */
 int peernet2id(struct net *net, struct net *peer)
@@ -268,6 +267,16 @@ struct net *get_net_ns_by_id(struct net *net, int id)
 	rcu_read_unlock();
 
 	return peer;
+}
+
+static struct ucounts *inc_net_namespaces(struct user_namespace *ns)
+{
+	return inc_ucount(ns, current_euid(), UCOUNT_NET_NAMESPACES);
+}
+
+static void dec_net_namespaces(struct ucounts *ucounts)
+{
+	dec_ucount(ucounts, UCOUNT_NET_NAMESPACES);
 }
 
 /*
@@ -313,37 +322,8 @@ out_undo:
 	goto out;
 }
 
-static int __net_init net_defaults_init_net(struct net *net)
-{
-	net->core.sysctl_somaxconn = SOMAXCONN;
-	return 0;
-}
-
-static struct pernet_operations net_defaults_ops = {
-	.init = net_defaults_init_net,
-};
-
-static __init int net_defaults_init(void)
-{
-	if (register_pernet_subsys(&net_defaults_ops))
-		panic("Cannot initialize net default settings");
-
-	return 0;
-}
-
-core_initcall(net_defaults_init);
 
 #ifdef CONFIG_NET_NS
-static struct ucounts *inc_net_namespaces(struct user_namespace *ns)
-{
-	return inc_ucount(ns, current_euid(), UCOUNT_NET_NAMESPACES);
-}
-
-static void dec_net_namespaces(struct ucounts *ucounts)
-{
-	dec_ucount(ucounts, UCOUNT_NET_NAMESPACES);
-}
-
 static struct kmem_cache *net_cachep;
 static struct workqueue_struct *netns_wq;
 
@@ -509,17 +489,17 @@ EXPORT_SYMBOL_GPL(__put_net);
 
 struct net *get_net_ns_by_fd(int fd)
 {
+	struct proc_ns *ei;
 	struct file *file;
-	struct ns_common *ns;
 	struct net *net;
 
 	file = proc_ns_fget(fd);
 	if (IS_ERR(file))
 		return ERR_CAST(file);
 
-	ns = get_proc_ns(file_inode(file));
-	if (ns->ops == &netns_operations)
-		net = get_net(container_of(ns, struct net, ns));
+	ei = get_proc_ns(file_inode(file));
+	if (ei->ns_ops == &netns_operations)
+		net = get_net(ei->ns);
 	else
 		net = ERR_PTR(-EINVAL);
 
@@ -559,15 +539,12 @@ EXPORT_SYMBOL_GPL(get_net_ns_by_pid);
 
 static __net_init int net_ns_net_init(struct net *net)
 {
-#ifdef CONFIG_NET_NS
-	net->ns.ops = &netns_operations;
-#endif
-	return ns_alloc_inum(&net->ns);
+	return proc_alloc_inum(&net->proc_inum);
 }
 
 static __net_exit void net_ns_net_exit(struct net *net)
 {
-	ns_free_inum(&net->ns);
+	proc_free_inum(net->proc_inum);
 }
 
 static struct pernet_operations __net_initdata net_ns_ops = {
@@ -575,7 +552,7 @@ static struct pernet_operations __net_initdata net_ns_ops = {
 	.exit = net_ns_net_exit,
 };
 
-static const struct nla_policy rtnl_net_policy[NETNSA_MAX + 1] = {
+static struct nla_policy rtnl_net_policy[NETNSA_MAX + 1] = {
 	[NETNSA_NONE]		= { .type = NLA_UNSPEC },
 	[NETNSA_NSID]		= { .type = NLA_S32 },
 	[NETNSA_PID]		= { .type = NLA_U32 },
@@ -794,16 +771,13 @@ static int __init net_ns_init(void)
 	if (setup_net(&init_net, &init_user_ns))
 		panic("Could not setup the initial network namespace");
 
-	init_net_initialized = true;
-
 	rtnl_lock();
 	list_add_tail_rcu(&init_net.list, &net_namespace_list);
 	rtnl_unlock();
 
 	mutex_unlock(&net_mutex);
 
-	if (register_pernet_subsys(&net_ns_ops))
-		panic("Could not register network namespace subsystems");
+	register_pernet_subsys(&net_ns_ops);
 
 	rtnl_register(PF_UNSPEC, RTM_NEWNSID, rtnl_net_newid, NULL, NULL);
 	rtnl_register(PF_UNSPEC, RTM_GETNSID, rtnl_net_getid, rtnl_net_dumpid,
@@ -858,24 +832,15 @@ static void __unregister_pernet_operations(struct pernet_operations *ops)
 static int __register_pernet_operations(struct list_head *list,
 					struct pernet_operations *ops)
 {
-	if (!init_net_initialized) {
-		list_add_tail(&ops->list, list);
-		return 0;
-	}
-
 	return ops_init(ops, &init_net);
 }
 
 static void __unregister_pernet_operations(struct pernet_operations *ops)
 {
-	if (!init_net_initialized) {
-		list_del(&ops->list);
-	} else {
-		LIST_HEAD(net_exit_list);
-		list_add(&init_net.exit_list, &net_exit_list);
-		ops_exit_list(ops, &net_exit_list);
-		ops_free_list(ops, &net_exit_list);
-	}
+	LIST_HEAD(net_exit_list);
+	list_add(&init_net.exit_list, &net_exit_list);
+	ops_exit_list(ops, &net_exit_list);
+	ops_free_list(ops, &net_exit_list);
 }
 
 #endif /* CONFIG_NET_NS */
@@ -1015,7 +980,7 @@ void unregister_pernet_device(struct pernet_operations *ops)
 EXPORT_SYMBOL_GPL(unregister_pernet_device);
 
 #ifdef CONFIG_NET_NS
-static struct ns_common *netns_get(struct task_struct *task)
+static void *netns_get(struct task_struct *task)
 {
 	struct net *net = NULL;
 	struct nsproxy *nsproxy;
@@ -1026,22 +991,17 @@ static struct ns_common *netns_get(struct task_struct *task)
 		net = get_net(nsproxy->net_ns);
 	task_unlock(task);
 
-	return net ? &net->ns : NULL;
+	return net;
 }
 
-static inline struct net *to_net_ns(struct ns_common *ns)
+static void netns_put(void *ns)
 {
-	return container_of(ns, struct net, ns);
+	put_net(ns);
 }
 
-static void netns_put(struct ns_common *ns)
+static int netns_install(struct nsproxy *nsproxy, void *ns)
 {
-	put_net(to_net_ns(ns));
-}
-
-static int netns_install(struct nsproxy *nsproxy, struct ns_common *ns)
-{
-	struct net *net = to_net_ns(ns);
+	struct net *net = ns;
 
 	if (!ns_capable(net->user_ns, CAP_SYS_ADMIN) ||
 	    !ns_capable(current_user_ns(), CAP_SYS_ADMIN))
@@ -1052,9 +1012,10 @@ static int netns_install(struct nsproxy *nsproxy, struct ns_common *ns)
 	return 0;
 }
 
-static struct user_namespace *netns_owner(struct ns_common *ns)
+static unsigned int netns_inum(void *ns)
 {
-	return to_net_ns(ns)->user_ns;
+	struct net *net = ns;
+	return net->proc_inum;
 }
 
 const struct proc_ns_operations netns_operations = {
@@ -1063,6 +1024,6 @@ const struct proc_ns_operations netns_operations = {
 	.get		= netns_get,
 	.put		= netns_put,
 	.install	= netns_install,
-	.owner		= netns_owner,
+	.inum		= netns_inum,
 };
 #endif

@@ -1,23 +1,5 @@
-/* Intel PRO/1000 Linux driver
- * Copyright(c) 1999 - 2015 Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * The full GNU General Public License is included in this distribution in
- * the file called "COPYING".
- *
- * Contact Information:
- * Linux NICS <linux.nics@intel.com>
- * e1000-devel Mailing List <e1000-devel@lists.sourceforge.net>
- * Intel Corporation, 5200 N.E. Elam Young Parkway, Hillsboro, OR 97124-6497
- */
+// SPDX-License-Identifier: GPL-2.0
+/* Copyright(c) 1999 - 2018 Intel Corporation. */
 
 /* ethtool support for e1000 */
 
@@ -105,6 +87,7 @@ static const struct e1000_stats e1000_gstrings_stats[] = {
 	E1000_STAT("uncorr_ecc_errors", uncorr_errors),
 	E1000_STAT("corr_ecc_errors", corr_errors),
 	E1000_STAT("tx_hwtstamp_timeouts", tx_hwtstamp_timeouts),
+	E1000_STAT("tx_hwtstamp_skipped", tx_hwtstamp_skipped),
 };
 
 #define E1000_GLOBAL_STATS_LEN	ARRAY_SIZE(e1000_gstrings_stats)
@@ -519,8 +502,8 @@ static int e1000_get_eeprom(struct net_device *netdev,
 	first_word = eeprom->offset >> 1;
 	last_word = (eeprom->offset + eeprom->len - 1) >> 1;
 
-	eeprom_buff = kmalloc(sizeof(u16) * (last_word - first_word + 1),
-			      GFP_KERNEL);
+	eeprom_buff = kmalloc_array(last_word - first_word + 1, sizeof(u16),
+				    GFP_KERNEL);
 	if (!eeprom_buff)
 		return -ENOMEM;
 
@@ -904,19 +887,20 @@ static int e1000_reg_test(struct e1000_adapter *adapter, u64 *data)
 	case e1000_pch2lan:
 	case e1000_pch_lpt:
 	case e1000_pch_spt:
+		/* fall through */
+	case e1000_pch_cnp:
 		mask |= BIT(18);
 		break;
 	default:
 		break;
 	}
 
-	if ((mac->type == e1000_pch_lpt) || (mac->type == e1000_pch_spt))
+	if (mac->type >= e1000_pch_lpt)
 		wlock_mac = (er32(FWSM) & E1000_FWSM_WLOCK_MAC_MASK) >>
 		    E1000_FWSM_WLOCK_MAC_SHIFT;
 
 	for (i = 0; i < mac->rar_entry_count; i++) {
-		if ((mac->type == e1000_pch_lpt) ||
-		    (mac->type == e1000_pch_spt)) {
+		if (mac->type >= e1000_pch_lpt) {
 			/* Cannot test write-protected SHRAL[n] registers */
 			if ((wlock_mac == 1) || (wlock_mac && (i > wlock_mac)))
 				continue;
@@ -1525,7 +1509,7 @@ static int e1000_setup_loopback_test(struct e1000_adapter *adapter)
 	struct e1000_hw *hw = &adapter->hw;
 	u32 rctl, fext_nvm11, tarc0;
 
-	if (hw->mac.type == e1000_pch_spt) {
+	if (hw->mac.type >= e1000_pch_spt) {
 		fext_nvm11 = er32(FEXTNVM11);
 		fext_nvm11 |= E1000_FEXTNVM11_DISABLE_MULR_FIX;
 		ew32(FEXTNVM11, fext_nvm11);
@@ -1569,6 +1553,7 @@ static void e1000_loopback_cleanup(struct e1000_adapter *adapter)
 
 	switch (hw->mac.type) {
 	case e1000_pch_spt:
+	case e1000_pch_cnp:
 		fext_nvm11 = er32(FEXTNVM11);
 		fext_nvm11 &= ~E1000_FEXTNVM11_DISABLE_MULR_FIX;
 		ew32(FEXTNVM11, fext_nvm11);
@@ -2063,7 +2048,7 @@ static void e1000_get_ethtool_stats(struct net_device *netdev,
 
 	pm_runtime_get_sync(netdev->dev.parent);
 
-	e1000e_get_stats64(netdev, &net_stats);
+	dev_get_stats(netdev, &net_stats);
 
 	pm_runtime_put_sync(netdev->dev.parent);
 
@@ -2346,5 +2331,5 @@ static const struct ethtool_ops e1000_ethtool_ops = {
 
 void e1000e_set_ethtool_ops(struct net_device *netdev)
 {
-	netdev->ethtool_ops = &e1000_ethtool_ops;
+	SET_ETHTOOL_OPS(netdev, &e1000_ethtool_ops);
 }

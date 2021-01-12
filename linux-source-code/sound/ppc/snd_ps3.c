@@ -883,7 +883,7 @@ static void snd_ps3_audio_set_base_addr(uint64_t ioaddr_start)
 static void snd_ps3_audio_fixup(struct snd_ps3_card_info *card)
 {
 	/*
-	 * avsetting driver seems to never change the followings
+	 * avsetting driver seems to never change the following
 	 * so, init them here once
 	 */
 
@@ -931,10 +931,8 @@ static int snd_ps3_driver_probe(struct ps3_system_bus_device *dev)
 	int i, ret;
 	u64 lpar_addr, lpar_size;
 
-	if (WARN_ON(!firmware_has_feature(FW_FEATURE_PS3_LV1)))
-		return -ENODEV;
-	if (WARN_ON(dev->match_id != PS3_MATCH_ID_SOUND))
-		return -ENODEV;
+	BUG_ON(!firmware_has_feature(FW_FEATURE_PS3_LV1));
+	BUG_ON(dev->match_id != PS3_MATCH_ID_SOUND);
 
 	the_card.ps3_dev = dev;
 
@@ -1042,7 +1040,7 @@ static int snd_ps3_driver_probe(struct ps3_system_bus_device *dev)
 	if (!the_card.null_buffer_start_vaddr) {
 		pr_info("%s: nullbuffer alloc failed\n", __func__);
 		ret = -ENOMEM;
-		goto clean_card;
+		goto clean_preallocate;
 	}
 	pr_debug("%s: null vaddr=%p dma=%#llx\n", __func__,
 		 the_card.null_buffer_start_vaddr,
@@ -1064,6 +1062,8 @@ clean_dma_map:
 			  PAGE_SIZE,
 			  the_card.null_buffer_start_vaddr,
 			  the_card.null_buffer_start_dma_addr);
+clean_preallocate:
+	snd_pcm_lib_preallocate_free_for_all(the_card.pcm);
 clean_card:
 	snd_card_free(the_card.card);
 clean_irq:

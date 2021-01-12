@@ -27,10 +27,11 @@
 #include <linux/time.h>
 #include <linux/atomic.h>
 
-#include <uapi/asm/eeh.h>
+#include <linux/rh_kabi.h>
 
 struct pci_dev;
 struct pci_bus;
+struct device_node;
 struct pci_dn;
 
 #ifdef CONFIG_EEH
@@ -57,7 +58,7 @@ struct pci_dn;
 /*
  * The struct is used to trace PE related EEH functionality.
  * In theory, there will have one instance of the struct to
- * be created against particular PE. In nature, PEs correlate
+ * be created against particular PE. In nature, PEs corelate
  * to each other. the struct has to reflect that hierarchy in
  * order to easily pick up those affected PEs when one particular
  * PE has EEH errors.
@@ -95,12 +96,12 @@ struct eeh_pe {
 	int freeze_count;		/* Times of froze up		*/
 	struct timeval tstamp;		/* Time on first-time freeze	*/
 	int false_positives;		/* Times of reported #ff's	*/
-	atomic_t pass_dev_cnt;		/* Count of passed through devs	*/
 	struct eeh_pe *parent;		/* Parent PE			*/
-	void *data;			/* PE auxillary data		*/
 	struct list_head child_list;	/* Link PE to the child list	*/
 	struct list_head edevs;		/* Link list of EEH devices	*/
 	struct list_head child;		/* Child PEs			*/
+	RH_KABI_EXTEND(atomic_t pass_dev_cnt)	/* Count of passed through devs	*/
+	RH_KABI_EXTEND(void *data)	/* PE auxillary data		*/
 };
 
 #define eeh_pe_for_each_dev(pe, edev, tmp) \
@@ -134,19 +135,26 @@ struct eeh_dev {
 	int config_addr;		/* Config address		*/
 	int pe_config_addr;		/* PE config address		*/
 	u32 config_space[16];		/* Saved PCI config space	*/
-	int pcix_cap;			/* Saved PCIx capability	*/
-	int pcie_cap;			/* Saved PCIe capability	*/
-	int aer_cap;			/* Saved AER capability		*/
-	int af_cap;			/* Saved AF capability		*/
+	/*
+	 * This changes pcie_cap from a u8 to an int.  However, there is no
+	 * space for the extra 8 bits.  Instead, reserve the current space
+	 * and extend the struct at the end.
+	 */
+	RH_KABI_DEPRECATE(u8, pcie_cap)	/* Saved PCIe capability        */
 	struct eeh_pe *pe;		/* Associated PE		*/
 	struct list_head list;		/* Form link list in the PE	*/
-	struct list_head rmv_list;	/* Record the removed edevs	*/
 	struct pci_controller *phb;	/* Associated PHB		*/
-	struct pci_dn *pdn;		/* Associated PCI device node	*/
+	RH_KABI_REPLACE(struct device_node *dn, /* Associated device node */
+			    struct pci_dn *pdn) /* Associated PCI device node */
 	struct pci_dev *pdev;		/* Associated PCI device	*/
-	bool in_error;			/* Error flag for edev		*/
-	struct pci_dev *physfn;		/* Associated SRIOV PF		*/
 	struct pci_bus *bus;		/* PCI bus for partial hotplug	*/
+	RH_KABI_EXTEND(int pcix_cap)	/* Saved PCIx capability	*/
+	RH_KABI_EXTEND(int pcie_cap)	/* Saved PCIe capability	*/
+	RH_KABI_EXTEND(int aer_cap)	/* Saved AER capability		*/
+	RH_KABI_EXTEND(struct pci_dev *physfn)	/* Associated SRIOV PF	*/
+	RH_KABI_EXTEND(int af_cap)	/* Saved AF capability		*/
+	RH_KABI_EXTEND(struct list_head rmv_list)	/* Record the removed edevs	*/
+	RH_KABI_EXTEND(bool in_error)	/* Error flag for edev		*/
 };
 
 static inline struct pci_dn *eeh_dev_to_pdn(struct eeh_dev *edev)
@@ -193,6 +201,11 @@ enum {
 #define EEH_STATE_DMA_ACTIVE	(1 << 4)	/* Active DMA		*/
 #define EEH_STATE_MMIO_ENABLED	(1 << 5)	/* MMIO enabled		*/
 #define EEH_STATE_DMA_ENABLED	(1 << 6)	/* DMA enabled		*/
+#define EEH_PE_STATE_NORMAL		0	/* Normal state		*/
+#define EEH_PE_STATE_RESET		1	/* PE reset asserted	*/
+#define EEH_PE_STATE_STOPPED_IO_DMA	2	/* Frozen PE		*/
+#define EEH_PE_STATE_STOPPED_DMA	4	/* Stopped DMA, Enabled IO */
+#define EEH_PE_STATE_UNAVAIL		5	/* Unavailable		*/
 #define EEH_RESET_DEACTIVATE	0	/* Deactivate the PE reset	*/
 #define EEH_RESET_HOT		1	/* Hot reset			*/
 #define EEH_RESET_FUNDAMENTAL	3	/* Fundamental reset		*/
@@ -274,7 +287,7 @@ void eeh_pe_restore_bars(struct eeh_pe *pe);
 const char *eeh_pe_loc_get(struct eeh_pe *pe);
 struct pci_bus *eeh_pe_bus_get(struct eeh_pe *pe);
 
-struct eeh_dev *eeh_dev_init(struct pci_dn *pdn);
+void *eeh_dev_init(struct pci_dn *pdn, void *data);
 void eeh_dev_phb_init_dynamic(struct pci_controller *phb);
 int eeh_init(void);
 int __init eeh_ops_register(struct eeh_ops *ops);
@@ -297,8 +310,6 @@ int eeh_pe_set_option(struct eeh_pe *pe, int option);
 int eeh_pe_get_state(struct eeh_pe *pe);
 int eeh_pe_reset(struct eeh_pe *pe, int option);
 int eeh_pe_configure(struct eeh_pe *pe);
-int eeh_pe_inject_err(struct eeh_pe *pe, int type, int func,
-		      unsigned long addr, unsigned long mask);
 
 /**
  * EEH_POSSIBLE_ERROR() -- test for possible MMIO failure.

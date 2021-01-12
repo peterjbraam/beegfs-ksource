@@ -112,7 +112,7 @@ int msi_bitmap_reserve_dt_hwirqs(struct msi_bitmap *bmp)
 	return 0;
 }
 
-int __ref msi_bitmap_alloc(struct msi_bitmap *bmp, unsigned int irq_count,
+int msi_bitmap_alloc(struct msi_bitmap *bmp, unsigned int irq_count,
 		     struct device_node *of_node)
 {
 	int size;
@@ -155,7 +155,7 @@ void msi_bitmap_free(struct msi_bitmap *bmp)
 
 #ifdef CONFIG_MSI_BITMAP_SELFTEST
 
-static void __init test_basics(void)
+void __init test_basics(void)
 {
 	struct msi_bitmap bmp;
 	int rc, i, size = 512;
@@ -215,7 +215,7 @@ static void __init test_basics(void)
 	WARN_ON(bmp.bitmap != NULL);
 }
 
-static void __init test_of_node(void)
+void __init test_of_node(void)
 {
 	u32 prop_data[] = { 10, 10, 25, 3, 40, 1, 100, 100, 200, 20 };
 	const char *expected_str = "0-9,20-24,28-39,41-99,220-255";
@@ -262,7 +262,7 @@ static void __init test_of_node(void)
 	kfree(bmp.bitmap);
 }
 
-static int __init msi_bitmap_selftest(void)
+int __init msi_bitmap_selftest(void)
 {
 	printk(KERN_DEBUG "Running MSI bitmap self-tests ...\n");
 

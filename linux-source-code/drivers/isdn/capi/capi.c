@@ -687,9 +687,6 @@ capi_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos
 	if (!cdev->ap.applid)
 		return -ENODEV;
 
-	if (count < CAPIMSG_BASELEN)
-		return -EINVAL;
-
 	skb = alloc_skb(count, GFP_USER);
 	if (!skb)
 		return -ENOMEM;
@@ -700,8 +697,7 @@ capi_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos
 	}
 	mlen = CAPIMSG_LEN(skb->data);
 	if (CAPIMSG_CMD(skb->data) == CAPI_DATA_B3_REQ) {
-		if (count < CAPI_DATA_B3_REQ_LEN ||
-		    (size_t)(mlen + CAPIMSG_DATALEN(skb->data)) != count) {
+		if ((size_t)(mlen + CAPIMSG_DATALEN(skb->data)) != count) {
 			kfree_skb(skb);
 			return -EINVAL;
 		}
@@ -714,10 +710,6 @@ capi_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos
 	CAPIMSG_SETAPPID(skb->data, cdev->ap.applid);
 
 	if (CAPIMSG_CMD(skb->data) == CAPI_DISCONNECT_B3_RESP) {
-		if (count < CAPI_DISCONNECT_B3_RESP_LEN) {
-			kfree_skb(skb);
-			return -EINVAL;
-		}
 		mutex_lock(&cdev->lock);
 		capincci_free(cdev, CAPIMSG_NCCI(skb->data));
 		mutex_unlock(&cdev->lock);
@@ -1090,7 +1082,7 @@ static int capinc_tty_put_char(struct tty_struct *tty, unsigned char ch)
 	skb = mp->outskb;
 	if (skb) {
 		if (skb_tailroom(skb) > 0) {
-			*(skb_put(skb, 1)) = ch;
+			*(u8 *)skb_put(skb, 1) = ch;
 			goto unlock_out;
 		}
 		mp->outskb = NULL;
@@ -1102,7 +1094,7 @@ static int capinc_tty_put_char(struct tty_struct *tty, unsigned char ch)
 	skb = alloc_skb(CAPI_DATA_B3_REQ_LEN + CAPI_MAX_BLKSIZE, GFP_ATOMIC);
 	if (skb) {
 		skb_reserve(skb, CAPI_DATA_B3_REQ_LEN);
-		*(skb_put(skb, 1)) = ch;
+		*(u8 *)skb_put(skb, 1) = ch;
 		mp->outskb = skb;
 	} else {
 		printk(KERN_ERR "capinc_put_char: char %u lost\n", ch);
@@ -1268,7 +1260,7 @@ static int __init capinc_tty_init(void)
 	if (capi_ttyminors <= 0)
 		capi_ttyminors = CAPINC_NR_PORTS;
 
-	capiminors = kzalloc(sizeof(struct capiminor *) * capi_ttyminors,
+	capiminors = kzalloc(sizeof(struct capi_minor *) * capi_ttyminors,
 			     GFP_KERNEL);
 	if (!capiminors)
 		return -ENOMEM;
@@ -1279,7 +1271,7 @@ static int __init capinc_tty_init(void)
 		return -ENOMEM;
 	}
 	drv->driver_name = "capi_nc";
-	drv->name = "capi!";
+	drv->name = "capi";
 	drv->major = 0;
 	drv->minor_start = 0;
 	drv->type = TTY_DRIVER_TYPE_SERIAL;
@@ -1425,7 +1417,7 @@ static int __init capi_init(void)
 		return PTR_ERR(capi_class);
 	}
 
-	device_create(capi_class, NULL, MKDEV(capi_major, 0), NULL, "capi20");
+	device_create(capi_class, NULL, MKDEV(capi_major, 0), NULL, "capi");
 
 	if (capinc_tty_init() < 0) {
 		device_destroy(capi_class, MKDEV(capi_major, 0));

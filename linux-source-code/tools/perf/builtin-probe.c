@@ -344,9 +344,6 @@ static int perf_add_probe_events(struct perf_probe_event *pevs, int npevs)
 
 		for (k = 0; k < pev->ntevs; k++) {
 			struct probe_trace_event *tev = &pev->tevs[k];
-			/* Skipped events have no event name */
-			if (!tev->event)
-				continue;
 
 			/* We use tev's name for showing new events */
 			show_perf_probe_event(tev->group, tev->event, pev,
@@ -471,7 +468,7 @@ out:
 
 
 static int
-__cmd_probe(int argc, const char **argv, const char *prefix __maybe_unused)
+__cmd_probe(int argc, const char **argv)
 {
 	const char * const probe_usage[] = {
 		"perf probe [<options>] 'PROBEDEF' ['PROBEDEF' ...]",
@@ -489,7 +486,7 @@ __cmd_probe(int argc, const char **argv, const char *prefix __maybe_unused)
 	OPT_INCR('v', "verbose", &verbose,
 		    "be more verbose (show parsed arguments, etc)"),
 	OPT_BOOLEAN('q', "quiet", &params.quiet,
-		    "be quiet (do not show any mesages)"),
+		    "be quiet (do not show any messages)"),
 	OPT_CALLBACK_DEFAULT('l', "list", NULL, "[GROUP:]EVENT",
 			     "list up probe events",
 			     opt_set_filter_with_command, DEFAULT_LIST_FILTER),
@@ -555,6 +552,8 @@ __cmd_probe(int argc, const char **argv, const char *prefix __maybe_unused)
 	OPT_BOOLEAN(0, "demangle-kernel", &symbol_conf.demangle_kernel,
 		    "Enable kernel symbol demangling"),
 	OPT_BOOLEAN(0, "cache", &probe_conf.cache, "Manipulate probe cache"),
+	OPT_STRING(0, "symfs", &symbol_conf.symfs, "directory",
+		   "Look for files with symbols relative to this directory"),
 	OPT_END()
 	};
 	int ret;
@@ -678,16 +677,6 @@ __cmd_probe(int argc, const char **argv, const char *prefix __maybe_unused)
 
 		ret = perf_add_probe_events(params.events, params.nevents);
 		if (ret < 0) {
-
-			/*
-			 * When perf_add_probe_events() fails it calls
-			 * cleanup_perf_probe_events(pevs, npevs), i.e.
-			 * cleanup_perf_probe_events(params.events, params.nevents), which
-			 * will call clear_perf_probe_event(), so set nevents to zero
-			 * to avoid cleanup_params() to call clear_perf_probe_event() again
-			 * on the same pevs.
-			 */
-			params.nevents = 0;
 			pr_err_with_code("  Error: Failed to add events.", ret);
 			return ret;
 		}
@@ -698,13 +687,13 @@ __cmd_probe(int argc, const char **argv, const char *prefix __maybe_unused)
 	return 0;
 }
 
-int cmd_probe(int argc, const char **argv, const char *prefix)
+int cmd_probe(int argc, const char **argv)
 {
 	int ret;
 
 	ret = init_params();
 	if (!ret) {
-		ret = __cmd_probe(argc, argv, prefix);
+		ret = __cmd_probe(argc, argv);
 		cleanup_params();
 	}
 

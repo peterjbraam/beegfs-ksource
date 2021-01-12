@@ -131,9 +131,6 @@
 /* sorted alphabetically */
 #define PPC_INST_BHRBE			0x7c00025c
 #define PPC_INST_CLRBHRB		0x7c00035c
-#define PPC_INST_COPY			0x7c00060c
-#define PPC_INST_COPY_FIRST		0x7c20060c
-#define PPC_INST_CP_ABORT		0x7c00068c
 #define PPC_INST_DCBA			0x7c0005ec
 #define PPC_INST_DCBA_MASK		0xfc0007fe
 #define PPC_INST_DCBAL			0x7c2005ec
@@ -152,20 +149,15 @@
 #define PPC_INST_LWSYNC			0x7c2004ac
 #define PPC_INST_SYNC			0x7c0004ac
 #define PPC_INST_SYNC_MASK		0xfc0007fe
-#define PPC_INST_ISYNC			0x4c00012c
 #define PPC_INST_LXVD2X			0x7c000698
 #define PPC_INST_MCRXR			0x7c000400
 #define PPC_INST_MCRXR_MASK		0xfc0007fe
 #define PPC_INST_MFSPR_PVR		0x7c1f42a6
-#define PPC_INST_MFSPR_PVR_MASK		0xfc1ffffe
-#define PPC_INST_MFTMR			0x7c0002dc
+#define PPC_INST_MFSPR_PVR_MASK		0xfc1fffff
 #define PPC_INST_MSGSND			0x7c00019c
 #define PPC_INST_MSGCLR			0x7c0001dc
 #define PPC_INST_MSGSNDP		0x7c00011c
-#define PPC_INST_MTTMR			0x7c0003dc
 #define PPC_INST_NOP			0x60000000
-#define PPC_INST_PASTE			0x7c00070c
-#define PPC_INST_PASTE_LAST		0x7c20070d
 #define PPC_INST_POPCNTB		0x7c0000f4
 #define PPC_INST_POPCNTB_MASK		0xfc0007fe
 #define PPC_INST_POPCNTD		0x7c0003f4
@@ -174,17 +166,14 @@
 #define PPC_INST_RFDI			0x4c00004e
 #define PPC_INST_RFMCI			0x4c00004c
 #define PPC_INST_MFSPR_DSCR		0x7c1102a6
-#define PPC_INST_MFSPR_DSCR_MASK	0xfc1ffffe
+#define PPC_INST_MFSPR_DSCR_MASK	0xfc1fffff
 #define PPC_INST_MTSPR_DSCR		0x7c1103a6
-#define PPC_INST_MTSPR_DSCR_MASK	0xfc1ffffe
+#define PPC_INST_MTSPR_DSCR_MASK	0xfc1fffff
 #define PPC_INST_MFSPR_DSCR_USER	0x7c0302a6
-#define PPC_INST_MFSPR_DSCR_USER_MASK	0xfc1ffffe
+#define PPC_INST_MFSPR_DSCR_USER_MASK	0xfc1fffff
 #define PPC_INST_MTSPR_DSCR_USER	0x7c0303a6
-#define PPC_INST_MTSPR_DSCR_USER_MASK	0xfc1ffffe
-#define PPC_INST_MFVSRD			0x7c000066
-#define PPC_INST_MTVSRD			0x7c000166
+#define PPC_INST_MTSPR_DSCR_USER_MASK	0xfc1fffff
 #define PPC_INST_SLBFEE			0x7c0007a7
-#define PPC_INST_SLBIA			0x7c0003e4
 
 #define PPC_INST_STRING			0x7c00042a
 #define PPC_INST_STRING_MASK		0xfc0007fe
@@ -194,13 +183,10 @@
 #define PPC_INST_STSWX			0x7c00052a
 #define PPC_INST_STXVD2X		0x7c000798
 #define PPC_INST_TLBIE			0x7c000264
-#define PPC_INST_TLBIEL			0x7c000224
 #define PPC_INST_TLBILX			0x7c000024
 #define PPC_INST_WAIT			0x7c00007c
 #define PPC_INST_TLBIVAX		0x7c000624
 #define PPC_INST_TLBSRX_DOT		0x7c0006a5
-#define PPC_INST_VPMSUMW		0x10000488
-#define PPC_INST_VPMSUMD		0x100004c8
 #define PPC_INST_XXLOR			0xf0000510
 #define PPC_INST_XXSWAPD		0xf0000250
 #define PPC_INST_XVCPSGNDP		0xf0000780
@@ -211,8 +197,6 @@
 #define PPC_INST_NAP			0x4c000364
 #define PPC_INST_SLEEP			0x4c0003a4
 #define PPC_INST_WINKLE			0x4c0003e4
-
-#define PPC_INST_STOP			0x4c0002e4
 
 /* A2 specific instructions */
 #define PPC_INST_ERATWE			0x7c0001a6
@@ -261,7 +245,6 @@
 #define PPC_INST_MULLI			0x1c000000
 #define PPC_INST_DIVWU			0x7c000396
 #define PPC_INST_DIVD			0x7c0003d2
-#define PPC_INST_DIVDU			0x7c000392
 #define PPC_INST_RLWINM			0x54000000
 #define PPC_INST_RLWIMI			0x50000000
 #define PPC_INST_RLDICL			0x78000000
@@ -293,9 +276,6 @@
 #define ___PPC_RB(b)	(((b) & 0x1f) << 11)
 #define ___PPC_RS(s)	(((s) & 0x1f) << 21)
 #define ___PPC_RT(t)	___PPC_RS(t)
-#define ___PPC_R(r)	(((r) & 0x1) << 16)
-#define ___PPC_PRS(prs)	(((prs) & 0x1) << 17)
-#define ___PPC_RIC(ric)	(((ric) & 0x3) << 18)
 #define __PPC_RA(a)	___PPC_RA(__REG_##a)
 #define __PPC_RA0(a)	___PPC_RA(__REGA0_##a)
 #define __PPC_RB(b)	___PPC_RB(__REG_##b)
@@ -309,6 +289,7 @@
 #define __PPC_WC(w)	(((w) & 0x3) << 21)
 #define __PPC_WS(w)	(((w) & 0x1f) << 11)
 #define __PPC_SH(s)	__PPC_WS(s)
+#define __PPC_SH64(s)	(__PPC_SH(s) | (((s) & 0x20) >> 4))
 #define __PPC_MB(s)	(((s) & 0x1f) << 6)
 #define __PPC_ME(s)	(((s) & 0x1f) << 1)
 #define __PPC_MB64(s)	(__PPC_MB(s) | ((s) & 0x20))
@@ -327,7 +308,6 @@
 #endif
 
 /* Deal with instructions that older assemblers aren't aware of */
-#define	PPC_CP_ABORT		stringify_in_c(.long PPC_INST_CP_ABORT)
 #define	PPC_DCBAL(a, b)		stringify_in_c(.long PPC_INST_DCBAL | \
 					__PPC_RA(a) | __PPC_RB(b))
 #define	PPC_DCBZL(a, b)		stringify_in_c(.long PPC_INST_DCBZL | \
@@ -362,16 +342,6 @@
 					__PPC_WC(w))
 #define PPC_TLBIE(lp,a) 	stringify_in_c(.long PPC_INST_TLBIE | \
 					       ___PPC_RB(a) | ___PPC_RS(lp))
-#define	PPC_TLBIE_5(rb,rs,ric,prs,r) \
-				stringify_in_c(.long PPC_INST_TLBIE | \
-					___PPC_RB(rb) | ___PPC_RS(rs) | \
-					___PPC_RIC(ric) | ___PPC_PRS(prs) | \
-					___PPC_R(r))
-#define	PPC_TLBIEL(rb,rs,ric,prs,r) \
-				stringify_in_c(.long PPC_INST_TLBIEL | \
-					___PPC_RB(rb) | ___PPC_RS(rs) | \
-					___PPC_RIC(ric) | ___PPC_PRS(prs) | \
-					___PPC_R(r))
 #define PPC_TLBSRX_DOT(a,b)	stringify_in_c(.long PPC_INST_TLBSRX_DOT | \
 					__PPC_RA0(a) | __PPC_RB(b))
 #define PPC_TLBIVAX(a,b)	stringify_in_c(.long PPC_INST_TLBIVAX | \
@@ -410,14 +380,6 @@
 					       VSX_XX1((s), a, b))
 #define LXVD2X(s, a, b)		stringify_in_c(.long PPC_INST_LXVD2X | \
 					       VSX_XX1((s), a, b))
-#define MFVRD(a, t)		stringify_in_c(.long PPC_INST_MFVSRD | \
-					       VSX_XX1((t)+32, a, R0))
-#define MTVRD(t, a)		stringify_in_c(.long PPC_INST_MTVSRD | \
-					       VSX_XX1((t)+32, a, R0))
-#define VPMSUMW(t, a, b)	stringify_in_c(.long PPC_INST_VPMSUMW | \
-					       VSX_XX3((t), a, b))
-#define VPMSUMD(t, a, b)	stringify_in_c(.long PPC_INST_VPMSUMD | \
-					       VSX_XX3((t), a, b))
 #define XXLOR(t, a, b)		stringify_in_c(.long PPC_INST_XXLOR | \
 					       VSX_XX3((t), a, b))
 #define XXSWAPD(t, a)		stringify_in_c(.long PPC_INST_XXSWAPD | \
@@ -428,8 +390,6 @@
 #define PPC_NAP			stringify_in_c(.long PPC_INST_NAP)
 #define PPC_SLEEP		stringify_in_c(.long PPC_INST_SLEEP)
 #define PPC_WINKLE		stringify_in_c(.long PPC_INST_WINKLE)
-
-#define PPC_STOP		stringify_in_c(.long PPC_INST_STOP)
 
 /* BHRB instructions */
 #define PPC_CLRBHRB		stringify_in_c(.long PPC_INST_CLRBHRB)
@@ -444,13 +404,6 @@
 #define TABORT(r)		stringify_in_c(.long PPC_INST_TABORT \
 					       | __PPC_RA(r))
 
-/* book3e thread control instructions */
-#define TMRN(x)			((((x) & 0x1f) << 16) | (((x) & 0x3e0) << 6))
-#define MTTMR(tmr, r)		stringify_in_c(.long PPC_INST_MTTMR | \
-					       TMRN(tmr) | ___PPC_RS(r))
-#define MFTMR(tmr, r)		stringify_in_c(.long PPC_INST_MFTMR | \
-					       TMRN(tmr) | ___PPC_RT(r))
-
 /* Coprocessor instructions */
 #define PPC_ICSWX(s, a, b)	stringify_in_c(.long PPC_INST_ICSWX |	\
 					       ___PPC_RS(s) |		\
@@ -461,8 +414,5 @@
 					       ___PPC_RA(a) |		\
 					       ___PPC_RB(b))
 
-#define PPC_SLBIA(IH)	stringify_in_c(.long PPC_INST_SLBIA | \
-				       ((IH & 0x7) << 21))
-#define PPC_INVALIDATE_ERAT	PPC_SLBIA(7)
 
 #endif /* _ASM_POWERPC_PPC_OPCODE_H */

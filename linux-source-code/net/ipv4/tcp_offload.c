@@ -14,23 +14,8 @@
 #include <net/tcp.h>
 #include <net/protocol.h>
 
-static void tcp_gso_tstamp(struct sk_buff *skb, unsigned int ts_seq,
-			   unsigned int seq, unsigned int mss)
-{
-	while (skb) {
-		if (before(ts_seq, seq + mss)) {
-			skb_shinfo(skb)->tx_flags |= SKBTX_SW_TSTAMP;
-			skb_shinfo(skb)->tskey = ts_seq;
-			return;
-		}
-
-		skb = skb->next;
-		seq += mss;
-	}
-}
-
-static struct sk_buff *tcp4_gso_segment(struct sk_buff *skb,
-					netdev_features_t features)
+struct sk_buff *tcp4_gso_segment(struct sk_buff *skb,
+				 netdev_features_t features)
 {
 	if (!(skb_shinfo(skb)->gso_type & SKB_GSO_TCPV4))
 		return ERR_PTR(-EINVAL);
@@ -117,9 +102,6 @@ struct sk_buff *tcp_gso_segment(struct sk_buff *skb,
 	skb = segs;
 	th = tcp_hdr(skb);
 	seq = ntohl(th->seq);
-
-	if (unlikely(skb_shinfo(gso_skb)->tx_flags & SKBTX_SW_TSTAMP))
-		tcp_gso_tstamp(segs, skb_shinfo(gso_skb)->tskey, seq, mss);
 
 	newcheck = ~csum_fold((__force __wsum)((__force u32)th->check +
 					       (__force u32)delta));

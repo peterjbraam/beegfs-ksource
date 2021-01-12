@@ -39,7 +39,6 @@
 #include <linux/dmi.h>
 #include <linux/slab.h>
 #include <linux/iommu.h>
-#include <linux/limits.h>
 #include <asm/irq_remapping.h>
 #include <asm/iommu_table.h>
 
@@ -139,19 +138,12 @@ dmar_alloc_pci_notify_info(struct pci_dev *dev, unsigned long event)
 
 	BUG_ON(dev->is_virtfn);
 
-	/*
-	 * Ignore devices that have a domain number higher than what can
-	 * be looked up in DMAR, e.g. VMD subdevices with domain 0x10000
-	 */
-	if (pci_domain_nr(dev->bus) > U16_MAX)
-		return NULL;
-
 	/* Only generate path[] for device addition event */
 	if (event == BUS_NOTIFY_ADD_DEVICE)
 		for (tmp = dev; tmp; tmp = tmp->bus->self)
 			level++;
 
-	size = sizeof(*info) + level * sizeof(info->path[0]);
+	size = sizeof(*info) + level * sizeof(struct acpi_dmar_pci_path);
 	if (size <= sizeof(dmar_pci_notify_info_buf)) {
 		info = (struct dmar_pci_notify_info *)dmar_pci_notify_info_buf;
 	} else {
@@ -458,13 +450,12 @@ static int __init dmar_parse_one_andd(struct acpi_dmar_header *header,
 
 	/* Check for NUL termination within the designated length */
 	if (strnlen(andd->device_name, header->length - 8) == header->length - 8) {
-		pr_warn(FW_BUG
+		WARN_TAINT(1, TAINT_FIRMWARE_WORKAROUND,
 			   "Your BIOS is broken; ANDD object name is not NUL-terminated\n"
 			   "BIOS vendor: %s; Ver: %s; Product Version: %s\n",
 			   dmi_get_system_info(DMI_BIOS_VENDOR),
 			   dmi_get_system_info(DMI_BIOS_VERSION),
 			   dmi_get_system_info(DMI_PRODUCT_VERSION));
-		add_taint(TAINT_FIRMWARE_WORKAROUND, LOCKDEP_STILL_OK);
 		return -EINVAL;
 	}
 	pr_info("ANDD device: %x name: %s\n", andd->device_number,
@@ -490,14 +481,14 @@ static int dmar_parse_one_rhsa(struct acpi_dmar_header *header, void *arg)
 			return 0;
 		}
 	}
-	pr_warn(FW_BUG
+	WARN_TAINT(
+		1, TAINT_FIRMWARE_WORKAROUND,
 		"Your BIOS is broken; RHSA refers to non-existent DMAR unit at %llx\n"
 		"BIOS vendor: %s; Ver: %s; Product Version: %s\n",
-		rhsa->base_address,
+		drhd->reg_base_addr,
 		dmi_get_system_info(DMI_BIOS_VENDOR),
 		dmi_get_system_info(DMI_BIOS_VERSION),
 		dmi_get_system_info(DMI_PRODUCT_VERSION));
-	add_taint(TAINT_FIRMWARE_WORKAROUND, LOCKDEP_STILL_OK);
 
 	return 0;
 }
@@ -809,11 +800,14 @@ int __init dmar_dev_scope_init(void)
 				dmar_free_pci_notify_info(info);
 			}
 		}
-
-		bus_register_notifier(&pci_bus_type, &dmar_pci_bus_nb);
 	}
 
 	return dmar_dev_scope_status;
+}
+
+void dmar_register_bus_notifier(void)
+{
+	bus_register_notifier(&pci_bus_type, &dmar_pci_bus_nb);
 }
 
 
@@ -841,15 +835,16 @@ int __init dmar_table_init(void)
 	return dmar_table_initialized < 0 ? dmar_table_initialized : 0;
 }
 
-static void warn_invalid_dmar(u64 addr, const char *message)
+static inline void warn_invalid_dmar(u64 addr, const char *message)
 {
-	pr_warn_once(FW_BUG
-		"Your BIOS is broken; DMAR reported at address %llx%s!\n"
-		"BIOS vendor: %s; Ver: %s; Product Version: %s\n",
-		addr, message,
-		dmi_get_system_info(DMI_BIOS_VENDOR),
-		dmi_get_system_info(DMI_BIOS_VERSION),
-		dmi_get_system_info(DMI_PRODUCT_VERSION));
+	printk_once(FW_WARN "%s at %d: "
+		    "Your BIOS is broken; DMAR reported at address %llx%s!\n"
+		    "BIOS vendor: %s; Ver: %s; Product Version: %s\n",
+		    __FILE__, __LINE__,
+		    addr, message,
+		    dmi_get_system_info(DMI_BIOS_VENDOR),
+		    dmi_get_system_info(DMI_BIOS_VERSION),
+		    dmi_get_system_info(DMI_PRODUCT_VERSION));
 	add_taint(TAINT_FIRMWARE_WORKAROUND, LOCKDEP_STILL_OK);
 }
 
@@ -1116,14 +1111,9 @@ static void free_iommu(struct intel_iommu *iommu)
 	iommu_device_destroy(iommu->iommu_dev);
 
 	if (iommu->irq) {
-		if (iommu->pr_irq) {
-			free_irq(iommu->pr_irq, iommu);
-			dmar_free_hwirq(iommu->pr_irq);
-			iommu->pr_irq = 0;
-		}
 		free_irq(iommu->irq, iommu);
+		irq_set_handler_data(iommu->irq, NULL);
 		dmar_free_hwirq(iommu->irq);
-		iommu->irq = 0;
 	}
 
 	if (iommu->qi) {
@@ -1337,14 +1327,14 @@ void qi_flush_iotlb(struct intel_iommu *iommu, u16 did, u64 addr,
 	qi_submit_sync(&desc, iommu);
 }
 
-void qi_flush_dev_iotlb(struct intel_iommu *iommu, u16 sid, u16 pfsid,
-			u16 qdep, u64 addr, unsigned mask)
+void qi_flush_dev_iotlb(struct intel_iommu *iommu, u16 sid, u16 qdep,
+			u64 addr, unsigned mask)
 {
 	struct qi_desc desc;
 
 	if (mask) {
 		BUG_ON(addr & ((1 << (VTD_PAGE_SHIFT + mask)) - 1));
-		addr |= (1 << (VTD_PAGE_SHIFT + mask - 1)) - 1;
+		addr |= (1ULL << (VTD_PAGE_SHIFT + mask - 1)) - 1;
 		desc.high = QI_DEV_IOTLB_ADDR(addr) | QI_DEV_IOTLB_SIZE;
 	} else
 		desc.high = QI_DEV_IOTLB_ADDR(addr);
@@ -1353,7 +1343,7 @@ void qi_flush_dev_iotlb(struct intel_iommu *iommu, u16 sid, u16 pfsid,
 		qdep = 0;
 
 	desc.low = QI_DEV_IOTLB_SID(sid) | QI_DEV_IOTLB_QDEP(qdep) |
-		   QI_DIOTLB_TYPE | QI_DEV_IOTLB_PFSID(pfsid);
+		   QI_DIOTLB_TYPE;
 
 	qi_submit_sync(&desc, iommu);
 }
@@ -1523,68 +1513,53 @@ static const char *dmar_get_fault_reason(u8 fault_reason, int *fault_type)
 	}
 }
 
-
-static inline int dmar_msi_reg(struct intel_iommu *iommu, int irq)
-{
-	if (iommu->irq == irq)
-		return DMAR_FECTL_REG;
-	else if (iommu->pr_irq == irq)
-		return DMAR_PECTL_REG;
-	else
-		BUG();
-}
-
 void dmar_msi_unmask(struct irq_data *data)
 {
 	struct intel_iommu *iommu = irq_data_get_irq_handler_data(data);
-	int reg = dmar_msi_reg(iommu, data->irq);
 	unsigned long flag;
 
 	/* unmask it */
 	raw_spin_lock_irqsave(&iommu->register_lock, flag);
-	writel(0, iommu->reg + reg);
+	writel(0, iommu->reg + DMAR_FECTL_REG);
 	/* Read a reg to force flush the post write */
-	readl(iommu->reg + reg);
+	readl(iommu->reg + DMAR_FECTL_REG);
 	raw_spin_unlock_irqrestore(&iommu->register_lock, flag);
 }
 
 void dmar_msi_mask(struct irq_data *data)
 {
-	struct intel_iommu *iommu = irq_data_get_irq_handler_data(data);
-	int reg = dmar_msi_reg(iommu, data->irq);
 	unsigned long flag;
+	struct intel_iommu *iommu = irq_data_get_irq_handler_data(data);
 
 	/* mask it */
 	raw_spin_lock_irqsave(&iommu->register_lock, flag);
-	writel(DMA_FECTL_IM, iommu->reg + reg);
+	writel(DMA_FECTL_IM, iommu->reg + DMAR_FECTL_REG);
 	/* Read a reg to force flush the post write */
-	readl(iommu->reg + reg);
+	readl(iommu->reg + DMAR_FECTL_REG);
 	raw_spin_unlock_irqrestore(&iommu->register_lock, flag);
 }
 
 void dmar_msi_write(int irq, struct msi_msg *msg)
 {
 	struct intel_iommu *iommu = irq_get_handler_data(irq);
-	int reg = dmar_msi_reg(iommu, irq);
 	unsigned long flag;
 
 	raw_spin_lock_irqsave(&iommu->register_lock, flag);
-	writel(msg->data, iommu->reg + reg + 4);
-	writel(msg->address_lo, iommu->reg + reg + 8);
-	writel(msg->address_hi, iommu->reg + reg + 12);
+	writel(msg->data, iommu->reg + DMAR_FEDATA_REG);
+	writel(msg->address_lo, iommu->reg + DMAR_FEADDR_REG);
+	writel(msg->address_hi, iommu->reg + DMAR_FEUADDR_REG);
 	raw_spin_unlock_irqrestore(&iommu->register_lock, flag);
 }
 
 void dmar_msi_read(int irq, struct msi_msg *msg)
 {
 	struct intel_iommu *iommu = irq_get_handler_data(irq);
-	int reg = dmar_msi_reg(iommu, irq);
 	unsigned long flag;
 
 	raw_spin_lock_irqsave(&iommu->register_lock, flag);
-	msg->data = readl(iommu->reg + reg + 4);
-	msg->address_lo = readl(iommu->reg + reg + 8);
-	msg->address_hi = readl(iommu->reg + reg + 12);
+	msg->data = readl(iommu->reg + DMAR_FEDATA_REG);
+	msg->address_lo = readl(iommu->reg + DMAR_FEADDR_REG);
+	msg->address_hi = readl(iommu->reg + DMAR_FEUADDR_REG);
 	raw_spin_unlock_irqrestore(&iommu->register_lock, flag);
 }
 
@@ -1677,7 +1652,8 @@ irqreturn_t dmar_fault(int irq, void *dev_id)
 		raw_spin_lock_irqsave(&iommu->register_lock, flag);
 	}
 
-	writel(DMA_FSTS_PFO | DMA_FSTS_PPF, iommu->reg + DMAR_FSTS_REG);
+	writel(DMA_FSTS_PFO | DMA_FSTS_PPF | DMA_FSTS_PRO,
+	       iommu->reg + DMAR_FSTS_REG);
 
 unlock_exit:
 	raw_spin_unlock_irqrestore(&iommu->register_lock, flag);
@@ -1694,12 +1670,21 @@ int dmar_set_interrupt(struct intel_iommu *iommu)
 	if (iommu->irq)
 		return 0;
 
-	irq = dmar_alloc_hwirq(iommu->seq_id, iommu->node, iommu);
-	if (irq > 0) {
-		iommu->irq = irq;
-	} else {
+	irq = dmar_alloc_hwirq();
+	if (irq <= 0) {
 		pr_err("No free IRQ vectors\n");
 		return -EINVAL;
+	}
+
+	irq_set_handler_data(irq, iommu);
+	iommu->irq = irq;
+
+	ret = arch_setup_dmar_msi(irq);
+	if (ret) {
+		irq_set_handler_data(irq, NULL);
+		iommu->irq = 0;
+		dmar_free_hwirq(irq);
+		return ret;
 	}
 
 	ret = request_irq(irq, dmar_fault, IRQF_NO_THREAD, iommu->name, iommu);
@@ -1889,11 +1874,10 @@ static int dmar_hp_remove_drhd(struct acpi_dmar_header *header, void *arg)
 	/*
 	 * All PCI devices managed by this unit should have been destroyed.
 	 */
-	if (!dmaru->include_all && dmaru->devices && dmaru->devices_cnt) {
+	if (!dmaru->include_all && dmaru->devices && dmaru->devices_cnt)
 		for_each_active_dev_scope(dmaru->devices,
 					  dmaru->devices_cnt, i, dev)
 			return -EBUSY;
-	}
 
 	ret = dmar_ir_hotplug(dmaru, false);
 	if (ret == 0)

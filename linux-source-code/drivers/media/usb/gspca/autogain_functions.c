@@ -121,9 +121,9 @@ int gspca_coarse_grained_expo_autogain(
 	orig_gain = gain = v4l2_ctrl_g_ctrl(gspca_dev->gain);
 	orig_exposure = exposure = v4l2_ctrl_g_ctrl(gspca_dev->exposure);
 
-	gain_low  = (s32)(gspca_dev->gain->maximum - gspca_dev->gain->minimum) /
+	gain_low  = (gspca_dev->gain->maximum - gspca_dev->gain->minimum) /
 		    5 * 2 + gspca_dev->gain->minimum;
-	gain_high = (s32)(gspca_dev->gain->maximum - gspca_dev->gain->minimum) /
+	gain_high = (gspca_dev->gain->maximum - gspca_dev->gain->minimum) /
 		    5 * 4 + gspca_dev->gain->minimum;
 
 	/* If we are of a multiple of deadzone, do multiple steps to reach the
@@ -145,10 +145,13 @@ int gspca_coarse_grained_expo_autogain(
 		gspca_dev->exp_too_low_cnt = 0;
 	} else {
 		gain += steps;
-		if (gain > gspca_dev->gain->maximum)
+		if (gain > gspca_dev->gain->maximum) {
+			gmb();
 			gain = gspca_dev->gain->maximum;
-		else if (gain < gspca_dev->gain->minimum)
+		} else if (gain < gspca_dev->gain->minimum) {
+			gmb();
 			gain = gspca_dev->gain->minimum;
+		}
 		gspca_dev->exp_too_high_cnt = 0;
 		gspca_dev->exp_too_low_cnt = 0;
 	}

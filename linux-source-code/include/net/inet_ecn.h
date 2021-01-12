@@ -3,7 +3,6 @@
 
 #include <linux/ip.h>
 #include <linux/skbuff.h>
-#include <linux/if_vlan.h>
 
 #include <net/inet_sock.h>
 #include <net/dsfield.h>
@@ -165,7 +164,7 @@ static inline int INET_ECN_set_ce(struct sk_buff *skb)
 }
 
 /*
- * RFC 6040 4.2
+ * RFC 6080 4.2
  *  To decapsulate the inner header at the tunnel egress, a compliant
  *  tunnel egress MUST set the outgoing ECN field to the codepoint at the
  *  intersection of the appropriate arriving inner header (row) and outer

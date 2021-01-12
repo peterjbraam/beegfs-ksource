@@ -63,6 +63,8 @@ static inline int udp_sock_create(struct net *net,
 }
 
 typedef int (*udp_tunnel_encap_rcv_t)(struct sock *sk, struct sk_buff *skb);
+typedef int (*udp_tunnel_encap_err_lookup_t)(struct sock *sk,
+					     struct sk_buff *skb);
 typedef void (*udp_tunnel_encap_destroy_t)(struct sock *sk);
 typedef struct sk_buff **(*udp_tunnel_gro_receive_t)(struct sock *sk,
 						     struct sk_buff **head,
@@ -75,6 +77,7 @@ struct udp_tunnel_sock_cfg {
 	/* Used for setting up udp_sock fields, see udp.h for details */
 	__u8  encap_type;
 	udp_tunnel_encap_rcv_t encap_rcv;
+	udp_tunnel_encap_err_lookup_t encap_err_lookup;
 	udp_tunnel_encap_destroy_t encap_destroy;
 	udp_tunnel_gro_receive_t gro_receive;
 	udp_tunnel_gro_complete_t gro_complete;
@@ -115,6 +118,8 @@ struct udp_tunnel_info {
 /* Notify network devices of offloadable types */
 void udp_tunnel_push_rx_port(struct net_device *dev, struct socket *sock,
 			     unsigned short type);
+void udp_tunnel_drop_rx_port(struct net_device *dev, struct socket *sock,
+			     unsigned short type);
 void udp_tunnel_notify_add_rx_port(struct socket *sock, unsigned short type);
 void udp_tunnel_notify_del_rx_port(struct socket *sock, unsigned short type);
 
@@ -122,6 +127,12 @@ static inline void udp_tunnel_get_rx_info(struct net_device *dev)
 {
 	ASSERT_RTNL();
 	call_netdevice_notifiers(NETDEV_UDP_TUNNEL_PUSH_INFO, dev);
+}
+
+static inline void udp_tunnel_drop_rx_info(struct net_device *dev)
+{
+	ASSERT_RTNL();
+	call_netdevice_notifiers(NETDEV_UDP_TUNNEL_DROP_INFO, dev);
 }
 
 /* Transmit the skb using UDP encapsulation. */

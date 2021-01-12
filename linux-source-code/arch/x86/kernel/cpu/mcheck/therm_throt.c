@@ -6,7 +6,7 @@
  *
  * Maintains a counter in /sys that keeps track of the number of thermal
  * events, such that the user knows how bad the thermal problem might be
- * (since the logging to syslog and mcelog is rate limited).
+ * (since the logging to syslog is rate limited).
  *
  * Author: Dmitriy Zavin (dmitriyz@google.com)
  *
@@ -123,7 +123,7 @@ static struct attribute *thermal_throttle_attrs[] = {
 	NULL
 };
 
-static struct attribute_group thermal_attr_group = {
+static const struct attribute_group thermal_attr_group = {
 	.attrs	= thermal_throttle_attrs,
 	.name	= "thermal_throttle"
 };
@@ -142,13 +142,8 @@ static struct attribute_group thermal_attr_group = {
  * IRQ has been acknowledged.
  *
  * It will take care of rate limiting and printing messages to the syslog.
- *
- * Returns: 0 : Event should NOT be further logged, i.e. still in
- *              "timeout" from previous log message.
- *          1 : Event should be logged further, and a message has been
- *              printed to the syslog.
  */
-static int therm_throt_process(bool new_event, int event, int level)
+static void therm_throt_process(bool new_event, int event, int level)
 {
 	struct _thermal_state *state;
 	unsigned int this_cpu = smp_processor_id();
@@ -163,16 +158,16 @@ static int therm_throt_process(bool new_event, int event, int level)
 		else if (event == POWER_LIMIT_EVENT)
 			state = &pstate->core_power_limit;
 		else
-			 return 0;
+			return;
 	} else if (level == PACKAGE_LEVEL) {
 		if (event == THERMAL_THROTTLING_EVENT)
 			state = &pstate->package_throttle;
 		else if (event == POWER_LIMIT_EVENT)
 			state = &pstate->package_power_limit;
 		else
-			return 0;
+			return;
 	} else
-		return 0;
+		return;
 
 	old_event = state->new_event;
 	state->new_event = new_event;
@@ -182,7 +177,7 @@ static int therm_throt_process(bool new_event, int event, int level)
 
 	if (time_before64(now, state->next_check) &&
 			state->count != state->last_count)
-		return 0;
+		return;
 
 	state->next_check = now + CHECK_INTERVAL;
 	state->last_count = state->count;
@@ -190,20 +185,19 @@ static int therm_throt_process(bool new_event, int event, int level)
 	/* if we just entered the thermal event */
 	if (new_event) {
 		if (event == THERMAL_THROTTLING_EVENT)
-			pr_warn("CPU%d: %s temperature above threshold, cpu clock throttled (total events = %lu)\n",
+			printk(KERN_CRIT "CPU%d: %s temperature above threshold, cpu clock throttled (total events = %lu)\n",
 				this_cpu,
 				level == CORE_LEVEL ? "Core" : "Package",
 				state->count);
-		return 1;
+		return;
 	}
 	if (old_event) {
 		if (event == THERMAL_THROTTLING_EVENT)
-			pr_info("CPU%d: %s temperature/speed normal\n", this_cpu,
+			printk(KERN_INFO "CPU%d: %s temperature/speed normal\n",
+				this_cpu,
 				level == CORE_LEVEL ? "Core" : "Package");
-		return 1;
+		return;
 	}
-
-	return 0;
 }
 
 static int thresh_event_valid(int level, int event)
@@ -385,17 +379,16 @@ static void intel_thermal_interrupt(void)
 	__u64 msr_val;
 
 	if (static_cpu_has(X86_FEATURE_HWP))
-		wrmsrl_safe(MSR_HWP_STATUS, 0);
+		wrmsrl_safe(MSR_HWP_STATUS, 0ull);
 
 	rdmsrl(MSR_IA32_THERM_STATUS, msr_val);
 
 	/* Check for violation of core thermal thresholds*/
 	notify_thresholds(msr_val);
 
-	if (therm_throt_process(msr_val & THERM_STATUS_PROCHOT,
-				THERMAL_THROTTLING_EVENT,
-				CORE_LEVEL) != 0)
-		mce_log_therm_throt_event(msr_val);
+	therm_throt_process(msr_val & THERM_STATUS_PROCHOT,
+			    THERMAL_THROTTLING_EVENT,
+			    CORE_LEVEL);
 
 	if (this_cpu_has(X86_FEATURE_PLN) && int_pln_enable)
 		therm_throt_process(msr_val & THERM_STATUS_POWER_LIMIT,
@@ -419,8 +412,8 @@ static void intel_thermal_interrupt(void)
 
 static void unexpected_thermal_interrupt(void)
 {
-	pr_err("CPU%d: Unexpected LVT thermal interrupt!\n",
-		smp_processor_id());
+	printk(KERN_ERR "CPU%d: Unexpected LVT thermal interrupt!\n",
+			smp_processor_id());
 }
 
 static void (*smp_thermal_vector)(void) = unexpected_thermal_interrupt;
@@ -431,16 +424,14 @@ static inline void __smp_thermal_interrupt(void)
 	smp_thermal_vector();
 }
 
-asmlinkage __visible void __irq_entry
-smp_thermal_interrupt(struct pt_regs *regs)
+asmlinkage void smp_thermal_interrupt(struct pt_regs *regs)
 {
 	entering_irq();
 	__smp_thermal_interrupt();
 	exiting_ack_irq();
 }
 
-asmlinkage __visible void __irq_entry
-smp_trace_thermal_interrupt(struct pt_regs *regs)
+asmlinkage void smp_trace_thermal_interrupt(struct pt_regs *regs)
 {
 	entering_irq();
 	trace_thermal_apic_entry(THERMAL_APIC_VECTOR);
@@ -452,7 +443,7 @@ smp_trace_thermal_interrupt(struct pt_regs *regs)
 /* Thermal monitoring depends on APIC, ACPI and clock modulation */
 static int intel_thermal_supported(struct cpuinfo_x86 *c)
 {
-	if (!boot_cpu_has(X86_FEATURE_APIC))
+	if (!cpu_has_apic)
 		return 0;
 	if (!cpu_has(c, X86_FEATURE_ACPI) || !cpu_has(c, X86_FEATURE_ACC))
 		return 0;
@@ -503,7 +494,7 @@ void intel_init_thermal(struct cpuinfo_x86 *c)
 
 	if ((l & MSR_IA32_MISC_ENABLE_TM1) && (h & APIC_DM_SMI)) {
 		if (system_state == SYSTEM_BOOTING)
-			pr_debug("CPU%d: Thermal monitoring handled by SMI\n", cpu);
+			printk(KERN_DEBUG "CPU%d: Thermal monitoring handled by SMI\n", cpu);
 		return;
 	}
 
@@ -561,8 +552,8 @@ void intel_init_thermal(struct cpuinfo_x86 *c)
 	l = apic_read(APIC_LVTTHMR);
 	apic_write(APIC_LVTTHMR, l & ~APIC_LVT_MASKED);
 
-	pr_info_once("CPU0: Thermal monitoring enabled (%s)\n",
-		      tm2 ? "TM2" : "TM1");
+	printk_once(KERN_INFO "CPU0: Thermal monitoring enabled (%s)\n",
+		       tm2 ? "TM2" : "TM1");
 
 	/* enable thermal throttle processing */
 	atomic_set(&therm_throt_en, 1);

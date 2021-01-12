@@ -27,7 +27,6 @@
 #include <net/tcp.h>
 #include <net/ipv6.h>
 #include <net/ip6_checksum.h>
-#include <net/busy_poll.h>
 #include <linux/prefetch.h>
 #include "bnx2x_cmn.h"
 #include "bnx2x_init.h"
@@ -552,14 +551,7 @@ static int bnx2x_alloc_rx_sge(struct bnx2x *bp, struct bnx2x_fastpath *fp,
 	struct bnx2x_alloc_pool *pool = &fp->page_pool;
 	dma_addr_t mapping;
 
-	if (!pool->page || (PAGE_SIZE - pool->offset) < SGE_PAGE_SIZE) {
-
-		/* put page reference used by the memory pool, since we
-		 * won't be using this page as the mempool anymore.
-		 */
-		if (pool->page)
-			put_page(pool->page);
-
+	if (!pool->page) {
 		pool->page = alloc_pages(gfp_mask, PAGES_PER_SGE_SHIFT);
 		if (unlikely(!pool->page))
 			return -ENOMEM;
@@ -574,7 +566,6 @@ static int bnx2x_alloc_rx_sge(struct bnx2x *bp, struct bnx2x_fastpath *fp,
 		return -ENOMEM;
 	}
 
-	get_page(pool->page);
 	sw_buf->page = pool->page;
 	sw_buf->offset = pool->offset;
 
@@ -584,7 +575,10 @@ static int bnx2x_alloc_rx_sge(struct bnx2x *bp, struct bnx2x_fastpath *fp,
 	sge->addr_lo = cpu_to_le32(U64_LO(mapping));
 
 	pool->offset += SGE_PAGE_SIZE;
-
+	if (PAGE_SIZE - pool->offset >= SGE_PAGE_SIZE)
+		get_page(pool->page);
+	else
+		pool->page = NULL;
 	return 0;
 }
 
@@ -690,7 +684,7 @@ static void *bnx2x_frag_alloc(const struct bnx2x_fastpath *fp, gfp_t gfp_mask)
 {
 	if (fp->rx_frag_size) {
 		/* GFP_KERNEL allocations are used only during initialization */
-		if (unlikely(gfpflags_allow_blocking(gfp_mask)))
+		if (unlikely(gfp_mask & __GFP_WAIT))
 			return (void *)__get_free_page(gfp_mask);
 
 		return netdev_alloc_frag(fp->rx_frag_size);
@@ -727,7 +721,7 @@ static void bnx2x_gro_ipv6_csum(struct bnx2x *bp, struct sk_buff *skb)
 static void bnx2x_gro_csum(struct bnx2x *bp, struct sk_buff *skb,
 			    void (*gro_func)(struct bnx2x*, struct sk_buff*))
 {
-	skb_set_network_header(skb, 0);
+	skb_reset_network_header(skb);
 	gro_func(bp, skb);
 	tcp_gro_complete(skb);
 }
@@ -746,8 +740,9 @@ static void bnx2x_gro_receive(struct bnx2x *bp, struct bnx2x_fastpath *fp,
 			bnx2x_gro_csum(bp, skb, bnx2x_gro_ipv6_csum);
 			break;
 		default:
-			WARN_ONCE(1, "Error: FW GRO supports only IPv4/IPv6, not 0x%04x\n",
-				  be16_to_cpu(skb->protocol));
+			netdev_WARN_ONCE(bp->dev,
+					 "Error: FW GRO supports only IPv4/IPv6, not 0x%04x\n",
+					 be16_to_cpu(skb->protocol));
 		}
 	}
 #endif
@@ -2031,7 +2026,7 @@ static void bnx2x_set_rx_buf_size(struct bnx2x *bp)
 			mtu = bp->dev->mtu;
 		fp->rx_buf_size = BNX2X_FW_RX_ALIGN_START +
 				  IP_HEADER_ALIGNMENT_PADDING +
-				  ETH_OVREHEAD +
+				  ETH_OVERHEAD +
 				  mtu +
 				  BNX2X_FW_RX_ALIGN_END;
 		fp->rx_buf_size = SKB_DATA_ALIGN(fp->rx_buf_size);
@@ -2495,8 +2490,7 @@ static void bnx2x_bz_fp(struct bnx2x *bp, int index)
 	 */
 	if (bp->dev->features & NETIF_F_LRO)
 		fp->mode = TPA_MODE_LRO;
-	else if (bp->dev->features & NETIF_F_GRO &&
-		 bnx2x_mtu_allows_gro(bp->dev->mtu))
+	else if (bp->dev->features & NETIF_F_GRO_HW)
 		fp->mode = TPA_MODE_GRO;
 	else
 		fp->mode = TPA_MODE_DISABLED;
@@ -2849,6 +2843,7 @@ int bnx2x_nic_load(struct bnx2x *bp, int load_mode)
 	bnx2x_set_rx_mode_inner(bp);
 
 	if (bp->flags & PTP_SUPPORTED) {
+		bnx2x_register_phc(bp);
 		bnx2x_init_ptp(bp);
 		bnx2x_configure_ptp_filters(bp);
 	}
@@ -3240,7 +3235,7 @@ static int bnx2x_poll(struct napi_struct *napi, int budget)
 		 * has been updated when NAPI was scheduled.
 		 */
 		if (IS_FCOE_FP(fp)) {
-			napi_complete(napi);
+			napi_complete_done(napi, rx_work_done);
 		} else {
 			bnx2x_update_fpsb_idx(fp);
 			/* bnx2x_has_rx_work() reads the status block,
@@ -3259,13 +3254,14 @@ static int bnx2x_poll(struct napi_struct *napi, int budget)
 			rmb();
 
 			if (!(bnx2x_has_rx_work(fp) || bnx2x_has_tx_work(fp))) {
-				napi_complete(napi);
-				/* Re-enable interrupts */
-				DP(NETIF_MSG_RX_STATUS,
-				   "Update index to %d\n", fp->fp_hc_idx);
-				bnx2x_ack_sb(bp, fp->igu_sb_id, USTORM_ID,
-					     le16_to_cpu(fp->fp_hc_idx),
-					     IGU_INT_ENABLE, 1);
+				if (napi_complete_done(napi, rx_work_done)) {
+					/* Re-enable interrupts */
+					DP(NETIF_MSG_RX_STATUS,
+					   "Update index to %d\n", fp->fp_hc_idx);
+					bnx2x_ack_sb(bp, fp->igu_sb_id, USTORM_ID,
+						     le16_to_cpu(fp->fp_hc_idx),
+						     IGU_INT_ENABLE, 1);
+				}
 			} else {
 				rx_work_done = budget;
 			}
@@ -3864,12 +3860,9 @@ netdev_tx_t bnx2x_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	if (unlikely(skb_shinfo(skb)->tx_flags & SKBTX_HW_TSTAMP)) {
 		if (!(bp->flags & TX_TIMESTAMPING_EN)) {
-			bp->eth_stats.ptp_skip_tx_ts++;
 			BNX2X_ERR("Tx timestamping was not enabled, this packet will not be timestamped\n");
 		} else if (bp->ptp_tx_skb) {
-			bp->eth_stats.ptp_skip_tx_ts++;
-			dev_err_once(&bp->dev->dev,
-					"Device supports only a single outstanding packet to timestamp, this packet won't be timestamped\n");
+			BNX2X_ERR("The device supports only a single outstanding packet to timestamp, this packet will not be timestamped\n");
 		} else {
 			skb_shinfo(skb)->tx_flags |= SKBTX_IN_PROGRESS;
 			/* schedule check for Tx timestamp */
@@ -4170,9 +4163,10 @@ netdev_tx_t bnx2x_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	wmb();
 
 	txdata->tx_db.data.prod += nbd;
-	barrier();
+	/* make sure descriptor update is observed by HW */
+	wmb();
 
-	DOORBELL(bp, txdata->cid, txdata->tx_db.raw);
+	DOORBELL_RELAXED(bp, txdata->cid, txdata->tx_db.raw);
 
 	mmiowb();
 
@@ -4301,12 +4295,17 @@ int bnx2x_setup_tc(struct net_device *dev, u8 num_tc)
 	return 0;
 }
 
-int __bnx2x_setup_tc(struct net_device *dev, u32 handle, __be16 proto,
-		     struct tc_to_netdev *tc)
+int __bnx2x_setup_tc(struct net_device *dev, enum tc_setup_type type,
+		     void *type_data)
 {
-	if (tc->type != TC_SETUP_MQPRIO)
-		return -EINVAL;
-	return bnx2x_setup_tc(dev, tc->tc);
+	struct tc_mqprio_qopt *mqprio = type_data;
+
+	if (type != TC_SETUP_QDISC_MQPRIO)
+		return -EOPNOTSUPP;
+
+	mqprio->hw = TC_MQPRIO_HW_OFFLOAD_TCS;
+
+	return bnx2x_setup_tc(dev, mqprio->num_tc);
 }
 
 /* called with rtnl_lock */
@@ -4880,17 +4879,14 @@ int bnx2x_change_mtu(struct net_device *dev, int new_mtu)
 		return -EAGAIN;
 	}
 
-	if ((new_mtu > ETH_MAX_JUMBO_PACKET_SIZE) ||
-	    ((new_mtu + ETH_HLEN) < ETH_MIN_PACKET_SIZE)) {
-		BNX2X_ERR("Can't support requested MTU size\n");
-		return -EINVAL;
-	}
-
 	/* This does not race with packet allocation
 	 * because the actual alloc size is
 	 * only updated as part of load
 	 */
 	dev->mtu = new_mtu;
+
+	if (!bnx2x_mtu_allows_gro(new_mtu))
+		dev->features &= ~NETIF_F_GRO_HW;
 
 	if (IS_PF(bp) && SHMEM2_HAS(bp, curr_cfg))
 		SHMEM2_WR(bp, curr_cfg, CURR_CFG_MET_OS);
@@ -4921,10 +4917,13 @@ netdev_features_t bnx2x_fix_features(struct net_device *dev,
 	}
 
 	/* TPA requires Rx CSUM offloading */
-	if (!(features & NETIF_F_RXCSUM)) {
+	if (!(features & NETIF_F_RXCSUM))
 		features &= ~NETIF_F_LRO;
-		features &= ~NETIF_F_GRO;
-	}
+
+	if (!(features & NETIF_F_GRO) || !bnx2x_mtu_allows_gro(dev->mtu))
+		features &= ~NETIF_F_GRO_HW;
+	if (features & NETIF_F_GRO_HW)
+		features &= ~NETIF_F_LRO;
 
 	return features;
 }
@@ -4951,13 +4950,8 @@ int bnx2x_set_features(struct net_device *dev, netdev_features_t features)
 		}
 	}
 
-	/* if GRO is changed while LRO is enabled, don't force a reload */
-	if ((changes & NETIF_F_GRO) && (features & NETIF_F_LRO))
-		changes &= ~NETIF_F_GRO;
-
-	/* if GRO is changed while HW TPA is off, don't force a reload */
-	if ((changes & NETIF_F_GRO) && bp->disable_tpa)
-		changes &= ~NETIF_F_GRO;
+	/* Don't care about GRO changes */
+	changes &= ~NETIF_F_GRO;
 
 	if (changes)
 		bnx2x_reload = true;
@@ -4978,8 +4972,13 @@ void bnx2x_tx_timeout(struct net_device *dev)
 {
 	struct bnx2x *bp = netdev_priv(dev);
 
-#ifdef BNX2X_STOP_ON_ERROR
+	/* We want the information of the dump logged,
+	 * but calling bnx2x_panic() would kill all chances of recovery.
+	 */
 	if (!bp->panic)
+#ifndef BNX2X_STOP_ON_ERROR
+		bnx2x_panic_dump(bp, false);
+#else
 		bnx2x_panic();
 #endif
 

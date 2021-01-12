@@ -184,8 +184,8 @@ static void sci_io_request_build_ssp_command_iu(struct isci_request *ireq)
 	cmd_iu->task_attr = task->ssp_task.task_attr;
 	cmd_iu->_r_c = 0;
 
-	sci_swab32_cpy(&cmd_iu->cdb, task->ssp_task.cmd->cmnd,
-		       (task->ssp_task.cmd->cmd_len+3) / sizeof(u32));
+	sci_swab32_cpy(&cmd_iu->cdb, task->ssp_task.cdb,
+		       sizeof(task->ssp_task.cdb) / sizeof(u32));
 }
 
 static void sci_task_request_build_ssp_task_iu(struct isci_request *ireq)
@@ -1626,9 +1626,9 @@ static enum sci_status atapi_d2h_reg_frame_handler(struct isci_request *ireq,
 
 	if (status == SCI_SUCCESS) {
 		if (ireq->stp.rsp.status & ATA_ERR)
-			status = SCI_FAILURE_IO_RESPONSE_VALID;
+			status = SCI_IO_FAILURE_RESPONSE_VALID;
 	} else {
-		status = SCI_FAILURE_IO_RESPONSE_VALID;
+		status = SCI_IO_FAILURE_RESPONSE_VALID;
 	}
 
 	if (status != SCI_SUCCESS) {
@@ -3169,10 +3169,7 @@ static enum sci_status isci_request_stp_request_construct(struct isci_request *i
 	status = sci_io_request_construct_basic_sata(ireq);
 
 	if (qc && (qc->tf.command == ATA_CMD_FPDMA_WRITE ||
-		   qc->tf.command == ATA_CMD_FPDMA_READ ||
-		   qc->tf.command == ATA_CMD_FPDMA_RECV ||
-		   qc->tf.command == ATA_CMD_FPDMA_SEND ||
-		   qc->tf.command == ATA_CMD_NCQ_NON_DATA)) {
+		   qc->tf.command == ATA_CMD_FPDMA_READ)) {
 		fis->sector_count = qc->tag << 3;
 		ireq->tc->type.stp.ncq_tag = qc->tag;
 	}

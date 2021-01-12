@@ -12,23 +12,21 @@
 #include <linux/export.h>
 #include <linux/sched.h>
 #include <linux/spinlock.h>
+#include <linux/bootmem.h>
 #include <linux/init.h>
 #include <linux/memblock.h>
 #include <linux/sizes.h>
-#include <linux/cma.h>
 #include <linux/bitops.h>
 
 #include <asm/cputable.h>
 #include <asm/kvm_ppc.h>
 #include <asm/kvm_book3s.h>
-#include <asm/archrandom.h>
 #include <asm/xics.h>
 #include <asm/dbell.h>
 #include <asm/cputhreads.h>
 #include <asm/io.h>
 
-#define KVM_CMA_CHUNK_ORDER	18
-
+#include "book3s_hv_cma.h"
 /*
  * Hash page table alignment on newer cpus(CPU_FTR_ARCH_206)
  * should be power of 2.
@@ -39,7 +37,6 @@
  */
 static unsigned long kvm_cma_resv_ratio = 5;
 
-static struct cma *kvm_cma;
 
 static int __init early_parse_kvm_cma_resv(char *p)
 {
@@ -50,25 +47,25 @@ static int __init early_parse_kvm_cma_resv(char *p)
 }
 early_param("kvm_cma_resv_ratio", early_parse_kvm_cma_resv);
 
-struct page *kvm_alloc_hpt(unsigned long nr_pages)
+struct page *kvm_alloc_hpt_cma(unsigned long nr_pages)
 {
 	VM_BUG_ON(order_base_2(nr_pages) < KVM_CMA_CHUNK_ORDER - PAGE_SHIFT);
 
-	return cma_alloc(kvm_cma, nr_pages, order_base_2(HPT_ALIGN_PAGES));
+	return kvm_alloc_cma(nr_pages, HPT_ALIGN_PAGES);
 }
-EXPORT_SYMBOL_GPL(kvm_alloc_hpt);
+EXPORT_SYMBOL_GPL(kvm_alloc_hpt_cma);
 
-void kvm_release_hpt(struct page *page, unsigned long nr_pages)
+void kvm_free_hpt_cma(struct page *page, unsigned long nr_pages)
 {
-	cma_release(kvm_cma, page, nr_pages);
+	kvm_release_cma(page, nr_pages);
 }
-EXPORT_SYMBOL_GPL(kvm_release_hpt);
+EXPORT_SYMBOL_GPL(kvm_free_hpt_cma);
 
 /**
  * kvm_cma_reserve() - reserve area for kvm hash pagetable
  *
  * This function reserves memory from early allocator. It should be
- * called by arch specific code once the memblock allocator
+ * called by arch specific code once the early allocator (memblock or bootmem)
  * has been activated and all other subsystems have already allocated/reserved
  * memory.
  */
@@ -96,8 +93,7 @@ void __init kvm_cma_reserve(void)
 		pr_debug("%s: reserving %ld MiB for global area\n", __func__,
 			 (unsigned long)selected_size / SZ_1M);
 		align_size = HPT_ALIGN_PAGES << PAGE_SHIFT;
-		cma_declare_contiguous(0, selected_size, 0, align_size,
-			KVM_CMA_CHUNK_ORDER - PAGE_SHIFT, false, &kvm_cma);
+		kvm_cma_declare_contiguous(selected_size, align_size);
 	}
 }
 
@@ -175,20 +171,6 @@ int kvmppc_hcall_impl_hv_realmode(unsigned long cmd)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(kvmppc_hcall_impl_hv_realmode);
-
-int kvmppc_hwrng_present(void)
-{
-	return powernv_hwrng_present();
-}
-EXPORT_SYMBOL_GPL(kvmppc_hwrng_present);
-
-long kvmppc_h_random(struct kvm_vcpu *vcpu)
-{
-	if (powernv_get_random_real_mode(&vcpu->arch.gpr[4]))
-		return H_SUCCESS;
-
-	return H_HARDWARE;
-}
 
 static inline void rm_writeb(unsigned long paddr, u8 val)
 {
@@ -363,7 +345,6 @@ static inline int kvmppc_check_passthru(u32 xisr, __be32 xirr)
  * Returns:
  *	0 if no interrupt is pending
  *	1 if an interrupt is pending that needs to be handled by the host
- *	2 Passthrough that needs completion in the host
  *	-1 if there was a guest wakeup IPI (which has now been cleared)
  *	-2 if there is PCI passthrough external interrupt that was handled
  */

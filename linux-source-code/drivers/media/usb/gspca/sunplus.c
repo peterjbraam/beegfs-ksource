@@ -268,11 +268,6 @@ static void reg_r(struct gspca_dev *gspca_dev,
 	if (ret < 0) {
 		pr_err("reg_r err %d\n", ret);
 		gspca_dev->usb_err = ret;
-		/*
-		 * Make sure the buffer is zeroed to avoid uninitialized
-		 * values.
-		 */
-		memset(gspca_dev->usb_buf, 0, USB_BUF_SZ);
 	}
 }
 
@@ -720,8 +715,7 @@ static int sd_start(struct gspca_dev *gspca_dev)
 	int enable;
 
 	/* create the JPEG header */
-	jpeg_define(sd->jpeg_hdr, gspca_dev->pixfmt.height,
-			gspca_dev->pixfmt.width,
+	jpeg_define(sd->jpeg_hdr, gspca_dev->height, gspca_dev->width,
 			0x22);		/* JPEG 411 */
 	jpeg_set_qual(sd->jpeg_hdr, QUALITY);
 
@@ -1032,7 +1026,6 @@ static const struct usb_device_id device_table[] = {
 	{USB_DEVICE(0x055f, 0xc650), BS(SPCA533, 0)},
 	{USB_DEVICE(0x05da, 0x1018), BS(SPCA504B, 0)},
 	{USB_DEVICE(0x06d6, 0x0031), BS(SPCA533, 0)},
-	{USB_DEVICE(0x06d6, 0x0041), BS(SPCA504B, 0)},
 	{USB_DEVICE(0x0733, 0x1311), BS(SPCA533, 0)},
 	{USB_DEVICE(0x0733, 0x1314), BS(SPCA533, 0)},
 	{USB_DEVICE(0x0733, 0x2211), BS(SPCA533, 0)},

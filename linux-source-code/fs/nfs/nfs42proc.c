@@ -12,6 +12,7 @@
 #include "nfs42.h"
 #include "iostat.h"
 #include "pnfs.h"
+#include "nfs4session.h"
 #include "internal.h"
 
 #define NFSDBG_FACILITY NFSDBG_PROC
@@ -92,13 +93,13 @@ int nfs42_proc_allocate(struct file *filep, loff_t offset, loff_t len)
 	if (!nfs_server_capable(inode, NFS_CAP_ALLOCATE))
 		return -EOPNOTSUPP;
 
-	inode_lock(inode);
+	mutex_lock(&inode->i_mutex);
 
 	err = nfs42_proc_fallocate(&msg, filep, offset, len);
 	if (err == -EOPNOTSUPP)
 		NFS_SERVER(inode)->caps &= ~NFS_CAP_ALLOCATE;
 
-	inode_unlock(inode);
+	mutex_unlock(&inode->i_mutex);
 	return err;
 }
 
@@ -113,18 +114,16 @@ int nfs42_proc_deallocate(struct file *filep, loff_t offset, loff_t len)
 	if (!nfs_server_capable(inode, NFS_CAP_DEALLOCATE))
 		return -EOPNOTSUPP;
 
-	inode_lock(inode);
-	err = nfs_sync_inode(inode);
-	if (err)
-		goto out_unlock;
+	nfs_wb_all(inode);
+	mutex_lock(&inode->i_mutex);
 
 	err = nfs42_proc_fallocate(&msg, filep, offset, len);
 	if (err == 0)
 		truncate_pagecache_range(inode, offset, (offset + len) -1);
 	if (err == -EOPNOTSUPP)
 		NFS_SERVER(inode)->caps &= ~NFS_CAP_DEALLOCATE;
-out_unlock:
-	inode_unlock(inode);
+
+	mutex_unlock(&inode->i_mutex);
 	return err;
 }
 
@@ -145,7 +144,7 @@ static ssize_t _nfs42_proc_copy(struct file *src,
 	loff_t pos_src = args->src_pos;
 	loff_t pos_dst = args->dst_pos;
 	size_t count = args->count;
-	int status;
+	ssize_t status;
 
 	status = nfs4_set_rw_stateid(&args->src_stateid, src_lock->open_context,
 				     src_lock, FMODE_READ);
@@ -166,23 +165,29 @@ static ssize_t _nfs42_proc_copy(struct file *src,
 	if (status)
 		return status;
 
+	res->commit_res.verf = kzalloc(sizeof(struct nfs_writeverf), GFP_NOFS);
+	if (!res->commit_res.verf)
+		return -ENOMEM;
 	status = nfs4_call_sync(server->client, server, &msg,
 				&args->seq_args, &res->seq_res, 0);
 	if (status == -ENOTSUPP)
 		server->caps &= ~NFS_CAP_COPY;
 	if (status)
-		return status;
+		goto out;
 
-	if (res->write_res.verifier.committed != NFS_FILE_SYNC) {
-		status = nfs_commit_file(dst, &res->write_res.verifier.verifier);
-		if (status)
-			return status;
+	if (nfs_write_verifier_cmp(&res->write_res.verifier.verifier,
+				    &res->commit_res.verf->verifier)) {
+		status = -EAGAIN;
+		goto out;
 	}
 
 	truncate_pagecache_range(dst_inode, pos_dst,
 				 pos_dst + res->write_res.count);
 
-	return res->write_res.count;
+	status = res->write_res.count;
+out:
+	kfree(res->commit_res.verf);
+	return status;
 }
 
 ssize_t nfs42_proc_copy(struct file *src, loff_t pos_src,
@@ -228,17 +233,20 @@ ssize_t nfs42_proc_copy(struct file *src, loff_t pos_src,
 	dst_exception.state = dst_lock->open_context->state;
 
 	do {
-		inode_lock(file_inode(dst));
+		mutex_lock(&file_inode(dst)->i_mutex);
 		err = _nfs42_proc_copy(src, src_lock,
 				dst, dst_lock,
 				&args, &res);
-		inode_unlock(file_inode(dst));
+		mutex_unlock(&file_inode(dst)->i_mutex);
 
 		if (err >= 0)
 			break;
 		if (err == -ENOTSUPP) {
 			err = -EOPNOTSUPP;
 			break;
+		} if (err == -EAGAIN) {
+			dst_exception.retry = 1;
+			continue;
 		}
 
 		err2 = nfs4_handle_exception(server, err, &src_exception);
@@ -280,11 +288,7 @@ static loff_t _nfs42_proc_llseek(struct file *filep,
 	if (status)
 		return status;
 
-	status = nfs_filemap_write_and_wait_range(inode->i_mapping,
-			offset, LLONG_MAX);
-	if (status)
-		return status;
-
+	nfs_wb_all(inode);
 	status = nfs4_call_sync(server->client, server, &msg,
 				&args.seq_args, &res.seq_res, 0);
 	if (status == -ENOTSUPP)
@@ -324,7 +328,6 @@ loff_t nfs42_proc_llseek(struct file *filep, loff_t offset, int whence)
 	return err;
 }
 
-
 static void
 nfs42_layoutstat_prepare(struct rpc_task *task, void *calldata)
 {
@@ -342,9 +345,8 @@ nfs42_layoutstat_prepare(struct rpc_task *task, void *calldata)
 	}
 	nfs4_stateid_copy(&data->args.stateid, &lo->plh_stateid);
 	spin_unlock(&inode->i_lock);
-	nfs41_setup_sequence(nfs4_get_session(server), &data->args.seq_args,
-			     &data->res.seq_res, task);
-
+	nfs4_setup_sequence(server->nfs_client, &data->args.seq_args,
+			    &data->res.seq_res, task);
 }
 
 static void
@@ -361,8 +363,6 @@ nfs42_layoutstat_done(struct rpc_task *task, void *calldata)
 	case 0:
 		break;
 	case -NFS4ERR_EXPIRED:
-	case -NFS4ERR_ADMIN_REVOKED:
-	case -NFS4ERR_DELEG_REVOKED:
 	case -NFS4ERR_STALE_STATEID:
 	case -NFS4ERR_BAD_STATEID:
 		spin_lock(&inode->i_lock);
@@ -379,6 +379,7 @@ nfs42_layoutstat_done(struct rpc_task *task, void *calldata)
 			pnfs_mark_layout_stateid_invalid(lo, &head);
 			spin_unlock(&inode->i_lock);
 			pnfs_free_lseg_list(&head);
+			nfs_commit_inode(inode, 0);
 		} else
 			spin_unlock(&inode->i_lock);
 		break;
@@ -408,10 +409,13 @@ static void
 nfs42_layoutstat_release(void *calldata)
 {
 	struct nfs42_layoutstat_data *data = calldata;
-	struct nfs_server *nfss = NFS_SERVER(data->args.inode);
+	struct nfs42_layoutstat_devinfo *devinfo = data->args.devinfo;
+	int i;
 
-	if (nfss->pnfs_curr_ld->cleanup_layoutstats)
-		nfss->pnfs_curr_ld->cleanup_layoutstats(data);
+	for (i = 0; i < data->args.num_dev; i++) {
+		if (devinfo[i].ld_private.ops && devinfo[i].ld_private.ops->free)
+			devinfo[i].ld_private.ops->free(&devinfo[i].ld_private);
+	}
 
 	pnfs_put_layout_hdr(NFS_I(data->args.inode)->layout);
 	smp_mb__before_atomic();

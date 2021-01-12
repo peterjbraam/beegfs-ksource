@@ -143,7 +143,7 @@ gss_cred_set_ctx(struct rpc_cred *cred, struct gss_cl_ctx *ctx)
 	gss_get_ctx(ctx);
 	rcu_assign_pointer(gss_cred->gc_ctx, ctx);
 	set_bit(RPCAUTH_CRED_UPTODATE, &cred->cr_flags);
-	smp_mb__before_atomic();
+	smp_mb__before_clear_bit();
 	clear_bit(RPCAUTH_CRED_NEW, &cred->cr_flags);
 }
 
@@ -1753,8 +1753,8 @@ alloc_enc_pages(struct rpc_rqst *rqstp)
 		return 0;
 	}
 
-	first = snd_buf->page_base >> PAGE_SHIFT;
-	last = (snd_buf->page_base + snd_buf->page_len - 1) >> PAGE_SHIFT;
+	first = snd_buf->page_base >> PAGE_CACHE_SHIFT;
+	last = (snd_buf->page_base + snd_buf->page_len - 1) >> PAGE_CACHE_SHIFT;
 	rqstp->rq_enc_pages_num = last - first + 1 + 1;
 	rqstp->rq_enc_pages
 		= kmalloc(rqstp->rq_enc_pages_num * sizeof(struct page *),
@@ -1800,10 +1800,10 @@ gss_wrap_req_priv(struct rpc_cred *cred, struct gss_cl_ctx *ctx,
 	status = alloc_enc_pages(rqstp);
 	if (status)
 		return status;
-	first = snd_buf->page_base >> PAGE_SHIFT;
+	first = snd_buf->page_base >> PAGE_CACHE_SHIFT;
 	inpages = snd_buf->pages + first;
 	snd_buf->pages = rqstp->rq_enc_pages;
-	snd_buf->page_base -= first << PAGE_SHIFT;
+	snd_buf->page_base -= first << PAGE_CACHE_SHIFT;
 	/*
 	 * Give the tail its own page, in case we need extra space in the
 	 * head when wrapping:

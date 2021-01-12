@@ -175,9 +175,8 @@ static int nfs_map_numeric_to_string(__u32 id, char *buf, size_t buflen)
 
 static struct key_type key_type_id_resolver = {
 	.name		= "id_resolver",
-	.preparse	= user_preparse,
-	.free_preparse	= user_free_preparse,
-	.instantiate	= generic_key_instantiate,
+	.instantiate	= user_instantiate,
+	.match		= user_match,
 	.revoke		= user_revoke,
 	.destroy	= user_destroy,
 	.describe	= user_describe,
@@ -201,7 +200,7 @@ int nfs_idmap_init(void)
 				GLOBAL_ROOT_UID, GLOBAL_ROOT_GID, cred,
 				(KEY_POS_ALL & ~KEY_POS_SETATTR) |
 				KEY_USR_VIEW | KEY_USR_READ,
-				KEY_ALLOC_NOT_IN_QUOTA, NULL, NULL);
+				KEY_ALLOC_NOT_IN_QUOTA, NULL);
 	if (IS_ERR(keyring)) {
 		ret = PTR_ERR(keyring);
 		goto failed_put_cred;
@@ -316,7 +315,7 @@ static ssize_t nfs_idmap_get_key(const char *name, size_t namelen,
 	if (ret < 0)
 		goto out_up;
 
-	payload = user_key_payload(rkey);
+	payload = user_key_payload_rcu(rkey);
 	if (IS_ERR_OR_NULL(payload)) {
 		ret = PTR_ERR(payload);
 		goto out_up;
@@ -398,9 +397,8 @@ static const struct rpc_pipe_ops idmap_upcall_ops = {
 
 static struct key_type key_type_id_resolver_legacy = {
 	.name		= "id_legacy",
-	.preparse	= user_preparse,
-	.free_preparse	= user_free_preparse,
-	.instantiate	= generic_key_instantiate,
+	.instantiate	= user_instantiate,
+	.match		= user_match,
 	.revoke		= user_revoke,
 	.destroy	= user_destroy,
 	.describe	= user_describe,

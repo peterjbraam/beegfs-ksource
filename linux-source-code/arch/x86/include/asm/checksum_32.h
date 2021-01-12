@@ -2,7 +2,8 @@
 #define _ASM_X86_CHECKSUM_32_H
 
 #include <linux/in6.h>
-#include <linux/uaccess.h>
+
+#include <asm/uaccess.h>
 
 /*
  * computes the checksum of a memory block at buff, length len,
@@ -148,7 +149,8 @@ static inline __sum16 ip_compute_csum(const void *buff, int len)
 #define _HAVE_ARCH_IPV6_CSUM
 static inline __sum16 csum_ipv6_magic(const struct in6_addr *saddr,
 				      const struct in6_addr *daddr,
-				      __u32 len, __u8 proto, __wsum sum)
+				      __u32 len, unsigned short proto,
+				      __wsum sum)
 {
 	asm("addl 0(%1), %0	;\n"
 	    "adcl 4(%1), %0	;\n"

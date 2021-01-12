@@ -16,13 +16,6 @@
 #include <linux/uidgid.h>
 #include <uapi/linux/nfs4.h>
 
-enum nfs4_acl_whotype {
-	NFS4_ACL_WHO_NAMED = 0,
-	NFS4_ACL_WHO_OWNER,
-	NFS4_ACL_WHO_GROUP,
-	NFS4_ACL_WHO_EVERYONE,
-};
-
 struct nfs4_ace {
 	uint32_t	type;
 	uint32_t	flag;
@@ -441,6 +434,7 @@ enum lock_type4 {
 #define FATTR4_WORD2_MDSTHRESHOLD       (1UL << 4)
 #define FATTR4_WORD2_CLONE_BLKSIZE	(1UL << 13)
 #define FATTR4_WORD2_SECURITY_LABEL     (1UL << 16)
+#define FATTR4_WORD2_MODE_UMASK		(1UL << 17)
 
 /* MDS threshold bitmap bits */
 #define THRESHOLD_RD                    (1UL << 0)
@@ -643,17 +637,6 @@ enum pnfs_update_layout_reason {
 	PNFS_UPDATE_LAYOUT_BLOCKED,
 	PNFS_UPDATE_LAYOUT_INVALID_OPEN,
 	PNFS_UPDATE_LAYOUT_SEND_LAYOUTGET,
-};
-
-#define NFS4_OP_MAP_NUM_LONGS					\
-	DIV_ROUND_UP(LAST_NFS4_OP, 8 * sizeof(unsigned long))
-#define NFS4_OP_MAP_NUM_WORDS \
-	(NFS4_OP_MAP_NUM_LONGS * sizeof(unsigned long) / sizeof(u32))
-struct nfs4_op_map {
-	union {
-		unsigned long longs[NFS4_OP_MAP_NUM_LONGS];
-		u32 words[NFS4_OP_MAP_NUM_WORDS];
-	} u;
 };
 
 #endif

@@ -33,7 +33,7 @@
 #include "iscsi_target_erl2.h"
 #include "iscsi_target.h"
 
-#define OFFLOAD_BUF_SIZE	32768
+#define OFFLOAD_BUF_SIZE	32768U
 
 /*
  *	Used to dump excess datain payload for certain error recovery
@@ -55,7 +55,7 @@ int iscsit_dump_data_payload(
 	if (conn->sess->sess_ops->RDMAExtensions)
 		return 0;
 
-	length = (buf_len > OFFLOAD_BUF_SIZE) ? OFFLOAD_BUF_SIZE : buf_len;
+	length = min(buf_len, OFFLOAD_BUF_SIZE);
 
 	buf = kzalloc(length, GFP_ATOMIC);
 	if (!buf) {
@@ -66,8 +66,7 @@ int iscsit_dump_data_payload(
 	memset(&iov, 0, sizeof(struct kvec));
 
 	while (offset < buf_len) {
-		size = ((offset + length) > buf_len) ?
-			(buf_len - offset) : length;
+		size = min(buf_len - offset, length);
 
 		iov.iov_len = size;
 		iov.iov_base = buf;
@@ -211,11 +210,13 @@ int iscsit_create_recovery_datain_values_datasequenceinorder_yes(
 		if ((dr->next_burst_len +
 		     conn->conn_ops->MaxRecvDataSegmentLength) <
 		     conn->sess->sess_ops->MaxBurstLength) {
+			gmb();
 			dr->read_data_done +=
 				conn->conn_ops->MaxRecvDataSegmentLength;
 			dr->next_burst_len +=
 				conn->conn_ops->MaxRecvDataSegmentLength;
 		} else {
+			gmb();
 			dr->read_data_done +=
 				(conn->sess->sess_ops->MaxBurstLength -
 				 dr->next_burst_len);
@@ -1169,15 +1170,21 @@ static void iscsit_handle_dataout_timeout(unsigned long data)
 	na = iscsit_tpg_get_node_attrib(sess);
 
 	if (!sess->sess_ops->ErrorRecoveryLevel) {
-		pr_debug("Unable to recover from DataOut timeout while"
-			" in ERL=0.\n");
+		pr_err("Unable to recover from DataOut timeout while"
+			" in ERL=0, closing iSCSI connection for I_T Nexus"
+			" %s,i,0x%6phN,%s,t,0x%02x\n",
+			sess->sess_ops->InitiatorName, sess->isid,
+			sess->tpg->tpg_tiqn->tiqn, (u32)sess->tpg->tpgt);
 		goto failure;
 	}
 
 	if (++cmd->dataout_timeout_retries == na->dataout_timeout_retries) {
-		pr_debug("Command ITT: 0x%08x exceeded max retries"
-			" for DataOUT timeout %u, closing iSCSI connection.\n",
-			cmd->init_task_tag, na->dataout_timeout_retries);
+		pr_err("Command ITT: 0x%08x exceeded max retries"
+			" for DataOUT timeout %u, closing iSCSI connection for"
+			" I_T Nexus %s,i,0x%6phN,%s,t,0x%02x\n",
+			cmd->init_task_tag, na->dataout_timeout_retries,
+			sess->sess_ops->InitiatorName, sess->isid,
+			sess->tpg->tpg_tiqn->tiqn, (u32)sess->tpg->tpgt);
 		goto failure;
 	}
 
@@ -1224,6 +1231,7 @@ static void iscsit_handle_dataout_timeout(unsigned long data)
 
 failure:
 	spin_unlock_bh(&cmd->dataout_timeout_lock);
+	iscsit_fill_cxn_timeout_err_stats(sess);
 	iscsit_cause_connection_reinstatement(conn, 0);
 	iscsit_dec_conn_usage_count(conn);
 }

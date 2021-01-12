@@ -2465,8 +2465,10 @@ struct isci_request *sci_request_by_tag(struct isci_host *ihost, u16 io_tag)
 	task_index = ISCI_TAG_TCI(io_tag);
 
 	if (task_index < ihost->task_context_entries) {
-		struct isci_request *ireq = ihost->reqs[task_index];
+		struct isci_request *ireq;
 
+		gmb();
+		ireq = ihost->reqs[task_index];
 		if (test_bit(IREQ_ACTIVE, &ireq->flags)) {
 			task_sequence = ISCI_TAG_SEQ(io_tag);
 
@@ -2717,9 +2719,9 @@ enum sci_status sci_controller_continue_io(struct isci_request *ireq)
  *    the task management request.
  * @task_request: the handle to the task request object to start.
  */
-enum sci_status sci_controller_start_task(struct isci_host *ihost,
-					  struct isci_remote_device *idev,
-					  struct isci_request *ireq)
+enum sci_task_status sci_controller_start_task(struct isci_host *ihost,
+					       struct isci_remote_device *idev,
+					       struct isci_request *ireq)
 {
 	enum sci_status status;
 
@@ -2728,7 +2730,7 @@ enum sci_status sci_controller_start_task(struct isci_host *ihost,
 			 "%s: SCIC Controller starting task from invalid "
 			 "state\n",
 			 __func__);
-		return SCI_FAILURE_INVALID_STATE;
+		return SCI_TASK_FAILURE_INVALID_STATE;
 	}
 
 	status = sci_remote_device_start_task(ihost, idev, ireq);

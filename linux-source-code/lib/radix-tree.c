@@ -35,7 +35,7 @@
 #include <linux/string.h>
 #include <linux/bitops.h>
 #include <linux/rcupdate.h>
-#include <linux/preempt.h>		/* in_interrupt() */
+#include <linux/preempt_mask.h>		/* in_interrupt() */
 
 
 /* Number of nodes in fully populated tree of given height */
@@ -272,18 +272,8 @@ radix_tree_node_alloc(struct radix_tree_root *root)
 	 * preloading during an interrupt anyway as all the allocations have
 	 * to be atomic. So just do normal allocation when in interrupt.
 	 */
-	if (!gfpflags_allow_blocking(gfp_mask) && !in_interrupt()) {
+	if (!(gfp_mask & __GFP_WAIT) && !in_interrupt()) {
 		struct radix_tree_preload *rtp;
-
-		/*
-		 * Even if the caller has preloaded, try to allocate from the
-		 * cache first for the new node to get accounted to the memory
-		 * cgroup.
-		 */
-		ret = kmem_cache_alloc(radix_tree_node_cachep,
-				       gfp_mask | __GFP_NOWARN);
-		if (ret)
-			goto out;
 
 		/*
 		 * Provided the caller has preloaded here, we will always
@@ -302,10 +292,10 @@ radix_tree_node_alloc(struct radix_tree_root *root)
 		 * for debugging.
 		 */
 		kmemleak_update_trace(ret);
-		goto out;
 	}
-	ret = kmem_cache_alloc(radix_tree_node_cachep, gfp_mask);
-out:
+	if (ret == NULL)
+		ret = kmem_cache_alloc(radix_tree_node_cachep, gfp_mask);
+
 	BUG_ON(radix_tree_is_internal_node(ret));
 	return ret;
 }
@@ -343,19 +333,13 @@ radix_tree_node_free(struct radix_tree_node *node)
  * with preemption not disabled.
  *
  * To make use of this facility, the radix tree must be initialised without
- * __GFP_DIRECT_RECLAIM being passed to INIT_RADIX_TREE().
+ * __GFP_WAIT being passed to INIT_RADIX_TREE().
  */
 static int __radix_tree_preload(gfp_t gfp_mask, int nr)
 {
 	struct radix_tree_preload *rtp;
 	struct radix_tree_node *node;
 	int ret = -ENOMEM;
-
-	/*
-	 * Nodes preloaded by one cgroup can be be used by another cgroup, so
-	 * they should never be accounted to any particular memory cgroup.
-	 */
-	gfp_mask &= ~__GFP_ACCOUNT;
 
 	preempt_disable();
 	rtp = this_cpu_ptr(&radix_tree_preloads);
@@ -386,12 +370,12 @@ out:
  * with preemption not disabled.
  *
  * To make use of this facility, the radix tree must be initialised without
- * __GFP_DIRECT_RECLAIM being passed to INIT_RADIX_TREE().
+ * __GFP_WAIT being passed to INIT_RADIX_TREE().
  */
 int radix_tree_preload(gfp_t gfp_mask)
 {
 	/* Warn on non-sensical use... */
-	WARN_ON_ONCE(!gfpflags_allow_blocking(gfp_mask));
+	WARN_ON_ONCE(!(gfp_mask & __GFP_WAIT));
 	return __radix_tree_preload(gfp_mask, RADIX_TREE_PRELOAD_SIZE);
 }
 EXPORT_SYMBOL(radix_tree_preload);
@@ -403,7 +387,7 @@ EXPORT_SYMBOL(radix_tree_preload);
  */
 int radix_tree_maybe_preload(gfp_t gfp_mask)
 {
-	if (gfpflags_allow_blocking(gfp_mask))
+	if (gfp_mask & __GFP_WAIT)
 		return __radix_tree_preload(gfp_mask, RADIX_TREE_PRELOAD_SIZE);
 	/* Preloading doesn't help anything with this gfp mask, skip it */
 	preempt_disable();
@@ -421,7 +405,7 @@ int radix_tree_maybe_preload_order(gfp_t gfp_mask, int order)
 	int nr_nodes, subtree_height;
 
 	/* Preloading doesn't help anything with this gfp mask, skip it */
-	if (!gfpflags_allow_blocking(gfp_mask)) {
+	if (!(gfp_mask & __GFP_WAIT)) {
 		preempt_disable();
 		return 0;
 	}

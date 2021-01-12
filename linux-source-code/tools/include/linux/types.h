@@ -43,7 +43,11 @@ typedef __s8  s8;
 #else
 #define __bitwise__
 #endif
+#ifdef __CHECK_ENDIAN__
 #define __bitwise __bitwise__
+#else
+#define __bitwise
+#endif
 
 #define __force
 #define __user

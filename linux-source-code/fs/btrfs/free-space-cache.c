@@ -29,7 +29,7 @@
 #include "inode-map.h"
 #include "volumes.h"
 
-#define BITS_PER_BITMAP		(PAGE_SIZE * 8UL)
+#define BITS_PER_BITMAP		(PAGE_CACHE_SIZE * 8UL)
 #define MAX_CACHE_BYTES_PER_GIG	SZ_32K
 
 struct btrfs_trim_range {
@@ -85,8 +85,8 @@ static struct inode *__lookup_free_space_inode(struct btrfs_root *root,
 	}
 
 	mapping_set_gfp_mask(inode->i_mapping,
-			mapping_gfp_constraint(inode->i_mapping,
-			~(__GFP_FS | __GFP_HIGHMEM)));
+			mapping_gfp_mask(inode->i_mapping) &
+			~(__GFP_FS | __GFP_HIGHMEM));
 
 	return inode;
 }
@@ -280,7 +280,7 @@ fail:
 	if (locked)
 		mutex_unlock(&trans->transaction->cache_write_mutex);
 	if (ret)
-		btrfs_abort_transaction(trans, ret);
+		btrfs_abort_transaction(trans, root, ret);
 
 	return ret;
 }
@@ -295,7 +295,7 @@ static int readahead_cache(struct inode *inode)
 		return -ENOMEM;
 
 	file_ra_state_init(ra, inode->i_mapping);
-	last_index = (i_size_read(inode) - 1) >> PAGE_SHIFT;
+	last_index = (i_size_read(inode) - 1) >> PAGE_CACHE_SHIFT;
 
 	page_cache_sync_readahead(inode->i_mapping, ra, NULL, 0, last_index);
 
@@ -310,14 +310,14 @@ static int io_ctl_init(struct btrfs_io_ctl *io_ctl, struct inode *inode,
 	int num_pages;
 	int check_crcs = 0;
 
-	num_pages = DIV_ROUND_UP(i_size_read(inode), PAGE_SIZE);
+	num_pages = DIV_ROUND_UP(i_size_read(inode), PAGE_CACHE_SIZE);
 
 	if (btrfs_ino(inode) != BTRFS_FREE_INO_OBJECTID)
 		check_crcs = 1;
 
 	/* Make sure we can fit our crcs into the first page */
 	if (write && check_crcs &&
-	    (num_pages * sizeof(u32)) >= PAGE_SIZE)
+	    (num_pages * sizeof(u32)) >= PAGE_CACHE_SIZE)
 		return -ENOSPC;
 
 	memset(io_ctl, 0, sizeof(struct btrfs_io_ctl));
@@ -354,9 +354,9 @@ static void io_ctl_map_page(struct btrfs_io_ctl *io_ctl, int clear)
 	io_ctl->page = io_ctl->pages[io_ctl->index++];
 	io_ctl->cur = page_address(io_ctl->page);
 	io_ctl->orig = io_ctl->cur;
-	io_ctl->size = PAGE_SIZE;
+	io_ctl->size = PAGE_CACHE_SIZE;
 	if (clear)
-		memset(io_ctl->cur, 0, PAGE_SIZE);
+		memset(io_ctl->cur, 0, PAGE_CACHE_SIZE);
 }
 
 static void io_ctl_drop_pages(struct btrfs_io_ctl *io_ctl)
@@ -369,7 +369,7 @@ static void io_ctl_drop_pages(struct btrfs_io_ctl *io_ctl)
 		if (io_ctl->pages[i]) {
 			ClearPageChecked(io_ctl->pages[i]);
 			unlock_page(io_ctl->pages[i]);
-			put_page(io_ctl->pages[i]);
+			page_cache_release(io_ctl->pages[i]);
 		}
 	}
 }
@@ -391,12 +391,6 @@ static int io_ctl_prepare_pages(struct btrfs_io_ctl *io_ctl, struct inode *inode
 		if (uptodate && !PageUptodate(page)) {
 			btrfs_readpage(NULL, page);
 			lock_page(page);
-			if (page->mapping != inode->i_mapping) {
-				btrfs_err(BTRFS_I(inode)->root->fs_info,
-					  "free space cache page truncated");
-				io_ctl_drop_pages(io_ctl);
-				return -EIO;
-			}
 			if (!PageUptodate(page)) {
 				btrfs_err(BTRFS_I(inode)->root->fs_info,
 					   "error reading free space cache");
@@ -481,7 +475,7 @@ static void io_ctl_set_crc(struct btrfs_io_ctl *io_ctl, int index)
 		offset = sizeof(u32) * io_ctl->num_pages;
 
 	crc = btrfs_csum_data(io_ctl->orig + offset, crc,
-			      PAGE_SIZE - offset);
+			      PAGE_CACHE_SIZE - offset);
 	btrfs_csum_final(crc, (char *)&crc);
 	io_ctl_unmap_page(io_ctl);
 	tmp = page_address(io_ctl->pages[0]);
@@ -509,7 +503,7 @@ static int io_ctl_check_crc(struct btrfs_io_ctl *io_ctl, int index)
 
 	io_ctl_map_page(io_ctl, 0);
 	crc = btrfs_csum_data(io_ctl->orig + offset, crc,
-			      PAGE_SIZE - offset);
+			      PAGE_CACHE_SIZE - offset);
 	btrfs_csum_final(crc, (char *)&crc);
 	if (val != crc) {
 		btrfs_err_rl(io_ctl->root->fs_info,
@@ -567,7 +561,7 @@ static int io_ctl_add_bitmap(struct btrfs_io_ctl *io_ctl, void *bitmap)
 		io_ctl_map_page(io_ctl, 0);
 	}
 
-	memcpy(io_ctl->cur, bitmap, PAGE_SIZE);
+	memcpy(io_ctl->cur, bitmap, PAGE_CACHE_SIZE);
 	io_ctl_set_crc(io_ctl, io_ctl->index - 1);
 	if (io_ctl->index < io_ctl->num_pages)
 		io_ctl_map_page(io_ctl, 0);
@@ -627,7 +621,7 @@ static int io_ctl_read_bitmap(struct btrfs_io_ctl *io_ctl,
 	if (ret)
 		return ret;
 
-	memcpy(entry->bitmap, io_ctl->cur, PAGE_SIZE);
+	memcpy(entry->bitmap, io_ctl->cur, PAGE_CACHE_SIZE);
 	io_ctl_unmap_page(io_ctl);
 
 	return 0;
@@ -780,7 +774,7 @@ static int __load_free_space_cache(struct btrfs_root *root, struct inode *inode,
 		} else {
 			ASSERT(num_bitmaps);
 			num_bitmaps--;
-			e->bitmap = kzalloc(PAGE_SIZE, GFP_NOFS);
+			e->bitmap = kzalloc(PAGE_CACHE_SIZE, GFP_NOFS);
 			if (!e->bitmap) {
 				kmem_cache_free(
 					btrfs_free_space_cachep, e);
@@ -1165,6 +1159,7 @@ int btrfs_wait_cache_io(struct btrfs_root *root,
 	ret = update_cache_item(trans, root, inode, path, offset,
 				io_ctl->entries, io_ctl->bitmaps);
 out:
+	io_ctl_free(io_ctl);
 	if (ret) {
 		invalidate_inode_pages2(inode->i_mapping);
 		BTRFS_I(inode)->generation = 0;
@@ -1258,7 +1253,7 @@ static int __btrfs_write_out_cache(struct btrfs_root *root, struct inode *inode,
 	/* Lock all pages first so we can lock the extent safely. */
 	ret = io_ctl_prepare_pages(io_ctl, inode, 0);
 	if (ret)
-		goto out_unlock;
+		goto out;
 
 	lock_extent_bits(&BTRFS_I(inode)->io_tree, 0, i_size_read(inode) - 1,
 			 &cached_state);
@@ -1313,7 +1308,6 @@ static int __btrfs_write_out_cache(struct btrfs_root *root, struct inode *inode,
 	 * them out later
 	 */
 	io_ctl_drop_pages(io_ctl);
-	io_ctl_free(io_ctl);
 
 	unlock_extent_cached(&BTRFS_I(inode)->io_tree, 0,
 			     i_size_read(inode) - 1, &cached_state, GFP_NOFS);
@@ -1352,7 +1346,6 @@ out_nospc_locked:
 out_nospc:
 	cleanup_write_cache_enospc(inode, io_ctl, &cached_state, &bitmap_list);
 
-out_unlock:
 	if (block_group && (block_group->flags & BTRFS_BLOCK_GROUP_DATA))
 		up_write(&block_group->data_rwsem);
 
@@ -1446,10 +1439,13 @@ static int tree_insert_offset(struct rb_root *root, u64 offset,
 		info = rb_entry(parent, struct btrfs_free_space, offset_index);
 
 		if (offset < info->offset) {
+			gmb();
 			p = &(*p)->rb_left;
 		} else if (offset > info->offset) {
+			gmb();
 			p = &(*p)->rb_right;
 		} else {
+			gmb();
 			/*
 			 * we could have a bitmap entry and an extent entry
 			 * share the same offset.  If this is the case, we want
@@ -1699,8 +1695,6 @@ static inline void __bitmap_clear_bits(struct btrfs_free_space_ctl *ctl,
 	bitmap_clear(info->bitmap, start, count);
 
 	info->bytes -= bytes;
-	if (info->max_extent_size > ctl->unit)
-		info->max_extent_size = 0;
 }
 
 static void bitmap_clear_bits(struct btrfs_free_space_ctl *ctl,
@@ -1784,13 +1778,6 @@ static int search_bitmap(struct btrfs_free_space_ctl *ctl,
 	return -1;
 }
 
-static inline u64 get_max_extent_size(struct btrfs_free_space *entry)
-{
-	if (entry->bitmap)
-		return entry->max_extent_size;
-	return entry->bytes;
-}
-
 /* Cache the size of the max extent in bytes */
 static struct btrfs_free_space *
 find_free_space(struct btrfs_free_space_ctl *ctl, u64 *offset, u64 *bytes,
@@ -1812,8 +1799,9 @@ find_free_space(struct btrfs_free_space_ctl *ctl, u64 *offset, u64 *bytes,
 	for (node = &entry->offset_index; node; node = rb_next(node)) {
 		entry = rb_entry(node, struct btrfs_free_space, offset_index);
 		if (entry->bytes < *bytes) {
-			*max_extent_size = max(get_max_extent_size(entry),
-					       *max_extent_size);
+			gmb();
+			if (entry->bytes > *max_extent_size)
+				*max_extent_size = entry->bytes;
 			continue;
 		}
 
@@ -1831,8 +1819,8 @@ find_free_space(struct btrfs_free_space_ctl *ctl, u64 *offset, u64 *bytes,
 		}
 
 		if (entry->bytes < *bytes + align_off) {
-			*max_extent_size = max(get_max_extent_size(entry),
-					       *max_extent_size);
+			if (entry->bytes > *max_extent_size)
+				*max_extent_size = entry->bytes;
 			continue;
 		}
 
@@ -1844,10 +1832,8 @@ find_free_space(struct btrfs_free_space_ctl *ctl, u64 *offset, u64 *bytes,
 				*offset = tmp;
 				*bytes = size;
 				return entry;
-			} else {
-				*max_extent_size =
-					max(get_max_extent_size(entry),
-					    *max_extent_size);
+			} else if (size > *max_extent_size) {
+				*max_extent_size = size;
 			}
 			continue;
 		}
@@ -2002,7 +1988,7 @@ static bool use_bitmap(struct btrfs_free_space_ctl *ctl,
 		/*
 		 * If this block group has some small extents we don't want to
 		 * use up all of our free slots in the cache with them, we want
-		 * to reserve them to larger extents, however if we have plenty
+		 * to reserve them to larger extents, however if we have plent
 		 * of cache left then go ahead an dadd them, no sense in adding
 		 * the overhead of a bitmap if we don't have to.
 		 */
@@ -2130,7 +2116,7 @@ new_bitmap:
 		}
 
 		/* allocate the bitmap */
-		info->bitmap = kzalloc(PAGE_SIZE, GFP_NOFS);
+		info->bitmap = kzalloc(PAGE_CACHE_SIZE, GFP_NOFS);
 		spin_lock(&ctl->tree_lock);
 		if (!info->bitmap) {
 			ret = -ENOMEM;
@@ -2152,7 +2138,7 @@ out:
 static bool try_merge_free_space(struct btrfs_free_space_ctl *ctl,
 			  struct btrfs_free_space *info, bool update_stat)
 {
-	struct btrfs_free_space *left_info = NULL;
+	struct btrfs_free_space *left_info;
 	struct btrfs_free_space *right_info;
 	bool merged = false;
 	u64 offset = info->offset;
@@ -2167,7 +2153,7 @@ static bool try_merge_free_space(struct btrfs_free_space_ctl *ctl,
 	if (right_info && rb_prev(&right_info->offset_index))
 		left_info = rb_entry(rb_prev(&right_info->offset_index),
 				     struct btrfs_free_space, offset_index);
-	else if (!right_info)
+	else
 		left_info = tree_search_offset(ctl, offset - 1, 0, 0);
 
 	if (right_info && !right_info->bitmap) {
@@ -2317,8 +2303,7 @@ static void steal_from_bitmap(struct btrfs_free_space_ctl *ctl,
 	}
 }
 
-int __btrfs_add_free_space(struct btrfs_fs_info *fs_info,
-			   struct btrfs_free_space_ctl *ctl,
+int __btrfs_add_free_space(struct btrfs_free_space_ctl *ctl,
 			   u64 offset, u64 bytes)
 {
 	struct btrfs_free_space *info;
@@ -2365,7 +2350,7 @@ out:
 	spin_unlock(&ctl->tree_lock);
 
 	if (ret) {
-		btrfs_crit(fs_info, "unable to add free space :%d", ret);
+		printk(KERN_CRIT "BTRFS: unable to add free space :%d\n", ret);
 		ASSERT(ret != -EEXIST);
 	}
 
@@ -2470,7 +2455,6 @@ void btrfs_dump_free_space(struct btrfs_block_group_cache *block_group,
 	struct rb_node *n;
 	int count = 0;
 
-	spin_lock(&ctl->tree_lock);
 	for (n = rb_first(&ctl->free_space_offset); n; n = rb_next(n)) {
 		info = rb_entry(n, struct btrfs_free_space, offset_index);
 		if (info->bytes >= bytes && !block_group->ro)
@@ -2480,7 +2464,6 @@ void btrfs_dump_free_space(struct btrfs_block_group_cache *block_group,
 			   info->offset, info->bytes,
 		       (info->bitmap) ? "yes" : "no");
 	}
-	spin_unlock(&ctl->tree_lock);
 	btrfs_info(block_group->fs_info, "block group has cluster?: %s",
 	       list_empty(&block_group->cluster_list) ? "no" : "yes");
 	btrfs_info(block_group->fs_info,
@@ -2643,8 +2626,7 @@ out:
 	spin_unlock(&ctl->tree_lock);
 
 	if (align_gap_len)
-		__btrfs_add_free_space(block_group->fs_info, ctl,
-				       align_gap, align_gap_len);
+		__btrfs_add_free_space(ctl, align_gap, align_gap_len);
 	return ret;
 }
 
@@ -2708,8 +2690,8 @@ static u64 btrfs_alloc_from_bitmap(struct btrfs_block_group_cache *block_group,
 
 	err = search_bitmap(ctl, entry, &search_start, &search_bytes, true);
 	if (err) {
-		*max_extent_size = max(get_max_extent_size(entry),
-				       *max_extent_size);
+		if (search_bytes > *max_extent_size)
+			*max_extent_size = search_bytes;
 		return 0;
 	}
 
@@ -2746,9 +2728,8 @@ u64 btrfs_alloc_from_cluster(struct btrfs_block_group_cache *block_group,
 
 	entry = rb_entry(node, struct btrfs_free_space, offset_index);
 	while (1) {
-		if (entry->bytes < bytes)
-			*max_extent_size = max(get_max_extent_size(entry),
-					       *max_extent_size);
+		if (entry->bytes < bytes && entry->bytes > *max_extent_size)
+			*max_extent_size = entry->bytes;
 
 		if (entry->bytes < bytes ||
 		    (!entry->bitmap && entry->offset < min_start)) {
@@ -3604,7 +3585,7 @@ again:
 	}
 
 	if (!map) {
-		map = kzalloc(PAGE_SIZE, GFP_NOFS);
+		map = kzalloc(PAGE_CACHE_SIZE, GFP_NOFS);
 		if (!map) {
 			kmem_cache_free(btrfs_free_space_cachep, info);
 			return -ENOMEM;

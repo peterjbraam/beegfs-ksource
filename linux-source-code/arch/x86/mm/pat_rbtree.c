@@ -169,9 +169,9 @@ success:
 	return 0;
 
 failure:
-	pr_info("x86/PAT: %s:%d conflicting memory types %Lx-%Lx %s<->%s\n",
-		current->comm, current->pid, start, end,
-		cattr_name(found_type), cattr_name(match->type));
+	printk(KERN_INFO "%s:%d conflicting memory types "
+		"%Lx-%Lx %s<->%s\n", current->comm, current->pid, start,
+		end, cattr_name(found_type), cattr_name(match->type));
 	return -EBUSY;
 }
 
@@ -254,7 +254,9 @@ struct memtype *rbt_memtype_erase(u64 start, u64 end)
 
 struct memtype *rbt_memtype_lookup(u64 addr)
 {
-	return memtype_rb_lowest_match(&memtype_rbroot, addr, addr + PAGE_SIZE);
+	struct memtype *data;
+	data = memtype_rb_lowest_match(&memtype_rbroot, addr, addr + PAGE_SIZE);
+	return data;
 }
 
 #if defined(CONFIG_DEBUG_FS)

@@ -22,7 +22,6 @@ struct route_info {
 #include <net/flow.h>
 #include <net/ip6_fib.h>
 #include <net/sock.h>
-#include <net/lwtunnel.h>
 #include <linux/ip.h>
 #include <linux/ipv6.h>
 #include <linux/route.h>
@@ -33,7 +32,6 @@ struct route_info {
 #define RT6_LOOKUP_F_SRCPREF_TMP	0x00000008
 #define RT6_LOOKUP_F_SRCPREF_PUBLIC	0x00000010
 #define RT6_LOOKUP_F_SRCPREF_COA	0x00000020
-#define RT6_LOOKUP_F_IGNORE_LINKSTATE	0x00000040
 
 /* We do not (yet ?) support IPv6 jumbograms (RFC 2675)
  * Unlike IPv4, hdr->seg_len doesn't include the IPv6 header
@@ -65,25 +63,13 @@ static inline bool rt6_need_strict(const struct in6_addr *daddr)
 		(IPV6_ADDR_MULTICAST | IPV6_ADDR_LINKLOCAL | IPV6_ADDR_LOOPBACK);
 }
 
+
 void ip6_route_input(struct sk_buff *skb);
-struct dst_entry *ip6_route_input_lookup(struct net *net,
-					 struct net_device *dev,
-					 struct flowi6 *fl6, int flags);
 
-struct dst_entry *ip6_route_output_flags(struct net *net, const struct sock *sk,
-					 struct flowi6 *fl6, int flags);
-
-static inline struct dst_entry *ip6_route_output(struct net *net,
-						 const struct sock *sk,
-						 struct flowi6 *fl6)
-{
-	return ip6_route_output_flags(net, sk, fl6, 0);
-}
-
+struct dst_entry *ip6_route_output(struct net *net, const struct sock *sk,
+				   struct flowi6 *fl6);
 struct dst_entry *ip6_route_lookup(struct net *net, struct flowi6 *fl6,
 				   int flags);
-struct rt6_info *ip6_pol_route(struct net *net, struct fib6_table *table,
-			       int ifindex, struct flowi6 *fl6, int flags);
 
 void ip6_route_init_special_entries(void);
 int ip6_route_init(void);
@@ -95,23 +81,9 @@ int ip6_route_add(struct fib6_config *cfg);
 int ip6_ins_rt(struct rt6_info *);
 int ip6_del_rt(struct rt6_info *);
 
-static inline int ip6_route_get_saddr(struct net *net, struct rt6_info *rt,
-				      const struct in6_addr *daddr,
-				      unsigned int prefs,
-				      struct in6_addr *saddr)
-{
-	struct inet6_dev *idev =
-			rt ? ip6_dst_idev((struct dst_entry *)rt) : NULL;
-	int err = 0;
-
-	if (rt && rt->rt6i_prefsrc.plen)
-		*saddr = rt->rt6i_prefsrc.addr;
-	else
-		err = ipv6_dev_get_saddr(net, idev ? idev->dev : NULL,
-					 daddr, prefs, saddr);
-
-	return err;
-}
+int ip6_route_get_saddr(struct net *net, struct rt6_info *rt,
+			const struct in6_addr *daddr, unsigned int prefs,
+			struct in6_addr *saddr);
 
 struct rt6_info *rt6_lookup(struct net *net, const struct in6_addr *daddr,
 			    const struct in6_addr *saddr, int oif, int flags);
@@ -123,9 +95,6 @@ void fib6_force_start_gc(struct net *net);
 
 struct rt6_info *addrconf_dst_alloc(struct inet6_dev *idev,
 				    const struct in6_addr *addr, bool anycast);
-
-struct rt6_info *ip6_dst_alloc(struct net *net, struct net_device *dev,
-			       int flags);
 
 /*
  *	support functions for ND
@@ -195,12 +164,11 @@ static inline bool ipv6_anycast_destination(const struct dst_entry *dst,
 
 	return rt->rt6i_flags & RTF_ANYCAST ||
 		(rt->rt6i_dst.plen != 128 &&
-		 !(rt->rt6i_flags & (RTF_GATEWAY | RTF_NONEXTHOP)) &&
 		 ipv6_addr_equal(&rt->rt6i_dst.addr, daddr));
 }
 
-int ip6_fragment(struct net *net, struct sock *sk, struct sk_buff *skb,
-		 int (*output)(struct net *, struct sock *, struct sk_buff *));
+int ip6_fragment(struct sock *sk, struct sk_buff *skb,
+		 int (*output)(struct sock *, struct sk_buff *));
 
 static inline int ip6_skb_dst_mtu(struct sk_buff *skb)
 {
@@ -223,8 +191,8 @@ static inline bool ip6_sk_ignore_df(const struct sock *sk)
 	       inet6_sk(sk)->pmtudisc == IPV6_PMTUDISC_OMIT;
 }
 
-static inline struct in6_addr *rt6_nexthop(struct rt6_info *rt,
-					   struct in6_addr *daddr)
+static inline const struct in6_addr *rt6_nexthop(const struct rt6_info *rt,
+						 const struct in6_addr *daddr)
 {
 	if (rt->rt6i_flags & RTF_GATEWAY)
 		return &rt->rt6i_gateway;
@@ -234,11 +202,4 @@ static inline struct in6_addr *rt6_nexthop(struct rt6_info *rt,
 		return daddr;
 }
 
-static inline bool rt6_duplicate_nexthop(struct rt6_info *a, struct rt6_info *b)
-{
-	return a->dst.dev == b->dst.dev &&
-	       a->rt6i_idev == b->rt6i_idev &&
-	       ipv6_addr_equal(&a->rt6i_gateway, &b->rt6i_gateway) &&
-	       !lwtunnel_cmp_encap(a->dst.lwtstate, b->dst.lwtstate);
-}
 #endif

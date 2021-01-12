@@ -11,10 +11,11 @@
 #include <linux/export.h>
 #include <linux/kobject.h>
 #include <linux/string.h>
-#include <linux/pm-trace.h>
+#include <linux/resume-trace.h>
 #include <linux/workqueue.h>
 #include <linux/debugfs.h>
 #include <linux/seq_file.h>
+#include <linux/security.h>
 
 #include "power.h"
 
@@ -38,18 +39,11 @@ int unregister_pm_notifier(struct notifier_block *nb)
 }
 EXPORT_SYMBOL_GPL(unregister_pm_notifier);
 
-int __pm_notifier_call_chain(unsigned long val, int nr_to_call, int *nr_calls)
-{
-	int ret;
-
-	ret = __blocking_notifier_call_chain(&pm_chain_head, val, NULL,
-						nr_to_call, nr_calls);
-
-	return notifier_to_errno(ret);
-}
 int pm_notifier_call_chain(unsigned long val)
 {
-	return __pm_notifier_call_chain(val, -1, NULL);
+	int ret = blocking_notifier_call_chain(&pm_chain_head, val, NULL);
+
+	return notifier_to_errno(ret);
 }
 
 /* If set, devices may be suspended and resumed asynchronously. */
@@ -279,45 +273,35 @@ static inline void pm_print_times_init(void)
 {
 	pm_print_times_enabled = !!initcall_debug;
 }
-
-static ssize_t pm_wakeup_irq_show(struct kobject *kobj,
-					struct kobj_attribute *attr,
-					char *buf)
-{
-	return pm_wakeup_irq ? sprintf(buf, "%u\n", pm_wakeup_irq) : -ENODATA;
-}
-
-power_attr_ro(pm_wakeup_irq);
-
-#else /* !CONFIG_PM_SLEEP_DEBUG */
+#else /* !CONFIG_PP_SLEEP_DEBUG */
 static inline void pm_print_times_init(void) {}
 #endif /* CONFIG_PM_SLEEP_DEBUG */
 
 struct kobject *power_kobj;
 
 /**
- * state - control system sleep states.
+ *	state - control system power state.
  *
- * show() returns available sleep state labels, which may be "mem", "standby",
- * "freeze" and "disk" (hibernation).  See Documentation/power/states.txt for a
- * description of what they mean.
+ *	show() returns what states are supported, which is hard-coded to
+ *	'standby' (Power-On Suspend), 'mem' (Suspend-to-RAM), and
+ *	'disk' (Suspend-to-Disk).
  *
- * store() accepts one of those strings, translates it into the proper
- * enumerated value, and initiates a suspend transition.
+ *	store() accepts one of those strings, translates it into the
+ *	proper enumerated value, and initiates a suspend transition.
  */
 static ssize_t state_show(struct kobject *kobj, struct kobj_attribute *attr,
 			  char *buf)
 {
 	char *s = buf;
 #ifdef CONFIG_SUSPEND
-	suspend_state_t i;
+	int i;
 
-	for (i = PM_SUSPEND_MIN; i < PM_SUSPEND_MAX; i++)
-		if (pm_states[i])
+	for (i = 0; i < PM_SUSPEND_MAX; i++) {
+		if (pm_states[i] && valid_state(i))
 			s += sprintf(s,"%s ", pm_states[i]);
-
+	}
 #endif
-	if (hibernation_available())
+	if (get_securelevel() <= 0 && hibernation_available())
 		s += sprintf(s, "disk ");
 	if (s != buf)
 		/* convert the last space to a newline */
@@ -328,7 +312,8 @@ static ssize_t state_show(struct kobject *kobj, struct kobj_attribute *attr,
 static suspend_state_t decode_state(const char *buf, size_t n)
 {
 #ifdef CONFIG_SUSPEND
-	suspend_state_t state;
+	suspend_state_t state = PM_SUSPEND_MIN;
+	const char * const *s;
 #endif
 	char *p;
 	int len;
@@ -341,12 +326,9 @@ static suspend_state_t decode_state(const char *buf, size_t n)
 		return PM_SUSPEND_MAX;
 
 #ifdef CONFIG_SUSPEND
-	for (state = PM_SUSPEND_MIN; state < PM_SUSPEND_MAX; state++) {
-		const char *label = pm_states[state];
-
-		if (label && len == strlen(label) && !strncmp(buf, label, len))
+	for (s = &pm_states[state]; state < PM_SUSPEND_MAX; s++, state++)
+		if (*s && len == strlen(*s) && !strncmp(buf, *s, len))
 			return state;
-	}
 #endif
 
 	return PM_SUSPEND_ON;
@@ -464,8 +446,8 @@ static ssize_t autosleep_show(struct kobject *kobj,
 
 #ifdef CONFIG_SUSPEND
 	if (state < PM_SUSPEND_MAX)
-		return sprintf(buf, "%s\n", pm_states[state] ?
-					pm_states[state] : "error");
+		return sprintf(buf, "%s\n", valid_state(state) ?
+						pm_states[state] : "error");
 #endif
 #ifdef CONFIG_HIBERNATION
 	return sprintf(buf, "disk\n");
@@ -565,7 +547,14 @@ static ssize_t pm_trace_dev_match_show(struct kobject *kobj,
 	return show_trace_dev_match(buf, PAGE_SIZE);
 }
 
-power_attr_ro(pm_trace_dev_match);
+static ssize_t
+pm_trace_dev_match_store(struct kobject *kobj, struct kobj_attribute *attr,
+			 const char *buf, size_t n)
+{
+	return -EINVAL;
+}
+
+power_attr(pm_trace_dev_match);
 
 #endif /* CONFIG_PM_TRACE */
 
@@ -614,7 +603,6 @@ static struct attribute * g[] = {
 #endif
 #ifdef CONFIG_PM_SLEEP_DEBUG
 	&pm_print_times_attr.attr,
-	&pm_wakeup_irq_attr.attr,
 #endif
 #endif
 #ifdef CONFIG_FREEZER
@@ -644,7 +632,6 @@ static int __init pm_init(void)
 		return error;
 	hibernate_image_size_init();
 	hibernate_reserved_size_init();
-	pm_states_init();
 	power_kobj = kobject_create_and_add("power", NULL);
 	if (!power_kobj)
 		return -ENOMEM;

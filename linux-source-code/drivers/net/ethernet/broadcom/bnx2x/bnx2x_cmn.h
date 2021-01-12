@@ -488,14 +488,15 @@ netdev_tx_t bnx2x_start_xmit(struct sk_buff *skb, struct net_device *dev);
 
 /* setup_tc callback */
 int bnx2x_setup_tc(struct net_device *dev, u8 num_tc);
-int __bnx2x_setup_tc(struct net_device *dev, u32 handle, __be16 proto,
-		     struct tc_to_netdev *tc);
+int __bnx2x_setup_tc(struct net_device *dev, enum tc_setup_type type,
+		     void *type_data);
 
 int bnx2x_get_vf_config(struct net_device *dev, int vf,
 			struct ifla_vf_info *ivi);
 int bnx2x_set_vf_mac(struct net_device *dev, int queue, u8 *mac);
 int bnx2x_set_vf_vlan(struct net_device *netdev, int vf, u16 vlan, u8 qos,
 		      __be16 vlan_proto);
+int bnx2x_set_vf_spoofchk(struct net_device *dev, int idx, bool val);
 
 /* select_queue callback */
 u16 bnx2x_select_queue(struct net_device *dev, struct sk_buff *skb,
@@ -524,8 +525,8 @@ static inline void bnx2x_update_rx_prod(struct bnx2x *bp,
 	wmb();
 
 	for (i = 0; i < sizeof(rx_prods)/4; i++)
-		REG_WR(bp, fp->ustorm_rx_prods_offset + i*4,
-		       ((u32 *)&rx_prods)[i]);
+		REG_WR_RELAXED(bp, fp->ustorm_rx_prods_offset + i * 4,
+			       ((u32 *)&rx_prods)[i]);
 
 	mmiowb(); /* keep prod updates ordered */
 
@@ -1112,7 +1113,7 @@ static inline u8 bnx2x_get_path_func_num(struct bnx2x *bp)
 		for (i = 0; i < E1H_FUNC_MAX / 2; i++) {
 			u32 func_config =
 				MF_CFG_RD(bp,
-					  func_mf_config[BP_PATH(bp) + 2 * i].
+					  func_mf_config[BP_PORT(bp) + 2 * i].
 					  config);
 			func_num +=
 				((func_config & FUNC_MF_CFG_FUNC_HIDE) ? 0 : 1);

@@ -11,15 +11,19 @@
  */
 #define BSS_FIRST_SECTIONS *(.bss..swapper_pg_dir)
 
-/* Handle ro_after_init data on our own. */
-#define RO_AFTER_INIT_DATA
-
 #include <asm-generic/vmlinux.lds.h>
 
+#ifndef CONFIG_64BIT
+OUTPUT_FORMAT("elf32-s390", "elf32-s390", "elf32-s390")
+OUTPUT_ARCH(s390:31-bit)
+ENTRY(startup)
+jiffies = jiffies_64 + 4;
+#else
 OUTPUT_FORMAT("elf64-s390", "elf64-s390", "elf64-s390")
 OUTPUT_ARCH(s390:64-bit)
 ENTRY(startup)
 jiffies = jiffies_64;
+#endif
 
 PHDRS {
 	text PT_LOAD FLAGS(5);	/* R_E */
@@ -45,11 +49,11 @@ SECTIONS
 		LOCK_TEXT
 		KPROBES_TEXT
 		IRQENTRY_TEXT
-		SOFTIRQENTRY_TEXT
 		*(.fixup)
 		*(.gnu.warning)
 	} :text = 0x0700
 
+	. = ALIGN(PAGE_SIZE);
 	_etext = .;		/* End of text section */
 
 	NOTES :text :note
@@ -66,16 +70,7 @@ SECTIONS
 	_eshared = .;		/* End of shareable data */
 	_sdata = .;		/* Start of data section */
 
-	. = ALIGN(PAGE_SIZE);
-	__start_ro_after_init = .;
-	__start_data_ro_after_init = .;
-	.data..ro_after_init : {
-		 *(.data..ro_after_init)
-	}
-	__end_data_ro_after_init = .;
-	EXCEPTION_TABLE(16)
-	. = ALIGN(PAGE_SIZE);
-	__end_ro_after_init = .;
+	EXCEPTION_TABLE(16) :data
 
 	RW_DATA_SECTION(0x100, PAGE_SIZE, THREAD_SIZE)
 
@@ -85,7 +80,13 @@ SECTIONS
 	. = ALIGN(PAGE_SIZE);	/* Init code and data */
 	__init_begin = .;
 
-	INIT_TEXT_SECTION(PAGE_SIZE)
+	. = ALIGN(PAGE_SIZE);
+	.init.text : AT(ADDR(.init.text) - LOAD_OFFSET) {
+		VMLINUX_SYMBOL(_sinittext) = . ;
+		INIT_TEXT
+		. = ALIGN(PAGE_SIZE);
+		VMLINUX_SYMBOL(_einittext) = . ;
+	}
 
 	/*
 	 * .exit.text is discarded at runtime, not link time,

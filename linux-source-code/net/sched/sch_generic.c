@@ -29,6 +29,9 @@
 #include <net/sch_generic.h>
 #include <net/pkt_sched.h>
 #include <net/dst.h>
+#ifndef __GENKSYMS__
+#include <trace/events/qdisc.h>
+#endif
 
 /* Qdisc to use by default */
 const struct Qdisc_ops *default_qdisc_ops = &pfifo_fast_ops;
@@ -126,7 +129,7 @@ static struct sk_buff *dequeue_skb(struct Qdisc *q, bool *validate,
 			q->q.qlen--;
 		} else
 			skb = NULL;
-		return skb;
+		goto trace;
 	}
 	*validate = true;
 	skb = q->skb_bad_txq;
@@ -139,7 +142,8 @@ static struct sk_buff *dequeue_skb(struct Qdisc *q, bool *validate,
 			q->q.qlen--;
 			goto bulk;
 		}
-		return NULL;
+		skb = NULL;
+		goto trace;
 	}
 	if (!(q->flags & TCQ_F_ONETXQUEUE) ||
 	    !netif_xmit_frozen_or_stopped(txq))
@@ -151,7 +155,38 @@ bulk:
 		else
 			try_bulk_dequeue_skb_slow(q, skb, packets);
 	}
+trace:
+	trace_qdisc_dequeue(q, txq, *packets, skb);
 	return skb;
+}
+
+static inline int handle_dev_cpu_collision(struct sk_buff *skb,
+					   struct netdev_queue *dev_queue,
+					   struct Qdisc *q)
+{
+	int ret;
+
+	if (unlikely(dev_queue->xmit_lock_owner == smp_processor_id())) {
+		/*
+		 * Same CPU holding the lock. It may be a transient
+		 * configuration error, when hard_start_xmit() recurses. We
+		 * detect it by checking xmit owner and drop the packet when
+		 * deadloop is detected. Return OK to try the next skb.
+		 */
+		kfree_skb_list(skb);
+		net_warn_ratelimited("Dead loop on netdevice %s, fix it urgently!\n",
+				     dev_queue->dev->name);
+		ret = qdisc_qlen(q);
+	} else {
+		/*
+		 * Another cpu is holding lock, requeue & delay xmits for
+		 * some time.
+		 */
+		__this_cpu_inc(softnet_data.cpu_collision);
+		ret = dev_requeue_skb(skb, q);
+	}
+
+	return ret;
 }
 
 /*
@@ -191,6 +226,9 @@ int sch_direct_xmit(struct sk_buff *skb, struct Qdisc *q,
 	if (dev_xmit_complete(ret)) {
 		/* Driver sent out skb successfully or skb was consumed */
 		ret = qdisc_qlen(q);
+	} else if (ret == NETDEV_TX_LOCKED) {
+		/* Driver try lock failed */
+		ret = handle_dev_cpu_collision(skb, txq, q);
 	} else {
 		/* Driver returned NETDEV_TX_BUSY - requeue skb */
 		if (unlikely(ret != NETDEV_TX_BUSY))
@@ -247,7 +285,7 @@ static inline int qdisc_restart(struct Qdisc *q, int *packets)
 
 void __qdisc_run(struct Qdisc *q)
 {
-	int quota = weight_p;
+	int quota = dev_tx_weight;
 	int packets;
 
 	while (qdisc_restart(q, &packets)) {
@@ -279,6 +317,8 @@ unsigned long dev_trans_start(struct net_device *dev)
 		if (val && time_after(val, res))
 			res = val;
 	}
+	/* RHEL - update deprecated trans_start for old binary modules */
+	dev->rh_reserved_trans_start = res;
 
 	return res;
 }
@@ -337,7 +377,6 @@ void __netdev_watchdog_up(struct net_device *dev)
 			dev_hold(dev);
 	}
 }
-EXPORT_SYMBOL_GPL(__netdev_watchdog_up);
 
 static void dev_watchdog_up(struct net_device *dev)
 {
@@ -591,7 +630,6 @@ struct Qdisc_ops pfifo_fast_ops __read_mostly = {
 EXPORT_SYMBOL(pfifo_fast_ops);
 
 static struct lock_class_key qdisc_tx_busylock;
-static struct lock_class_key qdisc_running_key;
 
 struct Qdisc *qdisc_alloc(struct netdev_queue *dev_queue,
 			  const struct Qdisc_ops *ops)
@@ -600,8 +638,14 @@ struct Qdisc *qdisc_alloc(struct netdev_queue *dev_queue,
 	struct Qdisc *sch;
 	unsigned int size = QDISC_ALIGN(sizeof(*sch)) + ops->priv_size;
 	int err = -ENOBUFS;
-	struct net_device *dev = dev_queue->dev;
+	struct net_device *dev;
 
+	if (!dev_queue) {
+		err = -EINVAL;
+		goto errout;
+	}
+
+	dev = dev_queue->dev;
 	p = kzalloc_node(size, GFP_KERNEL,
 			 netdev_queue_numa_node_read(dev_queue));
 
@@ -621,15 +665,27 @@ struct Qdisc *qdisc_alloc(struct netdev_queue *dev_queue,
 	qdisc_skb_head_init(&sch->q);
 	spin_lock_init(&sch->q.lock);
 
+	if (ops->static_flags & TCQ_F_CPUSTATS) {
+		sch->cpu_bstats =
+			netdev_alloc_pcpu_stats(struct gnet_stats_basic_cpu);
+		if (!sch->cpu_bstats)
+			goto errout1;
+
+		sch->cpu_qstats = alloc_percpu(struct gnet_stats_queue);
+		if (!sch->cpu_qstats) {
+			free_percpu(sch->cpu_bstats);
+			goto errout1;
+		}
+	}
+
 	spin_lock_init(&sch->busylock);
 	lockdep_set_class(&sch->busylock,
 			  dev->qdisc_tx_busylock ?: &qdisc_tx_busylock);
 
 	seqcount_init(&sch->running);
-	lockdep_set_class(&sch->running,
-			  dev->qdisc_running_key ?: &qdisc_running_key);
 
 	sch->ops = ops;
+	sch->flags = ops->static_flags;
 	sch->enqueue = ops->enqueue;
 	sch->dequeue = ops->dequeue;
 	sch->dev_queue = dev_queue;
@@ -637,6 +693,8 @@ struct Qdisc *qdisc_alloc(struct netdev_queue *dev_queue,
 	atomic_set(&sch->refcnt, 1);
 
 	return sch;
+errout1:
+	kfree(p);
 errout:
 	return ERR_PTR(err);
 }
@@ -686,10 +744,8 @@ void qdisc_reset(struct Qdisc *qdisc)
 }
 EXPORT_SYMBOL(qdisc_reset);
 
-static void qdisc_rcu_free(struct rcu_head *head)
+void qdisc_free(struct Qdisc *qdisc)
 {
-	struct Qdisc *qdisc = container_of(head, struct Qdisc, rcu_head);
-
 	if (qdisc_is_percpu_stats(qdisc)) {
 		free_percpu(qdisc->cpu_bstats);
 		free_percpu(qdisc->cpu_qstats);
@@ -700,11 +756,7 @@ static void qdisc_rcu_free(struct rcu_head *head)
 
 void qdisc_destroy(struct Qdisc *qdisc)
 {
-	const struct Qdisc_ops *ops;
-
-	if (!qdisc)
-		return;
-	ops = qdisc->ops;
+	const struct Qdisc_ops  *ops = qdisc->ops;
 
 	if (qdisc->flags & TCQ_F_BUILTIN ||
 	    !atomic_dec_and_test(&qdisc->refcnt))
@@ -715,7 +767,7 @@ void qdisc_destroy(struct Qdisc *qdisc)
 
 	qdisc_put_stab(rtnl_dereference(qdisc->stab));
 #endif
-	gen_kill_estimator(&qdisc->bstats, &qdisc->rate_est);
+	gen_kill_estimator(&qdisc->rate_est);
 	if (ops->reset)
 		ops->reset(qdisc);
 	if (ops->destroy)
@@ -726,11 +778,7 @@ void qdisc_destroy(struct Qdisc *qdisc)
 
 	kfree_skb_list(qdisc->gso_skb);
 	kfree_skb(qdisc->skb_bad_txq);
-	/*
-	 * gen_estimator est_timer() might access qdisc->q.lock,
-	 * wait a RCU grace period before freeing qdisc.
-	 */
-	call_rcu(&qdisc->rcu_head, qdisc_rcu_free);
+	qdisc_free(qdisc);
 }
 EXPORT_SYMBOL(qdisc_destroy);
 
@@ -791,7 +839,7 @@ static void attach_default_qdiscs(struct net_device *dev)
 	    dev->priv_flags & IFF_NO_QUEUE) {
 		netdev_for_each_tx_queue(dev, attach_one_default_qdisc, NULL);
 		dev->qdisc = txq->qdisc_sleeping;
-		atomic_inc(&dev->qdisc->refcnt);
+		qdisc_refcount_inc(dev->qdisc);
 	} else {
 		qdisc = qdisc_create_dflt(txq, &mq_qdisc_ops, TC_H_ROOT);
 		if (qdisc) {
@@ -800,8 +848,8 @@ static void attach_default_qdiscs(struct net_device *dev)
 		}
 	}
 #ifdef CONFIG_NET_SCHED
-	if (dev->qdisc)
-		qdisc_hash_add(dev->qdisc);
+	if (dev->qdisc != &noop_qdisc)
+		qdisc_hash_add(dev->qdisc, false);
 #endif
 }
 
@@ -1025,3 +1073,51 @@ void psched_ratecfg_precompute(struct psched_ratecfg *r,
 	}
 }
 EXPORT_SYMBOL(psched_ratecfg_precompute);
+
+static void mini_qdisc_rcu_func(struct rcu_head *head)
+{
+}
+
+void mini_qdisc_pair_swap(struct mini_Qdisc_pair *miniqp,
+			  struct tcf_proto *tp_head)
+{
+	struct mini_Qdisc *miniq_old = rtnl_dereference(*miniqp->p_miniq);
+	struct mini_Qdisc *miniq;
+
+	if (!tp_head) {
+		RCU_INIT_POINTER(*miniqp->p_miniq, NULL);
+		/* Wait for flying RCU callback before it is freed. */
+		rcu_barrier_bh();
+		return;
+	}
+
+	miniq = !miniq_old || miniq_old == &miniqp->miniq2 ?
+		&miniqp->miniq1 : &miniqp->miniq2;
+
+	/* We need to make sure that readers won't see the miniq
+	 * we are about to modify. So wait until previous call_rcu_bh callback
+	 * is done.
+	 */
+	rcu_barrier_bh();
+	miniq->filter_list = tp_head;
+	rcu_assign_pointer(*miniqp->p_miniq, miniq);
+
+	if (miniq_old)
+		/* This is counterpart of the rcu barriers above. We need to
+		 * block potential new user of miniq_old until all readers
+		 * are not seeing it.
+		 */
+		call_rcu_bh(&miniq_old->rcu, mini_qdisc_rcu_func);
+}
+EXPORT_SYMBOL(mini_qdisc_pair_swap);
+
+void mini_qdisc_pair_init(struct mini_Qdisc_pair *miniqp, struct Qdisc *qdisc,
+			  struct mini_Qdisc __rcu **p_miniq)
+{
+	miniqp->miniq1.cpu_bstats = qdisc->cpu_bstats;
+	miniqp->miniq1.cpu_qstats = qdisc->cpu_qstats;
+	miniqp->miniq2.cpu_bstats = qdisc->cpu_bstats;
+	miniqp->miniq2.cpu_qstats = qdisc->cpu_qstats;
+	miniqp->p_miniq = p_miniq;
+}
+EXPORT_SYMBOL(mini_qdisc_pair_init);

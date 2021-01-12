@@ -3,7 +3,18 @@
 
 struct target_core_fabric_ops {
 	struct module *module;
-	const char *name;
+	/*
+	 * XXX: Special case for iscsi/iSCSI...
+	 * If non-null, fabric_alias is used for matching target/$fabric
+	 * ConfigFS paths. If null, fabric_name is used for this (see below).
+	 */
+	const char *fabric_alias;
+	/*
+	 * fabric_name is used for matching target/$fabric ConfigFS paths
+	 * without a fabric_alias (see above). It's also used for the ALUA state
+	 * path and is stored on disk with PR state.
+	 */
+	const char *fabric_name;
 	size_t node_acl_size;
 	/*
 	 * Limits number of scatterlist entries per SCF_SCSI_DATA_CDB payload.
@@ -18,7 +29,6 @@ struct target_core_fabric_ops {
 	 * XXX: Currently assumes single PAGE_SIZE per scatterlist entry
 	 */
 	u32 max_data_sg_nents;
-	char *(*get_fabric_name)(void);
 	char *(*tpg_get_wwn)(struct se_portal_group *);
 	u16 (*tpg_get_tag)(struct se_portal_group *);
 	u32 (*tpg_get_default_depth)(struct se_portal_group *);
@@ -43,13 +53,17 @@ struct target_core_fabric_ops {
 	u32 (*tpg_get_inst_index)(struct se_portal_group *);
 	/*
 	 * Optional to release struct se_cmd and fabric dependent allocated
-	 * I/O descriptor in transport_cmd_check_stop().
+	 * I/O descriptor after command execution has finished.
 	 *
 	 * Returning 1 will signal a descriptor has been released.
 	 * Returning 0 will signal a descriptor has not been released.
 	 */
 	int (*check_stop_free)(struct se_cmd *);
 	void (*release_cmd)(struct se_cmd *);
+	/*
+	 * Called with spin_lock_bh(struct se_portal_group->session_lock held.
+	 */
+	int (*shutdown_session)(struct se_session *);
 	void (*close_session)(struct se_session *);
 	u32 (*sess_get_index)(struct se_session *);
 	/*
@@ -104,11 +118,12 @@ void target_unregister_template(const struct target_core_fabric_ops *fo);
 int target_depend_item(struct config_item *item);
 void target_undepend_item(struct config_item *item);
 
-struct se_session *target_alloc_session(struct se_portal_group *,
+struct se_session *target_setup_session(struct se_portal_group *,
 		unsigned int, unsigned int, enum target_prot_op prot_op,
 		const char *, void *,
 		int (*callback)(struct se_portal_group *,
 				struct se_session *, void *));
+void target_remove_session(struct se_session *);
 
 struct se_session *transport_init_session(enum target_prot_op);
 int transport_alloc_session_tags(struct se_session *, unsigned int,
@@ -119,6 +134,8 @@ void	__transport_register_session(struct se_portal_group *,
 		struct se_node_acl *, struct se_session *, void *);
 void	transport_register_session(struct se_portal_group *,
 		struct se_node_acl *, struct se_session *, void *);
+int	target_get_session(struct se_session *);
+void	target_put_session(struct se_session *);
 ssize_t	target_show_dynamic_sessions(struct se_portal_group *, char *);
 void	transport_free_session(struct se_session *);
 void	target_put_nacl(struct se_node_acl *);
@@ -156,6 +173,7 @@ int	target_get_sess_cmd(struct se_cmd *, bool);
 int	target_put_sess_cmd(struct se_cmd *);
 void	target_sess_cmd_list_set_waiting(struct se_session *);
 void	target_wait_for_sess_cmds(struct se_session *);
+void	target_show_cmd(const char *pfx, struct se_cmd *cmd);
 
 int	core_alua_check_nonop_delay(struct se_cmd *);
 

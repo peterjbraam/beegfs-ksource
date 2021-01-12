@@ -7,8 +7,6 @@
  * of the GNU General Public License version 2.
  */
 
-#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
-
 #include <linux/sched.h>
 #include <linux/spinlock.h>
 #include <linux/completion.h>
@@ -96,16 +94,13 @@ static ssize_t freeze_show(struct gfs2_sbd *sdp, char *buf)
 	struct super_block *sb = sdp->sd_vfs;
 	int frozen = (sb->s_writers.frozen == SB_UNFROZEN) ? 0 : 1;
 
-	return snprintf(buf, PAGE_SIZE, "%d\n", frozen);
+	return snprintf(buf, PAGE_SIZE, "%u\n", frozen);
 }
 
 static ssize_t freeze_store(struct gfs2_sbd *sdp, const char *buf, size_t len)
 {
-	int error, n;
-
-	error = kstrtoint(buf, 0, &n);
-	if (error)
-		return error;
+	int error;
+	int n = simple_strtol(buf, NULL, 0);
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
@@ -137,36 +132,25 @@ static ssize_t withdraw_show(struct gfs2_sbd *sdp, char *buf)
 
 static ssize_t withdraw_store(struct gfs2_sbd *sdp, const char *buf, size_t len)
 {
-	int error, val;
-
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
-	error = kstrtoint(buf, 0, &val);
-	if (error)
-		return error;
-
-	if (val != 1)
+	if (simple_strtol(buf, NULL, 0) != 1)
 		return -EINVAL;
 
-	gfs2_lm_withdraw(sdp, "withdrawing from cluster at user's request\n");
-
+	gfs2_lm_withdraw(sdp,
+		"GFS2: fsid=%s: withdrawing from cluster at user's request\n",
+		sdp->sd_fsname);
 	return len;
 }
 
 static ssize_t statfs_sync_store(struct gfs2_sbd *sdp, const char *buf,
 				 size_t len)
 {
-	int error, val;
-
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
-	error = kstrtoint(buf, 0, &val);
-	if (error)
-		return error;
-
-	if (val != 1)
+	if (simple_strtol(buf, NULL, 0) != 1)
 		return -EINVAL;
 
 	gfs2_statfs_sync(sdp->sd_vfs, 0);
@@ -176,16 +160,10 @@ static ssize_t statfs_sync_store(struct gfs2_sbd *sdp, const char *buf,
 static ssize_t quota_sync_store(struct gfs2_sbd *sdp, const char *buf,
 				size_t len)
 {
-	int error, val;
-
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
-	error = kstrtoint(buf, 0, &val);
-	if (error)
-		return error;
-
-	if (val != 1)
+	if (simple_strtol(buf, NULL, 0) != 1)
 		return -EINVAL;
 
 	gfs2_quota_sync(sdp->sd_vfs, 0);
@@ -202,9 +180,7 @@ static ssize_t quota_refresh_user_store(struct gfs2_sbd *sdp, const char *buf,
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
-	error = kstrtou32(buf, 0, &id);
-	if (error)
-		return error;
+	id = simple_strtoul(buf, NULL, 0);
 
 	qid = make_kqid(current_user_ns(), USRQUOTA, id);
 	if (!qid_valid(qid))
@@ -224,9 +200,7 @@ static ssize_t quota_refresh_group_store(struct gfs2_sbd *sdp, const char *buf,
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
-	error = kstrtou32(buf, 0, &id);
-	if (error)
-		return error;
+	id = simple_strtoul(buf, NULL, 0);
 
 	qid = make_kqid(current_user_ns(), GRPQUOTA, id);
 	if (!qid_valid(qid))
@@ -265,8 +239,8 @@ static ssize_t demote_rq_store(struct gfs2_sbd *sdp, const char *buf, size_t len
 
 	if (gltype > LM_TYPE_JOURNAL)
 		return -EINVAL;
-	if (gltype == LM_TYPE_NONDISK && glnum == GFS2_FREEZE_LOCK)
-		glops = &gfs2_freeze_glops;
+	if (gltype == LM_TYPE_NONDISK && glnum == GFS2_TRANS_LOCK)
+		glops = &gfs2_trans_glops;
 	else
 		glops = gfs2_glops_list[gltype];
 	if (glops == NULL)
@@ -314,7 +288,7 @@ static void gfs2_sbd_release(struct kobject *kobj)
 {
 	struct gfs2_sbd *sdp = container_of(kobj, struct gfs2_sbd, sd_kobj);
 
-	kfree(sdp);
+	free_sbd(sdp);
 }
 
 static struct kobj_type gfs2_ktype = {
@@ -349,22 +323,21 @@ static ssize_t block_show(struct gfs2_sbd *sdp, char *buf)
 static ssize_t block_store(struct gfs2_sbd *sdp, const char *buf, size_t len)
 {
 	struct lm_lockstruct *ls = &sdp->sd_lockstruct;
-	int ret, val;
+	ssize_t ret = len;
+	int val;
 
-	ret = kstrtoint(buf, 0, &val);
-	if (ret)
-		return ret;
+	val = simple_strtol(buf, NULL, 0);
 
 	if (val == 1)
 		set_bit(DFL_BLOCK_LOCKS, &ls->ls_recover_flags);
 	else if (val == 0) {
 		clear_bit(DFL_BLOCK_LOCKS, &ls->ls_recover_flags);
-		smp_mb__after_atomic();
+		smp_mb__after_clear_bit();
 		gfs2_glock_thaw(sdp);
 	} else {
-		return -EINVAL;
+		ret = -EINVAL;
 	}
-	return len;
+	return ret;
 }
 
 static ssize_t wdack_show(struct gfs2_sbd *sdp, char *buf)
@@ -376,18 +349,17 @@ static ssize_t wdack_show(struct gfs2_sbd *sdp, char *buf)
 
 static ssize_t wdack_store(struct gfs2_sbd *sdp, const char *buf, size_t len)
 {
-	int ret, val;
+	ssize_t ret = len;
+	int val;
 
-	ret = kstrtoint(buf, 0, &val);
-	if (ret)
-		return ret;
+	val = simple_strtol(buf, NULL, 0);
 
 	if ((val == 1) &&
 	    !strcmp(sdp->sd_lockstruct.ls_ops->lm_proto_name, "lock_dlm"))
 		complete(&sdp->sd_wdack);
 	else
-		return -EINVAL;
-	return len;
+		ret = -EINVAL;
+	return ret;
 }
 
 static ssize_t lkfirst_show(struct gfs2_sbd *sdp, char *buf)
@@ -439,11 +411,18 @@ int gfs2_recover_set(struct gfs2_sbd *sdp, unsigned jid)
 
 	spin_lock(&sdp->sd_jindex_spin);
 	rv = -EBUSY;
-	if (sdp->sd_jdesc->jd_jid == jid)
+	/**
+	 * If we're a spectator, we use journal0, but it's not really ours.
+	 * So we need to wait for its recovery too. If we skip it we'd never
+	 * queue work to the recovery workqueue, and so its completion would
+	 * never clear the DFL_BLOCK_LOCKS flag, so all our locks would
+	 * permanently stop working.
+	 */
+	if (sdp->sd_jdesc->jd_jid == jid && !sdp->sd_args.ar_spectator)
 		goto out;
 	rv = -ENOENT;
 	list_for_each_entry(jd, &sdp->sd_jindex_list, jd_list) {
-		if (jd->jd_jid != jid)
+		if (jd->jd_jid != jid && !sdp->sd_args.ar_spectator)
 			continue;
 		rv = gfs2_recover_journal(jd, false);
 		break;
@@ -512,7 +491,7 @@ static ssize_t jid_store(struct gfs2_sbd *sdp, const char *buf, size_t len)
 		rv = jid = -EINVAL;
 	sdp->sd_lockstruct.ls_jid = jid;
 	clear_bit(SDF_NOJOURNALID, &sdp->sd_flags);
-	smp_mb__after_atomic();
+	smp_mb__after_clear_bit();
 	wake_up_bit(&sdp->sd_flags, SDF_NOJOURNALID);
 out:
 	spin_unlock(&sdp->sd_jindex_spin);
@@ -580,14 +559,11 @@ static ssize_t tune_set(struct gfs2_sbd *sdp, unsigned int *field,
 {
 	struct gfs2_tune *gt = &sdp->sd_tune;
 	unsigned int x;
-	int error;
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
-	error = kstrtouint(buf, 0, &x);
-	if (error)
-		return error;
+	x = simple_strtoul(buf, NULL, 0);
 
 	if (check_zero && !x)
 		return -EINVAL;
@@ -688,7 +664,6 @@ fail_lock_module:
 fail_tune:
 	sysfs_remove_group(&sdp->sd_kobj, &tune_group);
 fail_reg:
-	free_percpu(sdp->sd_lkstats);
 	fs_err(sdp, "error %d adding sysfs files", error);
 	if (sysfs_frees_sdp)
 		kobject_put(&sdp->sd_kobj);

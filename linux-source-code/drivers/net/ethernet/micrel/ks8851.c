@@ -23,11 +23,8 @@
 #include <linux/crc32.h>
 #include <linux/mii.h>
 #include <linux/eeprom_93cx6.h>
-#include <linux/regulator/consumer.h>
 
 #include <linux/spi/spi.h>
-#include <linux/gpio.h>
-#include <linux/of_gpio.h>
 
 #include "ks8851.h"
 
@@ -86,9 +83,6 @@ union ks8851_tx_hdr {
  * @rc_rxqcr: Cached copy of KS_RXQCR.
  * @eeprom_size: Companion eeprom size in Bytes, 0 if no eeprom
  * @eeprom: 93CX6 EEPROM state for accessing on-board EEPROM.
- * @vdd_reg:	Optional regulator supplying the chip
- * @vdd_io: Optional digital power supply for IO
- * @gpio: Optional reset_n gpio
  *
  * The @lock ensures that the chip is protected when certain operations are
  * in progress. When the read or write packet transfer is in progress, most
@@ -136,9 +130,6 @@ struct ks8851_net {
 	struct spi_transfer	spi_xfer2[2];
 
 	struct eeprom_93cx6	eeprom;
-	struct regulator	*vdd_reg;
-	struct regulator	*vdd_io;
-	int			gpio;
 };
 
 static int msg_enable;
@@ -547,8 +538,9 @@ static void ks8851_rx_pkts(struct ks8851_net *ks)
 		/* set dma read address */
 		ks8851_wrreg16(ks, KS_RXFDPR, RXFDPR_RXFPAI | 0x00);
 
-		/* start DMA access */
-		ks8851_wrreg16(ks, KS_RXQCR, ks->rc_rxqcr | RXQCR_SDA);
+		/* start the packet dma process, and set auto-dequeue rx */
+		ks8851_wrreg16(ks, KS_RXQCR,
+			       ks->rc_rxqcr | RXQCR_SDA | RXQCR_ADRFE);
 
 		if (rxlen > 4) {
 			unsigned int rxalign;
@@ -579,8 +571,7 @@ static void ks8851_rx_pkts(struct ks8851_net *ks)
 			}
 		}
 
-		/* end DMA access and dequeue packet */
-		ks8851_wrreg16(ks, KS_RXQCR, ks->rc_rxqcr | RXQCR_RRXEF);
+		ks8851_wrreg16(ks, KS_RXQCR, ks->rc_rxqcr);
 	}
 }
 
@@ -797,15 +788,6 @@ static void ks8851_tx_work(struct work_struct *work)
 static int ks8851_net_open(struct net_device *dev)
 {
 	struct ks8851_net *ks = netdev_priv(dev);
-	int ret;
-
-	ret = request_threaded_irq(dev->irq, NULL, ks8851_irq,
-				   IRQF_TRIGGER_LOW | IRQF_ONESHOT,
-				   dev->name, ks);
-	if (ret < 0) {
-		netdev_err(dev, "failed to get irq\n");
-		return ret;
-	}
 
 	/* lock the card, even if we may not actually be doing anything
 	 * else at the moment */
@@ -870,7 +852,6 @@ static int ks8851_net_open(struct net_device *dev)
 	netif_dbg(ks, ifup, ks->netdev, "network device up\n");
 
 	mutex_unlock(&ks->lock);
-	mii_check_link(&ks->mii);
 	return 0;
 }
 
@@ -920,8 +901,6 @@ static int ks8851_net_stop(struct net_device *dev)
 
 		dev_kfree_skb(txb);
 	}
-
-	free_irq(dev->irq, ks);
 
 	return 0;
 }
@@ -1422,7 +1401,6 @@ static int ks8851_probe(struct spi_device *spi)
 	struct ks8851_net *ks;
 	int ret;
 	unsigned cider;
-	int gpio;
 
 	ndev = alloc_etherdev(sizeof(struct ks8851_net));
 	if (!ndev)
@@ -1435,54 +1413,6 @@ static int ks8851_probe(struct spi_device *spi)
 	ks->netdev = ndev;
 	ks->spidev = spi;
 	ks->tx_space = 6144;
-
-	gpio = of_get_named_gpio_flags(spi->dev.of_node, "reset-gpios",
-				       0, NULL);
-	if (gpio == -EPROBE_DEFER) {
-		ret = gpio;
-		goto err_gpio;
-	}
-
-	ks->gpio = gpio;
-	if (gpio_is_valid(gpio)) {
-		ret = devm_gpio_request_one(&spi->dev, gpio,
-					    GPIOF_OUT_INIT_LOW, "ks8851_rst_n");
-		if (ret) {
-			dev_err(&spi->dev, "reset gpio request failed\n");
-			goto err_gpio;
-		}
-	}
-
-	ks->vdd_io = devm_regulator_get(&spi->dev, "vdd-io");
-	if (IS_ERR(ks->vdd_io)) {
-		ret = PTR_ERR(ks->vdd_io);
-		goto err_reg_io;
-	}
-
-	ret = regulator_enable(ks->vdd_io);
-	if (ret) {
-		dev_err(&spi->dev, "regulator vdd_io enable fail: %d\n",
-			ret);
-		goto err_reg_io;
-	}
-
-	ks->vdd_reg = devm_regulator_get(&spi->dev, "vdd");
-	if (IS_ERR(ks->vdd_reg)) {
-		ret = PTR_ERR(ks->vdd_reg);
-		goto err_reg;
-	}
-
-	ret = regulator_enable(ks->vdd_reg);
-	if (ret) {
-		dev_err(&spi->dev, "regulator vdd enable fail: %d\n",
-			ret);
-		goto err_reg;
-	}
-
-	if (gpio_is_valid(gpio)) {
-		usleep_range(10000, 11000);
-		gpio_set_value(gpio, 1);
-	}
 
 	mutex_init(&ks->lock);
 	spin_lock_init(&ks->statelock);
@@ -1523,12 +1453,11 @@ static int ks8851_probe(struct spi_device *spi)
 
 	skb_queue_head_init(&ks->txq);
 
-	ndev->ethtool_ops = &ks8851_ethtool_ops;
+	SET_ETHTOOL_OPS(ndev, &ks8851_ethtool_ops);
 	SET_NETDEV_DEV(ndev, &spi->dev);
 
 	spi_set_drvdata(spi, ks);
 
-	netif_carrier_off(ks->netdev);
 	ndev->if_port = IF_PORT_100BASET;
 	ndev->netdev_ops = &ks8851_netdev_ops;
 	ndev->irq = spi->irq;
@@ -1555,6 +1484,14 @@ static int ks8851_probe(struct spi_device *spi)
 	ks8851_read_selftest(ks);
 	ks8851_init_mac(ks);
 
+	ret = request_threaded_irq(spi->irq, NULL, ks8851_irq,
+				   IRQF_TRIGGER_LOW | IRQF_ONESHOT,
+				   ndev->name, ks);
+	if (ret < 0) {
+		dev_err(&spi->dev, "failed to get irq\n");
+		goto err_irq;
+	}
+
 	ret = register_netdev(ndev);
 	if (ret) {
 		dev_err(&spi->dev, "failed to register network device\n");
@@ -1567,15 +1504,12 @@ static int ks8851_probe(struct spi_device *spi)
 
 	return 0;
 
+
 err_netdev:
+	free_irq(ndev->irq, ks);
+
 err_id:
-	if (gpio_is_valid(gpio))
-		gpio_set_value(gpio, 0);
-	regulator_disable(ks->vdd_reg);
-err_reg:
-	regulator_disable(ks->vdd_io);
-err_reg_io:
-err_gpio:
+err_irq:
 	free_netdev(ndev);
 	return ret;
 }
@@ -1588,25 +1522,16 @@ static int ks8851_remove(struct spi_device *spi)
 		dev_info(&spi->dev, "remove\n");
 
 	unregister_netdev(priv->netdev);
-	if (gpio_is_valid(priv->gpio))
-		gpio_set_value(priv->gpio, 0);
-	regulator_disable(priv->vdd_reg);
-	regulator_disable(priv->vdd_io);
+	free_irq(spi->irq, priv);
 	free_netdev(priv->netdev);
 
 	return 0;
 }
 
-static const struct of_device_id ks8851_match_table[] = {
-	{ .compatible = "micrel,ks8851" },
-	{ }
-};
-MODULE_DEVICE_TABLE(of, ks8851_match_table);
-
 static struct spi_driver ks8851_driver = {
 	.driver = {
 		.name = "ks8851",
-		.of_match_table = ks8851_match_table,
+		.owner = THIS_MODULE,
 		.pm = &ks8851_pm_ops,
 	},
 	.probe = ks8851_probe,

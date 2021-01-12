@@ -26,10 +26,11 @@
 #include <linux/mm.h>
 #include <linux/interrupt.h>
 #include <linux/highmem.h>
-#include <linux/extable.h>
+#include <linux/module.h>
 #include <linux/kprobes.h>
 #include <linux/kdebug.h>
 #include <linux/perf_event.h>
+#include <linux/magic.h>
 #include <linux/ratelimit.h>
 #include <linux/context_tracking.h>
 #include <linux/hugetlb.h>
@@ -43,6 +44,7 @@
 #include <asm/tlbflush.h>
 #include <asm/siginfo.h>
 #include <asm/debug.h>
+#include <mm/mmu_decl.h>
 
 #include "icswx.h"
 
@@ -121,29 +123,29 @@ static int do_sigbus(struct pt_regs *regs, unsigned long address,
 
 	up_read(&current->mm->mmap_sem);
 
-	if (!user_mode(regs))
-		return MM_FAULT_ERR(SIGBUS);
-
-	current->thread.trap_nr = BUS_ADRERR;
-	info.si_signo = SIGBUS;
-	info.si_errno = 0;
-	info.si_code = BUS_ADRERR;
-	info.si_addr = (void __user *)address;
+	if (user_mode(regs)) {
+		current->thread.trap_nr = BUS_ADRERR;
+		info.si_signo = SIGBUS;
+		info.si_errno = 0;
+		info.si_code = BUS_ADRERR;
+		info.si_addr = (void __user *)address;
 #ifdef CONFIG_MEMORY_FAILURE
-	if (fault & (VM_FAULT_HWPOISON|VM_FAULT_HWPOISON_LARGE)) {
-		pr_err("MCE: Killing %s:%d due to hardware memory corruption fault at %lx\n",
-			current->comm, current->pid, address);
-		info.si_code = BUS_MCEERR_AR;
-	}
+		if (fault & (VM_FAULT_HWPOISON|VM_FAULT_HWPOISON_LARGE)) {
+			pr_err("MCE: Killing %s:%d due to hardware memory corruption fault at %lx\n",
+				current->comm, current->pid, address);
+			info.si_code = BUS_MCEERR_AR;
+		}
 
-	if (fault & VM_FAULT_HWPOISON_LARGE)
-		lsb = hstate_index_to_shift(VM_FAULT_GET_HINDEX(fault));
-	if (fault & VM_FAULT_HWPOISON)
-		lsb = PAGE_SHIFT;
+		if (fault & VM_FAULT_HWPOISON_LARGE)
+			lsb = hstate_index_to_shift(VM_FAULT_GET_HINDEX(fault));
+		if (fault & VM_FAULT_HWPOISON)
+			lsb = PAGE_SHIFT;
 #endif
-	info.si_addr_lsb = lsb;
-	force_sig_info(SIGBUS, &info, current);
-	return MM_FAULT_RETURN;
+		info.si_addr_lsb = lsb;
+		force_sig_info(SIGBUS, &info, current);
+		return MM_FAULT_RETURN;
+	}
+	return MM_FAULT_ERR(SIGBUS);
 }
 
 static int mm_fault_error(struct pt_regs *regs, unsigned long addr, int fault)
@@ -192,9 +194,6 @@ static int mm_fault_error(struct pt_regs *regs, unsigned long addr, int fault)
 	return MM_FAULT_CONTINUE;
 }
 
-// This comes from 64-bit struct rt_sigframe + __SIGNAL_FRAMESIZE
-#define SIGFRAME_MAX_SIZE	(4096 + 128)
-
 /*
  * For 600- and 800-family processors, the error_code parameter is DSISR
  * for a data fault, SRR1 for an instruction fault. For 400-family processors
@@ -208,7 +207,7 @@ static int mm_fault_error(struct pt_regs *regs, unsigned long addr, int fault)
  * The return value is 0 if the fault was handled, or the signal
  * number if this is a kernel fault that can't be handled here.
  */
-int do_page_fault(struct pt_regs *regs, unsigned long address,
+int __kprobes do_page_fault(struct pt_regs *regs, unsigned long address,
 			    unsigned long error_code)
 {
 	enum ctx_state prev_state = exception_enter();
@@ -297,7 +296,7 @@ int do_page_fault(struct pt_regs *regs, unsigned long address,
 	 * can result in fault, which will cause a deadlock when called with
 	 * mmap_sem held
 	 */
-	if (!is_exec && user_mode(regs))
+	if (user_mode(regs))
 		store_update_sp = store_updates_sp(regs);
 
 	if (user_mode(regs))
@@ -344,7 +343,7 @@ retry:
 	/*
 	 * N.B. The POWER/Open ABI allows programs to access up to
 	 * 288 bytes below the stack pointer.
-	 * The kernel signal delivery code writes up to about 4kB
+	 * The kernel signal delivery code writes up to about 1.5kB
 	 * below the stack pointer (r1) before decrementing it.
 	 * The exec code can write slightly over 640kB to the stack
 	 * before setting the user r1.  Thus we allow the stack to
@@ -368,7 +367,7 @@ retry:
 		 * between the last mapped region and the stack will
 		 * expand the stack rather than segfaulting.
 		 */
-		if (address + SIGFRAME_MAX_SIZE < uregs->gpr[1] && !store_update_sp)
+		if (address + 2048 < uregs->gpr[1] && !store_update_sp)
 			goto bad_area;
 	}
 	if (expand_stack(vma, address))
@@ -383,6 +382,12 @@ good_area:
 		goto bad_area;
 #endif /* CONFIG_6xx */
 #if defined(CONFIG_8xx)
+	/* 8xx sometimes need to load a invalid/non-present TLBs.
+	 * These must be invalidated separately as linux mm don't.
+	 */
+	if (error_code & 0x40000000) /* no translation? */
+		_tlbil_va(address, 0, 0, 0);
+
         /* The MPC8xx seems to always set 0x80000000, which is
          * "undefined".  Of those that can be set, this is the only
          * one which seems bad.
@@ -393,6 +398,19 @@ good_area:
 #endif /* CONFIG_8xx */
 
 	if (is_exec) {
+#ifdef CONFIG_PPC_STD_MMU
+		/* Protection fault on exec go straight to failure on
+		 * Hash based MMUs as they either don't support per-page
+		 * execute permission, or if they do, it's handled already
+		 * at the hash level. This test would probably have to
+		 * be removed if we change the way this works to make hash
+		 * processors use the same I/D cache coherency mechanism
+		 * as embedded.
+		 */
+		if (error_code & DSISR_PROTFAULT)
+			goto bad_area;
+#endif /* CONFIG_PPC_STD_MMU */
+
 		/*
 		 * Allow execution from readable areas if the MMU does not
 		 * provide separate controls over reading and executing.
@@ -407,14 +425,6 @@ good_area:
 		    (cpu_has_feature(CPU_FTR_NOEXECUTE) ||
 		     !(vma->vm_flags & (VM_READ | VM_WRITE))))
 			goto bad_area;
-#ifdef CONFIG_PPC_STD_MMU
-		/*
-		 * protfault should only happen due to us
-		 * mapping a region readonly temporarily. PROT_NONE
-		 * is also covered by the VMA check above.
-		 */
-		WARN_ON_ONCE(error_code & DSISR_PROTFAULT);
-#endif /* CONFIG_PPC_STD_MMU */
 	/* a write */
 	} else if (is_write) {
 		if (!(vma->vm_flags & VM_WRITE))
@@ -422,9 +432,11 @@ good_area:
 		flags |= FAULT_FLAG_WRITE;
 	/* a read */
 	} else {
+		/* protection fault */
+		if (error_code & 0x08000000)
+			goto bad_area;
 		if (!(vma->vm_flags & (VM_READ | VM_EXEC | VM_WRITE)))
 			goto bad_area;
-		WARN_ON_ONCE(error_code & DSISR_PROTFAULT);
 	}
 
 	/*
@@ -501,8 +513,8 @@ bad_area_nosemaphore:
 bail:
 	exception_exit(prev_state);
 	return rc;
+
 }
-NOKPROBE_SYMBOL(do_page_fault);
 
 /*
  * bad_page_fault is called when we have a bad access from the kernel.
@@ -512,6 +524,7 @@ NOKPROBE_SYMBOL(do_page_fault);
 void bad_page_fault(struct pt_regs *regs, unsigned long address, int sig)
 {
 	const struct exception_table_entry *entry;
+	unsigned long *stackend;
 
 	/* Are we prepared to handle this fault?  */
 	if ((entry = search_exception_tables(regs->nip)) != NULL) {
@@ -524,28 +537,24 @@ void bad_page_fault(struct pt_regs *regs, unsigned long address, int sig)
 	switch (regs->trap) {
 	case 0x300:
 	case 0x380:
-		pr_alert("BUG: %s at 0x%08lx\n",
-			 regs->dar < PAGE_SIZE ? "Kernel NULL pointer dereference" :
-			 "Unable to handle kernel data access", regs->dar);
+		printk(KERN_ALERT "Unable to handle kernel paging request for "
+			"data at address 0x%08lx\n", regs->dar);
 		break;
 	case 0x400:
 	case 0x480:
-		pr_alert("BUG: Unable to handle kernel instruction fetch%s",
-			 regs->nip < PAGE_SIZE ? " (NULL pointer?)\n" : "\n");
-		break;
-	case 0x600:
-		pr_alert("BUG: Unable to handle kernel unaligned access at 0x%08lx\n",
-			 regs->dar);
+		printk(KERN_ALERT "Unable to handle kernel paging request for "
+			"instruction fetch\n");
 		break;
 	default:
-		pr_alert("BUG: Unable to handle unknown paging fault at 0x%08lx\n",
-			 regs->dar);
+		printk(KERN_ALERT "Unable to handle kernel paging request for "
+			"unknown fault\n");
 		break;
 	}
 	printk(KERN_ALERT "Faulting instruction address: 0x%08lx\n",
 		regs->nip);
 
-	if (task_stack_end_corrupted(current))
+	stackend = end_of_stack(current);
+	if (current != &init_task && *stackend != STACK_END_MAGIC)
 		printk(KERN_ALERT "Thread overran stack, or stack corrupted\n");
 
 	die("Kernel access of bad area", regs, sig);

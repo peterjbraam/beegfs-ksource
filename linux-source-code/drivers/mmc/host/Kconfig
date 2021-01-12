@@ -4,6 +4,15 @@
 
 comment "MMC/SD/SDIO Host Controller Drivers"
 
+config MMC_DEBUG
+	bool "MMC host drivers debugging"
+	depends on MMC != n
+	help
+	  This is an option for use by developers; most people should
+	  say N here. This enables MMC host driver debugging. And further
+	  added host drivers please don't invent their private macro for
+	  debugging.
+
 config MMC_ARMMMCI
 	tristate "ARM AMBA Multimedia Card Interface support"
 	depends on ARM_AMBA
@@ -72,6 +81,7 @@ config MMC_SDHCI_BIG_ENDIAN_32BIT_BYTE_SWAPPER
 config MMC_SDHCI_PCI
 	tristate "SDHCI support on PCI bus"
 	depends on MMC_SDHCI && PCI
+	select MMC_CQHCI
 	help
 	  This selects the PCI Secure Digital Host Controller Interface.
 	  Most controllers found today are PCI devices.
@@ -118,32 +128,12 @@ config MMC_SDHCI_PLTFM
 
 	  If unsure, say N.
 
-config MMC_SDHCI_OF_ARASAN
-	tristate "SDHCI OF support for the Arasan SDHCI controllers"
-	depends on MMC_SDHCI_PLTFM
-	depends on OF
-	depends on COMMON_CLK
-	help
-	  This selects the Arasan Secure Digital Host Controller Interface
-	  (SDHCI). This hardware is found e.g. in Xilinx' Zynq SoC.
-
-	  If you have a controller with this interface, say Y or M here.
-
-	  If unsure, say N.
-
-config MMC_SDHCI_OF_AT91
-	tristate "SDHCI OF support for the Atmel SDMMC controller"
-	depends on MMC_SDHCI_PLTFM
-	depends on OF
-	select MMC_SDHCI_IO_ACCESSORS
-	help
-	  This selects the Atmel SDMMC driver
-
 config MMC_SDHCI_OF_ESDHC
 	tristate "SDHCI OF support for the Freescale eSDHC controller"
 	depends on MMC_SDHCI_PLTFM
 	depends on PPC || ARCH_MXC || ARCH_LAYERSCAPE
 	select MMC_SDHCI_IO_ACCESSORS
+	select FSL_GUTS
 	help
 	  This selects the Freescale eSDHC controller support.
 
@@ -160,6 +150,17 @@ config MMC_SDHCI_OF_HLWD
 	  This selects the Secure Digital Host Controller Interface (SDHCI)
 	  found in the "Hollywood" chipset of the Nintendo Wii video game
 	  console.
+
+	  If you have a controller with this interface, say Y or M here.
+
+	  If unsure, say N.
+
+config MMC_SDHCI_CADENCE
+	tristate "SDHCI support for the Cadence SD/SDIO/eMMC controller"
+	depends on MMC_SDHCI_PLTFM
+	depends on OF
+	help
+	  This selects the Cadence SD/SDIO/eMMC driver.
 
 	  If you have a controller with this interface, say Y or M here.
 
@@ -267,6 +268,7 @@ config MMC_SDHCI_SPEAR
 	tristate "SDHCI support on ST SPEAr platform"
 	depends on MMC_SDHCI && PLAT_SPEAR
 	depends on OF
+	depends on COMMON_CLK
 	help
 	  This selects the Secure Digital Host Controller Interface (SDHCI)
 	  often referrered to as the HSMMC block in some of the ST SPEAR range
@@ -297,6 +299,17 @@ config MMC_SDHCI_BCM_KONA
 
 	  If you have a controller with this interface, say Y or M here.
 
+config MMC_SDHCI_BCM2835
+	tristate "SDHCI platform support for the BCM2835 SD/MMC Controller"
+	depends on ARCH_BCM2835
+	depends on MMC_SDHCI_PLTFM
+	select MMC_SDHCI_IO_ACCESSORS
+	help
+	  This selects the BCM2835 SD/MMC controller. If you have a BCM2835
+	  platform with SD or MMC devices, say Y or M here.
+
+	  If unsure, say N.
+
 config MMC_SDHCI_F_SDH30
 	tristate "SDHCI support for Fujitsu Semiconductor F_SDH30"
 	depends on MMC_SDHCI_PLTFM
@@ -309,15 +322,15 @@ config MMC_SDHCI_F_SDH30
 	  If unsure, say N.
 
 config MMC_SDHCI_IPROC
-	tristate "SDHCI support for the BCM2835 & iProc SD/MMC Controller"
-	depends on ARCH_BCM2835 || ARCH_BCM_IPROC || COMPILE_TEST
+	tristate "SDHCI platform support for the iProc SD/MMC Controller"
+	depends on ARCH_BCM_IPROC || COMPILE_TEST
 	depends on MMC_SDHCI_PLTFM
 	default ARCH_BCM_IPROC
 	select MMC_SDHCI_IO_ACCESSORS
 	help
 	  This selects the iProc SD/MMC controller.
 
-	  If you have a BCM2835 or IPROC platform with SD or MMC devices,
+	  If you have an IPROC platform with SD or MMC devices,
 	  say Y or M here.
 
 	  If unsure, say N.
@@ -399,6 +412,7 @@ config MMC_SDHCI_MSM
 	tristate "Qualcomm SDHCI Controller Support"
 	depends on ARCH_QCOM || (ARM && COMPILE_TEST)
 	depends on MMC_SDHCI_PLTFM
+	select MMC_SDHCI_IO_ACCESSORS
 	help
 	  This selects the Secure Digital Host Controller Interface (SDHCI)
 	  support present in Qualcomm SOCs. The controller supports
@@ -407,6 +421,14 @@ config MMC_SDHCI_MSM
 	  If you have a controller with this interface, say Y or M here.
 
 	  If unsure, say N.
+
+config MMC_MSM
+	tristate "Qualcomm SDCC Controller Support"
+	depends on MMC && (ARCH_MSM7X00A || ARCH_MSM7X30 || ARCH_QSD8X50)
+	help
+	  This provides support for the SD/MMC cell found in the
+	  MSM and QSD SOCs from Qualcomm. The controller also has
+	  support for SDIO devices.
 
 config MMC_MXC
 	tristate "Freescale i.MX21/27/31 or MPC512x Multimedia Card support"
@@ -473,7 +495,7 @@ config MMC_GOLDFISH
 
 config MMC_SPI
 	tristate "MMC/SD/SDIO over SPI"
-	depends on SPI_MASTER && !HIGHMEM && HAS_DMA
+	depends on SPI_MASTER && HAS_DMA
 	select CRC7
 	select CRC_ITU_T
 	help
@@ -551,8 +573,8 @@ config MMC_TMIO
 
 config MMC_SDHI
 	tristate "SH-Mobile SDHI SD/SDIO controller support"
-	depends on SUPERH || ARM || ARM64
-	depends on SUPERH || ARCH_RENESAS || COMPILE_TEST
+	depends on SUPERH || ARM
+	depends on SUPERH || ARCH_SHMOBILE || COMPILE_TEST
 	select MMC_TMIO_CORE
 	help
 	  This provides support for the SDHI SD/SDIO controller found in
@@ -560,7 +582,7 @@ config MMC_SDHI
 
 config MMC_CB710
 	tristate "ENE CB710 MMC/SD Interface support"
-	depends on PCI
+	depends on PCI && GENERIC_HARDIRQS
 	select CB710_CORE
 	help
 	  This option enables support for MMC/SD part of ENE CB710/720 Flash
@@ -633,15 +655,6 @@ config MMC_DW_EXYNOS
 	  Synopsys DesignWare Memory Card Interface driver. Select this option
 	  for platforms based on Exynos4 and Exynos5 SoC's.
 
-config MMC_DW_K3
-	tristate "K3 specific extensions for Synopsys DW Memory Card Interface"
-	depends on MMC_DW
-	select MMC_DW_PLTFM
-	help
-	  This selects support for Hisilicon K3 SoC specific extensions to the
-	  Synopsys DesignWare Memory Card Interface driver. Select this option
-	  for platforms based on Hisilicon K3 SoC's.
-
 config MMC_DW_PCI
 	tristate "Synopsys Designware MCI support on PCI bus"
 	depends on MMC_DW && PCI
@@ -665,7 +678,7 @@ config MMC_DW_ROCKCHIP
 config MMC_SH_MMCIF
 	tristate "SuperH Internal MMCIF support"
 	depends on HAS_DMA
-	depends on SUPERH || ARCH_RENESAS || COMPILE_TEST
+	depends on SUPERH || ARCH_SHMOBILE || COMPILE_TEST
 	help
 	  This selects the MMC Host Interface controller (MMCIF) found in various
 	  Renesas SoCs for SH and ARM architectures.
@@ -763,6 +776,19 @@ config MMC_SUNXI
 	help
 	  This selects support for the SD/MMC Host Controller on
 	  Allwinner sunxi SoCs.
+
+config MMC_CQHCI
+	tristate "Command Queue Host Controller Interface support"
+	depends on HAS_DMA
+	help
+	  This selects the Command Queue Host Controller Interface (CQHCI)
+	  support present in host controllers of Qualcomm Technologies, Inc
+	  amongst others.
+	  This controller supports eMMC devices with command queue support.
+
+	  If you have a controller with this interface, say Y or M here.
+
+	  If unsure, say N.
 
 config MMC_TOSHIBA_PCI
 	tristate "Toshiba Type A SD/MMC Card Interface Driver"

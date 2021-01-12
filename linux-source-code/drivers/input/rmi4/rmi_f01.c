@@ -8,10 +8,12 @@
  */
 
 #include <linux/kernel.h>
+#include <linux/kconfig.h>
 #include <linux/rmi.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
 #include <linux/of.h>
+#include <asm/unaligned.h>
 #include "rmi_driver.h"
 
 #define RMI_PRODUCT_ID_LENGTH    10
@@ -54,6 +56,7 @@ struct f01_basic_properties {
 	u8 product_id[RMI_PRODUCT_ID_LENGTH + 1];
 	u16 productinfo;
 	u32 firmware_id;
+	u32 package_id;
 };
 
 /* F01 device status bits */
@@ -218,8 +221,19 @@ static int rmi_f01_read_properties(struct rmi_device *rmi_dev,
 			has_build_id_query = !!(queries[0] & BIT(1));
 		}
 
-		if (has_package_id_query)
+		if (has_package_id_query) {
+			ret = rmi_read_block(rmi_dev, prod_info_addr,
+					     queries, sizeof(__le64));
+			if (ret) {
+				dev_err(&rmi_dev->dev,
+					"Failed to read package info: %d\n",
+					ret);
+				return ret;
+			}
+
+			props->package_id = get_unaligned_le64(queries);
 			prod_info_addr++;
+		}
 
 		if (has_build_id_query) {
 			ret = rmi_read_block(rmi_dev, prod_info_addr, queries,
@@ -239,56 +253,89 @@ static int rmi_f01_read_properties(struct rmi_device *rmi_dev,
 	return 0;
 }
 
-char *rmi_f01_get_product_ID(struct rmi_function *fn)
+const char *rmi_f01_get_product_ID(struct rmi_function *fn)
 {
 	struct f01_data *f01 = dev_get_drvdata(&fn->dev);
 
 	return f01->properties.product_id;
 }
 
-#ifdef CONFIG_OF
-static int rmi_f01_of_probe(struct device *dev,
-				struct rmi_device_platform_data *pdata)
+static ssize_t rmi_driver_manufacturer_id_show(struct device *dev,
+					       struct device_attribute *dattr,
+					       char *buf)
 {
-	int retval;
-	u32 val;
+	struct rmi_driver_data *data = dev_get_drvdata(dev);
+	struct f01_data *f01 = dev_get_drvdata(&data->f01_container->dev);
 
-	retval = rmi_of_property_read_u32(dev,
-			(u32 *)&pdata->power_management.nosleep,
-			"syna,nosleep-mode", 1);
-	if (retval)
-		return retval;
-
-	retval = rmi_of_property_read_u32(dev, &val,
-			"syna,wakeup-threshold", 1);
-	if (retval)
-		return retval;
-
-	pdata->power_management.wakeup_threshold = val;
-
-	retval = rmi_of_property_read_u32(dev, &val,
-			"syna,doze-holdoff-ms", 1);
-	if (retval)
-		return retval;
-
-	pdata->power_management.doze_holdoff = val * 100;
-
-	retval = rmi_of_property_read_u32(dev, &val,
-			"syna,doze-interval-ms", 1);
-	if (retval)
-		return retval;
-
-	pdata->power_management.doze_interval = val / 10;
-
-	return 0;
+	return scnprintf(buf, PAGE_SIZE, "%d\n",
+			 f01->properties.manufacturer_id);
 }
-#else
-static inline int rmi_f01_of_probe(struct device *dev,
-					struct rmi_device_platform_data *pdata)
+
+static DEVICE_ATTR(manufacturer_id, 0444,
+		   rmi_driver_manufacturer_id_show, NULL);
+
+static ssize_t rmi_driver_dom_show(struct device *dev,
+				   struct device_attribute *dattr, char *buf)
 {
-	return -ENODEV;
+	struct rmi_driver_data *data = dev_get_drvdata(dev);
+	struct f01_data *f01 = dev_get_drvdata(&data->f01_container->dev);
+
+	return scnprintf(buf, PAGE_SIZE, "%s\n", f01->properties.dom);
 }
-#endif
+
+static DEVICE_ATTR(date_of_manufacture, 0444, rmi_driver_dom_show, NULL);
+
+static ssize_t rmi_driver_product_id_show(struct device *dev,
+					  struct device_attribute *dattr,
+					  char *buf)
+{
+	struct rmi_driver_data *data = dev_get_drvdata(dev);
+	struct f01_data *f01 = dev_get_drvdata(&data->f01_container->dev);
+
+	return scnprintf(buf, PAGE_SIZE, "%s\n", f01->properties.product_id);
+}
+
+static DEVICE_ATTR(product_id, 0444, rmi_driver_product_id_show, NULL);
+
+static ssize_t rmi_driver_firmware_id_show(struct device *dev,
+					   struct device_attribute *dattr,
+					   char *buf)
+{
+	struct rmi_driver_data *data = dev_get_drvdata(dev);
+	struct f01_data *f01 = dev_get_drvdata(&data->f01_container->dev);
+
+	return scnprintf(buf, PAGE_SIZE, "%d\n", f01->properties.firmware_id);
+}
+
+static DEVICE_ATTR(firmware_id, 0444, rmi_driver_firmware_id_show, NULL);
+
+static ssize_t rmi_driver_package_id_show(struct device *dev,
+					  struct device_attribute *dattr,
+					  char *buf)
+{
+	struct rmi_driver_data *data = dev_get_drvdata(dev);
+	struct f01_data *f01 = dev_get_drvdata(&data->f01_container->dev);
+
+	u32 package_id = f01->properties.package_id;
+
+	return scnprintf(buf, PAGE_SIZE, "%04x.%04x\n",
+			 package_id & 0xffff, (package_id >> 16) & 0xffff);
+}
+
+static DEVICE_ATTR(package_id, 0444, rmi_driver_package_id_show, NULL);
+
+static struct attribute *rmi_f01_attrs[] = {
+	&dev_attr_manufacturer_id.attr,
+	&dev_attr_date_of_manufacture.attr,
+	&dev_attr_product_id.attr,
+	&dev_attr_firmware_id.attr,
+	&dev_attr_package_id.attr,
+	NULL
+};
+
+static const struct attribute_group rmi_f01_attr_group = {
+	.attrs = rmi_f01_attrs,
+};
 
 static int rmi_f01_probe(struct rmi_function *fn)
 {
@@ -300,12 +347,6 @@ static int rmi_f01_probe(struct rmi_function *fn)
 	u16 ctrl_base_addr = fn->fd.control_base_addr;
 	u8 device_status;
 	u8 temp;
-
-	if (fn->dev.of_node) {
-		error = rmi_f01_of_probe(&fn->dev, pdata);
-		if (error)
-			return error;
-	}
 
 	f01 = devm_kzalloc(&fn->dev, sizeof(struct f01_data), GFP_KERNEL);
 	if (!f01)
@@ -326,12 +367,12 @@ static int rmi_f01_probe(struct rmi_function *fn)
 	}
 
 	switch (pdata->power_management.nosleep) {
-	case RMI_F01_NOSLEEP_DEFAULT:
+	case RMI_REG_STATE_DEFAULT:
 		break;
-	case RMI_F01_NOSLEEP_OFF:
+	case RMI_REG_STATE_OFF:
 		f01->device_control.ctrl0 &= ~RMI_F01_CTRL0_NOSLEEP_BIT;
 		break;
-	case RMI_F01_NOSLEEP_ON:
+	case RMI_REG_STATE_ON:
 		f01->device_control.ctrl0 |= RMI_F01_CTRL0_NOSLEEP_BIT;
 		break;
 	}
@@ -478,7 +519,16 @@ static int rmi_f01_probe(struct rmi_function *fn)
 
 	dev_set_drvdata(&fn->dev, f01);
 
+	error = sysfs_create_group(&fn->rmi_dev->dev.kobj, &rmi_f01_attr_group);
+	if (error)
+		dev_warn(&fn->dev, "Failed to create sysfs group: %d\n", error);
+
 	return 0;
+}
+
+static void rmi_f01_remove(struct rmi_function *fn)
+{
+	sysfs_remove_group(&fn->rmi_dev->dev.kobj, &rmi_f01_attr_group);
 }
 
 static int rmi_f01_config(struct rmi_function *fn)
@@ -616,6 +666,7 @@ struct rmi_function_handler rmi_f01_handler = {
 	},
 	.func		= 0x01,
 	.probe		= rmi_f01_probe,
+	.remove		= rmi_f01_remove,
 	.config		= rmi_f01_config,
 	.attention	= rmi_f01_attention,
 	.suspend	= rmi_f01_suspend,

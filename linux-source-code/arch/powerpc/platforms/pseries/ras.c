@@ -69,7 +69,8 @@ static int __init init_ras_IRQ(void)
 	/* Hotplug Events */
 	np = of_find_node_by_path("/event-sources/hot-plug-events");
 	if (np != NULL) {
-		request_event_sources_irqs(np, ras_hotplug_interrupt,
+		if (dlpar_workqueue_init() == 0)
+			request_event_sources_irqs(np, ras_hotplug_interrupt,
 					   "RAS_HOTPLUG");
 		of_node_put(np);
 	}
@@ -83,7 +84,7 @@ static int __init init_ras_IRQ(void)
 
 	return 0;
 }
-machine_subsys_initcall(pseries, init_ras_IRQ);
+subsys_initcall(init_ras_IRQ);
 
 #define EPOW_SHUTDOWN_NORMAL				1
 #define EPOW_SHUTDOWN_ON_UPS				2
@@ -137,7 +138,7 @@ struct epow_errorlog {
 #define EPOW_MAIN_ENCLOSURE		5
 #define EPOW_POWER_OFF			7
 
-static void rtas_parse_epow_errlog(struct rtas_error_log *log)
+void rtas_parse_epow_errlog(struct rtas_error_log *log)
 {
 	struct pseries_errorlog *pseries_log;
 	struct epow_errorlog *epow_log;
@@ -310,11 +311,10 @@ static irqreturn_t ras_error_interrupt(int irq, void *dev_id)
 /*
  * Some versions of FWNMI place the buffer inside the 4kB page starting at
  * 0x7000. Other versions place it inside the rtas buffer. We check both.
- * Minimum size of the buffer is 16 bytes.
  */
 #define VALID_FWNMI_BUFFER(A) \
-	((((A) >= 0x7000) && ((A) <= 0x8000 - 16)) || \
-	(((A) >= rtas.base) && ((A) <= (rtas.base + rtas.size - 16))))
+	((((A) >= 0x7000) && ((A) < 0x7ff0)) || \
+	(((A) >= rtas.base) && ((A) < (rtas.base + rtas.size - 16))))
 
 /*
  * Get the error information for errors coming through the
@@ -346,18 +346,18 @@ static struct rtas_error_log *fwnmi_get_errinfo(struct pt_regs *regs)
 	}
 
 	savep = __va(regs->gpr[3]);
-	regs->gpr[3] = be64_to_cpu(savep[0]);	/* restore original r3 */
+	regs->gpr[3] = savep[0];	/* restore original r3 */
 
 	/* If it isn't an extended log we can use the per cpu 64bit buffer */
 	h = (struct rtas_error_log *)&savep[1];
 	if (!rtas_error_extended(h)) {
-		memcpy(this_cpu_ptr(&mce_data_buf), h, sizeof(__u64));
-		errhdr = (struct rtas_error_log *)this_cpu_ptr(&mce_data_buf);
+		memcpy(&__get_cpu_var(mce_data_buf), h, sizeof(__u64));
+		errhdr = (struct rtas_error_log *)&__get_cpu_var(mce_data_buf);
 	} else {
 		int len, error_log_length;
 
 		error_log_length = 8 + rtas_error_extended_log_length(h);
-		len = min_t(int, error_log_length, RTAS_ERROR_LOG_MAX);
+		len = max_t(int, error_log_length, RTAS_ERROR_LOG_MAX);
 		memset(global_mce_data_buf, 0, RTAS_ERROR_LOG_MAX);
 		memcpy(global_mce_data_buf, h, len);
 		errhdr = (struct rtas_error_log *)global_mce_data_buf;

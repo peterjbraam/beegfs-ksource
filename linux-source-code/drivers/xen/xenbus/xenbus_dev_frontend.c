@@ -55,13 +55,15 @@
 #include <linux/string.h>
 #include <linux/slab.h>
 #include <linux/miscdevice.h>
-#include <linux/init.h>
+#include <linux/module.h>
 
 #include "xenbus_comms.h"
 
 #include <xen/xenbus.h>
 #include <xen/xen.h>
 #include <asm/xen/hypervisor.h>
+
+MODULE_LICENSE("GPL");
 
 /*
  * An element of a list of outstanding transactions, for which we're
@@ -364,7 +366,7 @@ out:
 
 static int xenbus_write_watch(unsigned msg_type, struct xenbus_file_priv *u)
 {
-	struct watch_adapter *watch;
+	struct watch_adapter *watch, *tmp_watch;
 	char *path, *token;
 	int err, rc;
 	LIST_HEAD(staging_q);
@@ -399,7 +401,7 @@ static int xenbus_write_watch(unsigned msg_type, struct xenbus_file_priv *u)
 		}
 		list_add(&watch->list, &u->watches);
 	} else {
-		list_for_each_entry(watch, &u->watches, list) {
+		list_for_each_entry_safe(watch, tmp_watch, &u->watches, list) {
 			if (!strcmp(watch->token, token) &&
 			    !strcmp(watch->watch.node, path)) {
 				unregister_xenbus_watch(&watch->watch);
@@ -536,7 +538,9 @@ static int xenbus_file_open(struct inode *inode, struct file *filp)
 	if (xen_store_evtchn == 0)
 		return -ENOENT;
 
-	stream_open(inode, filp);
+	nonseekable_open(inode, filp);
+
+	filp->f_mode &= ~FMODE_ATOMIC_POS; /* cdev-style semantics */
 
 	u = kzalloc(sizeof(*u), GFP_KERNEL);
 	if (u == NULL)
@@ -626,4 +630,11 @@ static int __init xenbus_init(void)
 		pr_err("Could not register xenbus frontend device\n");
 	return err;
 }
-device_initcall(xenbus_init);
+
+static void __exit xenbus_exit(void)
+{
+	misc_deregister(&xenbus_dev);
+}
+
+module_init(xenbus_init);
+module_exit(xenbus_exit);

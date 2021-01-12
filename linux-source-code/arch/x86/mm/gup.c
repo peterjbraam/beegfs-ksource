@@ -14,10 +14,17 @@
 #include <asm/mmu_context.h>
 #include <asm/pgtable.h>
 
+/*
+ * RHEL-only. Hypervisors overriding pv_mmu_ops.flush_tlb_others need to do
+ * static_key_slow_dec(&rh_flush_tlb_others_native)
+ */
+struct static_key rh_flush_tlb_others_native __read_mostly = STATIC_KEY_INIT_TRUE;
+#define rh_flush_tlb_others_IPI_less() (static_key_false(&rh_flush_tlb_others_native))
+
 static inline pte_t gup_get_pte(pte_t *ptep)
 {
 #ifndef CONFIG_X86_PAE
-	return READ_ONCE(*ptep);
+	return ACCESS_ONCE(*ptep);
 #else
 	/*
 	 * With get_user_pages_fast, we walk down the pagetables without taking
@@ -98,20 +105,6 @@ static inline int pte_allows_gup(unsigned long pteval, int write)
 }
 
 /*
- * Return the compund head page with ref appropriately incremented,
- * or NULL if that failed.
- */
-static inline struct page *try_get_compound_head(struct page *page, int refs)
-{
-	struct page *head = compound_head(page);
-	if (WARN_ON_ONCE(page_ref_count(head) < 0))
-		return NULL;
-	if (unlikely(!page_cache_add_speculative(head, refs)))
-		return NULL;
-	return head;
-}
-
-/*
  * The performance critical leaf functions are made noinline otherwise gcc
  * inlines everything into a single function which results in too much
  * register pressure.
@@ -126,15 +119,17 @@ static noinline int gup_pte_range(pmd_t pmd, unsigned long addr,
 	ptep = pte_offset_map(&pmd, addr);
 	do {
 		pte_t pte = gup_get_pte(ptep);
-		struct page *head, *page;
+		struct page *page;
 
 		/* Similar to the PMD case, NUMA hinting must take slow path */
-		if (pte_protnone(pte)) {
+		if (pte_numa(pte)) {
+			put_dev_pagemap(pgmap);
 			pte_unmap(ptep);
 			return 0;
 		}
 
 		if (!pte_allows_gup(pte_val(pte), write)) {
+			put_dev_pagemap(pgmap);
 			pte_unmap(ptep);
 			return 0;
 		}
@@ -147,32 +142,42 @@ static noinline int gup_pte_range(pmd_t pmd, unsigned long addr,
 				return 0;
 			}
 		} else if (pte_special(pte)) {
+			put_dev_pagemap(pgmap);
 			pte_unmap(ptep);
 			return 0;
 		}
 		VM_BUG_ON(!pfn_valid(pte_pfn(pte)));
 		page = pte_page(pte);
 
-		head = try_get_compound_head(page, 1);
-		if (!head) {
-			put_dev_pagemap(pgmap);
-			pte_unmap(ptep);
-			return 0;
+		/*
+		 * RHEL-only: upstream has HAVE_GENERIC_GUP and it always does
+		 * page_cache_get_speculative() here to ensure serialization
+		 * when IPIs are not send on TLB shootdown.
+		 */
+		if (rh_flush_tlb_others_IPI_less()) {
+			if (!try_get_compound_head(page, 1)) {
+				put_dev_pagemap(pgmap);
+				return 0;
+			}
+			if (unlikely(pte_val(pte) != pte_val(*ptep))) {
+				put_page(page);
+				put_dev_pagemap(pgmap);
+				return 0;
+			}
+		} else {
+			if (WARN_ON_ONCE(page_ref_count(page) < 0)) {
+				put_dev_pagemap(pgmap);
+				return 0;
+			}
+			get_page(page);
 		}
-
-		if (unlikely(pte_val(pte) != pte_val(*ptep))) {
-			put_page(head);
-			put_dev_pagemap(pgmap);
-			pte_unmap(ptep);
-			return 0;
-		}
-
-		put_dev_pagemap(pgmap);
 		SetPageReferenced(page);
 		pages[*nr] = page;
 		(*nr)++;
 
 	} while (ptep++, addr += PAGE_SIZE, addr != end);
+	if (pgmap)
+		put_dev_pagemap(pgmap);
 	pte_unmap(ptep - 1);
 
 	return 1;
@@ -182,18 +187,26 @@ static inline void get_head_page_multiple(struct page *page, int nr)
 {
 	VM_BUG_ON_PAGE(page != compound_head(page), page);
 	VM_BUG_ON_PAGE(page_count(page) == 0, page);
+
+	/*
+	 * RHEL note: if this triggers in normal workloads after being
+	 * already checked in gup_huge_pud() and gup_huge_pmd(), we
+	 * might have to proactively check for overflows. Currently
+	 * overflows can only happen with malicious page referencing
+	 * workloads (CVE-2019-11487)
+	 */
+	if (WARN_ON_ONCE(page_ref_count(compound_head(page)) < 0))
+		return;
 	page_ref_add(page, nr);
 	SetPageReferenced(page);
 }
 
-static int __gup_device_huge_pmd(pmd_t pmd, unsigned long addr,
+static int __gup_device_huge(unsigned long pfn, unsigned long addr,
 		unsigned long end, struct page **pages, int *nr)
 {
 	int nr_start = *nr;
-	unsigned long pfn = pmd_pfn(pmd);
 	struct dev_pagemap *pgmap = NULL;
 
-	pfn += (addr & ~PMD_MASK) >> PAGE_SHIFT;
 	do {
 		struct page *page = pfn_to_page(pfn);
 
@@ -202,43 +215,95 @@ static int __gup_device_huge_pmd(pmd_t pmd, unsigned long addr,
 			undo_dev_pagemap(nr, nr_start, pages);
 			return 0;
 		}
-		if (unlikely(!try_get_page(page))) {
-			put_dev_pagemap(pgmap);
-			return 0;
-		}
 		SetPageReferenced(page);
 		pages[*nr] = page;
-		put_dev_pagemap(pgmap);
+		get_page(page);
 		(*nr)++;
 		pfn++;
 	} while (addr += PAGE_SIZE, addr != end);
+
+	if (pgmap)
+		put_dev_pagemap(pgmap);
 	return 1;
 }
 
-static noinline int gup_huge_pmd(pmd_t pmd, unsigned long addr,
+static int __gup_device_huge_pmd(pmd_t orig, pmd_t *pmdp, unsigned long addr,
+		unsigned long end, struct page **pages, int *nr)
+{
+	unsigned long fault_pfn;
+	int nr_start = *nr;
+
+	fault_pfn = pmd_pfn(orig) + ((addr & ~PMD_MASK) >> PAGE_SHIFT);
+	if (!__gup_device_huge(fault_pfn, addr, end, pages, nr))
+		return 0;
+
+	if (unlikely(pmd_val(orig) != pmd_val(*pmdp))) {
+		undo_dev_pagemap(nr, nr_start, pages);
+		return 0;
+	}
+	return 1;
+}
+
+static int __gup_device_huge_pud(pud_t orig, pud_t *pudp, unsigned long addr,
+		unsigned long end, struct page **pages, int *nr)
+{
+	unsigned long fault_pfn;
+	int nr_start = *nr;
+
+	fault_pfn = pud_pfn(orig) + ((addr & ~PUD_MASK) >> PAGE_SHIFT);
+	if (!__gup_device_huge(fault_pfn, addr, end, pages, nr))
+		return 0;
+
+	if (unlikely(pud_val(orig) != pud_val(*pudp))) {
+		undo_dev_pagemap(nr, nr_start, pages);
+		return 0;
+	}
+	return 1;
+}
+
+static noinline int gup_huge_pmd(pmd_t orig, pmd_t *pmdp, unsigned long addr,
 		unsigned long end, int write, struct page **pages, int *nr)
 {
+	pte_t pte = *(pte_t *)&orig;
 	struct page *head, *page;
 	int refs;
 
-	if (!pte_allows_gup(pmd_val(pmd), write))
+	if (!pte_allows_gup(pte_val(pte), write))
 		return 0;
 
-	VM_BUG_ON(!pfn_valid(pmd_pfn(pmd)));
-	if (pmd_devmap(pmd))
-		return __gup_device_huge_pmd(pmd, addr, end, pages, nr);
+	VM_BUG_ON(!pfn_valid(pte_pfn(pte)));
+	if (pmd_devmap(orig))
+		return __gup_device_huge_pmd(orig, pmdp, addr, end, pages, nr);
 
 	/* hugepages are never "special" */
-	VM_BUG_ON(pmd_flags(pmd) & _PAGE_SPECIAL);
+	VM_BUG_ON(pte_flags(pte) & _PAGE_SPECIAL);
 
 	refs = 0;
-	head = pmd_page(pmd);
-	if (WARN_ON_ONCE(page_ref_count(head) <= 0))
-		return 0;
+	head = pte_page(pte);
+
+	/* RHEL-only. See gup_pte_range() */
+	if (rh_flush_tlb_others_IPI_less()) {
+		head = try_get_compound_head(head, 1);
+		if (!head)
+			return 0;
+		if (unlikely(pte_val(pte) != pte_val(*(pte_t *)&orig))) {
+			put_page(head);
+			return 0;
+		}
+
+		/* Don't take ref to the head page twice */
+		refs--;
+	} else {
+		if (WARN_ON_ONCE(page_ref_count(head) < 0))
+			return 0;
+	}
+
 	page = head + ((addr & ~PMD_MASK) >> PAGE_SHIFT);
 	do {
 		VM_BUG_ON_PAGE(compound_head(page) != head, page);
 		pages[*nr] = page;
+		if (PageTail(page))
+			get_huge_page_tail(page);
 		(*nr)++;
 		page++;
 		refs++;
@@ -259,7 +324,18 @@ static int gup_pmd_range(pud_t pud, unsigned long addr, unsigned long end,
 		pmd_t pmd = *pmdp;
 
 		next = pmd_addr_end(addr, end);
-		if (pmd_none(pmd))
+		/*
+		 * The pmd_trans_splitting() check below explains why
+		 * pmdp_splitting_flush has to flush the tlb, to stop
+		 * this gup-fast code from running while we set the
+		 * splitting bit in the pmd. Returning zero will take
+		 * the slow path that will call wait_split_huge_page()
+		 * if the pmd is still in splitting state. gup-fast
+		 * can't because it has irq disabled and
+		 * wait_split_huge_page() would never return as the
+		 * tlb flush IPI wouldn't run.
+		 */
+		if (pmd_none(pmd) || pmd_trans_splitting(pmd))
 			return 0;
 		if (unlikely(pmd_large(pmd) || !pmd_present(pmd))) {
 			/*
@@ -267,9 +343,10 @@ static int gup_pmd_range(pud_t pud, unsigned long addr, unsigned long end,
 			 * slowpath for accounting purposes and so that they
 			 * can be serialised against THP migration.
 			 */
-			if (pmd_protnone(pmd))
+			if (pmd_numa(pmd))
 				return 0;
-			if (!gup_huge_pmd(pmd, addr, next, write, pages, nr))
+			if (!gup_huge_pmd(pmd, pmdp, addr, next, write,
+				pages, nr))
 				return 0;
 		} else {
 			if (!gup_pte_range(pmd, addr, next, write, pages, nr))
@@ -280,26 +357,49 @@ static int gup_pmd_range(pud_t pud, unsigned long addr, unsigned long end,
 	return 1;
 }
 
-static noinline int gup_huge_pud(pud_t pud, unsigned long addr,
+static noinline int gup_huge_pud(pud_t orig, pud_t *pudp, unsigned long addr,
 		unsigned long end, int write, struct page **pages, int *nr)
 {
+	pte_t pte = *(pte_t *)&orig;
 	struct page *head, *page;
 	int refs;
 
-	if (!pte_allows_gup(pud_val(pud), write))
+	if (!pte_allows_gup(pte_val(pte), write))
 		return 0;
+
+	VM_BUG_ON(!pfn_valid(pte_pfn(pte)));
+	if (pud_devmap(orig))
+		return __gup_device_huge_pud(orig, pudp, addr, end, pages, nr);
+
 	/* hugepages are never "special" */
-	VM_BUG_ON(pud_flags(pud) & _PAGE_SPECIAL);
-	VM_BUG_ON(!pfn_valid(pud_pfn(pud)));
+	VM_BUG_ON(pte_flags(pte) & _PAGE_SPECIAL);
 
 	refs = 0;
-	head = pud_page(pud);
-	if (WARN_ON_ONCE(page_ref_count(head) <= 0))
-		return 0;
+	head = pte_page(pte);
+
+	/* RHEL-only. See gup_pte_range() */
+	if (rh_flush_tlb_others_IPI_less()) {
+		head = try_get_compound_head(head, 1);
+		if (!head)
+			return 0;
+		if (unlikely(pte_val(pte) != pte_val(*(pte_t *)&orig))) {
+			put_page(head);
+			return 0;
+		}
+
+		/* Don't take ref to the head page twice */
+		refs--;
+	} else {
+		if (WARN_ON_ONCE(page_ref_count(head) < 0))
+			return 0;
+	}
+
 	page = head + ((addr & ~PUD_MASK) >> PAGE_SHIFT);
 	do {
 		VM_BUG_ON_PAGE(compound_head(page) != head, page);
 		pages[*nr] = page;
+		if (PageTail(page))
+			get_huge_page_tail(page);
 		(*nr)++;
 		page++;
 		refs++;
@@ -323,7 +423,8 @@ static int gup_pud_range(pgd_t pgd, unsigned long addr, unsigned long end,
 		if (pud_none(pud))
 			return 0;
 		if (unlikely(pud_large(pud))) {
-			if (!gup_huge_pud(pud, addr, next, write, pages, nr))
+			if (!gup_huge_pud(pud, pudp, addr, next, write,
+					  pages, nr))
 				return 0;
 		} else {
 			if (!gup_pmd_range(pud, addr, next, write, pages, nr))
@@ -472,9 +573,9 @@ slow_irqon:
 		start += nr << PAGE_SHIFT;
 		pages += nr;
 
-		ret = get_user_pages_unlocked(start,
+		ret = get_user_pages_unlocked(current, mm, start,
 					      (end - start) >> PAGE_SHIFT,
-					      pages, write ? FOLL_WRITE : 0);
+					      write, 0, pages);
 
 		/* Have to be a bit careful with return values */
 		if (nr > 0) {

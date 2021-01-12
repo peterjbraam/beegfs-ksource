@@ -50,6 +50,7 @@
 #include <linux/list.h>
 #include <linux/radix-tree.h>
 #include <linux/mutex.h>
+#include <linux/bootmem.h>
 #include <linux/pci.h>
 #include <linux/debugfs.h>
 #include <linux/of.h>
@@ -67,7 +68,6 @@
 #include <asm/smp.h>
 #include <asm/debug.h>
 #include <asm/livepatch.h>
-#include <asm/asm-prototypes.h>
 
 #ifdef CONFIG_PPC64
 #include <asm/paca.h>
@@ -76,7 +76,6 @@
 #endif
 #define CREATE_TRACE_POINTS
 #include <asm/trace.h>
-#include <asm/cpu_has_feature.h>
 
 DEFINE_PER_CPU_SHARED_ALIGNED(irq_cpustat_t, irq_stat);
 EXPORT_PER_CPU_SYMBOL(irq_stat);
@@ -116,7 +115,7 @@ static inline notrace void set_soft_enabled(unsigned long enable)
 static inline notrace int decrementer_check_overflow(void)
 {
  	u64 now = get_tb_or_rtc();
-	u64 *next_tb = this_cpu_ptr(&decrementers_next_tb);
+ 	u64 *next_tb = &__get_cpu_var(decrementers_next_tb);
  
 	return now >= *next_tb;
 }
@@ -146,19 +145,6 @@ notrace unsigned int __check_irq_replay(void)
 
 	/* Clear bit 0 which we wouldn't clear otherwise */
 	local_paca->irq_happened &= ~PACA_IRQ_HARD_DIS;
-	if (happened & PACA_IRQ_HARD_DIS) {
-		/*
-		 * We may have missed a decrementer interrupt if hard disabled.
-		 * Check the decrementer register in case we had a rollover
-		 * while hard disabled.
-		 */
-		if (!(happened & PACA_IRQ_DEC)) {
-			if (decrementer_check_overflow()) {
-				local_paca->irq_happened |= PACA_IRQ_DEC;
-				happened |= PACA_IRQ_DEC;
-			}
-		}
-	}
 
 	/*
 	 * Force the delivery of pending soft-disabled interrupts on PS3.
@@ -170,21 +156,12 @@ notrace unsigned int __check_irq_replay(void)
 	}
 
 	/*
-	 * Check if an hypervisor Maintenance interrupt happened.
-	 * This is a higher priority interrupt than the others, so
-	 * replay it first.
-	 */
-	local_paca->irq_happened &= ~PACA_IRQ_HMI;
-	if (happened & PACA_IRQ_HMI)
-		return 0xe60;
-
-	/*
 	 * We may have missed a decrementer interrupt. We check the
 	 * decrementer itself rather than the paca irq_happened field
 	 * in case we also had a rollover while hard disabled
 	 */
 	local_paca->irq_happened &= ~PACA_IRQ_DEC;
-	if (happened & PACA_IRQ_DEC)
+	if ((happened & PACA_IRQ_DEC) || decrementer_check_overflow())
 		return 0x900;
 
 	/* Finally check if an external interrupt happened */
@@ -212,6 +189,11 @@ notrace unsigned int __check_irq_replay(void)
 		return 0xa00;
 	}
 #endif /* CONFIG_PPC_BOOK3E */
+
+	/* Check if an hypervisor Maintenance interrupt happened */
+	local_paca->irq_happened &= ~PACA_IRQ_HMI;
+	if (happened & PACA_IRQ_HMI)
+		return 0xe60;
 
 	/* There should be nothing left ! */
 	BUG_ON(local_paca->irq_happened != 0);
@@ -269,7 +251,7 @@ notrace void arch_local_irq_restore(unsigned long en)
 		if (WARN_ON(mfmsr() & MSR_EE))
 			__hard_irq_disable();
 	}
-#endif /* CONFIG_TRACE_IRQFLAGS */
+#endif /* CONFIG_TRACE_IRQFLAG */
 
 	set_soft_enabled(0);
 
@@ -359,29 +341,6 @@ bool prep_irq_for_idle(void)
 
 	/* Tell the caller to enter the low power state */
 	return true;
-}
-
-/*
- * Force a replay of the external interrupt handler on this CPU.
- */
-void force_external_irq_replay(void)
-{
-	/*
-	 * This must only be called with interrupts soft-disabled,
-	 * the replay will happen when re-enabling.
-	 */
-	WARN_ON(!arch_irqs_disabled());
-
-	/*
-	 * Interrupts must always be hard disabled before irq_happened is
-	 * modified (to prevent lost update in case of interrupt between
-	 * load and store).
-	 */
-	__hard_irq_disable();
-	local_paca->irq_happened |= PACA_IRQ_HARD_DIS;
-
-	/* Indicate in the PACA that we have an interrupt to replay */
-	local_paca->irq_happened |= PACA_IRQ_EE;
 }
 
 #endif /* CONFIG_PPC64 */
@@ -484,15 +443,15 @@ void migrate_irqs(void)
 
 		chip = irq_data_get_irq_chip(data);
 
-		cpumask_and(mask, irq_data_get_affinity_mask(data), map);
+		cpumask_and(mask, data->affinity, map);
 		if (cpumask_any(mask) >= nr_cpu_ids) {
-			pr_warn("Breaking affinity for irq %i\n", irq);
+			printk("Breaking affinity for irq %i\n", irq);
 			cpumask_copy(mask, map);
 		}
 		if (chip->irq_set_affinity)
 			chip->irq_set_affinity(data, mask, true);
 		else if (desc->action && !(warned++))
-			pr_err("Cannot set affinity for irq %i\n", irq);
+			printk("Cannot set affinity for irq %i\n", irq);
 	}
 
 	free_cpumask_var(mask);
@@ -508,11 +467,11 @@ static inline void check_stack_overflow(void)
 #ifdef CONFIG_DEBUG_STACKOVERFLOW
 	long sp;
 
-	sp = current_stack_pointer() & (THREAD_SIZE-1);
+	sp = __get_SP() & (THREAD_SIZE-1);
 
 	/* check for stack overflow: is there less than 2KB free? */
 	if (unlikely(sp < (sizeof(struct thread_info) + 2048))) {
-		pr_err("do_IRQ: stack overflow: %ld\n",
+		printk("do_IRQ: stack overflow: %ld\n",
 			sp - sizeof(struct thread_info));
 		dump_stack();
 	}
@@ -527,6 +486,8 @@ void __do_irq(struct pt_regs *regs)
 
 	trace_irq_entry(regs);
 
+	check_stack_overflow();
+
 	/*
 	 * Query the platform PIC for the interrupt & ack it.
 	 *
@@ -538,8 +499,8 @@ void __do_irq(struct pt_regs *regs)
 	may_hard_irq_enable();
 
 	/* And finally process it */
-	if (unlikely(!irq))
-		__this_cpu_inc(irq_stat.spurious_irqs);
+	if (unlikely(irq == NO_IRQ))
+		__get_cpu_var(irq_stat).spurious_irqs++;
 	else
 		generic_handle_irq(irq);
 
@@ -557,8 +518,6 @@ void do_IRQ(struct pt_regs *regs)
 	curtp = current_thread_info();
 	irqtp = hardirq_ctx[raw_smp_processor_id()];
 	sirqtp = softirq_ctx[raw_smp_processor_id()];
-
-	check_stack_overflow();
 
 	/* Already there ? */
 	if (unlikely(curtp == irqtp || curtp == sirqtp)) {
@@ -611,13 +570,8 @@ void exc_lvl_ctx_init(void)
 #ifdef CONFIG_PPC64
 		cpu_nr = i;
 #else
-#ifdef CONFIG_SMP
 		cpu_nr = get_hard_smp_processor_id(i);
-#else
-		cpu_nr = 0;
 #endif
-#endif
-
 		memset((void *)critirq_ctx[cpu_nr], 0, THREAD_SIZE);
 		tp = critirq_ctx[cpu_nr];
 		tp->cpu = cpu_nr;
@@ -659,7 +613,7 @@ void irq_ctx_init(void)
 	}
 }
 
-void do_softirq_own_stack(void)
+static inline void do_softirq_onstack(void)
 {
 	struct thread_info *curtp, *irqtp;
 
@@ -675,6 +629,21 @@ void do_softirq_own_stack(void)
 	 */
 	if (irqtp->flags)
 		set_bits(irqtp->flags, &curtp->flags);
+}
+
+void do_softirq(void)
+{
+	unsigned long flags;
+
+	if (in_interrupt())
+		return;
+
+	local_irq_save(flags);
+
+	if (local_softirq_pending())
+		do_softirq_onstack();
+
+	local_irq_restore(flags);
 }
 
 irq_hw_number_t virq_to_hw(unsigned int virq)

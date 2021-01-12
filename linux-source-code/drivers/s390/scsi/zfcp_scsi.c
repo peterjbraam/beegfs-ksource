@@ -32,6 +32,25 @@ static bool allow_lun_scan = 1;
 module_param(allow_lun_scan, bool, 0600);
 MODULE_PARM_DESC(allow_lun_scan, "For NPIV, scan and attach all storage LUNs");
 
+static int zfcp_scsi_change_queue_depth(struct scsi_device *sdev, int depth,
+					int reason)
+{
+	switch (reason) {
+	case SCSI_QDEPTH_DEFAULT:
+		scsi_adjust_queue_depth(sdev, scsi_get_tag_type(sdev), depth);
+		break;
+	case SCSI_QDEPTH_QFULL:
+		scsi_track_queue_full(sdev, depth);
+		break;
+	case SCSI_QDEPTH_RAMP_UP:
+		scsi_adjust_queue_depth(sdev, scsi_get_tag_type(sdev), depth);
+		break;
+	default:
+		return -EOPNOTSUPP;
+	}
+	return sdev->queue_depth;
+}
+
 static void zfcp_scsi_slave_destroy(struct scsi_device *sdev)
 {
 	struct zfcp_scsi_dev *zfcp_sdev = sdev_to_zfcp(sdev);
@@ -47,7 +66,9 @@ static void zfcp_scsi_slave_destroy(struct scsi_device *sdev)
 static int zfcp_scsi_slave_configure(struct scsi_device *sdp)
 {
 	if (sdp->tagged_supported)
-		scsi_change_queue_depth(sdp, default_depth);
+		scsi_adjust_queue_depth(sdp, MSG_SIMPLE_TAG, default_depth);
+	else
+		scsi_adjust_queue_depth(sdp, 0, 1);
 	return 0;
 }
 
@@ -123,15 +144,6 @@ static int zfcp_scsi_slave_alloc(struct scsi_device *sdev)
 		return -ENXIO;
 
 	zfcp_sdev->erp_action.port = port;
-
-	mutex_lock(&zfcp_sysfs_port_units_mutex);
-	if (zfcp_sysfs_port_is_removing(port)) {
-		/* port is already gone */
-		mutex_unlock(&zfcp_sysfs_port_units_mutex);
-		put_device(&port->dev); /* undo zfcp_get_port_by_wwpn() */
-		return -ENXIO;
-	}
-	mutex_unlock(&zfcp_sysfs_port_units_mutex);
 
 	unit = zfcp_unit_find(port, zfcp_scsi_dev_lun(sdev));
 	if (unit)
@@ -335,10 +347,6 @@ static int zfcp_scsi_eh_host_reset_handler(struct scsi_cmnd *scpnt)
 	struct zfcp_adapter *adapter = zfcp_sdev->port->adapter;
 	int ret = SUCCESS, fc_ret;
 
-	if (!(adapter->connection_features & FSF_FEATURE_NPIV_MODE)) {
-		zfcp_erp_port_forced_reopen_all(adapter, 0, "schrh_p");
-		zfcp_erp_wait(adapter);
-	}
 	zfcp_erp_adapter_reopen(adapter, 0, "schrh_1");
 	zfcp_erp_wait(adapter);
 	fc_ret = fc_block_scsi_eh(scpnt);
@@ -362,7 +370,7 @@ static struct scsi_host_template zfcp_scsi_host_template = {
 	.slave_alloc		 = zfcp_scsi_slave_alloc,
 	.slave_configure	 = zfcp_scsi_slave_configure,
 	.slave_destroy		 = zfcp_scsi_slave_destroy,
-	.change_queue_depth	 = scsi_change_queue_depth,
+	.change_queue_depth	 = zfcp_scsi_change_queue_depth,
 	.proc_name		 = "zfcp",
 	.can_queue		 = 4096,
 	.this_id		 = -1,
@@ -373,10 +381,10 @@ static struct scsi_host_template zfcp_scsi_host_template = {
 				     * ZFCP_QDIO_MAX_SBALS_PER_REQ) - 2) * 8,
 				   /* GCD, adjusted later */
 	.dma_boundary		 = ZFCP_QDIO_SBALE_LEN - 1,
+	.cmd_per_lun		 = 1,
 	.use_clustering		 = 1,
 	.shost_attrs		 = zfcp_sysfs_shost_attrs,
 	.sdev_attrs		 = zfcp_sysfs_sdev_attrs,
-	.track_queue_depth	 = 1,
 };
 
 /**

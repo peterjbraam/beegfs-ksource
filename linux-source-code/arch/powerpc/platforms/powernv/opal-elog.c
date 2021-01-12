@@ -71,14 +71,19 @@ static ssize_t elog_ack_show(struct elog_obj *elog_obj,
 	return sprintf(buf, "ack - acknowledge log message\n");
 }
 
+static void delay_release_kobj(void *kobj)
+{
+	kobject_put((struct kobject *)kobj);
+}
+
 static ssize_t elog_ack_store(struct elog_obj *elog_obj,
 			      struct elog_attribute *attr,
 			      const char *buf,
 			      size_t count)
 {
 	opal_send_ack_elog(elog_obj->id);
-	sysfs_remove_file_self(&elog_obj->kobj, &attr->attr);
-	kobject_put(&elog_obj->kobj);
+	sysfs_schedule_callback(&elog_obj->kobj, delay_release_kobj,
+				&elog_obj->kobj, THIS_MODULE);
 	return count;
 }
 
@@ -183,14 +188,14 @@ static ssize_t raw_attr_read(struct file *filep, struct kobject *kobj,
 	return count;
 }
 
-static void create_elog_obj(uint64_t id, size_t size, uint64_t type)
+static struct elog_obj *create_elog_obj(uint64_t id, size_t size, uint64_t type)
 {
 	struct elog_obj *elog;
 	int rc;
 
 	elog = kzalloc(sizeof(*elog), GFP_KERNEL);
 	if (!elog)
-		return;
+		return NULL;
 
 	elog->kobj.kset = elog_kset;
 
@@ -223,40 +228,21 @@ static void create_elog_obj(uint64_t id, size_t size, uint64_t type)
 	rc = kobject_add(&elog->kobj, NULL, "0x%llx", id);
 	if (rc) {
 		kobject_put(&elog->kobj);
-		return;
+		return NULL;
 	}
 
-	/*
-	 * As soon as the sysfs file for this elog is created/activated there is
-	 * a chance the opal_errd daemon (or any userspace) might read and
-	 * acknowledge the elog before kobject_uevent() is called. If that
-	 * happens then there is a potential race between
-	 * elog_ack_store->kobject_put() and kobject_uevent() which leads to a
-	 * use-after-free of a kernfs object resulting in a kernel crash.
-	 *
-	 * To avoid that, we need to take a reference on behalf of the bin file,
-	 * so that our reference remains valid while we call kobject_uevent().
-	 * We then drop our reference before exiting the function, leaving the
-	 * bin file to drop the last reference (if it hasn't already).
-	 */
-
-	/* Take a reference for the bin file */
-	kobject_get(&elog->kobj);
 	rc = sysfs_create_bin_file(&elog->kobj, &elog->raw_attr);
-	if (rc == 0) {
-		kobject_uevent(&elog->kobj, KOBJ_ADD);
-	} else {
-		/* Drop the reference taken for the bin file */
+	if (rc) {
 		kobject_put(&elog->kobj);
+		return NULL;
 	}
 
-	/* Drop our reference */
-	kobject_put(&elog->kobj);
+	kobject_uevent(&elog->kobj, KOBJ_ADD);
 
-	return;
+	return elog;
 }
 
-static irqreturn_t elog_event(int irq, void *data)
+static void elog_work_fn(struct work_struct *work)
 {
 	__be64 size;
 	__be64 id;
@@ -271,7 +257,7 @@ static irqreturn_t elog_event(int irq, void *data)
 	rc = opal_get_elog_size(&id, &size, &type);
 	if (rc != OPAL_SUCCESS) {
 		pr_err("ELOG: OPAL log info read failed\n");
-		return IRQ_HANDLED;
+		return;
 	}
 
 	elog_size = be64_to_cpu(size);
@@ -293,11 +279,17 @@ static irqreturn_t elog_event(int irq, void *data)
 	if (kobj) {
 		/* Drop reference added by kset_find_obj() */
 		kobject_put(kobj);
-		return IRQ_HANDLED;
+		return;
 	}
 
 	create_elog_obj(log_id, elog_size, elog_type);
+}
 
+static DECLARE_WORK(elog_work, elog_work_fn);
+
+static irqreturn_t elog_event(int irq, void *data)
+{
+	schedule_work(&elog_work);
 	return IRQ_HANDLED;
 }
 
@@ -322,8 +314,8 @@ int __init opal_elog_init(void)
 		return irq;
 	}
 
-	rc = request_threaded_irq(irq, NULL, elog_event,
-			IRQF_TRIGGER_HIGH | IRQF_ONESHOT, "opal-elog", NULL);
+	rc = request_irq(irq, elog_event,
+			IRQ_TYPE_LEVEL_HIGH, "opal-elog", NULL);
 	if (rc) {
 		pr_err("%s: Can't request OPAL event irq (%d)\n",
 		       __func__, rc);

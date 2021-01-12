@@ -1,9 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0
 /* uio_pci_generic - generic UIO driver for PCI 2.3 devices
  *
  * Copyright (C) 2009 Red Hat, Inc.
  * Author: Michael S. Tsirkin <mst@redhat.com>
- *
- * This work is licensed under the terms of the GNU GPL, version 2.
  *
  * Since the driver does not declare any device ids, you must allocate
  * id and bind the device to the driver yourself.  For example:
@@ -91,8 +90,7 @@ static int probe(struct pci_dev *pdev,
 	gdev->info.handler = irqhandler;
 	gdev->pdev = pdev;
 
-	err = uio_register_device(&pdev->dev, &gdev->info);
-	if (err)
+	if (uio_register_device(&pdev->dev, &gdev->info))
 		goto err_register;
 	pci_set_drvdata(pdev, gdev);
 
@@ -114,14 +112,27 @@ static void remove(struct pci_dev *pdev)
 	kfree(gdev);
 }
 
-static struct pci_driver uio_pci_driver = {
+static struct pci_driver driver = {
 	.name = "uio_pci_generic",
 	.id_table = NULL, /* only dynamic id's */
 	.probe = probe,
 	.remove = remove,
 };
 
-module_pci_driver(uio_pci_driver);
+static int __init init(void)
+{
+	pr_info(DRIVER_DESC " version: " DRIVER_VERSION "\n");
+	return pci_register_driver(&driver);
+}
+
+static void __exit cleanup(void)
+{
+	pci_unregister_driver(&driver);
+}
+
+module_init(init);
+module_exit(cleanup);
+
 MODULE_VERSION(DRIVER_VERSION);
 MODULE_LICENSE("GPL v2");
 MODULE_AUTHOR(DRIVER_AUTHOR);

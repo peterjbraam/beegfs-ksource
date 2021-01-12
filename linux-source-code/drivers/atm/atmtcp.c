@@ -299,7 +299,6 @@ static int atmtcp_c_send(struct atm_vcc *vcc,struct sk_buff *skb)
 	out_vcc = find_vcc(dev, ntohs(hdr->vpi), ntohs(hdr->vci));
 	read_unlock(&vcc_sklist_lock);
 	if (!out_vcc) {
-		result = -EUNATCH;
 		atomic_inc(&vcc->stats->tx_err);
 		goto done;
 	}
@@ -432,15 +431,9 @@ static int atmtcp_remove_persistent(int itf)
 		return -EMEDIUMTYPE;
 	}
 	dev_data = PRIV(dev);
-	if (!dev_data->persist) {
-		atm_dev_put(dev);
-		return 0;
-	}
+	if (!dev_data->persist) return 0;
 	dev_data->persist = 0;
-	if (PRIV(dev)->vcc) {
-		atm_dev_put(dev);
-		return 0;
-	}
+	if (PRIV(dev)->vcc) return 0;
 	kfree(dev_data);
 	atm_dev_put(dev);
 	atm_dev_deregister(dev);

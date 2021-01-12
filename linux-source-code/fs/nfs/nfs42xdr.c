@@ -55,35 +55,45 @@
 #define decode_clone_maxsz		(op_decode_hdr_maxsz)
 
 #define NFS4_enc_allocate_sz		(compound_encode_hdr_maxsz + \
+					 encode_sequence_maxsz + \
 					 encode_putfh_maxsz + \
 					 encode_allocate_maxsz + \
 					 encode_getattr_maxsz)
 #define NFS4_dec_allocate_sz		(compound_decode_hdr_maxsz + \
+					 decode_sequence_maxsz + \
 					 decode_putfh_maxsz + \
 					 decode_allocate_maxsz + \
 					 decode_getattr_maxsz)
 #define NFS4_enc_copy_sz		(compound_encode_hdr_maxsz + \
+					 encode_sequence_maxsz + \
 					 encode_putfh_maxsz + \
 					 encode_savefh_maxsz + \
 					 encode_putfh_maxsz + \
-					 encode_copy_maxsz)
+					 encode_copy_maxsz + \
+					 encode_commit_maxsz)
 #define NFS4_dec_copy_sz		(compound_decode_hdr_maxsz + \
+					 decode_sequence_maxsz + \
 					 decode_putfh_maxsz + \
 					 decode_savefh_maxsz + \
 					 decode_putfh_maxsz + \
-					 decode_copy_maxsz)
+					 decode_copy_maxsz + \
+					 decode_commit_maxsz)
 #define NFS4_enc_deallocate_sz		(compound_encode_hdr_maxsz + \
+					 encode_sequence_maxsz + \
 					 encode_putfh_maxsz + \
 					 encode_deallocate_maxsz + \
 					 encode_getattr_maxsz)
 #define NFS4_dec_deallocate_sz		(compound_decode_hdr_maxsz + \
+					 decode_sequence_maxsz + \
 					 decode_putfh_maxsz + \
 					 decode_deallocate_maxsz + \
 					 decode_getattr_maxsz)
 #define NFS4_enc_seek_sz		(compound_encode_hdr_maxsz + \
+					 encode_sequence_maxsz + \
 					 encode_putfh_maxsz + \
 					 encode_seek_maxsz)
 #define NFS4_dec_seek_sz		(compound_decode_hdr_maxsz + \
+					 decode_sequence_maxsz + \
 					 decode_putfh_maxsz + \
 					 decode_seek_maxsz)
 #define NFS4_enc_layoutstats_sz		(compound_encode_hdr_maxsz + \
@@ -181,8 +191,9 @@ static void encode_layoutstats(struct xdr_stream *xdr,
 			NFS4_DEVICEID4_SIZE);
 	/* Encode layoutupdate4 */
 	*p++ = cpu_to_be32(devinfo->layout_type);
-	if (devinfo->layoutstats_encode != NULL)
-		devinfo->layoutstats_encode(xdr, args, devinfo);
+	if (devinfo->ld_private.ops)
+		devinfo->ld_private.ops->encode(xdr, args,
+				&devinfo->ld_private);
 	else
 		encode_uint32(xdr, 0);
 }
@@ -221,6 +232,18 @@ static void nfs4_xdr_enc_allocate(struct rpc_rqst *req,
 	encode_nops(&hdr);
 }
 
+static void encode_copy_commit(struct xdr_stream *xdr,
+			  struct nfs42_copy_args *args,
+			  struct compound_hdr *hdr)
+{
+	__be32 *p;
+
+	encode_op_hdr(xdr, OP_COMMIT, decode_commit_maxsz, hdr);
+	p = reserve_space(xdr, 12);
+	p = xdr_encode_hyper(p, args->dst_pos);
+	*p = cpu_to_be32(args->count);
+}
+
 /*
  * Encode COPY request
  */
@@ -238,6 +261,7 @@ static void nfs4_xdr_enc_copy(struct rpc_rqst *req,
 	encode_savefh(xdr, &hdr);
 	encode_putfh(xdr, args->dst_fh, &hdr);
 	encode_copy(xdr, args, &hdr);
+	encode_copy_commit(xdr, args, &hdr);
 	encode_nops(&hdr);
 }
 
@@ -330,21 +354,13 @@ static int decode_write_response(struct xdr_stream *xdr,
 				 struct nfs42_write_res *res)
 {
 	__be32 *p;
+	int stateids;
 
 	p = xdr_inline_decode(xdr, 4 + 8 + 4);
 	if (unlikely(!p))
 		goto out_overflow;
 
-	/*
-	 * We never use asynchronous mode, so warn if a server returns
-	 * a stateid.
-	 */
-	if (unlikely(*p != 0)) {
-		pr_err_once("%s: server has set unrequested "
-				"asynchronous mode\n", __func__);
-		return -EREMOTEIO;
-	}
-	p++;
+	stateids = be32_to_cpup(p++);
 	p = xdr_decode_hyper(p, &res->count);
 	res->verifier.committed = be32_to_cpup(p);
 	return decode_verifier(xdr, &res->verifier.verifier);
@@ -480,6 +496,9 @@ static int nfs4_xdr_dec_copy(struct rpc_rqst *rqstp,
 	if (status)
 		goto out;
 	status = decode_copy(xdr, res);
+	if (status)
+		goto out;
+	status = decode_commit(xdr, &res->commit_res);
 out:
 	return status;
 }

@@ -21,8 +21,10 @@
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/fcntl.h>
+#include <linux/aio.h>
 #include <linux/pci.h>
 #include <linux/poll.h>
+#include <linux/init.h>
 #include <linux/ioctl.h>
 #include <linux/cdev.h>
 #include <linux/sched.h>
@@ -94,6 +96,11 @@ static const struct pci_device_id mei_me_pci_tbl[] = {
 
 	{MEI_PCI_DEVICE(MEI_DEV_ID_KBP, mei_me_pch8_cfg)},
 	{MEI_PCI_DEVICE(MEI_DEV_ID_KBP_2, mei_me_pch8_cfg)},
+
+	{MEI_PCI_DEVICE(MEI_DEV_ID_CNP_LP, mei_me_pch8_cfg)},
+	{MEI_PCI_DEVICE(MEI_DEV_ID_CNP_LP_4, mei_me_pch8_cfg)},
+	{MEI_PCI_DEVICE(MEI_DEV_ID_CNP_H, mei_me_pch8_cfg)},
+	{MEI_PCI_DEVICE(MEI_DEV_ID_CNP_H_4, mei_me_pch8_cfg)},
 
 	/* required last entry */
 	{0, }
@@ -260,11 +267,38 @@ end:
 }
 
 /**
+ * mei_me_shutdown - Device Removal Routine
+ *
+ * @pdev: PCI device structure
+ *
+ * mei_me_shutdown is called from the reboot notifier
+ * it's a simplified version of remove so we go down
+ * faster.
+ */
+static void mei_me_shutdown(struct pci_dev *pdev)
+{
+	struct mei_device *dev;
+
+	dev = pci_get_drvdata(pdev);
+	if (!dev)
+		return;
+
+	dev_dbg(&pdev->dev, "shutdown\n");
+	mei_stop(dev);
+
+	if (!pci_dev_run_wake(pdev))
+		mei_me_unset_pm_domain(dev);
+
+	mei_disable_interrupts(dev);
+	free_irq(pdev->irq, dev);
+}
+
+/**
  * mei_me_remove - Device Removal Routine
  *
  * @pdev: PCI device structure
  *
- * mei_remove is called by the PCI subsystem to alert the driver
+ * mei_me_remove is called by the PCI subsystem to alert the driver
  * that it should release a PCI device.
  */
 static void mei_me_remove(struct pci_dev *pdev)
@@ -489,7 +523,7 @@ static struct pci_driver mei_me_driver = {
 	.id_table = mei_me_pci_tbl,
 	.probe = mei_me_probe,
 	.remove = mei_me_remove,
-	.shutdown = mei_me_remove,
+	.shutdown = mei_me_shutdown,
 	.driver.pm = MEI_ME_PM_OPS,
 };
 

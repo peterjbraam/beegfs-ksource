@@ -327,16 +327,13 @@ void cx18_read_eeprom(struct cx18 *cx, struct tveeprom *tv)
 	struct i2c_client *c;
 	u8 eedata[256];
 
-	memset(tv, 0, sizeof(*tv));
-
 	c = kzalloc(sizeof(*c), GFP_KERNEL);
-	if (!c)
-		return;
 
 	strlcpy(c->name, "cx18 tveeprom tmp", sizeof(c->name));
 	c->adapter = &cx->i2c_adap[0];
 	c->addr = 0xa0 >> 1;
 
+	memset(tv, 0, sizeof(*tv));
 	if (tveeprom_read(c, eedata, sizeof(eedata)))
 		goto ret;
 
@@ -560,7 +557,7 @@ static void cx18_process_options(struct cx18 *cx)
 	cx->stream_buf_size[CX18_ENC_STREAM_TYPE_MPG] = enc_mpg_bufsize;
 	cx->stream_buf_size[CX18_ENC_STREAM_TYPE_IDX] = enc_idx_bufsize;
 	cx->stream_buf_size[CX18_ENC_STREAM_TYPE_YUV] = enc_yuv_bufsize;
-	cx->stream_buf_size[CX18_ENC_STREAM_TYPE_VBI] = VBI_ACTIVE_SAMPLES * 36;
+	cx->stream_buf_size[CX18_ENC_STREAM_TYPE_VBI] = vbi_active_samples * 36;
 	cx->stream_buf_size[CX18_ENC_STREAM_TYPE_PCM] = enc_pcm_bufsize;
 	cx->stream_buf_size[CX18_ENC_STREAM_TYPE_RAD] = 0; /* control no data */
 
@@ -786,11 +783,11 @@ static void cx18_init_struct2(struct cx18 *cx)
 {
 	int i;
 
-	for (i = 0; i < CX18_CARD_MAX_VIDEO_INPUTS - 1; i++)
+	for (i = 0; i < CX18_CARD_MAX_VIDEO_INPUTS; i++)
 		if (cx->card->video_inputs[i].video_type == 0)
 			break;
 	cx->nof_inputs = i;
-	for (i = 0; i < CX18_CARD_MAX_AUDIO_INPUTS - 1; i++)
+	for (i = 0; i < CX18_CARD_MAX_AUDIO_INPUTS; i++)
 		if (cx->card->audio_inputs[i].audio_type == 0)
 			break;
 	cx->nof_audio_inputs = i;
@@ -1038,7 +1035,8 @@ static int cx18_probe(struct pci_dev *pci_dev,
 
 	/* Register IRQ */
 	retval = request_irq(cx->pci_dev->irq, cx18_irq_handler,
-			     IRQF_SHARED, cx->v4l2_dev.name, (void *)cx);
+			     IRQF_SHARED | IRQF_DISABLED,
+			     cx->v4l2_dev.name, (void *)cx);
 	if (retval) {
 		CX18_ERR("Failed to register irq %d\n", retval);
 		goto free_i2c;
@@ -1091,7 +1089,6 @@ static int cx18_probe(struct pci_dev *pci_dev,
 		setup.addr = ADDR_UNSET;
 		setup.type = cx->options.tuner;
 		setup.mode_mask = T_ANALOG_TV;  /* matches TV tuners */
-		setup.config = NULL;
 		if (cx->options.radio > 0)
 			setup.mode_mask |= T_RADIO;
 		setup.tuner_callback = (setup.type == TUNER_XC2028) ?

@@ -52,16 +52,6 @@ nfs4_is_valid_delegation(const struct nfs_delegation *delegation,
 	return false;
 }
 
-struct nfs_delegation *nfs4_get_valid_delegation(const struct inode *inode)
-{
-	struct nfs_delegation *delegation;
-
-	delegation = rcu_dereference(NFS_I(inode)->delegation);
-	if (nfs4_is_valid_delegation(delegation, 0))
-		return delegation;
-	return NULL;
-}
-
 static int
 nfs4_do_check_delegation(struct inode *inode, fmode_t flags, bool mark)
 {
@@ -105,30 +95,25 @@ static int nfs_delegation_claim_locks(struct nfs4_state *state, const nfs4_state
 {
 	struct inode *inode = state->inode;
 	struct file_lock *fl;
-	struct file_lock_context *flctx = inode->i_flctx;
-	struct list_head *list;
 	int status = 0;
 
-	if (flctx == NULL)
+	if (inode->i_flock == NULL)
 		goto out;
 
-	list = &flctx->flc_posix;
-	spin_lock(&flctx->flc_lock);
-restart:
-	list_for_each_entry(fl, list, fl_list) {
+	/* Protect inode->i_flock using the i_lock */
+	spin_lock(&inode->i_lock);
+	for (fl = inode->i_flock; fl != NULL; fl = fl->fl_next) {
+		if (!(fl->fl_flags & (FL_POSIX|FL_FLOCK)))
+			continue;
 		if (nfs_file_open_context(fl->fl_file)->state != state)
 			continue;
-		spin_unlock(&flctx->flc_lock);
+		spin_unlock(&inode->i_lock);
 		status = nfs4_lock_delegation_recall(fl, state, stateid);
 		if (status < 0)
 			goto out;
-		spin_lock(&flctx->flc_lock);
+		spin_lock(&inode->i_lock);
 	}
-	if (list == &flctx->flc_posix) {
-		list = &flctx->flc_flock;
-		goto restart;
-	}
-	spin_unlock(&flctx->flc_lock);
+	spin_unlock(&inode->i_lock);
 out:
 	return status;
 }
@@ -403,10 +388,6 @@ int nfs_inode_set_delegation(struct inode *inode, struct rpc_cred *cred, struct 
 	rcu_assign_pointer(nfsi->delegation, delegation);
 	delegation = NULL;
 
-	/* Ensure we revalidate the attributes and page cache! */
-	spin_lock(&inode->i_lock);
-	nfsi->cache_validity |= NFS_INO_REVAL_FORCED;
-	spin_unlock(&inode->i_lock);
 	trace_nfs4_set_delegation(inode, res->delegation_type);
 
 out:
@@ -1055,6 +1036,33 @@ int nfs_delegations_present(struct nfs_client *clp)
 			break;
 		}
 	rcu_read_unlock();
+	return ret;
+}
+
+/**
+ * nfs4_refresh_delegation_stateid - Update delegation stateid seqid
+ * @dst: stateid to refresh
+ * @inode: inode to check
+ *
+ * Returns "true" and updates "dst->seqid" * if inode had a delegation
+ * that matches our delegation stateid. Otherwise "false" is returned.
+ */
+bool nfs4_refresh_delegation_stateid(nfs4_stateid *dst, struct inode *inode)
+{
+	struct nfs_delegation *delegation;
+	bool ret = false;
+	if (!inode)
+		goto out;
+
+	rcu_read_lock();
+	delegation = rcu_dereference(NFS_I(inode)->delegation);
+	if (delegation != NULL &&
+	    nfs4_stateid_match_other(dst, &delegation->stateid)) {
+		dst->seqid = delegation->stateid.seqid;
+		return ret;
+	}
+	rcu_read_unlock();
+out:
 	return ret;
 }
 

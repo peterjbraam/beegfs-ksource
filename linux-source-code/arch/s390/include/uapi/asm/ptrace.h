@@ -290,6 +290,17 @@ typedef struct
 } s390_regs;
 
 /*
+ * The user_pt_regs structure exports the beginning of
+ * the in-kernel pt_regs structure to user space.
+ */
+typedef struct
+{
+	unsigned long args[1];
+	psw_t psw;
+	unsigned long gprs[NUM_GPRS];
+} user_pt_regs;
+
+/*
  * Now for the user space program event recording (trace) definitions.
  * The following structures are used only for the ptrace interface, don't
  * touch or even look at it if you don't want to modify the user-space
@@ -359,9 +370,9 @@ typedef struct
 		per_cr_bits    bits;
 	} control_regs;
 	/*
-	 * The single_step and instruction_fetch bits are obsolete,
-	 * the kernel always sets them to zero. To enable single
-	 * stepping use ptrace(PTRACE_SINGLESTEP) instead.
+	 * Use these flags instead of setting em_instruction_fetch
+	 * directly they are used so that single stepping can be
+	 * switched on & off while not affecting other tracing
 	 */
 	unsigned  single_step       : 1;
 	unsigned  instruction_fetch : 1;
@@ -401,12 +412,6 @@ typedef struct
 #define PTRACE_ENABLE_TE	      0x5009
 #define PTRACE_DISABLE_TE	      0x5010
 #define PTRACE_TE_ABORT_RAND	      0x5011
-
-/*
- * The numbers chosen here are somewhat arbitrary but absolutely MUST
- * not overlap with any of the number assigned in <linux/ptrace.h>.
- */
-#define PTRACE_SINGLEBLOCK	12	/* resume execution until next branch */
 
 /*
  * PT_PROT definition is loosely based on hppa bsd definition in

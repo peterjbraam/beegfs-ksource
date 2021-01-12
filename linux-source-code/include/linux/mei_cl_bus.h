@@ -9,7 +9,7 @@ struct mei_cl_device;
 struct mei_device;
 
 typedef void (*mei_cldev_event_cb_t)(struct mei_cl_device *cldev,
-				     u32 events, void *context);
+			       u32 events, void *context);
 
 /**
  * struct mei_cl_device - MEI device handle
@@ -67,19 +67,31 @@ struct mei_cl_driver {
 	int (*remove)(struct mei_cl_device *cldev);
 };
 
-int __mei_cldev_driver_register(struct mei_cl_driver *cldrv,
-				struct module *owner);
-#define mei_cldev_driver_register(cldrv)             \
+int __mei_cldev_driver_register(struct mei_cl_driver *cldrv, struct module *owner);
+#define mei_cldev_driver_register(cldrv)	\
 	__mei_cldev_driver_register(cldrv, THIS_MODULE)
 
 void mei_cldev_driver_unregister(struct mei_cl_driver *cldrv);
+
+/**
+ * module_mei_cl_driver - Helper macro for registering mei cl driver
+ *
+ * @__mei_cldrv mei_cl_driver structure
+ *
+ *  Helper macro for mei cl drivers which do not do anything special in module
+ *  init/exit, for eliminating a boilerplate code.
+ */
+#define module_mei_cl_driver(__mei_cldrv) \
+	module_driver(__mei_cldrv, \
+		      mei_cldev_driver_register,\
+		      mei_cldev_driver_unregister)
 
 ssize_t mei_cldev_send(struct mei_cl_device *cldev, u8 *buf, size_t length);
 ssize_t  mei_cldev_recv(struct mei_cl_device *cldev, u8 *buf, size_t length);
 
 int mei_cldev_register_event_cb(struct mei_cl_device *cldev,
-				unsigned long event_mask,
-				mei_cldev_event_cb_t read_cb, void *context);
+			  unsigned long event_mask,
+			  mei_cldev_event_cb_t read_cb, void *context);
 
 #define MEI_CL_EVENT_RX 0
 #define MEI_CL_EVENT_TX 1

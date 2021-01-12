@@ -237,38 +237,6 @@ DEFINE_NFS4_CLIENTID_EVENT(nfs4_bind_conn_to_session);
 DEFINE_NFS4_CLIENTID_EVENT(nfs4_sequence);
 DEFINE_NFS4_CLIENTID_EVENT(nfs4_reclaim_complete);
 
-TRACE_EVENT(nfs4_setup_sequence,
-		TP_PROTO(
-			const struct nfs4_session *session,
-			const struct nfs4_sequence_args *args
-		),
-		TP_ARGS(session, args),
-
-		TP_STRUCT__entry(
-			__field(unsigned int, session)
-			__field(unsigned int, slot_nr)
-			__field(unsigned int, seq_nr)
-			__field(unsigned int, highest_used_slotid)
-		),
-
-		TP_fast_assign(
-			const struct nfs4_slot *sa_slot = args->sa_slot;
-			__entry->session = nfs_session_id_hash(&session->sess_id);
-			__entry->slot_nr = sa_slot->slot_nr;
-			__entry->seq_nr = sa_slot->seq_nr;
-			__entry->highest_used_slotid =
-					sa_slot->table->highest_used_slotid;
-		),
-		TP_printk(
-			"session=0x%08x slot_nr=%u seq_nr=%u "
-			"highest_used_slotid=%u",
-			__entry->session,
-			__entry->slot_nr,
-			__entry->seq_nr,
-			__entry->highest_used_slotid
-		)
-);
-
 #define show_nfs4_sequence_status_flags(status) \
 	__print_flags((unsigned long)status, "|", \
 		{ SEQ4_STATUS_CB_PATH_DOWN, "CB_PATH_DOWN" }, \
@@ -378,6 +346,38 @@ TRACE_EVENT(nfs4_cb_sequence,
 );
 #endif /* CONFIG_NFS_V4_1 */
 
+TRACE_EVENT(nfs4_setup_sequence,
+		TP_PROTO(
+			const struct nfs4_session *session,
+			const struct nfs4_sequence_args *args
+		),
+		TP_ARGS(session, args),
+
+		TP_STRUCT__entry(
+			__field(unsigned int, session)
+			__field(unsigned int, slot_nr)
+			__field(unsigned int, seq_nr)
+			__field(unsigned int, highest_used_slotid)
+		),
+
+		TP_fast_assign(
+			const struct nfs4_slot *sa_slot = args->sa_slot;
+			__entry->session = session ? nfs_session_id_hash(&session->sess_id) : 0;
+			__entry->slot_nr = sa_slot->slot_nr;
+			__entry->seq_nr = sa_slot->seq_nr;
+			__entry->highest_used_slotid =
+					sa_slot->table->highest_used_slotid;
+		),
+		TP_printk(
+			"session=0x%08x slot_nr=%u seq_nr=%u "
+			"highest_used_slotid=%u",
+			__entry->session,
+			__entry->slot_nr,
+			__entry->seq_nr,
+			__entry->highest_used_slotid
+		)
+);
+
 DECLARE_EVENT_CLASS(nfs4_open_event,
 		TP_PROTO(
 			const struct nfs_open_context *ctx,
@@ -433,7 +433,7 @@ DECLARE_EVENT_CLASS(nfs4_open_event,
 				__entry->fileid = 0;
 				__entry->fhandle = 0;
 			}
-			__entry->dir = NFS_FILEID(d_inode(ctx->dentry->d_parent));
+			__entry->dir = NFS_FILEID(ctx->dentry->d_parent->d_inode);
 			__assign_str(name, ctx->dentry->d_name.name);
 		),
 
@@ -1032,6 +1032,8 @@ DECLARE_EVENT_CLASS(nfs4_inode_stateid_event,
 
 DEFINE_NFS4_INODE_STATEID_EVENT(nfs4_setattr);
 DEFINE_NFS4_INODE_STATEID_EVENT(nfs4_delegreturn);
+DEFINE_NFS4_INODE_STATEID_EVENT(nfs4_open_stateid_update);
+DEFINE_NFS4_INODE_STATEID_EVENT(nfs4_open_stateid_update_wait);
 
 DECLARE_EVENT_CLASS(nfs4_getattr_event,
 		TP_PROTO(
@@ -1105,7 +1107,7 @@ DECLARE_EVENT_CLASS(nfs4_inode_callback_event,
 		TP_fast_assign(
 			__entry->error = error;
 			__entry->fhandle = nfs_fhandle_hash(fhandle);
-			if (inode != NULL) {
+			if (!IS_ERR_OR_NULL(inode)) {
 				__entry->fileid = NFS_FILEID(inode);
 				__entry->dev = inode->i_sb->s_dev;
 			} else {
@@ -1162,7 +1164,7 @@ DECLARE_EVENT_CLASS(nfs4_inode_stateid_callback_event,
 		TP_fast_assign(
 			__entry->error = error;
 			__entry->fhandle = nfs_fhandle_hash(fhandle);
-			if (inode != NULL) {
+			if (!IS_ERR_OR_NULL(inode)) {
 				__entry->fileid = NFS_FILEID(inode);
 				__entry->dev = inode->i_sb->s_dev;
 			} else {
@@ -1223,8 +1225,8 @@ DECLARE_EVENT_CLASS(nfs4_idmap_event,
 				len = 0;
 			__entry->error = error < 0 ? error : 0;
 			__entry->id = id;
-			memcpy(__get_str(name), name, len);
-			__get_str(name)[len] = 0;
+			memcpy(__get_dynamic_array(name), name, len);
+			((char *)__get_dynamic_array(name))[len] = 0;
 		),
 
 		TP_printk(
@@ -1451,7 +1453,7 @@ TRACE_EVENT(nfs4_layoutget,
 		),
 
 		TP_fast_assign(
-			const struct inode *inode = d_inode(ctx->dentry);
+			const struct inode *inode = ctx->dentry->d_inode;
 			const struct nfs4_state *state = ctx->state;
 			__entry->dev = inode->i_sb->s_dev;
 			__entry->fileid = NFS_FILEID(inode);

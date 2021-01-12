@@ -13,9 +13,9 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/dma-mapping.h>
-#include <linux/scatterlist.h>
 
 #include <asm/machdep.h>
+#include <asm/scatterlist.h>
 #include <asm/io.h>
 #include <asm/prom.h>
 #include <asm/pci-bridge.h>
@@ -136,6 +136,9 @@ extern pgprot_t	pci_phys_mem_access_prot(struct file *file,
 					 pgprot_t prot);
 
 #define HAVE_ARCH_PCI_RESOURCE_TO_USER
+extern void pci_resource_to_user(const struct pci_dev *dev, int bar,
+				 const struct resource *rsrc,
+				 resource_size_t *start, resource_size_t *end);
 
 extern resource_size_t pcibios_io_space_offset(struct pci_controller *hose);
 extern void pcibios_setup_bus_devices(struct pci_bus *bus);

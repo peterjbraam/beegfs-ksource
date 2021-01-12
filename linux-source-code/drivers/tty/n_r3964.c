@@ -1080,7 +1080,7 @@ static ssize_t r3964_read(struct tty_struct *tty, struct file *file,
 		pMsg = remove_msg(pInfo, pClient);
 		if (pMsg == NULL) {
 			/* no messages available. */
-			if (tty_io_nonblock(tty, file)) {
+			if (file->f_flags & O_NONBLOCK) {
 				ret = -EAGAIN;
 				goto unlock;
 			}
@@ -1248,7 +1248,7 @@ static void r3964_receive_buf(struct tty_struct *tty, const unsigned char *cp,
 {
 	struct r3964_info *pInfo = tty->disc_data;
 	const unsigned char *p;
-	char *f, flags = TTY_NORMAL;
+	char *f, flags = 0;
 	int i;
 
 	for (i = count, p = cp, f = fp; i; i--, p++) {

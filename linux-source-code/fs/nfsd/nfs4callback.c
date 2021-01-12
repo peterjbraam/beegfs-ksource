@@ -49,6 +49,9 @@ static void nfsd4_mark_cb_fault(struct nfs4_client *, int reason);
 
 /* Index of predefined Linux callback client operations */
 
+#define to_delegation(cb) \
+	container_of(cb, struct nfs4_delegation, dl_recall)
+
 struct nfs4_cb_compound_hdr {
 	/* args */
 	u32		ident;	/* minorversion 0 only */
@@ -448,7 +451,7 @@ static int decode_cb_sequence4res(struct xdr_stream *xdr,
 {
 	int status;
 
-	if (cb->cb_clp->cl_minorversion == 0)
+	if (cb->cb_minorversion == 0)
 		return 0;
 
 	status = decode_cb_op_status(xdr, OP_CB_SEQUENCE, &cb->cb_seq_status);
@@ -482,10 +485,10 @@ static void nfs4_xdr_enc_cb_null(struct rpc_rqst *req, struct xdr_stream *xdr,
 static void nfs4_xdr_enc_cb_recall(struct rpc_rqst *req, struct xdr_stream *xdr,
 				   const struct nfsd4_callback *cb)
 {
-	const struct nfs4_delegation *dp = cb_to_delegation(cb);
+	const struct nfs4_delegation *dp = to_delegation(cb);
 	struct nfs4_cb_compound_hdr hdr = {
 		.ident = cb->cb_clp->cl_cb_ident,
-		.minorversion = cb->cb_clp->cl_minorversion,
+		.minorversion = cb->cb_minorversion,
 	};
 
 	encode_cb_compound4args(xdr, &hdr);
@@ -594,7 +597,7 @@ static void nfs4_xdr_enc_cb_layout(struct rpc_rqst *req,
 		container_of(cb, struct nfs4_layout_stateid, ls_recall);
 	struct nfs4_cb_compound_hdr hdr = {
 		.ident = 0,
-		.minorversion = cb->cb_clp->cl_minorversion,
+		.minorversion = cb->cb_minorversion,
 	};
 
 	encode_cb_compound4args(xdr, &hdr);
@@ -751,14 +754,6 @@ int set_callback_cred(void)
 	if (!callback_cred)
 		return -ENOMEM;
 	return 0;
-}
-
-void cleanup_callback_cred(void)
-{
-	if (callback_cred) {
-		put_rpccred(callback_cred);
-		callback_cred = NULL;
-	}
 }
 
 static struct rpc_cred *get_backchannel_cred(struct nfs4_client *clp, struct rpc_clnt *client, struct nfsd4_session *ses)
@@ -927,6 +922,7 @@ static void nfsd4_cb_prepare(struct rpc_task *task, void *calldata)
 	struct nfs4_client *clp = cb->cb_clp;
 	u32 minorversion = clp->cl_minorversion;
 
+	cb->cb_minorversion = minorversion;
 	/*
 	 * cb_seq_status is only set in decode_cb_sequence4res,
 	 * and so will remain 1 if an rpc level failure occurs.
@@ -934,9 +930,8 @@ static void nfsd4_cb_prepare(struct rpc_task *task, void *calldata)
 	cb->cb_seq_status = 1;
 	cb->cb_status = 0;
 	if (minorversion) {
-		if (!cb->cb_holds_slot && !nfsd41_cb_get_slot(clp, task))
+		if (!nfsd41_cb_get_slot(clp, task))
 			return;
-		cb->cb_holds_slot = true;
 	}
 	rpc_call_start(task);
 }
@@ -962,9 +957,6 @@ static bool nfsd4_cb_sequence_done(struct rpc_task *task, struct nfsd4_callback 
 
 		return true;
 	}
-
-	if (!cb->cb_holds_slot)
-		goto need_restart;
 
 	switch (cb->cb_seq_status) {
 	case 0:
@@ -1003,7 +995,6 @@ static bool nfsd4_cb_sequence_done(struct rpc_task *task, struct nfsd4_callback 
 			cb->cb_seq_status);
 	}
 
-	cb->cb_holds_slot = false;
 	clear_bit(0, &clp->cl_cb_slot_busy);
 	rpc_wake_up_next(&clp->cl_cb_waitq);
 	dprintk("%s: freed slot, new seqid=%d\n", __func__,
@@ -1156,8 +1147,6 @@ static void nfsd4_process_cb_update(struct nfsd4_callback *cb)
 	err = setup_callback_client(clp, &conn, ses);
 	if (err) {
 		nfsd4_mark_cb_down(clp, err);
-		if (c)
-			svc_xprt_put(c->cn_xprt);
 		return;
 	}
 }
@@ -1213,7 +1202,6 @@ void nfsd4_init_cb(struct nfsd4_callback *cb, struct nfs4_client *clp,
 	cb->cb_seq_status = 1;
 	cb->cb_status = 0;
 	cb->cb_need_restart = false;
-	cb->cb_holds_slot = false;
 }
 
 void nfsd4_run_cb(struct nfsd4_callback *cb)

@@ -89,10 +89,10 @@ static char version[] __initdata =
 #define DEB(x,y)	if (i596_debug & (x)) y
 
 
-#if IS_ENABLED(CONFIG_MVME16x_NET)
+#if defined(CONFIG_MVME16x_NET) || defined(CONFIG_MVME16x_NET_MODULE)
 #define ENABLE_MVME16x_NET
 #endif
-#if IS_ENABLED(CONFIG_BVME6000_NET)
+#if defined(CONFIG_BVME6000_NET) || defined(CONFIG_BVME6000_NET_MODULE)
 #define ENABLE_BVME6000_NET
 #endif
 
@@ -1527,7 +1527,9 @@ int __init init_module(void)
 	if (debug >= 0)
 		i596_debug = debug;
 	dev_82596 = i82596_probe(-1);
-	return PTR_ERR_OR_ZERO(dev_82596);
+	if (IS_ERR(dev_82596))
+		return PTR_ERR(dev_82596);
+	return 0;
 }
 
 void __exit cleanup_module(void)

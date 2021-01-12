@@ -93,9 +93,11 @@ void zfcp_dbf_hba_fsf_res(char *tag, int level, struct zfcp_fsf_req *req)
 	memcpy(rec->u.res.fsf_status_qual, &q_head->fsf_status_qual,
 	       FSF_STATUS_QUALIFIER_SIZE);
 
-	rec->pl_len = q_head->log_length;
-	zfcp_dbf_pl_write(dbf, (char *)q_pref + q_head->log_start,
-			  rec->pl_len, "fsf_res", req->req_id);
+	if (req->fsf_command != FSF_QTCB_FCP_CMND) {
+		rec->pl_len = q_head->log_length;
+		zfcp_dbf_pl_write(dbf, (char *)q_pref + q_head->log_start,
+				  rec->pl_len, "fsf_res", req->req_id);
+	}
 
 	debug_event(dbf->hba, level, rec, sizeof(*rec));
 	spin_unlock_irqrestore(&dbf->hba_lock, flags);
@@ -443,7 +445,7 @@ out:
 
 /**
  * zfcp_dbf_san_req - trace event for issued SAN request
- * @tag: identifier for event
+ * @tag: indentifier for event
  * @fsf_req: request containing issued CT data
  * d_id: destination ID
  */
@@ -521,7 +523,7 @@ static u16 zfcp_dbf_san_res_cap_len_if_gpn_ft(char *tag,
 
 /**
  * zfcp_dbf_san_res - trace event for received SAN request
- * @tag: identifier for event
+ * @tag: indentifier for event
  * @fsf_req: request containing issued CT data
  */
 void zfcp_dbf_san_res(char *tag, struct zfcp_fsf_req *fsf)
@@ -538,7 +540,7 @@ void zfcp_dbf_san_res(char *tag, struct zfcp_fsf_req *fsf)
 
 /**
  * zfcp_dbf_san_in_els - trace event for incoming ELS
- * @tag: identifier for event
+ * @tag: indentifier for event
  * @fsf_req: request containing issued CT data
  */
 void zfcp_dbf_san_in_els(char *tag, struct zfcp_fsf_req *fsf)
@@ -582,8 +584,7 @@ void zfcp_dbf_scsi(char *tag, int level, struct scsi_cmnd *sc,
 	rec->scsi_retries = sc->retries;
 	rec->scsi_allowed = sc->allowed;
 	rec->scsi_id = sc->device->id;
-	rec->scsi_lun = (u32)sc->device->lun;
-	rec->scsi_lun_64_hi = (u32)(sc->device->lun >> 32);
+	rec->scsi_lun = sc->device->lun;
 	rec->host_scribble = (unsigned long)sc->host_scribble;
 
 	memcpy(rec->scsi_opcode, sc->cmnd,
@@ -641,7 +642,7 @@ void zfcp_dbf_scsi_eh(char *tag, struct zfcp_adapter *adapter,
 	unsigned long flags;
 	static int const level = 1;
 
-	if (unlikely(!debug_level_enabled(adapter->dbf->scsi, level)))
+	if (unlikely(level > adapter->dbf->scsi->level))
 		return;
 
 	spin_lock_irqsave(&dbf->scsi_lock, flags);
@@ -655,7 +656,6 @@ void zfcp_dbf_scsi_eh(char *tag, struct zfcp_adapter *adapter,
 	rec->fcp_rsp_info = ~0;
 	rec->scsi_id = scsi_id;
 	rec->scsi_lun = (u32)ZFCP_DBF_INVALID_LUN;
-	rec->scsi_lun_64_hi = (u32)(ZFCP_DBF_INVALID_LUN >> 32);
 	rec->host_scribble = ~0;
 	memset(rec->scsi_opcode, 0xff, ZFCP_DBF_SCSI_OPCODE);
 

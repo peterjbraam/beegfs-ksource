@@ -21,24 +21,30 @@
  * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with GNU CC; see the file COPYING.  If not, see
- * <http://www.gnu.org/licenses/>.
+ * along with GNU CC; see the file COPYING.  If not, write to
+ * the Free Software Foundation, 59 Temple Place - Suite 330,
+ * Boston, MA 02111-1307, USA.
  *
  * Please send any bug reports or fixes you make to the
  * email address(es):
- *    lksctp developers <linux-sctp@vger.kernel.org>
+ *    lksctp developers <lksctp-developers@lists.sourceforge.net>
+ *
+ * Or submit a bug report through the following website:
+ *    http://www.sf.net/projects/lksctp
  *
  * Written or modified by:
  *    Jon Grimm             <jgrimm@us.ibm.com>
  *    La Monte H.P. Yarroll <piggy@acm.org>
  *    Sridhar Samudrala     <sri@us.ibm.com>
+ *
+ * Any bugs reported given to us we will try to fix... any fixes shared will
+ * be incorporated into the next SCTP release.
  */
 
 #include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/skbuff.h>
 #include <net/sock.h>
-#include <net/busy_poll.h>
 #include <net/sctp/structs.h>
 #include <net/sctp/sctp.h>
 #include <net/sctp/sm.h>
@@ -140,8 +146,11 @@ int sctp_clear_pd(struct sock *sk, struct sctp_association *asoc)
 		 * we can go ahead and clear out the lobby in one shot
 		 */
 		if (!skb_queue_empty(&sp->pd_lobby)) {
+			struct list_head *list;
 			skb_queue_splice_tail_init(&sp->pd_lobby,
 						   &sk->sk_receive_queue);
+			list = (struct list_head *)&sctp_sk(sk)->pd_lobby;
+			INIT_LIST_HEAD(list);
 			return 1;
 		}
 	} else {
@@ -206,10 +215,6 @@ int sctp_ulpq_tail_event(struct sctp_ulpq *ulpq, struct sctp_ulpevent *event)
 	     !sctp_ulpevent_is_notification(event)))
 		goto out_free;
 
-	if (!sctp_ulpevent_is_notification(event)) {
-		sk_mark_napi_id(sk, skb);
-		sk_incoming_cpu_update(sk);
-	}
 	/* Check if the user wishes to receive this event.  */
 	if (!sctp_ulpevent_is_enabled(event, &sp->subscribe))
 		goto out_free;
@@ -267,7 +272,7 @@ int sctp_ulpq_tail_event(struct sctp_ulpq *ulpq, struct sctp_ulpevent *event)
 	if (queue == &sk->sk_receive_queue && !sp->data_ready_signalled) {
 		if (!sock_owned_by_user(sk))
 			sp->data_ready_signalled = 1;
-		sk->sk_data_ready(sk);
+		sk->sk_data_ready(sk, 0);
 	}
 	return 1;
 
@@ -1147,6 +1152,6 @@ void sctp_ulpq_abort_pd(struct sctp_ulpq *ulpq, gfp_t gfp)
 	/* If there is data waiting, send it up the socket now. */
 	if ((sctp_ulpq_clear_pd(ulpq) || ev) && !sp->data_ready_signalled) {
 		sp->data_ready_signalled = 1;
-		sk->sk_data_ready(sk);
+		sk->sk_data_ready(sk, 0);
 	}
 }

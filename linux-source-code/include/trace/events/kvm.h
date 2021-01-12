@@ -38,25 +38,22 @@ TRACE_EVENT(kvm_userspace_exit,
 );
 
 TRACE_EVENT(kvm_vcpu_wakeup,
-	    TP_PROTO(__u64 ns, bool waited, bool valid),
-	    TP_ARGS(ns, waited, valid),
+	    TP_PROTO(__u64 ns, bool waited),
+	    TP_ARGS(ns, waited),
 
 	TP_STRUCT__entry(
 		__field(	__u64,		ns		)
 		__field(	bool,		waited		)
-		__field(	bool,		valid		)
 	),
 
 	TP_fast_assign(
 		__entry->ns		= ns;
 		__entry->waited		= waited;
-		__entry->valid		= valid;
 	),
 
-	TP_printk("%s time %lld ns, polling %s",
+	TP_printk("%s time %lld ns",
 		  __entry->waited ? "wait" : "poll",
-		  __entry->ns,
-		  __entry->valid ? "valid" : "invalid")
+		  __entry->ns)
 );
 
 #if defined(CONFIG_HAVE_KVM_IRQFD)
@@ -169,14 +166,6 @@ TRACE_EVENT(kvm_msi_set_irq,
 
 #if defined(CONFIG_HAVE_KVM_IRQFD)
 
-#ifdef kvm_irqchips
-#define kvm_ack_irq_string "irqchip %s pin %u"
-#define kvm_ack_irq_parm  __print_symbolic(__entry->irqchip, kvm_irqchips), __entry->pin
-#else
-#define kvm_ack_irq_string "irqchip %d pin %u"
-#define kvm_ack_irq_parm  __entry->irqchip, __entry->pin
-#endif
-
 TRACE_EVENT(kvm_ack_irq,
 	TP_PROTO(unsigned int irqchip, unsigned int pin),
 	TP_ARGS(irqchip, pin),
@@ -191,7 +180,13 @@ TRACE_EVENT(kvm_ack_irq,
 		__entry->pin		= pin;
 	),
 
-	TP_printk(kvm_ack_irq_string, kvm_ack_irq_parm)
+#ifdef kvm_irqchips
+	TP_printk("irqchip %s pin %u",
+		  __print_symbolic(__entry->irqchip, kvm_irqchips),
+		 __entry->pin)
+#else
+	TP_printk("irqchip %d pin %u", __entry->irqchip, __entry->pin)
+#endif
 );
 
 #endif /* defined(CONFIG_HAVE_KVM_IRQFD) */
@@ -208,7 +203,7 @@ TRACE_EVENT(kvm_ack_irq,
 	{ KVM_TRACE_MMIO_WRITE, "write" }
 
 TRACE_EVENT(kvm_mmio,
-	TP_PROTO(int type, int len, u64 gpa, void *val),
+	TP_PROTO(int type, int len, u64 gpa, u64 val),
 	TP_ARGS(type, len, gpa, val),
 
 	TP_STRUCT__entry(
@@ -222,10 +217,7 @@ TRACE_EVENT(kvm_mmio,
 		__entry->type		= type;
 		__entry->len		= len;
 		__entry->gpa		= gpa;
-		__entry->val		= 0;
-		if (val)
-			memcpy(&__entry->val, val,
-			       min_t(u32, sizeof(__entry->val), len));
+		__entry->val		= val;
 	),
 
 	TP_printk("mmio %s len %u gpa 0x%llx val 0x%llx",

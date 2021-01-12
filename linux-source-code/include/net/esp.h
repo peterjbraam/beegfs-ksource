@@ -3,6 +3,16 @@
 
 #include <linux/skbuff.h>
 
+struct crypto_aead;
+
+struct esp_data {
+	/* 0..255 */
+	int padlen;
+
+	/* Confidentiality & Integrity */
+	struct crypto_aead *aead;
+};
+
 struct ip_esp_hdr;
 
 static inline struct ip_esp_hdr *ip_esp_hdr(const struct sk_buff *skb)

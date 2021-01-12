@@ -28,12 +28,11 @@
 #include <linux/bcd.h>
 
 #include <asm/bootinfo.h>
-#include <asm/bootinfo-vme.h>
-#include <asm/byteorder.h>
 #include <asm/pgtable.h>
 #include <asm/setup.h>
 #include <asm/irq.h>
 #include <asm/traps.h>
+#include <asm/rtc.h>
 #include <asm/machdep.h>
 #include <asm/bvme6000hw.h>
 
@@ -45,10 +44,15 @@ extern int bvme6000_set_clock_mmss (unsigned long);
 extern void bvme6000_reset (void);
 void bvme6000_set_vectors (void);
 
+/* Save tick handler routine pointer, will point to xtime_update() in
+ * kernel/timer/timekeeping.c, called via bvme6000_process_int() */
 
-int __init bvme6000_parse_bootinfo(const struct bi_record *bi)
+static irq_handler_t tick_handler;
+
+
+int bvme6000_parse_bootinfo(const struct bi_record *bi)
 {
-	if (be16_to_cpu(bi->tag) == BI_VME_TYPE)
+	if (bi->tag == BI_VME_TYPE)
 		return 0;
 	else
 		return 1;
@@ -154,18 +158,12 @@ irqreturn_t bvme6000_abort_int (int irq, void *dev_id)
 
 static irqreturn_t bvme6000_timer_int (int irq, void *dev_id)
 {
-    irq_handler_t timer_routine = dev_id;
-    unsigned long flags;
     volatile RtcPtr_t rtc = (RtcPtr_t)BVME_RTC_BASE;
-    unsigned char msr;
+    unsigned char msr = rtc->msr & 0xc0;
 
-    local_irq_save(flags);
-    msr = rtc->msr & 0xc0;
     rtc->msr = msr | 0x20;		/* Ack the interrupt */
-    timer_routine(0, NULL);
-    local_irq_restore(flags);
 
-    return IRQ_HANDLED;
+    return tick_handler(irq, dev_id);
 }
 
 /*
@@ -184,8 +182,9 @@ void bvme6000_sched_init (irq_handler_t timer_routine)
 
     rtc->msr = 0;	/* Ensure timer registers accessible */
 
-    if (request_irq(BVME_IRQ_RTC, bvme6000_timer_int, 0, "timer",
-                    timer_routine))
+    tick_handler = timer_routine;
+    if (request_irq(BVME_IRQ_RTC, bvme6000_timer_int, 0,
+				"timer", bvme6000_timer_int))
 	panic ("Couldn't register timer int");
 
     rtc->t1cr_omr = 0x04;	/* Mode 2, ext clk */

@@ -17,13 +17,11 @@
 #include <linux/ftrace.h>
 #include <linux/io.h>
 #include <linux/suspend.h>
-#include <linux/vmalloc.h>
 
 #include <asm/init.h>
 #include <asm/pgtable.h>
 #include <asm/tlbflush.h>
 #include <asm/mmu_context.h>
-#include <asm/io_apic.h>
 #include <asm/debugreg.h>
 #include <asm/kexec-bzimage64.h>
 #include <asm/setup.h>
@@ -37,20 +35,18 @@ static struct kexec_file_ops *kexec_file_loaders[] = {
 static void free_transition_pgtable(struct kimage *image)
 {
 	free_page((unsigned long)image->arch.pud);
-	image->arch.pud = NULL;
 	free_page((unsigned long)image->arch.pmd);
-	image->arch.pmd = NULL;
 	free_page((unsigned long)image->arch.pte);
-	image->arch.pte = NULL;
 }
 
 static int init_transition_pgtable(struct kimage *image, pgd_t *pgd)
 {
+	pgprot_t prot = PAGE_KERNEL_EXEC_NOENC;
+	unsigned long vaddr, paddr;
+	int result = -ENOMEM;
 	pud_t *pud;
 	pmd_t *pmd;
 	pte_t *pte;
-	unsigned long vaddr, paddr;
-	int result = -ENOMEM;
 
 	vaddr = (unsigned long)relocate_kernel;
 	paddr = __pa(page_address(image->control_code_page)+PAGE_SIZE);
@@ -79,9 +75,14 @@ static int init_transition_pgtable(struct kimage *image, pgd_t *pgd)
 		set_pmd(pmd, __pmd(__pa(pte) | _KERNPG_TABLE));
 	}
 	pte = pte_offset_kernel(pmd, vaddr);
-	set_pte(pte, pfn_pte(paddr >> PAGE_SHIFT, PAGE_KERNEL_EXEC));
+
+	if (sev_active())
+		prot = PAGE_KERNEL_EXEC;
+
+	set_pte(pte, pfn_pte(paddr >> PAGE_SHIFT, prot));
 	return 0;
 err:
+	free_transition_pgtable(image);
 	return result;
 }
 
@@ -105,7 +106,8 @@ static int init_pgtable(struct kimage *image, unsigned long start_pgtable)
 	struct x86_mapping_info info = {
 		.alloc_pgt_page	= alloc_pgt_page,
 		.context	= image,
-		.pmd_flag	= __PAGE_KERNEL_LARGE_EXEC,
+		.page_flag      = __PAGE_KERNEL_LARGE_EXEC,
+		.kernpg_flag	= _KERNPG_TABLE_NOENC,
 	};
 	unsigned long mstart, mend;
 	pgd_t *level4p;
@@ -114,6 +116,14 @@ static int init_pgtable(struct kimage *image, unsigned long start_pgtable)
 
 	level4p = (pgd_t *)__va(start_pgtable);
 	clear_page(level4p);
+	if (sev_active()) {
+		info.page_flag   |= _PAGE_ENC;
+		info.kernpg_flag |= _PAGE_ENC;
+	}
+
+	if (direct_gbpages)
+		info.direct_gbpages = true;
+
 	for (i = 0; i < nr_pfn_mapped; i++) {
 		mstart = pfn_mapped[i].start << PAGE_SHIFT;
 		mend   = pfn_mapped[i].end << PAGE_SHIFT;
@@ -237,6 +247,14 @@ int machine_kexec_prepare(struct kimage *image)
 	if (result)
 		return result;
 
+#ifdef CONFIG_PAGE_TABLE_ISOLATION
+	/*
+	 * The second page of control_code_page may be corrupted by the
+	 * PTI code, so just clear the page for safety.
+	 */
+	clear_page(page_address(image->control_code_page) + PAGE_SIZE);
+#endif
+
 	/* update purgatory as needed */
 	result = arch_update_purgatory(image);
 	if (result)
@@ -276,11 +294,11 @@ void machine_kexec(struct kimage *image)
 		/*
 		 * We need to put APICs in legacy mode so that we can
 		 * get timer interrupts in second kernel. kexec/kdump
-		 * paths already have calls to disable_IO_APIC() in
-		 * one form or other. kexec jump path also need
-		 * one.
+		 * paths already have calls to restore_boot_irq_mode()
+		 * in one form or other. kexec jump path also need one.
 		 */
-		disable_IO_APIC();
+		clear_IO_APIC();
+		restore_boot_irq_mode();
 #endif
 	}
 
@@ -318,7 +336,8 @@ void machine_kexec(struct kimage *image)
 	image->start = relocate_kernel((unsigned long)image->head,
 				       (unsigned long)page_list,
 				       image->start,
-				       image->preserve_context);
+				       image->preserve_context,
+				       sme_active());
 
 #ifdef CONFIG_KEXEC_JUMP
 	if (image->preserve_context)
@@ -330,7 +349,9 @@ void machine_kexec(struct kimage *image)
 
 void arch_crash_save_vmcoreinfo(void)
 {
-	VMCOREINFO_SYMBOL(phys_base);
+	u64 sme_mask = sme_me_mask;
+
+	VMCOREINFO_NUMBER(phys_base);
 	VMCOREINFO_SYMBOL(init_level4_pgt);
 
 #ifdef CONFIG_NUMA
@@ -339,9 +360,8 @@ void arch_crash_save_vmcoreinfo(void)
 #endif
 	vmcoreinfo_append_str("KERNELOFFSET=%lx\n",
 			      kaslr_offset());
-	VMCOREINFO_PAGE_OFFSET(PAGE_OFFSET);
-	VMCOREINFO_VMALLOC_START(VMALLOC_START);
-	VMCOREINFO_VMEMMAP_START(VMEMMAP_START);
+	VMCOREINFO_NUMBER(KERNEL_IMAGE_SIZE);
+	VMCOREINFO_NUMBER(sme_mask);
 }
 
 /* arch-dependent functionality related to kexec file-based syscall */
@@ -542,6 +562,40 @@ overflow:
 	pr_err("Overflow in relocation type %d value 0x%lx\n",
 	       (int)ELF64_R_TYPE(rel[i].r_info), value);
 	return -ENOEXEC;
+}
+
+/*
+ * During a traditional boot under SME, SME will encrypt the kernel,
+ * so the SME kexec kernel also needs to be un-encrypted in order to
+ * replicate a normal SME boot.
+ *
+ * During a traditional boot under SEV, the kernel has already been
+ * loaded encrypted, so the SEV kexec kernel needs to be encrypted in
+ * order to replicate a normal SEV boot.
+ */
+int arch_kexec_post_alloc_pages(void *vaddr, unsigned int pages, gfp_t gfp)
+{
+	if (sev_active())
+		return 0;
+
+	/*
+	 * If SME is active we need to be sure that kexec pages are
+	 * not encrypted because when we boot to the new kernel the
+	 * pages won't be accessed encrypted (initially).
+	 */
+	return set_memory_decrypted((unsigned long)vaddr, pages);
+}
+
+void arch_kexec_pre_free_pages(void *vaddr, unsigned int pages)
+{
+	if (sev_active())
+		return;
+
+	/*
+	 * If SME is active we need to reset the pages back to being
+	 * an encrypted mapping before freeing them.
+	 */
+	set_memory_encrypted((unsigned long)vaddr, pages);
 }
 #endif /* CONFIG_KEXEC_FILE */
 

@@ -1,5 +1,5 @@
 /*
- * Pluggable TCP congestion control support and newReno
+ * Plugable TCP congestion control support and newReno
  * congestion control.
  * Based on ideas from I/O scheduler support and Web100.
  *
@@ -69,7 +69,7 @@ int tcp_register_congestion_control(struct tcp_congestion_ops *ca)
 	int ret = 0;
 
 	/* all algorithms must implement ssthresh and cong_avoid ops */
-	if (!ca->ssthresh || !(ca->cong_avoid || ca->cong_control)) {
+	if (!ca->ssthresh || !ca->cong_avoid) {
 		pr_err("%s does not implement required ops\n", ca->name);
 		return -EINVAL;
 	}
@@ -83,7 +83,7 @@ int tcp_register_congestion_control(struct tcp_congestion_ops *ca)
 		ret = -EEXIST;
 	} else {
 		list_add_tail_rcu(&ca->list, &tcp_cong_list);
-		pr_debug("%s registered\n", ca->name);
+		pr_info("%s registered\n", ca->name);
 	}
 	spin_unlock(&tcp_cong_list_lock);
 
@@ -167,25 +167,20 @@ void tcp_assign_congestion_control(struct sock *sk)
 	}
 out:
 	rcu_read_unlock();
-	memset(icsk->icsk_ca_priv, 0, sizeof(icsk->icsk_ca_priv));
 
-	if (ca->flags & TCP_CONG_NEEDS_ECN)
-		INET_ECN_xmit(sk);
-	else
-		INET_ECN_dontxmit(sk);
+	/* Clear out private data before diag gets it and
+	 * the ca has not been initialized.
+	 */
+	if (ca->get_info)
+		memset(icsk->icsk_ca_priv, 0, sizeof(icsk->icsk_ca_priv));
 }
 
 void tcp_init_congestion_control(struct sock *sk)
 {
 	const struct inet_connection_sock *icsk = inet_csk(sk);
 
-	tcp_sk(sk)->prior_ssthresh = 0;
 	if (icsk->icsk_ca_ops->init)
 		icsk->icsk_ca_ops->init(sk);
-	if (tcp_ca_needs_ecn(sk))
-		INET_ECN_xmit(sk);
-	else
-		INET_ECN_dontxmit(sk);
 }
 
 static void tcp_reinit_congestion_control(struct sock *sk,
@@ -196,10 +191,9 @@ static void tcp_reinit_congestion_control(struct sock *sk,
 	tcp_cleanup_congestion_control(sk);
 	icsk->icsk_ca_ops = ca;
 	icsk->icsk_ca_setsockopt = 1;
-	memset(icsk->icsk_ca_priv, 0, sizeof(icsk->icsk_ca_priv));
 
-	if (!((1 << sk->sk_state) & (TCPF_CLOSE | TCPF_LISTEN)))
-		tcp_init_congestion_control(sk);
+	if (sk->sk_state != TCP_CLOSE && icsk->icsk_ca_ops->init)
+		icsk->icsk_ca_ops->init(sk);
 }
 
 /* Manage refcounts on socket close. */
@@ -374,8 +368,10 @@ int tcp_set_congestion_control(struct sock *sk, const char *name)
  */
 u32 tcp_slow_start(struct tcp_sock *tp, u32 acked)
 {
-	u32 cwnd = min(tp->snd_cwnd + acked, tp->snd_ssthresh);
+	u32 cwnd = tp->snd_cwnd + acked;
 
+	if (cwnd > tp->snd_ssthresh)
+		cwnd = tp->snd_ssthresh + 1;
 	acked -= cwnd - tp->snd_cwnd;
 	tp->snd_cwnd = min(cwnd, tp->snd_cwnd_clamp);
 
@@ -383,25 +379,16 @@ u32 tcp_slow_start(struct tcp_sock *tp, u32 acked)
 }
 EXPORT_SYMBOL_GPL(tcp_slow_start);
 
-/* In theory this is tp->snd_cwnd += 1 / tp->snd_cwnd (or alternative w),
- * for every packet that was ACKed.
- */
+/* In theory this is tp->snd_cwnd += 1 / tp->snd_cwnd (or alternative w) */
 void tcp_cong_avoid_ai(struct tcp_sock *tp, u32 w, u32 acked)
 {
-	/* If credits accumulated at a higher w, apply them gently now. */
 	if (tp->snd_cwnd_cnt >= w) {
+		if (tp->snd_cwnd < tp->snd_cwnd_clamp)
+			tp->snd_cwnd++;
 		tp->snd_cwnd_cnt = 0;
-		tp->snd_cwnd++;
+	} else {
+		tp->snd_cwnd_cnt += acked;
 	}
-
-	tp->snd_cwnd_cnt += acked;
-	if (tp->snd_cwnd_cnt >= w) {
-		u32 delta = tp->snd_cwnd_cnt / w;
-
-		tp->snd_cwnd_cnt -= delta * w;
-		tp->snd_cwnd += delta;
-	}
-	tp->snd_cwnd = min(tp->snd_cwnd, tp->snd_cwnd_clamp);
 }
 EXPORT_SYMBOL_GPL(tcp_cong_avoid_ai);
 
@@ -420,13 +407,11 @@ void tcp_reno_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 		return;
 
 	/* In "safe" area, increase. */
-	if (tcp_in_slow_start(tp)) {
-		acked = tcp_slow_start(tp, acked);
-		if (!acked)
-			return;
-	}
+	if (tp->snd_cwnd <= tp->snd_ssthresh)
+		tcp_slow_start(tp, acked);
 	/* In dangerous area, increase slowly. */
-	tcp_cong_avoid_ai(tp, tp->snd_cwnd, acked);
+	else
+		tcp_cong_avoid_ai(tp, tp->snd_cwnd, 1);
 }
 EXPORT_SYMBOL_GPL(tcp_reno_cong_avoid);
 

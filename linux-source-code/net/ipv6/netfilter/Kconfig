@@ -49,7 +49,6 @@ config NFT_REJECT_IPV6
 
 config NFT_DUP_IPV6
 	tristate "IPv6 nf_tables packet duplication support"
-	depends on !NF_CONNTRACK || NF_CONNTRACK
 	select NF_DUP_IPV6
 	help
 	  This module enables IPv6 packet duplication support for nf_tables.
@@ -59,7 +58,6 @@ endif # NF_TABLES
 
 config NF_DUP_IPV6
 	tristate "Netfilter IPv6 packet duplication to alternate destination"
-	depends on !NF_CONNTRACK || NF_CONNTRACK
 	help
 	  This option enables the nf_dup_ipv6 core, which duplicates an IPv6
 	  packet to be rerouted to another destination.
@@ -70,7 +68,7 @@ config NF_REJECT_IPV6
 
 config NF_LOG_IPV6
 	tristate "IPv6 packet logging"
-	default m if NETFILTER_ADVANCED=n
+	depends on NETFILTER_ADVANCED
 	select NF_LOG_COMMON
 
 config NF_NAT_IPV6
@@ -200,8 +198,7 @@ config IP6_NF_MATCH_MH
 
 config IP6_NF_MATCH_RPFILTER
 	tristate '"rpfilter" reverse path filter match support'
-	depends on NETFILTER_ADVANCED
-	depends on IP6_NF_MANGLE || IP6_NF_RAW
+	depends on NETFILTER_ADVANCED && (IP6_NF_MANGLE || IP6_NF_RAW)
 	---help---
 	  This option allows you to match packets whose replies would
 	  go out via the interface the packet came in.

@@ -33,22 +33,20 @@ struct pstore_read_data {
 	enum pstore_type_id *type;
 	int *count;
 	struct timespec *timespec;
-	bool *compressed;
-	ssize_t *ecc_notice_size;
 	char **buf;
 };
 
 static inline u64 generic_id(unsigned long timestamp,
 			     unsigned int part, int count)
 {
-	return ((u64) timestamp * 100 + part) * 1000 + count;
+	return (timestamp * 100 + part) * 1000 + count;
 }
 
 static int efi_pstore_read_func(struct efivar_entry *entry, void *data)
 {
 	efi_guid_t vendor = LINUX_EFI_CRASH_GUID;
 	struct pstore_read_data *cb_data = data;
-	char name[DUMP_NAME_LEN], data_type;
+	char name[DUMP_NAME_LEN];
 	int i;
 	int cnt;
 	unsigned int part;
@@ -60,25 +58,12 @@ static int efi_pstore_read_func(struct efivar_entry *entry, void *data)
 	for (i = 0; i < DUMP_NAME_LEN; i++)
 		name[i] = entry->var.VariableName[i];
 
-	if (sscanf(name, "dump-type%u-%u-%d-%lu-%c",
-		   cb_data->type, &part, &cnt, &time, &data_type) == 5) {
-		*cb_data->id = generic_id(time, part, cnt);
-		*cb_data->count = cnt;
-		cb_data->timespec->tv_sec = time;
-		cb_data->timespec->tv_nsec = 0;
-		if (data_type == 'C')
-			*cb_data->compressed = true;
-		else
-			*cb_data->compressed = false;
-		*cb_data->ecc_notice_size = 0;
-	} else if (sscanf(name, "dump-type%u-%u-%d-%lu",
+	if (sscanf(name, "dump-type%u-%u-%d-%lu",
 		   cb_data->type, &part, &cnt, &time) == 4) {
 		*cb_data->id = generic_id(time, part, cnt);
 		*cb_data->count = cnt;
 		cb_data->timespec->tv_sec = time;
 		cb_data->timespec->tv_nsec = 0;
-		*cb_data->compressed = false;
-		*cb_data->ecc_notice_size = 0;
 	} else if (sscanf(name, "dump-type%u-%u-%lu",
 			  cb_data->type, &part, &time) == 3) {
 		/*
@@ -90,24 +75,28 @@ static int efi_pstore_read_func(struct efivar_entry *entry, void *data)
 		*cb_data->count = 0;
 		cb_data->timespec->tv_sec = time;
 		cb_data->timespec->tv_nsec = 0;
-		*cb_data->compressed = false;
-		*cb_data->ecc_notice_size = 0;
 	} else
 		return 0;
 
+	mutex_lock(&entry->var_data_mutex);
+
 	entry->var.DataSize = 1024;
-	__efivar_entry_get(entry, &entry->var.Attributes,
-			   &entry->var.DataSize, entry->var.Data);
+	if (__efivar_entry_get(entry, &entry->var.Attributes,
+			       &entry->var.DataSize, entry->var.Data)) {
+		mutex_unlock(&entry->var_data_mutex);
+		return -EIO;
+	}
 	size = entry->var.DataSize;
 	memcpy(*cb_data->buf, entry->var.Data,
 	       (size_t)min_t(unsigned long, EFIVARS_DATA_SIZE_MAX, size));
 
+	mutex_unlock(&entry->var_data_mutex);
 	return size;
 }
 
 /**
  * efi_pstore_scan_sysfs_enter
- * @pos: scanning entry
+ * @entry: scanning entry
  * @next: next entry
  * @head: list head
  */
@@ -228,7 +217,6 @@ static int efi_pstore_sysfs_entry_iter(void *data, struct efivar_entry **pos)
 static ssize_t efi_pstore_read(u64 *id, enum pstore_type_id *type,
 			       int *count, struct timespec *timespec,
 			       char **buf, bool *compressed,
-			       ssize_t *ecc_notice_size,
 			       struct pstore_info *psi)
 {
 	struct pstore_read_data data;
@@ -238,8 +226,6 @@ static ssize_t efi_pstore_read(u64 *id, enum pstore_type_id *type,
 	data.type = type;
 	data.count = count;
 	data.timespec = timespec;
-	data.compressed = compressed;
-	data.ecc_notice_size = ecc_notice_size;
 	data.buf = buf;
 
 	*data.buf = kzalloc(EFIVARS_DATA_SIZE_MAX, GFP_KERNEL);
@@ -268,8 +254,8 @@ static int efi_pstore_write(enum pstore_type_id type,
 	efi_guid_t vendor = LINUX_EFI_CRASH_GUID;
 	int i, ret = 0;
 
-	sprintf(name, "dump-type%u-%u-%d-%lu-%c", type, part, count,
-		get_seconds(), compressed ? 'C' : 'D');
+	sprintf(name, "dump-type%u-%u-%d-%lu", type, part, count,
+		get_seconds());
 
 	for (i = 0; i < DUMP_NAME_LEN; i++)
 		efi_name[i] = name[i];
@@ -380,7 +366,6 @@ static int efi_pstore_erase(enum pstore_type_id type, u64 id, int count,
 static struct pstore_info efi_pstore_info = {
 	.owner		= THIS_MODULE,
 	.name		= "efi",
-	.flags		= PSTORE_FLAGS_DMESG,
 	.open		= efi_pstore_open,
 	.close		= efi_pstore_close,
 	.read		= efi_pstore_read,
@@ -417,13 +402,6 @@ static __init int efivars_pstore_init(void)
 
 static __exit void efivars_pstore_exit(void)
 {
-	if (!efi_pstore_info.bufsize)
-		return;
-
-	pstore_unregister(&efi_pstore_info);
-	kfree(efi_pstore_info.buf);
-	efi_pstore_info.buf = NULL;
-	efi_pstore_info.bufsize = 0;
 }
 
 module_init(efivars_pstore_init);
@@ -431,4 +409,3 @@ module_exit(efivars_pstore_exit);
 
 MODULE_DESCRIPTION("EFI variable backend for pstore");
 MODULE_LICENSE("GPL");
-MODULE_ALIAS("platform:efivars");

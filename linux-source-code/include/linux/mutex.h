@@ -19,6 +19,7 @@
 #include <asm/processor.h>
 #include <linux/osq_lock.h>
 
+#include <linux/rh_kabi.h>
 /*
  * Simple, straightforward mutexes with strict semantics:
  *
@@ -52,13 +53,15 @@ struct mutex {
 	atomic_t		count;
 	spinlock_t		wait_lock;
 	struct list_head	wait_list;
-#if defined(CONFIG_DEBUG_MUTEXES) || defined(CONFIG_MUTEX_SPIN_ON_OWNER)
+#if defined(CONFIG_DEBUG_MUTEXES) || defined(CONFIG_SMP)
 	struct task_struct	*owner;
 #endif
 #ifdef CONFIG_MUTEX_SPIN_ON_OWNER
-	struct optimistic_spin_queue osq; /* Spinner MCS lock */
+	RH_KABI_REPLACE(void			*spin_mlock,	/* Spinner MCS lock */
+		          struct optimistic_spin_queue osq)	/* Spinner MCS lock */
 #endif
 #ifdef CONFIG_DEBUG_MUTEXES
+	const char 		*name;
 	void			*magic;
 #endif
 #ifdef CONFIG_DEBUG_LOCK_ALLOC
@@ -131,8 +134,8 @@ static inline int mutex_is_locked(struct mutex *lock)
 }
 
 /*
- * See kernel/locking/mutex.c for detailed documentation of these APIs.
- * Also see Documentation/locking/mutex-design.txt.
+ * See kernel/mutex.c for detailed documentation of these APIs.
+ * Also see Documentation/mutex-design.txt.
  */
 #ifdef CONFIG_DEBUG_LOCK_ALLOC
 extern void mutex_lock_nested(struct mutex *lock, unsigned int subclass);
@@ -174,5 +177,9 @@ extern int mutex_trylock(struct mutex *lock);
 extern void mutex_unlock(struct mutex *lock);
 
 extern int atomic_dec_and_mutex_lock(atomic_t *cnt, struct mutex *lock);
+
+#ifndef arch_mutex_cpu_relax
+# define arch_mutex_cpu_relax() cpu_relax()
+#endif
 
 #endif /* __LINUX_MUTEX_H */

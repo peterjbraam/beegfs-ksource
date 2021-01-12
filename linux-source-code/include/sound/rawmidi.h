@@ -30,7 +30,7 @@
 #include <linux/workqueue.h>
 #include <linux/device.h>
 
-#if defined(CONFIG_SND_SEQUENCER) || defined(CONFIG_SND_SEQUENCER_MODULE)
+#if IS_ENABLED(CONFIG_SND_SEQUENCER)
 #include <sound/seq_device.h>
 #endif
 
@@ -76,7 +76,6 @@ struct snd_rawmidi_runtime {
 	size_t avail_min;	/* min avail for wakeup */
 	size_t avail;		/* max used buffer for wakeup */
 	size_t xruns;		/* over/underruns counter */
-	int buffer_ref;		/* buffer reference count */
 	/* misc */
 	spinlock_t lock;
 	wait_queue_head_t sleep;
@@ -93,9 +92,9 @@ struct snd_rawmidi_substream {
 	struct list_head list;		/* list of all substream for given stream */
 	int stream;			/* direction */
 	int number;			/* substream number */
-	bool opened;			/* open flag */
-	bool append;			/* append flag (merge more streams) */
-	bool active_sensing;		/* send active sensing when close */
+	unsigned int opened: 1,		/* open flag */
+		     append: 1,		/* append flag (merge more streams) */
+		     active_sensing: 1; /* send active sensing when close */
 	int use_count;			/* use counter (for output) */
 	size_t bytes;
 	struct snd_rawmidi *rmidi;
@@ -104,7 +103,7 @@ struct snd_rawmidi_substream {
 	struct snd_rawmidi_runtime *runtime;
 	struct pid *pid;
 	/* hardware layer */
-	struct snd_rawmidi_ops *ops;
+	const struct snd_rawmidi_ops *ops;
 };
 
 struct snd_rawmidi_file {
@@ -145,7 +144,7 @@ struct snd_rawmidi {
 
 	struct snd_info_entry *proc_entry;
 
-#if defined(CONFIG_SND_SEQUENCER) || defined(CONFIG_SND_SEQUENCER_MODULE)
+#if IS_ENABLED(CONFIG_SND_SEQUENCER)
 	struct snd_seq_device *seq_dev;
 #endif
 };
@@ -156,12 +155,14 @@ int snd_rawmidi_new(struct snd_card *card, char *id, int device,
 		    int output_count, int input_count,
 		    struct snd_rawmidi **rmidi);
 void snd_rawmidi_set_ops(struct snd_rawmidi *rmidi, int stream,
-			 struct snd_rawmidi_ops *ops);
+			 const struct snd_rawmidi_ops *ops);
 
 /* callbacks */
 
+void snd_rawmidi_receive_reset(struct snd_rawmidi_substream *substream);
 int snd_rawmidi_receive(struct snd_rawmidi_substream *substream,
 			const unsigned char *buffer, int count);
+void snd_rawmidi_transmit_reset(struct snd_rawmidi_substream *substream);
 int snd_rawmidi_transmit_empty(struct snd_rawmidi_substream *substream);
 int snd_rawmidi_transmit_peek(struct snd_rawmidi_substream *substream,
 			      unsigned char *buffer, int count);
@@ -172,6 +173,7 @@ int __snd_rawmidi_transmit_peek(struct snd_rawmidi_substream *substream,
 			      unsigned char *buffer, int count);
 int __snd_rawmidi_transmit_ack(struct snd_rawmidi_substream *substream,
 			       int count);
+int snd_rawmidi_proceed(struct snd_rawmidi_substream *substream);
 
 /* main midi functions */
 

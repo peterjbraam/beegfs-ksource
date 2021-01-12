@@ -650,13 +650,10 @@ il3945_rs_get_rate(void *il_r, struct ieee80211_sta *sta, void *il_sta,
 		il_sta = NULL;
 	}
 
-	if (rate_control_send_low(sta, il_sta, txrc))
-		return;
-
 	rate_mask = sta->supp_rates[sband->band];
 
 	/* get user max rate if set */
-	max_rate_idx = txrc->max_rate_idx;
+	max_rate_idx = fls(txrc->rate_idx_mask) - 1;
 	if (sband->band == NL80211_BAND_5GHZ && max_rate_idx != -1)
 		max_rate_idx += IL_FIRST_OFDM_RATE;
 	if (max_rate_idx < 0 || max_rate_idx >= RATE_COUNT)

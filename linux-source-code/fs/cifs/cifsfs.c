@@ -37,7 +37,6 @@
 #include <linux/freezer.h>
 #include <linux/namei.h>
 #include <linux/random.h>
-#include <linux/xattr.h>
 #include <net/ipv6.h>
 #include "cifsfs.h"
 #include "cifspdu.h"
@@ -50,9 +49,7 @@
 #include <linux/key-type.h>
 #include "cifs_spnego.h"
 #include "fscache.h"
-#ifdef CONFIG_CIFS_SMB2
 #include "smb2pdu.h"
-#endif
 
 int cifsFYI = 0;
 bool traceSMB;
@@ -138,7 +135,6 @@ cifs_read_super(struct super_block *sb)
 
 	sb->s_magic = CIFS_MAGIC_NUMBER;
 	sb->s_op = &cifs_super_ops;
-	sb->s_xattr = cifs_xattr_handlers;
 	sb->s_bdi = &cifs_sb->bdi;
 	sb->s_blocksize = CIFS_MAX_MSGSIZE;
 	sb->s_blocksize_bits = 14;	/* default 2**14 = CIFS_MAX_MSGSIZE */
@@ -271,9 +267,9 @@ cifs_alloc_inode(struct super_block *sb)
 	cifs_inode->uniqueid = 0;
 	cifs_inode->createtime = 0;
 	cifs_inode->epoch = 0;
-#ifdef CONFIG_CIFS_SMB2
+	spin_lock_init(&cifs_inode->open_file_lock);
 	generate_random_uuid(cifs_inode->lease_key);
-#endif
+
 	/*
 	 * Can not set i_flags here - they get immediately overwritten to zero
 	 * by the VFS.
@@ -458,6 +454,8 @@ cifs_show_options(struct seq_file *s, struct dentry *root)
 		seq_puts(s, ",nocase");
 	if (tcon->retry)
 		seq_puts(s, ",hard");
+	else
+		seq_puts(s, ",soft");
 	if (tcon->use_persistent)
 		seq_puts(s, ",persistenthandles");
 	else if (tcon->use_resilient)
@@ -567,7 +565,6 @@ static int cifs_show_stats(struct seq_file *s, struct dentry *root)
 
 static int cifs_remount(struct super_block *sb, int *flags, char *data)
 {
-	sync_filesystem(sb);
 	*flags |= MS_NODIRATIME;
 	return 0;
 }
@@ -616,7 +613,7 @@ cifs_get_root(struct smb_vol *vol, struct super_block *sb)
 		return dget(sb->s_root);
 
 	full_path = cifs_build_path_to_root(vol, cifs_sb,
-					    cifs_sb_master_tcon(cifs_sb));
+				cifs_sb_master_tcon(cifs_sb), 0);
 	if (full_path == NULL)
 		return ERR_PTR(-ENOMEM);
 
@@ -760,22 +757,24 @@ out_nls:
 }
 
 static ssize_t
-cifs_loose_read_iter(struct kiocb *iocb, struct iov_iter *iter)
+cifs_loose_read(struct kiocb *iocb, const struct iovec *iov,
+                                   unsigned long nr_segs, loff_t pos)
 {
 	ssize_t rc;
 	struct inode *inode = file_inode(iocb->ki_filp);
 
 	if (iocb->ki_filp->f_flags & O_DIRECT)
-		return cifs_user_readv(iocb, iter);
+		return cifs_user_readv_wrapper(iocb, iov, nr_segs, pos);
 
 	rc = cifs_revalidate_mapping(inode);
 	if (rc)
 		return rc;
 
-	return generic_file_read_iter(iocb, iter);
+	return generic_file_aio_read(iocb, iov, nr_segs, pos);
 }
 
-static ssize_t cifs_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
+static ssize_t cifs_file_aio_write(struct kiocb *iocb, const struct iovec *iov,
+				   unsigned long nr_segs, loff_t pos)
 {
 	struct inode *inode = file_inode(iocb->ki_filp);
 	struct cifsInodeInfo *cinode = CIFS_I(inode);
@@ -783,7 +782,7 @@ static ssize_t cifs_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	int rc;
 
 	if (iocb->ki_filp->f_flags & O_DIRECT) {
-		written = cifs_user_writev(iocb, from);
+		written = cifs_user_writev(iocb, iov, nr_segs, pos);
 		if (written > 0 && CIFS_CACHE_READ(cinode)) {
 			cifs_zap_mapping(inode);
 			cifs_dbg(FYI,
@@ -798,14 +797,14 @@ static ssize_t cifs_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	if (written)
 		return written;
 
-	written = generic_file_write_iter(iocb, from);
+	written = generic_file_aio_write(iocb, iov, nr_segs, pos);
 
 	if (CIFS_CACHE_WRITE(CIFS_I(inode)))
 		goto out;
 
 	rc = filemap_fdatawrite(inode->i_mapping);
 	if (rc)
-		cifs_dbg(FYI, "cifs_file_write_iter: %d rc on %p inode\n",
+		cifs_dbg(FYI, "cifs_file_aio_write: %d rc on %p inode\n",
 			 rc, inode);
 
 out:
@@ -882,15 +881,21 @@ cifs_setlease(struct file *file, long arg, struct file_lock **lease, void **priv
 		return -EAGAIN;
 }
 
+static int cifs_rename(struct inode *old_dir, struct dentry *old,
+		       struct inode *new_dir, struct dentry *new)
+{
+	return cifs_rename2(old_dir, old, new_dir, new, 0);
+}
+
 struct file_system_type cifs_fs_type = {
 	.owner = THIS_MODULE,
 	.name = "cifs",
 	.mount = cifs_do_mount,
 	.kill_sb = cifs_kill_sb,
-	/*  .fs_flags */
 };
 MODULE_ALIAS_FS("cifs");
-const struct inode_operations cifs_dir_inode_ops = {
+const struct inode_operations_wrapper cifs_dir_inode_ops = {
+	.ops = {
 	.create = cifs_create,
 	.atomic_open = cifs_atomic_open,
 	.lookup = cifs_lookup,
@@ -899,26 +904,44 @@ const struct inode_operations cifs_dir_inode_ops = {
 	.link = cifs_hardlink,
 	.mkdir = cifs_mkdir,
 	.rmdir = cifs_rmdir,
-	.rename = cifs_rename2,
+	.rename = cifs_rename,
 	.permission = cifs_permission,
 	.setattr = cifs_setattr,
 	.symlink = cifs_symlink,
 	.mknod   = cifs_mknod,
+#ifdef CONFIG_CIFS_XATTR
+	.setxattr = cifs_setxattr,
+	.getxattr = cifs_getxattr,
 	.listxattr = cifs_listxattr,
+	.removexattr = cifs_removexattr,
+#endif
+	},
+	.rename2 = cifs_rename2,
 };
 
 const struct inode_operations cifs_file_inode_ops = {
 	.setattr = cifs_setattr,
 	.getattr = cifs_getattr,
 	.permission = cifs_permission,
+#ifdef CONFIG_CIFS_XATTR
+	.setxattr = cifs_setxattr,
+	.getxattr = cifs_getxattr,
 	.listxattr = cifs_listxattr,
+	.removexattr = cifs_removexattr,
+#endif
 };
 
 const struct inode_operations cifs_symlink_inode_ops = {
 	.readlink = generic_readlink,
-	.get_link = cifs_get_link,
+	.follow_link = cifs_follow_link,
+	.put_link = kfree_put_link,
 	.permission = cifs_permission,
+#ifdef CONFIG_CIFS_XATTR
+	.setxattr = cifs_setxattr,
+	.getxattr = cifs_getxattr,
 	.listxattr = cifs_listxattr,
+	.removexattr = cifs_removexattr,
+#endif
 };
 
 static int cifs_clone_file_range(struct file *src_file, loff_t off,
@@ -927,8 +950,8 @@ static int cifs_clone_file_range(struct file *src_file, loff_t off,
 	struct inode *src_inode = file_inode(src_file);
 	struct inode *target_inode = file_inode(dst_file);
 	struct cifsFileInfo *smb_file_src = src_file->private_data;
-	struct cifsFileInfo *smb_file_target;
-	struct cifs_tcon *target_tcon;
+	struct cifsFileInfo *smb_file_target = dst_file->private_data;
+	struct cifs_tcon *target_tcon = tlink_tcon(smb_file_target->tlink);
 	unsigned int xid;
 	int rc;
 
@@ -941,9 +964,6 @@ static int cifs_clone_file_range(struct file *src_file, loff_t off,
 		cifs_dbg(VFS, "missing cifsFileInfo on copy range src file\n");
 		goto out;
 	}
-
-	smb_file_target = dst_file->private_data;
-	target_tcon = tlink_tcon(smb_file_target->tlink);
 
 	/*
 	 * Note: cifs case is easier than btrfs since server responsible for
@@ -958,7 +978,7 @@ static int cifs_clone_file_range(struct file *src_file, loff_t off,
 	cifs_dbg(FYI, "about to flush pages\n");
 	/* should we flush first and last page first */
 	truncate_inode_pages_range(&target_inode->i_data, destoff,
-				   PAGE_ALIGN(destoff + len)-1);
+				   PAGE_CACHE_ALIGN(destoff + len)-1);
 
 	if (target_tcon->ses->server->ops->duplicate_extents)
 		rc = target_tcon->ses->server->ops->duplicate_extents(xid,
@@ -977,114 +997,222 @@ out:
 	return rc;
 }
 
-const struct file_operations cifs_file_ops = {
-	.read_iter = cifs_loose_read_iter,
-	.write_iter = cifs_file_write_iter,
-	.open = cifs_open,
-	.release = cifs_close,
-	.lock = cifs_lock,
-	.fsync = cifs_fsync,
-	.flush = cifs_flush,
-	.mmap  = cifs_file_mmap,
-	.splice_read = generic_file_splice_read,
-	.llseek = cifs_llseek,
-	.unlocked_ioctl	= cifs_ioctl,
+ssize_t cifs_file_copychunk_range(unsigned int xid,
+				struct file *src_file, loff_t off,
+				struct file *dst_file, loff_t destoff,
+				size_t len, unsigned int flags)
+{
+	struct inode *src_inode = file_inode(src_file);
+	struct inode *target_inode = file_inode(dst_file);
+	struct cifsFileInfo *smb_file_src;
+	struct cifsFileInfo *smb_file_target;
+	struct cifs_tcon *src_tcon;
+	struct cifs_tcon *target_tcon;
+	ssize_t rc;
+
+	cifs_dbg(FYI, "copychunk range\n");
+
+	if (!src_file->private_data || !dst_file->private_data) {
+		rc = -EBADF;
+		cifs_dbg(VFS, "missing cifsFileInfo on copy range src file\n");
+		goto out;
+	}
+
+	rc = -EXDEV;
+	smb_file_target = dst_file->private_data;
+	smb_file_src = src_file->private_data;
+	src_tcon = tlink_tcon(smb_file_src->tlink);
+	target_tcon = tlink_tcon(smb_file_target->tlink);
+
+	if (src_tcon->ses != target_tcon->ses) {
+		cifs_dbg(VFS, "source and target of copy not on same server\n");
+		goto out;
+	}
+
+	/*
+	 * Note: cifs case is easier than btrfs since server responsible for
+	 * checks for proper open modes and file type and if it wants
+	 * server could even support copy of range where source = target
+	 */
+	lock_two_nondirectories(target_inode, src_inode);
+
+	cifs_dbg(FYI, "about to flush pages\n");
+	/* should we flush first and last page first */
+	truncate_inode_pages(&target_inode->i_data, 0);
+
+	if (target_tcon->ses->server->ops->copychunk_range)
+		rc = target_tcon->ses->server->ops->copychunk_range(xid,
+			smb_file_src, smb_file_target, off, len, destoff);
+	else
+		rc = -EOPNOTSUPP;
+
+	/* force revalidate of size and timestamps of target file now
+	 * that target is updated on the server
+	 */
+	CIFS_I(target_inode)->time = 0;
+	/* although unlocking in the reverse order from locking is not
+	 * strictly necessary here it is a little cleaner to be consistent
+	 */
+	unlock_two_nondirectories(src_inode, target_inode);
+
+out:
+	return rc;
+}
+
+static ssize_t cifs_copy_file_range(struct file *src_file, loff_t off,
+				struct file *dst_file, loff_t destoff,
+				size_t len, unsigned int flags)
+{
+	unsigned int xid = get_xid();
+	ssize_t rc;
+
+	rc = cifs_file_copychunk_range(xid, src_file, off, dst_file, destoff,
+					len, flags);
+	free_xid(xid);
+	return rc;
+}
+
+const struct file_operations_extend cifs_file_ops = {
+	.kabi_fops = {
+		.read = do_sync_read,
+		.write = do_sync_write,
+		.aio_read = cifs_loose_read,
+		.aio_write = cifs_file_aio_write,
+		.open = cifs_open,
+		.release = cifs_close,
+		.lock = cifs_lock,
+		.fsync = cifs_fsync,
+		.flush = cifs_flush,
+		.mmap  = cifs_file_mmap,
+		.splice_read = generic_file_splice_read,
+		.llseek = cifs_llseek,
+		.unlocked_ioctl	= cifs_ioctl,
+		.setlease = cifs_setlease,
+		.fallocate = cifs_fallocate,
+	},
 	.clone_file_range = cifs_clone_file_range,
-	.setlease = cifs_setlease,
-	.fallocate = cifs_fallocate,
+	.copy_file_range = cifs_copy_file_range,
 };
 
-const struct file_operations cifs_file_strict_ops = {
-	.read_iter = cifs_strict_readv,
-	.write_iter = cifs_strict_writev,
-	.open = cifs_open,
-	.release = cifs_close,
-	.lock = cifs_lock,
-	.fsync = cifs_strict_fsync,
-	.flush = cifs_flush,
-	.mmap = cifs_file_strict_mmap,
-	.splice_read = generic_file_splice_read,
-	.llseek = cifs_llseek,
-	.unlocked_ioctl	= cifs_ioctl,
+const struct file_operations_extend cifs_file_strict_ops = {
+	.kabi_fops = {
+		.read = do_sync_read,
+		.write = do_sync_write,
+		.aio_read = cifs_strict_readv,
+		.aio_write = cifs_strict_writev,
+		.open = cifs_open,
+		.release = cifs_close,
+		.lock = cifs_lock,
+		.fsync = cifs_strict_fsync,
+		.flush = cifs_flush,
+		.mmap = cifs_file_strict_mmap,
+		.splice_read = generic_file_splice_read,
+		.llseek = cifs_llseek,
+		.unlocked_ioctl	= cifs_ioctl,
+		.setlease = cifs_setlease,
+		.fallocate = cifs_fallocate,
+	},
 	.clone_file_range = cifs_clone_file_range,
-	.setlease = cifs_setlease,
-	.fallocate = cifs_fallocate,
+	.copy_file_range = cifs_copy_file_range,
 };
 
-const struct file_operations cifs_file_direct_ops = {
+const struct file_operations_extend cifs_file_direct_ops = {
 	/* BB reevaluate whether they can be done with directio, no cache */
-	.read_iter = cifs_user_readv,
-	.write_iter = cifs_user_writev,
-	.open = cifs_open,
-	.release = cifs_close,
-	.lock = cifs_lock,
-	.fsync = cifs_fsync,
-	.flush = cifs_flush,
-	.mmap = cifs_file_mmap,
-	.splice_read = generic_file_splice_read,
-	.unlocked_ioctl  = cifs_ioctl,
+	.kabi_fops = {
+		.read = do_sync_read,
+		.write = do_sync_write,
+		.aio_read = cifs_user_readv_wrapper,
+		.aio_write = cifs_user_writev,
+		.open = cifs_open,
+		.release = cifs_close,
+		.lock = cifs_lock,
+		.fsync = cifs_fsync,
+		.flush = cifs_flush,
+		.mmap = cifs_file_mmap,
+		.splice_read = generic_file_splice_read,
+		.unlocked_ioctl  = cifs_ioctl,
+		.llseek = cifs_llseek,
+		.setlease = cifs_setlease,
+		.fallocate = cifs_fallocate,
+	},
 	.clone_file_range = cifs_clone_file_range,
-	.llseek = cifs_llseek,
-	.setlease = cifs_setlease,
-	.fallocate = cifs_fallocate,
+	.copy_file_range = cifs_copy_file_range,
 };
 
-const struct file_operations cifs_file_nobrl_ops = {
-	.read_iter = cifs_loose_read_iter,
-	.write_iter = cifs_file_write_iter,
-	.open = cifs_open,
-	.release = cifs_close,
-	.fsync = cifs_fsync,
-	.flush = cifs_flush,
-	.mmap  = cifs_file_mmap,
-	.splice_read = generic_file_splice_read,
-	.llseek = cifs_llseek,
-	.unlocked_ioctl	= cifs_ioctl,
+const struct file_operations_extend cifs_file_nobrl_ops = {
+	.kabi_fops = {
+		.read = do_sync_read,
+		.write = do_sync_write,
+		.aio_read = cifs_loose_read,
+		.aio_write = cifs_file_aio_write,
+		.open = cifs_open,
+		.release = cifs_close,
+		.fsync = cifs_fsync,
+		.flush = cifs_flush,
+		.mmap  = cifs_file_mmap,
+		.splice_read = generic_file_splice_read,
+		.llseek = cifs_llseek,
+		.unlocked_ioctl	= cifs_ioctl,
+		.setlease = cifs_setlease,
+		.fallocate = cifs_fallocate,
+	},
 	.clone_file_range = cifs_clone_file_range,
-	.setlease = cifs_setlease,
-	.fallocate = cifs_fallocate,
+	.copy_file_range = cifs_copy_file_range,
 };
 
-const struct file_operations cifs_file_strict_nobrl_ops = {
-	.read_iter = cifs_strict_readv,
-	.write_iter = cifs_strict_writev,
-	.open = cifs_open,
-	.release = cifs_close,
-	.fsync = cifs_strict_fsync,
-	.flush = cifs_flush,
-	.mmap = cifs_file_strict_mmap,
-	.splice_read = generic_file_splice_read,
-	.llseek = cifs_llseek,
-	.unlocked_ioctl	= cifs_ioctl,
+const struct file_operations_extend cifs_file_strict_nobrl_ops = {
+	.kabi_fops = {
+		.read = do_sync_read,
+		.write = do_sync_write,
+		.aio_read = cifs_strict_readv,
+		.aio_write = cifs_strict_writev,
+		.open = cifs_open,
+		.release = cifs_close,
+		.fsync = cifs_strict_fsync,
+		.flush = cifs_flush,
+		.mmap = cifs_file_strict_mmap,
+		.splice_read = generic_file_splice_read,
+		.llseek = cifs_llseek,
+		.unlocked_ioctl	= cifs_ioctl,
+		.setlease = cifs_setlease,
+		.fallocate = cifs_fallocate,
+	},
 	.clone_file_range = cifs_clone_file_range,
-	.setlease = cifs_setlease,
-	.fallocate = cifs_fallocate,
+	.copy_file_range = cifs_copy_file_range,
 };
 
-const struct file_operations cifs_file_direct_nobrl_ops = {
+const struct file_operations_extend cifs_file_direct_nobrl_ops = {
 	/* BB reevaluate whether they can be done with directio, no cache */
-	.read_iter = cifs_user_readv,
-	.write_iter = cifs_user_writev,
-	.open = cifs_open,
-	.release = cifs_close,
-	.fsync = cifs_fsync,
-	.flush = cifs_flush,
-	.mmap = cifs_file_mmap,
-	.splice_read = generic_file_splice_read,
-	.unlocked_ioctl  = cifs_ioctl,
+	.kabi_fops = {
+		.read = do_sync_read,
+		.write = do_sync_write,
+		.aio_read = cifs_user_readv_wrapper,
+		.aio_write = cifs_user_writev,
+		.open = cifs_open,
+		.release = cifs_close,
+		.fsync = cifs_fsync,
+		.flush = cifs_flush,
+		.mmap = cifs_file_mmap,
+		.splice_read = generic_file_splice_read,
+		.unlocked_ioctl  = cifs_ioctl,
+		.llseek = cifs_llseek,
+		.setlease = cifs_setlease,
+		.fallocate = cifs_fallocate,
+	},
 	.clone_file_range = cifs_clone_file_range,
-	.llseek = cifs_llseek,
-	.setlease = cifs_setlease,
-	.fallocate = cifs_fallocate,
+	.copy_file_range = cifs_copy_file_range,
 };
 
-const struct file_operations cifs_dir_ops = {
-	.iterate_shared = cifs_readdir,
-	.release = cifs_closedir,
-	.read    = generic_read_dir,
-	.unlocked_ioctl  = cifs_ioctl,
+const struct file_operations_extend cifs_dir_ops = {
+	.kabi_fops = {
+		.readdir = cifs_readdir,
+		.release = cifs_closedir,
+		.read    = generic_read_dir,
+		.unlocked_ioctl  = cifs_ioctl,
+		.llseek = generic_file_llseek,
+	},
 	.clone_file_range = cifs_clone_file_range,
-	.llseek = generic_file_llseek,
+	.copy_file_range = cifs_copy_file_range,
 };
 
 static void
@@ -1124,14 +1252,12 @@ cifs_destroy_inodecache(void)
 static int
 cifs_init_request_bufs(void)
 {
-	size_t max_hdr_size = MAX_CIFS_HDR_SIZE;
-#ifdef CONFIG_CIFS_SMB2
 	/*
 	 * SMB2 maximum header size is bigger than CIFS one - no problems to
 	 * allocate some more bytes for CIFS.
 	 */
-	max_hdr_size = MAX_SMB2_HDR_SIZE;
-#endif
+	size_t max_hdr_size = MAX_SMB2_HDR_SIZE;
+
 	if (CIFSMaxBufSize < 8192) {
 	/* Buffer size can not be smaller than 2 * PATH_MAX since maximum
 	Unicode path name has to fit in any SMB/CIFS path based frames */
@@ -1237,6 +1363,50 @@ cifs_destroy_mids(void)
 	kmem_cache_destroy(cifs_mid_cachep);
 }
 
+static void
+cifs_unregister_fo_extends(void)
+{
+	unregister_fo_extend(&cifs_dir_ops);
+	unregister_fo_extend(&cifs_file_direct_nobrl_ops);
+	unregister_fo_extend(&cifs_file_strict_nobrl_ops);
+	unregister_fo_extend(&cifs_file_nobrl_ops);
+	unregister_fo_extend(&cifs_file_direct_ops);
+	unregister_fo_extend(&cifs_file_strict_ops);
+	unregister_fo_extend(&cifs_file_ops);
+}
+
+static int __init
+cifs_register_fo_extends(void)
+{
+	int rc;
+
+	rc = register_fo_extend(&cifs_file_ops);
+	if (rc)
+		goto out;
+	rc = register_fo_extend(&cifs_file_strict_ops);
+	if (rc)
+		goto out;
+	rc = register_fo_extend(&cifs_file_direct_ops);
+	if (rc)
+		goto out;
+	rc = register_fo_extend(&cifs_file_nobrl_ops);
+	if (rc)
+		goto out;
+	rc = register_fo_extend(&cifs_file_strict_nobrl_ops);
+	if (rc)
+		goto out;
+	rc = register_fo_extend(&cifs_file_direct_nobrl_ops);
+	if (rc)
+		goto out;
+	rc = register_fo_extend(&cifs_dir_ops);
+	if (rc)
+		goto out;
+	return 0;
+out:
+	cifs_unregister_fo_extends();
+	return -1;
+}
+
 static int __init
 init_cifs(void)
 {
@@ -1322,12 +1492,18 @@ init_cifs(void)
 		goto out_register_key_type;
 #endif /* CONFIG_CIFS_ACL */
 
-	rc = register_filesystem(&cifs_fs_type);
+	rc = cifs_register_fo_extends();
 	if (rc)
 		goto out_init_cifs_idmap;
 
+	rc = register_filesystem(&cifs_fs_type);
+	if (rc)
+		goto out_init_cifs_fo_extends;
+
 	return 0;
 
+out_init_cifs_fo_extends:
+	cifs_unregister_fo_extends();
 out_init_cifs_idmap:
 #ifdef CONFIG_CIFS_ACL
 	exit_cifs_idmap();
@@ -1358,6 +1534,7 @@ exit_cifs(void)
 {
 	cifs_dbg(NOISY, "exit_cifs\n");
 	unregister_filesystem(&cifs_fs_type);
+	cifs_unregister_fo_extends();
 	cifs_dfs_release_automount_timer();
 #ifdef CONFIG_CIFS_ACL
 	exit_cifs_idmap();
@@ -1380,5 +1557,17 @@ MODULE_DESCRIPTION
     ("VFS to access servers complying with the SNIA CIFS Specification "
      "e.g. Samba and Windows");
 MODULE_VERSION(CIFS_VERSION);
+MODULE_SOFTDEP("pre: arc4");
+MODULE_SOFTDEP("pre: des");
+MODULE_SOFTDEP("pre: ecb");
+MODULE_SOFTDEP("pre: hmac");
+MODULE_SOFTDEP("pre: md4");
+MODULE_SOFTDEP("pre: md5");
+MODULE_SOFTDEP("pre: nls");
+MODULE_SOFTDEP("pre: aes");
+MODULE_SOFTDEP("pre: cmac");
+MODULE_SOFTDEP("pre: sha256");
+MODULE_SOFTDEP("pre: aead2");
+MODULE_SOFTDEP("pre: ccm");
 module_init(init_cifs)
 module_exit(exit_cifs)

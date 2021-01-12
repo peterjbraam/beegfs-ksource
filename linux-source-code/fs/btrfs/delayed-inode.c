@@ -1167,7 +1167,7 @@ static int __btrfs_run_delayed_items(struct btrfs_trans_handle *trans,
 		if (ret) {
 			btrfs_release_delayed_node(curr_node);
 			curr_node = NULL;
-			btrfs_abort_transaction(trans, ret);
+			btrfs_abort_transaction(trans, root, ret);
 			break;
 		}
 
@@ -1584,23 +1584,15 @@ int btrfs_inode_delayed_dir_index_count(struct inode *inode)
 	return 0;
 }
 
-bool btrfs_readdir_get_delayed_items(struct inode *inode,
-				     struct list_head *ins_list,
-				     struct list_head *del_list)
+void btrfs_get_delayed_items(struct inode *inode, struct list_head *ins_list,
+			     struct list_head *del_list)
 {
 	struct btrfs_delayed_node *delayed_node;
 	struct btrfs_delayed_item *item;
 
 	delayed_node = btrfs_get_delayed_node(inode);
 	if (!delayed_node)
-		return false;
-
-	/*
-	 * We can only do one readdir with delayed items at a time because of
-	 * item->readdir_list.
-	 */
-	inode_unlock_shared(inode);
-	inode_lock(inode);
+		return;
 
 	mutex_lock(&delayed_node->mutex);
 	item = __btrfs_first_delayed_insertion_item(delayed_node);
@@ -1627,13 +1619,10 @@ bool btrfs_readdir_get_delayed_items(struct inode *inode,
 	 * requeue or dequeue this delayed node.
 	 */
 	atomic_dec(&delayed_node->refs);
-
-	return true;
 }
 
-void btrfs_readdir_put_delayed_items(struct inode *inode,
-				     struct list_head *ins_list,
-				     struct list_head *del_list)
+void btrfs_put_delayed_items(struct list_head *ins_list,
+			     struct list_head *del_list)
 {
 	struct btrfs_delayed_item *curr, *next;
 
@@ -1648,12 +1637,6 @@ void btrfs_readdir_put_delayed_items(struct inode *inode,
 		if (atomic_dec_and_test(&curr->refs))
 			kfree(curr);
 	}
-
-	/*
-	 * The VFS is going to do up_read(), so we need to downgrade back to a
-	 * read lock.
-	 */
-	downgrade_write(&inode->i_rwsem);
 }
 
 int btrfs_should_delete_dir_index(struct list_head *del_list,
@@ -1687,7 +1670,8 @@ int btrfs_should_delete_dir_index(struct list_head *del_list,
  * btrfs_readdir_delayed_dir_index - read dir info stored in the delayed tree
  *
  */
-int btrfs_readdir_delayed_dir_index(struct dir_context *ctx,
+int btrfs_readdir_delayed_dir_index(struct file *filp, void *dirent,
+				    filldir_t filldir,
 				    struct list_head *ins_list, bool *emitted)
 {
 	struct btrfs_dir_item *di;
@@ -1709,13 +1693,13 @@ int btrfs_readdir_delayed_dir_index(struct dir_context *ctx,
 	list_for_each_entry_safe(curr, next, ins_list, readdir_list) {
 		list_del(&curr->readdir_list);
 
-		if (curr->key.offset < ctx->pos) {
+		if (curr->key.offset < filp->f_pos) {
 			if (atomic_dec_and_test(&curr->refs))
 				kfree(curr);
 			continue;
 		}
 
-		ctx->pos = curr->key.offset;
+		filp->f_pos = curr->key.offset;
 
 		di = (struct btrfs_dir_item *)curr->data;
 		name = (char *)(di + 1);
@@ -1724,7 +1708,7 @@ int btrfs_readdir_delayed_dir_index(struct dir_context *ctx,
 		d_type = btrfs_filetype_table[di->type];
 		btrfs_disk_key_to_cpu(&location, &di->location);
 
-		over = !dir_emit(ctx, name, name_len,
+		over = filldir(dirent, name, name_len, curr->key.offset,
 			       location.objectid, d_type);
 
 		if (atomic_dec_and_test(&curr->refs))

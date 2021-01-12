@@ -11,41 +11,153 @@
 
 #include <linux/module.h>
 #include <linux/slab.h>
+#include <linux/types.h>
+#include <linux/string.h>
+#include <linux/errno.h>
 #include <linux/skbuff.h>
+#include <linux/cgroup.h>
 #include <linux/rcupdate.h>
+#include <linux/fdtable.h>
 #include <net/rtnetlink.h>
 #include <net/pkt_cls.h>
 #include <net/sock.h>
 #include <net/cls_cgroup.h>
+
+static inline struct cgroup_cls_state *cgrp_cls_state(struct cgroup *cgrp)
+{
+	return container_of(cgroup_subsys_state(cgrp, net_cls_subsys_id),
+			    struct cgroup_cls_state, css);
+}
+
+static inline struct cgroup_cls_state *task_cls_state(struct task_struct *p)
+{
+	return container_of(task_subsys_state(p, net_cls_subsys_id),
+			    struct cgroup_cls_state, css);
+}
+
+static struct cgroup_subsys_state *cgrp_css_alloc(struct cgroup *cgrp)
+{
+	struct cgroup_cls_state *cs;
+
+	cs = kzalloc(sizeof(*cs), GFP_KERNEL);
+	if (!cs)
+		return ERR_PTR(-ENOMEM);
+	return &cs->css;
+}
+
+static int cgrp_css_online(struct cgroup *cgrp)
+{
+	if (cgrp->parent)
+		cgrp_cls_state(cgrp)->classid =
+			cgrp_cls_state(cgrp->parent)->classid;
+	return 0;
+}
+
+static void cgrp_css_free(struct cgroup *cgrp)
+{
+	kfree(cgrp_cls_state(cgrp));
+}
+
+static int update_classid(const void *v, struct file *file, unsigned n)
+{
+	int err;
+	struct socket *sock = sock_from_file(file, &err);
+	if (sock)
+		sock->sk->sk_classid = (u32)(unsigned long)v;
+	return 0;
+}
+
+static void cgrp_attach(struct cgroup *cgrp, struct cgroup_taskset *tset)
+{
+	struct task_struct *p;
+	void *v;
+
+	cgroup_taskset_for_each(p, cgrp, tset) {
+		task_lock(p);
+		v = (void *)(unsigned long)task_cls_classid(p);
+		iterate_fd(p->files, 0, update_classid, v);
+		task_unlock(p);
+	}
+}
+
+static u64 read_classid(struct cgroup *cgrp, struct cftype *cft)
+{
+	return cgrp_cls_state(cgrp)->classid;
+}
+
+static int write_classid(struct cgroup *cgrp, struct cftype *cft, u64 value)
+{
+	cgrp_cls_state(cgrp)->classid = (u32) value;
+	return 0;
+}
+
+static struct cftype ss_files[] = {
+	{
+		.name = "classid",
+		.read_u64 = read_classid,
+		.write_u64 = write_classid,
+	},
+	{ }	/* terminate */
+};
+
+struct cgroup_subsys net_cls_subsys = {
+	.name		= "net_cls",
+	.css_alloc	= cgrp_css_alloc,
+	.css_online	= cgrp_css_online,
+	.css_free	= cgrp_css_free,
+	.attach		= cgrp_attach,
+	.subsys_id	= net_cls_subsys_id,
+	.base_cftypes	= ss_files,
+	.module		= THIS_MODULE,
+};
 
 struct cls_cgroup_head {
 	u32			handle;
 	struct tcf_exts		exts;
 	struct tcf_ematch_tree	ematches;
 	struct tcf_proto	*tp;
-	struct rcu_head		rcu;
+	struct rcu_work		rwork;
 };
 
 static int cls_cgroup_classify(struct sk_buff *skb, const struct tcf_proto *tp,
 			       struct tcf_result *res)
 {
 	struct cls_cgroup_head *head = rcu_dereference_bh(tp->root);
-	u32 classid = task_get_classid(skb);
+	u32 classid;
+
+	classid = task_cls_state(current)->classid;
+
+	/*
+	 * Due to the nature of the classifier it is required to ignore all
+	 * packets originating from softirq context as accessing `current'
+	 * would lead to false results.
+	 *
+	 * This test assumes that all callers of dev_queue_xmit() explicitely
+	 * disable bh. Knowing this, it is possible to detect softirq based
+	 * calls by looking at the number of nested bh disable calls because
+	 * softirqs always disables bh.
+	 */
+	if (in_serving_softirq()) {
+		/* If there is an sk_classid we'll use that. */
+		if (!skb->sk)
+			return -1;
+		classid = skb->sk->sk_classid;
+	}
 
 	if (!classid)
 		return -1;
+
 	if (!tcf_em_tree_match(skb, &head->ematches, NULL))
 		return -1;
 
 	res->classid = classid;
 	res->class = 0;
-
 	return tcf_exts_exec(skb, &head->exts, res);
 }
 
-static unsigned long cls_cgroup_get(struct tcf_proto *tp, u32 handle)
+static void *cls_cgroup_get(struct tcf_proto *tp, u32 handle)
 {
-	return 0UL;
+	return NULL;
 }
 
 static int cls_cgroup_init(struct tcf_proto *tp)
@@ -57,27 +169,32 @@ static const struct nla_policy cgroup_policy[TCA_CGROUP_MAX + 1] = {
 	[TCA_CGROUP_EMATCHES]	= { .type = NLA_NESTED },
 };
 
-static void cls_cgroup_destroy_rcu(struct rcu_head *root)
+static void __cls_cgroup_destroy(struct cls_cgroup_head *head)
 {
-	struct cls_cgroup_head *head = container_of(root,
-						    struct cls_cgroup_head,
-						    rcu);
-
 	tcf_exts_destroy(&head->exts);
 	tcf_em_tree_destroy(&head->ematches);
+	tcf_exts_put_net(&head->exts);
 	kfree(head);
+}
+
+static void cls_cgroup_destroy_work(struct work_struct *work)
+{
+	struct cls_cgroup_head *head = container_of(to_rcu_work(work),
+						    struct cls_cgroup_head,
+						    rwork);
+	rtnl_lock();
+	__cls_cgroup_destroy(head);
+	rtnl_unlock();
 }
 
 static int cls_cgroup_change(struct net *net, struct sk_buff *in_skb,
 			     struct tcf_proto *tp, unsigned long base,
 			     u32 handle, struct nlattr **tca,
-			     unsigned long *arg, bool ovr)
+			     void **arg, bool ovr)
 {
 	struct nlattr *tb[TCA_CGROUP_MAX + 1];
 	struct cls_cgroup_head *head = rtnl_dereference(tp->root);
 	struct cls_cgroup_head *new;
-	struct tcf_ematch_tree t;
-	struct tcf_exts e;
 	int err;
 
 	if (!tca[TCA_OPTIONS])
@@ -103,27 +220,19 @@ static int cls_cgroup_change(struct net *net, struct sk_buff *in_skb,
 	if (err < 0)
 		goto errout;
 
-	err = tcf_exts_init(&e, TCA_CGROUP_ACT, TCA_CGROUP_POLICE);
+	err = tcf_exts_validate(net, tp, tb, tca[TCA_RATE], &new->exts, ovr);
 	if (err < 0)
 		goto errout;
-	err = tcf_exts_validate(net, tp, tb, tca[TCA_RATE], &e, ovr);
-	if (err < 0) {
-		tcf_exts_destroy(&e);
-		goto errout;
-	}
 
-	err = tcf_em_tree_validate(tp, tb[TCA_CGROUP_EMATCHES], &t);
-	if (err < 0) {
-		tcf_exts_destroy(&e);
+	err = tcf_em_tree_validate(tp, tb[TCA_CGROUP_EMATCHES], &new->ematches);
+	if (err < 0)
 		goto errout;
-	}
-
-	tcf_exts_change(tp, &new->exts, &e);
-	tcf_em_tree_change(tp, &new->ematches, &t);
 
 	rcu_assign_pointer(tp->root, new);
-	if (head)
-		call_rcu(&head->rcu, cls_cgroup_destroy_rcu);
+	if (head) {
+		tcf_exts_get_net(&head->exts);
+		tcf_queue_work(&head->rwork, cls_cgroup_destroy_work);
+	}
 	return 0;
 errout:
 	tcf_exts_destroy(&new->exts);
@@ -131,20 +240,20 @@ errout:
 	return err;
 }
 
-static bool cls_cgroup_destroy(struct tcf_proto *tp, bool force)
+static void cls_cgroup_destroy(struct tcf_proto *tp)
 {
 	struct cls_cgroup_head *head = rtnl_dereference(tp->root);
 
-	if (!force)
-		return false;
 	/* Head can still be NULL due to cls_cgroup_init(). */
-	if (head)
-		call_rcu(&head->rcu, cls_cgroup_destroy_rcu);
-
-	return true;
+	if (head) {
+		if (tcf_exts_get_net(&head->exts))
+			tcf_queue_work(&head->rwork, cls_cgroup_destroy_work);
+		else
+			__cls_cgroup_destroy(head);
+	}
 }
 
-static int cls_cgroup_delete(struct tcf_proto *tp, unsigned long arg)
+static int cls_cgroup_delete(struct tcf_proto *tp, void *arg, bool *last)
 {
 	return -EOPNOTSUPP;
 }
@@ -156,7 +265,7 @@ static void cls_cgroup_walk(struct tcf_proto *tp, struct tcf_walker *arg)
 	if (arg->count < arg->skip)
 		goto skip;
 
-	if (arg->fn(tp, (unsigned long) head, arg) < 0) {
+	if (arg->fn(tp, head, arg) < 0) {
 		arg->stop = 1;
 		return;
 	}
@@ -164,7 +273,7 @@ skip:
 	arg->count++;
 }
 
-static int cls_cgroup_dump(struct net *net, struct tcf_proto *tp, unsigned long fh,
+static int cls_cgroup_dump(struct net *net, struct tcf_proto *tp, void *fh,
 			   struct sk_buff *skb, struct tcmsg *t)
 {
 	struct cls_cgroup_head *head = rtnl_dereference(tp->root);
@@ -207,12 +316,25 @@ static struct tcf_proto_ops cls_cgroup_ops __read_mostly = {
 
 static int __init init_cgroup_cls(void)
 {
-	return register_tcf_proto_ops(&cls_cgroup_ops);
+	int ret;
+
+	ret = cgroup_load_subsys(&net_cls_subsys);
+	if (ret)
+		goto out;
+
+	ret = register_tcf_proto_ops(&cls_cgroup_ops);
+	if (ret)
+		cgroup_unload_subsys(&net_cls_subsys);
+
+out:
+	return ret;
 }
 
 static void __exit exit_cgroup_cls(void)
 {
 	unregister_tcf_proto_ops(&cls_cgroup_ops);
+
+	cgroup_unload_subsys(&net_cls_subsys);
 }
 
 module_init(init_cgroup_cls);

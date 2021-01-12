@@ -172,9 +172,9 @@ static int osst_probe(struct device *);
 static int osst_remove(struct device *);
 
 static struct scsi_driver osst_template = {
+	.owner			= THIS_MODULE,
 	.gendrv = {
 		.name		=  "osst",
-		.owner		= THIS_MODULE,
 		.probe		= osst_probe,
 		.remove		= osst_remove,
 	}
@@ -3327,18 +3327,19 @@ static int osst_write_frame(struct osst_tape * STp, struct osst_request ** aSRpn
 /* Lock or unlock the drive door. Don't use when struct osst_request allocated. */
 static int do_door_lock(struct osst_tape * STp, int do_lock)
 {
-	int retval;
+	int retval, cmd;
 
+	cmd = do_lock ? SCSI_IOCTL_DOORLOCK : SCSI_IOCTL_DOORUNLOCK;
 #if DEBUG
 	printk(OSST_DEB_MSG "%s:D: %socking drive door.\n", tape_name(STp), do_lock ? "L" : "Unl");
 #endif
-
-	retval = scsi_set_medium_removal(STp->device,
-			do_lock ? SCSI_REMOVAL_PREVENT : SCSI_REMOVAL_ALLOW);
-	if (!retval)
+	retval = scsi_ioctl(STp->device, cmd, NULL);
+	if (!retval) {
 		STp->door_locked = do_lock ? ST_LOCKED_EXPLICIT : ST_UNLOCKED;
-	else
+	}
+	else {
 		STp->door_locked = ST_LOCK_FAILS;
+	}
 	return retval;
 }
 
@@ -3492,6 +3493,7 @@ static ssize_t osst_write(struct file * filp, const char __user * buf, size_t co
 				}
       			}	  
 			if ((STps->drv_file + STps->drv_block) > 0 && STps->drv_file < STp->filemark_cnt) {
+				gmb();
 				STp->filemark_cnt = STps->drv_file;
 				STp->last_mark_ppos =
 				       	ntohl(STp->header_cache->dat_fm_tab.fm_tab_ent[STp->filemark_cnt-1]);
@@ -4968,10 +4970,10 @@ static long osst_ioctl(struct file * file,
 	 * may try and take the device offline, in which case all further
 	 * access to the device is prohibited.
 	 */
-	retval = scsi_ioctl_block_when_processing_errors(STp->device, cmd_in,
-			file->f_flags & O_NDELAY);
-	if (retval)
+	if( !scsi_block_when_processing_errors(STp->device) ) {
+		retval = (-ENXIO);
 		goto out;
+	}
 
 	cmd_type = _IOC_TYPE(cmd_in);
 	cmd_nr   = _IOC_NR(cmd_in);

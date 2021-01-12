@@ -14,7 +14,6 @@
 #define _UAPI_LINUX_IF_BRIDGE_H
 
 #include <linux/types.h>
-#include <linux/if_ether.h>
 #include <linux/in6.h>
 
 #define SYSFS_BRIDGE_ATTR	"bridge"
@@ -90,7 +89,7 @@ struct __port_info {
 };
 
 struct __fdb_entry {
-	__u8 mac_addr[ETH_ALEN];
+	__u8 mac_addr[6];
 	__u8 port_no;
 	__u8 is_local;
 	__u32 ageing_timer_value;
@@ -118,6 +117,7 @@ enum {
 	IFLA_BRIDGE_FLAGS,
 	IFLA_BRIDGE_MODE,
 	IFLA_BRIDGE_VLAN_INFO,
+	IFLA_BRIDGE_VLAN_TUNNEL_INFO,
 	__IFLA_BRIDGE_MAX,
 };
 #define IFLA_BRIDGE_MAX (__IFLA_BRIDGE_MAX - 1)
@@ -133,6 +133,16 @@ struct bridge_vlan_info {
 	__u16 flags;
 	__u16 vid;
 };
+
+enum {
+	IFLA_BRIDGE_VLAN_TUNNEL_UNSPEC,
+	IFLA_BRIDGE_VLAN_TUNNEL_ID,
+	IFLA_BRIDGE_VLAN_TUNNEL_VID,
+	IFLA_BRIDGE_VLAN_TUNNEL_FLAGS,
+	__IFLA_BRIDGE_VLAN_TUNNEL_MAX,
+};
+
+#define IFLA_BRIDGE_VLAN_TUNNEL_MAX (__IFLA_BRIDGE_VLAN_TUNNEL_MAX - 1)
 
 struct bridge_vlan_xstats {
 	__u64 rx_bytes;

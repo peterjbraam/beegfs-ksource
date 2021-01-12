@@ -401,8 +401,8 @@ static int teql_master_close(struct net_device *dev)
 	return 0;
 }
 
-static struct rtnl_link_stats64 *teql_master_stats64(struct net_device *dev,
-						     struct rtnl_link_stats64 *stats)
+static void teql_master_stats64(struct net_device *dev,
+				struct rtnl_link_stats64 *stats)
 {
 	struct teql_master *m = netdev_priv(dev);
 
@@ -410,7 +410,6 @@ static struct rtnl_link_stats64 *teql_master_stats64(struct net_device *dev,
 	stats->tx_bytes		= m->tx_bytes;
 	stats->tx_errors	= m->tx_errors;
 	stats->tx_dropped	= m->tx_dropped;
-	return stats;
 }
 
 static int teql_master_mtu(struct net_device *dev, int new_mtu)
@@ -438,7 +437,7 @@ static const struct net_device_ops teql_netdev_ops = {
 	.ndo_stop	= teql_master_close,
 	.ndo_start_xmit	= teql_master_xmit,
 	.ndo_get_stats64 = teql_master_stats64,
-	.ndo_change_mtu	= teql_master_mtu,
+	.ndo_change_mtu_rh74 = teql_master_mtu,
 };
 
 static __init void teql_master_setup(struct net_device *dev)
@@ -480,8 +479,8 @@ static int __init teql_init(void)
 		struct net_device *dev;
 		struct teql_master *master;
 
-		dev = alloc_netdev(sizeof(struct teql_master), "teql%d",
-				   NET_NAME_UNKNOWN, teql_master_setup);
+		dev = alloc_netdev(sizeof(struct teql_master),
+				  "teql%d", teql_master_setup);
 		if (!dev) {
 			err = -ENOMEM;
 			break;

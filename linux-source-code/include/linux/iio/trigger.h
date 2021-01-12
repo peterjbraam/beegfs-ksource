@@ -142,15 +142,6 @@ void devm_iio_trigger_unregister(struct device *dev,
 				 struct iio_trigger *trig_info);
 
 /**
- * iio_trigger_set_immutable() - set an immutable trigger on destination
- *
- * @indio_dev - IIO device structure containing the device
- * @trig - trigger to assign to device
- *
- **/
-int iio_trigger_set_immutable(struct iio_dev *indio_dev, struct iio_trigger *trig);
-
-/**
  * iio_trigger_poll() - called on a trigger occurring
  * @trig:	trigger which occurred
  *
@@ -170,6 +161,8 @@ void iio_trigger_free(struct iio_trigger *trig);
  */
 bool iio_trigger_using_own(struct iio_dev *indio_dev);
 
+int iio_trigger_validate_own_device(struct iio_trigger *trig,
+				     struct iio_dev *indio_dev);
 
 #else
 struct iio_trigger;

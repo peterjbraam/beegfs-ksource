@@ -11,7 +11,6 @@
 #include <asm/unaligned.h>
 #include <net/tcp.h>
 #include <net/netns/generic.h>
-#include <linux/proc_fs.h>
 
 #include <linux/netfilter_ipv4/ip_tables.h>
 #include <linux/netfilter/x_tables.h>
@@ -188,7 +187,7 @@ unsigned int synproxy_tstamp_adjust(struct sk_buff *skb,
 				    const struct nf_conn_synproxy *synproxy)
 {
 	unsigned int optoff, optend;
-	__be32 *ptr, old;
+	u32 *ptr, old;
 
 	if (synproxy->tsoff == 0)
 		return 1;
@@ -216,18 +215,18 @@ unsigned int synproxy_tstamp_adjust(struct sk_buff *skb,
 			if (op[0] == TCPOPT_TIMESTAMP &&
 			    op[1] == TCPOLEN_TIMESTAMP) {
 				if (CTINFO2DIR(ctinfo) == IP_CT_DIR_REPLY) {
-					ptr = (__be32 *)&op[2];
+					ptr = (u32 *)&op[2];
 					old = *ptr;
 					*ptr = htonl(ntohl(*ptr) -
 						     synproxy->tsoff);
 				} else {
-					ptr = (__be32 *)&op[6];
+					ptr = (u32 *)&op[6];
 					old = *ptr;
 					*ptr = htonl(ntohl(*ptr) +
 						     synproxy->tsoff);
 				}
 				inet_proto_csum_replace4(&th->check, skb,
-							 old, *ptr, false);
+							 old, *ptr, 0);
 				return 1;
 			}
 			optoff += op[1];

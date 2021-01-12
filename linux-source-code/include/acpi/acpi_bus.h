@@ -16,6 +16,10 @@
  *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  *  General Public License for more details.
  *
+ *  You should have received a copy of the GNU General Public License along
+ *  with this program; if not, write to the Free Software Foundation, Inc.,
+ *  59 Temple Place, Suite 330, Boston, MA 02111-1307 USA.
+ *
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  */
 
@@ -24,6 +28,8 @@
 
 #include <linux/device.h>
 #include <linux/property.h>
+
+#include <acpi/acpi.h>
 
 /* TBD: Make dynamic */
 #define ACPI_MAX_HANDLES	10
@@ -131,7 +137,7 @@ static inline struct acpi_hotplug_profile *to_acpi_hotplug_profile(
 struct acpi_scan_handler {
 	const struct acpi_device_id *ids;
 	struct list_head list_node;
-	bool (*match)(const char *idstr, const struct acpi_device_id **matchid);
+	bool (*match)(char *idstr, const struct acpi_device_id **matchid);
 	int (*attach)(struct acpi_device *dev, const struct acpi_device_id *id);
 	void (*detach)(struct acpi_device *dev);
 	void (*bind)(struct device *phys_dev);
@@ -207,9 +213,7 @@ struct acpi_device_flags {
 	u32 hotplug_notify:1;
 	u32 is_dock_station:1;
 	u32 of_compatible_ok:1;
-	u32 coherent_dma:1;
-	u32 cca_seen:1;
-	u32 reserved:20;
+	u32 reserved:22;
 };
 
 /* File System */
@@ -229,7 +233,7 @@ typedef char acpi_device_class[20];
 
 struct acpi_hardware_id {
 	struct list_head list;
-	const char *id;
+	char *id;
 };
 
 struct acpi_pnp_type {
@@ -265,13 +269,13 @@ struct acpi_device_power_flags {
 	u32 inrush_current:1;	/* Serialize Dx->D0 */
 	u32 power_removed:1;	/* Optimize Dx->D0 */
 	u32 ignore_parent:1;	/* Power is independent of parent power state */
-	u32 dsw_present:1;	/* _DSW present? */
-	u32 reserved:26;
+	u32 reserved:27;
 };
 
 struct acpi_device_power_state {
 	struct {
 		u8 valid:1;
+		u8 os_accessible:1;
 		u8 explicit_set:1;	/* _PSx present? */
 		u8 reserved:6;
 	} flags;
@@ -314,7 +318,6 @@ struct acpi_device_wakeup_flags {
 	u8 valid:1;		/* Can successfully enable wakeup? */
 	u8 run_wake:1;		/* Run-Wake GPE devices */
 	u8 notifier_present:1;  /* Wake-up notify handler has been installed */
-	u8 enabled:1;		/* Enabled for wakeup */
 };
 
 struct acpi_device_wakeup_context {
@@ -375,7 +378,6 @@ struct acpi_device {
 	void *driver_data;
 	struct device dev;
 	unsigned int physical_node_count;
-	unsigned int dep_unmet;
 	struct list_head physical_node_list;
 	struct mutex physical_node_lock;
 	void (*remove)(struct acpi_device *);
@@ -394,13 +396,13 @@ struct acpi_data_node {
 
 static inline bool is_acpi_node(struct fwnode_handle *fwnode)
 {
-	return !IS_ERR_OR_NULL(fwnode) && (fwnode->type == FWNODE_ACPI
+	return fwnode && (fwnode->type == FWNODE_ACPI
 		|| fwnode->type == FWNODE_ACPI_DATA);
 }
 
 static inline bool is_acpi_device_node(struct fwnode_handle *fwnode)
 {
-	return !IS_ERR_OR_NULL(fwnode) && fwnode->type == FWNODE_ACPI;
+	return fwnode && fwnode->type == FWNODE_ACPI;
 }
 
 static inline struct acpi_device *to_acpi_device_node(struct fwnode_handle *fwnode)
@@ -477,8 +479,6 @@ extern struct kobject *acpi_kobj;
 extern int acpi_bus_generate_netlink_event(const char*, const char*, u8, int);
 void acpi_bus_private_data_handler(acpi_handle, void *);
 int acpi_bus_get_private_data(acpi_handle, void **);
-int acpi_bus_attach_private_data(acpi_handle, void *);
-void acpi_bus_detach_private_data(acpi_handle);
 extern int acpi_notifier_call_chain(struct acpi_device *, u32, u32);
 extern int register_acpi_notifier(struct notifier_block *);
 extern int unregister_acpi_notifier(struct notifier_block *);
@@ -508,6 +508,15 @@ bool acpi_bus_power_manageable(acpi_handle handle);
 bool acpi_bus_can_wakeup(acpi_handle handle);
 #else
 static inline bool acpi_bus_can_wakeup(acpi_handle handle) { return false; }
+#endif
+
+#ifdef CONFIG_ACPI_PROC_EVENT
+int acpi_bus_generate_proc_event(struct acpi_device *device, u8 type, int data);
+int acpi_bus_generate_proc_event4(const char *class, const char *bid, u8 type, int data);
+int acpi_bus_receive_event(struct acpi_bus_event *event);
+#else
+static inline int acpi_bus_generate_proc_event(struct acpi_device *device, u8 type, int data)
+	{ return 0; }
 #endif
 
 void acpi_scan_lock_acquire(void);
@@ -555,8 +564,6 @@ struct acpi_bus_type {
 };
 int register_acpi_bus_type(struct acpi_bus_type *);
 int unregister_acpi_bus_type(struct acpi_bus_type *);
-int acpi_bind_one(struct device *dev, struct acpi_device *adev);
-int acpi_unbind_one(struct device *dev);
 
 struct acpi_pci_root {
 	struct acpi_device * device;
@@ -571,9 +578,6 @@ struct acpi_pci_root {
 
 /* helper */
 
-bool acpi_dma_supported(struct acpi_device *adev);
-enum dev_dma_attr acpi_get_dma_attr(struct acpi_device *adev);
-
 struct acpi_device *acpi_find_child_device(struct acpi_device *parent,
 					   u64 address, bool check_children);
 int acpi_is_root_bridge(acpi_handle);
@@ -587,7 +591,6 @@ acpi_status acpi_add_pm_notifier(struct acpi_device *adev, struct device *dev,
 				 void (*work_func)(struct work_struct *work));
 acpi_status acpi_remove_pm_notifier(struct acpi_device *adev);
 int acpi_pm_device_sleep_state(struct device *, int *, int);
-int acpi_pm_device_run_wake(struct device *, bool);
 #else
 static inline acpi_status acpi_add_pm_notifier(struct acpi_device *adev,
 					       struct device *dev,
@@ -607,6 +610,11 @@ static inline int acpi_pm_device_sleep_state(struct device *d, int *p, int m)
 	return (m >= ACPI_STATE_D0 && m <= ACPI_STATE_D3_COLD) ?
 		m : ACPI_STATE_D0;
 }
+#endif
+
+#ifdef CONFIG_PM_RUNTIME
+int acpi_pm_device_run_wake(struct device *, bool);
+#else
 static inline int acpi_pm_device_run_wake(struct device *dev, bool enable)
 {
 	return -ENODEV;
@@ -640,9 +648,7 @@ static inline bool acpi_device_can_wakeup(struct acpi_device *adev)
 
 static inline bool acpi_device_can_poweroff(struct acpi_device *adev)
 {
-	return adev->power.states[ACPI_STATE_D3_COLD].flags.valid ||
-		((acpi_gbl_FADT.header.revision < 6) &&
-		adev->power.states[ACPI_STATE_D3_HOT].flags.explicit_set);
+	return adev->power.states[ACPI_STATE_D3_COLD].flags.os_accessible;
 }
 
 #else	/* CONFIG_ACPI */

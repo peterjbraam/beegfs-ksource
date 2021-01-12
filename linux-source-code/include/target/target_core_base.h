@@ -6,7 +6,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/blkdev.h>
 #include <linux/percpu_ida.h>
-#include <linux/t10-pi.h>
+#include <scsi/scsi_cmnd.h>
 #include <net/sock.h>
 #include <net/tcp.h>
 
@@ -21,7 +21,7 @@
  * From include/scsi/scsi_cmnd.h:SCSI_SENSE_BUFFERSIZE, currently
  * defined 96, but the real limit is 252 (or 260 including the header)
  */
-#define TRANSPORT_SENSE_BUFFER			96
+#define TRANSPORT_SENSE_BUFFER			SCSI_SENSE_BUFFERSIZE
 /* Used by transport_send_check_condition_and_sense() */
 #define SPC_SENSE_KEY_OFFSET			2
 #define SPC_ADD_SENSE_LEN_OFFSET		7
@@ -88,6 +88,8 @@
 #define DA_EMULATE_3PC				1
 /* No Emulation for PSCSI by default */
 #define DA_EMULATE_ALUA				0
+/* Emulate SCSI2 RESERVE/RELEASE and Persistent Reservations by default */
+#define DA_EMULATE_PR				1
 /* Enforce SCSI Initiator Port TransportID with 'ISID' for PR */
 #define DA_ENFORCE_PR_ISIDS			1
 /* Force SPC-3 PR Activate Persistence across Target Power Loss */
@@ -119,6 +121,7 @@ enum transport_state_table {
 	TRANSPORT_ISTATE_PROCESSING = 11,
 	TRANSPORT_COMPLETE_QF_WP = 18,
 	TRANSPORT_COMPLETE_QF_OK = 19,
+	TRANSPORT_COMPLETE_QF_ERR = 20,
 };
 
 /* Used for struct se_cmd->se_cmd_flags */
@@ -138,7 +141,6 @@ enum se_cmd_flags_table {
 	SCF_ALUA_NON_OPTIMIZED		= 0x00008000,
 	SCF_PASSTHROUGH_SG_TO_MEM_NOALLOC = 0x00020000,
 	SCF_COMPARE_AND_WRITE		= 0x00080000,
-	SCF_COMPARE_AND_WRITE_POST	= 0x00100000,
 	SCF_PASSTHROUGH_PROT_SG_TO_MEM_NOALLOC = 0x00200000,
 	SCF_ACK_KREF			= 0x00400000,
 	SCF_USE_CPUID			= 0x00800000,
@@ -178,6 +180,12 @@ enum tcm_sense_reason_table {
 	TCM_LOGICAL_BLOCK_APP_TAG_CHECK_FAILED	= R(0x16),
 	TCM_LOGICAL_BLOCK_REF_TAG_CHECK_FAILED	= R(0x17),
 	TCM_COPY_TARGET_DEVICE_NOT_REACHABLE	= R(0x18),
+	TCM_TOO_MANY_TARGET_DESCS		= R(0x19),
+	TCM_UNSUPPORTED_TARGET_DESC_TYPE_CODE	= R(0x1a),
+	TCM_TOO_MANY_SEGMENT_DESCS		= R(0x1b),
+	TCM_UNSUPPORTED_SEGMENT_DESC_TYPE_CODE	= R(0x1c),
+	TCM_INSUFFICIENT_REGISTRATION_RESOURCES	= R(0x1d),
+	TCM_LUN_BUSY				= R(0x1e),
 #undef R
 };
 
@@ -185,7 +193,8 @@ enum target_sc_flags_table {
 	TARGET_SCF_BIDI_OP		= 0x01,
 	TARGET_SCF_ACK_KREF		= 0x02,
 	TARGET_SCF_UNKNOWN_SIZE		= 0x04,
-	TARGET_SCF_USE_CPUID	= 0x08,
+	TARGET_SCF_USE_CPUID		= 0x08,
+	TARGET_SCF_LOOKUP_LUN_FROM_TAG	= 0x10,
 };
 
 /* fabric independent task management function values */
@@ -215,7 +224,6 @@ enum tcm_tmrsp_table {
  */
 typedef enum {
 	SCSI_INST_INDEX,
-	SCSI_DEVICE_INDEX,
 	SCSI_AUTH_INTR_INDEX,
 	SCSI_INDEX_TYPE_MAX
 } scsi_index_t;
@@ -277,8 +285,6 @@ struct t10_alua_tg_pt_gp {
 	u16	tg_pt_gp_id;
 	int	tg_pt_gp_valid_id;
 	int	tg_pt_gp_alua_supported_states;
-	int	tg_pt_gp_alua_pending_state;
-	int	tg_pt_gp_alua_previous_state;
 	int	tg_pt_gp_alua_access_status;
 	int	tg_pt_gp_alua_access_type;
 	int	tg_pt_gp_nonop_delay_msecs;
@@ -287,18 +293,16 @@ struct t10_alua_tg_pt_gp {
 	int	tg_pt_gp_pref;
 	int	tg_pt_gp_write_metadata;
 	u32	tg_pt_gp_members;
-	atomic_t tg_pt_gp_alua_access_state;
+	int	tg_pt_gp_alua_access_state;
 	atomic_t tg_pt_gp_ref_cnt;
 	spinlock_t tg_pt_gp_lock;
-	struct mutex tg_pt_gp_md_mutex;
+	struct mutex tg_pt_gp_transition_mutex;
 	struct se_device *tg_pt_gp_dev;
 	struct config_group tg_pt_gp_group;
 	struct list_head tg_pt_gp_list;
 	struct list_head tg_pt_gp_lun_list;
 	struct se_lun *tg_pt_gp_alua_lun;
 	struct se_node_acl *tg_pt_gp_alua_nacl;
-	struct work_struct tg_pt_gp_transition_work;
-	struct completion *tg_pt_gp_transition_complete;
 };
 
 struct t10_vpd {
@@ -398,7 +402,6 @@ struct se_tmr_req {
 	void 			*fabric_tmr_ptr;
 	struct se_cmd		*task_cmd;
 	struct se_device	*tmr_dev;
-	struct se_lun		*tmr_lun;
 	struct list_head	tmr_list;
 };
 
@@ -427,6 +430,12 @@ enum target_core_dif_check {
 	TARGET_DIF_CHECK_GUARD  = 0x1 << 0,
 	TARGET_DIF_CHECK_APPTAG = 0x1 << 1,
 	TARGET_DIF_CHECK_REFTAG = 0x1 << 2,
+};
+
+struct se_dif_v1_tuple {
+	__be16			guard_tag;
+	__be16			app_tag;
+	__be32			ref_tag;
 };
 
 /* for sam_task_attr */
@@ -489,8 +498,6 @@ struct se_cmd {
 #define CMD_T_COMPLETE		(1 << 2)
 #define CMD_T_SENT		(1 << 4)
 #define CMD_T_STOP		(1 << 5)
-#define CMD_T_DEV_ACTIVE	(1 << 7)
-#define CMD_T_BUSY		(1 << 9)
 #define CMD_T_TAS		(1 << 10)
 #define CMD_T_FABRIC_STOP	(1 << 11)
 #define CMD_T_PRE_EXECUTE	(1 << 12)
@@ -607,6 +614,7 @@ struct se_session {
 	struct list_head	sess_cmd_list;
 	struct list_head	sess_wait_list;
 	spinlock_t		sess_cmd_lock;
+	struct kref		sess_kref;
 	void			*sess_cmd_map;
 	struct percpu_ida	sess_tag_pool;
 };
@@ -666,9 +674,10 @@ struct se_dev_attrib {
 	int		emulate_tpws;
 	int		emulate_caw;
 	int		emulate_3pc;
-	int		pi_prot_format;
+	int		emulate_pr;
 	enum target_prot_type pi_prot_type;
 	enum target_prot_type hw_pi_prot_type;
+	int		pi_prot_verify;
 	int		enforce_pr_isids;
 	int		force_pr_aptpl;
 	int		is_nonrot;
@@ -705,8 +714,6 @@ struct scsi_port_stats {
 
 struct se_lun {
 	u64			unpacked_lun;
-#define SE_LUN_LINK_MAGIC			0xffff7771
-	u32			lun_link_magic;
 	bool			lun_shutdown;
 	bool			lun_access_ro;
 	u32			lun_index;
@@ -750,8 +757,6 @@ struct se_dev_stat_grps {
 };
 
 struct se_device {
-#define SE_DEV_LINK_MAGIC			0xfeeddeef
-	u32			dev_link_magic;
 	/* RELATIVE TARGET PORT IDENTIFER Counter */
 	u16			dev_rpti_counter;
 	/* Used for SAM Task Attribute ordering */
@@ -771,6 +776,8 @@ struct se_device {
 	u32			dev_index;
 	u64			creation_time;
 	atomic_long_t		num_resets;
+	atomic_long_t		aborts_complete;
+	atomic_long_t		aborts_no_task;
 	atomic_long_t		num_cmds;
 	atomic_long_t		read_bytes;
 	atomic_long_t		write_bytes;
@@ -802,7 +809,6 @@ struct se_device {
 	struct list_head	delayed_cmd_list;
 	struct list_head	state_list;
 	struct list_head	qf_cmd_list;
-	struct list_head	g_dev_node;
 	/* Pointer to associated SE HBA */
 	struct se_hba		*se_hba;
 	/* T10 Inquiry and VPD WWN Information */
@@ -812,6 +818,7 @@ struct se_device {
 	/* T10 SPC-2 + SPC-3 Reservations */
 	struct t10_reservation	t10_pr;
 	struct se_dev_attrib	dev_attrib;
+	struct config_group	dev_action_group;
 	struct config_group	dev_group;
 	struct config_group	dev_pr_group;
 	struct se_dev_stat_grps dev_stat_grps;
@@ -821,8 +828,6 @@ struct se_device {
 	unsigned char		udev_path[SE_UDEV_PATH_LEN];
 	/* Pointer to template of function pointers for transport */
 	const struct target_backend_ops *transport;
-	/* Linked list for struct se_hba struct se_device list */
-	struct list_head	dev_list;
 	struct se_lun		xcopy_lun;
 	/* Protection Information */
 	int			prot_length;
@@ -918,6 +923,7 @@ static inline struct se_portal_group *param_to_tpg(struct config_item *item)
 
 struct se_wwn {
 	struct target_fabric_configfs *wwn_tf;
+	void			*priv;
 	struct config_group	wwn_group;
 	struct config_group	fabric_stat_group;
 };

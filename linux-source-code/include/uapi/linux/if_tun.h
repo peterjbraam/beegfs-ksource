@@ -56,6 +56,7 @@
  */
 #define TUNSETVNETBE _IOW('T', 222, int)
 #define TUNGETVNETBE _IOR('T', 223, int)
+#define TUNSETCARRIER _IOW('T', 226, int)
 
 /* TUNSETIFF ifr flags */
 #define IFF_TUN		0x0001
@@ -71,9 +72,6 @@
 /* read-only flag */
 #define IFF_PERSIST	0x0800
 #define IFF_NOFILTER	0x1000
-
-/* Socket options */
-#define TUN_TX_TIMESTAMP 1
 
 /* Features for GSO (TUNSETOFFLOAD). */
 #define TUN_F_CSUM	0x01	/* You can hand me unchecksummed packets. */

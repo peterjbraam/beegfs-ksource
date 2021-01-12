@@ -1,23 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*****************************************************************************/
 
 /*
  *      devio.c  --  User space communication with USB devices.
  *
  *      Copyright (C) 1999-2000  Thomas Sailer (sailer@ife.ee.ethz.ch)
- *
- *      This program is free software; you can redistribute it and/or modify
- *      it under the terms of the GNU General Public License as published by
- *      the Free Software Foundation; either version 2 of the License, or
- *      (at your option) any later version.
- *
- *      This program is distributed in the hope that it will be useful,
- *      but WITHOUT ANY WARRANTY; without even the implied warranty of
- *      MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *      GNU General Public License for more details.
- *
- *      You should have received a copy of the GNU General Public License
- *      along with this program; if not, write to the Free Software
- *      Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  *
  *  This file implements the usbfs/x/y files, where
  *  x is the bus number and y the device number.
@@ -212,7 +199,7 @@ static void usbdev_vm_close(struct vm_area_struct *vma)
 	dec_usb_memory_use_count(usbm, &usbm->vma_use_count);
 }
 
-static struct vm_operations_struct usbdev_vm_ops = {
+static const struct vm_operations_struct usbdev_vm_ops = {
 	.open = usbdev_vm_open,
 	.close = usbdev_vm_close
 };
@@ -477,11 +464,11 @@ static void snoop_urb(struct usb_device *udev,
 
 	if (userurb) {		/* Async */
 		if (when == SUBMIT)
-			dev_info(&udev->dev, "userurb %px, ep%d %s-%s, "
+			dev_info(&udev->dev, "userurb %pK, ep%d %s-%s, "
 					"length %u\n",
 					userurb, ep, t, d, length);
 		else
-			dev_info(&udev->dev, "userurb %px, ep%d %s-%s, "
+			dev_info(&udev->dev, "userurb %pK, ep%d %s-%s, "
 					"actual_length %u status %d\n",
 					userurb, ep, t, d, length,
 					timeout_or_status);
@@ -600,9 +587,10 @@ static void async_completed(struct urb *urb)
 	struct pid *pid = NULL;
 	u32 secid = 0;
 	const struct cred *cred = NULL;
+	unsigned long flags;
 	int signr;
 
-	spin_lock(&ps->lock);
+	spin_lock_irqsave(&ps->lock, flags);
 	list_move_tail(&as->asynclist, &ps->async_completed);
 	as->status = urb->status;
 	signr = as->signr;
@@ -627,7 +615,7 @@ static void async_completed(struct urb *urb)
 		cancel_bulk_urbs(ps, as->bulk_addr);
 
 	wake_up(&ps->wait);
-	spin_unlock(&ps->lock);
+	spin_unlock_irqrestore(&ps->lock, flags);
 
 	if (signr) {
 		kill_pid_info_as_cred(sinfo.si_signo, &sinfo, pid, cred, secid);
@@ -754,15 +742,8 @@ static int claimintf(struct usb_dev_state *ps, unsigned int ifnum)
 	intf = usb_ifnum_to_if(dev, ifnum);
 	if (!intf)
 		err = -ENOENT;
-	else {
-		unsigned int old_suppress;
-
-		/* suppress uevents while claiming interface */
-		old_suppress = dev_get_uevent_suppress(&intf->dev);
-		dev_set_uevent_suppress(&intf->dev, 1);
+	else
 		err = usb_driver_claim_interface(&usbfs_driver, intf, ps);
-		dev_set_uevent_suppress(&intf->dev, old_suppress);
-	}
 	if (err == 0)
 		set_bit(ifnum, &ps->ifclaimed);
 	return err;
@@ -782,13 +763,7 @@ static int releaseintf(struct usb_dev_state *ps, unsigned int ifnum)
 	if (!intf)
 		err = -ENOENT;
 	else if (test_and_clear_bit(ifnum, &ps->ifclaimed)) {
-		unsigned int old_suppress;
-
-		/* suppress uevents while releasing interface */
-		old_suppress = dev_get_uevent_suppress(&intf->dev);
-		dev_set_uevent_suppress(&intf->dev, 1);
 		usb_driver_release_interface(&usbfs_driver, intf);
-		dev_set_uevent_suppress(&intf->dev, old_suppress);
 		err = 0;
 	}
 	return err;
@@ -1719,8 +1694,6 @@ static int proc_do_submiturb(struct usb_dev_state *ps, struct usbdevfs_urb *uurb
 		u |= URB_ISO_ASAP;
 	if (allow_short && uurb->flags & USBDEVFS_URB_SHORT_NOT_OK)
 		u |= URB_SHORT_NOT_OK;
-	if (uurb->flags & USBDEVFS_URB_NO_FSBR)
-		u |= URB_NO_FSBR;
 	if (allow_zero && uurb->flags & USBDEVFS_URB_ZERO_PACKET)
 		u |= URB_ZERO_PACKET;
 	if (uurb->flags & USBDEVFS_URB_NO_INTERRUPT)
@@ -1823,6 +1796,8 @@ static int proc_do_submiturb(struct usb_dev_state *ps, struct usbdevfs_urb *uurb
 	return 0;
 
  error:
+	if (as && as->usbm)
+		dec_usb_memory_use_count(as->usbm, &as->usbm->urb_use_count);
 	kfree(isopkt);
 	kfree(dr);
 	if (as)
@@ -1945,7 +1920,7 @@ static int proc_reapurb(struct usb_dev_state *ps, void __user *arg)
 	if (as) {
 		int retval;
 
-		snoop(&ps->dev->dev, "reap %px\n", as->userurb);
+		snoop(&ps->dev->dev, "reap %pK\n", as->userurb);
 		retval = processcompl(as, (void __user * __user *)arg);
 		free_async(as);
 		return retval;
@@ -1962,7 +1937,7 @@ static int proc_reapurbnonblock(struct usb_dev_state *ps, void __user *arg)
 
 	as = async_getcompleted(ps);
 	if (as) {
-		snoop(&ps->dev->dev, "reap %px\n", as->userurb);
+		snoop(&ps->dev->dev, "reap %pK\n", as->userurb);
 		retval = processcompl(as, (void __user * __user *)arg);
 		free_async(as);
 	} else {
@@ -2016,27 +1991,21 @@ static int proc_disconnectsignal_compat(struct usb_dev_state *ps, void __user *a
 static int get_urb32(struct usbdevfs_urb *kurb,
 		     struct usbdevfs_urb32 __user *uurb)
 {
-	__u32  uptr;
-	if (!access_ok(VERIFY_READ, uurb, sizeof(*uurb)) ||
-	    __get_user(kurb->type, &uurb->type) ||
-	    __get_user(kurb->endpoint, &uurb->endpoint) ||
-	    __get_user(kurb->status, &uurb->status) ||
-	    __get_user(kurb->flags, &uurb->flags) ||
-	    __get_user(kurb->buffer_length, &uurb->buffer_length) ||
-	    __get_user(kurb->actual_length, &uurb->actual_length) ||
-	    __get_user(kurb->start_frame, &uurb->start_frame) ||
-	    __get_user(kurb->number_of_packets, &uurb->number_of_packets) ||
-	    __get_user(kurb->error_count, &uurb->error_count) ||
-	    __get_user(kurb->signr, &uurb->signr))
+	struct usbdevfs_urb32 urb32;
+	if (copy_from_user(&urb32, uurb, sizeof(*uurb)))
 		return -EFAULT;
-
-	if (__get_user(uptr, &uurb->buffer))
-		return -EFAULT;
-	kurb->buffer = compat_ptr(uptr);
-	if (__get_user(uptr, &uurb->usercontext))
-		return -EFAULT;
-	kurb->usercontext = compat_ptr(uptr);
-
+	kurb->type = urb32.type;
+	kurb->endpoint = urb32.endpoint;
+	kurb->status = urb32.status;
+	kurb->flags = urb32.flags;
+	kurb->buffer = compat_ptr(urb32.buffer);
+	kurb->buffer_length = urb32.buffer_length;
+	kurb->actual_length = urb32.actual_length;
+	kurb->start_frame = urb32.start_frame;
+	kurb->number_of_packets = urb32.number_of_packets;
+	kurb->error_count = urb32.error_count;
+	kurb->signr = urb32.signr;
+	kurb->usercontext = compat_ptr(urb32.usercontext);
 	return 0;
 }
 
@@ -2094,7 +2063,7 @@ static int proc_reapurb_compat(struct usb_dev_state *ps, void __user *arg)
 	if (as) {
 		int retval;
 
-		snoop(&ps->dev->dev, "reap %px\n", as->userurb);
+		snoop(&ps->dev->dev, "reap %pK\n", as->userurb);
 		retval = processcompl_compat(as, (void __user * __user *)arg);
 		free_async(as);
 		return retval;
@@ -2111,7 +2080,7 @@ static int proc_reapurbnonblock_compat(struct usb_dev_state *ps, void __user *ar
 
 	as = async_getcompleted(ps);
 	if (as) {
-		snoop(&ps->dev->dev, "reap %px\n", as->userurb);
+		snoop(&ps->dev->dev, "reap %pK\n", as->userurb);
 		retval = processcompl_compat(as, (void __user * __user *)arg);
 		free_async(as);
 	} else {
@@ -2249,18 +2218,14 @@ static int proc_ioctl_default(struct usb_dev_state *ps, void __user *arg)
 #ifdef CONFIG_COMPAT
 static int proc_ioctl_compat(struct usb_dev_state *ps, compat_uptr_t arg)
 {
-	struct usbdevfs_ioctl32 __user *uioc;
+	struct usbdevfs_ioctl32 ioc32;
 	struct usbdevfs_ioctl ctrl;
-	u32 udata;
 
-	uioc = compat_ptr((long)arg);
-	if (!access_ok(VERIFY_READ, uioc, sizeof(*uioc)) ||
-	    __get_user(ctrl.ifno, &uioc->ifno) ||
-	    __get_user(ctrl.ioctl_code, &uioc->ioctl_code) ||
-	    __get_user(udata, &uioc->data))
+	if (copy_from_user(&ioc32, compat_ptr(arg), sizeof(ioc32)))
 		return -EFAULT;
-	ctrl.data = compat_ptr(udata);
-
+	ctrl.ifno = ioc32.ifno;
+	ctrl.ioctl_code = ioc32.ioctl_code;
+	ctrl.data = compat_ptr(ioc32.data);
 	return proc_ioctl(ps, &ctrl);
 }
 #endif
@@ -2450,21 +2415,21 @@ static long usbdev_do_ioctl(struct file *file, unsigned int cmd,
 		snoop(&dev->dev, "%s: CONTROL\n", __func__);
 		ret = proc_control(ps, p);
 		if (ret >= 0)
-			inode->i_mtime = current_time(inode);
+			inode->i_mtime = CURRENT_TIME;
 		break;
 
 	case USBDEVFS_BULK:
 		snoop(&dev->dev, "%s: BULK\n", __func__);
 		ret = proc_bulk(ps, p);
 		if (ret >= 0)
-			inode->i_mtime = current_time(inode);
+			inode->i_mtime = CURRENT_TIME;
 		break;
 
 	case USBDEVFS_RESETEP:
 		snoop(&dev->dev, "%s: RESETEP\n", __func__);
 		ret = proc_resetep(ps, p);
 		if (ret >= 0)
-			inode->i_mtime = current_time(inode);
+			inode->i_mtime = CURRENT_TIME;
 		break;
 
 	case USBDEVFS_RESET:
@@ -2476,7 +2441,7 @@ static long usbdev_do_ioctl(struct file *file, unsigned int cmd,
 		snoop(&dev->dev, "%s: CLEAR_HALT\n", __func__);
 		ret = proc_clearhalt(ps, p);
 		if (ret >= 0)
-			inode->i_mtime = current_time(inode);
+			inode->i_mtime = CURRENT_TIME;
 		break;
 
 	case USBDEVFS_GETDRIVER:
@@ -2503,7 +2468,7 @@ static long usbdev_do_ioctl(struct file *file, unsigned int cmd,
 		snoop(&dev->dev, "%s: SUBMITURB\n", __func__);
 		ret = proc_submiturb(ps, p);
 		if (ret >= 0)
-			inode->i_mtime = current_time(inode);
+			inode->i_mtime = CURRENT_TIME;
 		break;
 
 #ifdef CONFIG_COMPAT
@@ -2511,14 +2476,14 @@ static long usbdev_do_ioctl(struct file *file, unsigned int cmd,
 		snoop(&dev->dev, "%s: CONTROL32\n", __func__);
 		ret = proc_control_compat(ps, p);
 		if (ret >= 0)
-			inode->i_mtime = current_time(inode);
+			inode->i_mtime = CURRENT_TIME;
 		break;
 
 	case USBDEVFS_BULK32:
 		snoop(&dev->dev, "%s: BULK32\n", __func__);
 		ret = proc_bulk_compat(ps, p);
 		if (ret >= 0)
-			inode->i_mtime = current_time(inode);
+			inode->i_mtime = CURRENT_TIME;
 		break;
 
 	case USBDEVFS_DISCSIGNAL32:
@@ -2530,7 +2495,7 @@ static long usbdev_do_ioctl(struct file *file, unsigned int cmd,
 		snoop(&dev->dev, "%s: SUBMITURB32\n", __func__);
 		ret = proc_submiturb_compat(ps, p);
 		if (ret >= 0)
-			inode->i_mtime = current_time(inode);
+			inode->i_mtime = CURRENT_TIME;
 		break;
 
 	case USBDEVFS_IOCTL32:
@@ -2540,7 +2505,7 @@ static long usbdev_do_ioctl(struct file *file, unsigned int cmd,
 #endif
 
 	case USBDEVFS_DISCARDURB:
-		snoop(&dev->dev, "%s: DISCARDURB %px\n", __func__, p);
+		snoop(&dev->dev, "%s: DISCARDURB %pK\n", __func__, p);
 		ret = proc_unlinkurb(ps, p);
 		break;
 
@@ -2588,12 +2553,15 @@ static long usbdev_do_ioctl(struct file *file, unsigned int cmd,
 	case USBDEVFS_DROP_PRIVILEGES:
 		ret = proc_drop_privileges(ps, p);
 		break;
+	case USBDEVFS_GET_SPEED:
+		ret = ps->dev->speed;
+		break;
 	}
 
  done:
 	usb_unlock_device(dev);
 	if (ret >= 0)
-		inode->i_atime = current_time(inode);
+		inode->i_atime = CURRENT_TIME;
 	return ret;
 }
 

@@ -11,7 +11,8 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; if not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #include <linux/kernel.h>
@@ -205,7 +206,7 @@ static int sja1000_isa_probe(struct platform_device *pdev)
 	else
 		priv->cdr = CDR_DEFAULT;
 
-	platform_set_drvdata(pdev, dev);
+	dev_set_drvdata(&pdev->dev, dev);
 	SET_NETDEV_DEV(dev, &pdev->dev);
 	dev->dev_id = idx;
 
@@ -234,11 +235,12 @@ static int sja1000_isa_probe(struct platform_device *pdev)
 
 static int sja1000_isa_remove(struct platform_device *pdev)
 {
-	struct net_device *dev = platform_get_drvdata(pdev);
+	struct net_device *dev = dev_get_drvdata(&pdev->dev);
 	struct sja1000_priv *priv = netdev_priv(dev);
 	int idx = pdev->id;
 
 	unregister_sja1000dev(dev);
+	dev_set_drvdata(&pdev->dev, NULL);
 
 	if (mem[idx]) {
 		iounmap(priv->reg_base);
@@ -259,6 +261,7 @@ static struct platform_driver sja1000_isa_driver = {
 	.remove = sja1000_isa_remove,
 	.driver = {
 		.name = DRV_NAME,
+		.owner = THIS_MODULE,
 	},
 };
 

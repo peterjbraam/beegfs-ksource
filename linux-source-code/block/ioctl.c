@@ -65,7 +65,7 @@ static int blkpg_ioctl(struct block_device *bdev, struct blkpg_ioctl_arg __user 
 			part = add_partition(disk, partno, start, length,
 					     ADDPART_FLAG_NONE, NULL);
 			mutex_unlock(&bdev->bd_mutex);
-			return PTR_ERR_OR_ZERO(part);
+			return IS_ERR(part) ? PTR_ERR(part) : 0;
 		case BLKPG_DEL_PARTITION:
 			part = disk_get_part(disk, partno);
 			if (!part)
@@ -199,6 +199,39 @@ static int blk_ioctl_discard(struct block_device *bdev, fmode_t mode,
 {
 	uint64_t range[2];
 	uint64_t start, len;
+	struct request_queue *q = bdev_get_queue(bdev);
+	struct address_space *mapping = bdev->bd_inode->i_mapping;
+
+
+	if (!(mode & FMODE_WRITE))
+		return -EBADF;
+
+	if (!blk_queue_discard(q))
+		return -EOPNOTSUPP;
+
+	if (copy_from_user(range, (void __user *)arg, sizeof(range)))
+		return -EFAULT;
+
+	start = range[0];
+	len = range[1];
+
+	if (start & 511)
+		return -EINVAL;
+	if (len & 511)
+		return -EINVAL;
+
+	if (start + len > i_size_read(bdev->bd_inode))
+		return -EINVAL;
+	truncate_inode_pages_range(mapping, start, start + len - 1);
+	return blkdev_issue_discard(bdev, start >> 9, len >> 9,
+				    GFP_KERNEL, flags);
+}
+
+static int blk_ioctl_zeroout(struct block_device *bdev, fmode_t mode,
+		unsigned long arg)
+{
+	uint64_t range[2];
+	uint64_t start, len;
 
 	if (!(mode & FMODE_WRITE))
 		return -EBADF;
@@ -218,41 +251,8 @@ static int blk_ioctl_discard(struct block_device *bdev, fmode_t mode,
 
 	if (start + len > (i_size_read(bdev->bd_inode) >> 9))
 		return -EINVAL;
-	return blkdev_issue_discard(bdev, start, len, GFP_KERNEL, flags);
-}
 
-static int blk_ioctl_zeroout(struct block_device *bdev, fmode_t mode,
-		unsigned long arg)
-{
-	uint64_t range[2];
-	struct address_space *mapping;
-	uint64_t start, end, len;
-
-	if (!(mode & FMODE_WRITE))
-		return -EBADF;
-
-	if (copy_from_user(range, (void __user *)arg, sizeof(range)))
-		return -EFAULT;
-
-	start = range[0];
-	len = range[1];
-	end = start + len - 1;
-
-	if (start & 511)
-		return -EINVAL;
-	if (len & 511)
-		return -EINVAL;
-	if (end >= (uint64_t)i_size_read(bdev->bd_inode))
-		return -EINVAL;
-	if (end < start)
-		return -EINVAL;
-
-	/* Invalidate the page cache, including dirty pages */
-	mapping = bdev->bd_inode->i_mapping;
-	truncate_inode_pages_range(mapping, start, end);
-
-	return blkdev_issue_zeroout(bdev, start >> 9, len >> 9, GFP_KERNEL,
-				    false);
+	return blkdev_issue_zeroout(bdev, start, len, GFP_KERNEL);
 }
 
 static int put_ushort(unsigned long arg, unsigned short val)
@@ -526,7 +526,7 @@ int blkdev_ioctl(struct block_device *bdev, fmode_t mode, unsigned cmd,
 		if (!arg)
 			return -EINVAL;
 		bdi = blk_get_backing_dev_info(bdev);
-		return put_long(arg, (bdi->ra_pages * PAGE_SIZE) / 512);
+		return put_long(arg, (bdi->ra_pages * PAGE_CACHE_SIZE) / 512);
 	case BLKROGET:
 		return put_int(arg, bdev_read_only(bdev) != 0);
 	case BLKBSZGET: /* get block device soft block size (cf. BLKSSZGET) */
@@ -554,7 +554,7 @@ int blkdev_ioctl(struct block_device *bdev, fmode_t mode, unsigned cmd,
 		if(!capable(CAP_SYS_ADMIN))
 			return -EACCES;
 		bdi = blk_get_backing_dev_info(bdev);
-		bdi->ra_pages = (arg * 512) / PAGE_SIZE;
+		bdi->ra_pages = (arg * 512) / PAGE_CACHE_SIZE;
 		return 0;
 	case BLKBSZSET:
 		return blkdev_bszset(bdev, mode, argp);

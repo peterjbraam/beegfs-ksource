@@ -39,6 +39,12 @@ enum {
 	EVENT_DATA_ERROR,
 };
 
+enum dw_mci_cookie {
+	COOKIE_UNMAPPED,
+	COOKIE_PRE_MAPPED,	/* mapped by pre_req() of dwmmc */
+	COOKIE_MAPPED,		/* mapped by prepare_data() of dwmmc */
+};
+
 struct mmc_data;
 
 enum {
@@ -127,11 +133,6 @@ struct dw_mci_dma_slave {
  * @cur_slot, @mrq and @state. These must always be updated
  * at the same time while holding @lock.
  *
- * @irq_lock is an irq-safe spinlock protecting the INTMASK register
- * to allow the interrupt handler to modify it directly.  Held for only long
- * enough to read-modify-write INTMASK and no other locks are grabbed when
- * holding this one.
- *
  * The @mrq field of struct dw_mci_slot is also protected by @lock,
  * and must always be written at the same time as the slot is added to
  * @queue.
@@ -151,7 +152,6 @@ struct dw_mci_dma_slave {
  */
 struct dw_mci {
 	spinlock_t		lock;
-	spinlock_t		irq_lock;
 	void __iomem		*regs;
 	void __iomem		*fifo_reg;
 
