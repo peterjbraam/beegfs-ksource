@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  *  Copyright (C) 1994  Linus Torvalds
  *
@@ -26,11 +25,11 @@
 #include <asm/vmx.h>
 #include <asm/paravirt.h>
 #include <asm/alternative.h>
-#include <asm/pgtable.h>
-#include <asm/set_memory.h>
-#include <asm/intel-family.h>
-#include <asm/e820/api.h>
 #include <asm/hypervisor.h>
+#include <asm/pgtable.h>
+#include <asm/cacheflush.h>
+#include <asm/intel-family.h>
+#include <asm/e820.h>
 
 #include "cpu.h"
 
@@ -83,7 +82,7 @@ void __init check_bugs(void)
 	 * identify_boot_cpu() initialized SMT support information, let the
 	 * core code know.
 	 */
-	cpu_smt_check_topology();
+	cpu_smt_check_topology_early();
 
 	if (!IS_ENABLED(CONFIG_SMP)) {
 		pr_info("CPU: ");
@@ -553,7 +552,7 @@ static void __init spectre_v1_select_mitigation(void)
 			 * stop speculation through swapgs.
 			 */
 			if (boot_cpu_has_bug(X86_BUG_SWAPGS) &&
-			    !boot_cpu_has(X86_FEATURE_PTI))
+			    !boot_cpu_has(X86_FEATURE_KAISER))
 				setup_force_cpu_cap(X86_FEATURE_FENCE_SWAPGS_USER);
 
 			/*
@@ -586,7 +585,7 @@ static enum spectre_v2_user_mitigation spectre_v2_user_stibp __ro_after_init =
 static enum spectre_v2_user_mitigation spectre_v2_user_ibpb __ro_after_init =
 	SPECTRE_V2_USER_NONE;
 
-#ifdef CONFIG_RETPOLINE
+#ifdef RETPOLINE
 static bool spectre_v2_bad_module;
 
 bool retpoline_module_ok(bool has_retpoline)
@@ -785,6 +784,8 @@ set_mode:
 
 static const char * const spectre_v2_strings[] = {
 	[SPECTRE_V2_NONE]			= "Vulnerable",
+	[SPECTRE_V2_RETPOLINE_MINIMAL]		= "Vulnerable: Minimal generic ASM retpoline",
+	[SPECTRE_V2_RETPOLINE_MINIMAL_AMD]	= "Vulnerable: Minimal AMD ASM retpoline",
 	[SPECTRE_V2_RETPOLINE_GENERIC]		= "Mitigation: Full generic retpoline",
 	[SPECTRE_V2_RETPOLINE_AMD]		= "Mitigation: Full AMD retpoline",
 	[SPECTRE_V2_IBRS_ENHANCED]		= "Mitigation: Enhanced IBRS",
@@ -807,6 +808,11 @@ static void __init spec_v2_print_cond(const char *reason, bool secure)
 {
 	if (boot_cpu_has_bug(X86_BUG_SPECTRE_V2) != secure)
 		pr_info("%s selected on command line.\n", reason);
+}
+
+static inline bool retp_compiler(void)
+{
+	return __is_defined(RETPOLINE);
 }
 
 static enum spectre_v2_mitigation_cmd __init spectre_v2_parse_cmdline(void)
@@ -906,12 +912,14 @@ retpoline_auto:
 			pr_err("Spectre mitigation: LFENCE not serializing, switching to generic retpoline\n");
 			goto retpoline_generic;
 		}
-		mode = SPECTRE_V2_RETPOLINE_AMD;
+		mode = retp_compiler() ? SPECTRE_V2_RETPOLINE_AMD :
+					 SPECTRE_V2_RETPOLINE_MINIMAL_AMD;
 		setup_force_cpu_cap(X86_FEATURE_RETPOLINE_AMD);
 		setup_force_cpu_cap(X86_FEATURE_RETPOLINE);
 	} else {
 	retpoline_generic:
-		mode = SPECTRE_V2_RETPOLINE_GENERIC;
+		mode = retp_compiler() ? SPECTRE_V2_RETPOLINE_GENERIC :
+					 SPECTRE_V2_RETPOLINE_MINIMAL;
 		setup_force_cpu_cap(X86_FEATURE_RETPOLINE);
 	}
 
@@ -1476,7 +1484,7 @@ static void __init l1tf_select_mitigation(void)
 
 	half_pa = (u64)l1tf_pfn_limit() << PAGE_SHIFT;
 	if (l1tf_mitigation != L1TF_MITIGATION_OFF &&
-			e820__mapped_any(half_pa, ULLONG_MAX - half_pa, E820_TYPE_RAM)) {
+			e820_any_mapped(half_pa, ULLONG_MAX - half_pa, E820_RAM)) {
 		pr_warn("System has more than MAX_PA/2 memory. L1TF mitigation not effective.\n");
 		pr_info("You may make it effective by booting the kernel with mem=%llu parameter.\n",
 				half_pa);
@@ -1568,10 +1576,12 @@ static ssize_t itlb_multihit_show_state(char *buf)
 
 static ssize_t mds_show_state(char *buf)
 {
+#ifdef CONFIG_HYPERVISOR_GUEST
 	if (boot_cpu_has(X86_FEATURE_HYPERVISOR)) {
 		return sprintf(buf, "%s; SMT Host state unknown\n",
 			       mds_strings[mds_mitigation]);
 	}
+#endif
 
 	if (boot_cpu_has(X86_BUG_MSBDS_ONLY)) {
 		return sprintf(buf, "%s; SMT %s\n", mds_strings[mds_mitigation],
@@ -1643,11 +1653,8 @@ static ssize_t cpu_show_common(struct device *dev, struct device_attribute *attr
 
 	switch (bug) {
 	case X86_BUG_CPU_MELTDOWN:
-		if (boot_cpu_has(X86_FEATURE_PTI))
+		if (boot_cpu_has(X86_FEATURE_KAISER))
 			return sprintf(buf, "Mitigation: PTI\n");
-
-		if (hypervisor_is_type(X86_HYPER_XEN_PV))
-			return sprintf(buf, "Unknown (XEN PV detected, hypervisor mitigation required)\n");
 
 		break;
 

@@ -44,17 +44,17 @@ static DEFINE_PER_CPU(struct perf_event *, bp_on_reg[ARM_MAX_BRP]);
 static DEFINE_PER_CPU(struct perf_event *, wp_on_reg[ARM_MAX_WRP]);
 
 /* Number of BRP/WRP registers on this CPU. */
-static int core_num_brps __ro_after_init;
-static int core_num_wrps __ro_after_init;
+static int core_num_brps;
+static int core_num_wrps;
 
 /* Debug architecture version. */
-static u8 debug_arch __ro_after_init;
+static u8 debug_arch;
 
 /* Does debug architecture support OS Save and Restore? */
-static bool has_ossr __ro_after_init;
+static bool has_ossr;
 
 /* Maximum supported watchpoint length. */
-static u8 max_watchpoint_len __ro_after_init;
+static u8 max_watchpoint_len;
 
 #define READ_WB_REG_CASE(OP2, M, VAL)			\
 	case ((OP2 << 4) + M):				\
@@ -456,13 +456,14 @@ static int get_hbp_len(u8 hbp_len)
 /*
  * Check whether bp virtual address is in kernel space.
  */
-int arch_check_bp_in_kernelspace(struct arch_hw_breakpoint *hw)
+int arch_check_bp_in_kernelspace(struct perf_event *bp)
 {
 	unsigned int len;
 	unsigned long va;
+	struct arch_hw_breakpoint *info = counter_arch_bp(bp);
 
-	va = hw->address;
-	len = get_hbp_len(hw->ctrl.len);
+	va = info->address;
+	len = get_hbp_len(info->ctrl.len);
 
 	return (va >= TASK_SIZE) && ((va + len - 1) >= TASK_SIZE);
 }
@@ -517,42 +518,42 @@ int arch_bp_generic_fields(struct arch_hw_breakpoint_ctrl ctrl,
 /*
  * Construct an arch_hw_breakpoint from a perf_event.
  */
-static int arch_build_bp_info(struct perf_event *bp,
-			      const struct perf_event_attr *attr,
-			      struct arch_hw_breakpoint *hw)
+static int arch_build_bp_info(struct perf_event *bp)
 {
+	struct arch_hw_breakpoint *info = counter_arch_bp(bp);
+
 	/* Type */
-	switch (attr->bp_type) {
+	switch (bp->attr.bp_type) {
 	case HW_BREAKPOINT_X:
-		hw->ctrl.type = ARM_BREAKPOINT_EXECUTE;
+		info->ctrl.type = ARM_BREAKPOINT_EXECUTE;
 		break;
 	case HW_BREAKPOINT_R:
-		hw->ctrl.type = ARM_BREAKPOINT_LOAD;
+		info->ctrl.type = ARM_BREAKPOINT_LOAD;
 		break;
 	case HW_BREAKPOINT_W:
-		hw->ctrl.type = ARM_BREAKPOINT_STORE;
+		info->ctrl.type = ARM_BREAKPOINT_STORE;
 		break;
 	case HW_BREAKPOINT_RW:
-		hw->ctrl.type = ARM_BREAKPOINT_LOAD | ARM_BREAKPOINT_STORE;
+		info->ctrl.type = ARM_BREAKPOINT_LOAD | ARM_BREAKPOINT_STORE;
 		break;
 	default:
 		return -EINVAL;
 	}
 
 	/* Len */
-	switch (attr->bp_len) {
+	switch (bp->attr.bp_len) {
 	case HW_BREAKPOINT_LEN_1:
-		hw->ctrl.len = ARM_BREAKPOINT_LEN_1;
+		info->ctrl.len = ARM_BREAKPOINT_LEN_1;
 		break;
 	case HW_BREAKPOINT_LEN_2:
-		hw->ctrl.len = ARM_BREAKPOINT_LEN_2;
+		info->ctrl.len = ARM_BREAKPOINT_LEN_2;
 		break;
 	case HW_BREAKPOINT_LEN_4:
-		hw->ctrl.len = ARM_BREAKPOINT_LEN_4;
+		info->ctrl.len = ARM_BREAKPOINT_LEN_4;
 		break;
 	case HW_BREAKPOINT_LEN_8:
-		hw->ctrl.len = ARM_BREAKPOINT_LEN_8;
-		if ((hw->ctrl.type != ARM_BREAKPOINT_EXECUTE)
+		info->ctrl.len = ARM_BREAKPOINT_LEN_8;
+		if ((info->ctrl.type != ARM_BREAKPOINT_EXECUTE)
 			&& max_watchpoint_len >= 8)
 			break;
 	default:
@@ -565,24 +566,24 @@ static int arch_build_bp_info(struct perf_event *bp,
 	 * by the hardware and must be aligned to the appropriate number of
 	 * bytes.
 	 */
-	if (hw->ctrl.type == ARM_BREAKPOINT_EXECUTE &&
-	    hw->ctrl.len != ARM_BREAKPOINT_LEN_2 &&
-	    hw->ctrl.len != ARM_BREAKPOINT_LEN_4)
+	if (info->ctrl.type == ARM_BREAKPOINT_EXECUTE &&
+	    info->ctrl.len != ARM_BREAKPOINT_LEN_2 &&
+	    info->ctrl.len != ARM_BREAKPOINT_LEN_4)
 		return -EINVAL;
 
 	/* Address */
-	hw->address = attr->bp_addr;
+	info->address = bp->attr.bp_addr;
 
 	/* Privilege */
-	hw->ctrl.privilege = ARM_BREAKPOINT_USER;
-	if (arch_check_bp_in_kernelspace(hw))
-		hw->ctrl.privilege |= ARM_BREAKPOINT_PRIV;
+	info->ctrl.privilege = ARM_BREAKPOINT_USER;
+	if (arch_check_bp_in_kernelspace(bp))
+		info->ctrl.privilege |= ARM_BREAKPOINT_PRIV;
 
 	/* Enabled? */
-	hw->ctrl.enabled = !attr->disabled;
+	info->ctrl.enabled = !bp->attr.disabled;
 
 	/* Mismatch */
-	hw->ctrl.mismatch = 0;
+	info->ctrl.mismatch = 0;
 
 	return 0;
 }
@@ -590,10 +591,9 @@ static int arch_build_bp_info(struct perf_event *bp,
 /*
  * Validate the arch-specific HW Breakpoint register settings.
  */
-int hw_breakpoint_arch_parse(struct perf_event *bp,
-			     const struct perf_event_attr *attr,
-			     struct arch_hw_breakpoint *hw)
+int arch_validate_hwbkpt_settings(struct perf_event *bp)
 {
+	struct arch_hw_breakpoint *info = counter_arch_bp(bp);
 	int ret = 0;
 	u32 offset, alignment_mask = 0x3;
 
@@ -602,14 +602,14 @@ int hw_breakpoint_arch_parse(struct perf_event *bp,
 		return -ENODEV;
 
 	/* Build the arch_hw_breakpoint. */
-	ret = arch_build_bp_info(bp, attr, hw);
+	ret = arch_build_bp_info(bp);
 	if (ret)
 		goto out;
 
 	/* Check address alignment. */
-	if (hw->ctrl.len == ARM_BREAKPOINT_LEN_8)
+	if (info->ctrl.len == ARM_BREAKPOINT_LEN_8)
 		alignment_mask = 0x7;
-	offset = hw->address & alignment_mask;
+	offset = info->address & alignment_mask;
 	switch (offset) {
 	case 0:
 		/* Aligned */
@@ -617,19 +617,19 @@ int hw_breakpoint_arch_parse(struct perf_event *bp,
 	case 1:
 	case 2:
 		/* Allow halfword watchpoints and breakpoints. */
-		if (hw->ctrl.len == ARM_BREAKPOINT_LEN_2)
+		if (info->ctrl.len == ARM_BREAKPOINT_LEN_2)
 			break;
 	case 3:
 		/* Allow single byte watchpoint. */
-		if (hw->ctrl.len == ARM_BREAKPOINT_LEN_1)
+		if (info->ctrl.len == ARM_BREAKPOINT_LEN_1)
 			break;
 	default:
 		ret = -EINVAL;
 		goto out;
 	}
 
-	hw->address &= ~alignment_mask;
-	hw->ctrl.len <<= offset;
+	info->address &= ~alignment_mask;
+	info->ctrl.len <<= offset;
 
 	if (is_default_overflow_handler(bp)) {
 		/*
@@ -640,7 +640,7 @@ int hw_breakpoint_arch_parse(struct perf_event *bp,
 			return -EINVAL;
 
 		/* We don't allow mismatch breakpoints in kernel space. */
-		if (arch_check_bp_in_kernelspace(hw))
+		if (arch_check_bp_in_kernelspace(bp))
 			return -EPERM;
 
 		/*
@@ -655,8 +655,8 @@ int hw_breakpoint_arch_parse(struct perf_event *bp,
 		 * reports them.
 		 */
 		if (!debug_exception_updates_fsr() &&
-		    (hw->ctrl.type == ARM_BREAKPOINT_LOAD ||
-		     hw->ctrl.type == ARM_BREAKPOINT_STORE))
+		    (info->ctrl.type == ARM_BREAKPOINT_LOAD ||
+		     info->ctrl.type == ARM_BREAKPOINT_STORE))
 			return -EINVAL;
 	}
 
@@ -986,9 +986,9 @@ static bool core_has_os_save_restore(void)
 	}
 }
 
-static void reset_ctrl_regs(unsigned int cpu)
+static void reset_ctrl_regs(void *unused)
 {
-	int i, raw_num_brps, err = 0;
+	int i, raw_num_brps, err = 0, cpu = smp_processor_id();
 	u32 val;
 
 	/*
@@ -1081,20 +1081,25 @@ out_mdbgen:
 		cpumask_or(&debug_err_mask, &debug_err_mask, cpumask_of(cpu));
 }
 
-static int dbg_reset_online(unsigned int cpu)
+static int dbg_reset_notify(struct notifier_block *self,
+				      unsigned long action, void *cpu)
 {
-	local_irq_disable();
-	reset_ctrl_regs(cpu);
-	local_irq_enable();
-	return 0;
+	if ((action & ~CPU_TASKS_FROZEN) == CPU_ONLINE)
+		smp_call_function_single((int)cpu, reset_ctrl_regs, NULL, 1);
+
+	return NOTIFY_OK;
 }
+
+static struct notifier_block dbg_reset_nb = {
+	.notifier_call = dbg_reset_notify,
+};
 
 #ifdef CONFIG_CPU_PM
 static int dbg_cpu_pm_notify(struct notifier_block *self, unsigned long action,
 			     void *v)
 {
 	if (action == CPU_PM_EXIT)
-		reset_ctrl_regs(smp_processor_id());
+		reset_ctrl_regs(NULL);
 
 	return NOTIFY_OK;
 }
@@ -1115,8 +1120,6 @@ static inline void pm_init(void)
 
 static int __init arch_hw_breakpoint_init(void)
 {
-	int ret;
-
 	debug_arch = get_debug_arch();
 
 	if (!debug_arch_supported()) {
@@ -1146,29 +1149,25 @@ static int __init arch_hw_breakpoint_init(void)
 	core_num_brps = get_num_brps();
 	core_num_wrps = get_num_wrps();
 
+	cpu_notifier_register_begin();
+
 	/*
 	 * We need to tread carefully here because DBGSWENABLE may be
 	 * driven low on this core and there isn't an architected way to
 	 * determine that.
 	 */
-	cpus_read_lock();
 	register_undef_hook(&debug_reg_hook);
 
 	/*
-	 * Register CPU notifier which resets the breakpoint resources. We
-	 * assume that a halting debugger will leave the world in a nice state
-	 * for us.
+	 * Reset the breakpoint resources. We assume that a halting
+	 * debugger will leave the world in a nice state for us.
 	 */
-	ret = cpuhp_setup_state_cpuslocked(CPUHP_AP_ONLINE_DYN,
-					   "arm/hw_breakpoint:online",
-					   dbg_reset_online, NULL);
+	on_each_cpu(reset_ctrl_regs, NULL, 1);
 	unregister_undef_hook(&debug_reg_hook);
-	if (WARN_ON(ret < 0) || !cpumask_empty(&debug_err_mask)) {
+	if (!cpumask_empty(&debug_err_mask)) {
 		core_num_brps = 0;
 		core_num_wrps = 0;
-		if (ret > 0)
-			cpuhp_remove_state_nocalls_cpuslocked(ret);
-		cpus_read_unlock();
+		cpu_notifier_register_done();
 		return 0;
 	}
 
@@ -1186,9 +1185,12 @@ static int __init arch_hw_breakpoint_init(void)
 			TRAP_HWBKPT, "watchpoint debug exception");
 	hook_ifault_code(FAULT_CODE_DEBUG, hw_breakpoint_pending, SIGTRAP,
 			TRAP_HWBKPT, "breakpoint debug exception");
-	cpus_read_unlock();
 
-	/* Register PM notifiers. */
+	/* Register hotplug and PM notifiers. */
+	__register_cpu_notifier(&dbg_reset_nb);
+
+	cpu_notifier_register_done();
+
 	pm_init();
 	return 0;
 }

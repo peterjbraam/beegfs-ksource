@@ -200,26 +200,6 @@ struct ads7846 {
 #define	REF_ON	(READ_12BIT_DFR(x, 1, 1))
 #define	REF_OFF	(READ_12BIT_DFR(y, 0, 0))
 
-static int get_pendown_state(struct ads7846 *ts)
-{
-	if (ts->get_pendown_state)
-		return ts->get_pendown_state();
-
-	return !gpio_get_value(ts->gpio_pendown);
-}
-
-static void ads7846_report_pen_up(struct ads7846 *ts)
-{
-	struct input_dev *input = ts->input;
-
-	input_report_key(input, BTN_TOUCH, 0);
-	input_report_abs(input, ABS_PRESSURE, 0);
-	input_sync(input);
-
-	ts->pendown = false;
-	dev_vdbg(&ts->spi->dev, "UP\n");
-}
-
 /* Must be called with ts->lock held */
 static void ads7846_stop(struct ads7846 *ts)
 {
@@ -236,10 +216,6 @@ static void ads7846_stop(struct ads7846 *ts)
 static void ads7846_restart(struct ads7846 *ts)
 {
 	if (!ts->disabled && !ts->suspended) {
-		/* Check if pen was released since last stop */
-		if (ts->pendown && !get_pendown_state(ts))
-			ads7846_report_pen_up(ts);
-
 		/* Tell IRQ thread that it may poll the device. */
 		ts->stopped = false;
 		mb();
@@ -524,7 +500,7 @@ static struct attribute *ads7846_attributes[] = {
 	NULL,
 };
 
-static const struct attribute_group ads7846_attr_group = {
+static struct attribute_group ads7846_attr_group = {
 	.attrs = ads7846_attributes,
 	.is_visible = ads7846_is_visible,
 };
@@ -624,11 +600,19 @@ static struct attribute *ads784x_attributes[] = {
 	NULL,
 };
 
-static const struct attribute_group ads784x_attr_group = {
+static struct attribute_group ads784x_attr_group = {
 	.attrs = ads784x_attributes,
 };
 
 /*--------------------------------------------------------------------------*/
+
+static int get_pendown_state(struct ads7846 *ts)
+{
+	if (ts->get_pendown_state)
+		return ts->get_pendown_state();
+
+	return !gpio_get_value(ts->gpio_pendown);
+}
 
 static void null_wait_for_sync(void)
 {
@@ -889,8 +873,16 @@ static irqreturn_t ads7846_irq(int irq, void *handle)
 				   msecs_to_jiffies(TS_POLL_PERIOD));
 	}
 
-	if (ts->pendown && !ts->stopped)
-		ads7846_report_pen_up(ts);
+	if (ts->pendown) {
+		struct input_dev *input = ts->input;
+
+		input_report_key(input, BTN_TOUCH, 0);
+		input_report_abs(input, ABS_PRESSURE, 0);
+		input_sync(input);
+
+		ts->pendown = false;
+		dev_vdbg(&ts->spi->dev, "UP\n");
+	}
 
 	return IRQ_HANDLED;
 }
@@ -1471,6 +1463,8 @@ static int ads7846_probe(struct spi_device *spi)
 static int ads7846_remove(struct spi_device *spi)
 {
 	struct ads7846 *ts = spi_get_drvdata(spi);
+
+	device_init_wakeup(&spi->dev, false);
 
 	sysfs_remove_group(&spi->dev.kobj, &ads784x_attr_group);
 

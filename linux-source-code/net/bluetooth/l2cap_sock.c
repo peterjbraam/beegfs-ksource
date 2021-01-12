@@ -29,7 +29,6 @@
 
 #include <linux/module.h>
 #include <linux/export.h>
-#include <linux/sched/signal.h>
 
 #include <net/bluetooth/bluetooth.h>
 #include <net/bluetooth/hci_core.h>
@@ -87,8 +86,7 @@ static int l2cap_sock_bind(struct socket *sock, struct sockaddr *addr, int alen)
 
 	BT_DBG("sk %p", sk);
 
-	if (!addr || alen < offsetofend(struct sockaddr, sa_family) ||
-	    addr->sa_family != AF_BLUETOOTH)
+	if (!addr || addr->sa_family != AF_BLUETOOTH)
 		return -EINVAL;
 
 	memset(&la, 0, sizeof(la));
@@ -182,7 +180,7 @@ static int l2cap_sock_connect(struct socket *sock, struct sockaddr *addr,
 
 	BT_DBG("sk %p", sk);
 
-	if (!addr || alen < offsetofend(struct sockaddr, sa_family) ||
+	if (!addr || alen < sizeof(addr->sa_family) ||
 	    addr->sa_family != AF_BLUETOOTH)
 		return -EINVAL;
 
@@ -302,7 +300,7 @@ done:
 }
 
 static int l2cap_sock_accept(struct socket *sock, struct socket *newsock,
-			     int flags, bool kern)
+			     int flags)
 {
 	DEFINE_WAIT_FUNC(wait, woken_wake_function);
 	struct sock *sk = sock->sk, *nsk;
@@ -358,7 +356,7 @@ done:
 }
 
 static int l2cap_sock_getname(struct socket *sock, struct sockaddr *addr,
-			      int peer)
+			      int *len, int peer)
 {
 	struct sockaddr_l2 *la = (struct sockaddr_l2 *) addr;
 	struct sock *sk = sock->sk;
@@ -373,6 +371,7 @@ static int l2cap_sock_getname(struct socket *sock, struct sockaddr *addr,
 
 	memset(la, 0, sizeof(struct sockaddr_l2));
 	addr->sa_family = AF_BLUETOOTH;
+	*len = sizeof(struct sockaddr_l2);
 
 	la->l2_psm = chan->psm;
 
@@ -386,7 +385,7 @@ static int l2cap_sock_getname(struct socket *sock, struct sockaddr *addr,
 		la->l2_bdaddr_type = chan->src_type;
 	}
 
-	return sizeof(struct sockaddr_l2);
+	return 0;
 }
 
 static int l2cap_sock_getsockopt_old(struct socket *sock, int optname,
@@ -1264,7 +1263,7 @@ static struct l2cap_chan *l2cap_sock_new_connection_cb(struct l2cap_chan *chan)
 
 	l2cap_sock_init(sk, parent);
 
-	bt_accept_enqueue(parent, sk, false);
+	bt_accept_enqueue(parent, sk);
 
 	release_sock(parent);
 

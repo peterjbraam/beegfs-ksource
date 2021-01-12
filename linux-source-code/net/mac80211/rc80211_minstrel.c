@@ -159,23 +159,21 @@ minstrel_update_rates(struct minstrel_priv *mp, struct minstrel_sta_info *mi)
 void
 minstrel_calc_rate_stats(struct minstrel_rate_stats *mrs)
 {
-	unsigned int cur_prob;
-
 	if (unlikely(mrs->attempts > 0)) {
 		mrs->sample_skipped = 0;
-		cur_prob = MINSTREL_FRAC(mrs->success, mrs->attempts);
+		mrs->cur_prob = MINSTREL_FRAC(mrs->success, mrs->attempts);
 		if (unlikely(!mrs->att_hist)) {
-			mrs->prob_ewma = cur_prob;
+			mrs->prob_ewma = mrs->cur_prob;
 		} else {
 			/* update exponential weighted moving variance */
-			mrs->prob_ewmv = minstrel_ewmv(mrs->prob_ewmv,
-							cur_prob,
-							mrs->prob_ewma,
-							EWMA_LEVEL);
+			mrs->prob_ewmsd = minstrel_ewmsd(mrs->prob_ewmsd,
+							 mrs->cur_prob,
+							 mrs->prob_ewma,
+							 EWMA_LEVEL);
 
 			/*update exponential weighted moving avarage */
 			mrs->prob_ewma = minstrel_ewma(mrs->prob_ewma,
-						       cur_prob,
+						       mrs->cur_prob,
 						       EWMA_LEVEL);
 		}
 		mrs->att_hist += mrs->attempts;
@@ -264,9 +262,9 @@ minstrel_update_stats(struct minstrel_priv *mp, struct minstrel_sta_info *mi)
 
 static void
 minstrel_tx_status(void *priv, struct ieee80211_supported_band *sband,
-		   void *priv_sta, struct ieee80211_tx_status *st)
+		   struct ieee80211_sta *sta, void *priv_sta,
+		   struct ieee80211_tx_info *info)
 {
-	struct ieee80211_tx_info *info = st->info;
 	struct minstrel_priv *mp = priv;
 	struct minstrel_sta_info *mi = priv_sta;
 	struct ieee80211_tx_rate *ar = info->status.rates;
@@ -360,11 +358,6 @@ minstrel_get_rate(void *priv, struct ieee80211_sta *sta,
 	if (mp->fixed_rate_idx != -1)
 		return;
 #endif
-
-	/* Don't use EAPOL frames for sampling on non-mrr hw */
-	if (mp->hw->max_rates == 1 &&
-	    (info->control.flags & IEEE80211_TX_CTRL_PORT_CTRL_PROTO))
-		return;
 
 	delta = (mi->total_packets * sampling_ratio / 100) -
 			mi->sample_packets;
@@ -575,11 +568,11 @@ minstrel_alloc_sta(void *priv, struct ieee80211_sta *sta, gfp_t gfp)
 			max_rates = sband->n_bitrates;
 	}
 
-	mi->r = kcalloc(max_rates, sizeof(struct minstrel_rate), gfp);
+	mi->r = kzalloc(sizeof(struct minstrel_rate) * max_rates, gfp);
 	if (!mi->r)
 		goto error;
 
-	mi->sample_table = kmalloc_array(max_rates, SAMPLE_COLUMNS, gfp);
+	mi->sample_table = kmalloc(SAMPLE_COLUMNS * max_rates, gfp);
 	if (!mi->sample_table)
 		goto error1;
 
@@ -673,7 +666,7 @@ minstrel_alloc(struct ieee80211_hw *hw, struct dentry *debugfsdir)
 #ifdef CONFIG_MAC80211_DEBUGFS
 	mp->fixed_rate_idx = (u32) -1;
 	mp->dbg_fixed_rate = debugfs_create_u32("fixed_rate_idx",
-			0666, debugfsdir, &mp->fixed_rate_idx);
+			S_IRUGO | S_IWUGO, debugfsdir, &mp->fixed_rate_idx);
 #endif
 
 	minstrel_init_cck_rates(mp);
@@ -709,7 +702,7 @@ static u32 minstrel_get_expected_throughput(void *priv_sta)
 
 const struct rate_control_ops mac80211_minstrel = {
 	.name = "minstrel",
-	.tx_status_ext = minstrel_tx_status,
+	.tx_status_noskb = minstrel_tx_status,
 	.get_rate = minstrel_get_rate,
 	.rate_init = minstrel_rate_init,
 	.alloc = minstrel_alloc,
@@ -734,3 +727,4 @@ rc80211_minstrel_exit(void)
 {
 	ieee80211_rate_control_unregister(&mac80211_minstrel);
 }
+

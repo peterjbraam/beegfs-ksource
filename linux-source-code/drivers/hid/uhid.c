@@ -25,6 +25,8 @@
 #include <linux/spinlock.h>
 #include <linux/uhid.h>
 #include <linux/wait.h>
+#include <linux/uaccess.h>
+#include <linux/eventpoll.h>
 
 #define UHID_NAME	"uhid"
 #define UHID_BUFSIZE	32
@@ -370,7 +372,7 @@ static int uhid_hid_output_report(struct hid_device *hid, __u8 *buf,
 	return uhid_hid_output_raw(hid, buf, count, HID_OUTPUT_REPORT);
 }
 
-struct hid_ll_driver uhid_hid_driver = {
+static struct hid_ll_driver uhid_hid_driver = {
 	.start = uhid_hid_start,
 	.stop = uhid_hid_stop,
 	.open = uhid_hid_open,
@@ -379,7 +381,6 @@ struct hid_ll_driver uhid_hid_driver = {
 	.raw_request = uhid_hid_raw_request,
 	.output_report = uhid_hid_output_report,
 };
-EXPORT_SYMBOL_GPL(uhid_hid_driver);
 
 #ifdef CONFIG_COMPAT
 
@@ -497,7 +498,6 @@ static int uhid_dev_create2(struct uhid_device *uhid,
 		goto err_free;
 	}
 
-	/* @hid is zero-initialized, strncpy() is correct, strlcpy() not */
 	len = min(sizeof(hid->name), sizeof(ev->u.create2.name)) - 1;
 	strncpy(hid->name, ev->u.create2.name, len);
 	len = min(sizeof(hid->phys), sizeof(ev->u.create2.phys)) - 1;
@@ -766,15 +766,15 @@ unlock:
 	return ret ? ret : count;
 }
 
-static __poll_t uhid_char_poll(struct file *file, poll_table *wait)
+static unsigned int uhid_char_poll(struct file *file, poll_table *wait)
 {
 	struct uhid_device *uhid = file->private_data;
-	__poll_t mask = EPOLLOUT | EPOLLWRNORM; /* uhid is always writable */
+	unsigned int mask = POLLOUT | POLLWRNORM; /* uhid is always writable */
 
 	poll_wait(file, &uhid->waitq, wait);
 
 	if (uhid->head != uhid->tail)
-		mask |= EPOLLIN | EPOLLRDNORM;
+		mask |= POLLIN | POLLRDNORM;
 
 	return mask;
 }

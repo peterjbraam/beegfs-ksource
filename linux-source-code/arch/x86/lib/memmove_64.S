@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Normally compiler builtins are used, but sometimes the compiler calls out
  * of line code. Based on asm-i386/string.h.
@@ -25,8 +24,8 @@
  * rax: dest
  */
 .weak memmove
-.p2align 4, 0x90
-memmove:
+
+ENTRY(memmove)
 ENTRY(__memmove)
 
 	/* Handle more 32 bytes in loop */

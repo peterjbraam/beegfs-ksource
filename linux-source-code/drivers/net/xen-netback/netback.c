@@ -187,9 +187,9 @@ static void tx_add_credit(struct xenvif_queue *queue)
 	queue->rate_limited = false;
 }
 
-void xenvif_tx_credit_callback(struct timer_list *t)
+void xenvif_tx_credit_callback(unsigned long data)
 {
-	struct xenvif_queue *queue = from_timer(queue, t, credit_timeout);
+	struct xenvif_queue *queue = (struct xenvif_queue *)data;
 	tx_add_credit(queue);
 	xenvif_napi_schedule_or_enable_events(queue);
 }
@@ -219,7 +219,7 @@ static void xenvif_fatal_tx_err(struct xenvif *vif)
 	netdev_err(vif->dev, "fatal error; disabling device\n");
 	vif->disabled = true;
 	/* Disable the vif from queue 0's kthread */
-	if (vif->num_queues)
+	if (vif->queues)
 		xenvif_kick_thread(&vif->queues[0]);
 }
 
@@ -704,6 +704,8 @@ static bool tx_credit_exceeded(struct xenvif_queue *queue, unsigned size)
 
 	/* Still too big to send right now? Set a callback. */
 	if (size > queue->remaining_credit) {
+		queue->credit_timeout.data     =
+			(unsigned long)queue;
 		mod_timer(&queue->credit_timeout,
 			  next_credit);
 		queue->credit_window_start = next_credit;
@@ -1609,9 +1611,9 @@ static void xenvif_ctrl_action(struct xenvif *vif)
 static bool xenvif_ctrl_work_todo(struct xenvif *vif)
 {
 	if (likely(RING_HAS_UNCONSUMED_REQUESTS(&vif->ctrl)))
-		return true;
+		return 1;
 
-	return false;
+	return 0;
 }
 
 irqreturn_t xenvif_ctrl_irq_fn(int irq, void *data)

@@ -814,7 +814,7 @@ static int octeon_irq_ciu_set_affinity(struct irq_data *data,
 			pen = &per_cpu(octeon_irq_ciu1_en_mirror, cpu);
 
 		if (cpumask_test_cpu(cpu, dest) && enable_one) {
-			enable_one = false;
+			enable_one = 0;
 			__set_bit(cd->bit, pen);
 		} else {
 			__clear_bit(cd->bit, pen);
@@ -2968,12 +2968,3 @@ void octeon_fixup_irqs(void)
 }
 
 #endif /* CONFIG_HOTPLUG_CPU */
-
-struct irq_domain *octeon_irq_get_block_domain(int node, uint8_t block)
-{
-	struct octeon_ciu3_info *ciu3_info;
-
-	ciu3_info = octeon_ciu3_info_per_node[node & CVMX_NODE_MASK];
-	return ciu3_info->domain[block];
-}
-EXPORT_SYMBOL(octeon_irq_get_block_domain);

@@ -41,7 +41,7 @@
 #include <linux/capability.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
-#include <linux/sched/signal.h>
+#include <linux/sched.h>
 #include <linux/timer.h>
 #include <linux/string.h>
 #include <linux/net.h>
@@ -51,7 +51,7 @@
 #include <linux/slab.h>
 #include <net/sock.h>
 #include <net/tcp_states.h>
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
 #include <linux/fcntl.h>
 #include <linux/termios.h>	/* For TIOCINQ/OUTQ */
 #include <linux/notifier.h>
@@ -74,7 +74,7 @@ DEFINE_RWLOCK(x25_list_lock);
 
 static const struct proto_ops x25_proto_ops;
 
-static const struct x25_address null_x25_address = {"               "};
+static struct x25_address null_x25_address = {"               "};
 
 #ifdef CONFIG_COMPAT
 struct compat_x25_subscrip_struct {
@@ -372,11 +372,9 @@ static void __x25_destroy_socket(struct sock *);
 /*
  *	handler for deferred kills.
  */
-static void x25_destroy_timer(struct timer_list *t)
+static void x25_destroy_timer(unsigned long data)
 {
-	struct sock *sk = from_timer(sk, t, sk_timer);
-
-	x25_destroy_socket_from_timer(sk);
+	x25_destroy_socket_from_timer((struct sock *)data);
 }
 
 /*
@@ -414,6 +412,7 @@ static void __x25_destroy_socket(struct sock *sk)
 		/* Defer: outstanding buffers */
 		sk->sk_timer.expires  = jiffies + 10 * HZ;
 		sk->sk_timer.function = x25_destroy_timer;
+		sk->sk_timer.data = (unsigned long)sk;
 		add_timer(&sk->sk_timer);
 	} else {
 		/* drop last reference so sock_put will free */
@@ -869,8 +868,7 @@ static int x25_wait_for_data(struct sock *sk, long timeout)
 	return rc;
 }
 
-static int x25_accept(struct socket *sock, struct socket *newsock, int flags,
-		      bool kern)
+static int x25_accept(struct socket *sock, struct socket *newsock, int flags)
 {
 	struct sock *sk = sock->sk;
 	struct sock *newsk;
@@ -912,7 +910,7 @@ out:
 }
 
 static int x25_getname(struct socket *sock, struct sockaddr *uaddr,
-		       int peer)
+		       int *uaddr_len, int peer)
 {
 	struct sockaddr_x25 *sx25 = (struct sockaddr_x25 *)uaddr;
 	struct sock *sk = sock->sk;
@@ -929,7 +927,7 @@ static int x25_getname(struct socket *sock, struct sockaddr *uaddr,
 		sx25->sx25_addr = x25->source_addr;
 
 	sx25->sx25_family = AF_X25;
-	rc = sizeof(*sx25);
+	*uaddr_len = sizeof(*sx25);
 
 out:
 	return rc;

@@ -1,15 +1,7 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __USBMIXER_H
 #define __USBMIXER_H
 
 #include <sound/info.h>
-
-struct usbmix_connector_map {
-	u8 id;
-	u8 delegated_id;
-	u8 control;
-	u8 channel;
-};
 
 struct usb_mixer_interface {
 	struct snd_usb_audio *chip;
@@ -22,9 +14,6 @@ struct usb_mixer_interface {
 
 	/* the usb audio specification version this interface complies to */
 	int protocol;
-
-	/* optional connector delegation map */
-	const struct usbmix_connector_map *connector_map;
 
 	/* Sound Blaster remote control stuff */
 	const struct rc_config *rc_cfg;
@@ -123,7 +112,5 @@ int snd_usb_get_cur_mix_value(struct usb_mixer_elem_info *cval,
                              int channel, int index, int *value);
 
 extern void snd_usb_mixer_elem_free(struct snd_kcontrol *kctl);
-
-extern struct snd_kcontrol_new *snd_usb_feature_unit_ctl;
 
 #endif /* __USBMIXER_H */

@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: (GPL-2.0 OR BSD-3-Clause)
 /*
  * sisusb - usb kernel driver for SiS315(E) based USB2VGA dongles
  *
@@ -611,11 +610,13 @@ static int sisusb_write_memio_byte(struct sisusb_usb_data *sisusb, int type,
 		u32 addr, u8 data)
 {
 	struct sisusb_packet packet;
+	int ret;
 
 	packet.header  = (1 << (addr & 3)) | (type << 6);
 	packet.address = addr & ~3;
 	packet.data    = data << ((addr & 3) << 3);
-	return sisusb_send_packet(sisusb, 10, &packet);
+	ret = sisusb_send_packet(sisusb, 10, &packet);
+	return ret;
 }
 
 static int sisusb_write_memio_word(struct sisusb_usb_data *sisusb, int type,
@@ -1332,11 +1333,13 @@ static int sisusb_write_pci_config(struct sisusb_usb_data *sisusb,
 		int regnum, u32 data)
 {
 	struct sisusb_packet packet;
+	int ret;
 
 	packet.header = 0x008f;
 	packet.address = regnum | 0x10000;
 	packet.data = data;
-	return sisusb_send_packet(sisusb, 10, &packet);
+	ret = sisusb_send_packet(sisusb, 10, &packet);
+	return ret;
 }
 
 static int sisusb_read_pci_config(struct sisusb_usb_data *sisusb,
@@ -1750,7 +1753,7 @@ static int sisusb_setup_screen(struct sisusb_usb_data *sisusb,
 static int sisusb_set_default_mode(struct sisusb_usb_data *sisusb,
 		int touchengines)
 {
-	int ret = 0, i, j, modex, bpp, du;
+	int ret = 0, i, j, modex, modey, bpp, du;
 	u8 sr31, cr63, tmp8;
 	static const char attrdata[] = {
 		0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
@@ -1773,7 +1776,7 @@ static int sisusb_set_default_mode(struct sisusb_usb_data *sisusb,
 		0x00
 	};
 
-	modex = 640; bpp = 2;
+	modex = 640; modey = 480; bpp = 2;
 
 	GETIREG(SISSR, 0x31, &sr31);
 	GETIREG(SISCR, 0x63, &cr63);
@@ -1828,10 +1831,16 @@ static int sisusb_set_default_mode(struct sisusb_usb_data *sisusb,
 	SETIREGANDOR(SISCR, 0x09, 0x5f, ((crtcdata[16] & 0x01) << 5));
 	SETIREG(SISCR, 0x14, 0x4f);
 	du = (modex / 16) * (bpp * 2);	/* offset/pitch */
+	if (modex % 16)
+		du += bpp;
+
 	SETIREGANDOR(SISSR, 0x0e, 0xf0, ((du >> 8) & 0x0f));
 	SETIREG(SISCR, 0x13, (du & 0xff));
 	du <<= 5;
 	tmp8 = du >> 8;
+	if (du & 0xff)
+		tmp8++;
+
 	SETIREG(SISSR, 0x10, tmp8);
 	SETIREG(SISSR, 0x31, 0x00);	/* VCLK */
 	SETIREG(SISSR, 0x2b, 0x1b);
@@ -2107,7 +2116,7 @@ static void sisusb_get_ramconfig(struct sisusb_usb_data *sisusb)
 		bw = busSDR[(tmp8 & 0x03)];
 		break;
 	case 2:
-		ramtypetext1 = "asymmetric";
+		ramtypetext1 = "asymmeric";
 		sisusb->vramsize += sisusb->vramsize/2;
 		bw = busDDRA[(tmp8 & 0x03)];
 		break;
@@ -2979,11 +2988,14 @@ err_out:
 static long sisusb_compat_ioctl(struct file *f, unsigned int cmd,
 		unsigned long arg)
 {
+	long retval;
+
 	switch (cmd) {
 	case SISUSB_GET_CONFIG_SIZE:
 	case SISUSB_GET_CONFIG:
 	case SISUSB_COMMAND:
-		return sisusb_ioctl(f, cmd, arg);
+		retval = sisusb_ioctl(f, cmd, arg);
+		return retval;
 
 	default:
 		return -ENOIOCTLCMD;

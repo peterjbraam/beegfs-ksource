@@ -648,7 +648,6 @@ int ocfs2_calc_xattr_init(struct inode *dir,
 			if (S_ISDIR(mode))
 				a_size <<= 1;
 		} else if (acl_len != 0 && acl_len != -ENODATA) {
-			ret = acl_len;
 			mlog_errno(ret);
 			return ret;
 		}
@@ -904,7 +903,7 @@ static int ocfs2_xattr_list_entry(struct super_block *sb,
 
 	case OCFS2_XATTR_INDEX_POSIX_ACL_ACCESS:
 	case OCFS2_XATTR_INDEX_POSIX_ACL_DEFAULT:
-		if (!(sb->s_flags & SB_POSIXACL))
+		if (!(sb->s_flags & MS_POSIXACL))
 			return 0;
 		break;
 
@@ -2581,7 +2580,7 @@ int ocfs2_xattr_remove(struct inode *inode, struct buffer_head *di_bh)
 	if (!(oi->ip_dyn_features & OCFS2_HAS_XATTR_FL))
 		return 0;
 
-	if (ocfs2_is_refcount_inode(inode)) {
+	if (OCFS2_I(inode)->ip_dyn_features & OCFS2_HAS_REFCOUNT_FL) {
 		ret = ocfs2_lock_refcount_tree(OCFS2_SB(inode->i_sb),
 					       le64_to_cpu(di->i_refcount_loc),
 					       1, &ref_tree, &ref_root_bh);
@@ -3564,7 +3563,7 @@ int ocfs2_xattr_set(struct inode *inode,
 		.not_found = -ENODATA,
 	};
 
-	if (!ocfs2_supports_xattr(osb))
+	if (!ocfs2_supports_xattr(OCFS2_SB(inode->i_sb)))
 		return -EOPNOTSUPP;
 
 	/*
@@ -3614,7 +3613,7 @@ int ocfs2_xattr_set(struct inode *inode,
 	}
 
 	/* Check whether the value is refcounted and do some preparation. */
-	if (ocfs2_is_refcount_inode(inode) &&
+	if (OCFS2_I(inode)->ip_dyn_features & OCFS2_HAS_REFCOUNT_FL &&
 	    (!xis.not_found || !xbs.not_found)) {
 		ret = ocfs2_prepare_refcount_xattr(inode, di, &xi,
 						   &xis, &xbs, &ref_tree,
@@ -6415,7 +6414,7 @@ static int ocfs2_reflink_xattr_header(handle_t *handle,
 		 * and then insert the extents one by one.
 		 */
 		if (xv->xr_list.l_tree_depth) {
-			memcpy(new_xv, &def_xv, OCFS2_XATTR_ROOT_SIZE);
+			memcpy(new_xv, &def_xv, sizeof(def_xv));
 			vb->vb_xv = new_xv;
 			vb->vb_bh = value_bh;
 			ocfs2_init_xattr_value_extent_tree(&data_et,
@@ -6800,7 +6799,7 @@ static int ocfs2_lock_reflink_xattr_rec_allocators(
 		*credits += 1;
 
 	/* count in the xattr tree change. */
-	num_free_extents = ocfs2_num_free_extents(xt_et);
+	num_free_extents = ocfs2_num_free_extents(osb, xt_et);
 	if (num_free_extents < 0) {
 		ret = num_free_extents;
 		mlog_errno(ret);

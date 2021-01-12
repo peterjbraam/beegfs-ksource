@@ -10,9 +10,6 @@
 #include <linux/capability.h>
 #include <linux/export.h>
 #include <linux/sched.h>
-#include <linux/sched/mm.h>
-#include <linux/sched/coredump.h>
-#include <linux/sched/task.h>
 #include <linux/errno.h>
 #include <linux/mm.h>
 #include <linux/highmem.h>
@@ -29,7 +26,6 @@
 #include <linux/hw_breakpoint.h>
 #include <linux/cn_proc.h>
 #include <linux/compat.h>
-#include <linux/sched/signal.h>
 
 /*
  * Access another process' address space via ptrace.
@@ -258,11 +254,15 @@ static int ptrace_check_attach(struct task_struct *child, bool ignore_state)
 	return ret;
 }
 
-static bool ptrace_has_cap(struct user_namespace *ns, unsigned int mode)
+static int ptrace_has_cap(struct user_namespace *ns, unsigned int mode)
 {
+	if (mode & PTRACE_MODE_SCHED)
+		return false;
+
 	if (mode & PTRACE_MODE_NOAUDIT)
-		return ns_capable_noaudit(ns, CAP_SYS_PTRACE);
-	return ns_capable(ns, CAP_SYS_PTRACE);
+		return has_ns_capability_noaudit(current, ns, CAP_SYS_PTRACE);
+	else
+		return has_ns_capability(current, ns, CAP_SYS_PTRACE);
 }
 
 /* Returns 0 on success, -errno on denial. */
@@ -336,7 +336,14 @@ ok:
 	     !ptrace_has_cap(mm->user_ns, mode)))
 	    return -EPERM;
 
+	if (mode & PTRACE_MODE_SCHED)
+		return 0;
 	return security_ptrace_access_check(task, mode);
+}
+
+bool ptrace_may_access_sched(struct task_struct *task, unsigned int mode)
+{
+	return __ptrace_may_access(task, mode | PTRACE_MODE_SCHED);
 }
 
 bool ptrace_may_access(struct task_struct *task, unsigned int mode)
@@ -667,7 +674,7 @@ static int ptrace_getsiginfo(struct task_struct *child, siginfo_t *info)
 	if (lock_task_sighand(child, &flags)) {
 		error = -EINVAL;
 		if (likely(child->last_siginfo != NULL)) {
-			copy_siginfo(info, child->last_siginfo);
+			*info = *child->last_siginfo;
 			error = 0;
 		}
 		unlock_task_sighand(child, &flags);
@@ -683,7 +690,7 @@ static int ptrace_setsiginfo(struct task_struct *child, const siginfo_t *info)
 	if (lock_task_sighand(child, &flags)) {
 		error = -EINVAL;
 		if (likely(child->last_siginfo != NULL)) {
-			copy_siginfo(child->last_siginfo, info);
+			*child->last_siginfo = *info;
 			error = 0;
 		}
 		unlock_task_sighand(child, &flags);
@@ -742,7 +749,8 @@ static int ptrace_peek_siginfo(struct task_struct *child,
 		if (unlikely(in_compat_syscall())) {
 			compat_siginfo_t __user *uinfo = compat_ptr(data);
 
-			if (copy_siginfo_to_user32(uinfo, &info)) {
+			if (copy_siginfo_to_user32(uinfo, &info) ||
+			    __put_user(info.si_code, &uinfo->si_code)) {
 				ret = -EFAULT;
 				break;
 			}
@@ -752,7 +760,8 @@ static int ptrace_peek_siginfo(struct task_struct *child,
 		{
 			siginfo_t __user *uinfo = (siginfo_t __user *) data;
 
-			if (copy_siginfo_to_user(uinfo, &info)) {
+			if (copy_siginfo_to_user(uinfo, &info) ||
+			    __put_user(info.si_code, &uinfo->si_code)) {
 				ret = -EFAULT;
 				break;
 			}
@@ -939,26 +948,18 @@ int ptrace_request(struct task_struct *child, long request,
 			ret = ptrace_setsiginfo(child, &siginfo);
 		break;
 
-	case PTRACE_GETSIGMASK: {
-		sigset_t *mask;
-
+	case PTRACE_GETSIGMASK:
 		if (addr != sizeof(sigset_t)) {
 			ret = -EINVAL;
 			break;
 		}
 
-		if (test_tsk_restore_sigmask(child))
-			mask = &child->saved_sigmask;
-		else
-			mask = &child->blocked;
-
-		if (copy_to_user(datavp, mask, sizeof(sigset_t)))
+		if (copy_to_user(datavp, &child->blocked, sizeof(sigset_t)))
 			ret = -EFAULT;
 		else
 			ret = 0;
 
 		break;
-	}
 
 	case PTRACE_SETSIGMASK: {
 		sigset_t new_set;
@@ -983,8 +984,6 @@ int ptrace_request(struct task_struct *child, long request,
 		spin_lock_irq(&child->sighand->siglock);
 		child->blocked = new_set;
 		spin_unlock_irq(&child->sighand->siglock);
-
-		clear_tsk_restore_sigmask(child);
 
 		ret = 0;
 		break;
@@ -1116,15 +1115,26 @@ int ptrace_request(struct task_struct *child, long request,
 		ret = seccomp_get_filter(child, addr, datavp);
 		break;
 
-	case PTRACE_SECCOMP_GET_METADATA:
-		ret = seccomp_get_metadata(child, addr, datavp);
-		break;
-
 	default:
 		break;
 	}
 
 	return ret;
+}
+
+static struct task_struct *ptrace_get_task_struct(pid_t pid)
+{
+	struct task_struct *child;
+
+	rcu_read_lock();
+	child = find_task_by_vpid(pid);
+	if (child)
+		get_task_struct(child);
+	rcu_read_unlock();
+
+	if (!child)
+		return ERR_PTR(-ESRCH);
+	return child;
 }
 
 #ifndef arch_ptrace_attach
@@ -1144,9 +1154,9 @@ SYSCALL_DEFINE4(ptrace, long, request, long, pid, unsigned long, addr,
 		goto out;
 	}
 
-	child = find_get_task_by_vpid(pid);
-	if (!child) {
-		ret = -ESRCH;
+	child = ptrace_get_task_struct(pid);
+	if (IS_ERR(child)) {
+		ret = PTR_ERR(child);
 		goto out;
 	}
 
@@ -1239,6 +1249,7 @@ int compat_ptrace_request(struct task_struct *child, compat_long_t request,
 		break;
 
 	case PTRACE_SETSIGINFO:
+		memset(&siginfo, 0, sizeof siginfo);
 		if (copy_siginfo_from_user32(
 			    &siginfo, (struct compat_siginfo __user *) datap))
 			ret = -EFAULT;
@@ -1290,9 +1301,9 @@ COMPAT_SYSCALL_DEFINE4(ptrace, compat_long_t, request, compat_long_t, pid,
 		goto out;
 	}
 
-	child = find_get_task_by_vpid(pid);
-	if (!child) {
-		ret = -ESRCH;
+	child = ptrace_get_task_struct(pid);
+	if (IS_ERR(child)) {
+		ret = PTR_ERR(child);
 		goto out;
 	}
 

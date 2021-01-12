@@ -107,9 +107,9 @@ static void idletimer_tg_work(struct work_struct *work)
 	sysfs_notify(idletimer_tg_kobj, NULL, timer->attr.attr.name);
 }
 
-static void idletimer_tg_expired(struct timer_list *t)
+static void idletimer_tg_expired(unsigned long data)
 {
-	struct idletimer_tg *timer = from_timer(timer, t, timer);
+	struct idletimer_tg *timer = (struct idletimer_tg *) data;
 
 	pr_debug("timer %s expired\n", timer->attr.attr.name);
 
@@ -152,7 +152,7 @@ static int idletimer_tg_create(struct idletimer_tg_info *info)
 		ret = -ENOMEM;
 		goto out_free_timer;
 	}
-	info->timer->attr.attr.mode = 0444;
+	info->timer->attr.attr.mode = S_IRUGO;
 	info->timer->attr.show = idletimer_tg_show;
 
 	ret = sysfs_create_file(idletimer_tg_kobj, &info->timer->attr.attr);
@@ -163,7 +163,8 @@ static int idletimer_tg_create(struct idletimer_tg_info *info)
 
 	list_add(&info->timer->entry, &idletimer_tg_list);
 
-	timer_setup(&info->timer->timer, idletimer_tg_expired, 0);
+	setup_timer(&info->timer->timer, idletimer_tg_expired,
+		    (unsigned long) info->timer);
 	info->timer->refcnt = 1;
 
 	INIT_WORK(&info->timer->work, idletimer_tg_work);
@@ -275,7 +276,6 @@ static struct xt_target idletimer_tg __read_mostly = {
 	.family		= NFPROTO_UNSPEC,
 	.target		= idletimer_tg_target,
 	.targetsize     = sizeof(struct idletimer_tg_info),
-	.usersize	= offsetof(struct idletimer_tg_info, timer),
 	.checkentry	= idletimer_tg_checkentry,
 	.destroy        = idletimer_tg_destroy,
 	.me		= THIS_MODULE,

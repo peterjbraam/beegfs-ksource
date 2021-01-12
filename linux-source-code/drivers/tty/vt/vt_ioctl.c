@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  *  Copyright (C) 1992 obz under the linux copyright
  *
@@ -11,7 +10,7 @@
 
 #include <linux/types.h>
 #include <linux/errno.h>
-#include <linux/sched/signal.h>
+#include <linux/sched.h>
 #include <linux/tty.h>
 #include <linux/timer.h>
 #include <linux/kernel.h>
@@ -30,7 +29,7 @@
 #include <linux/timex.h>
 
 #include <asm/io.h>
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
 
 #include <linux/nospec.h>
 
@@ -80,7 +79,7 @@ static inline bool vt_busy(int i)
  */
 
 #ifdef CONFIG_X86
-#include <asm/syscalls.h>
+#include <linux/syscalls.h>
 #endif
 
 static void complete_change_console(struct vc_data *vc);
@@ -290,6 +289,10 @@ do_unimap_ioctl(int cmd, struct unimapdesc __user *user_ud, int perm, struct vc_
 
 	if (copy_from_user(&tmp, user_ud, sizeof tmp))
 		return -EFAULT;
+	if (tmp.entries)
+		if (!access_ok(VERIFY_WRITE, tmp.entries,
+				tmp.entry_ct*sizeof(struct unipair)))
+			return -EFAULT;
 	switch (cmd) {
 	case PIO_UNIMAP:
 		if (!perm)
@@ -430,12 +433,12 @@ int vt_ioctl(struct tty_struct *tty,
 			ret = -EINVAL;
 			break;
 		}
-		ret = ksys_ioperm(arg, 1, (cmd == KDADDIO)) ? -ENXIO : 0;
+		ret = sys_ioperm(arg, 1, (cmd == KDADDIO)) ? -ENXIO : 0;
 		break;
 
 	case KDENABIO:
 	case KDDISABIO:
-		ret = ksys_ioperm(GPFIRST, GPNUM,
+		ret = sys_ioperm(GPFIRST, GPNUM,
 				  (cmd == KDENABIO)) ? -ENXIO : 0;
 		break;
 #endif
@@ -1184,6 +1187,10 @@ compat_unimap_ioctl(unsigned int cmd, struct compat_unimapdesc __user *user_ud,
 	if (copy_from_user(&tmp, user_ud, sizeof tmp))
 		return -EFAULT;
 	tmp_entries = compat_ptr(tmp.entries);
+	if (tmp_entries)
+		if (!access_ok(VERIFY_WRITE, tmp_entries,
+				tmp.entry_ct*sizeof(struct unipair)))
+			return -EFAULT;
 	switch (cmd) {
 	case PIO_UNIMAP:
 		if (!perm)

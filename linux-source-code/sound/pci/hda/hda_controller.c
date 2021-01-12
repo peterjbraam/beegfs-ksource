@@ -624,13 +624,6 @@ static int azx_pcm_open(struct snd_pcm_substream *substream)
 				     20,
 				     178000000);
 
-	/* by some reason, the playback stream stalls on PulseAudio with
-	 * tsched=1 when a capture stream triggers.  Until we figure out the
-	 * real cause, disable tsched mode by telling the PCM info flag.
-	 */
-	if (chip->driver_caps & AZX_DCAPS_AMD_WORKAROUND)
-		runtime->hw.info |= SNDRV_PCM_INFO_BATCH;
-
 	if (chip->align_buffer_size)
 		/* constrain buffer sizes to be multiple of 128
 		   bytes. This is more efficient in terms of memory
@@ -867,10 +860,6 @@ static int azx_rirb_get_response(struct hdac_bus *bus, unsigned int addr,
 		 */
 		return -EIO;
 	}
-
-	/* no fallback mechanism? */
-	if (!chip->fallback_to_single_cmd)
-		return -EIO;
 
 	/* a fatal communication error; need either to reset or to fallback
 	 * to the single_cmd mode
@@ -1362,9 +1351,6 @@ int azx_codec_configure(struct azx *chip)
 	list_for_each_codec_safe(codec, next, &chip->bus) {
 		snd_hda_codec_configure(codec);
 	}
-
-	if (!azx_bus(chip)->num_codecs)
-		return -ENODEV;
 	return 0;
 }
 EXPORT_SYMBOL_GPL(azx_codec_configure);

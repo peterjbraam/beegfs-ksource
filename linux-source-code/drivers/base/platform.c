@@ -1,9 +1,10 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * platform.c - platform 'pseudo' bus for legacy devices
  *
  * Copyright (c) 2002-3 Patrick Mochel
  * Copyright (c) 2002-3 Open Source Development Labs
+ *
+ * This file is released under the GPLv2
  *
  * Please see Documentation/driver-model/platform.txt for more
  * information.
@@ -103,16 +104,6 @@ int platform_get_irq(struct platform_device *dev, unsigned int num)
 	}
 
 	r = platform_get_resource(dev, IORESOURCE_IRQ, num);
-	if (has_acpi_companion(&dev->dev)) {
-		if (r && r->flags & IORESOURCE_DISABLED) {
-			int ret;
-
-			ret = acpi_irq_get(ACPI_HANDLE(&dev->dev), num, r);
-			if (ret)
-				return ret;
-		}
-	}
-
 	/*
 	 * The resources may pass trigger flags to the irqs that need
 	 * to be set up. It so happens that the trigger flags for
@@ -345,7 +336,7 @@ EXPORT_SYMBOL_GPL(platform_device_add_data);
  * platform device is released.
  */
 int platform_device_add_properties(struct platform_device *pdev,
-				   const struct property_entry *properties)
+				   struct property_entry *properties)
 {
 	return device_add_properties(&pdev->dev, properties);
 }
@@ -408,7 +399,7 @@ int platform_device_add(struct platform_device *pdev)
 		}
 
 		if (p && insert_resource(p, r)) {
-			dev_err(&pdev->dev, "failed to claim resource %d: %pR\n", i, r);
+			dev_err(&pdev->dev, "failed to claim resource %d\n", i);
 			ret = -EBUSY;
 			goto failed;
 		}
@@ -577,16 +568,17 @@ static int platform_drv_probe(struct device *_dev)
 		return ret;
 
 	ret = dev_pm_domain_attach(_dev, true);
-	if (ret)
-		goto out;
-
-	if (drv->probe) {
-		ret = drv->probe(dev);
-		if (ret)
-			dev_pm_domain_detach(_dev, true);
+	if (ret != -EPROBE_DEFER) {
+		if (drv->probe) {
+			ret = drv->probe(dev);
+			if (ret)
+				dev_pm_domain_detach(_dev, true);
+		} else {
+			/* don't fail if just dev_pm_domain_attach failed */
+			ret = 0;
+		}
 	}
 
-out:
 	if (drv->prevent_deferred_probe && ret == -EPROBE_DEFER) {
 		dev_warn(_dev, "probe deferral not supported\n");
 		ret = -ENXIO;
@@ -852,7 +844,7 @@ static ssize_t modalias_show(struct device *dev, struct device_attribute *a,
 	struct platform_device	*pdev = to_platform_device(dev);
 	int len;
 
-	len = of_device_modalias(dev, buf, PAGE_SIZE);
+	len = of_device_get_modalias(dev, buf, PAGE_SIZE -1);
 	if (len != -ENODEV)
 		return len;
 
@@ -1136,22 +1128,6 @@ int platform_pm_restore(struct device *dev)
 
 #endif /* CONFIG_HIBERNATE_CALLBACKS */
 
-int platform_dma_configure(struct device *dev)
-{
-	enum dev_dma_attr attr;
-	int ret = 0;
-
-	if (dev->of_node) {
-		ret = of_dma_configure(dev, dev->of_node, true);
-	} else if (has_acpi_companion(dev)) {
-		attr = acpi_get_dma_attr(to_acpi_device_node(dev->fwnode));
-		if (attr != DEV_DMA_NOT_SUPPORTED)
-			ret = acpi_dma_configure(dev, attr);
-	}
-
-	return ret;
-}
-
 static const struct dev_pm_ops platform_dev_pm_ops = {
 	.runtime_suspend = pm_generic_runtime_suspend,
 	.runtime_resume = pm_generic_runtime_resume,
@@ -1163,7 +1139,6 @@ struct bus_type platform_bus_type = {
 	.dev_groups	= platform_dev_groups,
 	.match		= platform_match,
 	.uevent		= platform_uevent,
-	.dma_configure	= platform_dma_configure,
 	.pm		= &platform_dev_pm_ops,
 };
 EXPORT_SYMBOL_GPL(platform_bus_type);
@@ -1175,10 +1150,8 @@ int __init platform_bus_init(void)
 	early_platform_cleanup();
 
 	error = device_register(&platform_bus);
-	if (error) {
-		put_device(&platform_bus);
+	if (error)
 		return error;
-	}
 	error =  bus_register(&platform_bus_type);
 	if (error)
 		device_unregister(&platform_bus);
